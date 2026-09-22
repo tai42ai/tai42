@@ -74,6 +74,8 @@ class _Recorder:
         attachments=None,
         location=None,
         locale=None,
+        *,
+        client_connected,
     ):
         self.calls.append((route_name, external_user_id, caller_principal))
         return ApiSubmitResult(message_id="m-1", thread_id=f"bridge:{route_name}:{external_user_id}", answer=None)
@@ -213,7 +215,7 @@ class _EventRecorder:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
 
-    async def __call__(self, route_name, submission, caller_principal):
+    async def __call__(self, route_name, submission, caller_principal, *, client_connected):
         self.calls.append((route_name, submission.event.event_id, caller_principal))
         return ApiSubmitResult(message_id="e-1", thread_id=f"bridge:{route_name}:x", answer=None)
 

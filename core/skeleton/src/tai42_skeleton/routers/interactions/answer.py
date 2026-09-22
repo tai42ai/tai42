@@ -32,7 +32,7 @@ async def _extract_answer(request: Request) -> dict:
     """Read + bound the human-answer body at the HTTP edge into the operation's flat ``answer`` argument.
 
     The byte cap (413), invalid JSON (400), and a missing ``answer`` key (400) are the same loud
-    rejections the door has always answered — reproduced here so the operation receives an
+    rejections the door answers — reproduced here so the operation receives an
     already-parsed answer value (the adapter's plain parse would yield 422).
     """
     settings = _pkg.interactions_settings()

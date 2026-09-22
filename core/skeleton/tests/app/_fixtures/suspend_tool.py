@@ -2,7 +2,7 @@
 preservation of a ``SuspendedInteraction`` through a preset (``TransformedTool``)."""
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import SuspendedInteraction, get_resume_continuation_tool
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, get_resume_continuation_tool
 from tai42_contract.presets import PresetInputSchemaSupport
 
 
@@ -12,6 +12,12 @@ def make_suspend() -> SuspendedInteraction:
     # Stamp the resume owner the real platform ask does (the bound resume continuation), so the
     # fixture sentinel is faithful to what an async ask mints.
     return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())
+
+
+@tai42_app.tools.tool
+def make_buffered() -> ResumeBuffered:
+    """Return a ``ResumeBuffered`` partial — the non-terminal a resume of one sibling produces."""
+    return ResumeBuffered(remaining_ids=["r1", "r2"])
 
 
 @tai42_app.tools.tool

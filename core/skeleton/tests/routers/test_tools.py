@@ -72,17 +72,35 @@ class _FakeTools:
             raise UnknownToolError(key)
         return tool
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.run_calls.append((key, arguments, offload_sync))
         if self._run_exc is not None:
             raise self._run_exc
         return self._run_result
 
 
+class _PassthroughInteractions:
+    """A ``visit`` fake that runs the door's ``start`` and wraps its return as a ``VisitOutcome``.
+
+    The run-tool door drives its dispatch through ``tai42_app.interactions.visit``; the fake
+    classifies a ``SuspendedInteraction`` return as a park and any other value as a result.
+    """
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        from tai42_contract.interactions import SuspendedInteraction, VisitOutcome
+
+        result = await start(extras)
+        if isinstance(result, SuspendedInteraction):
+            return VisitOutcome(action="started", cancelled=list(cancel), kind="parked", suspended=result)
+        return VisitOutcome(action="started", cancelled=list(cancel), kind="result", result=result)
+
+
 @pytest.fixture
 def install(monkeypatch):
     def _install(fake_tools: _FakeTools):
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=fake_tools))
+        monkeypatch.setattr(
+            tai42_app, "_impl", SimpleNamespace(tools=fake_tools, interactions=_PassthroughInteractions())
+        )
         return fake_tools
 
     return _install
@@ -282,7 +300,7 @@ async def test_run_tool_sync_body_does_not_stall_the_loop(install):
     ticks: list[int] = []
 
     class _BlockingTools(_FakeTools):
-        async def run_tool(self, key, arguments, *, offload_sync=False):
+        async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
             assert offload_sync is True
             # Block a worker thread; if it ran inline the loop would freeze and the
             # ticker below could not advance.
@@ -306,3 +324,69 @@ async def test_run_tool_sync_body_does_not_stall_the_loop(install):
     assert _json(resp) == {"data": {"done": True}}
     # The loop kept ticking while the sync body blocked its thread.
     assert len(ticks) == 30
+
+
+# -- the run-tool subject reaches the operation ------------------------------
+
+
+def _capture_api_state_context(monkeypatch) -> list:
+    """Spy the ``api_state_context`` seam the op deposits the caller's subject through.
+
+    Records each ``(subject, actor)`` and returns a null context so the wrapped run
+    proceeds. The op imports the seam function-locally, so patching the module attribute
+    intercepts the real call.
+    """
+    from contextlib import nullcontext
+
+    import tai42_skeleton.states.api_context as api_context
+
+    seen: list = []
+
+    def _spy(subject, actor):
+        seen.append((subject, actor))
+        return nullcontext()
+
+    monkeypatch.setattr(api_context, "api_state_context", _spy)
+    return seen
+
+
+async def test_run_tool_parses_subject_to_the_operation(install, monkeypatch):
+    from tai42_contract.states import StateSubject
+
+    seen = _capture_api_state_context(monkeypatch)
+    install(_FakeTools({"alpha": _tool("alpha")}, run_result={"ok": 1}))
+    body = (
+        b'{"tool_name": "alpha", "arguments": {},'
+        b' "subject": {"target_kind": "tool", "target_name": "acct-42", "kind": "thread", "key": "t-1"}}'
+    )
+    resp = await router.run_tool(_body_req(body))
+    assert resp.status_code == 200
+    assert len(seen) == 1
+    subject, _actor = seen[0]
+    assert subject == StateSubject(target_kind="tool", target_name="acct-42", kind="thread", key="t-1")
+
+
+async def test_run_tool_without_subject_deposits_none(install, monkeypatch):
+    seen = _capture_api_state_context(monkeypatch)
+    install(_FakeTools({"alpha": _tool("alpha")}, run_result={"ok": 1}))
+    await router.run_tool(_body_req(b'{"tool_name": "alpha", "arguments": {}}'))
+    assert len(seen) == 1
+    assert seen[0][0] is None
+
+
+async def test_run_tool_malformed_subject_is_400(install):
+    # A subject the contract model rejects (an unknown ``target_kind``) is a loud 400 at
+    # the edge, never silently dropped or a 500 deeper in.
+    install(_FakeTools({"alpha": _tool("alpha")}))
+    bad = '{"target_kind": "nope", "target_name": "x", "kind": "thread", "key": "k"}'
+    body = ('{"tool_name": "alpha", "subject": ' + bad + "}").encode()
+    resp = await router.run_tool(_body_req(body))
+    assert resp.status_code == 400
+    assert "subject" in _json(resp)["error"]
+
+
+async def test_run_tool_non_object_subject_is_400(install):
+    install(_FakeTools({"alpha": _tool("alpha")}))
+    resp = await router.run_tool(_body_req(b'{"tool_name": "alpha", "subject": 5}'))
+    assert resp.status_code == 400
+    assert "subject" in _json(resp)["error"]

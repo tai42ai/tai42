@@ -41,11 +41,11 @@ def _record_bound_keys(app) -> list[tuple[str, str | None]]:
     seen: list[tuple[str, str | None]] = []
     original = app.tools.run_tool
 
-    async def recording_run_tool(name, tool_input, *, offload_sync=False):
+    async def recording_run_tool(name, tool_input, *, offload_sync=False, extras=None):
         identity = get_execution_identity()
         seen.append((name, identity.user_id if identity is not None else None))
         await asyncio.sleep(0)  # yield so co-scheduled hooks interleave
-        return await original(name, tool_input, offload_sync=offload_sync)
+        return await original(name, tool_input, offload_sync=offload_sync, extras=extras)
 
     app.tools.run_tool = recording_run_tool
     return seen

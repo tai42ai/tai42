@@ -49,12 +49,30 @@ async def test_create_run_persists_arguments_and_flag_when_crash_resume(wired) -
         settings,
         user_id="u1",
         arguments={"x": 1},
+        extras={"warm": "y"},
         crash_resume=True,
     )
     record = await store.get_run(fake, "r1")
     assert record is not None
     assert record["crash_resume"] == "1"
     assert json.loads(record["arguments"]) == {"x": 1}
+    assert json.loads(record["extras"]) == {"warm": "y"}
+
+
+async def test_crash_resume_re_drive_passes_the_recorded_extras(wired, monkeypatch) -> None:
+    # A warm-started run re-driven WITHOUT its extras would run the nodes its author filled; the
+    # re-drive replays the stored (arguments, extras) pair through ``run_recorded``.
+    from tai42_skeleton.operations.tool_runs import reconcile, supervisor
+
+    captured: dict = {}
+
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None) -> None:
+        captured.update(tool_name=tool_name, arguments=arguments, extras=extras)
+
+    monkeypatch.setattr(supervisor, "run_recorded", _fake_run_recorded)
+    record = {"tool_name": "alpha", "arguments": json.dumps({"x": 1}), "extras": json.dumps({"warm": "y"})}
+    await reconcile._crash_resume("r-x", record)
+    assert captured == {"tool_name": "alpha", "arguments": {"x": 1}, "extras": {"warm": "y"}}
 
 
 async def test_create_run_stores_neither_for_an_unflagged_run(wired) -> None:

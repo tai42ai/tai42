@@ -125,7 +125,9 @@ async def test_tools_facet_async_forwarding():
     assert await f.get_client_tools(["a"]) == "get_client_tools-result"
     app._tool_binding.get_client_tools.assert_awaited_once_with(["a"])
     assert await f.run_tool("k", {"x": 1}) == "run_tool-result"
-    app._tool_binding.run_tool.assert_awaited_once_with("k", {"x": 1}, offload_sync=False)
+    app._tool_binding.run_tool.assert_awaited_once_with(
+        "k", {"x": 1}, offload_sync=False, continues_chain=None, extras=None
+    )
 
 
 # -- AgentsFacet --------------------------------------------------------------

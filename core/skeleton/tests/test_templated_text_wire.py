@@ -32,10 +32,10 @@ def _hook_params(**over: object) -> HookParams:
 
 def test_hooks_door_serializes_templated_text_canonically() -> None:
     # ``list_hooks`` dumps each stored ``HookParams`` with ``mode="json"``; the nested
-    # condition/expr must carry exactly their set source key and no null.
-    dumped = _hook_params(condition=_BY_ID, expr=_INLINE).model_dump(mode="json")
+    # condition/start_expr must carry exactly their set source key and no null.
+    dumped = _hook_params(condition=_BY_ID, start_expr=_INLINE).model_dump(mode="json")
     assert dumped["condition"] == _CANONICAL_BY_ID
-    assert dumped["expr"] == _CANONICAL_INLINE
+    assert dumped["start_expr"] == _CANONICAL_INLINE
 
 
 def test_presets_door_serializes_templated_text_canonically() -> None:
@@ -49,7 +49,7 @@ def test_presets_door_serializes_templated_text_canonically() -> None:
 def test_the_two_doors_emit_the_identical_shape() -> None:
     # The anti-drift pin: the hooks door and the presets door serialize the SAME
     # ``TemplatedText`` to the SAME bytes.
-    hook = _hook_params(condition=_BY_ID, expr=_INLINE).model_dump(mode="json")
+    hook = _hook_params(condition=_BY_ID, start_expr=_INLINE).model_dump(mode="json")
     preset = PresetBody(base_tool="echo", output_schema=_BY_ID, input_schema=_INLINE).model_dump(mode="json")
     assert hook["condition"] == preset["output_schema"]
-    assert hook["expr"] == preset["input_schema"]
+    assert hook["start_expr"] == preset["input_schema"]

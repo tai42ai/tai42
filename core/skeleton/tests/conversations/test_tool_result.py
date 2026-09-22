@@ -17,6 +17,7 @@ from .conftest import (
     _TURN_LOGGER,
     FakeChannel,
     FakeManager,
+    _connected,
     _settle,
     _store,
     _tool_api_route,
@@ -445,13 +446,17 @@ async def test_tool_target_paused_envelope_binds_completion_and_delivers_on_resu
     assert context["route_name"] == "tool-line"
 
     # The resume drives past the pause to compose_messages and fires the completion; reply_expr
-    # maps the now-committed reply and it delivers back into the thread.
-    out = await turn_module.deliver_tool_completion(
-        delivery_thread_id=thread_id,
-        completion_id="c-resume",
-        result={"result": {"outputs": {"compose_messages": "your quote is ready"}}},
-        status=PARK_COMPLETION_SUCCEEDED,
-    )
+    # maps the now-committed reply and it delivers back into the thread. Fired inside the platform's
+    # delivery-fire context, as the real delivery ladder wraps every address-tool fire.
+    from tai42_skeleton.runs.chokepoint import delivery_fire
+
+    with delivery_fire("c-resume"):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id=thread_id,
+            completion_id="c-resume",
+            result={"result": {"outputs": {"compose_messages": "your quote is ready"}}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
     await _settle()
     assert out == {"message_id": "c-resume"}
     delivered = await _store().get_record("c-resume")
@@ -474,7 +479,9 @@ async def test_tool_target_paused_envelope_over_the_api_door_delivers_a_silent_m
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    result = await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     assert result.answer is not None

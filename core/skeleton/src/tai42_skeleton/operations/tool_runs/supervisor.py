@@ -14,7 +14,7 @@ import json
 import logging
 import secrets
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import SuspendedInteraction
@@ -25,9 +25,15 @@ from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 import tai42_skeleton.operations.tool_runs as _pkg
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings, tool_runs_store_configured
+from tai42_skeleton.runs.chokepoint import collect_resumed_interactions
 
 from .models import _DEFAULT_CANCEL_REASON, _FAILED, _PARKED, _SUCCEEDED
 from .store import ToolRunStore
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from tai42_contract.states import StateSubject
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +102,20 @@ def _discard_supervisor(task: asyncio.Task[None]) -> None:
     _SUPERVISOR_EPOCH.pop(task, None)
 
 
-def _spawn_supervisor(run_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
+def _spawn_supervisor(
+    run_id: str, tool_name: str, arguments: dict[str, Any], subject: StateSubject | None = None
+) -> None:
     """Detach the task that runs ``tool_name`` and persists its outcome.
 
     The task must be spawned HERE so it copies the submitting context: that carries a
     bound execution identity into the run, which is what authorizes the dispatch
     :func:`_supervise` makes long after the submitting fire released its binding.
+
+    ``subject`` is the submit door's named subject: the detached run runs under its
+    ``door="api"`` :class:`StateContext`, so a tool that async-parks indexes the park
+    under that subject and a later run on the same subject finds and resumes it.
     """
-    task = asyncio.create_task(_supervise(run_id, tool_name, arguments))
+    task = asyncio.create_task(_supervise(run_id, tool_name, arguments, subject=subject))
     _enroll_supervisor(task)
     task.add_done_callback(lambda t: _on_supervisor_done(t, run_id, tool_name))
 
@@ -152,7 +164,13 @@ async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, setti
 
 
 async def _supervise(
-    run_id: str, tool_name: str, arguments: dict[str, Any], *, propagate_failure: bool = False
+    run_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    propagate_failure: bool = False,
+    subject: StateSubject | None = None,
+    extras: Mapping[str, Any] | None = None,
 ) -> None:
     """Run ``tool_name`` and persist its terminal record, refreshing liveness while it runs.
 
@@ -162,9 +180,19 @@ async def _supervise(
     The detached submit supervisor leaves it off — it is the top of its task, with no caller
     to propagate to, so a recorded failure is the whole outcome (a re-raise would only reach
     the done-callback's generic task-failure log).
+
+    ``subject`` (set on the submit-door path) deposits the ``door="api"``
+    :class:`StateContext` around the run, so the tool's async park indexes under the caller's
+    named subject; the inline ``run_recorded`` path passes none, running under the fire door's
+    own already-deposited context.
     """
+    from tai42_skeleton.states.api_context import api_state_context
+
     settings = _pkg.tool_runs_settings()
     store = ToolRunStore(settings.key_prefix)
+    # The run's accountable principal is the caller's own bound execution key, copied into this
+    # detached context at spawn; it is the ``actor`` on the subject context the park records.
+    actor, _restricted = _pkg.request_identity()
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
         refresher = asyncio.create_task(_refresh_liveness_loop(r, store, run_id, settings))
         # Bind this run's id as the interaction origin for the tool body, so a
@@ -181,78 +209,100 @@ async def _supervise(
         parked: SuspendedInteraction | None = None
         result_json = ""
         try:
-            try:
-                result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
-                if isinstance(result, SuspendedInteraction):
-                    # The tool async-parked (a generic contract sentinel): the run has NOT
-                    # succeeded — its answer is delivered out of band by the tool's own resumer —
-                    # so it terminates PARKED, keyed by the parked interaction id, never a
-                    # succeeded record over an unfinished run.
-                    parked = result
+            # Arm the resumed-interaction collector for the dispatch span: a submit/hook run
+            # whose tool resumes or takes a parked entry records those interaction ids in its
+            # terminal record. Every terminal path below writes ``list(resumed)`` as the
+            # JSON-encoded ``resumed_interactions`` field (``[]`` when it resumed nothing).
+            with collect_resumed_interactions() as resumed:
+                try:
+                    # The ``door="api"`` subject context (submit path only) is ambient across the
+                    # dispatch so an async park of the run indexes under the caller's named subject;
+                    # the inline ``run_recorded`` path passes no subject and runs under the fire door's
+                    # own already-deposited context.
+                    with api_state_context(subject, actor):
+                        result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True, extras=extras)
+                    if isinstance(result, SuspendedInteraction):
+                        # The tool async-parked (a generic contract sentinel): the run has NOT
+                        # succeeded — its answer is delivered out of band by the tool's own resumer —
+                        # so it terminates PARKED, keyed by the parked interaction id, never a
+                        # succeeded record over an unfinished run.
+                        parked = result
+                    else:
+                        # ``run_tool`` already json-normalizes the body; a residual dumps
+                        # failure surfaces as a ``failed`` record rather than a lost run. A
+                        # background run has no live-caller door, so any wrapped secret is
+                        # masked to the placeholder before it lands in the durable record.
+                        result_json = json.dumps(mask_secrets(result))
+                except asyncio.CancelledError as cancel:
+                    # A drain (process shutdown OR an epoch retire) cancelled this run
+                    # mid-flight. Record it as ``failed`` through the same one-way CAS the
+                    # normal path uses (so a record already reconciled to ``lost`` is never
+                    # overwritten), naming the ACTUAL cause the drain passed as the cancel
+                    # message, then re-raise so the cancellation propagates to the drain
+                    # handler. Safe to await here: the drain cancels each task exactly once,
+                    # then waits.
+                    reason = cancel.args[0] if cancel.args else _DEFAULT_CANCEL_REASON
+                    fields = {
+                        "status": _FAILED,
+                        "finished_at": _pkg._now().isoformat(),
+                        "error": reason,
+                        "resumed_interactions": json.dumps(resumed),
+                    }
+                    persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)
+                    if not persisted:
+                        logger.warning(
+                            "tool-run %s (%s) was cancelled at shutdown but the record was already "
+                            "reconciled to lost; terminal write skipped (one-way lost)",
+                            run_id,
+                            tool_name,
+                        )
+                    raise
+                except Exception as exc:
+                    # Persist the raised error as record data so the requester reads it; logged
+                    # too, never dropped. An inline caller additionally re-raises it below.
+                    logger.exception("tool-run %s (%s) failed", run_id, tool_name)
+                    tool_error = exc
+                    fields = {
+                        "status": _FAILED,
+                        "finished_at": _pkg._now().isoformat(),
+                        "error": str(exc),
+                        "resumed_interactions": json.dumps(resumed),
+                    }
                 else:
-                    # ``run_tool`` already json-normalizes the body; a residual dumps
-                    # failure surfaces as a ``failed`` record rather than a lost run. A
-                    # background run has no live-caller door, so any wrapped secret is
-                    # masked to the placeholder before it lands in the durable record.
-                    result_json = json.dumps(mask_secrets(result))
-            except asyncio.CancelledError as cancel:
-                # A drain (process shutdown OR an epoch retire) cancelled this run
-                # mid-flight. Record it as ``failed`` through the same one-way CAS the
-                # normal path uses (so a record already reconciled to ``lost`` is never
-                # overwritten), naming the ACTUAL cause the drain passed as the cancel
-                # message, then re-raise so the cancellation propagates to the drain
-                # handler. Safe to await here: the drain cancels each task exactly once,
-                # then waits.
-                reason = cancel.args[0] if cancel.args else _DEFAULT_CANCEL_REASON
-                fields = {
-                    "status": _FAILED,
-                    "finished_at": _pkg._now().isoformat(),
-                    "error": reason,
-                }
+                    if parked is not None:
+                        fields = {
+                            "status": _PARKED,
+                            "finished_at": _pkg._now().isoformat(),
+                            "result": json.dumps(
+                                {
+                                    "interaction_id": parked.interaction_id,
+                                    "expiry_at": parked.expiry_at.isoformat() if parked.expiry_at is not None else None,
+                                }
+                            ),
+                            "resumed_interactions": json.dumps(resumed),
+                        }
+                    else:
+                        fields = {
+                            "status": _SUCCEEDED,
+                            "finished_at": _pkg._now().isoformat(),
+                            "result": result_json,
+                            "resumed_interactions": json.dumps(resumed),
+                        }
+                # Gate the terminal write on the record still being ``running`` so it
+                # can never overwrite a ``lost`` a reader already wrote (one-way lost).
                 persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)
                 if not persisted:
                     logger.warning(
-                        "tool-run %s (%s) was cancelled at shutdown but the record was already "
-                        "reconciled to lost; terminal write skipped (one-way lost)",
+                        "tool-run %s (%s) finished as %s but the record was already reconciled to lost; "
+                        "terminal write skipped (one-way lost)",
                         run_id,
                         tool_name,
+                        fields["status"],
                     )
-                raise
-            except Exception as exc:
-                # Persist the raised error as record data so the requester reads it; logged
-                # too, never dropped. An inline caller additionally re-raises it below.
-                logger.exception("tool-run %s (%s) failed", run_id, tool_name)
-                tool_error = exc
-                fields = {"status": _FAILED, "finished_at": _pkg._now().isoformat(), "error": str(exc)}
-            else:
-                if parked is not None:
-                    fields = {
-                        "status": _PARKED,
-                        "finished_at": _pkg._now().isoformat(),
-                        "result": json.dumps(
-                            {
-                                "interaction_id": parked.interaction_id,
-                                "expiry_at": parked.expiry_at.isoformat() if parked.expiry_at is not None else None,
-                            }
-                        ),
-                    }
-                else:
-                    fields = {"status": _SUCCEEDED, "finished_at": _pkg._now().isoformat(), "result": result_json}
-            # Gate the terminal write on the record still being ``running`` so it
-            # can never overwrite a ``lost`` a reader already wrote (one-way lost).
-            persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)
-            if not persisted:
-                logger.warning(
-                    "tool-run %s (%s) finished as %s but the record was already reconciled to lost; "
-                    "terminal write skipped (one-way lost)",
-                    run_id,
-                    tool_name,
-                    fields["status"],
-                )
-            # Terminal record written; only now let the failure propagate to an inline
-            # caller so its own surfacing runs on top of the recorded failure.
-            if tool_error is not None and propagate_failure:
-                raise tool_error
+                # Terminal record written; only now let the failure propagate to an inline
+                # caller so its own surfacing runs on top of the recorded failure.
+                if tool_error is not None and propagate_failure:
+                    raise tool_error
         finally:
             reset_detached_run(detached_token)
             reset_interaction_origin(origin_token)
@@ -261,8 +311,14 @@ async def _supervise(
                 await refresher
 
 
-async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
+async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Mapping[str, Any] | None = None) -> None:
     """Execute ``tool_name`` under the CURRENTLY bound execution identity, writing the full run-record lifecycle.
+
+    ``extras`` is the door start ``extras`` mapping the fired run reads through ``app.tools.extras()``;
+    a hook door threads its ``extras_expr`` result here. It is stored beside ``arguments`` on a
+    crash-resume-declared record so a re-drive replays the run WITH its warm data, and passed on both
+    ``run_tool`` call sites (the store-off inline run and the ``_supervise`` task); ``None`` binds an
+    empty mapping, exactly as a run with no door extras.
 
     Writes the SAME running -> succeeded/failed lifecycle a background submit
     writes — so a hook- or trigger-dispatched fire is listable via ``GET /api/tool-runs``
@@ -286,7 +342,7 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
         # blocks the event loop — the OFF branch only skips recording, not the offload.
         detached_token = mark_detached_run()
         try:
-            await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
+            await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True, extras=extras)
         finally:
             reset_detached_run(detached_token)
         return
@@ -315,6 +371,7 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
             settings,
             user_id=user_id,
             arguments=arguments,
+            extras=extras,
             crash_resume=crash_resume,
         )
     # Run under a supervisor task ENROLLED in the drain registry exactly like a submitted
@@ -325,7 +382,7 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
     # done-callback only clears the registry, never the submit door's ``_ACTIVE_RUNS`` count.
     # The run is still awaited INLINE, so ``propagate_failure`` re-raises a tool failure to
     # the fan-out's per-hook error log exactly as a direct await would.
-    task = asyncio.create_task(_supervise(run_id, tool_name, arguments, propagate_failure=True))
+    task = asyncio.create_task(_supervise(run_id, tool_name, arguments, extras=extras, propagate_failure=True))
     _enroll_supervisor(task)
     task.add_done_callback(_discard_supervisor)
     try:

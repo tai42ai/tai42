@@ -57,6 +57,41 @@ def test_schedules_add_merges_tool_and_schedule_kwargs(monkeypatch: pytest.Monke
     assert result.exit_code == 0, result.output
 
 
+def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["execution_key"] == "svc"
+        assert body["start_expr"] == {"content": ".payload"}
+        assert body["cancel_expr"] == {"content": "$parked[].id"}
+        assert body["resume_expr"] == {"content": "$parked[0].id"}
+        assert body["extras_expr"] == {"content": "{warm: .seed}"}
+        assert body["state_binding"] == {"states": []}
+        return data_response({"name": "report"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "schedules",
+            "add",
+            "report",
+            "--execution-key",
+            "svc",
+            "--start-expr",
+            ".payload",
+            "--cancel-expr",
+            "$parked[].id",
+            "--resume-expr",
+            "$parked[0].id",
+            "--extras-expr",
+            "{warm: .seed}",
+            "--state-binding",
+            '{"states": []}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_schedules_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"

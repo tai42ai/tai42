@@ -8,19 +8,20 @@ reply (or to a silent/error outcome).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import AnswerPart, ConversationRoute, Person, TurnSupersededError
 from tai42_contract.interactions import (
     LocationElement,
     MediaItem,
-    SuspendedInteraction,
+    VisitOutcome,
     reset_park_completion,
     set_park_completion,
 )
 from tai42_contract.states.binding import StateBinding
-from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
+from tai42_contract.tools import tool_call_frame
+from tai42_kit.interactions.door_contract import DOOR_START_DEFAULT, evaluate_door_contract, parked_entries_for_jq
 from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.authz.execution import bind_execution_identity
@@ -42,9 +43,14 @@ from tai42_skeleton.conversations.turn.tool_result import (
     _result_shape,
     _suspended_result_note,
 )
+from tai42_skeleton.interactions.visit import list_parked, visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from tai42_kit.interactions.door_contract import DoorContractOutcome
+
     from tai42_skeleton.conversations.turn.overlap import Batch
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
@@ -104,7 +110,7 @@ def _tool_payload(
     }
     if record.inbound_kind == "event":
         # An event turn has no human text and no sender; its structured payload rides the
-        # dedicated ``event`` key, and ``message``/``sender`` are null so a payload_expr
+        # dedicated ``event`` key, and ``message``/``sender`` are null so a start_expr
         # (and the default kwargs) never read an event as a text message.
         event = record.inbound_event or {}
         payload["message"] = None
@@ -130,13 +136,23 @@ def _tool_payload(
     return payload
 
 
-async def _dispatch_tool(
-    route: ConversationRoute, kwargs: dict[str, object], thread_id: str, *, route_state_binding: StateBinding | None
-) -> object:
-    """Run the tool under the bound execution identity and return the raw result.
+async def _drive_visit(
+    route: ConversationRoute,
+    thread_id: str,
+    *,
+    message_id: str,
+    contract: DoorContractOutcome,
+    kwargs: dict[str, object],
+    start_requested: bool,
+    route_state_binding: StateBinding | None,
+) -> VisitOutcome:
+    """Drive the route's parkable run through the shared visit and return its :class:`VisitOutcome`.
 
-    The generic tool-route completion is bound around the dispatch and the
-    route's optional state binding is set/reset. The caller owns the
+    The whole turn runs under the bound execution identity (its ``run_tool`` seam authorizes the
+    dispatch and it is the run's fire authority a detached resume re-binds) and the bound generic
+    tool-route completion, under which the outermost minting call frame reads that completion as this
+    run's out-of-band delivery address. ``visit`` deposits the route's ``state_binding`` around
+    ``start`` alone — never around a resume/take/cancel continuation. The caller owns the
     denied/failed dispatch guards.
     """
     async with bind_execution_identity(route.execution_key, bound_fingerprint=route.execution_key_fingerprint):
@@ -144,47 +160,53 @@ async def _dispatch_tool(
         # the door↔turn package free of an import cycle.
         from tai42_skeleton.conversations.turn.completion_delivery import DELIVER_TOOL_COMPLETION_NAME
 
-        # Bind the generic tool-route completion for the dispatch: a parking tool captures
-        # it, and its resumer fires the deferred outcome back to THIS thread out of band.
-        # A non-parking tool never reads it. Reset in a finally so it never leaks past the
-        # dispatch.
-        # Pin the ORIGINATING route beside the delivery thread: a linked person may write
-        # from a different route before the resume, and the completion must map the outcome
-        # through THIS route's reply_expr, not the route the thread's newest record names.
+        # Bind the generic tool-route completion for the turn: a parking tool captures it, and its
+        # resumer fires the deferred outcome back to THIS thread out of band. A non-parking tool
+        # never reads it. Pin the ORIGINATING route beside the delivery thread and this turn's
+        # ``message_id`` (the late-path deliverer rebuilds ``$turn`` from that stored record) — a
+        # linked person may write from a different route before the resume, and the completion must
+        # map the outcome through THIS route's reply_expr, not the route the thread's newest record
+        # names. Reset in a finally so it never leaks past the turn.
         completion_token = set_park_completion(
             DELIVER_TOOL_COMPLETION_NAME,
-            {"delivery_thread_id": thread_id, "route_name": route.route_name},
+            {"delivery_thread_id": thread_id, "route_name": route.route_name, "message_id": message_id},
         )
-        binding_token = (
-            set_current_tool_invocation(ToolInvocation(tool_name=route.target_name, state_binding=route_state_binding))
-            if route_state_binding is not None
-            else None
-        )
+
+        # ``offload_sync``: a synchronous tool runs off the event loop, matching the meta-executor
+        # door, so a blocking tool cannot starve the turn engine. ``start`` is ``None`` when the
+        # contract asked to start nothing (a ``start_expr`` yielding null).
+        async def _start(extras: Mapping[str, Any]) -> object:
+            return await accessors._tools().run_tool(route.target_name, kwargs, offload_sync=True, extras=extras)
+
         try:
-            # ``offload_sync``: a synchronous tool runs off the event loop, matching the
-            # meta-executor door, so a blocking tool cannot starve the turn engine.
-            return await accessors._tools().run_tool(route.target_name, kwargs, offload_sync=True)
+            # The outermost minting call frame in its DOOR form (name=None): it mints the run's
+            # delivery id and reads the bound completion as its out-of-band address (so a park
+            # captures the route's real address, never None) and pushes no chain entry, for a start
+            # AND a resume turn alike.
+            with tool_call_frame():
+                return await visit(
+                    target_name=route.target_name,
+                    cancel=contract.cancel,
+                    resume=contract.resume,
+                    start=_start if start_requested else None,
+                    extras=contract.extras,
+                    state_binding=route_state_binding,
+                    receives_outcome=True,
+                )
         finally:
             reset_park_completion(completion_token)
-            if binding_token is not None:
-                reset_current_tool_invocation(binding_token)
 
 
-async def _tool_outcome_of_result(route: ConversationRoute, result: object) -> _ToolOutcome:
-    """Map a raw tool run result to an outcome.
+async def _tool_outcome_of_result(
+    route: ConversationRoute, result: object, *, turn: dict[str, object], parked: list[dict[str, Any]]
+) -> _ToolOutcome:
+    """Map a started tool run's final result to an outcome.
 
-    Applies the ordered SuspendedInteraction / suspended-note / interrupt /
-    failure / reply-mapping disposition chain. A paused/suspended run is silent,
-    an interrupt or non-success terminal is a client-safe error, and a clean
-    result maps through ``reply_expr`` to an answer or (null/blank) a silent
-    outcome.
+    Applies the ordered suspended-note / interrupt / failure / reply-mapping disposition chain (a
+    caller park or a user park is normalised by the visit, never reaching here). A paused/suspended
+    envelope is silent, an interrupt or non-success terminal is a client-safe error, and a clean
+    result maps through ``reply_expr`` to an answer or (null/blank) a silent outcome.
     """
-    if isinstance(result, SuspendedInteraction):
-        # The tool parked the caller on an async ask (a generic contract sentinel —
-        # the turn learns nothing of the driver's resume state): produce no reply and
-        # end the turn silently. The completion continuation bound around this dispatch
-        # is what delivers the reply back into the thread when the parked run resumes.
-        return _SilentOutcome()
     suspended_note = _suspended_result_note(result)
     if suspended_note is not None:
         # The run handed back a NON-TERMINAL SUSPENDED envelope, NOT the SuspendedInteraction
@@ -218,7 +240,7 @@ async def _tool_outcome_of_result(route: ConversationRoute, result: object) -> _
         logger.error("conversations: tool turn for route %r failed: %s", route.route_name, failure_detail)
         return _tool_error(failure_detail, route)
     try:
-        reply = await _tool_reply(route, result)
+        reply = await _tool_reply(route, result, turn=turn, asks=[], parked=parked)
     except Exception as exc:
         logger.exception("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
         # VALUE-FREE ground truth: the mapped envelope's SHAPE — never its participant-content values —
@@ -257,18 +279,18 @@ async def _run_tool_turn(
 
     The outcome is a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`.
     Stateless per message — no conversation memory. The inbound payload maps to
-    the tool kwargs (``payload_expr`` or a fixed ``{message, sender, turn}``), the tool runs under
+    the tool kwargs (``start_expr`` or a fixed ``{message, sender, turn}``), the tool runs under
     the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
     result maps to the reply (``reply_expr`` or a null/string pass-through). The payload
     always carries ``thread_id`` — this turn's canonical thread id, the same opaque string the
     thread doors address (``DELETE /api/conversations/{route_name}/thread?thread_id=``) — so a
-    ``payload_expr`` can thread the conversation id through to the tool/flow kwargs. The payload
+    ``start_expr`` can thread the conversation id through to the tool/flow kwargs. The payload
     carries ``person_id`` and ``person_addresses`` IFF the target has multichannel on;
     ``sender`` stays the sending address either way. Non-empty ``params`` nest under a
     ``params`` key (never merged into the root); ``None``/empty leave the payload unchanged.
     A structured inbound ``form`` (an ask-less form's submission) rides the payload under a
-    ``form`` key ONLY when the inbound carried one, so an existing ``payload_expr`` over a
-    form-less inbound sees a byte-identical payload; the default no-``payload_expr`` kwargs
+    ``form`` key ONLY when the inbound carried one, so an existing ``start_expr`` over a
+    form-less inbound sees a byte-identical payload; the default no-``start_expr`` kwargs
     stay the fixed ``{message, sender, turn}`` either way — a route maps the form deliberately or
     not at all. Structured inbound ``attachments`` (the participant's media, as JSON ``MediaItem``
     objects) and a ``location`` (a JSON ``LocationElement``) ride the payload under those stable
@@ -309,8 +331,11 @@ async def _run_tool_turn(
         attachments=attachments,
         location=location,
     )
+    # The run's currently parked interactions on this turn's subject, read once and bound as
+    # ``$parked`` in every door jq, dumped to the one compact shape every door presents.
+    parked = parked_entries_for_jq(await list_parked())
     try:
-        kwargs = await _tool_kwargs(route, payload)
+        contract = await evaluate_door_contract(route, payload, parked)
     except Exception as exc:
         # VALUE-FREE: a jq runtime error embeds the offending payload input (which now
         # carries opaque entry params) in its text, and this detail is both logged and
@@ -318,18 +343,26 @@ async def _run_tool_turn(
         # and never ``exc_info``. The adjacent tool-run/reply-mapping paths keep their
         # diagnosable text: they render the tool's own output, not the platform's jq input.
         logger.exception(
-            "conversations: mapping the inbound payload for route %r failed with %s",
+            "conversations: evaluating the door contract for route %r failed with %s",
             route.route_name,
             type(exc).__name__,
         )
-        return _tool_error(f"payload_expr error ({type(exc).__name__})", route)
-    # The route's optional door binding, read from the target config; deposited on the
-    # ambient dispatch context so the chokepoint carries it forward and applies it around the
-    # tool turn. A route with no binding deposits nothing.
+        return _tool_error(f"door contract error ({type(exc).__name__})", route)
+    kwargs, start_requested = _start_kwargs(payload, contract.start)
+    # The route's optional door binding, read from the target config; handed to ``visit``, which
+    # deposits it around ``start`` alone. A route with no binding deposits nothing.
     target_config = await accessors._config_store().get(route.target_kind, route.target_name)
     route_state_binding = target_config.state_binding if target_config is not None else None
     try:
-        result = await _dispatch_tool(route, kwargs, thread_id, route_state_binding=route_state_binding)
+        outcome = await _drive_visit(
+            route,
+            thread_id,
+            message_id=record.message_id,
+            contract=contract,
+            kwargs=kwargs,
+            start_requested=start_requested,
+            route_state_binding=route_state_binding,
+        )
     except TurnSupersededError as exc:
         # The tool read the pending seam and yielded to a newer message: resolve the turn
         # ``superseded`` exactly as the cancel watcher does — no reply, no error reply, no
@@ -340,47 +373,81 @@ async def _run_tool_turn(
     except Exception as exc:
         logger.exception("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
         return _tool_error(f"turn error: {exc}", route)
-    return await _tool_outcome_of_result(route, result)
+    return await _outcome_of_visit(route, outcome, turn=cast("dict[str, object]", payload["turn"]), parked=parked)
 
 
-async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> dict[str, object]:
-    """The kwargs the tool is dispatched with.
-
-    No ``payload_expr`` → the fixed ``{message, sender, turn}`` (plus ``event``
-    on an event turn). Otherwise the jq program over the full payload, which MUST
-    emit exactly one value and it MUST be a JSON object.
-    """
-    if route.payload_expr is None:
-        kwargs: dict[str, object] = {
-            "message": payload["message"],
-            "sender": payload["sender"],
-            "turn": payload["turn"],
-        }
-        if "event" in payload:
-            kwargs["event"] = payload["event"]
-        return kwargs
-    # Render the templated payload_expr to its jq program IMMEDIATELY before evaluating it;
-    # a by-id text whose stored resource cannot be fetched raises here and is surfaced as
-    # the route's loud payload_expr error.
-    program = await tai42_app.storage.resource_manager.render_templated_text(route.payload_expr)
-    # Bounded at one, so an over-emitting program is capped rather than materialized whole.
-    values = await run_jq_bounded(program, payload, 1)
-    if len(values) != 1:
-        raise ValueError(f"payload_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
-    kwargs = values[0]
-    if not isinstance(kwargs, dict):
-        raise ValueError(f"payload_expr must emit a JSON object, emitted {type(kwargs).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+def _default_tool_kwargs(payload: dict[str, object]) -> dict[str, object]:
+    """The fixed ``{message, sender, turn}`` (plus ``event``) a route with no ``start_expr`` dispatches."""
+    kwargs: dict[str, object] = {
+        "message": payload["message"],
+        "sender": payload["sender"],
+        "turn": payload["turn"],
+    }
+    if "event" in payload:
+        kwargs["event"] = payload["event"]
     return kwargs
 
 
-async def _tool_reply(route: ConversationRoute, result: object) -> str | list[AnswerPart] | None:
-    """The reply a tool result maps to.
+def _start_kwargs(payload: dict[str, object], start: object) -> tuple[dict[str, object], bool]:
+    """The tool kwargs to dispatch and whether a start runs at all.
+
+    :data:`DOOR_START_DEFAULT` (no ``start_expr``) → the fixed default kwargs, start runs;
+    ``None`` (``start_expr`` yielded null) → start nothing; a dict → those kwargs, start runs.
+    """
+    if start is DOOR_START_DEFAULT:
+        return _default_tool_kwargs(payload), True
+    if start is None:
+        return {}, False
+    return cast("dict[str, object]", start), True
+
+
+async def _outcome_of_visit(
+    route: ConversationRoute, outcome: VisitOutcome, *, turn: dict[str, object], parked: list[dict[str, Any]]
+) -> _ToolOutcome:
+    """Map a :class:`VisitOutcome` to the turn's outcome.
+
+    ``result`` → the started run's final result mapped through the disposition chain; ``asks`` → the
+    caller asks mapped through ``reply_expr`` (``.`` = null, ``$asks`` = the entries) or silent with
+    no ``reply_expr``; ``parked`` (only user asks left) and ``none`` (nothing ran) → silent, the
+    reply delivering out of band through the bound completion when a parked run resumes.
+    """
+    if outcome.kind == "result":
+        return await _tool_outcome_of_result(route, outcome.result, turn=turn, parked=parked)
+    if outcome.kind == "asks":
+        asks = parked_entries_for_jq(outcome.asks)
+        try:
+            reply = await _tool_reply(route, None, turn=turn, asks=asks, parked=parked)
+        except Exception as exc:
+            logger.exception(
+                "conversations: mapping the caller asks for route %r failed", route.route_name, exc_info=exc
+            )
+            return _tool_error(f"reply_expr error: {exc}", route)
+        parts = _reply_parts(reply)
+        if parts is None:
+            return _SilentOutcome()
+        return _ResolvedOutcome(answer_status="answered", parts=parts, error=None)
+    return _SilentOutcome()
+
+
+async def _tool_reply(
+    route: ConversationRoute,
+    result: object,
+    *,
+    turn: dict[str, object] | None,
+    asks: list[dict[str, Any]],
+    parked: list[dict[str, Any]],
+) -> str | list[AnswerPart] | None:
+    """The reply a started run's outcome maps to.
 
     Either ``None`` for a silent outcome, a single string, or an ORDERED LIST OF
     RICH :class:`AnswerPart` messages the delivery machine sends as separate
     messages in order. No ``reply_expr`` → the result must itself be ``None``, a
-    string, or a list. Otherwise the jq program over the raw result, which MUST
-    emit exactly one value and it MUST be null, a string, or an array.
+    string, or a list (so a caller-asks outcome, whose ``result`` is null, is silent).
+    Otherwise the jq program over the run's result as ``.`` (null for a caller-asks outcome),
+    with ``$turn`` (this turn's ids/subject, null on a late delivery whose record aged out),
+    ``$asks`` (the caller ask entries, empty on a plain result) and ``$parked`` (the run's parked
+    interactions) bound beside it; it MUST emit exactly one value and it MUST be null, a string,
+    or an array.
 
     A reply ARRAY is the multi-message authoring surface: each element is EITHER a plain
     string (shorthand for a text-only part) or a part OBJECT (``{message, media?, options?,
@@ -402,8 +469,10 @@ async def _tool_reply(route: ConversationRoute, result: object) -> str | list[An
     # by-id text whose stored resource cannot be fetched raises here and is surfaced as the
     # route's loud reply_expr error.
     program = await tai42_app.storage.resource_manager.render_templated_text(route.reply_expr)
-    # Bounded at one, so an over-emitting program is capped rather than materialized whole.
-    values = await run_jq_bounded(program, result, 1)
+    # Bounded at one, so an over-emitting program is capped rather than materialized whole. The
+    # result is the ``.`` (null when the run asked its caller); ``$turn`` / ``$asks`` / ``$parked``
+    # ride beside it (``$turn`` null on a late delivery whose originating record has aged out).
+    values = await run_jq_bounded(program, result, 1, variables={"turn": turn, "asks": asks, "parked": parked})
     if len(values) != 1:
         raise ValueError(f"reply_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
     reply = values[0]

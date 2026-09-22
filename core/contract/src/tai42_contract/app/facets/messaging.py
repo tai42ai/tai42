@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,6 +12,8 @@ from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt
 from tai42_contract.interactions.answer_check import QuestionFormat
 from tai42_contract.interactions.asker import Ask
 from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.visit import ParkedEntry, Visit, VisitOutcome
+from tai42_contract.states import StateContext
 from tai42_contract.webhooks import WebhookVerifier
 
 
@@ -62,6 +65,87 @@ class AppInteractions(Protocol):
         The continuation-due record ages out at it and the reaper caps its redelivery backoff at
         it, so no resume redelivery fires past it. A resuming driver derives its own
         resolution-record retention from this value rather than a hard-coded guess.
+        """
+        ...
+
+    @property
+    def visit(self) -> Visit:
+        """The bound, :class:`~tai42_contract.interactions.Visit`-typed shared-visit callable.
+
+        The ONE seam every door drives a parkable run through: it runs the cancel / resume / take /
+        start order once for every caller (checks everything before doing anything, cancels,
+        resumes or takes at most one action besides cancel, starts the target when nothing was
+        resumed, normalises what came back), and returns a
+        :class:`~tai42_contract.interactions.VisitOutcome`. A door resolves its own jqs to plain
+        values and hands them in; the generic ``list_parked`` / ``resume_parked`` / ``cancel_parked``
+        below are thin wrappers over this same seam.
+        """
+        ...
+
+    async def list_parked(self) -> list[ParkedEntry]:
+        """Every parked interaction on the current run's subject — the full parked entries.
+
+        Reads the ambient run's subject candidates and returns the union over its subject keys,
+        de-duplicated, each a :class:`~tai42_contract.interactions.ParkedEntry` with its id, status
+        (``asking``/``running``/``finished``/``failed``) and the question/answer fields a
+        state-backed entry carries. The same rows a door-contract jq reads as ``$parked``.
+        """
+        ...
+
+    async def list_parked_for(self, context: StateContext | None) -> list[ParkedEntry]:
+        """Every parked interaction on ``context``'s subject — the same entries as :meth:`list_parked`.
+
+        A parkable-driving door fetches this over its OWN
+        :class:`~tai42_contract.states.StateContext` once and feeds the list to the door-contract
+        evaluator as ``$parked``, keeping the contract evaluation a pure function of an injected
+        list rather than an ambient read. A ``None`` context has no subject and returns an empty
+        list.
+        """
+        ...
+
+    def current_fire_identity(self) -> tuple[str, str] | None:
+        """The ambient execution identity as the ``(user_id, fingerprint)`` pair a fire forwards, or ``None``.
+
+        A background task tool dispatched from within a door fire forwards this pair onto its worker
+        job so the deferred fire re-binds the SAME authority; ``None`` when no identity (or no
+        per-mint fingerprint) is bound, so nothing is forwarded and the deferred fire fails closed on
+        any credential seam rather than under a substituted principal.
+        """
+        ...
+
+    def bound_execution_identity_for_fire(
+        self, execution_key: str, fingerprint: str
+    ) -> AbstractAsyncContextManager[Any]:
+        """An ``async with`` binding ``execution_key``'s live-grant identity for a receiver-less door fire.
+
+        A scheduled fire has no live caller, so the door stores the firing identity (the execution
+        key's ``user_id`` and its per-mint ``fingerprint``) at create and binds it here at fire, so a
+        run that async-parks can rebind its continuation and a ``to="caller"`` resume acts under the
+        same authority. Homed beside the door's other kit-reachable seams so a backend plugin binds a
+        scheduled fire's identity without importing the skeleton. Raises when the key no longer
+        carries authority — the fire fails closed, never under a substituted principal.
+        """
+        ...
+
+    async def resume_parked(self, interaction_id: str, payload: Any = ...) -> VisitOutcome:
+        """Resume a parked caller ask with ``payload``, or TAKE its waiting outcome when omitted.
+
+        With ``payload`` given it resumes the ``asking`` caller ask ``interaction_id`` and returns
+        the resumed run's normalised outcome; with ``payload`` omitted it TAKES a ``finished``
+        entry's waiting outcome (``kind="result"``) or re-raises a ``failed`` one as
+        :class:`~tai42_contract.interactions.ParkableRunFailedError`. A live inline receiver, so the
+        resumed run's terminal is returned inline rather than delivered out of band.
+        """
+        ...
+
+    async def cancel_parked(self, ids: list[str]) -> VisitOutcome:
+        """Whole-chain kill every parked interaction named in ``ids`` on the current run's subject.
+
+        Each id is torn down through the one teardown seam (its run and every run it linked above it
+        close for good, delivering FAILED once to a door that started it); returns a
+        :class:`~tai42_contract.interactions.VisitOutcome` naming the ids cancelled. An id outside
+        the run's own parked list raises :class:`~tai42_contract.interactions.ParkedEntryGoneError`
+        with nothing cancelled.
         """
         ...
 
@@ -275,7 +359,7 @@ class AppConversations(Protocol):
 
         ``form`` is an optional structured participant submission (an ask-less form's answers)
         riding WITH the required rendered ``text`` — the text stays the whole turn every
-        consumer sees, while a tool target's ``payload_expr`` may map the structured copy
+        consumer sees, while a tool target's ``start_expr`` may map the structured copy
         from the payload's ``form`` key (present only when the inbound carried one). The
         platform bounds it as pure transport
         (:func:`~tai42_contract.conversations.validate_inbound_form`) and attaches no

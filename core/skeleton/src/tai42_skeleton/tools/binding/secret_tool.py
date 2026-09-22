@@ -4,7 +4,7 @@ from typing import Any
 
 from fastmcp.tools.base import ToolResult
 from fastmcp.tools.function_tool import FunctionTool
-from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.secrets import contains_secrets, mask_secrets, unwrap_secrets
 
 from tai42_skeleton.tools.reveal_gate import inprocess_reveal_gate, note_secret_reveal
@@ -36,13 +36,14 @@ class _SecretRevealingTool(FunctionTool):
     def convert_result(self, raw_value: Any) -> ToolResult:
         gate = inprocess_reveal_gate.get()
         if gate is not None:
-            if isinstance(raw_value, SuspendedInteraction):
-                # An async ask through a preset parks the caller and returns this
-                # sentinel. FastMCP's serialization would FLATTEN the pydantic model into
-                # ``structured_content`` (a plain dict), so the dispatch's type-based park
-                # recognition fails and the flow proceeds UN-parked while the delivered
-                # question's later answer strands — a silent lost-park. Stow it RAW so the
-                # in-process dispatch returns the object intact, exactly as the direct-run
+            if isinstance(raw_value, (SuspendedInteraction, ResumeBuffered)):
+                # An async ask through a preset parks the caller and returns a
+                # ``SuspendedInteraction`` sentinel; a resume through a preset that leaves sibling
+                # asks of the same super-step still open returns a ``ResumeBuffered``. FastMCP's
+                # serialization would FLATTEN either pydantic model into ``structured_content`` (a
+                # plain dict), so the dispatch's type-based park recognition fails and the run
+                # proceeds as if the value were a terminal result — a silent lost-park. Stow it RAW
+                # so the in-process dispatch returns the object intact, exactly as the direct-run
                 # seam preserves it; the ToolResult built below is never returned.
                 gate.park = raw_value
                 gate.has_park = True

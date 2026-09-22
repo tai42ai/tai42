@@ -9,6 +9,9 @@ the store leans on:
 * ``UPDATE ... trace_id = COALESCE(%s, trace_id)`` fills only a NULL trace id;
 * ``UPDATE ... interaction_id = COALESCE(interaction_id, %s)`` is first-set-wins —
   a park id at the terminal write never clobbers a resume origin captured at START;
+* ``UPDATE ... resumed_interactions = COALESCE(%s::jsonb, resumed_interactions)`` sets
+  the list the terminal write carries and keeps the START default (``[]``) on a NULL
+  arg, so the NOT NULL column is never nulled; the START insert leaves it at the default;
 * the static optional-filter list reads the params in the store's fixed order and
   pages newest-first with a ``run_id`` tiebreak.
 
@@ -71,10 +74,13 @@ class _FakeCursor:
                     "outcome": "running",
                     "started_at": _dt(started_at),
                     "ended_at": None,
+                    # The `resumed_interactions JSONB NOT NULL DEFAULT '[]'` column is left at its
+                    # default by the START insert (the SQL never names it).
+                    "resumed_interactions": [],
                 }
             )
         elif norm.startswith("UPDATE run_index SET"):
-            outcome, ended_at, trace_id, interaction_id, run_id = params
+            outcome, ended_at, trace_id, interaction_id, resumed_interactions, run_id = params
             for r in pg.rows:
                 if r["run_id"] == run_id:
                     r["outcome"] = outcome
@@ -83,6 +89,10 @@ class _FakeCursor:
                         r["trace_id"] = trace_id
                     if r["interaction_id"] is None:  # COALESCE(interaction_id, %s) — first-set wins
                         r["interaction_id"] = interaction_id
+                    if resumed_interactions is not None:  # COALESCE(%s::jsonb, resumed_interactions)
+                        # The store wraps the list in psycopg's ``Json`` adapter; the fake reads
+                        # the underlying list back, as real Postgres returns a parsed list.
+                        r["resumed_interactions"] = resumed_interactions.obj
                     self.rowcount = 1
         elif norm.startswith("SELECT run_id, preset_name, preset_version"):
             preset = params[0]
@@ -121,6 +131,7 @@ class _FakeCursor:
                     r["outcome"],
                     r["started_at"],
                     r["ended_at"],
+                    r["resumed_interactions"],
                 )
                 for r in window
             ]

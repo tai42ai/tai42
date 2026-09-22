@@ -55,17 +55,43 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key, arguments):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         if key not in self._registered:
             raise UnknownToolError(key)
         self.run_calls.append((key, arguments))
         return self._run_result
 
 
+class _FakeScheduleInteractions:
+    """The interactions facade a run-once schedule fire drives through: an empty ``$parked`` source
+    and a ``visit`` that runs ``start`` and returns its result outcome."""
+
+    async def list_parked_for(self, context):
+        return []
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        from tai42_contract.interactions import VisitOutcome
+
+        result = await start(extras) if start is not None else None
+        return VisitOutcome(
+            action="started" if start is not None else "none",
+            kind="result" if start is not None else "none",
+            result=result,
+        )
+
+
 @pytest.fixture
 def install(monkeypatch):
     def _install(fake_tools: _FakeTools):
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=fake_tools))
+        monkeypatch.setattr(
+            tai42_app,
+            "_impl",
+            SimpleNamespace(
+                tools=fake_tools,
+                interactions=_FakeScheduleInteractions(),
+                storage=SimpleNamespace(resource_manager=None),
+            ),
+        )
         return fake_tools
 
     return _install
@@ -157,7 +183,7 @@ async def test_create_maps_unknown_tool_raised_for_another_name_to_structured_50
     # name, and never an unstructured propagation out of the door.
     fake = install(_FakeTools(_MARKERS | {"send_report"}))
 
-    async def _run_tool(key, arguments):
+    async def _run_tool(key, arguments, *, offload_sync=False, extras=None):
         raise UnknownToolError("some_inner_tool")
 
     monkeypatch.setattr(fake, "run_tool", _run_tool)

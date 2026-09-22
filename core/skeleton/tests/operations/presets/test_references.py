@@ -51,6 +51,40 @@ def test_uses_used_by_reference_chain(pg) -> None:
     asyncio.run(run())
 
 
+def test_presets_facet_used_by_seam(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            await _seed_body("leaf", "weather", {"units": "v"})
+            await _seed_body("composer", "echo", {"tool_names": ["leaf"]})
+
+            assert await instance.app.presets.used_by("leaf") == ["composer"]
+            assert await instance.app.presets.used_by("composer") == []
+
+            from tai42_contract.presets.errors import PresetNotFoundError
+
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.used_by("no-such-preset")
+
+    asyncio.run(run())
+
+
+def test_tools_facet_declared_extras_direct_and_inherited(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            # A base tool's declared ``extras_keys`` are read directly by name.
+            assert await instance.app.tools.declared_extras("plan_tool") == frozenset({"warm_start"})
+            # A tool that declared none reads an empty set, and an unknown name too.
+            assert await instance.app.tools.declared_extras("weather") == frozenset()
+            assert await instance.app.tools.declared_extras("no-such-tool") == frozenset()
+
+            # A live preset over the base tool INHERITS the base's declared keys via the
+            # parent-tool chain walk.
+            await _create("planner", base_tool="plan_tool", fixed_kwargs={"plan": {"refs": []}})
+            assert await instance.app.tools.declared_extras("planner") == frozenset({"warm_start"})
+
+    asyncio.run(run())
+
+
 def test_uses_excludes_self_and_non_preset_base_tools(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):

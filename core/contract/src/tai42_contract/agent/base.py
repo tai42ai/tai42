@@ -180,6 +180,10 @@ class Agent(ABC):
     ToolInput: ClassVar[type[BaseModel]]
     spec_runnable: ClassVar[bool] = False
     preset_bakeable_fields: ClassVar[frozenset[str]] = frozenset()
+    # The door ``extras`` keys this agent target reads when a door starts it. The visit checks a
+    # door's ``extras`` against this set before the run and refuses an undeclared key. The empty
+    # default declares an agent that reads no extras.
+    extras_keys: ClassVar[frozenset[str]] = frozenset()
 
     @classmethod
     def from_tool_input(cls, validated: BaseModel) -> dict[str, Any]:

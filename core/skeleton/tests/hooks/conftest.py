@@ -18,6 +18,7 @@ from __future__ import annotations
 import fnmatch
 import json
 from contextlib import ExitStack, asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -305,11 +306,60 @@ class _FakeTools:
         self.runs: list = []
         self._raise_for = raise_for or set()
 
-    async def run_tool(self, name, tool_input, *, offload_sync=False):
+    async def run_tool(self, name, tool_input, *, offload_sync=False, extras=None):
         self.runs.append((name, tool_input))
         if name in self._raise_for:
             raise RuntimeError(f"tool {name} failed")
         return {"ok": True}
+
+
+class _FakeInteractions:
+    """The interactions facade the hook door drives through: a fake ``visit`` that deposits the door
+    binding around ``start`` alone and an empty ``$parked`` source."""
+
+    def __init__(self) -> None:
+        self.visit_calls: list = []
+        self.parked: list = []
+
+    async def list_parked_for(self, context):
+        return list(self.parked)
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        from tai42_contract.interactions import VisitOutcome
+        from tai42_contract.tools import (
+            ToolInvocation,
+            reset_current_tool_invocation,
+            set_current_tool_invocation,
+        )
+
+        self.visit_calls.append(
+            SimpleNamespace(
+                target_name=target_name,
+                cancel=cancel,
+                resume=resume,
+                extras=dict(extras),
+                state_binding=state_binding,
+                receives_outcome=receives_outcome,
+                started=start is not None,
+            )
+        )
+        result = None
+        if start is not None:
+            token = (
+                set_current_tool_invocation(ToolInvocation(tool_name=target_name, state_binding=state_binding))
+                if state_binding is not None
+                else None
+            )
+            try:
+                result = await start(extras)
+            finally:
+                if token is not None:
+                    reset_current_tool_invocation(token)
+        return VisitOutcome(
+            action="started" if start is not None else "none",
+            kind="result" if start is not None else "none",
+            result=result,
+        )
 
 
 class _FakeStorage:
@@ -322,6 +372,7 @@ class _FakeApp:
         self.resource_manager = _FakeResourceManager(by_id)
         self.storage = _FakeStorage(self.resource_manager)
         self.tools = _FakeTools(raise_tools)
+        self.interactions = _FakeInteractions()
 
 
 @pytest.fixture

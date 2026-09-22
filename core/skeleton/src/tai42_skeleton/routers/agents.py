@@ -46,14 +46,19 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from datetime import datetime
 from typing import Any
 
 from pydantic import RootModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from tai42_contract.agent import Agent
+from tai42_contract.agent.events import AsksFinal, MessageFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.presets.errors import PresetNotFoundError
+from tai42_contract.states import StateSubject
+from tai42_contract.tools import tool_call_frame
 
 from tai42_skeleton.agent.thread_reservation import ReservedThreadNamespaceError, run_kwargs_from_tool_input
 from tai42_skeleton.app import instance
@@ -210,19 +215,129 @@ async def _build_run_kwargs(
     return run_kwargs
 
 
-async def _produce(agent: Agent, run_kwargs: dict[str, Any], queue: asyncio.Queue[tuple[str, Any]]) -> None:
-    """Drain ``agent.astream`` into ``queue`` as ``(kind, payload)`` items.
+def _subject_from_query(request: Request) -> StateSubject | None:
+    """The caller's named subject for an agent-run SSE stream, read off the query.
 
-    ``("event", StreamEvent)`` per event, then one terminal ``("end", None)`` or
-    ``("error", exc)``. A cancellation (client disconnect) propagates into
+    ``?subject_kind=&subject_key=&subject_target=`` name the subject an async park of the run
+    indexes under (the target scope is the agent, ``target_kind="agent"``). The three must be
+    given together or all absent; a partial set is a loud refusal (the subject is malformed).
+    ``None`` when the caller named none. The request body stays the free-form agent input.
+    """
+    params = request.query_params
+    kind = params.get("subject_kind")
+    key = params.get("subject_key")
+    target = params.get("subject_target")
+    if kind is None and key is None and target is None:
+        return None
+    if not (kind and key and target):
+        raise ValueError("subject_kind, subject_key and subject_target must be given together")
+    return StateSubject(target_kind="agent", target_name=target, kind=kind, key=key)
+
+
+def _parse_expiry(iso: str | None) -> datetime | None:
+    """Parse an ISO-8601 park deadline into an aware ``datetime``, or ``None`` when the park carried none."""
+    return datetime.fromisoformat(iso) if iso is not None else None
+
+
+async def _suspended_sentinel(final: SuspendedFinal) -> SuspendedInteraction:
+    """The :class:`SuspendedInteraction` a park's :class:`SuspendedFinal` normalises to for ``visit``.
+
+    The caller/user split ``visit`` classifies on is read off the run's own parked list — the ids the
+    run parked ``to="caller"`` are the ones the live SSE caller must answer (``asks``); the rest are
+    user asks answered out of band (``parked``).
+    """
+    parked = await tai42_app.interactions.list_parked()
+    ids = set(final.interaction_ids)
+    caller_ids = [entry.id for entry in parked if entry.to == "caller" and entry.id in ids]
+    return SuspendedInteraction(
+        interaction_id=final.interaction_ids[0],
+        interaction_ids=list(final.interaction_ids),
+        caller_interaction_ids=caller_ids,
+        expiry_at=_parse_expiry(final.expiry_at),
+    )
+
+
+async def _drive_capturing_terminal(
+    agent: Agent,
+    run_kwargs: dict[str, Any],
+    queue: asyncio.Queue[tuple[str, Any]],
+    captured: dict[str, StreamEvent],
+) -> Any:
+    """Drive the agent run, streaming interim events and capturing the park/final terminal for ``visit``.
+
+    Interim events and an ``InterruptFinal`` (not a park — the client answers it and the drive ends)
+    stream live as ``("event", …)``; the park/final terminal (``SuspendedFinal`` /
+    ``StructuredFinal`` / ``MessageFinal``) is captured WITHOUT streaming and its ``visit`` value
+    returned — a :class:`SuspendedInteraction` for a park, the final event itself for a finish, so
+    ``visit`` classifies the finish as a ``result`` and re-emits today's terminal frame. ``None``
+    when the drive ended on an interrupt (already streamed) — ``visit`` classifies it ``none``.
+    """
+    async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
+        if isinstance(event, SuspendedFinal | StructuredFinal | MessageFinal):
+            captured["terminal"] = event
+            return await _suspended_sentinel(event) if isinstance(event, SuspendedFinal) else event
+        await queue.put(("event", event))
+    return None
+
+
+def _terminal_stream_item(outcome: Any, captured: StreamEvent | None) -> tuple[str, Any] | None:
+    """The ONE terminal SSE item mapped from a ``VisitOutcome`` kind, or ``None`` when none is emitted.
+
+    ``result`` re-emits the captured finish event (today's ``StructuredFinal``/``MessageFinal``
+    frame); ``parked`` re-emits the captured ``SuspendedFinal`` (today's suspended frame carrying the
+    park's ``interaction_ids``); ``asks`` emits an :class:`AsksFinal` carrying the caller ask entries;
+    ``none`` emits nothing (an interrupt already streamed its ``interrupt_final``).
+    """
+    if outcome.kind == "result":
+        return ("event", outcome.result)
+    if outcome.kind == "parked":
+        return ("event", captured)
+    if outcome.kind == "asks":
+        return ("event", AsksFinal(asks=[entry.model_dump(mode="json") for entry in outcome.asks]))
+    return None
+
+
+async def _produce(
+    agent: Agent,
+    run_kwargs: dict[str, Any],
+    queue: asyncio.Queue[tuple[str, Any]],
+    *,
+    target_name: str,
+    subject: StateSubject | None,
+    caller_key: str | None,
+) -> None:
+    """Drive the agent run through the shared :func:`visit` into ``queue`` as ``(kind, payload)`` items.
+
+    The run drives inside ``visit``'s ``start`` callable: interim events and an interrupt stream live
+    as ``("event", …)``, while the park/final terminal is captured and handed to ``visit`` to
+    normalise; ``_produce`` then emits EXACTLY ONE terminal frame mapped from the outcome kind before
+    ``("end", None)``. A PUSH ``tool_call_frame`` of the target agent's name wraps the whole visit —
+    the outermost run start, so it mints the run-delivery id an async park captures — under the
+    caller's opportunistically bound identity and the ``door="api"`` subject context. The live-caller
+    budget/attribution seam stays inside the drive. A cancellation (client disconnect) propagates into
     ``astream`` and re-raises so the abandoned run stops.
     """
+    from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
+
+    captured: dict[str, StreamEvent] = {}
+
+    async def start(_extras: Any) -> Any:
+        return await _drive_capturing_terminal(agent, run_kwargs, queue, captured)
+
     try:
-        # Route the live-caller drive through the shared budget+attribution seam: this
-        # SSE route holds a live client connection, so it is not detached-exempt and its
-        # turn must be budgeted (and its trace attributed), never an unbudgeted astream.
-        async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
-            await queue.put(("event", event))
+        async with caller_execution_identity(caller_key):
+            with api_state_context(subject, caller_key), tool_call_frame(name=target_name):
+                outcome = await tai42_app.interactions.visit(
+                    target_name=target_name,
+                    cancel=[],
+                    resume=[],
+                    start=start,
+                    extras={},
+                    receives_outcome=True,
+                )
+                terminal = _terminal_stream_item(outcome, captured.get("terminal"))
+                if terminal is not None:
+                    await queue.put(terminal)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -258,7 +373,15 @@ def _render_stream_item(kind: str, payload: Any) -> tuple[str, bool]:
     return _error_frame(payload), True
 
 
-async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[str, Any]) -> AsyncIterator[str]:
+async def _agent_event_stream(
+    request: Request,
+    agent: Agent,
+    run_kwargs: dict[str, Any],
+    *,
+    target_name: str,
+    subject: StateSubject | None,
+    caller_key: str | None,
+) -> AsyncIterator[str]:
     """Yield SSE frames for one agent run.
 
     One frame per ``StreamEvent`` (via ``model_dump_json(fallback=str)`` so a live
@@ -280,7 +403,9 @@ async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[s
     producer: asyncio.Future[None] | None = None
     monitor: asyncio.Future[None] | None = None
     try:
-        producer = asyncio.ensure_future(_produce(agent, run_kwargs, queue))
+        producer = asyncio.ensure_future(
+            _produce(agent, run_kwargs, queue, target_name=target_name, subject=subject, caller_key=caller_key)
+        )
         monitor = asyncio.ensure_future(_wait_until_disconnected(request))
         # Flush a no-op comment at connect, before the first (possibly-slow) agent event, so a
         # fetch-reader client resolves the stream immediately rather than up to a keepalive
@@ -350,8 +475,15 @@ async def run_agent(request: Request) -> Response:
     run_kwargs = await _build_run_kwargs(request, agent)
     if isinstance(run_kwargs, Response):
         return run_kwargs
+    try:
+        subject = _subject_from_query(request)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    from tai42_skeleton.access_control.user import request_identity
+
+    caller_key, _restricted = request_identity()
     return StreamingResponse(
-        _agent_event_stream(request, agent, run_kwargs),
+        _agent_event_stream(request, agent, run_kwargs, target_name=name, subject=subject, caller_key=caller_key),
         media_type="text/event-stream",
         headers=_STREAM_HEADERS,
     )
@@ -411,8 +543,17 @@ async def run_authored_agent(request: Request) -> Response:
     run_kwargs = await _build_run_kwargs(request, agent, baked=spec.fixed_kwargs)
     if isinstance(run_kwargs, Response):
         return run_kwargs
+    try:
+        subject = _subject_from_query(request)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    from tai42_skeleton.access_control.user import request_identity
+
+    caller_key, _restricted = request_identity()
     return StreamingResponse(
-        _agent_event_stream(request, agent, run_kwargs),
+        _agent_event_stream(
+            request, agent, run_kwargs, target_name=spec.base_tool, subject=subject, caller_key=caller_key
+        ),
         media_type="text/event-stream",
         headers=_STREAM_HEADERS,
     )

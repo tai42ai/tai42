@@ -111,7 +111,7 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
 
     Binds the execution identity rebuilt from the record's ``user_id`` (its CURRENT live
     grants, so a mid-life de-scope/revocation lands on the re-drive), then replays
-    ``run_recorded(tool_name, persisted arguments)``. When the principal's live grants no
+    ``run_recorded(tool_name, persisted arguments, extras=persisted extras)``. When the principal's live grants no
     longer carry authority the reconstruction binds ``None`` (identity-less) — the
     re-drive then fail-closes loudly on any credential seam, never a silent principal
     substitution under a revoked key.
@@ -121,9 +121,10 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     tool_name = record["tool_name"]
     try:
         arguments = json.loads(record.get("arguments") or "{}")
+        extras = json.loads(record.get("extras") or "{}")
     except json.JSONDecodeError:
         logger.exception(
-            "crash-resume: run %s (%s) has an unreadable arguments blob; skipping re-drive", run_id, tool_name
+            "crash-resume: run %s (%s) has an unreadable arguments/extras blob; skipping re-drive", run_id, tool_name
         )
         return
     user_id = record.get("user_id")
@@ -131,7 +132,7 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     logger.info("crash-resume: re-dispatching lost run %s (%s) from scratch", run_id, tool_name)
     token = set_execution_identity(identity)
     try:
-        await supervisor.run_recorded(tool_name, arguments)
+        await supervisor.run_recorded(tool_name, arguments, extras=extras)
     finally:
         reset_execution_identity(token)
 

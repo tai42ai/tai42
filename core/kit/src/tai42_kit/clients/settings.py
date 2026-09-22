@@ -116,7 +116,9 @@ class PostgresConnectionSettings(ClientSettings):
     pg_password: SecretStr | None = None
     pg_min_connections: int = 2
     pg_max_connections: int = 10
-    # libpq connect_timeout (seconds) for each new pool connection. Must be positive.
+    # libpq connect_timeout (seconds), applied across the whole connection
+    # establishment (including the TLS handshake). Bounds both the pre-hand-out
+    # connection proof and each new pool connection. Must be positive.
     pg_connect_timeout: int = Field(default=10, gt=0)
     # Server-side statement_timeout applied to every session of this pool. Bounds a
     # mid-statement stall; a legitimately longer statement needs the operator to

@@ -9,7 +9,10 @@ for those."""
 
 from __future__ import annotations
 
+import json as _json
+import socket as _socket
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -70,6 +73,34 @@ class ApiClient:
         merged = {**self._headers, **(headers or {})}
         async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout or self._timeout) as client:
             return await client.request(method, path, json=json, headers=merged, content=content)
+
+    def post_and_disconnect(self, path: str, *, json: Any = None) -> None:
+        """Send one POST over a raw socket, then close it AT ONCE without reading the response.
+
+        Models a caller that hangs up mid-request: the server holds a sync-wait response the
+        closed connection never receives, so the door's disconnect probe reads gone when the
+        turn finishes. Synchronous (a bare socket, no event loop) so the close lands as soon as
+        the request bytes are flushed — the raw-socket leg the async client cannot express.
+        """
+        parts = urlsplit(self._base_url)
+        host, port = parts.hostname, parts.port
+        if host is None or port is None:
+            raise ValueError(f"base url has no host:port to open a raw socket to: {self._base_url!r}")
+        body = b"" if json is None else _json.dumps(json).encode()
+        header_lines = [
+            f"POST {path} HTTP/1.1",
+            f"Host: {host}:{port}",
+            "Content-Type: application/json",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            *(f"{name}: {value}" for name, value in self._headers.items()),
+        ]
+        request = ("\r\n".join(header_lines) + "\r\n\r\n").encode() + body
+        sock = _socket.create_connection((host, port), timeout=self._timeout)
+        try:
+            sock.sendall(request)
+        finally:
+            sock.close()
 
     async def request(
         self,

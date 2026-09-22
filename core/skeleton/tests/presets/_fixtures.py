@@ -51,7 +51,7 @@ def _plan_refs(fixed_kwargs: dict[str, Any]) -> list[str]:
     return fixed_kwargs.get("plan", {}).get("refs", [])
 
 
-@tai42_app.tools.tool(tool_refs=_plan_refs)
+@tai42_app.tools.tool(tool_refs=_plan_refs, extras_keys=frozenset({"warm_start"}))
 def plan_tool(text: str, plan: dict | None = None) -> str:
     """Compose over a plan that lists other tools by name under a nested key."""
     return text

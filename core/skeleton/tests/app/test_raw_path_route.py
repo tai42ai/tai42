@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from starlette.routing import Match
 
-from tai42_skeleton.app.raw_path_route import RawPathRoute
+from tai42_skeleton.app.raw_path_route import RawPathRoute, SpaFallbackRoute
 
 _RECORD = "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"
+_SPA = "/{spa_path:path}"
 
 
 async def _endpoint(request: Any) -> Any:  # pragma: no cover - never invoked; only matched
@@ -144,3 +146,61 @@ def test_use_raw_path_key_upgrades_the_served_routes_to_raw_path_routes() -> Non
     upgraded = [r for r in table if getattr(r, "path", "").startswith(_RECORD_PREFIX)]
     assert len(upgraded) == len(endpoints)
     assert all(isinstance(r, RawPathRoute) for r in upgraded)
+
+
+# -- SpaFallbackRoute: the SPA catch-all held out of the /api and /mcp path spaces --------
+
+
+def _spa_match(raw: str, *, method: str = "GET", root_path: str = "") -> Match:
+    route = SpaFallbackRoute(_SPA, endpoint=_endpoint, methods=["GET"])
+    match, _ = route.matches(_scope(raw, method=method, root_path=root_path))
+    return match
+
+
+@pytest.mark.parametrize("path", ["/api", "/api/tools", "/mcp", "/mcp/x", "/api/deep/link"])
+def test_spa_fallback_never_matches_an_api_or_mcp_path(path) -> None:
+    assert _spa_match(path) is Match.NONE
+    # Even a wrong method stays NONE — never a PARTIAL that could 405 the shell surface, so an
+    # unknown /api or /mcp path always falls to the router's native 404.
+    assert _spa_match(path, method="POST") is Match.NONE
+
+
+@pytest.mark.parametrize("path", ["/", "/agents/settings", "/apiary", "/mcpx", "/tools"])
+def test_spa_fallback_matches_a_non_api_path(path) -> None:
+    # Segment-aware, not a bare startswith: /apiary and /mcpx are genuine SPA paths.
+    assert _spa_match(path) is Match.FULL
+
+
+def test_spa_fallback_non_get_is_partial_on_a_non_api_path() -> None:
+    # GET-only, so a non-API non-GET path is a PARTIAL -> the router's native 405.
+    assert _spa_match("/agents/settings", method="POST") is Match.PARTIAL
+
+
+def test_spa_fallback_strips_root_path_before_the_api_check() -> None:
+    # A mounted root_path is stripped exactly as get_route_path does, so /mnt/api/x reads as /api.
+    assert _spa_match("/mnt/api/x", root_path="/mnt") is Match.NONE
+    assert _spa_match("/mnt/agents", root_path="/mnt") is Match.FULL
+
+
+def test_use_spa_fallback_route_upgrades_the_catch_all_in_place() -> None:
+    from starlette.routing import Route
+
+    from tai42_skeleton.app.http import HttpSurface
+
+    table: list[Route] = [
+        Route("/api/known", endpoint=_endpoint, methods=["GET"]),
+        Route(_SPA, endpoint=_endpoint, methods=["GET"]),
+    ]
+
+    class _App:
+        def __init__(self) -> None:
+            self._fast_mcp = type("_FMcp", (), {"_additional_http_routes": table})()
+
+    surface = HttpSurface(_App())  # type: ignore[arg-type]
+    surface.use_spa_fallback_route(_SPA)
+    assert isinstance(table[1], SpaFallbackRoute)
+    assert not isinstance(table[0], SpaFallbackRoute)  # only the catch-all is upgraded
+    # Idempotent: a second call leaves the already-upgraded route as it is.
+    already = table[1]
+    surface.use_spa_fallback_route(_SPA)
+    assert table[1] is already

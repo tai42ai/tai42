@@ -98,6 +98,17 @@ async def _internal_error_handler(request: Request, exc: Exception) -> Response:
     return JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
 
 
+async def _not_found_handler(request: Request, exc: Exception) -> Response:
+    """Render the router's native 404 as the shared JSON error envelope on any adapter route.
+
+    Registered for status ``404`` only, so a known route addressed with the wrong method keeps
+    its native ``405``. An unknown path (the SPA catch-all no longer matches an ``/api``/``/mcp``
+    one) reaches the router's not-found and is answered ``{"error": "not found"}`` uniformly for
+    every method — the same envelope ``_error`` and the operations adapter emit.
+    """
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
 class TaiMCP(TaiMCPLifecycleMixin):
     """The concrete ``tai42_contract.app.TaiApp`` impl — owns the FastMCP server.
 
@@ -413,6 +424,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         # so every adapter route answers the generic {"error", "error_id"} envelope
         # instead of a plain-text 500 with internal detail.
         base_app.add_exception_handler(Exception, _internal_error_handler)
+        base_app.add_exception_handler(404, _not_found_handler)
 
         return self._http_surface.finalize(base_app)
 
@@ -448,6 +460,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         # so every adapter route answers the generic {"error", "error_id"} envelope
         # instead of a plain-text 500 with internal detail.
         base_app.add_exception_handler(Exception, _internal_error_handler)
+        base_app.add_exception_handler(404, _not_found_handler)
 
         return self._http_surface.finalize(base_app)
 

@@ -146,12 +146,11 @@ def bound_park_thread_id() -> str | None:
       delivery tool's parameter, which this module deliberately does not read, and there is no
       bridge turn context out of band. The asymmetry follows from the opacity rule above rather
       than from any judgement that one deserves indexing more.
-    * a nested park inside an AGENT running as a TOOL route's target. The agent binds its own
-      address over every tool it dispatches, so no nested driver can capture the address the
-      agent's answer is owed to; a tool turn establishes no bridge turn context. Whether such a
-      park is indexed follows from what the agent bound: a CHAINED dispatch composes a context
-      that carries this reserved field up from the one it wrapped, so the nested park is indexed
-      to the same thread; an unchained one clears the binding, and the park is unindexed.
+    * a nested park inside an AGENT running as a TOOL route's target. The door's completion
+      binding flows down through every nested dispatch unchanged (a nested driver binds only
+      its chain routing, never a completion of its own), so the nested park reads the same
+      reserved field the door bound and is indexed to the same thread; a tool turn establishes
+      no bridge turn context, so the thread comes from that binding alone.
 
     Closing the open cases means the resume drive (and the tool-turn door) establishing the thread
     binding in their own right, left to a follow-up.
@@ -172,13 +171,13 @@ def bound_park_thread_id() -> str | None:
 
 
 async def notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> None:
-    """Tell a CHAINED completion binding that the run it addresses just parked on a new ask.
+    """Tell a bound chain routing that the run it addresses just parked on a new ask.
 
     A caller whose own suspension horizon was inherited from that run can then refresh it.
 
-    Fired only when :func:`repark_notice` reports a chained binding — every other completion
-    binding (and no binding at all) is silent, so no delivery tool ever sees a fire it has no
-    horizon to answer. BEST-EFFORT by construction: the notice refreshes a horizon, it never
+    Fired only when :func:`repark_notice` reports a bound chain routing — with no chain routing
+    bound it is silent, so no delivery tool ever sees a fire it has no horizon to answer.
+    BEST-EFFORT by construction: the notice refreshes a horizon, it never
     carries an answer, so a failing notifier is logged and swallowed rather than turning a
     successfully persisted park into a failed ``ask``. The cost of a lost notice is a
     caller whose horizon stays at the previous ask's deadline.

@@ -67,13 +67,25 @@ def create_route(
         ),
     ],
     target_kind: Annotated[str, typer.Option("--target-kind", help="What the turn runs: 'agent' or 'tool'.")] = "agent",
-    payload_expr: Annotated[
+    start_expr: Annotated[
         str | None,
-        typer.Option("--payload-expr", help="target-kind=tool: jq mapping the inbound message to the tool kwargs."),
+        typer.Option("--start-expr", help="jq mapping the inbound turn payload to the started run's kwargs."),
+    ] = None,
+    cancel_expr: Annotated[
+        str | None,
+        typer.Option("--cancel-expr", help="jq naming the run's parked interactions to cancel ($parked bound)."),
+    ] = None,
+    resume_expr: Annotated[
+        str | None,
+        typer.Option("--resume-expr", help="jq naming the run's parked interactions to resume/take ($parked bound)."),
+    ] = None,
+    extras_expr: Annotated[
+        str | None,
+        typer.Option("--extras-expr", help="jq building the extras mapping handed to the started target."),
     ] = None,
     reply_expr: Annotated[
         str | None,
-        typer.Option("--reply-expr", help="target-kind=tool: jq mapping the tool result to the reply."),
+        typer.Option("--reply-expr", help="jq mapping the run's result to the reply ($turn/$asks/$parked bound)."),
     ] = None,
     initial_mode: Annotated[
         str,
@@ -152,9 +164,11 @@ def create_route(
     along with everything else (``created`` is ``false`` for a replace). A ``door=api``
     route's ``callback_secret`` is minted server-side and shown ONCE in the result; it
     signs the delivery callback and is never re-readable. There is no check that you can
-    run the target — the execution key's live grants bound the turn. A ``tool`` target may
-    map the message to the tool kwargs (``--payload-expr``) and the result to the reply
-    (``--reply-expr``); a tool reply of null/blank sends nothing.
+    run the target — the execution key's live grants bound the turn. Either target kind may map the
+    message to the run's kwargs (``--start-expr``), build the extras mapping handed to the started
+    target (``--extras-expr``), cancel or resume its parked interactions
+    (``--cancel-expr``/``--resume-expr``) and map the result to the reply (``--reply-expr``); a reply
+    of null/blank sends nothing.
 
     Example: ``tai conversations create chat-line --door channel --target-name relay \\
     --execution-key svc --channel twilio --identity +15550001111``
@@ -167,10 +181,15 @@ def create_route(
         "execution_key": execution_key,
         "initial_mode": initial_mode,
     }
-    if payload_expr is not None:
-        body["payload_expr"] = {"content": payload_expr}
-    if reply_expr is not None:
-        body["reply_expr"] = {"content": reply_expr}
+    for name, value in (
+        ("start_expr", start_expr),
+        ("cancel_expr", cancel_expr),
+        ("resume_expr", resume_expr),
+        ("extras_expr", extras_expr),
+        ("reply_expr", reply_expr),
+    ):
+        if value is not None:
+            body[name] = {"content": value}
     if channel is not None:
         body["channel"] = channel
     if our_identity is not None:

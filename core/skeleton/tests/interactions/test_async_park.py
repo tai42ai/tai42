@@ -4,7 +4,7 @@ stamps the generic continuation (tool + identity + fingerprint + expiry) onto th
 persisted question, and refuses an async ask with no resuming driver, no execution identity, no
 ``expiry_at``, or an ``expiry_at`` on a sync ask. Plus the per-interaction expiry
 index the reaper keys on — populated for an async park, empty for a sync question, and
-the re-park horizon notice a CHAINED completion binding (and only a chained one) receives
+the re-park horizon notice a bound chain routing (and only a chained dispatch) receives
 so a caller suspended on this run can move its inherited deadline with it.
 """
 
@@ -17,11 +17,13 @@ import pytest
 from tai42_contract.interactions import (
     PARK_COMPLETION_REPARKED,
     AnswerFormat,
+    ChainedResume,
     InteractionRequest,
     SuspendedInteraction,
-    chained_park_context,
+    reset_chained_resume,
     reset_park_completion,
     reset_resume_continuation_tool,
+    set_chained_resume,
     set_park_completion,
     set_resume_continuation_tool,
 )
@@ -208,16 +210,13 @@ async def test_a_park_under_a_chained_binding_notifies_the_new_horizon(
 ):
     _wire(monkeypatch, fake_client_ctx)
     expiry = datetime.now(UTC) + timedelta(hours=3)
-    completion = set_park_completion(
-        "deliver_chained_park",
-        chained_park_context(
-            "tai42:chained-park:k1", ("deliver_tool_completion", {"delivery_thread_id": "bridge:r:a"})
-        ),
+    completion = set_chained_resume(
+        ChainedResume(delivery_tool="deliver_chained_park", chain_key="tai42:chained-park:k1", asked_by=("main",))
     )
     try:
         result = await ask("proceed?", mode="async", expiry_at=expiry)
     finally:
-        reset_park_completion(completion)
+        reset_chained_resume(completion)
     assert isinstance(result, SuspendedInteraction)
     # A run that re-parks moves its chained caller's inherited horizon with it: one notice,
     # carrying the chained key, the NEW deadline, and the non-terminal status.
@@ -250,14 +249,14 @@ async def test_a_park_under_a_plain_delivery_binding_notifies_nothing(
 async def test_a_sync_ask_notifies_nothing(monkeypatch, fake_redis, fake_client_ctx, driver, repark_fires):
     settings = _wire(monkeypatch, fake_client_ctx)
     # Only a PARK moves a chained caller's horizon; a sync question never parks at all.
-    completion = set_park_completion(
-        "deliver_chained_park", chained_park_context("tai42:chained-park:k1", (None, None))
+    completion = set_chained_resume(
+        ChainedResume(delivery_tool="deliver_chained_park", chain_key="tai42:chained-park:k1", asked_by=("main",))
     )
     try:
         with pytest.raises(InteractionTimeoutError):
             await ask("proceed?", timeout=0.01)
     finally:
-        reset_park_completion(completion)
+        reset_chained_resume(completion)
     assert settings is not None
     assert repark_fires == []
 
@@ -269,8 +268,8 @@ async def test_a_failing_notice_never_fails_the_park(monkeypatch, fake_redis, fa
         raise RuntimeError("delivery tool is down")
 
     monkeypatch.setattr(park_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_boom)))
-    completion = set_park_completion(
-        "deliver_chained_park", chained_park_context("tai42:chained-park:k1", (None, None))
+    completion = set_chained_resume(
+        ChainedResume(delivery_tool="deliver_chained_park", chain_key="tai42:chained-park:k1", asked_by=("main",))
     )
     try:
         # The notice refreshes a horizon, it never carries an answer: a persisted park must not
@@ -278,12 +277,12 @@ async def test_a_failing_notice_never_fails_the_park(monkeypatch, fake_redis, fa
         # horizon it already had, and the failure is announced.
         result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
-        reset_park_completion(completion)
+        reset_chained_resume(completion)
     assert isinstance(result, SuspendedInteraction)
     assert "re-park horizon notice" in caplog.text
 
 
-# === the run-delivery capture ==============================================
+# === the run-delivery capture =========================================
 
 
 def _bind_run(*, with_address: bool):

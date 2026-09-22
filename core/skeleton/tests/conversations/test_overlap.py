@@ -37,6 +37,7 @@ from .conftest import (
     EchoAgent,
     FakeChannel,
     FakeManager,
+    _connected,
     _settle,
     _store,
     _wire,
@@ -68,14 +69,14 @@ def _agent_route(policy: OverlapPolicy, *, door: str = "channel", route_name: st
 
 
 def _tool_route(
-    policy: OverlapPolicy, *, payload_expr: str | None = None, route_name: str = "tool-line"
+    policy: OverlapPolicy, *, start_expr: str | None = None, route_name: str = "tool-line"
 ) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
         target_name="echo-tool",
-        payload_expr=TemplatedText(content=payload_expr) if payload_expr is not None else None,
+        start_expr=TemplatedText(content=start_expr) if start_expr is not None else None,
         execution_key="svc",
         channel="twilio",
         our_identity=_OUR,
@@ -245,7 +246,7 @@ async def test_settle_window_rides_a_burst_into_one_turn(env, monkeypatch):
     # deliver=all + settle: a turn starts after the window, gathering every message the burst
     # dropped in it, so one turn carries all three.
     tools = _wire_tool(monkeypatch, lambda kw: kw.get("message"))
-    route = _tool_route(OverlapPolicy(deliver="all", settle_seconds=1), payload_expr=".")
+    route = _tool_route(OverlapPolicy(deliver="all", settle_seconds=1), start_expr=".")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
 
     id1 = await _accept("one", "P1")
@@ -271,7 +272,7 @@ async def test_settle_window_is_fixed_from_the_lead_and_keeps_the_intake_lease_l
     monkeypatch.setenv("CONVERSATIONS_INTAKE_CLAIM_REFRESH_SECONDS", "1")
     caps_module._CAPS_CACHE.clear()
     _wire_tool(monkeypatch, lambda kw: "ok")
-    route = _tool_route(OverlapPolicy(deliver="all", settle_seconds=3), payload_expr=".")
+    route = _tool_route(OverlapPolicy(deliver="all", settle_seconds=3), start_expr=".")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
 
     id1 = await _accept("one", "P1")
@@ -360,7 +361,7 @@ async def test_a_follower_already_gone_is_skipped_by_the_merge(env, monkeypatch)
     # A follower whose record left ``accepted`` before the lead's gather is not merged and not
     # carried: the merge transition refuses it and it keeps its own outcome.
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
-    route = _tool_route(OverlapPolicy(deliver="all", settle_seconds=1), payload_expr=".")
+    route = _tool_route(OverlapPolicy(deliver="all", settle_seconds=1), start_expr=".")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
 
     await _accept("one", "P1")
@@ -389,7 +390,7 @@ async def test_an_event_turn_is_never_merged_superseded_or_a_canceller(env, monk
     # batching, and it sets no cancel marker.
     from tai42_contract.conversations import ConversationEvent, ConversationEventSubmission
 
-    route = _tool_route(OverlapPolicy(running="cancel", deliver="all"), payload_expr=".")
+    route = _tool_route(OverlapPolicy(running="cancel", deliver="all"), start_expr=".")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
     settings = ConversationsSettings()
     thread_id = f"bridge:tool-line:{_ADDR}"
@@ -406,7 +407,7 @@ async def test_an_event_turn_is_never_merged_superseded_or_a_canceller(env, monk
     submission = ConversationEventSubmission(
         thread_id=thread_id, event=ConversationEvent(event_id="E1", kind="ping", payload={"x": 1})
     )
-    result = await turn_module.submit_event("tool-line", submission, "svc-int")
+    result = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await _settle(timeout=6.0)
 
     record = await _record(result.message_id)
@@ -426,7 +427,7 @@ class _BlockingTools:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False) -> str:
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None) -> str:
         self.calls.append({"key": key, "arguments": arguments})
         self.entered.set()
         await self.release.wait()
@@ -444,7 +445,7 @@ async def test_an_event_turn_on_a_cancel_route_arms_no_watcher_and_survives_a_ne
 
     monkeypatch.setenv("CONVERSATIONS_OVERLAP_CANCEL_POLL_SECONDS", "0.02")
     caps_module._CAPS_CACHE.clear()
-    route = _tool_route(OverlapPolicy(running="cancel", deliver="all"), payload_expr=".")
+    route = _tool_route(OverlapPolicy(running="cancel", deliver="all"), start_expr=".")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
     settings = ConversationsSettings()
     thread_id = f"bridge:tool-line:{_ADDR}"
@@ -477,7 +478,7 @@ async def test_an_event_turn_on_a_cancel_route_arms_no_watcher_and_survives_a_ne
     submission = ConversationEventSubmission(
         thread_id=thread_id, event=ConversationEvent(event_id="E1", kind="ping", payload={"x": 1})
     )
-    event_result = await turn_module.submit_event("tool-line", submission, "svc-int")
+    event_result = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await asyncio.wait_for(tools.entered.wait(), 2)  # the event turn is dispatched and in flight
 
     # A newer participant message: its accept writes a strictly-newer cancel marker while the event
@@ -513,9 +514,13 @@ async def test_the_api_door_sync_wait_returns_a_superseded_marker_with_successor
     _wire(monkeypatch, FakeManager(_agent_route(OverlapPolicy(running="cancel"), door="api", route_name="chat")))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
-    first = asyncio.create_task(turn_module.submit_api_message("chat", "user-7", "one", "alice", 5))
+    first = asyncio.create_task(
+        turn_module.submit_api_message("chat", "user-7", "one", "alice", 5, client_connected=_connected)
+    )
     await asyncio.wait_for(agent.entered.wait(), 2)
-    second = asyncio.create_task(turn_module.submit_api_message("chat", "user-7", "two", "alice", 5))
+    second = asyncio.create_task(
+        turn_module.submit_api_message("chat", "user-7", "two", "alice", 5, client_connected=_connected)
+    )
     result1 = await asyncio.wait_for(first, 6)  # superseded once the watcher fires
     agent.release.set()  # let the second (surviving) turn finish
     result2 = await asyncio.wait_for(second, 6)
@@ -544,9 +549,13 @@ async def test_the_api_door_posts_a_merged_marker_to_the_callback(env, monkeypat
     _wire(monkeypatch, FakeManager(route))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
 
-    lead = asyncio.create_task(turn_module.submit_api_message("chat", "user-7", "one", "alice", 0))
+    lead = asyncio.create_task(
+        turn_module.submit_api_message("chat", "user-7", "one", "alice", 0, client_connected=_connected)
+    )
     await asyncio.sleep(0.2)
-    follower = asyncio.create_task(turn_module.submit_api_message("chat", "user-7", "two", "alice", 0))
+    follower = asyncio.create_task(
+        turn_module.submit_api_message("chat", "user-7", "two", "alice", 0, client_connected=_connected)
+    )
     r_lead = await asyncio.wait_for(lead, 6)
     r_follower = await asyncio.wait_for(follower, 6)
     await _settle(timeout=6.0)
@@ -684,7 +693,7 @@ def _msg_record(message_id: str, created_at: float, text: str, door: str = "chan
 
 
 def test_the_tool_payload_carries_messages_and_superseded_under_deliver_all():
-    route = _tool_route(OverlapPolicy(deliver="all"), payload_expr=".")
+    route = _tool_route(OverlapPolicy(deliver="all"), start_expr=".")
     lead = _msg_record("m2", 2.0, "two")
     follower = _msg_record("m3", 3.0, "three")
     dropped = _msg_record("m1", 1.0, "one")
@@ -712,7 +721,7 @@ def test_the_tool_payload_carries_messages_and_superseded_under_deliver_all():
 
 
 def test_the_tool_payload_is_byte_identical_under_deliver_one():
-    route = _tool_route(OverlapPolicy(), payload_expr=".")
+    route = _tool_route(OverlapPolicy(), start_expr=".")
     lead = _msg_record("m1", 1.0, "one")
     batch = overlap_module.Batch(lead=lead, members=[lead])
 

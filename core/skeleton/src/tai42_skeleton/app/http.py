@@ -15,7 +15,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
-from tai42_skeleton.app.raw_path_route import RawPathRoute
+from tai42_skeleton.app.raw_path_route import RawPathRoute, SpaFallbackRoute
 from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
 
 if TYPE_CHECKING:
@@ -103,7 +103,7 @@ class HttpSurface:
     ) -> Callable[[Callable[[Request], Awaitable[Response]]], Callable[[Request], Awaitable[Response]]]:
         """Register the handler with FastMCP AND record its OpenAPI metadata.
 
-        The route serves exactly as before; the added metadata (summary, tags,
+        The route serves unchanged by the registration; the metadata (summary, tags,
         request/response models, auth) is the source of truth the OpenAPI emitter
         and its coverage gate read. See :class:`tai42_contract.app.facets.AppHttp`.
 
@@ -213,6 +213,43 @@ class HttpSurface:
         for index, route in enumerate(routes):
             if getattr(route, "path", "").startswith(path_prefix) and not isinstance(route, RawPathRoute):
                 routes[index] = RawPathRoute(
+                    route.path,
+                    endpoint=route.endpoint,
+                    methods=sorted(route.methods) if route.methods else None,
+                    name=route.name,
+                    include_in_schema=route.include_in_schema,
+                )
+
+    def use_spa_fallback_route(self, path: str) -> None:
+        """Upgrade the registered SPA catch-all at ``path`` to a :class:`SpaFallbackRoute` in place.
+
+        Its :meth:`~SpaFallbackRoute.matches` then returns ``Match.NONE`` for an ``/api``/``/mcp``
+        path, so an unknown one falls to the router's native 404 and a known route keeps its 405;
+        the route's ``custom_route`` registration, methods and route-registry row are unchanged —
+        only its match narrows. Called AFTER the route is registered and idempotent: a route
+        already a :class:`SpaFallbackRoute` is left as it is.
+
+        This surface owns every write into the FastMCP additional-route table (see
+        ``route_table_savepoint``), so it owns the in-place upgrade too; the upgrade keeps the
+        row's position, so a bound-module savepoint/rollback is unaffected. An OFFLINE stand-in
+        serves no request and keeps no route table, so the upgrade is skipped there. A REAL served
+        ``FastMCP`` that exposes no route table is a torn surface: raise rather than silently leave
+        the catch-all matching ``/api``/``/mcp``.
+        """
+        from fastmcp import FastMCP
+
+        fast_mcp = self._app._fast_mcp
+        routes = getattr(fast_mcp, "_additional_http_routes", None)
+        if routes is None:
+            if isinstance(fast_mcp, FastMCP):
+                raise RuntimeError(
+                    "use_spa_fallback_route: the served FastMCP exposes no additional-route table; "
+                    "the SPA catch-all would keep matching /api and /mcp paths"
+                )
+            return
+        for index, route in enumerate(routes):
+            if getattr(route, "path", "") == path and not isinstance(route, SpaFallbackRoute):
+                routes[index] = SpaFallbackRoute(
                     route.path,
                     endpoint=route.endpoint,
                     methods=sorted(route.methods) if route.methods else None,

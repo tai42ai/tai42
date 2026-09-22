@@ -29,7 +29,7 @@ class EventTargetNotToolError(NotSupportedError):
     """The event door named a route whose target is an AGENT.
 
     An event carries a structured payload and no rendered text, so there is nothing to hand an agent turn;
-    only a tool target (which maps the payload through its ``payload_expr``) may run an event.
+    only a tool target (which maps the payload through its ``start_expr``) may run an event.
     """
 
 

@@ -3,7 +3,7 @@
 Three thin adapters over operations in ``tai42_skeleton.operations.tool_runs`` — no
 run/supervisor/store logic lives here:
 
-* ``POST /api/tool-runs`` — body ``{tool_name, arguments}`` (parsed by the same
+* ``POST /api/tool-runs`` — body ``{tool_name, arguments, subject}`` (parsed by the same
   helper the sync door uses, at the HTTP edge here); returns ``202 {"data":
   {"run_id": ...}}`` at once and executes the tool as an in-process background
   task through the ``tai42_app.tools.run_tool`` seam.
@@ -14,7 +14,7 @@ run/supervisor/store logic lives here:
   first; a restricted caller reads its own per-identity slice, an unrestricted
   caller the full shared window.
 
-The submit body's ``{tool_name, arguments}`` shape and the list's required
+The submit body's ``{tool_name, arguments, subject}`` shape and the list's required
 ``tool_name`` query param are validated here at the HTTP edge with typed 400s
 (producing the operation's flat arguments) rather than by the adapter's plain
 request-model parse. Success bodies are ``{"data": ...}``; failures are
@@ -34,16 +34,17 @@ from tai42_skeleton.routers._tool_call import ToolCallRequestError, read_tool_ca
 
 
 async def _extract_submission(request: Request) -> dict:
-    """Parse the tool-call body into the operation's flat ``tool_name``/``arguments`` arguments.
+    """Parse the tool-call body into the operation's flat ``tool_name``/``arguments``/``subject`` arguments.
 
     Maps the shared parser's loud ``ToolCallRequestError`` to the same explicit 400 (the adapter's plain
-    parse would yield 422).
+    parse would yield 422). ``subject`` is the validated
+    :class:`~tai42_contract.states.StateSubject` (or ``None``) the detached run indexes an async park under.
     """
     try:
-        tool_name, arguments = await read_tool_call(request)
+        tool_name, arguments, subject = await read_tool_call(request)
     except ToolCallRequestError as exc:
         raise BadRequestError(exc.message) from exc
-    return {"tool_name": tool_name, "arguments": arguments}
+    return {"tool_name": tool_name, "arguments": arguments, "subject": subject}
 
 
 async def _extract_list_query(request: Request) -> dict:

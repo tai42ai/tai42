@@ -275,6 +275,13 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
     assert protocol_members(AppInteractions) == {
         "ask",
         "check_answer",
+        "visit",
+        "list_parked",
+        "list_parked_for",
+        "resume_parked",
+        "cancel_parked",
+        "current_fire_identity",
+        "bound_execution_identity_for_fire",
         "assert_resume_authorized",
         "assert_delivery_authorized",
         "redelivery_horizon_seconds",
@@ -330,6 +337,28 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
             return self._ask
 
         def check_answer(self, question: object, answer: object) -> None:
+            return None
+
+        @property
+        def visit(self) -> object:
+            return None
+
+        async def list_parked(self) -> list[object]:
+            return []
+
+        async def list_parked_for(self, context: object) -> list[object]:
+            return []
+
+        async def resume_parked(self, interaction_id: str, payload: object = ...) -> object:
+            return None
+
+        async def cancel_parked(self, ids: list[str]) -> object:
+            return None
+
+        def current_fire_identity(self) -> tuple[str, str] | None:
+            return None
+
+        def bound_execution_identity_for_fire(self, execution_key: str, fingerprint: str) -> object:
             return None
 
         async def assert_resume_authorized(self, interaction_id: str) -> None:

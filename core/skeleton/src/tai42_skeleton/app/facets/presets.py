@@ -246,6 +246,25 @@ class PresetsFacet(_Facet):
             raise PresetNotFoundError(name) from exc
         return version, PresetBody.model_validate(body)
 
+    async def used_by(self, name: str) -> list[str]:
+        """The other presets whose active bodies compose preset ``name`` as a tool, sorted.
+
+        Reads the active preset population once and builds the ``used_by`` map over it (the shared
+        reference collector, self excluded, intersected with the population), so it answers "which
+        saved presets depend on this one" for a rename/delete dependents pass. Raises
+        :class:`~tai42_contract.presets.errors.PresetNotFoundError` for a name that is not a known
+        preset — never a silent empty list for an unknown name.
+        """
+        from tai42_contract.presets.errors import PresetNotFoundError
+
+        from tai42_skeleton.operations.presets.references import _reference_maps
+
+        bodies = await self.list_active_bodies()
+        if name not in bodies:
+            raise PresetNotFoundError(name)
+        _uses, used_by = _reference_maps(bodies)
+        return used_by[name]
+
     async def set_version_tags(self, name: str, version: int, tags: list[str]) -> None:
         """Replace the per-version ``tags`` annotation of one preset version.
 

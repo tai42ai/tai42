@@ -11,13 +11,14 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils import render as door_contract_module
 
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -60,6 +61,16 @@ def rendered_user_message(user_message: TemplatedText | None) -> str:
     if user_message.content is None:
         raise ValueError(f"agent double received a stored-id templated text with no inline content: {user_message!r}")
     return user_message.content
+
+
+async def _connected() -> bool:
+    """A ``client_connected`` probe for the api/event doors that reports the caller still connected.
+
+    The default the door tests use: the inline ``200`` claim is then reached exactly as a live
+    request whose socket is open takes it. A gone client is modelled with a probe returning
+    ``False``, a raising probe with one that raises.
+    """
+    return True
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +218,21 @@ class _MemorylessAgent(Agent):
         return ""
 
 
+class _AskingAgent(Agent):
+    """An agent whose declared ``tool_names`` include ``ask``, so it can ask its caller mid-run
+    and the platform bind validator requires the route's reply/resume path."""
+
+    tool_name = "asker"
+    tool_names: ClassVar[list[str]] = ["ask"]
+    ToolInput = _AgentInput
+
+    async def run(self, *, user_message: TemplatedText | None = None, **kwargs):
+        return ""
+
+    async def append_thread_messages(self, *, thread_id, messages, **kwargs) -> None:
+        return None
+
+
 class _FakeAgents:
     def __init__(self, agents: dict[str, Agent]) -> None:
         self._agents = agents
@@ -292,7 +318,7 @@ def wired(monkeypatch, record_redis):
     from tai42_skeleton.app import instance
 
     app = _OpsFakeApp(
-        {"relay": _MemoryAgent(), "mute": _MemorylessAgent()},
+        {"relay": _MemoryAgent(), "mute": _MemorylessAgent(), "asker": _AskingAgent()},
         {"echo-tool"},
         by_id={"route-payload": "{message: .message}", "route-reply": ".result.reply // null"},
     )
@@ -524,7 +550,7 @@ def _tool_channel_route(
     our_identity: str = "+15550001111",
     *,
     target_name: str = "echo-tool",
-    payload_expr: str | None = None,
+    start_expr: str | None = None,
     reply_expr: str | None = None,
     error_reply_text: str | None = None,
 ) -> ConversationRoute:
@@ -533,7 +559,7 @@ def _tool_channel_route(
         door="channel",
         target_kind="tool",
         target_name=target_name,
-        payload_expr=_expr(payload_expr),
+        start_expr=_expr(start_expr),
         reply_expr=_expr(reply_expr),
         execution_key="svc",
         channel="twilio",
@@ -547,7 +573,7 @@ def _tool_api_route(
     route_name: str = "tool-api",
     *,
     target_name: str = "echo-tool",
-    payload_expr: str | None = None,
+    start_expr: str | None = None,
     reply_expr: str | None = None,
     error_reply_text: str | None = None,
 ) -> ConversationRoute:
@@ -556,7 +582,7 @@ def _tool_api_route(
         door="api",
         target_kind="tool",
         target_name=target_name,
-        payload_expr=_expr(payload_expr),
+        start_expr=_expr(start_expr),
         reply_expr=_expr(reply_expr),
         execution_key="svc",
         callback_url="https://cb.example/x",
@@ -573,9 +599,12 @@ class _FakeTools:
     def __init__(self, fn) -> None:
         self.fn = fn
         self.calls: list[dict] = []
+        # The extras mapping each dispatch carried, in call order (a door's ``extras_expr`` result).
+        self.extras: list = []
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False):
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None):
         self.calls.append({"key": key, "arguments": arguments, "offload_sync": offload_sync})
+        self.extras.append(extras)
         return self.fn(arguments)
 
 
@@ -647,10 +676,12 @@ def _wire(
     # ``mode.default_mode`` resolves a person thread's spanned routes through the same lazy
     # accessor, so the fake manager answers everywhere through this one patch point.
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
-    # The turn renders a tool route's payload/reply jq slots through the bound resource
-    # manager immediately before evaluating them; a fake renders inline slots verbatim and a
-    # stored id from ``template_by_id``.
-    monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp(template_by_id))
+    # The turn renders a tool route's reply jq slot, and the door-contract helper renders the
+    # start/cancel/resume/extras jq slots, through the bound resource manager immediately before
+    # evaluating them; a fake renders inline slots verbatim and a stored id from ``template_by_id``.
+    fake_template_app = _FakeTemplateApp(template_by_id)
+    monkeypatch.setattr(tool_turn_module, "tai42_app", fake_template_app)
+    monkeypatch.setattr(door_contract_module, "tai42_app", fake_template_app)
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
 
@@ -693,7 +724,7 @@ async def _all_record_ids(store: ConversationRecordStore) -> list[str]:
 
 
 # The channel-door tool payload with no params — the byte-identical baseline every
-# ``None``/empty-params turn must reproduce exactly (``payload_expr="."`` passes it whole).
+# ``None``/empty-params turn must reproduce exactly (``start_expr="."`` passes it whole).
 _BASELINE_CHANNEL_PAYLOAD = {
     "message": "hi",
     "sender": "+15550002222",

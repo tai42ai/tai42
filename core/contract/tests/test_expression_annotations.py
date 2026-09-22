@@ -16,7 +16,7 @@ import json
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tai42_contract.access_control import AccessPolicy, RoleDefinition
 from tai42_contract.backend import CallbackSchema
@@ -194,9 +194,7 @@ def test_annotation_is_purely_additive_to_a_plain_declaration() -> None:
     ("model", "field", "payload"),
     [
         (HookRegister, "condition", GENERIC_CONDITION_PAYLOAD),
-        (HookRegister, "expr", GENERIC_EXPR_PAYLOAD),
         (HookParams, "condition", GENERIC_CONDITION_PAYLOAD),
-        (HookParams, "expr", GENERIC_EXPR_PAYLOAD),
         (AccessPolicy, "condition", ACCESS_CONDITION_PAYLOAD),
         (RoleDefinition, "condition", ACCESS_CONDITION_PAYLOAD),
         (CallbackSchema, "condition", CALLBACK_CONDITION_PAYLOAD),
@@ -222,6 +220,7 @@ def test_callback_override_changes_only_the_annotation_payload() -> None:
 
     class PlainCallbackSchema(PlainMixinCondition, PlainMixinExpr):
         tool: str = ""
+        carried_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     PlainCallbackSchema.__doc__ = CallbackSchema.__doc__
 

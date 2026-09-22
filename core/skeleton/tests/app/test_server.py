@@ -241,25 +241,27 @@ def test_http_app_builds_and_finalizes():
     assert result.app is sentinel
 
 
-def test_sse_app_registers_internal_error_handler():
-    # S1: the uniform-500 handler is installed on the base app's own
-    # ServerErrorMiddleware, so every adapter route on the SSE serving path answers
-    # the generic {"error", "error_id"} envelope instead of a plain-text 500.
+def test_sse_app_registers_error_handlers():
+    # The uniform-500 handler and the JSON-404 handler are installed on the base app's own
+    # exception table, so every adapter route on the SSE serving path answers the generic
+    # {"error", "error_id"} 500 envelope and the {"error": "not found"} 404 envelope.
     a = _fresh()
     sentinel = MagicMock()
     with patch.object(server_module, "create_sse_app", return_value=sentinel):
         a.sse_app()
-    sentinel.add_exception_handler.assert_called_once_with(Exception, server_module._internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
 
 
-def test_http_app_registers_internal_error_handler():
-    # S1: the same handler is installed on the http serving path's base app.
+def test_http_app_registers_error_handlers():
+    # The same two handlers are installed on the http serving path's base app.
     a = _fresh()
     sentinel = MagicMock()
     mcp = a._serving_core._fast_mcp = MagicMock()
     mcp.http_app.return_value = sentinel
     a.http_app(path="/mcp", transport="http")
-    sentinel.add_exception_handler.assert_called_once_with(Exception, server_module._internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
 
 
 def test_internal_error_handler_mints_id_and_hides_detail():

@@ -8,7 +8,9 @@ from typing import cast
 
 import pytest
 from tai42_contract.agent import Agent
+from tai42_contract.agent.events import MessageFinal
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import current_call_chain
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
@@ -30,6 +32,26 @@ from .conftest import (
     _wire,
     _wire_tool,
 )
+
+
+async def test_agent_turn_opens_the_push_frame_of_the_target_agent(env, monkeypatch):
+    # The agent route opens the outermost minting frame as a PUSH of the target agent's name, so the
+    # drive runs under a call chain rooted at the agent and its first ask records ``[agent]``.
+    seen: dict[str, tuple[str, ...]] = {}
+
+    class _ChainAgent(EchoAgent):
+        async def astream(self, **kwargs):  # type: ignore[override]
+            seen["chain"] = current_call_chain()
+            yield MessageFinal(text="ok")
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _ChainAgent()})
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert seen["chain"] == ("echo",)
 
 
 async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):

@@ -18,6 +18,9 @@ import pytest
 from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from tai42_contract.agent.events import AsksFinal, InterruptFinal, StructuredFinal, SuspendedFinal
+from tai42_contract.interactions import ParkedEntry
+from tai42_contract.tools import current_call_chain
 
 from tai42_skeleton.agent import (
     Agent,
@@ -508,3 +511,125 @@ async def test_run_allows_a_normal_thread_id(one_agent):
     resp = await router.run_agent(_make_run_request("faker", body))
     frames = _data_frames(await _collect(resp))
     assert frames[-1] == {"type": "stream.end"}
+
+
+# -- run route: the shared visit, one terminal frame per outcome kind --------
+
+
+class _ChainRecordingAgent(_FakeAgent):
+    """Records the ambient call chain seen inside its drive, so the door's PUSH frame is observable."""
+
+    def __init__(self, events: list[Any] | None = None) -> None:
+        super().__init__(events)
+        self.chain: tuple[str, ...] | None = None
+
+    async def astream(self, **kwargs: Any):  # type: ignore[override]
+        self.chain = current_call_chain()
+        async for event in super().astream(**kwargs):
+            yield event
+
+
+async def test_run_opens_the_push_frame_of_the_target_agent(one_agent):
+    # The SSE door opens the outermost minting frame as a PUSH of the target agent's name,
+    # so the run drives under a call chain rooted at the agent.
+    agent = _ChainRecordingAgent([MessageFinal(text="ok")])
+    one_agent(agent)
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    await _collect(resp)
+    assert agent.chain == ("faker",)
+
+
+async def test_run_finish_emits_the_final_frame_result(one_agent):
+    # ``result``: a structured final is captured by the drive and re-emitted as today's frame.
+    one_agent(_FakeAgent([StructuredFinal(data={"answer": 7})]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["structured_final", "stream.end"]
+    assert StructuredFinal.model_validate(frames[0]).data == {"answer": 7}
+
+
+async def test_run_user_park_emits_the_suspended_frame_parked(one_agent, monkeypatch):
+    # ``parked``: an async ask to the USER surfaces as the suspended frame carrying the park's
+    # interaction ids (today's ``SuspendedFinal`` shape). With no caller ask in the run's parked
+    # list, the whole park classifies as ``parked``.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    one_agent(_FakeAgent([SuspendedFinal(interaction_ids=["i1", "i2"], thread_id="t1")]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["suspended_final", "stream.end"]
+    assert SuspendedFinal.model_validate(frames[0]).interaction_ids == ["i1", "i2"]
+
+
+async def test_run_caller_ask_emits_the_asks_frame(one_agent, monkeypatch):
+    # ``asks``: an async ask to the CALLER (the live SSE client) surfaces as the ask-entries frame,
+    # NOT the suspended frame. ``visit`` classifies a caller ask (its store-backed caller/user split
+    # is covered by the visit unit tests); the door maps a ``kind="asks"`` outcome to ``asks_final``.
+    from tai42_contract.interactions import VisitOutcome
+
+    entry = ParkedEntry(id="i1", status="asking", to="caller", question="pick?", answer_format="text")
+
+    async def _fake_visit(*, start, **_kwargs) -> VisitOutcome:
+        await start({})
+        return VisitOutcome(action="started", cancelled=[], kind="asks", asks=[entry])
+
+    monkeypatch.setattr("tai42_skeleton.interactions.visit.visit", _fake_visit)
+    one_agent(_FakeAgent([SuspendedFinal(interaction_ids=["i1"], thread_id="t1")]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["asks_final", "stream.end"]
+    asks = AsksFinal.model_validate(frames[0]).asks
+    assert [a["id"] for a in asks] == ["i1"]
+
+
+async def test_run_interrupt_streams_and_ends_with_no_extra_terminal_frame(one_agent):
+    # ``none``: an interrupt is NOT a park — it streams as ``interrupt_final`` and the drive ends
+    # there, with no extra terminal frame before ``stream.end``.
+    one_agent(_FakeAgent([InterruptFinal(interrupt_id="x1", payload={"opts": [1, 2]}, reason="choose")]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["interrupt_final", "stream.end"]
+    assert InterruptFinal.model_validate(frames[0]).interrupt_id == "x1"
+
+
+def test_agent_run_request_models_carry_no_extras_field() -> None:
+    # ``extras`` is an in-process seam keyword only: no request field on the SSE doors can set it,
+    # and the direct run-tool / submit request models expose only tool_name/arguments/subject.
+    from tai42_skeleton.operations.tool_runs.models import ToolRunSubmission
+    from tai42_skeleton.operations.tools import RunToolRequest
+
+    assert "extras" not in RunToolRequest.model_fields
+    assert "extras" not in ToolRunSubmission.model_fields
+    assert set(RunToolRequest.model_fields) == {"tool_name", "arguments", "subject"}
+    assert set(ToolRunSubmission.model_fields) == {"tool_name", "arguments", "subject"}
+
+
+async def test_run_subject_query_deposits_the_api_state_context(one_agent, monkeypatch):
+    # The SSE door reads its subject off the query and deposits the ``door="api"`` state context, so
+    # the drive runs under the caller's named subject (an async park would index there).
+    from tai42_skeleton.states.context import current_state_context
+
+    seen: dict[str, Any] = {}
+
+    class _SubjectRecordingAgent(_FakeAgent):
+        async def astream(self, **kwargs: Any):  # type: ignore[override]
+            ctx = current_state_context()
+            seen["door"] = ctx.door if ctx is not None else None
+            seen["by_kind"] = dict(ctx.candidates.by_kind) if ctx is not None else None
+            async for event in super().astream(**kwargs):
+                yield event
+
+    one_agent(_SubjectRecordingAgent([MessageFinal(text="ok")]))
+    request = _make_run_request("faker", b'{"prompt":"hi"}')
+    request.scope["query_string"] = b"subject_kind=thread&subject_key=t-1&subject_target=faker"
+    resp = await router.run_agent(request)
+    await _collect(resp)
+    assert seen["door"] == "api"
+    assert seen["by_kind"] == {"thread": "t-1"}
+
+
+async def test_run_subject_query_partial_is_a_400(one_agent):
+    one_agent(_FakeAgent([MessageFinal(text="ok")]))
+    request = _make_run_request("faker", b'{"prompt":"hi"}')
+    request.scope["query_string"] = b"subject_kind=thread"
+    resp = await router.run_agent(request)
+    assert resp.status_code == 400

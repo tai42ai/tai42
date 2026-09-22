@@ -29,6 +29,27 @@ app = typer.Typer(
 
 _KWARGS_HELP = "Tool arguments as a JSON object."
 _KW_HELP = "A key=value tool argument (repeatable; value parsed as JSON)."
+_SUBJECT_KIND_HELP = "The subject kind an async park of this run indexes under (e.g. 'thread')."
+_SUBJECT_KEY_HELP = "The subject key an async park of this run indexes under."
+_SUBJECT_TARGET_HELP = "The subject's target scope name an async park of this run indexes under."
+
+
+def _subject_arg(
+    subject_kind: str | None, subject_key: str | None, subject_target: str | None
+) -> dict[str, str] | None:
+    """The tool-run subject built from the ``--subject-*`` options, or ``None`` when none is given.
+
+    The three name the addressed subject an async park of the run indexes under; the target scope is
+    the tool being run (``target_kind="tool"``). They are given together or all omitted; a partial
+    set is a loud refusal.
+    """
+    if subject_kind is None and subject_key is None and subject_target is None:
+        return None
+    if not (subject_kind and subject_key and subject_target):
+        raise typer.BadParameter("--subject-kind, --subject-key and --subject-target must be given together")
+    return {"target_kind": "tool", "target_name": subject_target, "kind": subject_kind, "key": subject_key}
+
+
 _KWARGS_FILE_HELP = (
     "Read the tool arguments JSON object from a file, or from stdin when the path is '-', instead of putting a "
     "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --kwargs; "
@@ -96,6 +117,9 @@ def run_tool(
     kwargs: Annotated[str | None, typer.Option("--kwargs", help=_KWARGS_HELP)] = None,
     kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     kw: Annotated[list[str] | None, typer.Option("--kw", help=_KW_HELP)] = None,
+    subject_kind: Annotated[str | None, typer.Option("--subject-kind", help=_SUBJECT_KIND_HELP)] = None,
+    subject_key: Annotated[str | None, typer.Option("--subject-key", help=_SUBJECT_KEY_HELP)] = None,
+    subject_target: Annotated[str | None, typer.Option("--subject-target", help=_SUBJECT_TARGET_HELP)] = None,
 ) -> None:
     """Run a registered tool synchronously and print its result.
 
@@ -105,8 +129,12 @@ def run_tool(
     arguments = load_kwargs_arg(
         kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
     )
+    body: dict[str, object] = {"tool_name": name, "arguments": arguments}
+    subject = _subject_arg(subject_kind, subject_key, subject_target)
+    if subject is not None:
+        body["subject"] = subject
     with ctx_obj.client() as client:
-        data = client.post("/api/run-tool", json={"tool_name": name, "arguments": arguments})
+        data = client.post("/api/run-tool", json=body)
     emit_result(ctx_obj, data)
 
 
@@ -266,6 +294,9 @@ def submit_run(
     kwargs: Annotated[str | None, typer.Option("--kwargs", help=_KWARGS_HELP)] = None,
     kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     kw: Annotated[list[str] | None, typer.Option("--kw", help=_KW_HELP)] = None,
+    subject_kind: Annotated[str | None, typer.Option("--subject-kind", help=_SUBJECT_KIND_HELP)] = None,
+    subject_key: Annotated[str | None, typer.Option("--subject-key", help=_SUBJECT_KEY_HELP)] = None,
+    subject_target: Annotated[str | None, typer.Option("--subject-target", help=_SUBJECT_TARGET_HELP)] = None,
 ) -> None:
     """Submit a tool for background execution and print its run id.
 
@@ -275,8 +306,12 @@ def submit_run(
     arguments = load_kwargs_arg(
         kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
     )
+    body: dict[str, object] = {"tool_name": name, "arguments": arguments}
+    subject = _subject_arg(subject_kind, subject_key, subject_target)
+    if subject is not None:
+        body["subject"] = subject
     with ctx_obj.client() as client:
-        data = client.post("/api/tool-runs", json={"tool_name": name, "arguments": arguments})
+        data = client.post("/api/tool-runs", json=body)
     emit_result(ctx_obj, data)
 
 

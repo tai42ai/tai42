@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import Field
 
@@ -20,6 +20,13 @@ class CallbackSchema(ConditionMixin, ExprMixin):
 
     # Optional: with no ``tool`` the backend runs the rendered ``expr`` directly.
     tool: str = ""
+
+    # The reserved fire kwargs a callback job carries so its follow-up tool re-establishes the door
+    # subject and firing identity of the run it follows (the ``backend_schedule_*`` subject/identity
+    # pair). The callback runs as a SEPARATE job that otherwise receives only the previous job's
+    # id/result and this spec, so the pair rides here or it is lost; empty when the followed job
+    # forwarded no door context, in which case the callback runs as a plain follow-up.
+    carried_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     # The mixins' generic jq annotations, refined with this surface's facts. BOTH
     # expressions evaluate over the finished backend task's raw tool result — an

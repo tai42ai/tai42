@@ -54,7 +54,10 @@ def list_runs(
 ) -> None:
     """List platform runs, newest first, filtered by the given flags.
 
-    Example: ``tai runs list --preset support --outcome error``
+    Each row carries ``resumedInteractions`` — the parked interaction ids the run
+    resumed or took across its dispatch span (empty when it resumed nothing).
+
+    Example: ``tai runs list --preset assistant --outcome error``
     """
     ctx_obj = app_context(ctx)
     params: dict[str, str] = compact(

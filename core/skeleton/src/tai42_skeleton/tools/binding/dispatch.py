@@ -1,18 +1,25 @@
 """The shared in-process ``run_tool`` seam — tier fence, dispatch scope, retry, and resolved-target call."""
 
 import inspect
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from fastmcp.server.dependencies import without_injected_parameters
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
 from fastmcp.utilities.types import get_cached_typeadapter
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.tools.binding.arguments import _validation_wrapper
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
-from tai42_skeleton.tools.binding.result import _serialize_result, _tool_result_value
+from tai42_skeleton.tools.binding.result import (
+    ToolResultEncodingError,
+    UnencodableLeafError,
+    _serialize_result,
+    _tool_result_value,
+    find_lone_surrogate,
+)
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.dispatch_scope import dispatch_scope
 from tai42_skeleton.tools.retry import dispatch_with_retry
@@ -33,6 +40,7 @@ class _DispatchMixin(_ResolutionMixin):
         *,
         offload_sync: bool = False,
         continues_chain: Sequence[str] | None = None,
+        extras: Mapping[str, Any] | None = None,
     ) -> Any:
         """Validate ``arguments`` against ``key``'s signature and invoke it.
 
@@ -62,6 +70,12 @@ class _DispatchMixin(_ResolutionMixin):
         :func:`dispatch_scope`, whose ``tool_call_frame`` SETS the call chain to it
         rather than pushing ``key`` — the platform's continuation runners restore a
         parked run's chain on the one dispatch that resumes it.
+
+        ``extras`` is likewise an in-process seam keyword ONLY: forwarded to
+        :func:`dispatch_scope`, which sets it on the ``tool_call_frame`` this dispatch
+        opens — ambient and read-only for THAT frame, so the started tool reads it
+        through ``app.tools.extras()`` and every nested dispatch reads an empty mapping.
+        A door carries author-configured values here; ``None`` binds an empty mapping.
         """
         # Run-time tier fence: a ``fenced``/``secret`` tool — or a preset/branch over one —
         # runs only for an administrator. Enforced here at the shared in-process seam every
@@ -76,8 +90,25 @@ class _DispatchMixin(_ResolutionMixin):
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
-        async with dispatch_scope(self._app, key, arguments, continues_chain=continues_chain) as scope:
-            result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+        async with dispatch_scope(self._app, key, arguments, continues_chain=continues_chain, extras=extras) as scope:
+            # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) HERE, at the
+            # shared seam every ``run_tool`` door flows through, so the innermost tool that
+            # produced the bad leaf is named (a nested dispatch raises before its parent re-walks)
+            # and no door reaches its wire encode with an un-encodable value. A reduction that
+            # could not even render a leaf (an un-encodable model/dataclass) surfaces as
+            # ``UnencodableLeafError`` carrying that leaf's path; a surrogate the reduction kept
+            # walkable is found by the detector. Either becomes the named error naming the tool
+            # and the path. A park sentinel is a marker object, never a wire result, so it is
+            # skipped. The raise unwinds the scope before ``observe``, so no state binding update
+            # applies and the run's row records the failure, not a success.
+            try:
+                result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+            except UnencodableLeafError as exc:
+                raise ToolResultEncodingError(key, exc.path) from exc
+            if not isinstance(result, (SuspendedInteraction, ResumeBuffered)):
+                offending_path = find_lone_surrogate(result)
+                if offending_path is not None:
+                    raise ToolResultEncodingError(key, offending_path)
             scope.observe(result)
             return result
 

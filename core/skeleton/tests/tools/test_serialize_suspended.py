@@ -13,7 +13,7 @@ import asyncio
 from typing import Any
 
 import pytest
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_skeleton.app import instance
@@ -28,6 +28,27 @@ def test_serialize_result_preserves_suspended_interaction():
     assert _serialize_result(sentinel) is sentinel
 
 
+def test_serialize_result_preserves_resume_buffered():
+    # The other non-terminal park signal (a resume that left sibling asks open) is kept BY TYPE too,
+    # so the delivery chokepoint and the visit recognise a still-parked step, never a terminal.
+    buffered = ResumeBuffered(remaining_ids=["r1"])
+    assert _serialize_result(buffered) is buffered
+
+
+def test_preset_path_preserves_resume_buffered():
+    # A preset (TransformedTool) over a base returning a ``ResumeBuffered`` must return it BY TYPE,
+    # exactly as the direct run does — never the flattened ``{"remaining_ids": [...]}`` dict.
+    async def go() -> Any:
+        await _clear_server()
+        async with instance.app.app_context(Manifest.model_validate(_manifest())):
+            await instance.app.preset_manager.register("buffered_preset", "make_buffered", {}, [], "d")
+            return await instance.app.tools.run_tool("buffered_preset", {})
+
+    result = asyncio.run(go())
+    assert isinstance(result, ResumeBuffered)
+    assert result.remaining_ids == ["r1", "r2"]
+
+
 def test_serialize_result_still_serializes_plain_values():
     assert _serialize_result({"a": 1}) == {"a": 1}
     assert _serialize_result("hi") == "hi"
@@ -39,7 +60,7 @@ def _manifest() -> dict:
             {
                 "title": "suspend",
                 "module": _MOD,
-                "include": ["make_suspend", "make_suspend_payload", "echo_payload"],
+                "include": ["make_suspend", "make_buffered", "make_suspend_payload", "echo_payload"],
             }
         ]
     }

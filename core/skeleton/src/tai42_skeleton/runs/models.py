@@ -42,6 +42,9 @@ class RunRow:
     resume origin the continuation drive deposits), so one equality query joins a
     logical run's parked and resume rows; a plain run has none. ``ended_at`` is
     ``None`` while the run is still ``running`` (in-flight or crash-interrupted).
+    ``resumed_interactions`` is the list of parked interaction ids this run resumed or
+    took across its whole dispatch span (nested inline resumes included, since a nested
+    dispatch opens no row of its own); empty when the run resumed nothing.
     Timestamps are ISO-8601 strings, matching the versioned-store row convention
     (the DB ``timestamptz`` rendered via ``.isoformat()``).
     """
@@ -56,6 +59,7 @@ class RunRow:
     outcome: RunOutcome
     started_at: str
     ended_at: str | None
+    resumed_interactions: list[str]
 
 
 @dataclass(frozen=True)

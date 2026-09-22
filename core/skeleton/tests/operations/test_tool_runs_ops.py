@@ -52,7 +52,7 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.calls.append((key, arguments, offload_sync))
         return self.result
 
@@ -116,6 +116,27 @@ async def test_background_run_of_a_parking_tool_records_parked_not_succeeded(wir
     record = await wired.store.get_run(wired.fake, out["run_id"])
     assert record["status"] == "parked"
     assert json.loads(record["result"]) == {"interaction_id": "i-detached", "expiry_at": None}
+
+
+async def test_background_submit_of_an_unencodable_result_records_failed_read_at_the_poll(wired):
+    # A tool whose result cannot be JSON-encoded is refused at the dispatch seam with the named
+    # ``ToolResultEncodingError``; the background supervisor's terminal-write path records the run
+    # ``failed`` with that message, read cleanly at the poll door — never a 500 at the poll read.
+    from tai42_skeleton.tools.binding import ToolResultEncodingError
+
+    tools = wired.install()
+
+    async def _raise(key, arguments, *, offload_sync=False, extras=None):
+        raise ToolResultEncodingError(key, "$.token")
+
+    tools.run_tool = _raise
+    out = await ops.submit_run("alpha", {})
+    await _drain()
+
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "failed"
+    assert "alpha" in record["error"]
+    assert "$.token" in record["error"]
 
 
 async def test_background_run_masks_wrapped_secrets_in_the_stored_record(wired):
@@ -200,7 +221,7 @@ async def test_run_binds_its_run_id_as_interaction_origin(wired):
     tools = wired.install()
     seen: dict[str, str | None] = {}
 
-    async def _run_tool(key, arguments, *, offload_sync=False):
+    async def _run_tool(key, arguments, *, offload_sync=False, extras=None):
         seen["origin"] = get_interaction_origin()
         return {"ok": 1}
 
@@ -279,6 +300,43 @@ async def test_list_tool_runs_returns_present_records(wired):
     assert "error" not in entries[0]
 
 
+async def test_full_view_carries_the_parsed_resumed_interactions(wired):
+    # The terminal record's ``resumed_interactions`` field (a JSON-encoded id list) is
+    # parsed back into the full GET view.
+    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.mark_terminal_if_running(
+        wired.fake,
+        "r1",
+        {
+            "status": "succeeded",
+            "finished_at": "2026-01-01T00:01:00",
+            "result": json.dumps({"ok": 1}),
+            "resumed_interactions": json.dumps(["i-a", "i-b"]),
+        },
+        wired.settings.result_ttl_seconds,
+    )
+    view = await ops.get_run("r1")
+    assert view["resumed_interactions"] == ["i-a", "i-b"]
+
+
+async def test_list_view_omits_resumed_interactions(wired):
+    # The trimmed list view stays id/tool/status/timestamps only — never the resumed list.
+    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.mark_terminal_if_running(
+        wired.fake,
+        "r1",
+        {
+            "status": "succeeded",
+            "finished_at": "2026-01-01T00:01:00",
+            "result": json.dumps({"ok": 1}),
+            "resumed_interactions": json.dumps(["i-a"]),
+        },
+        wired.settings.result_ttl_seconds,
+    )
+    entries = await ops.list_tool_runs("alpha")
+    assert "resumed_interactions" not in entries[0]
+
+
 def test_metadata_declares_the_tier1_destructive_submit_and_read_ops():
     submit = operation_metadata_of(ops.submit_run)
     assert submit.destructive is True
@@ -343,7 +401,7 @@ class _IdentityReadingTools(_FakeTools):
         super().__init__()
         self.seen_identities: list[object] = []
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         from tai42_skeleton.authz.execution_identity import get_execution_identity
 
         self.seen_identities.append(get_execution_identity())

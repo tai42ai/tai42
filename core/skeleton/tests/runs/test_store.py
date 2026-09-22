@@ -4,8 +4,10 @@ Exercises the flat runs-index store: the start/terminal write pair, the trace-id
 backfill (COALESCE keeps a captured id, fills a NULL), the lifecycle-correlation
 ``interaction_id`` (first-set wins: a resume origin captured at START survives a
 later park id; a NULL is filled by the park's terminal write), the
-duplicate-``run_id`` guard, the filtered + paged list (newest-first, every filter
-dimension, and the time range), and the prune-by-cutoff.
+``resumed_interactions`` list (default ``[]`` at START, the collected list at the
+terminal write, the NOT NULL column never nulled), the duplicate-``run_id`` guard, the
+filtered + paged list (newest-first, every filter dimension, and the time range), and
+the prune-by-cutoff.
 """
 
 from __future__ import annotations
@@ -108,6 +110,26 @@ async def test_lifecycle_rows_are_joinable_by_one_interaction_query(pg, store):
 
     rows = await store.list(RunIndexFilter(interaction="i-life"), page=1, page_size=10)
     assert {r.run_id for r in rows} == {"parked-run", "resume-run"}
+
+
+async def test_resumed_interactions_round_trips(pg, store):
+    # The START row defaults the column to `[]`; the terminal write persists the list the
+    # run collected, read back as a plain list.
+    await _seed(store, pg, "r1")
+    [row] = await store.list(RunIndexFilter(), page=1, page_size=10)
+    assert row.resumed_interactions == []
+    await store.update_outcome("r1", "success", _iso(1), resumed_interactions=["i-a", "i-b"])
+    [row] = await store.list(RunIndexFilter(), page=1, page_size=10)
+    assert row.resumed_interactions == ["i-a", "i-b"]
+
+
+async def test_terminal_write_without_resumed_interactions_keeps_the_default(pg, store):
+    # A terminal write that passes no list (the arg defaults to None) leaves the START
+    # default in place through the COALESCE — the NOT NULL column is never nulled.
+    await _seed(store, pg, "r1")
+    await store.update_outcome("r1", "success", _iso(1))
+    [row] = await store.list(RunIndexFilter(), page=1, page_size=10)
+    assert row.resumed_interactions == []
 
 
 async def test_duplicate_run_id_raises(pg, store):

@@ -84,13 +84,15 @@ extensions_modules: []      # modules registering tool extensions
 # both onto one branch. It never selects a tool — a mapped tool absent from the
 # selected set raises loudly.
 #
-# The skeleton also ships two runtime-native built-in tools; opt each module in
+# The skeleton also ships runtime-native built-in tools; opt each module in
 # the same way (see the built-in tools & extensions docs at
 # https://tai42.ai/concepts/tools-and-extensions):
 #   - title: file-loader
 #     module: tai42_skeleton.tools.builtin.file_loader  # file_loader (url or resource id -> text/media)
 #   - title: ask
 #     module: tai42_skeleton.tools.builtin.interactions  # ask (human-in-the-loop)
+#   - title: conversation-doors
+#     module: tai42_skeleton.tools.builtin.doors  # send_conversation_message / send_conversation_event (self-call a route under the run's identity)
 #
 # Management tools (run_tool, reload_config, update_manifest, list_hooks,
 # the mcp/template/resource families, notify_user, ...) are not builtin

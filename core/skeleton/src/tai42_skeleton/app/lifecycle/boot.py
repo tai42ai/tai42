@@ -16,6 +16,7 @@ from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.providers.registry import reset_registry
+from tai42_skeleton.conversations.target_validators import register_platform_target_validators
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
@@ -59,7 +60,10 @@ class BootMixin(LifecycleState):
         # Reset so a dropped conversation target validator doesn't linger across
         # update()/reload — the manifest's plugin modules re-run their
         # register_target_validator() call each start(). Mirrors the reset above.
+        # Then re-register the platform's own validators (the ``agent`` kind), which the
+        # skeleton owns rather than a plugin module, before any plugin registers its kinds.
         self._target_validator_registry.reset()
+        register_platform_target_validators(self._target_validator_registry)
 
         # Reset the per-base-tool preset input-schema support + registration-tier
         # declarations alongside the write validator, for the same reload reason. The
@@ -76,6 +80,11 @@ class BootMixin(LifecycleState):
         # a dropped @app.tools.tool(retry=...) declaration must not keep retrying a
         # tool that no longer claims idempotency.
         self._tool_retry_registry.reset()
+
+        # Reset the per-tool door-extras declarations for the same reload reason — a
+        # dropped @app.tools.tool(extras_keys=...) declaration must not keep admitting an
+        # extras key a tool no longer reads.
+        self._tool_extras_registry.reset()
 
         # Reset the rename-referee collection and the declared-preset-seed registry
         # alongside the registries above: a reload re-imports the plugin modules (which

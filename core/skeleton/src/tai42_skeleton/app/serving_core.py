@@ -33,7 +33,13 @@ from tai42_skeleton.states.service import (
     StatesConsumerListerRegistry,
     StatesService,
 )
-from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry, ToolTierRegistry
+from tai42_skeleton.tools import (
+    ToolExtrasRegistry,
+    ToolRefsRegistry,
+    ToolRegistry,
+    ToolRetryRegistry,
+    ToolTierRegistry,
+)
 from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
 from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
@@ -202,6 +208,10 @@ class ServingCore:
         # Per-tool declared retry-policy registry (@app.tools.tool(retry=...)),
         # reset each start() for the same reload reason.
         self._tool_retry_registry = ToolRetryRegistry()
+
+        # Per-tool declared door-extras registry (@app.tools.tool(extras_keys=...)),
+        # reset each start() for the same reload reason.
+        self._tool_extras_registry = ToolExtrasRegistry()
 
         # Tool-rename referee registry + declared-preset-seed registry, reset each
         # start() alongside the registries above so a reload re-imports the plugin

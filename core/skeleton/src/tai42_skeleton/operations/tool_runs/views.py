@@ -7,7 +7,11 @@ from typing import Any
 
 
 def _run_view(run_id: str, record: dict[str, str]) -> dict[str, Any]:
-    """The full GET view; ``result`` is parsed back from its stored JSON."""
+    """The full GET view; ``result`` and ``resumed_interactions`` are parsed back from stored JSON.
+
+    ``resumed_interactions`` is the parked interaction ids the run resumed or took while it
+    executed (written on every terminal record; ``[]`` when it resumed nothing).
+    """
     view: dict[str, Any] = {
         "run_id": run_id,
         "tool_name": record["tool_name"],
@@ -18,6 +22,8 @@ def _run_view(run_id: str, record: dict[str, str]) -> dict[str, Any]:
         view["finished_at"] = record["finished_at"]
     if "result" in record:
         view["result"] = json.loads(record["result"])
+    if "resumed_interactions" in record:
+        view["resumed_interactions"] = json.loads(record["resumed_interactions"])
     if "error" in record:
         view["error"] = record["error"]
     return view

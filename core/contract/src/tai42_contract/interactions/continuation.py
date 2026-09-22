@@ -29,11 +29,11 @@ at all, so a same-named sibling is refused on that, never on a name comparison h
 differ.
 
 Refusing is not the only answer to a park this caller does not own. :func:`resolve_park_adoption`
-is the OBJECT seams' form of the guard, and it answers adopt-your-own or CHAIN: a caller that
-bound a CHAINED completion around the nested dispatch parks on the nested CALL — a key of its
-own, owned by its own resume continuation — while the nested run keeps its park and its resume,
-and its terminal re-enters the caller through that binding's delivery tool. A caller that chained
-nothing still gets the loud refusal. The CLAIM point cannot chain: a park reaching it as content
+is the OBJECT seams' form of the guard, and it answers adopt-your-own or CHAIN: a nested dispatch
+a CHAIN routing was bound around parks on the nested CALL — a key of its own, owned by its own
+resume continuation — while the nested run keeps its park and its resume, and its terminal
+re-enters the caller through the routing's delivery tool. A dispatch nothing chained still gets
+the loud refusal. The CLAIM point cannot chain: a park reaching it as content
 belongs to no dispatch it could attribute the call to, so there it is adopt-or-refuse.
 
 The resume continuation is a bare tool name; the completion continuation is a tool name
@@ -54,14 +54,13 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapp
 from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar, Token
 from datetime import datetime
-from typing import Any, Final, cast
+from typing import Any, Final, NamedTuple, cast
 
 from tai42_contract.errors import ErrorKind
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "CHAINED_PARK_CONTEXT_KEY",
     "CHAINED_PARK_KEY_PREFIX",
     "CHAINED_PARK_TOKEN_KEY",
     "EXPIRY_ANSWER",
@@ -70,6 +69,7 @@ __all__ = [
     "PARK_COMPLETION_SUCCEEDED",
     "PARK_COMPLETION_THREAD_KEY",
     "SUSPENDED_INTERACTION_MARKER_KEY",
+    "ChainedResume",
     "NestedParkOwnershipError",
     "ParkDeliveryUnauthorizedError",
     "ParkResumeFailed",
@@ -78,9 +78,9 @@ __all__ = [
     "attach_chained_park",
     "bound_execution_identity_for_fire",
     "chained_park_claims",
-    "chained_park_context",
     "current_execution_identity",
     "fire_park_killed",
+    "get_chained_resume",
     "get_park_completion",
     "get_resume_continuation_tool",
     "is_chained_park_key",
@@ -90,9 +90,11 @@ __all__ = [
     "register_execution_identity_binder",
     "register_park_kill_handler",
     "repark_notice",
+    "reset_chained_resume",
     "reset_park_completion",
     "reset_resume_continuation_tool",
     "resolve_park_adoption",
+    "set_chained_resume",
     "set_park_completion",
     "set_resume_continuation_tool",
     "suspended_interaction_marker",
@@ -106,6 +108,45 @@ _resume_continuation_tool: ContextVar[str | None] = ContextVar("tai42_resume_con
 _ParkCompletion = tuple[str | None, Mapping[str, Any] | None]
 
 _park_completion: ContextVar[_ParkCompletion] = ContextVar("tai42_park_completion", default=(None, None))
+
+
+class ChainedResume(NamedTuple):
+    """The cross-driver chain routing a nested driver captures at park time.
+
+    A run whose nested tool ran on ANOTHER driver re-enters that waiting run ACROSS drivers by
+    firing a chain-delivery tool at its own terminal. The three facts that fire needs ride this
+    contextvar, bound by the platform around the nested dispatch and captured by the nested driver
+    onto its own park index (never on ``_park_completion``, which is left carrying only the door's
+    out-of-band address so it flows down unchanged):
+
+    * ``delivery_tool`` — the chain-delivery tool the terminal fires to re-enter the ancestor;
+    * ``chain_key`` — the key the ancestor's park is recorded under and the fire reverses back to it;
+    * ``asked_by`` — the ANCESTOR's own call chain, passed on the chain re-entry as
+      ``continues_chain`` so the ancestor's re-park records its OWN chain, not the descendant's plus
+      the chain tool's name.
+    """
+
+    delivery_tool: str
+    chain_key: str
+    asked_by: tuple[str, ...]
+
+
+_chained_resume: ContextVar[ChainedResume | None] = ContextVar("tai42_chained_resume", default=None)
+
+
+def get_chained_resume() -> ChainedResume | None:
+    """The chain routing bound around the current nested dispatch, or ``None`` when unchained."""
+    return _chained_resume.get()
+
+
+def set_chained_resume(routing: ChainedResume | None) -> Token[ChainedResume | None]:
+    """Bind ``routing`` as the current nested dispatch's chain routing and return the reset token."""
+    return _chained_resume.set(routing)
+
+
+def reset_chained_resume(token: Token[ChainedResume | None]) -> None:
+    """Restore the chain routing to the value captured in ``token``."""
+    _chained_resume.reset(token)
 
 
 # --- the platform delivery signals ------------------------------------------------------
@@ -305,9 +346,8 @@ PARK_COMPLETION_REPARKED: Final[str] = "reparked"
 
 # The ONE reserved field inside an otherwise-opaque completion context: the conversation
 # thread the addressed park belongs to. The platform's park-by-thread index reads it (so a
-# thread delete can cascade-cancel the parks it would orphan), which is why any party that
-# COMPOSES a completion context over another one carries it up to the new context's top level
-# — see :func:`chained_park_context`. Everything else in a context stays opaque here.
+# thread delete can cascade-cancel the parks it would orphan). Everything else in a context
+# stays opaque here.
 PARK_COMPLETION_THREAD_KEY: Final[str] = "delivery_thread_id"
 
 
@@ -418,26 +458,20 @@ class NestedParkOwnershipError(RuntimeError):
 
 # --- chained parks ---------------------------------------------------------------------
 #
-# A CHAINED call is a nested dispatch its caller binds a completion around: the caller parks
-# on the CALL rather than on whatever interaction the nested run parks on, and the nested
-# run's terminal fires the bound delivery tool, which re-enters the caller with that terminal.
-# The three pieces of shared vocabulary live here because three parties touch them: the
-# caller-side binder that composes the context, the platform seam that converts a returned
-# park sentinel, and the delivery tool that reads the fire back.
+# A CHAINED call is a nested dispatch a chain routing is bound around: the caller parks on the
+# CALL rather than on whatever interaction the nested run parks on, and the nested run's terminal
+# fires the routing's delivery tool, which re-enters the caller with that terminal. The shared
+# vocabulary lives here because several parties touch it: the platform seam that binds the
+# routing, the seam that converts a returned park sentinel onto the chain key, and the delivery
+# tool that reads the fire back.
 
 # Namespace prefix on every chained resume key, so a key naming a CALL is never mistaken for a
 # platform interaction id (they share one key space wherever a driver indexes its parks).
 CHAINED_PARK_KEY_PREFIX: Final[str] = "tai42:chained-park:"
 
-# The chained resume key, carried at the top level of the chain's completion context: the key
-# the CALLER's park is recorded under and the delivery tool reverses back to it.
+# The chained resume key, carried under this key in every chain fire's payload: the key the
+# CALLER's park is recorded under and the delivery tool reverses back to it.
 CHAINED_PARK_TOKEN_KEY: Final[str] = "chain_token"  # noqa: S105 constant identifier, not a secret value
-
-# The completion binding the chain's own context WRAPS — the caller's binding at the moment it
-# chained, embedded whole (``{"tool": ..., "context": ...}``, or ``None`` when nothing was
-# bound). A completion context is replaced, never merged, so embedding is how the replaced
-# binding survives the composition instead of being lost.
-CHAINED_PARK_CONTEXT_KEY: Final[str] = "chained_context"
 
 
 _chained_park_claims: ContextVar[set[str] | None] = ContextVar("tai42_chained_park_claims", default=None)
@@ -461,45 +495,13 @@ def is_chained_park_key(key: str) -> bool:
     return key.startswith(CHAINED_PARK_KEY_PREFIX)
 
 
-def chained_park_context(key: str, wrapped: _ParkCompletion) -> dict[str, Any]:
-    """Compose the completion context for a chained dispatch.
-
-    Carries the chained resume ``key``, the caller's own ``wrapped`` binding embedded whole,
-    and the reserved :data:`PARK_COMPLETION_THREAD_KEY` hoisted to the top level when the
-    wrapped context carried one.
-
-    The hoist is what keeps the platform's park-by-thread index working across the
-    composition: that index reads the ONE reserved field off whatever context is bound, and a
-    chained dispatch replaces the caller's context with this one. Everything else the wrapped
-    context holds stays opaque and untouched inside the embedding. JSON-serializable by
-    construction, as every completion context must be.
-    """
-    wrapped_tool, wrapped_context = wrapped
-    context: dict[str, Any] = {
-        CHAINED_PARK_TOKEN_KEY: key,
-        CHAINED_PARK_CONTEXT_KEY: (
-            {"tool": wrapped_tool, "context": dict(wrapped_context) if wrapped_context is not None else None}
-            if wrapped_tool is not None or wrapped_context is not None
-            else None
-        ),
-    }
-    if wrapped_context is not None:
-        thread_id = wrapped_context.get(PARK_COMPLETION_THREAD_KEY)
-        if thread_id is not None:
-            context[PARK_COMPLETION_THREAD_KEY] = thread_id
-    return context
-
-
 def _bound_chained_park_key() -> str | None:
     """The chained resume key bound around the CURRENT nested dispatch, or ``None`` if unchained.
 
-    Unchained means nothing bound, or a completion that is not a chain.
+    Unchained means no chain routing is bound.
     """
-    _tool, context = get_park_completion()
-    if context is None:
-        return None
-    key = context.get(CHAINED_PARK_TOKEN_KEY)
-    return key if isinstance(key, str) and key else None
+    routing = get_chained_resume()
+    return routing.chain_key if routing is not None else None
 
 
 @contextlib.contextmanager
@@ -551,8 +553,8 @@ def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool
 
     * the park is adoptable here (raised under the continuation bound HERE) — it is this run's
       own park, returned unchanged, and the platform resumes it directly;
-    * otherwise, if this dispatch was CHAINED (its caller bound a chained completion around it,
-      :func:`chained_park_context`), the run parks on the chained resume KEY instead, owned by
+    * otherwise, if this dispatch was CHAINED (a chain routing was bound around it,
+      :func:`get_chained_resume`), the run parks on the chained resume KEY instead, owned by
       this run's OWN resume continuation — because that park is genuinely this run's: it waits
       on the CALL, while the nested run keeps its own park and its own resume and re-enters
       here through the chain's delivery tool when it terminates. The key is recorded in the
@@ -579,25 +581,25 @@ def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool
 
 
 def repark_notice(expiry_at: datetime | None) -> tuple[str, dict[str, Any]] | None:
-    """The ``(tool, payload)`` fired when a park is raised under a CHAINED completion binding.
+    """The ``(tool, payload)`` fired when a park is raised under a bound chain routing.
 
-    Returns ``None`` when the bound completion is not a chain (every other binding, and no
-    binding at all).
+    Returns ``None`` when no chain routing is bound around the current dispatch.
 
     A chained caller's own suspension horizon is INHERITED from the nested run's current ask,
     so when that run re-parks on a new ask the caller's horizon must move with it. The notice
-    is that signal: the bound context merged with ``{"expiry_at": <iso>, "status":
-    PARK_COMPLETION_REPARKED}`` — the same generic shape a completion fire takes, under the one
-    non-terminal status, carrying the new deadline in place of a result. It resolves nothing;
-    the completion still fires later under a terminal status.
+    is that signal: the routing's ``delivery_tool`` paired with ``{CHAINED_PARK_TOKEN_KEY:
+    routing.chain_key, "expiry_at": <iso>, "status": PARK_COMPLETION_REPARKED}`` — the one
+    non-terminal status, carrying the new deadline in place of a result and the chain key the
+    delivery tool reverses back to the caller's park. It resolves nothing; the completion still
+    fires later under a terminal status.
 
-    Only a chained binding is notified, so no other delivery tool ever sees this fire.
+    Only a bound chain routing is notified, so no other delivery tool ever sees this fire.
     """
-    tool, context = get_park_completion()
-    if tool is None or _bound_chained_park_key() is None:
+    routing = get_chained_resume()
+    if routing is None:
         return None
-    return tool, {
-        **(context or {}),
+    return routing.delivery_tool, {
+        CHAINED_PARK_TOKEN_KEY: routing.chain_key,
         "expiry_at": expiry_at.isoformat() if expiry_at is not None else None,
         "status": PARK_COMPLETION_REPARKED,
     }

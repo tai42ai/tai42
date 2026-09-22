@@ -12,11 +12,14 @@ from typing import cast
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.responses import Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 import tai42_skeleton.plugins.registry as reg
 import tai42_skeleton.routers.plugins as router
+from tai42_skeleton.app.raw_path_route import SpaFallbackRoute
+from tai42_skeleton.app.server import _not_found_handler
 from tai42_skeleton.plugins.registry import build_registry, set_current_registry
 
 
@@ -303,14 +306,58 @@ async def test_spa_csp_declares_worker_src_self(studio_env):
     assert "worker-src 'self'" in csp
 
 
-async def test_spa_guards_api_paths(studio_env):
-    resp = await router.serve_spa(_req(spa_path="api/tools"))
-    assert resp.status_code == 404
+# -- the unknown-path 404 contract, at the routing layer + the base-app handler --------
+
+_HTTP_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 
 
-async def test_spa_guards_mcp_paths(studio_env):
-    resp = await router.serve_spa(_req(spa_path="mcp/x"))
-    assert resp.status_code == 404
+async def _known_api_route(request: Request) -> Response:
+    return Response("ok")
+
+
+def _spa_matrix_client(studio_env) -> TestClient:
+    # The two seams the unknown-path contract rides on, wired exactly as the served app does: a
+    # real GET-only ``/api`` route (its wrong-method 405 must survive), the SPA catch-all upgraded
+    # to a ``SpaFallbackRoute`` (never matches ``/api``/``/mcp``), and the base app's
+    # native-404 -> JSON envelope handler.
+    routes = [
+        Route("/api/known", _known_api_route, methods=["GET"]),
+        SpaFallbackRoute("/{spa_path:path}", endpoint=router.serve_spa, methods=["GET"]),
+    ]
+    app = Starlette(routes=routes)
+    app.add_exception_handler(404, _not_found_handler)
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("path", ["/api/x", "/mcp/x"])
+def test_unknown_api_or_mcp_path_is_json_404_for_every_method(studio_env, path):
+    client = _spa_matrix_client(studio_env)
+    for method in _HTTP_METHODS:
+        resp = client.request(method, path)
+        assert resp.status_code == 404, (method, path)
+        # HEAD carries no body by protocol; every other method renders the shared envelope.
+        if method != "HEAD":
+            assert resp.json() == {"error": "not found"}, (method, path)
+
+
+def test_known_api_route_wrong_method_keeps_native_405(studio_env):
+    # The 404 handler governs UNKNOWN paths only: a known route addressed with a wrong method is a
+    # PARTIAL on its own route, so it keeps the router's native 405 — the 404 handler is 404-only.
+    client = _spa_matrix_client(studio_env)
+    assert client.get("/api/known").status_code == 200
+    assert client.post("/api/known").status_code == 405
+
+
+def test_non_api_get_deep_link_still_serves_the_spa_shell(studio_env):
+    resp = _spa_matrix_client(studio_env).get("/agents/settings")
+    assert resp.status_code == 200
+    assert 'type="importmap"' in resp.text
+
+
+def test_non_api_non_get_is_native_405(studio_env):
+    # The catch-all is GET-only, so a non-API non-GET path is a PARTIAL -> native 405 (a wrong
+    # method on the SPA surface, not an unknown API path); the 404 handler is scoped to ``/api``/``/mcp``.
+    assert _spa_matrix_client(studio_env).post("/agents/settings").status_code == 405
 
 
 async def test_spa_disabled_when_dist_unset(studio_env, monkeypatch):

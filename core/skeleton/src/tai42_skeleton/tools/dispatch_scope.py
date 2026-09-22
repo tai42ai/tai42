@@ -15,7 +15,7 @@ never inspects what a preset wraps — the platform stays agnostic to preset con
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -50,8 +50,53 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from fastmcp.server.middleware import MiddlewareContext
+    from tai42_contract.states import StateSubject
 
     from tai42_skeleton.app.server import TaiMCP
+
+
+def _mcp_call_subject(message: Any) -> StateSubject | None:
+    """The caller's named subject read off an MCP ``tools/call`` request's ``_meta["tai42/subject"]``.
+
+    ``None`` when the caller named none; a malformed value raises loudly (never a silent drop).
+    """
+    from tai42_contract.states import StateSubject
+
+    meta = getattr(message, "meta", None)
+    extra = getattr(meta, "model_extra", None) if meta is not None else None
+    raw = extra.get("tai42/subject") if extra else None
+    return StateSubject.model_validate(raw) if raw is not None else None
+
+
+def _refuse_unencodable_mcp_result(name: str, result: Any) -> None:
+    """Raise a fastmcp ``ToolError`` if the MCP ``tools/call`` ``result`` cannot be JSON-encoded.
+
+    Walks the ``ToolResult``'s structured content and every content block's JSON-reduced form
+    for a lone UTF-16 surrogate — either carries the tool's reduced return — and, on a hit,
+    raises the edge's own tool-error type naming the tool and the offending JSON path, before
+    fastmcp's wire serialization would throw an unnamed transport error on the same value.
+    """
+    from fastmcp.exceptions import ToolError
+
+    from tai42_skeleton.tools.binding.result import (
+        UnencodableLeafError,
+        _jsonable_or_keep_walkable,
+        find_lone_surrogate,
+    )
+
+    path = find_lone_surrogate(getattr(result, "structured_content", None))
+    if path is None:
+        for block in getattr(result, "content", None) or ():
+            # A block the reducer cannot render surfaces as ``UnencodableLeafError`` carrying its
+            # path; a surrogate it kept walkable is found by the detector. Either names the leaf.
+            try:
+                path = find_lone_surrogate(_jsonable_or_keep_walkable(block))
+            except UnencodableLeafError as exc:
+                path = exc.path
+            if path is not None:
+                break
+    if path is not None:
+        raise ToolError(f"tool {name!r} produced a result that cannot be JSON-encoded at {path}")
 
 
 class DispatchScope:
@@ -130,7 +175,12 @@ async def _binding_application(
 
 @asynccontextmanager
 async def dispatch_scope(
-    app: TaiMCP, key: str, arguments: dict[str, Any] | None = None, *, continues_chain: Sequence[str] | None = None
+    app: TaiMCP,
+    key: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    continues_chain: Sequence[str] | None = None,
+    extras: Mapping[str, Any] | None = None,
 ) -> AsyncIterator[DispatchScope]:
     """Arm the shared run lifecycle around a dispatch of ``key``, yielding its :class:`DispatchScope`.
 
@@ -147,7 +197,9 @@ async def dispatch_scope(
 
     ``continues_chain`` (the in-process seam keyword forwarded from ``run_tool``) SETS the
     frame's call chain to it and pushes no name, so a continuation dispatch restores the
-    parked run's chain; without it the frame PUSHES ``key`` normally.
+    parked run's chain; without it the frame PUSHES ``key`` normally. ``extras`` (likewise
+    forwarded from ``run_tool``) is set on that frame — ambient and read-only for this
+    dispatch, so the started tool reads it and every nested dispatch reads an empty mapping.
 
     The door/preset binding applies ONCE, around the OUTERMOST dispatch (the door target),
     INDEPENDENT of whether that target is a preset: a preset target merges the carried door
@@ -168,7 +220,7 @@ async def dispatch_scope(
         # start — the run-delivery identity and address (read off the completion the door
         # bound before this dispatch). ``continues_chain`` SETS the chain (a continuation
         # dispatch); otherwise the frame PUSHES ``key``.
-        with tool_call_frame(name=key, continues_chain=continues_chain), stamp_run_attribution():
+        with tool_call_frame(name=key, extras=extras, continues_chain=continues_chain), stamp_run_attribution():
             async with turn_budget():
                 manager = app.preset_manager
                 is_preset = manager.is_registered(key)
@@ -209,8 +261,13 @@ class DispatchScopeMiddleware(Middleware):
 
     The caller identity the authz middleware bound is deposited as the run attribution
     before the scope, so a row born here carries the caller's ``user_id`` rather than
-    NULL. Retry rides via :func:`dispatch_with_retry` around ``call_next`` so a
-    policy-armed preset re-fires here exactly as through the in-process seam.
+    NULL. It is ALSO opportunistically bound as the run's execution identity (the same
+    ``rebuild_execution_identity`` path the sync run-tool door and the background submit
+    use), so a tool whose async ask parks can rebind its continuation instead of failing;
+    the caller's ``_meta["tai42/subject"]`` deposits the ``door="api"`` state context so
+    that park indexes under the caller's named subject. Retry rides via
+    :func:`dispatch_with_retry` around ``call_next`` so a policy-armed preset re-fires here
+    exactly as through the in-process seam.
     """
 
     def __init__(self, app: TaiMCP) -> None:
@@ -224,6 +281,7 @@ class DispatchScopeMiddleware(Middleware):
     ) -> Any:
         """Enter the shared dispatch scope for the MCP ``tools/call``, then delegate to ``call_next``."""
         from tai42_skeleton.access_control.user import request_identity
+        from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
 
         name = context.message.name
         # The MCP call's arguments, mutated in place by any binding injection so the edge
@@ -237,20 +295,32 @@ class DispatchScopeMiddleware(Middleware):
             binding_args = {}
             context.message.arguments = binding_args
         user_id, _restricted = request_identity()
+        subject = _mcp_call_subject(context.message)
         attribution = run_attribution(RunAttribution(user_id=user_id)) if user_id is not None else nullcontext()
-        with attribution:
-            async with dispatch_scope(self._app, name, binding_args) as scope:
-                policy = await self._app._tool_binding.resolve_retry_policy(name)
-                result = await dispatch_with_retry(name, policy, lambda: call_next(context))
-                # PARK recognition (explicit — never defaulted): a parked call returns
-                # the reserved suspended-interaction marker in its structured content;
-                # record ``park`` with its interaction id. A well-formed non-park result
-                # records ``success``. A park that instead surfaced as a raised error is
-                # recorded ``error`` by the chokepoint's exception path — a park is never
-                # silently recorded as success.
-                marker = read_suspended_interaction_marker(getattr(result, "structured_content", None))
-                if marker is not None:
-                    scope.observe_park(marker["interaction_id"])
-                else:
-                    scope.observe(result)
-                return result
+        # Bind the caller's own execution identity (so a parking tool can rebind its continuation)
+        # and deposit the ``door="api"`` subject context (so the park indexes under the caller's
+        # named subject), then arm the shared dispatch scope — the same treatment the direct
+        # run-tool door gives a synchronous call.
+        async with caller_execution_identity(user_id):
+            with attribution, api_state_context(subject, user_id):
+                async with dispatch_scope(self._app, name, binding_args) as scope:
+                    policy = await self._app._tool_binding.resolve_retry_policy(name)
+                    result = await dispatch_with_retry(name, policy, lambda: call_next(context))
+                    # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) BEFORE
+                    # fastmcp serializes the ``ToolResult`` to the wire, so the ``tools/call`` answers
+                    # a loud, named tool error instead of the transport 500 that encode would throw.
+                    # Both the structured content and every content block's JSON-reduced form are
+                    # walked, since either carries the reduced return.
+                    _refuse_unencodable_mcp_result(name, result)
+                    # PARK recognition (explicit — never defaulted): a parked call returns
+                    # the reserved suspended-interaction marker in its structured content;
+                    # record ``park`` with its interaction id. A well-formed non-park result
+                    # records ``success``. A park that instead surfaced as a raised error is
+                    # recorded ``error`` by the chokepoint's exception path — a park is never
+                    # silently recorded as success.
+                    marker = read_suspended_interaction_marker(getattr(result, "structured_content", None))
+                    if marker is not None:
+                        scope.observe_park(marker["interaction_id"])
+                    else:
+                        scope.observe(result)
+                    return result

@@ -14,6 +14,7 @@ from tai42_contract.agent.base import (
     SubAgentSpec,
 )
 from tai42_contract.agent.events import (
+    AsksFinal,
     InterruptFinal,
     MessageDelta,
     MessageFinal,
@@ -39,6 +40,7 @@ from tai42_contract.agent.session_thread import (
 __all__ = [
     "Agent",
     "AgentInterruptedError",
+    "AsksFinal",
     "InterruptFinal",
     "MessageDelta",
     "MessageFinal",

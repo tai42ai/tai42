@@ -21,6 +21,7 @@ from .conftest import (
     MemoryAgent,
     _accepting_callback,
     _channel_route,
+    _connected,
     _settle,
     _store,
     _tool_api_route,
@@ -224,9 +225,9 @@ _FORM = {"name": "Alice", "size": 42}
 async def test_accept_with_form_stamps_the_record_and_the_tool_payload(env, monkeypatch):
     # A channel door hands the turn the participant's structured submission WITH its rendered
     # text: the record stores it beside inbound_text, both read doors publish it, and a
-    # tool target's jq payload gains a "form" key the route's payload_expr can map.
+    # tool target's jq payload gains a "form" key the route's start_expr can map.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr="{msg: .message, form: .form}")
+    route = _tool_channel_route(start_expr="{msg: .message, form: .form}")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -244,10 +245,10 @@ async def test_accept_with_form_stamps_the_record_and_the_tool_payload(env, monk
 
 
 async def test_accept_without_form_keeps_the_payload_byte_identical(env, monkeypatch):
-    # A form-less inbound emits NO "form" key at all — an existing payload_expr over the
+    # A form-less inbound emits NO "form" key at all — an existing start_expr over the
     # whole payload sees exactly the shape it saw before the field existed.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -336,12 +337,14 @@ async def test_shed_records_carry_the_inbound_form(env, monkeypatch):
 async def test_api_submit_with_form_stamps_the_record_and_the_tool_payload(env, monkeypatch):
     # The api door twin: ConversationMessage.form threads through submit_api_message with
     # the same record + payload semantics the channel door has.
-    route = _tool_api_route(payload_expr="{msg: .message, form: .form}")
+    route = _tool_api_route(start_expr="{msg: .message, form: .form}")
     _wire(monkeypatch, FakeManager(route))
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
-    result = await turn_module.submit_api_message("tool-api", "u-7", "name: Alice", "caller", 2, form={"name": "Alice"})
+    result = await turn_module.submit_api_message(
+        "tool-api", "u-7", "name: Alice", "caller", 2, form={"name": "Alice"}, client_connected=_connected
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"msg": "name: Alice", "form": {"name": "Alice"}}
@@ -362,7 +365,7 @@ async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_p
     # rendered text: the record stores them beside inbound_text, both read doors publish them,
     # and a tool target's payload gains stable "attachments"/"location" keys.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -406,10 +409,10 @@ async def test_accept_with_attachments_and_location_stamps_record_and_the_tool_p
 
 
 async def test_accept_without_attachments_or_location_keeps_payload_byte_identical(env, monkeypatch):
-    # A plain inbound emits NEITHER key — an existing payload_expr over the whole payload sees
+    # A plain inbound emits NEITHER key — an existing start_expr over the whole payload sees
     # exactly the shape it saw before the fields existed.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -489,13 +492,20 @@ async def test_shed_records_carry_attachments_and_location(env, monkeypatch):
 async def test_api_submit_with_attachments_and_location(env, monkeypatch):
     # The api door twin: ConversationMessage.attachments/.location thread through
     # submit_api_message with the same record + payload semantics the channel door has.
-    route = _tool_api_route(payload_expr="{msg: .message, attachments: .attachments, location: .location}")
+    route = _tool_api_route(start_expr="{msg: .message, attachments: .attachments, location: .location}")
     _wire(monkeypatch, FakeManager(route))
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
     result = await turn_module.submit_api_message(
-        "tool-api", "u-7", "see attached", "caller", 2, attachments=[_DOC], location=_LOCATION
+        "tool-api",
+        "u-7",
+        "see attached",
+        "caller",
+        2,
+        attachments=[_DOC],
+        location=_LOCATION,
+        client_connected=_connected,
     )
     await _settle()
 

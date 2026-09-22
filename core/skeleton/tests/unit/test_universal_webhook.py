@@ -81,7 +81,7 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
                     tool="run_event_flow",
                     execution_key="k-fire",
                     execution_key_fingerprint="fp-fire",
-                    expr=TemplatedText(content=".payload"),
+                    start_expr=TemplatedText(content=".payload"),
                     tool_kwargs={"source": "webhook"},
                 )
             )
@@ -91,7 +91,9 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
 
             assert resp.background is not None
             await resp.background()
-            run_tool.assert_awaited_once_with("run_event_flow", {"id": 7, "source": "webhook"}, offload_sync=True)
+            run_tool.assert_awaited_once_with(
+                "run_event_flow", {"id": 7, "source": "webhook"}, offload_sync=True, continues_chain=None, extras={}
+            )
 
     asyncio.run(run())
 

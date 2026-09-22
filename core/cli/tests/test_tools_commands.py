@@ -63,6 +63,97 @@ def test_tools_run_posts_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(result.output) == {"sum": 3}
 
 
+def test_tools_run_posts_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``--subject-*`` flags ride the run-tool body as the ``subject`` object the edge
+    validates into a ``StateSubject`` (``target_kind`` is ``tool``)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/run-tool"
+        body = json.loads(request.content)
+        assert body["subject"] == {
+            "target_kind": "tool",
+            "target_name": "acct-42",
+            "kind": "thread",
+            "key": "t-1",
+        }
+        return data_response({"ok": 1})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "tools",
+            "run",
+            "add",
+            "--subject-kind",
+            "thread",
+            "--subject-key",
+            "t-1",
+            "--subject-target",
+            "acct-42",
+        ],
+        json_output=True,
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_tools_run_omits_subject_when_no_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no ``--subject-*`` flag the body carries no ``subject`` key, so the edge reads ``None``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "subject" not in body
+        return data_response({"ok": 1})
+
+    result = run_cli(monkeypatch, handler, ["tools", "run", "add"], json_output=True)
+    assert result.exit_code == 0, result.output
+
+
+def test_tools_run_partial_subject_flags_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The three subject flags are all-or-nothing: giving one alone is a usage error, before any call."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not be reached
+        raise AssertionError("no request should be made when the subject flags are incomplete")
+
+    result = run_cli(monkeypatch, handler, ["tools", "run", "add", "--subject-kind", "thread"])
+    assert result.exit_code != 0
+    assert "subject" in result.output.lower()
+
+
+def test_tools_runs_submit_posts_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The submit door carries the same ``subject`` object the sync door does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/tool-runs"
+        body = json.loads(request.content)
+        assert body["subject"] == {
+            "target_kind": "tool",
+            "target_name": "acct-42",
+            "kind": "thread",
+            "key": "t-1",
+        }
+        return data_response({"run_id": "r1"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "tools",
+            "runs",
+            "submit",
+            "slow",
+            "--subject-kind",
+            "thread",
+            "--subject-key",
+            "t-1",
+            "--subject-target",
+            "acct-42",
+        ],
+        json_output=True,
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_tools_schema_not_found_surfaces_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return error_response("Tool 'nope' not registered", 404)

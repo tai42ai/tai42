@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 from .base import _Facet
 
 if TYPE_CHECKING:
-    from tai42_contract.interactions import Ask, QuestionFormat
+    from contextlib import AbstractAsyncContextManager
+
+    from tai42_contract.interactions import Ask, ParkedEntry, QuestionFormat, Visit, VisitOutcome
+    from tai42_contract.states import StateContext
 
 
 class InteractionsFacet(_Facet):
@@ -51,6 +54,59 @@ class InteractionsFacet(_Facet):
         from tai42_skeleton.interactions.authorization import redelivery_horizon_seconds
 
         return redelivery_horizon_seconds()
+
+    @property
+    def visit(self) -> Visit:
+        """The bound, ``Visit``-typed shared-visit callable — the ONE seam every door drives through.
+
+        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.visit`, so an in-process door
+        or plugin drives a parkable run's cancel / resume / take / start order without importing the
+        skeleton.
+        """
+        from tai42_skeleton.interactions.visit import visit
+
+        return visit
+
+    async def list_parked(self) -> list[ParkedEntry]:
+        """Every parked interaction on the current run's subject — the full parked entries."""
+        from tai42_skeleton.interactions.visit import list_parked
+
+        return await list_parked()
+
+    async def list_parked_for(self, context: StateContext | None) -> list[ParkedEntry]:
+        """Every parked interaction on ``context``'s subject — the door-contract ``$parked`` source."""
+        from tai42_skeleton.interactions.visit import list_parked_for
+
+        return await list_parked_for(context)
+
+    def current_fire_identity(self) -> tuple[str, str] | None:
+        """The ambient execution identity as the ``(user_id, fingerprint)`` pair a fire forwards, or ``None``."""
+        from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+        identity = get_execution_identity()
+        if identity is None or identity.user_id is None or identity.execution_key_fingerprint is None:
+            return None
+        return identity.user_id, identity.execution_key_fingerprint
+
+    def bound_execution_identity_for_fire(
+        self, execution_key: str, fingerprint: str
+    ) -> AbstractAsyncContextManager[Any]:
+        """Bind ``execution_key``'s live-grant identity for a receiver-less door fire (a scheduled fire)."""
+        from tai42_skeleton.authz.execution import bind_execution_identity
+
+        return bind_execution_identity(execution_key, bound_fingerprint=fingerprint)
+
+    async def resume_parked(self, interaction_id: str, payload: Any = ...) -> VisitOutcome:
+        """Resume caller ask ``interaction_id`` with ``payload``, or TAKE its waiting outcome when omitted."""
+        from tai42_skeleton.interactions.visit import _TAKE, resume_parked
+
+        return await resume_parked(interaction_id, _TAKE if payload is ... else payload)
+
+    async def cancel_parked(self, ids: list[str]) -> VisitOutcome:
+        """Whole-chain kill every parked interaction named in ``ids`` on the current run's subject."""
+        from tai42_skeleton.interactions.visit import cancel_parked
+
+        return await cancel_parked(ids)
 
     @property
     def ask(self) -> Ask:

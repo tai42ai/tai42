@@ -92,7 +92,9 @@ def test_mcp_call_of_a_registered_preset_registers_a_run_row_and_trace_root(monk
         ):
             starts.append({"preset_name": preset_name, "trace_id": trace_id})
 
-        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+        async def update_outcome(
+            self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+        ):
             terminals.append({"outcome": outcome})
 
     monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
@@ -139,7 +141,9 @@ def test_mcp_call_of_a_parking_preset_records_parked_not_success(monkeypatch):
         ):
             pass
 
-        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+        async def update_outcome(
+            self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+        ):
             terminals.append({"outcome": outcome, "interaction_id": interaction_id})
 
     monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
@@ -187,7 +191,9 @@ def test_mcp_call_run_row_is_born_with_the_callers_user_id(monkeypatch):
         ):
             starts.append({"preset_name": preset_name, "user_id": user_id})
 
-        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+        async def update_outcome(
+            self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+        ):
             pass
 
     monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)

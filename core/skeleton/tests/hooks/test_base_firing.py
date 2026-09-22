@@ -35,7 +35,7 @@ async def test_on_event_fires_tool_with_merged_expr_and_kwargs(make_app):
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
             condition=TemplatedText(content='.status == "ready"'),
-            expr=TemplatedText(content="{id: .id}"),
+            start_expr=TemplatedText(content="{id: .id}"),
             tool_kwargs={"extra": 1},
         )
     )
@@ -120,12 +120,12 @@ def _track_peak_concurrency(app):
     state = {"in_flight": 0, "peak": 0}
     original_run_tool = app.tools.run_tool
 
-    async def tracking_run_tool(name, tool_input, *, offload_sync=False):
+    async def tracking_run_tool(name, tool_input, *, offload_sync=False, extras=None):
         state["in_flight"] += 1
         state["peak"] = max(state["peak"], state["in_flight"])
         try:
             await asyncio.sleep(0)  # yield so co-scheduled hooks can overlap
-            return await original_run_tool(name, tool_input, offload_sync=offload_sync)
+            return await original_run_tool(name, tool_input, offload_sync=offload_sync, extras=extras)
         finally:
             state["in_flight"] -= 1
 
@@ -241,7 +241,7 @@ def test_validate_jq_accepts_valid_expr_and_condition():
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
             condition=TemplatedText(content=".a"),
-            expr=TemplatedText(content=".b"),
+            start_expr=TemplatedText(content=".b"),
         )
     )
     # Nothing to validate when both inline fields are absent.
@@ -257,7 +257,7 @@ def test_validate_jq_rejects_bad_expr():
         tool="noop",
         execution_key="k-fire",
         execution_key_fingerprint="fp-fire",
-        expr=TemplatedText(content="this is ( not jq"),
+        start_expr=TemplatedText(content="this is ( not jq"),
     )
     with pytest.raises(ValueError, match="expr is not valid jq"):
         BaseHooksManager.validate_jq_fields(bad)
@@ -278,7 +278,7 @@ async def test_override_merges_over_event_input_but_under_hook_kwargs(make_app):
             tool="tool",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            expr=TemplatedText(content="{k: .k, m: .m, e: 1}"),
+            start_expr=TemplatedText(content="{k: .k, m: .m, e: 1}"),
             tool_kwargs={"k": "hook", "h": 2},
         )
     )
@@ -321,7 +321,7 @@ async def test_none_override_is_byte_identical(make_app):
             tool="tool",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            expr=TemplatedText(content="{id: .id}"),
+            start_expr=TemplatedText(content="{id: .id}"),
             tool_kwargs={"x": 1},
         )
     )

@@ -24,11 +24,12 @@ text recorded, bounded by whether the request MATCHED a route. A match records t
 path TEMPLATE, every path parameter written as its ``{name}`` — so a path-borne
 capability (``/trigger/{token}``, ``/api/interactions/callback/{ticket}``) records
 the template, never the secret. Under the default Studio SPA catch-all
-(``default_routers="all"``), ``/{spa_path:path}`` matches every GET and
-part-matches every other method, so a near-miss records ``/{spa_path}`` with its
-tail swallowed by the parameter. A request NO route matched — no catch-all
-(``default_routers`` ``"api"``/``"none"``), or a request the body cap refuses
-above the router — has no template: it records the bare ``<unmatched>``
+(``default_routers="all"``), ``/{spa_path:path}`` matches every non-``/api``/``/mcp``
+GET and part-matches every other such method, so a near-miss on a non-API path
+records ``/{spa_path}`` with its tail swallowed by the parameter. A request NO route
+matched — an unknown ``/api``/``/mcp`` path (the catch-all holds those out), no
+catch-all (``default_routers`` ``"api"``/``"none"``), or a request the body cap
+refuses above the router — has no template: it records the bare ``<unmatched>``
 constant, no path text at all.
 
 A request handed to a MOUNTED app (the sub-MCP router under ``/app``) is the third

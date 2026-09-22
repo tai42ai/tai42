@@ -125,6 +125,21 @@ class SuspendedFinal(StreamEvent):
     final: bool = True
 
 
+class AsksFinal(StreamEvent):
+    """The agent run asked its CALLER one or more questions before it could answer. Terminal.
+
+    A ``to="caller"`` ask is addressed to the run's own caller — here the SSE client driving the
+    stream — so the run cannot proceed until the caller answers it, unlike a ``to="user"`` park
+    (:class:`SuspendedFinal`) whose answer arrives out of band. ``asks`` carries the full parked
+    entries the caller must answer (id, question, answer format, and the rest of the parked-entry
+    shape); the vocabulary is generic — it names no driver, engine, or resume state.
+    """
+
+    type: Literal["asks_final"] = "asks_final"  # pyright: ignore[reportIncompatibleVariableOverride]
+    asks: list[dict[str, Any]]
+    final: bool = True
+
+
 class InterruptFinal(StreamEvent):
     """A platform interrupt surfaced out of a paused agent graph. Terminal.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Awaitable, Callable
 
 from fastapi import Request
 from pydantic import BaseModel, ValidationError
@@ -45,6 +46,21 @@ _EVENT_SUBMISSION_STATUS: dict[type[Exception], int] = {
 
 def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _client_connected(request: Request) -> Callable[[], Awaitable[bool]]:
+    """An async probe of whether the submitting client is still connected, for the api/event doors.
+
+    The door claims a finished turn's inline ``200`` only while this reads ``True``; a hung-up
+    caller's answer is left to the route's signed callback (or its terminal poll record) rather
+    than written to a closed socket. Reads Starlette's disconnect probe LIVE at claim time — a
+    cheap non-blocking receive peek — so the answer is a fresh read, not a stale snapshot.
+    """
+
+    async def _probe() -> bool:
+        return not await request.is_disconnected()
+
+    return _probe
 
 
 def _door_caller_principal() -> str | None:
@@ -136,7 +152,10 @@ async def send_conversation_message(request: Request) -> Response:
     answered/error turn with the answer, a silent turn with the silent marker (status
     ``silent``, no answer text) — and any callback (which otherwise carries
     answered/error/silent) is suppressed the same way, so it never double-fires; a turn
-    still running when the wait elapses falls back to ``202``.
+    still running when the wait elapses falls back to ``202``. The inline ``200`` is taken
+    only while the client is still connected — a caller that hung up during the wait gets its
+    answer by the route's signed callback (or its terminal poll record), never a write to a
+    closed socket.
     """
     if _pkg.reload_gate.locked:
         return _pkg.reload_gate.reject_response()
@@ -173,6 +192,7 @@ async def send_conversation_message(request: Request) -> Response:
             attachments=message.attachments,
             location=message.location,
             locale=message.locale,
+            client_connected=_client_connected(request),
         )
     except Exception as exc:
         mapped = _turn_submission_error(exc, _TURN_SUBMISSION_STATUS)
@@ -211,7 +231,9 @@ async def send_conversation_event(request: Request) -> Response:
     The answer is delivered by the TARGET route's door — a channel route texts the thread's
     address, an api route POSTs the route's signed callback (a ``wait_seconds`` body field,
     clamped to ``sync_wait_max_seconds``, returns a finished turn's answer inline in the
-    ``200`` and suppresses the callback). Default is ``202 {message_id, thread_id}``.
+    ``200`` and suppresses the callback, but only while the client is still connected — a
+    hung-up caller's answer falls to the callback or its terminal poll record). Default is
+    ``202 {message_id, thread_id}``.
 
     This is a TRUSTED-integration door: an authorized writer may address ANY existing thread
     of the route by ``thread_id`` (a channel participant's included), so a deployment grants its
@@ -237,7 +259,9 @@ async def send_conversation_event(request: Request) -> Response:
     from tai42_skeleton.conversations import submit_event
 
     try:
-        result = await submit_event(route_name, submission, _door_caller_principal())
+        result = await submit_event(
+            route_name, submission, _door_caller_principal(), client_connected=_client_connected(request)
+        )
     except Exception as exc:
         mapped = _turn_submission_error(exc, _EVENT_SUBMISSION_STATUS)
         if mapped is None:

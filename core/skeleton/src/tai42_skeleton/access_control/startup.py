@@ -206,9 +206,10 @@ def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[
         if meta.mounted:
             continue
         registered = meta.path
-        # The control plane is excluded structurally: serve_spa 404s /api and /mcp, so the
-        # shell tier never reaches them. The literal REGISTERED prefix decides (registered
-        # paths carry clean, un-encoded prefixes), so a templated /api route is excluded too.
+        # The control plane is excluded structurally: the SPA catch-all does not match /api or
+        # /mcp (a SpaFallbackRoute), so the shell tier never reaches them. The literal REGISTERED
+        # prefix decides (registered paths carry clean, un-encoded prefixes), so a templated /api
+        # route is excluded too.
         if under_prefix(registered, "/api") or under_prefix(registered, "/mcp"):
             continue
         templated = "{" in registered

@@ -161,7 +161,10 @@ def test_conversations_create_builds_full_body(monkeypatch: pytest.MonkeyPatch) 
 def test_conversations_create_with_tool_target_maps_exprs(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["payload_expr"] == {"content": ".text"}
+        assert body["start_expr"] == {"content": ".text"}
+        assert body["cancel_expr"] == {"content": "$parked | map(.id)"}
+        assert body["resume_expr"] == {"content": "null"}
+        assert body["extras_expr"] == {"content": "{warm_start: .text}"}
         assert body["reply_expr"] == {"content": ".result"}
         assert body["callback_url"] == "https://cb.example"
         return data_response({"created": False})
@@ -181,8 +184,14 @@ def test_conversations_create_with_tool_target_maps_exprs(monkeypatch: pytest.Mo
             "svc",
             "--target-kind",
             "tool",
-            "--payload-expr",
+            "--start-expr",
             ".text",
+            "--cancel-expr",
+            "$parked | map(.id)",
+            "--resume-expr",
+            "null",
+            "--extras-expr",
+            "{warm_start: .text}",
             "--reply-expr",
             ".result",
             "--callback-url",

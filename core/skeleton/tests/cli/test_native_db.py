@@ -167,6 +167,49 @@ def test_migrate_loud_and_credential_free_on_connection_failure(monkeypatch: pyt
     assert "could not connect to Postgres database 'default' at db:5432/tai" in result.output
 
 
+def _closed_loopback_port() -> int:
+    """A loopback port nothing listens on — a connect to it is refused at once."""
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def test_migrate_surfaces_the_real_connect_error_from_a_closed_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The pooled client now proves its first connection at ``client_ctx`` entry, so a refused
+    # connect raises the REAL ``psycopg.OperationalError`` (not a pool timeout) straight into
+    # the CLI's mapping — reported cleanly and credential-free, exit 1.
+    from pydantic import SecretStr
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.postgres import PostgresClient
+
+    settings = PostgresConnectionSettings(
+        pg_host="127.0.0.1",
+        pg_port=_closed_loopback_port(),
+        pg_password=SecretStr("s3cr3t-probe-pw"),
+        pg_min_connections=1,
+        pg_max_connections=1,
+        pg_connect_timeout=2,
+    )
+
+    async def _connect(entries: object) -> list[AppliedMigration]:
+        async with client_ctx(PostgresClient, settings) as pool, pool.connection():
+            pass
+        return []
+
+    monkeypatch.setattr(db, "apply_migrations", _connect)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
+
+    assert result.exit_code == 1
+    assert "could not connect to Postgres database 'default' at db:5432/tai" in result.output
+    # The real connection is refused, not a pool timeout, and the password never surfaces.
+    assert "s3cr3t-probe-pw" not in result.output
+
+
 def test_migrate_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _boom(entries: object) -> list[AppliedMigration]:
         raise DatabaseNotConfiguredError("database 'default' is not configured: set TAI_DATABASE_DEFAULT_PG_PASSWORD.")

@@ -9,7 +9,9 @@ helper must not sit in one.
 
 from __future__ import annotations
 
+from pydantic import ValidationError
 from starlette.requests import Request
+from tai42_contract.states import StateSubject
 
 
 class ToolCallRequestError(Exception):
@@ -25,14 +27,15 @@ class ToolCallRequestError(Exception):
         self.status_code = status_code
 
 
-async def read_tool_call(request: Request) -> tuple[str, dict[str, object]]:
-    """Parse and validate a tool-call body ``{tool_name, arguments}``.
+async def read_tool_call(request: Request) -> tuple[str, dict[str, object], StateSubject | None]:
+    """Parse and validate a tool-call body ``{tool_name, arguments, subject}``.
 
-    Both tool-execution doors share this one field shape — the explicit pair that
-    matches the run-record fields. Returns ``(tool_name, arguments)``;
-    ``arguments`` defaults to ``{}`` when absent. Raises
+    Both tool-execution doors share this one field shape — the explicit fields that
+    match the operation's request model. Returns ``(tool_name, arguments, subject)``;
+    ``arguments`` defaults to ``{}`` and ``subject`` to ``None`` when absent. Raises
     :class:`ToolCallRequestError` on invalid JSON, a non-object body, a
-    missing/empty ``tool_name``, or a non-object ``arguments`` — the caller maps
+    missing/empty ``tool_name``, a non-object ``arguments``, or a ``subject`` that
+    is not a valid :class:`~tai42_contract.states.StateSubject` — the caller maps
     it to the same loud 4xx both doors share.
     """
     try:
@@ -50,4 +53,20 @@ async def read_tool_call(request: Request) -> tuple[str, dict[str, object]]:
     # fail deeper as a 500.
     if not isinstance(arguments, dict):
         raise ToolCallRequestError("'arguments' must be a JSON object", 400)
-    return name, arguments
+    return name, arguments, _read_subject(body.get("subject"))
+
+
+def _read_subject(raw: object) -> StateSubject | None:
+    """Validate the body's optional ``subject`` into a :class:`StateSubject`.
+
+    Absent or ``null`` yields ``None`` — a caller who names no subject leaves an async
+    park un-indexed, exactly as when no subject can be named. Any present value is
+    validated against the contract model; a malformed one (a non-object, an unknown
+    ``target_kind``, a bad ``kind``/``key``) is a loud 400, never silently dropped.
+    """
+    if raw is None:
+        return None
+    try:
+        return StateSubject.model_validate(raw)
+    except ValidationError as exc:
+        raise ToolCallRequestError(f"invalid 'subject': {exc}", 400) from exc

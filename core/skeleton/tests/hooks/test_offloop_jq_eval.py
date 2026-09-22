@@ -1,7 +1,7 @@
-"""The hooks firing path evaluates its authored jq off the event loop via the
-shared ``run_jq_first`` helper. Both the condition and the
-expr->tool-input mapping route through it, and a fire-time jq error still
-propagates loudly — no site swallows it."""
+"""The hooks firing path evaluates its authored jq off the event loop. The condition routes
+through the shared ``run_jq_first`` helper; the door-contract ``start_expr`` routes through the
+door-contract evaluator (also off-loop). A fire-time jq error still propagates loudly — no site
+swallows it."""
 
 from __future__ import annotations
 
@@ -34,16 +34,16 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
             condition=TemplatedText(content='.status == "ready"'),
-            expr=TemplatedText(content="{id: .id}"),
+            start_expr=TemplatedText(content="{id: .id}"),
         )
     )
 
     await manager.on_event("t", {"id": 3, "status": "ready"})
 
-    # Same result the inline eval produced, now via the off-loop helper.
+    # The condition runs through the off-loop ``run_jq_first`` helper; the ``start_expr`` runs
+    # through the door-contract evaluator, and its transformed result reaching the tool proves it.
     assert app.tools.runs == [("noop", {"id": 3})]
     assert ('.status == "ready"', {"id": 3, "status": "ready"}) in calls
-    assert ("{id: .id}", {"id": 3, "status": "ready"}) in calls
 
 
 async def test_fire_time_jq_error_is_not_swallowed(make_app):

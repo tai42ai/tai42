@@ -272,7 +272,9 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
         ):
             pass
 
-        async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+        async def update_outcome(
+            self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+        ):
             terminals.append({"outcome": outcome, "interaction_id": interaction_id})
 
     import tai42_skeleton.runs.chokepoint as chokepoint
@@ -385,5 +387,84 @@ def test_injections_run_even_when_arguments_is_None_one_invariant() -> None:
             assert "v_in" in fake.evals
             # ...and the update engaged on the clean success — one shared guard.
             assert any(name == "v_up" for name, _ in fake.applies)
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_refuses_an_unencodable_result() -> None:
+    # The MCP ``tools/call`` edge walks the returned ``ToolResult``'s structured content (and
+    # every content block) for a lone surrogate BEFORE fastmcp serializes it to the wire, and
+    # answers a named ``ToolError`` — never the transport 500 the encode would otherwise throw.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from fastmcp.exceptions import ToolError
+    from fastmcp.server.middleware import MiddlewareContext
+
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            mw = DispatchScopeMiddleware(app)
+            message = SimpleNamespace(name="emits", arguments={})
+            context = SimpleNamespace(message=message)
+
+            async def call_next(_ctx: object) -> object:
+                return SimpleNamespace(structured_content={"token": "\ud83d"}, content=[])
+
+            with pytest.raises(ToolError, match=r"emits.*cannot be JSON-encoded at \$\.token"):
+                await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_refuses_a_surrogate_in_a_content_block() -> None:
+    # The reduced return can land in a text content block rather than structured content; the
+    # edge walks every block's JSON-reduced form too, so the refusal covers it.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from fastmcp.exceptions import ToolError
+    from fastmcp.server.middleware import MiddlewareContext
+    from mcp.types import TextContent
+
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            mw = DispatchScopeMiddleware(app)
+            message = SimpleNamespace(name="emits", arguments={})
+            context = SimpleNamespace(message=message)
+
+            async def call_next(_ctx: object) -> object:
+                return SimpleNamespace(structured_content=None, content=[TextContent(type="text", text="\ud83d")])
+
+            with pytest.raises(ToolError, match=r"emits.*cannot be JSON-encoded"):
+                await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_passes_an_encodable_result() -> None:
+    # A clean result (a real emoji) is not flagged: the edge returns it unchanged.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from fastmcp.server.middleware import MiddlewareContext
+
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            mw = DispatchScopeMiddleware(app)
+            message = SimpleNamespace(name="emits", arguments={})
+            context = SimpleNamespace(message=message)
+            sentinel = SimpleNamespace(structured_content={"emoji": "😀"}, content=[])
+
+            async def call_next(_ctx: object) -> object:
+                return sentinel
+
+            result = await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
+            assert result is sentinel
 
     asyncio.run(run())

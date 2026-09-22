@@ -31,6 +31,7 @@ class _RegistrationMixin(_BranchBindingMixin):
         tool_refs: "ToolRefsExtractor | None" = None,
         retry: ToolRetryPolicy | None = None,
         tier: "RouteAction | None" = None,
+        extras_keys: frozenset[str] | None = None,
         **kwargs,
     ) -> Any:
         func_to_register = None
@@ -65,6 +66,11 @@ class _RegistrationMixin(_BranchBindingMixin):
             # gate and the run-time fence read it.
             if tier is not None:
                 self._registration_tier_registry.register(name, tier)
+            # Likewise for the declared door-extras keys — keyed by the bound name so the
+            # visit's extras check (and a preset's inherited-keys walk) reads it. An empty
+            # declaration is the default (no extras), so only a non-empty set is registered.
+            if extras_keys:
+                self._tool_extras_registry.register(name, frozenset(extras_keys))
             return self.bind_tool_func(*decorator_args, **kwargs)(func)
 
         if func_to_register is not None:

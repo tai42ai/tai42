@@ -19,6 +19,7 @@ from tai42_contract.conversations import (
     TurnSupersededError,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils import render as door_contract_module
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -48,7 +49,7 @@ from tai42_skeleton.conversations.turn import pairing as pairing_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import rendered_user_message
+from .conftest import _connected, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _CODE_RE = re.compile(r"LINK-[A-Z0-9]{8}")
@@ -184,6 +185,7 @@ def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None,
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
+    monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent or EchoAgent()})
@@ -207,14 +209,14 @@ def _tool_route(
     route_name: str = "tool-line",
     our_identity: str = "+15550001111",
     *,
-    payload_expr: str | None = None,
+    start_expr: str | None = None,
 ):
     return ConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
         target_name="pinger",
-        payload_expr=TemplatedText(content=payload_expr) if payload_expr is not None else None,
+        start_expr=TemplatedText(content=start_expr) if start_expr is not None else None,
         execution_key="svc",
         channel="twilio",
         our_identity=our_identity,
@@ -226,7 +228,7 @@ class _FakeTools:
     def __init__(self, fn) -> None:
         self.fn = fn
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False):
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None):
         return self.fn(arguments)
 
 
@@ -637,7 +639,9 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
     # Three invalid redeems from ONE caller "mallory", each under a DIFFERENT external_user_id
     # (one past the threshold of 2 → the lock arms on the caller, if the source is the caller).
     for index in range(3):
-        res = await turn_module.submit_api_message("chat", f"victim-{index}", "LINK-QQQQQQQQ", "mallory", 5)
+        res = await turn_module.submit_api_message(
+            "chat", f"victim-{index}", "LINK-QQQQQQQQ", "mallory", 5, client_connected=_connected
+        )
         await _settle()
         assert res.answer is not None
         assert res.answer.answer == pairing_module._INVALID_CODE_TEXT
@@ -645,7 +649,9 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
     # The lock is now ARMED on the caller: a GENUINELY VALID redeem from mallory (under YET
     # another external_user_id) is refused with the SAME uniform reply and does NOT consume
     # the live code — proving external_user_id rotation no longer evades the throttle.
-    locked = await turn_module.submit_api_message("chat", "victim-final", good_code, "mallory", 5)
+    locked = await turn_module.submit_api_message(
+        "chat", "victim-final", good_code, "mallory", 5, client_connected=_connected
+    )
     await _settle()
     assert locked.answer is not None
     assert locked.answer.answer == pairing_module._INVALID_CODE_TEXT
@@ -931,13 +937,13 @@ async def test_a_greeting_carries_to_the_successor_on_the_api_door(env, monkeypa
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
     _wire_tool(monkeypatch, _YieldingTool())
 
-    first = await turn_module.submit_api_message("chat", "user-7", "hi", "alice", 5)
+    first = await turn_module.submit_api_message("chat", "user-7", "hi", "alice", 5, client_connected=_connected)
     await _settle()
     r1 = await _store().get_record(first.message_id)
     assert r1 is not None
     assert r1.answer_status == "superseded"  # yielded: the greeting was not delivered
 
-    second = await turn_module.submit_api_message("chat", "user-7", "again", "alice", 5)
+    second = await turn_module.submit_api_message("chat", "user-7", "again", "alice", 5, client_connected=_connected)
     await _settle()
     r2 = await _store().get_record(second.message_id)
     assert r2 is not None

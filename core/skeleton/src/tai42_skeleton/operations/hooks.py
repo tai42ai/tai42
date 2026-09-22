@@ -161,15 +161,25 @@ async def list_hooks(topic: str | None = None) -> dict[str, Any]:
 
 # The jq-typed flat params carry the ``x-tai42-expression`` vendor annotation so the
 # generated MCP tool form (the RunPanel door) recognizes them as jq — the model-level
-# annotation on ``HookRegister.condition``/``expr`` never reaches this FLAT projection,
-# which fastmcp derives from the signature alone. The payloads state the HOOK surface's
-# facts: both expressions run over the parsed webhook delivery (payload_parser merges
-# structured bodies — JSON objects, XML, form fields — top-level with the query string;
-# arbitrary text arrives under raw_body). A hook's condition
-# proceeds on any TRUTHY result (``bool(result)``, unlike access control's strict-true),
-# and its expr must yield an OBJECT — the fired tool's kwargs. Declared as ``Annotated``
-# metadata on the parameter type so the schema fastmcp builds off the flat signature
-# carries it; schema METADATA only, never validation.
+# annotation on ``HookRegister``'s expressions never reaches this FLAT projection, which
+# fastmcp derives from the signature alone. The payloads state the HOOK surface's facts:
+# every expression runs over the parsed webhook delivery (payload_parser merges structured
+# bodies — JSON objects, XML, form fields — top-level with the query string; arbitrary text
+# arrives under raw_body). A hook's condition proceeds on any TRUTHY result (``bool(result)``,
+# unlike access control's strict-true); the four door-contract expressions each read the run's
+# currently parked interactions as ``$parked`` beside the delivery. Declared as ``Annotated``
+# metadata on the parameter type so the schema fastmcp builds off the flat signature carries
+# it; schema METADATA only, never validation.
+_HOOK_DELIVERY_BLURB = (
+    "the parsed webhook delivery (structured bodies merged top-level with query params; arbitrary text under raw_body)"
+)
+# The parked-interactions variable every door-contract flat param reads as ``$parked``.
+_HOOK_PARKED_VARIABLE = (
+    "parked",
+    "the run's currently parked interactions on the hook's subject — each with its id, status, to, "
+    "asked_by, question and answer-format fields",
+    [{"id": "i-42", "status": "asking", "to": "caller", "asked_by": ["main"], "answer_format": "confirm"}],
+)
 _HOOK_CONDITION_PARAM = Annotated[
     TemplatedText | None,
     Field(
@@ -187,19 +197,62 @@ _HOOK_CONDITION_PARAM = Annotated[
         }
     ),
 ]
-_HOOK_EXPR_PARAM = Annotated[
+_HOOK_START_EXPR_PARAM = Annotated[
     TemplatedText | None,
     Field(
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                label="expression",
-                blurb="the parsed webhook delivery (structured bodies merged top-level with query "
-                "params; arbitrary text under raw_body)",
+                label="start expression",
+                blurb=_HOOK_DELIVERY_BLURB,
+                variables=[_HOOK_PARKED_VARIABLE],
                 returns="an object — the fired tool's kwargs (the hook's static tool_kwargs win on a key clash)",
                 caveats=[
-                    "an absent/empty expression fires the tool with its static tool_kwargs only; "
-                    "a present expression must yield an object and errors the fire if it produces no output"
+                    "absent fires the tool with its static tool_kwargs only; a present start expression "
+                    "must yield an object or null — null starts nothing (the run may still be "
+                    "cancelled/resumed by the other expressions)"
                 ],
+            )
+        }
+    ),
+]
+_HOOK_CANCEL_EXPR_PARAM = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="cancel expression",
+                blurb=_HOOK_DELIVERY_BLURB,
+                variables=[_HOOK_PARKED_VARIABLE],
+                returns="null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            )
+        }
+    ),
+]
+_HOOK_RESUME_EXPR_PARAM = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="resume expression",
+                blurb=_HOOK_DELIVERY_BLURB,
+                variables=[_HOOK_PARKED_VARIABLE],
+                returns=(
+                    "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to "
+                    "take a waiting outcome, or a list of these"
+                ),
+            )
+        }
+    ),
+]
+_HOOK_EXTRAS_EXPR_PARAM = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="extras expression",
+                blurb=_HOOK_DELIVERY_BLURB,
+                variables=[_HOOK_PARKED_VARIABLE],
+                returns="the extras mapping handed to the started target; null for no extras",
             )
         }
     ),
@@ -224,15 +277,20 @@ async def register_hook(
     execution_key: str,
     tool_kwargs: dict[str, Any] | None = None,
     condition: _HOOK_CONDITION_PARAM = None,
-    expr: _HOOK_EXPR_PARAM = None,
+    start_expr: _HOOK_START_EXPR_PARAM = None,
+    cancel_expr: _HOOK_CANCEL_EXPR_PARAM = None,
+    resume_expr: _HOOK_RESUME_EXPR_PARAM = None,
+    extras_expr: _HOOK_EXTRAS_EXPR_PARAM = None,
     *,
     subject: HookSubject | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Register a hook from its flat parameters — an UPSERT (the create path and the edit path).
 
-    Supports conditional execution (``condition``), payload transformation (``expr``) —
-    each a templated text carrying its jq inline or by stored id — and dynamic tool arguments.
+    Supports conditional execution (``condition``) and the four door-contract expressions
+    (``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr`` act on the
+    run's parked interactions; ``extras_expr`` builds the started run's extras) — each a templated
+    text carrying its jq inline or by stored id — plus dynamic tool arguments.
     ``execution_key`` is the api-key identity every fire runs as; the caller's authority
     to delegate it and its usability by a tokenless fire are decided BEFORE the upsert, so
     a refusal stores nothing and leaves any existing hook of that name untouched. Returns
@@ -251,7 +309,10 @@ async def register_hook(
             subject=subject,
             state_binding=state_binding,
             condition=condition,
-            expr=expr,
+            start_expr=start_expr,
+            cancel_expr=cancel_expr,
+            resume_expr=resume_expr,
+            extras_expr=extras_expr,
         )
         if state_binding is not None:
             from tai42_skeleton.app import instance

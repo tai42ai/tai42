@@ -505,9 +505,10 @@ def test_scope_url_delete_doors_document_the_400(
 # below holds none. That status belongs to the inner tool, not to the door's contract —
 # the equality is over what each door DECLARES, which is what a client reads off the spec.
 _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
-    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, OperationFailedError. Its
+    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, UpstreamError (502 — a
+    # tool result no JSON encoder can render is a bad-tool-output fault), OperationFailedError. Its
     # only 503 is the reload gate's, so none is declared here.
-    ("POST", "/api/run-tool"): {400, 401, 403, 404, 500},
+    ("POST", "/api/run-tool"): {400, 401, 403, 404, 500, 502},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — these two doors are not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},

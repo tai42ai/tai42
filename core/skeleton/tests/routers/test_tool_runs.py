@@ -114,7 +114,7 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.calls.append((key, arguments, offload_sync))
         if self.gate is not None:
             await self.gate.wait()
@@ -790,3 +790,55 @@ async def test_slow_sync_tool_over_liveness_ttl_is_not_marked_lost(monkeypatch):
         # No supervisor may outlive the test.
         for task in list(ops._SUPERVISORS):
             task.cancel()
+
+
+# -- the submit door parses the subject through to the spawned supervisor -----
+
+
+async def test_submit_parses_subject_to_the_supervisor(wired):
+    """A body carrying a ``subject`` reaches ``_spawn_supervisor`` as the validated
+    ``StateSubject`` (which later deposits it as the detached run's ``door="api"`` context)."""
+    from tai42_contract.states import StateSubject
+
+    from tai42_skeleton.operations.tool_runs import supervisor as supervisor_module
+
+    wired.install_tools()
+    captured: list = []
+
+    def _spy(run_id, tool_name, arguments, subject=None):
+        captured.append(subject)
+
+    wired.monkeypatch.setattr(supervisor_module, "_spawn_supervisor", _spy)
+    body = (
+        b'{"tool_name": "alpha", "arguments": {},'
+        b' "subject": {"target_kind": "tool", "target_name": "acct-42", "kind": "thread", "key": "t-1"}}'
+    )
+    resp = await router.submit_run(_post(body))
+    assert resp.status_code == 202
+    assert captured == [StateSubject(target_kind="tool", target_name="acct-42", kind="thread", key="t-1")]
+
+
+async def test_submit_without_subject_spawns_with_none(wired):
+    from tai42_skeleton.operations.tool_runs import supervisor as supervisor_module
+
+    wired.install_tools()
+    captured: list = []
+
+    def _spy(run_id, tool_name, arguments, subject=None):
+        captured.append(subject)
+
+    wired.monkeypatch.setattr(supervisor_module, "_spawn_supervisor", _spy)
+    resp = await router.submit_run(_post(b'{"tool_name": "alpha", "arguments": {}}'))
+    assert resp.status_code == 202
+    assert captured == [None]
+
+
+async def test_submit_malformed_subject_is_400(wired):
+    # A subject the contract model rejects is a loud 400 at the edge — no slot reserved,
+    # no record written, no supervisor spawned.
+    wired.install_tools()
+    bad = '{"target_kind": "nope", "target_name": "x", "kind": "thread", "key": "k"}'
+    body = ('{"tool_name": "alpha", "subject": ' + bad + "}").encode()
+    resp = await router.submit_run(_post(body))
+    assert resp.status_code == 400
+    assert "subject" in _json(resp)["error"]

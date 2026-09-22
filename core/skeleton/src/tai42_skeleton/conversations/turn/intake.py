@@ -74,7 +74,7 @@ async def accept(
 
     ``form`` is a structured participant submission (an ask-less form's answers) riding WITH the
     required rendered ``text`` — the text stays the turn every consumer sees, while a tool
-    route's ``payload_expr`` may map the structured copy from the payload's ``form`` key.
+    route's ``start_expr`` may map the structured copy from the payload's ``form`` key.
     It is validated here against the contract's transport bounds
     (``validate_inbound_form`` — a JSON object, bounded depth and size, contents opaque and
     untrusted) BEFORE any state is written, and stored on the record's ``inbound_form``

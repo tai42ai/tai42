@@ -391,8 +391,10 @@ class RunSubmitted(BaseModel):
 class ToolRunView(BaseModel):
     """A background tool run's full status view.
 
-    ``finished_at``/``result``/``error`` are present only once the run reaches a terminal status, so they are
-    optional; ``result`` is the tool's arbitrary output.
+    ``finished_at``/``result``/``error``/``resumed_interactions`` are present only once the run reaches a
+    terminal status, so they are optional; ``result`` is the tool's arbitrary output;
+    ``resumed_interactions`` is the parked interaction ids the run resumed or took while it executed
+    (``[]`` when it resumed nothing).
     """
 
     run_id: str
@@ -402,6 +404,7 @@ class ToolRunView(BaseModel):
     finished_at: str | None = None
     result: JsonValue | None = None
     error: str | None = None
+    resumed_interactions: list[str] | None = None
 
 
 class ToolRunListItem(BaseModel):

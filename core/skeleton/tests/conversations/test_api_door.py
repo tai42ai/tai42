@@ -26,6 +26,7 @@ from .conftest import (
     _api_route,
     _api_route_no_callback,
     _channel_route,
+    _connected,
     _EchoInput,
     _settle,
     _store,
@@ -47,7 +48,9 @@ async def test_api_wait_fast_returns_answer_and_suppresses_callback(env, monkeyp
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=5)
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     assert result.answer is not None
@@ -76,7 +79,9 @@ async def test_an_api_error_outcome_carries_the_route_error_reply_text(env, monk
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    result = await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     assert result.answer is not None
@@ -100,7 +105,9 @@ async def test_api_no_wait_returns_202_then_posts_signed_callback(env, monkeypat
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=0)
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=0, client_connected=_connected
+    )
     assert result.answer is None  # 202
     await _settle()
 
@@ -137,7 +144,9 @@ async def test_api_slow_wait_returns_202_then_posts_the_callback(env, monkeypatc
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=1)
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=1, client_connected=_connected
+    )
     assert result.answer is None  # the wait elapsed before the turn finished: 202
 
     release.set()
@@ -186,7 +195,9 @@ async def test_api_no_callback_slow_wait_202_then_readable_by_poll_and_no_callba
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=1)
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=1, client_connected=_connected
+    )
     assert result.answer is None  # the wait elapsed before the turn finished: 202
 
     release.set()
@@ -200,6 +211,120 @@ async def test_api_no_callback_slow_wait_202_then_readable_by_poll_and_no_callba
     view = await ops_module.get_conversation_message("chat", result.message_id)
     assert view["answer"] == "echo: hello"
     assert view["delivery_status"] == DeliveryStatus.DELIVERED.value
+
+
+# -- the inline-200 precondition: a receiver still connected --------------------
+
+
+async def _gone() -> bool:
+    return False
+
+
+async def test_api_wait_gone_client_falls_to_the_signed_callback(env, monkeypatch):
+    # The turn finishes inside the window but the client has hung up (probe False): the inline
+    # claim is NOT taken, so the response carries no inline answer and the answer is delivered
+    # by exactly one signed callback — never a write to a closed socket.
+    _wire(monkeypatch, FakeManager(_api_route()))
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append((url, signature))
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=5, client_connected=_gone
+    )
+    assert result.answer is None  # no inline answer written to a gone client
+    await _settle()
+
+    assert len(posted) == 1  # delivered by exactly one signed callback
+    assert posted[0][1].startswith("sha256=")
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_api_wait_gone_client_poll_only_is_terminal_readable_and_posts_nothing(env, monkeypatch):
+    # A gone client on a poll-only route (no callback declared): the answer is not written inline
+    # and no callback is POSTed; the record is driven terminal and served back off the poll door.
+    from types import SimpleNamespace
+
+    from tai42_skeleton.operations import conversations as ops_module
+
+    route = _api_route_no_callback()
+    _wire(monkeypatch, FakeManager(route))
+    monkeypatch.setattr(ops_module, "get_conversations_manager", lambda: FakeManager(route))
+
+    async def _caller():
+        return SimpleNamespace(is_admin=False)
+
+    monkeypatch.setattr(ops_module, "resolve_caller", _caller)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append(url)
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=5, client_connected=_gone
+    )
+    assert result.answer is None
+    await _settle()
+
+    assert posted == []  # a poll-only route never POSTs a callback
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+    view = await ops_module.get_conversation_message("chat", result.message_id)
+    assert view["answer"] == "echo: hello"
+    assert view["delivery_status"] == DeliveryStatus.DELIVERED.value
+
+
+async def test_api_wait_zero_never_evaluates_the_probe(env, monkeypatch):
+    # The pure-async path has no sync wait to gate, so it must never touch the probe.
+    _wire(monkeypatch, FakeManager(_api_route()))
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+
+    async def _post(url, body, signature, timeout_seconds):
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    async def _must_not_run() -> bool:
+        raise AssertionError("the probe must not be evaluated when wait_seconds == 0")
+
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=0, client_connected=_must_not_run
+    )
+    assert result.answer is None  # 202
+    await _settle()
+
+
+async def test_api_wait_probe_that_raises_propagates(env, monkeypatch):
+    # A probe that raises is a real fault, never a silent "connected": it propagates.
+    _wire(monkeypatch, FakeManager(_api_route()))
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+
+    async def _post(url, body, signature, timeout_seconds):
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    class _ProbeError(RuntimeError):
+        pass
+
+    async def _boom() -> bool:
+        raise _ProbeError("probe failed")
+
+    with pytest.raises(_ProbeError):
+        await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=5, client_connected=_boom)
+    await _settle()
 
 
 async def test_api_callback_retries_then_fails(env, monkeypatch):
@@ -216,7 +341,9 @@ async def test_api_callback_retries_then_fails(env, monkeypatch):
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=0)
+    result = await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=0, client_connected=_connected
+    )
     await _settle()
 
     assert len(posted) == 2  # exhausted delivery_max_attempts
@@ -234,9 +361,13 @@ async def test_a_caller_cannot_reach_another_callers_thread_by_naming_its_end_us
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
-    alice = await turn_module.submit_api_message("chat", "shared-user", "my lucky number is 4111", "alice", 5)
+    alice = await turn_module.submit_api_message(
+        "chat", "shared-user", "my lucky number is 4111", "alice", 5, client_connected=_connected
+    )
     await _settle()
-    bob = await turn_module.submit_api_message("chat", "shared-user", "what did I say?", "bob", 5)
+    bob = await turn_module.submit_api_message(
+        "chat", "shared-user", "what did I say?", "bob", 5, client_connected=_connected
+    )
     await _settle()
 
     assert alice.thread_id != bob.thread_id
@@ -273,16 +404,16 @@ async def test_an_api_caller_cannot_outrun_its_cap_by_varying_the_end_user_id(en
     store = _store()
 
     for index in range(2):
-        await turn_module.submit_api_message("chat", f"u-{index}", "hi", "alice", 0)
+        await turn_module.submit_api_message("chat", f"u-{index}", "hi", "alice", 0, client_connected=_connected)
     await _settle()
 
     with pytest.raises(caps_module.AddressRateLimitedError, match="alice"):
-        await turn_module.submit_api_message("chat", "u-2", "hi", "alice", 0)
+        await turn_module.submit_api_message("chat", "u-2", "hi", "alice", 0, client_connected=_connected)
     # The refusal wrote nothing: only the two admitted messages left records.
     assert len(await _all_record_ids(store)) == 2
 
     # A different caller has its own budget.
-    await turn_module.submit_api_message("chat", "u-0", "hi", "bob", 0)
+    await turn_module.submit_api_message("chat", "u-0", "hi", "bob", 0, client_connected=_connected)
     await _settle()
     assert len(await _all_record_ids(store)) == 3
 
@@ -299,10 +430,10 @@ async def test_an_api_caller_cannot_drain_a_channel_addresss_bucket(env, monkeyp
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
     # The caller spends its own single token naming the phone number as its end user.
-    await turn_module.submit_api_message("chat", "+15550002222", "hi", "alice", 0)
+    await turn_module.submit_api_message("chat", "+15550002222", "hi", "alice", 0, client_connected=_connected)
     await _settle()
     with pytest.raises(caps_module.AddressRateLimitedError):
-        await turn_module.submit_api_message("chat", "+15550002222", "again", "alice", 0)
+        await turn_module.submit_api_message("chat", "+15550002222", "again", "alice", 0, client_connected=_connected)
 
     # The real phone user is untouched: it is admitted and answered.
     message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hello", "PID1")
@@ -381,14 +512,14 @@ async def test_two_api_routes_give_a_caller_independent_buckets(env, monkeypatch
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
-    await turn_module.submit_api_message("chat", "u-1", "hi", "alice", 0)
+    await turn_module.submit_api_message("chat", "u-1", "hi", "alice", 0, client_connected=_connected)
     await _settle()
     # alice has spent her single token on ``chat``; a second there is refused.
     with pytest.raises(caps_module.AddressRateLimitedError, match="chat"):
-        await turn_module.submit_api_message("chat", "u-2", "hi", "alice", 0)
+        await turn_module.submit_api_message("chat", "u-2", "hi", "alice", 0, client_connected=_connected)
 
     # ``account``'s budget for alice is untouched: her message there is admitted and answered.
-    result = await turn_module.submit_api_message("account", "u-1", "hi", "alice", 5)
+    result = await turn_module.submit_api_message("account", "u-1", "hi", "alice", 5, client_connected=_connected)
     await _settle()
     assert result.answer is not None
     assert result.answer.answer == "echo: hi"
@@ -405,12 +536,12 @@ async def test_an_api_route_override_raises_the_cap_and_the_503_quotes_it(env, m
 
     # The override grants three turns where the global cap would have allowed one.
     for index in range(3):
-        await turn_module.submit_api_message("chat", f"u-{index}", "hi", "alice", 0)
+        await turn_module.submit_api_message("chat", f"u-{index}", "hi", "alice", 0, client_connected=_connected)
     await _settle()
 
     # The fourth is refused, and the 503 quotes the override rate of 3/hour, not the global 1.
     with pytest.raises(caps_module.AddressRateLimitedError, match="3/hour"):
-        await turn_module.submit_api_message("chat", "u-3", "hi", "alice", 0)
+        await turn_module.submit_api_message("chat", "u-3", "hi", "alice", 0, client_connected=_connected)
 
 
 async def test_a_channel_route_override_raises_the_cap_through_the_accept_path(env, monkeypatch):
@@ -453,7 +584,7 @@ async def test_an_api_message_without_an_authenticated_caller_is_refused(env, mo
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
 
     with pytest.raises(turn_module.UnauthenticatedApiCallerError):
-        await turn_module.submit_api_message("chat", "u-7", "hi", principal, 5)
+        await turn_module.submit_api_message("chat", "u-7", "hi", principal, 5, client_connected=_connected)
     await _settle()
 
     assert agent.calls == []
@@ -475,7 +606,9 @@ async def test_api_callback_signature_verifies_under_the_row_secret(env, monkeyp
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    await turn_module.submit_api_message("chat", "user-7", "hello", "alice", wait_seconds=0)
+    await turn_module.submit_api_message(
+        "chat", "user-7", "hello", "alice", wait_seconds=0, client_connected=_connected
+    )
     await _settle()
 
     assert len(captured) == 1

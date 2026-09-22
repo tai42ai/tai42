@@ -8,9 +8,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from tai42_contract.conversations import ConversationTargetKind
+from tai42_contract.interactions.door_contract import ParkableDoorMixin
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.states.models import SUBJECT_KIND_RE
-from tai42_contract.template import ConditionMixin, ExprMixin, TemplatedText
+from tai42_contract.template import ConditionMixin, TemplatedText
 
 # A hook's ``topic`` is dispatched as ONE path segment of the public webhook URL
 # (``/universal_webhook/{topic}``), and its ``name`` addresses the hook on every
@@ -64,8 +65,14 @@ class HookSubject(BaseModel):
         return value
 
 
-class HookRegister(ConditionMixin, ExprMixin):
+class HookRegister(ConditionMixin, ParkableDoorMixin):
     """The client-facing register-a-hook request body: the fields a caller supplies.
+
+    A hook is a parkable-driving door: it carries the four :class:`ParkableDoorMixin`
+    jqs (``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr``
+    act on the run's parked interactions; ``extras_expr`` builds the started run's extras),
+    each evaluated over the event payload with the run's parked interactions bound as
+    ``$parked``.
 
     ``execution_key_fingerprint`` is server-derived at bind and deliberately absent
     here; :class:`HookParams` is this shape plus that one stored field.

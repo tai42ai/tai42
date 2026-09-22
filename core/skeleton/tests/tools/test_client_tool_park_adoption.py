@@ -25,15 +25,15 @@ from typing import Any
 import pytest
 from langchain_core.tools import ToolException
 from tai42_contract.interactions import (
+    ChainedResume,
     SuspendedInteraction,
-    chained_park_context,
     read_suspended_interaction_marker,
-    reset_park_completion,
+    reset_chained_resume,
     reset_resume_continuation_tool,
-    set_park_completion,
+    set_chained_resume,
     set_resume_continuation_tool,
 )
-from tai42_contract.tools import tool_call_frame
+from tai42_contract.tools import current_call_chain, tool_call_frame
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -68,7 +68,9 @@ async def _run_parking_tool(
         runnable = app._tool_binding._client_runnable(tool_obj)
         token = set_resume_continuation_tool(bound)
         completion = (
-            set_park_completion("deliver_chained_park", chained_park_context(chained, (None, None)))
+            set_chained_resume(
+                ChainedResume(delivery_tool="deliver_chained_park", chain_key=chained, asked_by=("main",))
+            )
             if chained is not None
             else None
         )
@@ -76,8 +78,30 @@ async def _run_parking_tool(
             return await runnable(q="x")
         finally:
             if completion is not None:
-                reset_park_completion(completion)
+                reset_chained_resume(completion)
             reset_resume_continuation_tool(token)
+
+
+def test_the_in_process_runnable_opens_the_push_frame_of_the_tool():
+    # The in-process agent tool-dispatch door reaches the tool body directly, so it opens the call
+    # frame itself: a PUSH of the tool's own name, so an ask this dispatch raises records it.
+    seen: dict[str, tuple[str, ...]] = {}
+
+    async def _run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def records_chain(q: str) -> str:
+                """Records the ambient call chain the in-process runnable dispatches under."""
+                seen["chain"] = current_call_chain()
+                return "ok"
+
+            tool_obj = await app.tools.get_tool("records_chain")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+            await runnable(q="x")
+
+    asyncio.run(_run())
+    assert seen["chain"] == ("records_chain",)
 
 
 def test_a_park_this_run_owns_becomes_the_park_marker():

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .base import _Facet
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from typing import Any
 
     from fastmcp.tools import Tool
@@ -50,9 +50,38 @@ class ToolsFacet(_Facet):
         """The LangChain ``StructuredTool`` view of the tools named in ``names`` (all when ``None``)."""
         return await self._app._tool_binding.get_client_tools(names)
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
-        """Execute the tool ``key`` with ``arguments``; ``offload_sync`` runs a sync tool off the event loop."""
-        return await self._app._tool_binding.run_tool(key, arguments, offload_sync=offload_sync)
+    async def run_tool(
+        self,
+        key: str,
+        arguments: dict[str, Any],
+        *,
+        offload_sync: bool = False,
+        continues_chain: Sequence[str] | None = None,
+        extras: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Execute the tool ``key`` with ``arguments``; ``offload_sync`` runs a sync tool off the event loop.
+
+        ``continues_chain`` is the in-process seam keyword the platform's continuation runners pass
+        on the one dispatch that re-enters a parked run: it SETS the restored call chain rather than
+        pushing ``key``, so the continuation tool's own name is not re-added.
+
+        ``extras`` is the in-process seam keyword a door passes when it STARTS a run: the mapping is
+        set on the dispatch's call frame so the started tool reads it through :meth:`extras`, and
+        every nested dispatch reads an empty mapping.
+        """
+        return await self._app._tool_binding.run_tool(
+            key, arguments, offload_sync=offload_sync, continues_chain=continues_chain, extras=extras
+        )
+
+    def extras(self) -> Mapping[str, Any]:
+        """The ambient door ``extras`` the current run was started with (empty when none)."""
+        from tai42_contract.tools import current_extras
+
+        return current_extras()
+
+    async def declared_extras(self, name: str) -> frozenset[str]:
+        """The door ``extras`` keys tool ``name`` declares reading (a preset inherits its base tool's)."""
+        return await self._app._tool_binding.declared_extras(name)
 
     def remove_tool(self, name: str) -> None:
         """Unregister the tool named ``name``."""

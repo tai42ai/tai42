@@ -14,10 +14,23 @@ import logging
 
 import pytest
 from langchain_core.tools import ToolException
+from pydantic import BaseModel
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.binding import UnknownToolError
+
+
+class _PydanticOut(BaseModel):
+    """A tool-return model used to prove a pydantic field's surrogate does not slip through."""
+
+    name: str
+
+
+class _SurrogateKeyModel(BaseModel):
+    """A model whose ``data`` field is a dict keyed by a surrogate — un-encodable, not deep-walked."""
+
+    data: dict
 
 
 @pytest.fixture(autouse=True)
@@ -204,5 +217,84 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
                 "interaction_ids": ["i1"],
                 "caller_interaction_ids": [],
             }
+
+    asyncio.run(run())
+
+
+def test_unencodable_result_becomes_a_model_visible_tool_exception():
+    # A tool whose return holds a lone surrogate is refused as a model-visible ToolException
+    # naming the tool and the JSON path — never a crash when the langchain layer encodes it.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def emits() -> dict:
+                """A tool whose dict value holds a lone surrogate."""
+                return {"token": "\ud83d"}
+
+            tool_obj = await app.tools.get_tool("emits")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+
+            with pytest.raises(ToolException, match=r"emits.*cannot be JSON-encoded at \$\.token"):
+                await runnable()
+
+    asyncio.run(run())
+
+
+def test_a_pydantic_return_with_a_surrogate_is_refused():
+    # The RAW return is reduced FIRST, so a pydantic model whose field holds a surrogate
+    # cannot slip past the walk.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def emits() -> _PydanticOut:
+                """A tool returning a pydantic model whose field holds a lone surrogate."""
+                return _PydanticOut(name="\ud83d")
+
+            tool_obj = await app.tools.get_tool("emits")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+
+            with pytest.raises(ToolException, match=r"emits.*cannot be JSON-encoded at \$\.name"):
+                await runnable()
+
+    asyncio.run(run())
+
+
+def test_an_unencodable_model_leaf_becomes_a_model_visible_tool_exception():
+    # A leaf the encoder cannot render (a model holding a surrogate dict key) is refused as a
+    # model-visible ToolException naming the tool and the FIELD path — the model is not
+    # deep-reduced, and the reduction never crashes raw into the agent loop.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def emits() -> dict:
+                """A tool whose payload field is a model the encoder cannot render."""
+                return {"payload": _SurrogateKeyModel(data={"\ud83d": "v"})}
+
+            tool_obj = await app.tools.get_tool("emits")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+
+            with pytest.raises(ToolException, match=r"emits.*cannot be JSON-encoded at \$\.payload"):
+                await runnable()
+
+    asyncio.run(run())
+
+
+def test_an_encodable_emoji_return_passes_through():
+    # A real, encodable emoji is not flagged: the tool returns its value to the model.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def emits() -> dict:
+                """A tool returning a real, encodable emoji."""
+                return {"emoji": "😀"}
+
+            tool_obj = await app.tools.get_tool("emits")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+
+            assert await runnable() == {"emoji": "😀"}
 
     asyncio.run(run())
