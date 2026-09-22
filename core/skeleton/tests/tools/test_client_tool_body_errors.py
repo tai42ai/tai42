@@ -155,8 +155,8 @@ def test_cancelled_error_passes_through_untouched():
 
 
 def test_suspended_interaction_becomes_the_reserved_park_marker():
-    # An async ask_user parks the caller and returns a SuspendedInteraction sentinel.
-    # Inside a graph the tool task must COMPLETE (so ask_user runs exactly once, never
+    # An async ask parks the caller and returns a SuspendedInteraction sentinel.
+    # Inside a graph the tool task must COMPLETE (so ask runs exactly once, never
     # replayed on resume), so the in-process seam converts the sentinel to the reserved
     # contract marker the in-graph park middleware recognizes — never the raw sentinel.
     from datetime import UTC, datetime
@@ -178,7 +178,7 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
             @app.tools.tool(force=True)
             async def parks(q: str):
                 """A tool that async-parks and returns the suspension sentinel."""
-                # Faithful to ``ask_user(mode="async")``: the park names the continuation
+                # Faithful to ``ask(mode="async")``: the park names the continuation
                 # bound around this run as its owner, so this run may adopt it.
                 return SuspendedInteraction(
                     interaction_id="i1", expiry_at=deadline, resume_owner=get_resume_continuation_tool()
@@ -200,6 +200,9 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
                 "expiry_at": deadline.isoformat(),
                 # The owner rides the wire form the claim point reads.
                 "resume_owner": "agent_resume",
+                # The per-ask id lists ride it too, defaulting to the single id / empty caller set.
+                "interaction_ids": ["i1"],
+                "caller_interaction_ids": [],
             }
 
     asyncio.run(run())

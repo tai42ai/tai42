@@ -175,7 +175,7 @@ def _bind_validated(
     async def _enforce_output_schema(**kwargs: Any) -> Any:
         result = await forward(**kwargs)
         # A park sentinel is a SUSPEND signal, not the tool's output: an async
-        # ask_user parked the caller and the dispatch's reveal gate stowed the
+        # ask parked the caller and the dispatch's reveal gate stowed the
         # ``SuspendedInteraction`` RAW (the value that flowed back through the
         # transform is its flattened ToolResult). Output-schema validation must NOT
         # apply to the park — recognized on the gate by TYPE, it passes through

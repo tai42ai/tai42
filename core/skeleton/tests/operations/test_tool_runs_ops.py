@@ -193,7 +193,7 @@ async def test_background_run_of_a_secret_preset_schema_failure_redacts_the_reco
 
 async def test_run_binds_its_run_id_as_interaction_origin(wired):
     # The supervisor binds the run's id as the interaction origin for the tool body,
-    # so a question the tool raises through ask_user is attributed to the run. The
+    # so a question the tool raises through ask is attributed to the run. The
     # binding lives on the run's own context and is released with the run.
     from tai42_skeleton.interactions.origin import get_interaction_origin
 

@@ -211,6 +211,64 @@ def test_notifications_notify_non_object_schema_raises_before_request(monkeypatc
     assert "schema" in result.output.lower()
 
 
+def test_notifications_notify_data_and_pages_ride_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --data (a FormData) and --pages (a FormPage list) over --schema are validated into their
+    # contract models and posted on the body; the server owns the against-schema cross-check.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "fill this in",
+            "channel": "whatsapp",
+            "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+            "data": {"values": {"name": "Ada"}, "options": {}},
+            "pages": [{"title": "You", "fields": ["name"]}],
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "fill this in",
+            "--channel",
+            "whatsapp",
+            "--schema",
+            '{"type": "object", "properties": {"name": {"type": "string"}}}',
+            "--data",
+            '{"values": {"name": "Ada"}}',
+            "--pages",
+            '[{"title": "You", "fields": ["name"]}]',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_invalid_data_shape_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A --data JSON object carrying a key FormData does not declare is refused loudly before
+    # any request leaves — the CLI guards its own seam against a silently dropped key.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for an invalid --data")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "hi",
+            "--channel",
+            "whatsapp",
+            "--schema",
+            '{"type": "object"}',
+            "--data",
+            '{"nope": 1}',
+        ],
+    )
+    assert result.exit_code != 0
+    assert "data" in result.output.lower()
+
+
 def test_notifications_notify_options_ride_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
     # The --options JSON array is validated into the contract's discriminated Option union
     # (reply/link) and posted on the body with every field of each variant.

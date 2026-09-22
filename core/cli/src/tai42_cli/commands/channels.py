@@ -1,7 +1,7 @@
 """``tai channels`` — inspect the registered delivery channels.
 
 A thin wrapper over the authed ``GET /api/channels`` catalog route: the channel
-names ``ask_user(channel=...)`` can currently resolve. Registration itself is
+names ``ask(channel=...)`` can currently resolve. Registration itself is
 import-only (a manifest ``channel_modules`` entry), so this group is read-only.
 """
 

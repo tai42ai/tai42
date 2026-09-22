@@ -173,7 +173,7 @@ def test_direct_path_preserves_suspended_interaction():
 
 def test_output_schema_preset_path_preserves_suspended_interaction():
     # A preset carrying an ``output_schema`` runs output-schema validation on the tool
-    # RESULT. An async ask_user's park sentinel is a SUSPEND signal, NOT the tool's
+    # RESULT. An async ask's park sentinel is a SUSPEND signal, NOT the tool's
     # output: validation must NOT apply to it — the flattened
     # ``{"interaction_id": ...}`` would fail the wrapped answer schema
     # (``'answer' is a required property``). The park must pass through by TYPE, exactly

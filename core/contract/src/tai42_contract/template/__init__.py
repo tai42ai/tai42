@@ -45,6 +45,7 @@ def expression_annotation(
     label: str | None = None,
     blurb: str | None = None,
     keys: Sequence[tuple[str, str]] | None = None,
+    variables: Sequence[tuple[str, str, Any]] | None = None,
     returns: str | None = None,
     caveats: Sequence[str] | None = None,
     sample: Any = _UNSET,
@@ -56,11 +57,15 @@ def expression_annotation(
     omitted argument leaves its key absent rather than ``None``-filled.
 
     * ``label`` — a short human name for the field.
-    * ``blurb`` — what the expression's INPUT document is.
+    * ``blurb`` — what the expression's INPUT document (its ``.``) is.
     * ``keys`` — ``(name, gloss)`` pairs glossing the input document's known
       top-level keys. An EMPTY sequence is meaningful — it states the input is
       untyped/free-form — and is emitted as ``[]``, distinct from omitting the
       argument (shape unknown/undeclared).
+    * ``variables`` — ``(name, blurb, sample)`` triples describing the named jq
+      variables the expression may read as ``$name`` beside its ``.``: each
+      variable's blurb and a representative sample value. Emitted only when a jq
+      receives variables; a jq whose ``.`` is its only input leaves it absent.
     * ``returns`` — what the expression's result is consumed as.
     * ``caveats`` — evaluation edge cases a caller should know.
     * ``sample`` — a representative input document (any JSON value; ``None`` and
@@ -73,6 +78,8 @@ def expression_annotation(
         payload["blurb"] = blurb
     if keys is not None:
         payload["keys"] = [{"name": name, "gloss": gloss} for name, gloss in keys]
+    if variables is not None:
+        payload["variables"] = [{"name": name, "blurb": blurb, "sample": sample} for name, blurb, sample in variables]
     if returns is not None:
         payload["returns"] = returns
     if caveats is not None:

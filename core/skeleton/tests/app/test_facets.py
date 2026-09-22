@@ -451,11 +451,11 @@ def test_sandboxes_facet_sandbox_policy_resolves_from_settings(monkeypatch: pyte
 # -- InteractionsFacet --------------------------------------------------------
 
 
-def test_interactions_facet_ask_user_returns_the_helper():
-    from tai42_skeleton.interactions.helper import ask_user as helper_ask_user
+def test_interactions_facet_ask_returns_the_helper():
+    from tai42_skeleton.interactions.helper import ask as helper_ask
 
     f = InteractionsFacet(_app())
-    assert f.ask_user is helper_ask_user
+    assert f.ask is helper_ask
 
 
 # -- HttpFacet ----------------------------------------------------------------

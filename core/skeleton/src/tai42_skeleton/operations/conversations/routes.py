@@ -374,7 +374,7 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     # write re-stamps the route index only while the thread's own index still holds
     # members — either one unguarded would re-create a pair nothing walks and no TTL expires.
     #
-    # Cancel every async ``ask_user`` parked on each of the route's threads BEFORE the
+    # Cancel every async ``ask`` parked on each of the route's threads BEFORE the
     # indexes go, so deleting the route does not orphan a park (its expiry reaper would
     # later fire a continuation into a thread whose route is gone, and its channel
     # correlation would stay muted until the deadline). Enumerated up front from the route
@@ -382,6 +382,6 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
     for thread_id in await store.route_thread_ids(route_name):
-        await cancel_parks_for_thread(thread_id)
+        await cancel_parks_for_thread(thread_id, reason="route_deleted")
     await store.drop_route_threads(route_name)
     return {"removed": removed, "route_name": route_name}

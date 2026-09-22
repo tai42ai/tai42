@@ -143,6 +143,23 @@ async def test_record_notification_stores_full_vocabulary(sink_redis) -> None:
     assert records[0]["location"] is None
 
 
+async def test_record_notification_stores_form_data_and_pages(sink_redis) -> None:
+    # Feed parity for the ask-less form: the sink writer serializes and stores the per-send
+    # form data (values/options) and pages beside the schema, returned by the read doors.
+    from tai42_contract.interactions.models import FormData, FormOption, FormPage
+
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    data = FormData(values={"name": "Ada"}, options={"name": [FormOption(value="Ada")]})
+    pages = [FormPage(title="You", fields=["name"])]
+
+    await notifications_sink.record_notification("fill this in", schema=schema, data=data, pages=pages)
+
+    records = await notifications_sink.read_notifications()
+    assert records[0]["schema"] == schema
+    assert records[0]["data"] == data.model_dump(mode="json")
+    assert records[0]["pages"] == [page.model_dump(mode="json") for page in pages]
+
+
 async def test_record_defaults_full_vocabulary_to_none(fake_redis) -> None:
     # A plain record carries None for every richer-send field — the plain shape.
     sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
@@ -151,6 +168,8 @@ async def test_record_defaults_full_vocabulary_to_none(fake_redis) -> None:
     assert record["sections"] is None
     assert record["header"] is None
     assert record["footer"] is None
+    assert record["data"] is None
+    assert record["pages"] is None
 
 
 # -- per-identity feed (audience) --------------------------------------------

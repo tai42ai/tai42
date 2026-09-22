@@ -3,7 +3,7 @@
 A tool extension extends a single tool (plugins extend the platform).
 ``ask_external`` is a TRANSFORMER: it wraps a tool that builds an external
 resource from a ``callback_url`` and returns that resource's URL, presenting a
-composed signature that drives the human-in-the-loop ``ask_user`` external flow.
+composed signature that drives the human-in-the-loop ``ask`` external flow.
 The wrapped tool's own inputs stay; the injected control params ``question`` /
 ``answer_schema`` / ``timeout`` are added, and ``callback_url`` is hidden (the
 platform supplies it).
@@ -29,7 +29,7 @@ from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.render import resolve_schema_body
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
-from tai42_skeleton.interactions import ask_user
+from tai42_skeleton.interactions import ask
 
 # Injected onto the composed signature — a tool param sharing one of these names
 # would be silently shadowed, so a collision is rejected at wrap time. ``verifier``
@@ -101,7 +101,7 @@ def ask_external(
             return result
 
         resolved_schema = await resolve_schema_body("ask_external answer_schema", answer_schema)
-        return await ask_user(
+        return await ask(
             question,
             answer_format="external",
             schema=resolved_schema,

@@ -32,7 +32,7 @@ logger = logging.getLogger("tai42_skeleton.conversations.turn")
 async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _AgentParked:
     """Run the agent to its terminal event and return the answer text (or the ``_AGENT_PARKED`` sentinel).
 
-    The :data:`_AGENT_PARKED` sentinel is returned when the agent parked on an async ``ask_user``. A
+    The :data:`_AGENT_PARKED` sentinel is returned when the agent parked on an async ``ask``. A
     structured final is serialized; an interrupt is not answerable by a background turn and
     is raised.
     """
@@ -44,7 +44,7 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
         agent.astream(user_message=TemplatedText(content=text), thread_id=thread_id)
     ):
         if isinstance(event, SuspendedFinal):
-            # The agent parked on an async ask_user. The conversation door bound a completion
+            # The agent parked on an async ask. The conversation door bound a completion
             # tool around the run, so its resumed answer is delivered out of band into this
             # thread — the turn produces no reply now.
             return _AGENT_PARKED
@@ -72,7 +72,7 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
 
     The identity is bound for the turn's duration and the run authorized against it before the
     agent runs. A denied run, a mid-turn error or an empty answer becomes a client-safe
-    ``error`` outcome; a run that PARKS on an async ``ask_user`` becomes a silent outcome —
+    ``error`` outcome; a run that PARKS on an async ``ask`` becomes a silent outcome —
     its resumed answer delivers out of band through the completion continuation.
 
     The turn-scoped bridge context is established around the agent invocation, so an
@@ -80,7 +80,7 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
     conversation's thread from it — the same contextvar propagation the bound execution
     identity relies on. The completion continuation (:data:`COMPLETION_TOOL_NAME`) is bound
     for the run's duration too, carrying this turn's ``thread_id`` as the opaque delivery
-    address: it is the deferred-response delivery path that lets an async ask_user PARK here (a
+    address: it is the deferred-response delivery path that lets an async ask PARK here (a
     run with none bound refuses the ask loudly pre-persist), and a resumed run's final answer
     fires it with that address to post the reply back into this thread.
     """

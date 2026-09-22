@@ -1,6 +1,7 @@
 """The shared in-process ``run_tool`` seam — tier fence, dispatch scope, retry, and resolved-target call."""
 
 import inspect
+from collections.abc import Sequence
 from typing import Any
 
 from fastmcp.server.dependencies import without_injected_parameters
@@ -25,7 +26,14 @@ class _DispatchMixin(_ResolutionMixin):
     Fence, scope, identity authorization, resolution, retry, and result serialization.
     """
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+    async def run_tool(
+        self,
+        key: str,
+        arguments: dict[str, Any],
+        *,
+        offload_sync: bool = False,
+        continues_chain: Sequence[str] | None = None,
+    ) -> Any:
         """Validate ``arguments`` against ``key``'s signature and invoke it.
 
         With ``offload_sync`` set AND the resolved tool function being a plain
@@ -48,6 +56,12 @@ class _DispatchMixin(_ResolutionMixin):
         enters the SAME scope via ``DispatchScopeMiddleware``. Retry and bound-identity
         authorization live in :meth:`_dispatch_tool`, so a retried call is one logical
         dispatch inside one scope.
+
+        ``continues_chain`` is an in-process seam keyword ONLY (no request model, MCP
+        argument, or tool argument sets it): when given it is forwarded to
+        :func:`dispatch_scope`, whose ``tool_call_frame`` SETS the call chain to it
+        rather than pushing ``key`` — the platform's continuation runners restore a
+        parked run's chain on the one dispatch that resumes it.
         """
         # Run-time tier fence: a ``fenced``/``secret`` tool — or a preset/branch over one —
         # runs only for an administrator. Enforced here at the shared in-process seam every
@@ -62,7 +76,7 @@ class _DispatchMixin(_ResolutionMixin):
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
-        async with dispatch_scope(self._app, key, arguments) as scope:
+        async with dispatch_scope(self._app, key, arguments, continues_chain=continues_chain) as scope:
             result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
             scope.observe(result)
             return result
@@ -112,7 +126,7 @@ class _DispatchMixin(_ResolutionMixin):
                 finally:
                     inprocess_reveal_gate.reset(token)
                 if gate.has_park:
-                    # An async ask_user parked the caller: return the sentinel object by
+                    # An async ask parked the caller: return the sentinel object by
                     # TYPE (never the flattened ToolResult), so the preset path recognizes
                     # the park exactly as the direct-run path does. A park is a RETURN —
                     # never a retried failure.
@@ -153,7 +167,7 @@ class _DispatchMixin(_ResolutionMixin):
 
         async def run_function_attempt() -> Any:
             # In-process Context bridge: this invocation has no connected client, so
-            # an injected ``ctx.elicit()`` routes to the interactions ``ask_user``
+            # an injected ``ctx.elicit()`` routes to the interactions ``ask``
             # waiter and ``ctx.sample()`` falls back to the platform LLM. The bridge
             # no-ops when a live request context is already active, so a capable
             # client still resolves in-client. ``asyncio.to_thread`` copies

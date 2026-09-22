@@ -1,4 +1,4 @@
-"""The fake-channel end-to-end loop, offline: ``ask_user(channel=...)``
+"""The fake-channel end-to-end loop, offline: ``ask(channel=...)``
 delivers through a registered channel, the recorded ``callback_url`` receives
 the human's reply as ``{"answer": <value>}`` through the public callback door
 (which validates it against the stored format), and the blocked caller returns
@@ -7,7 +7,7 @@ with no network and no external stack.
 
 Handlers are driven directly (the router-test pattern); Redis is the shared
 in-memory fake, wired at both the router's and the helper's ``client_ctx``
-seams so the blocked ``ask_user`` caller and the callback door share one store.
+seams so the blocked ``ask`` caller and the callback door share one store.
 """
 
 from __future__ import annotations
@@ -31,11 +31,12 @@ from tai42_contract.interactions import (
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
+from tai42_contract.tools import tool_call_frame
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
-from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutError, ask_user
+from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutError, ask
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -174,7 +175,7 @@ def _empty(fake_redis) -> bool:
 
 async def test_fake_channel_text_loop(wired, fake_channel):
     # 1. an agent-side ask blocks, bound to the registered channel
-    task = asyncio.create_task(ask_user("What is the magic word?", channel="fake", timeout=5))
+    task = asyncio.create_task(ask("What is the magic word?", channel="fake", timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
 
     # 2. deliver() ran exactly once with the full delivery contract
@@ -200,12 +201,12 @@ async def test_fake_channel_text_loop(wired, fake_channel):
     assert resp.status_code == 200
     assert json.loads(bytes(resp.body))["data"]["status"] == "answered"
 
-    # 5. the blocked ask_user returns the TYPED answer (str) — loop closed
+    # 5. the blocked ask returns the TYPED answer (str) — loop closed
     assert await task == "please"
 
 
 async def test_fake_channel_confirm_loop(wired, fake_channel):
-    task = asyncio.create_task(ask_user("Deploy?", answer_format="confirm", channel="fake", timeout=5))
+    task = asyncio.create_task(ask("Deploy?", answer_format="confirm", channel="fake", timeout=5))
     await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
     assert delivery.answer_format == "confirm"
@@ -229,7 +230,7 @@ async def test_data_media_forwarded_absolute_on_channel_delivery(wired, fake_cha
         {"kind": "image", "url": "https://cdn.example/x.png"},
         {"kind": "link", "url": "https://docs.example/p"},
     ]
-    task = asyncio.create_task(ask_user("See this?", channel="fake", media=media, timeout=5))
+    task = asyncio.create_task(ask("See this?", channel="fake", media=media, timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
@@ -263,7 +264,7 @@ async def test_data_media_channel_ask_requires_public_base_url(monkeypatch, wire
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     media: list[MediaItem | dict[str, Any]] = [{"kind": "image", "url": _DATA_PNG}]
     with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
-        await ask_user("See this?", channel="fake", media=media, timeout=5)
+        await ask("See this?", channel="fake", media=media, timeout=5)
     # No delivery ever ran and nothing was persisted (the raise is before any store).
     assert fake_channel.deliveries == []
     assert not wired.fake._hashes
@@ -272,7 +273,7 @@ async def test_data_media_channel_ask_requires_public_base_url(monkeypatch, wire
 async def test_add_frame_omits_channel_when_unset(wired):
     # No channel → the add frame has NO ``channel`` key (conditional, like
     # ``server_verified``) and the persisted request carries None.
-    task = asyncio.create_task(ask_user("q", timeout=5))
+    task = asyncio.create_task(ask("q", timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
     state = await wired.store.get_state(wired.fake, iid)
     assert state is not None
@@ -296,7 +297,7 @@ async def test_delivery_runs_after_persist(wired, fake_channel):
     app._channel_registry.reset()
     tai42_app.channels.register("probe", ProbingChannel())
     try:
-        task = asyncio.create_task(ask_user("q", channel="probe", timeout=5))
+        task = asyncio.create_task(ask("q", channel="probe", timeout=5))
         _iid, _gid = await await_add_event(wired.fake, wired.store)
         deadline = asyncio.get_event_loop().time() + 2.0
         while "delivery" not in seen and asyncio.get_event_loop().time() < deadline:
@@ -315,7 +316,7 @@ async def test_delivery_runs_after_persist(wired, fake_channel):
 async def test_channel_external_url_is_callback_url(wired, fake_channel):
     # For a channel-delivered external ask, the stored tappable url IS the
     # callback door — no link builder involved.
-    task = asyncio.create_task(ask_user("Approve?", answer_format="external", channel="fake", timeout=5))
+    task = asyncio.create_task(ask("Approve?", answer_format="external", channel="fake", timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
@@ -335,7 +336,7 @@ async def test_channel_external_url_is_callback_url(wired, fake_channel):
 async def test_recipient_forwarded_in_delivery(wired, fake_channel):
     # The caller-requested address rides the delivery verbatim; the skeleton
     # resolves nothing — allowlist validation is the plugin's job.
-    task = asyncio.create_task(ask_user("Ping?", channel="fake", recipient="123456", timeout=5))
+    task = asyncio.create_task(ask("Ping?", channel="fake", recipient="123456", timeout=5))
     await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
@@ -351,7 +352,7 @@ async def test_recipient_forwarded_in_delivery(wired, fake_channel):
 async def test_recipient_persisted_on_record(wired, fake_channel):
     # The caller-requested address is also recorded on the durable question (feed
     # attribution), not only forwarded to the channel delivery.
-    task = asyncio.create_task(ask_user("Ping?", channel="fake", recipient="123456", timeout=5))
+    task = asyncio.create_task(ask("Ping?", channel="fake", recipient="123456", timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
@@ -373,7 +374,7 @@ async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_ch
     media: list[MediaItem | dict[str, Any]] = [
         {"kind": "image", "url": "https://cdn.example/p.png", "caption": "A product"}
     ]
-    task = asyncio.create_task(ask_user("Which?", channel="fake", media=media, timeout=5))
+    task = asyncio.create_task(ask("Which?", channel="fake", media=media, timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
@@ -395,7 +396,7 @@ async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_ch
 
 async def test_channel_select_delivery_carries_options(wired, fake_channel):
     task = asyncio.create_task(
-        ask_user("Pick one", answer_format="select", options=["red", "blue"], channel="fake", timeout=5)
+        ask("Pick one", answer_format="select", options=["red", "blue"], channel="fake", timeout=5)
     )
     await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
@@ -416,28 +417,26 @@ async def test_channel_select_delivery_carries_options(wired, fake_channel):
 async def test_unknown_channel_rejected_up_front(wired):
     app._channel_registry.reset()
     with pytest.raises(ValueError, match="unknown channel"):
-        await ask_user("q", channel="nope", timeout=5)
+        await ask("q", channel="nope", timeout=5)
     assert _empty(wired.fake)  # rejected BEFORE any state was written
 
 
 async def test_channel_forbids_link_non_external(wired, fake_channel):
     with pytest.raises(ValueError, match="link is forbidden when a channel is set"):
-        await ask_user("q", channel="fake", link="{callback_url}", timeout=5)
+        await ask("q", channel="fake", link="{callback_url}", timeout=5)
     assert _empty(wired.fake)
 
 
 async def test_channel_forbids_link_external(wired, fake_channel):
     with pytest.raises(ValueError, match="link is forbidden when a channel is set"):
-        await ask_user("q", answer_format="external", channel="fake", link="{callback_url}", timeout=5)
+        await ask("q", answer_format="external", channel="fake", link="{callback_url}", timeout=5)
     assert _empty(wired.fake)
 
 
 async def test_channel_forbids_verifier(wired, fake_channel):
     # A channel's forward is unsigned — a bound verifier would 401 every reply.
     with pytest.raises(ValueError, match="verifier is forbidden when a channel is set"):
-        await ask_user(
-            "q", answer_format="external", channel="fake", verifier={"name": "github", "config": {}}, timeout=5
-        )
+        await ask("q", answer_format="external", channel="fake", verifier={"name": "github", "config": {}}, timeout=5)
     assert _empty(wired.fake)
 
 
@@ -445,9 +444,7 @@ async def test_channel_without_form_capability_rejects_form(wired, fake_channel)
     # FakeChannel does not advertise ``supports_form_delivery``: a form is refused
     # loudly, naming the channel — nothing persisted.
     with pytest.raises(ValueError, match="channel 'fake' does not deliver form questions"):
-        await ask_user(
-            "q", answer_format="form", schema={"type": "object", "properties": {}}, channel="fake", timeout=5
-        )
+        await ask("q", answer_format="form", schema={"type": "object", "properties": {}}, channel="fake", timeout=5)
     assert _empty(wired.fake)
 
 
@@ -458,7 +455,7 @@ async def test_form_channel_without_schema_raises_before_persist(wired):
     tai42_app.channels.register("form", FormChannel())
     try:
         with pytest.raises(ValueError, match="answer_format 'form' requires a schema"):
-            await ask_user("q", answer_format="form", channel="form", timeout=5)
+            await ask("q", answer_format="form", channel="form", timeout=5)
         assert _empty(wired.fake)
     finally:
         app._channel_registry.reset()
@@ -473,9 +470,7 @@ async def test_form_channel_delivery_carries_schema_and_loops(wired):
     channel = FormChannel()
     tai42_app.channels.register("form", channel)
     try:
-        task = asyncio.create_task(
-            ask_user("Fill this in", answer_format="form", schema=schema, channel="form", timeout=5)
-        )
+        task = asyncio.create_task(ask("Fill this in", answer_format="form", schema=schema, channel="form", timeout=5))
         iid, _gid = await await_add_event(wired.fake, wired.store)
         delivery = await _await_delivery(channel)
         assert delivery.answer_format == "form"
@@ -524,7 +519,7 @@ async def test_channel_form_bad_schema_refused_before_persist(wired, schema, mat
     tai42_app.channels.register("form", FormChannel())
     try:
         with pytest.raises(ValueError, match=match):
-            await ask_user("q", answer_format="form", schema=schema, channel="form", timeout=5)
+            await ask("q", answer_format="form", schema=schema, channel="form", timeout=5)
         assert _empty(wired.fake)
     finally:
         app._channel_registry.reset()
@@ -580,7 +575,7 @@ async def test_validate_form_schema_hook_refuses_at_ask_time_before_persist(wire
     tai42_app.channels.register("capform", channel)
     try:
         with pytest.raises(ValueError, match="'reserved'"):
-            await ask_user("q", answer_format="form", schema=_RESERVED_SCHEMA, channel="capform", timeout=5)
+            await ask("q", answer_format="form", schema=_RESERVED_SCHEMA, channel="capform", timeout=5)
         assert _empty(wired.fake)  # nothing persisted
         assert channel.deliveries == []  # delivery was never attempted
     finally:
@@ -596,7 +591,7 @@ async def test_without_the_hook_the_bad_schema_persists_then_fails_at_delivery(w
     tai42_app.channels.register("nohookform", channel)
     try:
         with pytest.raises(ChannelInputError, match="'reserved'"):
-            await ask_user("q", answer_format="form", schema=_RESERVED_SCHEMA, channel="nohookform", timeout=5)
+            await ask("q", answer_format="form", schema=_RESERVED_SCHEMA, channel="nohookform", timeout=5)
         assert channel.deliveries != []  # it reached delivery (persisted first)
         assert await wired.store.count_open(wired.fake) == 0  # pruned on the delivery failure
     finally:
@@ -606,7 +601,7 @@ async def test_without_the_hook_the_bad_schema_persists_then_fails_at_delivery(w
 async def test_recipient_without_channel_rejected(wired):
     # An address is meaningless without a channel to send on.
     with pytest.raises(ValueError, match="recipient requires a channel"):
-        await ask_user("q", recipient="123456", timeout=5)
+        await ask("q", recipient="123456", timeout=5)
     assert _empty(wired.fake)
 
 
@@ -615,7 +610,7 @@ async def test_blank_recipient_with_channel_rejected(wired, fake_channel, bad_re
     # Rejected up-front as a clean ValueError — never a post-persist pydantic
     # error from the delivery frame's recipient validator.
     with pytest.raises(ValueError, match="recipient must be a non-empty address"):
-        await ask_user("q", channel="fake", recipient=bad_recipient, timeout=5)
+        await ask("q", channel="fake", recipient=bad_recipient, timeout=5)
     assert _empty(wired.fake)
 
 
@@ -623,14 +618,14 @@ async def test_channel_rejects_options_on_confirm(wired, fake_channel):
     # Rejected up-front as a clean ValueError — confirm carries no options (only select's
     # required answer set and text's suggested replies do).
     with pytest.raises(ValueError, match="options are not valid with answer_format 'confirm'"):
-        await ask_user("q", answer_format="confirm", channel="fake", options=["a", "b"], timeout=5)
+        await ask("q", answer_format="confirm", channel="fake", options=["a", "b"], timeout=5)
     assert _empty(wired.fake)
 
 
 async def test_channel_text_delivery_carries_suggested_reply_options(wired, fake_channel):
     # TEXT suggested replies ride the channel delivery; a tapped option submits its OWN text
     # as the free-text answer (which validates as any string).
-    task = asyncio.create_task(ask_user("How's it going?", channel="fake", options=["Good", "Bad"], timeout=5))
+    task = asyncio.create_task(ask("How's it going?", channel="fake", options=["Good", "Bad"], timeout=5))
     await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
@@ -649,7 +644,7 @@ async def test_channel_requires_public_base_url(monkeypatch, fake_redis, fake_cl
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
-        await ask_user("q", channel="fake", timeout=5)
+        await ask("q", channel="fake", timeout=5)
 
 
 # -- failed delivery: prune + raise, never a silent zombie question -------------
@@ -660,7 +655,7 @@ async def test_delivery_failure_prunes_and_raises(wired):
     tai42_app.channels.register("boom", FailingChannel())
     try:
         with pytest.raises(ChannelDeliveryError, match="provider unreachable"):
-            await ask_user("q", channel="boom", timeout=5)
+            await ask("q", channel="boom", timeout=5)
 
         # The persisted question was pruned: nothing open, nothing claimable.
         assert await wired.store.count_open(wired.fake) == 0
@@ -673,7 +668,7 @@ async def test_delivery_bug_prunes_and_raises(wired):
     tai42_app.channels.register("buggy", BuggyChannel())
     try:
         with pytest.raises(RuntimeError, match="plugin bug"):
-            await ask_user("q", channel="buggy", timeout=5)
+            await ask("q", channel="buggy", timeout=5)
 
         assert await wired.store.count_open(wired.fake) == 0
     finally:
@@ -703,7 +698,7 @@ async def test_terminal_delivery_failure_emits_delivery_failed_once(wired, monke
     tai42_app.channels.register("boom", CapturingFailer())
     try:
         with pytest.raises(ChannelDeliveryError, match="provider unreachable"):
-            await ask_user("q", channel="boom", recipient="@ops", timeout=5)
+            await ask("q", channel="boom", recipient="@ops", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -743,7 +738,7 @@ async def test_delivery_success_after_retry_emits_no_delivery_failed(wired, monk
     app._channel_registry.reset()
     tai42_app.channels.register("flaky", FlakyChannel())
     try:
-        assert await ask_user("q", channel="flaky", timeout=5) == "second"
+        assert await ask("q", channel="flaky", timeout=5) == "second"
     finally:
         app._channel_registry.reset()
 
@@ -767,7 +762,7 @@ async def test_cancelled_delivery_emits_no_delivery_failed(wired, monkeypatch):
     tai42_app.channels.register("cancelled", CancelledChannel())
     try:
         with pytest.raises(asyncio.CancelledError):
-            await ask_user("q", channel="cancelled", timeout=5)
+            await ask("q", channel="cancelled", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -788,7 +783,7 @@ async def test_failed_delivery_ticket_unclaimable(wired):
     tai42_app.channels.register("capfail", CapturingFailer())
     try:
         with pytest.raises(ChannelDeliveryError):
-            await ask_user("q", channel="capfail", timeout=5)
+            await ask("q", channel="capfail", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -821,7 +816,7 @@ async def test_delivery_failure_after_recorded_answer_falls_through(wired, monke
     app._channel_registry.reset()
     tai42_app.channels.register("racy", AnswerThenFail())
     try:
-        assert await ask_user("q", channel="racy", timeout=5) == "fast"
+        assert await ask("q", channel="racy", timeout=5) == "fast"
     finally:
         app._channel_registry.reset()
 
@@ -840,7 +835,7 @@ async def test_hung_delivery_times_out_prunes_and_raises(wired):
     tai42_app.channels.register("hung", HungChannel())
     try:
         with pytest.raises(ChannelDeliveryError, match=r"delivery timed out after .*interaction"):
-            await ask_user("q", channel="hung", timeout=0.05)
+            await ask("q", channel="hung", timeout=0.05)
 
         # The persisted question was pruned: nothing open, nothing claimable.
         assert await wired.store.count_open(wired.fake) == 0
@@ -870,7 +865,7 @@ async def test_retryable_failure_retries_and_the_second_attempt_delivers(wired, 
     app._channel_registry.reset()
     tai42_app.channels.register("flaky", FlakyChannel())
     try:
-        assert await ask_user("q", channel="flaky", timeout=5) == "second"
+        assert await ask("q", channel="flaky", timeout=5) == "second"
     finally:
         app._channel_registry.reset()
 
@@ -893,7 +888,7 @@ async def test_non_retryable_failure_is_not_retried(wired, monkeypatch):
     tai42_app.channels.register("hard", HardFailer())
     try:
         with pytest.raises(ChannelDeliveryError, match="recipient refused"):
-            await ask_user("q", channel="hard", timeout=5)
+            await ask("q", channel="hard", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -916,7 +911,7 @@ async def test_retries_exhaust_the_attempt_cap_then_prune_and_raise(wired, monke
     tai42_app.channels.register("throttled", AlwaysThrottled())
     try:
         with pytest.raises(ChannelDeliveryError, match="throttled #2"):
-            await ask_user("q", channel="throttled", timeout=5)
+            await ask("q", channel="throttled", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -939,7 +934,7 @@ async def test_retry_after_wins_over_the_backoff(wired, monkeypatch):
     tai42_app.channels.register("slowdown", RetryAfterChannel())
     try:
         with pytest.raises(ChannelDeliveryError, match="slow down"):
-            await ask_user("q", channel="slowdown", timeout=5)
+            await ask("q", channel="slowdown", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -962,7 +957,7 @@ async def test_no_retry_once_the_budget_cannot_hold_the_wait(wired, monkeypatch)
     tai42_app.channels.register("nobudget", AlwaysThrottled())
     try:
         with pytest.raises(ChannelDeliveryError, match="throttled"):
-            await ask_user("q", channel="nobudget", timeout=0.2)
+            await ask("q", channel="nobudget", timeout=0.2)
     finally:
         app._channel_registry.reset()
 
@@ -984,7 +979,7 @@ async def test_cancelled_delivery_is_never_retried(wired, monkeypatch):
     tai42_app.channels.register("cancelled", CancelledChannel())
     try:
         with pytest.raises(asyncio.CancelledError):
-            await ask_user("q", channel="cancelled", timeout=5)
+            await ask("q", channel="cancelled", timeout=5)
     finally:
         app._channel_registry.reset()
 
@@ -1009,7 +1004,7 @@ async def test_hung_delivery_that_recorded_an_answer_times_out_at_the_budget(wir
     tai42_app.channels.register("hang", AnswerThenHang())
     try:
         with pytest.raises(InteractionTimeoutError, match="an answer was recorded after the budget"):
-            await ask_user("q", channel="hang", timeout=0.3)
+            await ask("q", channel="hang", timeout=0.3)
     finally:
         app._channel_registry.reset()
 
@@ -1042,7 +1037,7 @@ async def test_delivery_time_shrinks_the_answer_wait(wired, monkeypatch):
     app._channel_registry.reset()
     tai42_app.channels.register("slowdeliver", SlowDeliverChannel())
     try:
-        assert await ask_user("q", channel="slowdeliver", timeout=5) == "ok"
+        assert await ask("q", channel="slowdeliver", timeout=5) == "ok"
     finally:
         app._channel_registry.reset()
 
@@ -1074,7 +1069,7 @@ async def test_delivery_that_eats_the_budget_times_out_without_a_forever_wait(wi
     tai42_app.channels.register("budgeteater", BudgetEatingChannel())
     try:
         with pytest.raises(InteractionTimeoutError, match="with no answer"):
-            await ask_user("q", channel="budgeteater", timeout=0.3)
+            await ask("q", channel="budgeteater", timeout=0.3)
     finally:
         app._channel_registry.reset()
 
@@ -1102,7 +1097,7 @@ async def test_timeout_when_record_already_gone_reports_gone(wired, monkeypatch)
     tai42_app.channels.register("silent", SilentChannel())
     try:
         with pytest.raises(InteractionTimeoutError, match="already gone"):
-            await ask_user("q", channel="silent", timeout=0.05)
+            await ask("q", channel="silent", timeout=0.05)
     finally:
         app._channel_registry.reset()
 
@@ -1113,10 +1108,12 @@ async def test_timeout_when_record_already_gone_reports_gone(wired, monkeypatch)
 @pytest.fixture
 def async_driver():
     # A bound resuming driver: the resume continuation tool + the execution identity
-    # the park's continuation is later rebound as. Both are reset after the test.
+    # the park's continuation is later rebound as. The run-delivery frame mints the run's
+    # delivery identity a parkable run always carries. All are reset after the test.
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    yield
+    with tool_call_frame():
+        yield
     reset_execution_identity(id_token)
     reset_resume_continuation_tool(tool_token)
 
@@ -1135,13 +1132,16 @@ async def test_async_park_callback_door_answerable_through_reaper_margin(
     _tune(monkeypatch, wired, idle_ttl_seconds=10, expiry_reaper_interval_seconds=45)
     resumed: list[Any] = []
 
-    async def _stub(identity, fingerprint, tool, interaction_id, answer, park_context=None):
+    async def _stub(
+        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+    ):
         resumed.append(answer)
+        return SuspendedInteraction(interaction_id=interaction_id)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _stub)
 
     expiry = datetime.now(UTC) + timedelta(seconds=200)
-    result = await ask_user("Approve?", channel="fake", mode="async", expiry_at=expiry)
+    result = await ask("Approve?", channel="fake", mode="async", expiry_at=expiry)
     assert isinstance(result, SuspendedInteraction)
     ticket = _ticket(fake_channel.deliveries[0])
 

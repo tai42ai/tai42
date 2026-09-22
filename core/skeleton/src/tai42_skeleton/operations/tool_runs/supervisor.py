@@ -168,7 +168,7 @@ async def _supervise(
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
         refresher = asyncio.create_task(_refresh_liveness_loop(r, store, run_id, settings))
         # Bind this run's id as the interaction origin for the tool body, so a
-        # question the tool raises through ``ask_user`` is attributed to the run.
+        # question the tool raises through ``ask`` is attributed to the run.
         origin_token = set_interaction_origin(run_id)
         # Detached: this run has no live caller holding a connection, so the turn budget
         # does not apply — covers a background submit AND a store-ON hook fire.

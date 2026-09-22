@@ -53,7 +53,7 @@ async def await_answer(
             # it. The store wraps the BLPOP in an outer wait_for (the passed timeout +
             # grace) instead, so a black-holed redis still fails loudly. Block on a
             # dedicated connection: pinning one from the shared pool would starve other
-            # concurrent ask_user calls once the pool is drained.
+            # concurrent ask calls once the pool is drained.
             from tai42_skeleton.interactions import helper
 
             reply_redis = settings.redis.model_copy(update={"socket_timeout": None})
@@ -73,15 +73,15 @@ async def await_answer(
         result = await prune(settings, store, interaction_id, group)
         if result == "pruned":
             raise InteractionTimeoutError(
-                f"ask_user timed out after {window.budget}s with no answer (interaction {interaction_id})"
+                f"ask timed out after {window.budget}s with no answer (interaction {interaction_id})"
             )
         if result == "answered":
             raise InteractionTimeoutError(
-                f"ask_user timed out after {window.budget}s; an answer was recorded after the budget "
+                f"ask timed out after {window.budget}s; an answer was recorded after the budget "
                 f"and was not returned (interaction {interaction_id})"
             )
         raise InteractionTimeoutError(
-            f"ask_user timed out after {window.budget}s; the question record was already gone "
+            f"ask timed out after {window.budget}s; the question record was already gone "
             f"(expired or pruned elsewhere) and no answer was returned (interaction {interaction_id})"
         )
     # A sensitive answer is handed back wrapped so it cannot leak through a repr, a log

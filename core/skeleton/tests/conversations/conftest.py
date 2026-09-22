@@ -66,7 +66,7 @@ def rendered_user_message(user_message: TemplatedText | None) -> str:
 def _clear_interactions_settings_cache():
     """Isolate the interactions store the conversation delete ops now consult.
 
-    ``delete_conversation_{thread,person,route}`` cancel every async ``ask_user`` parked on a
+    ``delete_conversation_{thread,person,route}`` cancel every async ``ask`` parked on a
     deleted thread via ``cancel_parks_for_thread`` → ``interactions_settings()``. That accessor
     is PROCESS-cached and many sibling suites set ``INTERACTIONS_REDIS_URL``, so a *configured*
     value cached by an earlier test would make a delete op here reach for a real Redis. Clearing
@@ -305,16 +305,16 @@ def wired(monkeypatch, record_redis):
 
 # -- the parked-ask cascade harness ----------------------------------------------------------
 #
-# A conversation thread/person/route delete must cascade-cancel every async ``ask_user`` parked
+# A conversation thread/person/route delete must cascade-cancel every async ``ask`` parked
 # on the affected thread, or the deletion orphans the park: its expiry reaper later fires a
 # continuation into the now-deleted thread and its channel correlation stays muted until the
-# deadline. These wire the ``ask_user`` interactions store the delete-op cascade reaches and
+# deadline. These wire the ``ask`` interactions store the delete-op cascade reaches and
 # assert a park's state, its ``pending:expiry`` member and the reverse index after the op.
 
 
 @pytest.fixture
 def interactions_parks(monkeypatch):
-    """Wire the ``ask_user`` interactions store the delete-op cascade reaches to a fake
+    """Wire the ``ask`` interactions store the delete-op cascade reaches to a fake
     Redis, and return ``(store, fake)`` so a test can seed a park bound to a thread and
     assert it was cancelled. Mirrors the async-park store harness the interactions suite
     uses (fakeredis via the helper's ``client_ctx`` seam)."""
@@ -339,7 +339,7 @@ def interactions_parks(monkeypatch):
 
 async def _seed_park(store, fake, *, interaction_id: str, group_id: str, thread_id: str) -> None:
     """Persist one async park bound to ``thread_id`` in the fake interactions store — the
-    exact ``add`` the ``ask_user`` async branch performs, carrying the thread id."""
+    exact ``add`` the ``ask`` async branch performs, carrying the thread id."""
     from datetime import UTC, datetime, timedelta
 
     from tai42_contract.interactions import AnswerFormat, InteractionRequest

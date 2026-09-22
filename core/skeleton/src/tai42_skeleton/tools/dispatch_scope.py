@@ -15,7 +15,7 @@ never inspects what a preset wraps — the platform stays agnostic to preset con
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -28,6 +28,7 @@ from tai42_contract.tools import (
     current_tool_invocation,
     reset_current_tool_invocation,
     set_current_tool_invocation,
+    tool_call_frame,
 )
 
 from tai42_skeleton.runs.chokepoint import RunRecord, record_outermost_preset_run
@@ -129,18 +130,24 @@ async def _binding_application(
 
 @asynccontextmanager
 async def dispatch_scope(
-    app: TaiMCP, key: str, arguments: dict[str, Any] | None = None
+    app: TaiMCP, key: str, arguments: dict[str, Any] | None = None, *, continues_chain: Sequence[str] | None = None
 ) -> AsyncIterator[DispatchScope]:
     """Arm the shared run lifecycle around a dispatch of ``key``, yielding its :class:`DispatchScope`.
 
     The caller drives the yielded scope with the dispatch outcome.
-    Deposits the ambient invoked-tool seam (CARRYING FORWARD any door binding a prior
-    deposit left on it, read-then-set), enters the run-attribution stamp and the turn
-    budget, and — when ``key`` is a REGISTERED preset with a retained active version —
+    Opens the :func:`tool_call_frame` for the dispatch (which owns the ambient call
+    chain, extras, and — at an outermost run start — the run-delivery identity and
+    address), deposits the ambient invoked-tool seam (CARRYING FORWARD any door binding a
+    prior deposit left on it, read-then-set), enters the run-attribution stamp and the
+    turn budget, and — when ``key`` is a REGISTERED preset with a retained active version —
     layers the preset version stamp and, for the OUTERMOST such dispatch, the runs-index
     record (which opens the trace root). A nested sub-preset dispatch sees the armed guard
     and adds no second stamp or row; a non-preset/draft key (version ``None``) adds neither.
     Retry and bound-identity authorization live in the caller's dispatch, not here.
+
+    ``continues_chain`` (the in-process seam keyword forwarded from ``run_tool``) SETS the
+    frame's call chain to it and pushes no name, so a continuation dispatch restores the
+    parked run's chain; without it the frame PUSHES ``key`` normally.
 
     The door/preset binding applies ONCE, around the OUTERMOST dispatch (the door target),
     INDEPENDENT of whether that target is a preset: a preset target merges the carried door
@@ -157,7 +164,11 @@ async def dispatch_scope(
     invocation_token = set_current_tool_invocation(ToolInvocation(tool_name=key, state_binding=door_binding))
     binding_token = _binding_scope_armed.set(True)
     try:
-        with stamp_run_attribution():
+        # The call frame owns the ambient call chain, extras, and — at an outermost run
+        # start — the run-delivery identity and address (read off the completion the door
+        # bound before this dispatch). ``continues_chain`` SETS the chain (a continuation
+        # dispatch); otherwise the frame PUSHES ``key``.
+        with tool_call_frame(name=key, continues_chain=continues_chain), stamp_run_attribution():
             async with turn_budget():
                 manager = app.preset_manager
                 is_preset = manager.is_registered(key)

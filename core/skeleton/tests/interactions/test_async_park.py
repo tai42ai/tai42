@@ -1,4 +1,4 @@
-"""The async ``ask_user`` park in the helper and store: the helper returns a
+"""The async ``ask`` park in the helper and store: the helper returns a
 ``SuspendedInteraction`` immediately (never blocks) naming the park's resume owner,
 stamps the generic continuation (tool + identity + fingerprint + expiry) onto the
 persisted question, and refuses an async ask with no resuming driver, no execution identity, no
@@ -25,10 +25,13 @@ from tai42_contract.interactions import (
     set_park_completion,
     set_resume_continuation_tool,
 )
+from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.tools import tool_call_frame
+from tai42_kit.utils.state_context import state_context
 
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.ask import park as park_module
 from tai42_skeleton.interactions.helper import InteractionTimeoutError
@@ -50,10 +53,13 @@ def _wire(monkeypatch, fake_client_ctx, **settings_kw) -> InteractionsSettings:
 @pytest.fixture
 def driver():
     # A bound resuming driver: the resume continuation tool + the execution identity
-    # the continuation is later rebound as. Both are reset after the test.
+    # the continuation is later rebound as. The run-delivery frame mints the run's
+    # delivery identity a parkable run always carries (the persist raises without one).
+    # All are reset after the test.
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    yield
+    with tool_call_frame():
+        yield
     reset_execution_identity(id_token)
     reset_resume_continuation_tool(tool_token)
 
@@ -61,7 +67,7 @@ def driver():
 async def test_async_returns_suspended_without_blocking(monkeypatch, fake_redis, fake_client_ctx, driver):
     _wire(monkeypatch, fake_client_ctx)
     expiry = datetime.now(UTC) + timedelta(hours=1)
-    result = await ask_user("proceed?", mode="async", expiry_at=expiry)
+    result = await ask("proceed?", mode="async", expiry_at=expiry)
     assert isinstance(result, SuspendedInteraction)
     assert result.expiry_at == expiry
     # The sentinel names the park's resume OWNER — the same continuation stamped onto the
@@ -86,7 +92,7 @@ async def test_async_far_future_expiry_is_expiry_indexed(monkeypatch, fake_redis
     # A park whose expiry runs far beyond the idle horizon is still indexed by that
     # expiry, so the reaper fires its continuation once the deadline passes.
     expiry = datetime.now(UTC) + timedelta(days=365)
-    result = await ask_user("proceed?", mode="async", expiry_at=expiry)
+    result = await ask("proceed?", mode="async", expiry_at=expiry)
     assert isinstance(result, SuspendedInteraction)
     assert result.expiry_at == expiry
     store = InteractionStore("interactions:")
@@ -100,13 +106,13 @@ async def test_async_without_expiry_at_raises(monkeypatch, fake_client_ctx, driv
     # the deadline: an async park with no ``expiry_at`` is refused up front.
     _wire(monkeypatch, fake_client_ctx)
     with pytest.raises(ValueError, match="async mode requires expiry_at"):
-        await ask_user("q", mode="async")
+        await ask("q", mode="async")
 
 
 async def test_async_without_driver_raises(monkeypatch, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     with pytest.raises(RuntimeError, match="resuming driver"):
-        await ask_user("q", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        await ask("q", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
 
 
 async def test_async_without_execution_identity_raises(monkeypatch, fake_client_ctx):
@@ -114,7 +120,7 @@ async def test_async_without_execution_identity_raises(monkeypatch, fake_client_
     token = set_resume_continuation_tool("resume_tool")
     try:
         with pytest.raises(RuntimeError, match="bound execution identity"):
-            await ask_user("q", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+            await ask("q", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_resume_continuation_tool(token)
 
@@ -122,13 +128,13 @@ async def test_async_without_execution_identity_raises(monkeypatch, fake_client_
 async def test_expiry_at_forbidden_for_sync(monkeypatch, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     with pytest.raises(ValueError, match="expiry_at is only valid"):
-        await ask_user("q", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        await ask("q", expiry_at=datetime.now(UTC) + timedelta(hours=1))
 
 
 async def test_timeout_and_expiry_are_mutually_exclusive(monkeypatch, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     with pytest.raises(ValueError, match="mutually exclusive"):
-        await ask_user("q", mode="async", timeout=5, expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        await ask("q", mode="async", timeout=5, expiry_at=datetime.now(UTC) + timedelta(hours=1))
 
 
 def _sync_req(store: InteractionStore) -> InteractionRequest:
@@ -209,7 +215,7 @@ async def test_a_park_under_a_chained_binding_notifies_the_new_horizon(
         ),
     )
     try:
-        result = await ask_user("proceed?", mode="async", expiry_at=expiry)
+        result = await ask("proceed?", mode="async", expiry_at=expiry)
     finally:
         reset_park_completion(completion)
     assert isinstance(result, SuspendedInteraction)
@@ -235,7 +241,7 @@ async def test_a_park_under_a_plain_delivery_binding_notifies_nothing(
     # refresh, so it is never fired with a notice it cannot answer.
     completion = set_park_completion("deliver_agent_completion", {"thread_id": "bridge:r:a"})
     try:
-        await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_park_completion(completion)
     assert repark_fires == []
@@ -249,7 +255,7 @@ async def test_a_sync_ask_notifies_nothing(monkeypatch, fake_redis, fake_client_
     )
     try:
         with pytest.raises(InteractionTimeoutError):
-            await ask_user("proceed?", timeout=0.01)
+            await ask("proceed?", timeout=0.01)
     finally:
         reset_park_completion(completion)
     assert settings is not None
@@ -270,8 +276,111 @@ async def test_a_failing_notice_never_fails_the_park(monkeypatch, fake_redis, fa
         # The notice refreshes a horizon, it never carries an answer: a persisted park must not
         # be turned into a failed ask by a notifier that is down. The caller simply keeps the
         # horizon it already had, and the failure is announced.
-        result = await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_park_completion(completion)
     assert isinstance(result, SuspendedInteraction)
     assert "re-park horizon notice" in caplog.text
+
+
+# === the run-delivery capture ==============================================
+
+
+def _bind_run(*, with_address: bool):
+    """A run start: the resume driver, the execution identity, an optional out-of-band
+    address bound BEFORE the frame that mints the run's delivery identity. Returns the reset
+    callable to run in a ``finally``.
+    """
+    tool_token = set_resume_continuation_tool("resume_tool")
+    id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
+    completion = set_park_completion("deliver_tool", {"thread_id": "t1"}) if with_address else None
+
+    def _reset() -> None:
+        if completion is not None:
+            reset_park_completion(completion)
+        reset_execution_identity(id_token)
+        reset_resume_continuation_tool(tool_token)
+
+    return _reset
+
+
+async def test_both_to_values_store_the_same_run_delivery_pair(monkeypatch, fake_redis, fake_client_ctx):
+    _wire(monkeypatch, fake_client_ctx)
+    store = InteractionStore(InteractionsSettings().key_prefix)
+    ctx = StateContext(door="conversation", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    reset = _bind_run(with_address=True)
+    try:
+        with tool_call_frame(), state_context(ctx):
+            expiry = datetime.now(UTC) + timedelta(hours=1)
+            user_park = await ask("u?", mode="async", expiry_at=expiry)
+            caller_park = await ask("c?", to="caller", mode="async", expiry_at=expiry)
+    finally:
+        reset()
+    us = await store.get_state(fake_redis, user_park.interaction_id)
+    cs = await store.get_state(fake_redis, caller_park.interaction_id)
+    assert us is not None
+    assert cs is not None
+    # Every ask of the run stores the RUN's one address and one identity — no ``to`` branch.
+    assert us.request.delivery == ("deliver_tool", {"thread_id": "t1"})
+    assert cs.request.delivery == us.request.delivery
+    assert us.request.run_delivery_id is not None
+    assert cs.request.run_delivery_id == us.request.run_delivery_id
+    # The caller subset on the sentinel names only the caller-addressed ask.
+    assert user_park.caller_interaction_ids == []
+    assert caller_park.caller_interaction_ids == [caller_park.interaction_id]
+
+
+async def test_persisted_caller_ask_is_hidden_from_the_read_filter(monkeypatch, fake_redis, fake_client_ctx):
+    # The persist path denormalizes ``to`` onto the state hash, so the store's read filter
+    # (the read-surface chokepoint) hides a caller ask while a co-persisted user ask lists.
+    _wire(monkeypatch, fake_client_ctx)
+    store = InteractionStore(InteractionsSettings().key_prefix)
+    ctx = StateContext(door="conversation", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    reset = _bind_run(with_address=True)
+    try:
+        with tool_call_frame(), state_context(ctx):
+            expiry = datetime.now(UTC) + timedelta(hours=1)
+            user_park = await ask("u?", mode="async", expiry_at=expiry)
+            caller_park = await ask("c?", to="caller", mode="async", expiry_at=expiry)
+    finally:
+        reset()
+    pending_ids = [req.interaction_id for req in await store.pending(fake_redis)]
+    assert user_park.interaction_id in pending_ids
+    assert caller_park.interaction_id not in pending_ids
+
+
+async def test_receiverless_run_stores_no_address_but_an_identity(monkeypatch, fake_redis, fake_client_ctx):
+    _wire(monkeypatch, fake_client_ctx)
+    store = InteractionStore(InteractionsSettings().key_prefix)
+    reset = _bind_run(with_address=False)
+    try:
+        with tool_call_frame():
+            result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+    finally:
+        reset()
+    state = await store.get_state(fake_redis, result.interaction_id)
+    assert state is not None
+    assert state.request.delivery is None
+    assert state.request.run_delivery_id is not None
+
+
+async def test_async_ask_with_no_ambient_run_delivery_id_raises(monkeypatch, fake_client_ctx):
+    _wire(monkeypatch, fake_client_ctx)
+    # A driver and an identity are bound, but the run never opened a frame that mints the
+    # run-delivery identity — a platform bug the persist refuses loudly, never a silent park.
+    reset = _bind_run(with_address=False)
+    try:
+        with pytest.raises(RuntimeError, match="no ambient run_delivery_id"):
+            await ask("q", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+    finally:
+        reset()
+
+
+async def test_caller_ask_without_a_state_context_raises(monkeypatch, fake_client_ctx):
+    _wire(monkeypatch, fake_client_ctx)
+    reset = _bind_run(with_address=True)
+    try:
+        with tool_call_frame(), pytest.raises(RuntimeError, match="requires an ambient state context"):
+            await ask("c?", to="caller", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+    finally:
+        reset()

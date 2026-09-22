@@ -1,10 +1,10 @@
 """Channel delivery contracts.
 
-A :class:`Channel` pushes an ``ask_user`` question to a human on a specific
+A :class:`Channel` pushes an ``ask`` question to a human on a specific
 medium (Telegram, Slack, SMS, ...) and bridges the human's reply back into the
 interactions store by forwarding it to the delivery's public ``callback_url``.
 Channels are registered on the app handle (``tai42_app.channels``) by channel
-plugins and looked up by name when ``ask_user`` is called with ``channel=...``.
+plugins and looked up by name when ``ask`` is called with ``channel=...``.
 Delivery either returns ``None`` (success) or raises
 :class:`ChannelDeliveryError` (any failure) — never a bool.
 

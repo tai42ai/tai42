@@ -10,7 +10,8 @@ from datetime import UTC, datetime
 import pytest
 from tai42_contract.interactions import AnswerFormat, InteractionResponse
 
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
+from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED
 from tai42_skeleton.operations.interactions import _add_data, _reply_ttl
 from tai42_skeleton.routers import interactions as router
 from tai42_skeleton.routers.interactions.callback import _POST_ONLY_EMPTY_BODY_DENY
@@ -20,6 +21,7 @@ from ..._helpers import await_add_event
 from ._harness import (
     _BINDING,
     _answer_bound,
+    _caller_ask_request,
     _external_request,
     _FakeVerifier,
     _json,
@@ -34,8 +36,35 @@ from ._harness import (
 )
 
 
+async def test_post_caller_ask_typed_refused_409(wired):
+    # A caller ask reaching the public answer door through a ticket (defence-in-depth:
+    # a caller ask carries no ticket) is refused loudly before the typed claim branch —
+    # it is answerable only by its calling run.
+    await wired.store.add(
+        wired.fake, _caller_ask_request(wired.store, fmt=AnswerFormat.TEXT), idle_ttl=86400, ticket="TKT", ticket_ttl=60
+    )
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": "x"}'))
+    assert resp.status_code == 409
+    assert _json(resp)["error"] == CALLER_ASK_RESOLUTION_REFUSED
+
+
+async def test_post_caller_ask_external_refused_409(wired):
+    # The same refusal pre-empts the external claim branch: the shared seam runs before
+    # the door splits on answer_format, so an EXTERNAL-format caller ask is refused too.
+    await wired.store.add(
+        wired.fake,
+        _caller_ask_request(wired.store, fmt=AnswerFormat.EXTERNAL, payload={"url": "https://ext.example/r"}),
+        idle_ttl=86400,
+        ticket="TKT",
+        ticket_ttl=60,
+    )
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"approved": true}'))
+    assert resp.status_code == 409
+    assert _json(resp)["error"] == CALLER_ASK_RESOLUTION_REFUSED
+
+
 async def test_post_valid_body_wakes_caller(wired):
-    task = asyncio.create_task(ask_user("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     iid, _gid = await await_add_event(wired.fake, wired.store)
 
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"signed":true}'))
@@ -135,9 +164,7 @@ async def test_post_non_object_body_400(wired, body):
 
 async def test_post_schema_invalid_then_valid(wired):
     schema = {"type": "object", "required": ["x"], "properties": {"x": {"type": "integer"}}}
-    task = asyncio.create_task(
-        ask_user("Sign?", answer_format="external", link="{callback_url}", schema=schema, timeout=5)
-    )
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", schema=schema, timeout=5))
     await await_add_event(wired.fake, wired.store)
 
     bad = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"nope":1}'))
@@ -171,7 +198,7 @@ async def test_post_large_body_small_content_length_413(wired):
 
 
 async def test_post_empty_body_uses_query_params(wired):
-    task = asyncio.create_task(ask_user("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="a=1&tag=x&tag=y"))
     assert resp.status_code == 200
@@ -179,7 +206,7 @@ async def test_post_empty_body_uses_query_params(wired):
 
 
 async def test_post_body_wins_over_query(wired):
-    task = asyncio.create_task(ask_user("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="a=1", body=b'{"b":2}'))
     assert resp.status_code == 200
@@ -223,7 +250,7 @@ async def test_post_json_headers_nosniff_nostore(wired):
 
 
 async def test_get_pending_confirm_page_no_state_change(wired):
-    task = asyncio.create_task(ask_user("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
 
     for _ in range(2):
@@ -337,7 +364,7 @@ async def test_get_html_is_byte_constant_and_headers(wired):
 
 
 async def test_get_single_and_multi_query_values(wired):
-    task = asyncio.create_task(ask_user("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
     # The confirm form POSTs back to the same URL with the query string.
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="a=1&tag=a&tag=b"))
@@ -358,7 +385,7 @@ async def test_post_lost_race_is_already_answered(wired, monkeypatch):
 
 
 async def test_post_three_repeated_query_values(wired):
-    task = asyncio.create_task(ask_user("Sign?", answer_format="external", link="{callback_url}", timeout=5))
+    task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, query="tag=a&tag=b&tag=c"))
     assert resp.status_code == 200

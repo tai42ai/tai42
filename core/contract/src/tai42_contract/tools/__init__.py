@@ -14,6 +14,15 @@ from pydantic import BaseModel
 
 from tai42_contract.app.facets import RouteAction
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.tools.call_frame import (
+    RunDelivery,
+    current_call_chain,
+    current_extras,
+    get_run_delivery,
+    get_run_delivery_id,
+    run_delivery,
+    tool_call_frame,
+)
 from tai42_contract.tools.invocation import (
     ToolInvocation,
     current_tool_invocation,
@@ -133,10 +142,22 @@ class AppTools(Protocol):
         """Return the client-facing tool objects, restricted to ``names`` when given."""
         ...
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+    async def run_tool(
+        self,
+        key: str,
+        arguments: dict[str, Any],
+        *,
+        offload_sync: bool = False,
+        continues_chain: Sequence[str] | None = None,
+    ) -> Any:
         """Execute the tool registered under ``key`` with ``arguments`` and return its result.
 
         ``offload_sync`` runs a synchronous tool body off the event loop in a worker thread.
+
+        ``continues_chain`` is an in-process seam keyword ONLY (no request model, MCP
+        argument, or tool argument sets it): when given, the dispatch's call frame SETS
+        the ambient call chain to it rather than pushing ``key``, so a continuation
+        runner restores a parked run's chain on the one dispatch that resumes it.
         """
         ...
 
@@ -232,6 +253,7 @@ __all__ = [
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
     "AppTools",
+    "RunDelivery",
     "StateTemplateDetachReferee",
     "ToolDeleteReferee",
     "ToolInfo",
@@ -240,7 +262,13 @@ __all__ = [
     "ToolRenameReferee",
     "ToolRetryBackoff",
     "ToolRetryPolicy",
+    "current_call_chain",
+    "current_extras",
     "current_tool_invocation",
+    "get_run_delivery",
+    "get_run_delivery_id",
     "reset_current_tool_invocation",
+    "run_delivery",
     "set_current_tool_invocation",
+    "tool_call_frame",
 ]

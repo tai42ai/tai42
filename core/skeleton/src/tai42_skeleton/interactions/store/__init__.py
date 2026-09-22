@@ -1,7 +1,7 @@
 """Redis store for the interactions capability.
 
 Holds every key shape and the read/write operations behind one class so the
-producer (the ``ask_user`` helper in this package) and the consumer (the API SSE
+producer (the ``ask`` helper in this package) and the consumer (the API SSE
 + answer endpoint) share the exact key contract. Operations take the redis
 client as an argument: each caller opens it from the interactions settings via
 ``client_ctx(RedisClient, settings.redis)``.
@@ -25,9 +25,18 @@ from __future__ import annotations
 from . import scripts, ttl
 from .events import ADD_EVENT, ANSWERED_EVENT, REMOVED_EVENT
 from .reads import _StoreReads
-from .records import CONTINUATION_DROPPED, ContinuationDue, ContinuationRetryDrop
+from .records import (
+    CONTINUATION_DROPPED,
+    KILL_DROPPED,
+    ContinuationDue,
+    ContinuationRetryDrop,
+    KillDue,
+    KillRetryDrop,
+    KillTarget,
+    WaitingOutcome,
+)
 from .serde import as_str
-from .writes import PruneResult, _StoreWrites
+from .writes import KILL_ACT_ON_ANY, KILL_ACT_ON_PENDING, KillEnqueueResult, PruneResult, _StoreWrites
 
 
 class InteractionStore(_StoreWrites, _StoreReads):
@@ -42,11 +51,19 @@ __all__ = [
     "ADD_EVENT",
     "ANSWERED_EVENT",
     "CONTINUATION_DROPPED",
+    "KILL_ACT_ON_ANY",
+    "KILL_ACT_ON_PENDING",
+    "KILL_DROPPED",
     "REMOVED_EVENT",
     "ContinuationDue",
     "ContinuationRetryDrop",
     "InteractionStore",
+    "KillDue",
+    "KillEnqueueResult",
+    "KillRetryDrop",
+    "KillTarget",
     "PruneResult",
+    "WaitingOutcome",
     "as_str",
     "scripts",
     "ttl",

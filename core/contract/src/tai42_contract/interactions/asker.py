@@ -1,6 +1,6 @@
-"""The ``ask_user`` author surface — a typed-callable Protocol.
+"""The ``ask`` author surface — a typed-callable Protocol.
 
-``AskUser`` is the engine-agnostic human-in-the-loop entry point: an awaitable
+``Ask`` is the engine-agnostic human-in-the-loop entry point: an awaitable
 called with a ``question`` (and an optional answer shape). In ``mode="sync"`` it
 blocks until a human answers and returns the typed answer; in ``mode="async"``
 it PARKS the caller and returns a sentinel, and a later answer/expiry resumes
@@ -37,7 +37,7 @@ def check_ask_timing(*, timeout: float | None, expiry_at: datetime | None) -> No
 
 
 @runtime_checkable
-class AskUser(Protocol):
+class Ask(Protocol):
     """The interaction-ask facet: pose a question to a human and receive the typed answer."""
 
     async def __call__(
@@ -62,6 +62,9 @@ class AskUser(Protocol):
         media: list[MediaItem | dict[str, Any]] | None = None,
         mode: Literal["sync", "async"] = "sync",
         expiry_at: datetime | None = None,
+        to: Literal["user", "caller"] = "user",
+        payload: dict[str, Any] | None = None,
+        on_expiry: Literal["kill", "resume"] = "kill",
     ) -> Any:
         """Ask a human ``question`` and return the typed answer.
 
@@ -176,8 +179,19 @@ class AskUser(Protocol):
         expires; async REQUIRES it (a park always carries a deadline) and it is
         mutually exclusive with ``timeout`` (``check_ask_timing`` enforces the
         exclusivity). ``None`` is valid only for a sync ask.
+
+        ``to`` addresses the ask. ``"user"`` (the default) is a human answered
+        through the inbox/callback/channel surfaces. ``"caller"`` addresses another
+        RUN: the ask carries NO out-of-band delivery — it parks the asking run and
+        its answer is handed back by the run that resolves it. A ``"caller"`` ask is
+        always ``mode="async"`` and requires an ambient state context. ``payload`` is
+        a structured value a ``"caller"`` ask hands the resolving run in place of (or
+        beside) ``question`` (when given, ``question`` may be empty); it is forbidden
+        on a ``"user"`` ask. ``on_expiry`` selects what the expiry reaper does when a
+        parked ask's deadline lapses: ``"kill"`` (the default) tears the whole run
+        chain down, ``"resume"`` resumes the continuation with the expiry marker.
         """
         ...
 
 
-__all__ = ["AskUser", "check_ask_timing"]
+__all__ = ["Ask", "check_ask_timing"]

@@ -14,7 +14,7 @@ class Channel(Protocol):
     """Delivers one question to a human on a specific medium.
 
     A channel plugin registers an instance under a name
-    (``tai42_app.channels.register``); ``ask_user`` resolves it by name and calls
+    (``tai42_app.channels.register``); ``ask`` resolves it by name and calls
     ``deliver`` after the interaction is persisted and its callback ticket is
     minted. A channel never reaches the interactions store directly: the
     human's reply travels back through the delivery's public ``callback_url``.
@@ -34,7 +34,7 @@ class Channel(Protocol):
     ``getattr(channel, "<flag>", False)`` and refuse the matching richer send to
     a channel that does not advertise the flag: ``notify_user`` refuses a media,
     template, options, sections, location or schema notification, and the
-    ``ask_user`` helper
+    ``ask`` helper
     refuses a ``form`` delivery, to a channel without the flag — so a channel
     that reads only the plain fields can never silently drop the extra content.
     A channel that does not advertise ``supports_form_delivery`` never receives
@@ -44,7 +44,7 @@ class Channel(Protocol):
     A form channel MAY also declare one OPTIONAL method, ``validate_form_schema``,
     following the same convention as the capability flags — a documented member,
     NOT a Protocol method, so declaring it never tightens the runtime structural
-    check. ``ask_user`` reads it defensively with
+    check. ``ask`` reads it defensively with
     ``getattr(channel, "validate_form_schema", None)`` right after the generic
     channel-deliverable subset check and, when present, calls
     ``channel.validate_form_schema(schema, question)`` at ask-time, BEFORE any

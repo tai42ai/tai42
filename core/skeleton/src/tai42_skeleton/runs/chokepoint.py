@@ -96,6 +96,37 @@ def resume_origin(interaction_id: str) -> Iterator[None]:
         _resume_origin.reset(token)
 
 
+# The ambient delivery-fire deposit: the interactions delivery ladder sets the run's
+# ``completion_id`` around the ONE ``run_tool`` that fires a door's out-of-band delivery-address
+# tool, so that tool can assert it is being fired by the platform for the outcome it is about to
+# deliver (``assert_delivery_authorized``). ``None`` outside a delivery fire; the value is the
+# delivery id of the run whose terminal is being delivered.
+_delivery_fire: ContextVar[str | None] = ContextVar("tai42_runs_delivery_fire", default=None)
+
+
+def get_delivery_fire() -> str | None:
+    """The ``completion_id`` of the delivery the platform is currently firing, or ``None``.
+
+    A plain contextvar read, never raises.
+    """
+    return _delivery_fire.get()
+
+
+@contextmanager
+def delivery_fire(completion_id: str) -> Iterator[None]:
+    """Deposit ``completion_id`` as the ambient delivery fire for the wrapped delivery-tool dispatch.
+
+    The interactions delivery ladder wraps its single address-fire ``run_tool`` in this, so a door
+    delivery-address tool it invokes passes ``assert_delivery_authorized(completion_id)``. Resets
+    in a ``finally`` (token discipline).
+    """
+    token = _delivery_fire.set(completion_id)
+    try:
+        yield
+    finally:
+        _delivery_fire.reset(token)
+
+
 def _safe_trace_id() -> str | None:
     """The active monitoring trace id, or ``None`` — a guard query that never raises.
 

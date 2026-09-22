@@ -12,8 +12,10 @@ forms ``media`` (a list of ``MediaItem`` dicts) / ``template`` (a ``ChannelTempl
 dict) / ``options`` (a list of ``Option`` dicts) / ``location`` (a ``LocationElement`` dict) /
 ``sections`` (a list of ``OptionSection`` dicts) / ``header`` (a ``MediaItem`` dict) /
 ``footer`` (a plain string) / ``schema`` (an ask-less form's
-answer-schema dict, present only via the channel path's audience feed write — the sink
-door refuses a channel-less form), and a server-side ``created_at`` —
+answer-schema dict) / ``data`` (its per-send ``FormData`` prefill/options dict) / ``pages`` (its
+stepped ``FormPage`` list) — ``schema`` and its ``data``/``pages`` present only via the channel
+path's audience feed write (the sink door refuses a channel-less form), and a server-side
+``created_at`` —
 pushed onto that per-deployment list; the read path returns the list newest-first — the
 rich fields (``media`` alongside the message) are STORED and RETURNED by the read doors,
 and rendering them is the host inbox's own surface, not a guarantee this platform makes.
@@ -62,7 +64,7 @@ from typing import Any, cast
 
 from redis.asyncio import Redis
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -144,6 +146,8 @@ class NotificationSink:
         header: dict | None = None,
         footer: str | None = None,
         schema: dict[str, Any] | None = None,
+        data: dict | None = None,
+        pages: list[dict] | None = None,
     ) -> dict:
         """Append one notification and return the stored record.
 
@@ -157,15 +161,17 @@ class NotificationSink:
         channel delivery address, orthogonal to the ``audience`` identity.
 
         ``media`` / ``template`` / ``options`` / ``location`` / ``sections`` / ``header`` /
-        ``footer`` / ``schema`` are the OPTIONAL richer-send forms
+        ``footer`` / ``schema`` / ``data`` / ``pages`` are the OPTIONAL richer-send forms
         the notification carried (already JSON-serialized by the caller — a list of
         ``MediaItem`` dicts, a ``ChannelTemplate`` dict, a list of ``Option`` dicts, a
         ``LocationElement`` dict, a list of ``OptionSection`` dicts, a header ``MediaItem`` dict,
-        a plain ``footer`` string, an ask-less form's answer-schema dict), stored
+        a plain ``footer`` string, an ask-less form's answer-schema dict, its per-send
+        ``FormData`` dict and a list of ``FormPage`` dicts), stored
         alongside the message and returned by the read doors — rendering them is the host
-        inbox's own surface. ``None`` for each keeps the plain record shape. A ``schema``
-        reaches here only from the CHANNEL path's audience feed write (feed parity with the
-        delivered form); the sink door itself refuses a channel-less form notification.
+        inbox's own surface. ``None`` for each keeps the plain record shape. A ``schema`` —
+        and with it any ``data``/``pages`` — reaches here only from the CHANNEL path's audience
+        feed write (feed parity with the delivered form); the sink door itself refuses a
+        channel-less form notification.
 
         Both feed writes are issued in ONE pipeline executed once, so a failure can
         never land the record on one feed but not the other.
@@ -183,6 +189,8 @@ class NotificationSink:
             "header": header,
             "footer": footer,
             "schema": schema,
+            "data": data,
+            "pages": pages,
             "created_at": datetime.now(UTC).isoformat(),
         }
         payload = json.dumps(record)
@@ -232,16 +240,18 @@ async def record_notification(
     header: MediaItem | None = None,
     footer: str | None = None,
     schema: dict[str, Any] | None = None,
+    data: FormData | None = None,
+    pages: list[FormPage] | None = None,
 ) -> dict:
     """Write one notification to the internal sink and return the stored record.
 
     Opens the interactions Redis connection and delegates to
     :meth:`NotificationSink.record`. When ``audience`` is set the record also lands
     on that identity's per-identity feed.
-    ``media``/``template``/``options``/``location``/``sections``/``header``/``footer``/``schema``
-    are the OPTIONAL richer-send forms (already contract-validated by the caller); they are
-    JSON-serialized here and stored on the record (``footer`` and ``schema`` are stored as the
-    plain string/dict they already are). Every Redis or serialization failure
+    ``media``/``template``/``options``/``location``/``sections``/``header``/``footer``/``schema``/
+    ``data``/``pages`` are the OPTIONAL richer-send forms (already contract-validated by the
+    caller); they are JSON-serialized here and stored on the record (``footer`` and ``schema`` are
+    stored as the plain string/dict they already are). Every Redis or serialization failure
     propagates loudly.
     """
     # The in-app feed is interactions-Redis-backed, so every feed write refuses with
@@ -272,6 +282,8 @@ async def record_notification(
             header=header.model_dump(mode="json") if header is not None else None,
             footer=footer,
             schema=schema,
+            data=data.model_dump(mode="json") if data is not None else None,
+            pages=[page.model_dump(mode="json") for page in pages] if pages is not None else None,
         )
 
 

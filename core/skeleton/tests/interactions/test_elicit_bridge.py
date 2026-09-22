@@ -1,5 +1,5 @@
 """Elicitation bridge: a tool's ``ctx.elicit()`` from an
-in-process caller resolves through the interactions ``ask_user`` channel, with
+in-process caller resolves through the interactions ``ask`` channel, with
 schema fidelity, accept-or-raise, and no silent dead-end."""
 
 from __future__ import annotations
@@ -21,17 +21,17 @@ def _bridge_ctx() -> context_bridge.PlatformBridgeContext:
     return context_bridge.PlatformBridgeContext(fastmcp=app.fastmcp)
 
 
-def _patch_ask_user(monkeypatch, answer=None, *, raises=None):
-    """Record the ask_user call and return ``answer`` (or raise ``raises``)."""
+def _patch_ask(monkeypatch, answer=None, *, raises=None):
+    """Record the ask call and return ``answer`` (or raise ``raises``)."""
     calls: list[dict] = []
 
-    async def fake_ask_user(question, *, answer_format, schema=None, **kwargs):
+    async def fake_ask(question, *, answer_format, schema=None, **kwargs):
         calls.append({"question": question, "answer_format": answer_format, "schema": schema})
         if raises is not None:
             raise raises
         return answer
 
-    monkeypatch.setattr("tai42_skeleton.interactions.helper.ask_user", fake_ask_user)
+    monkeypatch.setattr("tai42_skeleton.interactions.helper.ask", fake_ask)
     return calls
 
 
@@ -41,7 +41,7 @@ def _patch_ask_user(monkeypatch, answer=None, *, raises=None):
 def test_seam_a_derives_schema_and_maps_to_accepted(monkeypatch):
     # Scalar response_type -> parse_elicit_response_type wraps it as a {value}
     # form schema; the validated answer maps back to AcceptedElicitation.data.
-    calls = _patch_ask_user(monkeypatch, answer={"value": 7})
+    calls = _patch_ask(monkeypatch, answer={"value": 7})
     ctx = _bridge_ctx()
 
     result = asyncio.run(ctx.elicit("Pick a number", int))
@@ -59,7 +59,7 @@ class _Profile(BaseModel):
 
 
 def test_seam_a_model_response_type_round_trips(monkeypatch):
-    calls = _patch_ask_user(monkeypatch, answer={"name": "Ada", "age": 36})
+    calls = _patch_ask(monkeypatch, answer={"name": "Ada", "age": 36})
     ctx = _bridge_ctx()
 
     result = asyncio.run(ctx.elicit("Your profile", _Profile))
@@ -71,7 +71,7 @@ def test_seam_a_model_response_type_round_trips(monkeypatch):
 
 
 def test_seam_a_timeout_raises_no_decline_round_trip(monkeypatch):
-    _patch_ask_user(monkeypatch, raises=InteractionTimeoutError("no answer"))
+    _patch_ask(monkeypatch, raises=InteractionTimeoutError("no answer"))
     ctx = _bridge_ctx()
 
     with pytest.raises(InteractionTimeoutError):
@@ -105,11 +105,11 @@ def test_bridge_context_pushes_bridge_when_none_active():
     assert asyncio.run(go()) is True
 
 
-# -- integration: run_tool drives ctx.elicit through ask_user ----------------
+# -- integration: run_tool drives ctx.elicit through ask ----------------
 
 
-def test_run_tool_routes_ctx_elicit_through_ask_user(monkeypatch):
-    _patch_ask_user(monkeypatch, answer={"value": 42})
+def test_run_tool_routes_ctx_elicit_through_ask(monkeypatch):
+    _patch_ask(monkeypatch, answer={"value": 42})
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
@@ -122,7 +122,7 @@ def test_run_tool_routes_ctx_elicit_through_ask_user(monkeypatch):
                 return answer.data
 
             # run_tool is the in-process caller path: no client, so ctx.elicit
-            # resolves via the ask_user bridge (seam a).
+            # resolves via the ask bridge (seam a).
             assert await app.tools.run_tool("needs_input", {}) == 42
 
     asyncio.run(run())

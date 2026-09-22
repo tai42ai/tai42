@@ -1,10 +1,10 @@
-"""The driver-continuation context for an async ``ask_user``.
+"""The driver-continuation context for an async ``ask``.
 
 Two generic context variables naming registered tools a resuming driver binds:
 
 * the RESUME continuation — the tool that resumes the CURRENT driver when a tool
   async-suspends. The resuming driver SETS it around a tool dispatch; the platform
-  READS it when an ``ask_user`` is raised with ``mode="async"``, stamping the value
+  READS it when an ``ask`` is raised with ``mode="async"``, stamping the value
   onto the parked interaction as its ``continuation_tool``.
 * the COMPLETION continuation — the tool a driver fires with the FINAL answer when a
   resumed run drives to a clean terminal (not a re-park), so a deferred response is
@@ -71,21 +71,24 @@ __all__ = [
     "PARK_COMPLETION_THREAD_KEY",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "NestedParkOwnershipError",
+    "ParkDeliveryUnauthorizedError",
+    "ParkResumeFailed",
+    "ParkResumeUnauthorizedError",
     "assert_park_adoptable",
     "attach_chained_park",
     "bound_execution_identity_for_fire",
     "chained_park_claims",
     "chained_park_context",
     "current_execution_identity",
-    "fire_continuation_abandoned",
+    "fire_park_killed",
     "get_park_completion",
     "get_resume_continuation_tool",
     "is_chained_park_key",
     "new_chained_park_key",
     "read_suspended_interaction_marker",
-    "register_continuation_abandonment_handler",
     "register_execution_identity_accessor",
     "register_execution_identity_binder",
+    "register_park_kill_handler",
     "repark_notice",
     "reset_park_completion",
     "reset_resume_continuation_tool",
@@ -105,61 +108,59 @@ _ParkCompletion = tuple[str | None, Mapping[str, Any] | None]
 _park_completion: ContextVar[_ParkCompletion] = ContextVar("tai42_park_completion", default=(None, None))
 
 
-# --- the continuation-abandonment seam ---------------------------------------------------
+# --- the platform delivery signals ------------------------------------------------------
 #
-# An async park's resume is delivered AT-LEAST-ONCE: a resuming driver whose resume raises leaves
-# the durable continuation-due record for the platform to redeliver. That redelivery is not
-# unbounded — a record whose retention horizon lapses is dropped for good, a PERMANENT give-up
-# after which no redelivery will ever fire the resume again. The bound caller waiting on that run
-# (a conversation turn, a chained park) would otherwise learn nothing until its OWN deadline.
-#
-# This is the seam a resuming driver registers a handler on to be told of THAT terminus by
-# interaction id, so it can fire its own non-success completion (the FAILED terminal) exactly
-# once — at the one point where no later success can be deduped away, since the record is gone and
-# nothing can re-drive the run. Generic and flow-blind: the platform names the abandoned
-# interaction; the driver owns what an abandoned park means and how to close it.
-_ContinuationAbandonmentHandler = Callable[[str], Awaitable[None]]
-
-_continuation_abandonment_handlers: list[_ContinuationAbandonmentHandler] = []
+# A resuming driver's continuation face RETURNS the outermost run's next outcome; the platform's
+# delivery chokepoint reads that return and delivers it. Two exception signals cross that seam.
 
 
-def register_continuation_abandonment_handler(handler: _ContinuationAbandonmentHandler) -> None:
-    """Register ``handler`` to fire with the interaction id when a park's resume is abandoned.
+class ParkResumeFailed(Exception):  # noqa: N818 (a control-flow signal, not an *Error condition)
+    """A resumed run reached a TERMINAL that must be delivered FAILED — do NOT retry.
 
-    The abandonment is PERMANENT: the durable continuation-due record was dropped past its
-    retention horizon, so no redelivery will ever fire it again.
-
-    Idempotent by handler identity: a resuming driver's registration site may run per reload epoch
-    and from several agents, so re-registering the SAME callable is a no-op rather than a duplicate
-    fire.
+    A resuming driver RAISES this from its continuation face for a mid-drive ABORT or SUPERSEDE
+    terminal, carrying the failed ``outcome``. The delivery chokepoint catches it, CLEARS the
+    continuation-due record (no redelivery), and delivers ``outcome`` through the ladder with a
+    FAILED status. Distinct from a PLAIN raise, which means "transient — retain the due record and
+    redeliver", and from an ordinary business-error terminal, which the face RETURNS as a
+    FAILED-status outcome rather than raising.
     """
-    if handler not in _continuation_abandonment_handlers:
-        _continuation_abandonment_handlers.append(handler)
+
+    def __init__(self, outcome: Any) -> None:
+        """Carry the failed terminal ``outcome`` the ladder delivers with a FAILED status."""
+        super().__init__("park resume reached a terminal to deliver FAILED")
+        self.outcome = outcome
 
 
-async def fire_continuation_abandoned(interaction_id: str) -> None:
-    """Notify every registered handler that ``interaction_id``'s resume is permanently abandoned.
+class ParkResumeUnauthorizedError(Exception):
+    """A driver continuation face was invoked outside its run's own resume drive.
 
-    Best-effort per handler: one that raises is logged and swallowed, so a single driver's failure
-    never starves the other handlers or aborts the reaper pass that fired them. A process with no
-    resuming driver loaded holds no handlers and this is a no-op.
+    A driver's resume face and cross-driver chain-delivery tool are dispatchable by name at the
+    run-tool door and the MCP edge, so the platform gates them: a face may produce a run's outcome
+    ONLY inside the platform's resume of that run. Raised when the ambient run-authorization
+    context does not name the resumed interaction (or its run's delivery identity).
     """
-    for handler in _continuation_abandonment_handlers:
-        try:
-            await handler(interaction_id)
-        except Exception:
-            logger.warning(
-                "a continuation-abandonment handler raised for interaction %s; suppressed so it cannot "
-                "abort the abandonment fire or starve the other handlers",
-                interaction_id,
-                exc_info=True,
-            )
+
+    # A refusal to authorize the caller, not a caller input error or a transient unavailability.
+    __tai_error_kind__ = ErrorKind.UNAUTHORIZED
+
+
+class ParkDeliveryUnauthorizedError(Exception):
+    """A door's delivery-address tool was invoked outside the platform's own delivery fire.
+
+    A door's out-of-band delivery address is a registered tool, dispatchable by name at the
+    run-tool door and the MCP edge; only the platform's delivery ladder may fire it. Raised when
+    the ambient delivery-fire context is absent or names a different ``completion_id`` than the one
+    the tool was asked to deliver.
+    """
+
+    # A refusal to authorize the caller, not a caller input error or a transient unavailability.
+    __tai_error_kind__ = ErrorKind.UNAUTHORIZED
 
 
 # --- the execution-identity bridge -------------------------------------------------------
 #
 # A park records the execution identity its run is authorized as, so an OUT-OF-BAND completion
-# fired for it later (the abandonment fire) runs under that same identity — never fail-open. The
+# fired for it later runs under that same identity — never fail-open. The
 # identity machinery is a HOST concern (it reads live stored grants), so this contract holds only
 # a pair of registration slots a host fills: an ACCESSOR to read the current identity as
 # ``(execution key, fingerprint)`` when a park records it, and a BINDER to bind that identity
@@ -222,6 +223,51 @@ async def bound_execution_identity_for_fire(execution_key: str | None, fingerpri
         yield
 
 
+# --- the whole-chain kill teardown seam --------------------------------------------------
+#
+# A whole-chain kill tears a parked (or running) run down for good: the platform prunes its
+# park index and clears its continuation-due record, and each driver that owns durable run state
+# tears its OWN state down (its checkpoint, its resolution records, and every run it linked above
+# it). The platform holds only registration slots the drivers fill; it FIRES them from
+# ``kill_park`` with the run-authorization context bound around the fire (so a handler's
+# cross-driver teardown notify authorizes on the killed run's shared delivery identity), and it —
+# never a driver — delivers the run's single FAILED afterward.
+#
+# A handler is fired with ``(interaction_id, reason)`` and returns None. It owns ONLY its driver's
+# teardown: a handler that does not own the interaction is a no-op. A handler that cannot finish
+# yet (its own park record is not written, a link is still in flight, or a cross-driver teardown
+# notify failed) RAISES; the raise propagates so ``kill_park`` keeps the durable kill-due record
+# and the reaper redelivers the kill idempotently. What stays best-effort inside a driver's abort
+# layer is only the LOCAL finalize of already-dead local state.
+_ParkKillHandler = Callable[[str, str], Awaitable[None]]
+
+_park_kill_handlers: list[_ParkKillHandler] = []
+
+
+def register_park_kill_handler(handler: _ParkKillHandler) -> None:
+    """Register a driver teardown fired when a parked/running run is killed whole-chain.
+
+    Every registered handler is fired (in registration order) with the killed
+    ``(interaction_id, reason)``; a handler that does not own the interaction is a no-op. A driver
+    registers once at import. Handlers accumulate — each driver that resumes parks registers its
+    own — so the platform reaches every driver's teardown from one fire.
+    """
+    _park_kill_handlers.append(handler)
+
+
+async def fire_park_killed(interaction_id: str, reason: str) -> None:
+    """Fire every registered driver teardown for a killed run, in registration order.
+
+    Called by the platform's ``kill_park`` with the run-authorization context already bound. A
+    handler that RAISES propagates immediately (a later handler is not fired this pass); the caller
+    keeps the durable kill-due record and the reaper redelivers, re-firing every handler — so each
+    driver's teardown must be idempotent. With no handler registered this is a no-op (a host with
+    no resuming driver has nothing to tear down).
+    """
+    for handler in _park_kill_handlers:
+        await handler(interaction_id, reason)
+
+
 # The answer value a continuation receives when its interaction expired unanswered — the
 # generic marker a resuming consumer reads to run its expiry branch instead of a real answer.
 EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
@@ -267,7 +313,7 @@ PARK_COMPLETION_THREAD_KEY: Final[str] = "delivery_thread_id"
 
 # The reserved key a platform-produced async-park RESULT carries in place of an answer,
 # so a resuming driver recognizes the park by the RESULT shape (never a tool name). The
-# in-process client-tool seam stamps it onto the tool result when an async ``ask_user``
+# in-process client-tool seam stamps it onto the tool result when an async ``ask``
 # returns its ``SuspendedInteraction`` sentinel; a resuming driver reads it back off the
 # serialized tool output. Generic: it carries the parked interaction id, its deadline, and
 # the park's resume OWNER — no driver or engine state.
@@ -275,7 +321,11 @@ SUSPENDED_INTERACTION_MARKER_KEY: Final[str] = "tai42:suspended_interaction"
 
 
 def suspended_interaction_marker(
-    interaction_id: str, expiry_at: datetime | None, resume_owner: str | None = None
+    interaction_id: str,
+    expiry_at: datetime | None,
+    resume_owner: str | None = None,
+    interaction_ids: list[str] | None = None,
+    caller_interaction_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the reserved marker dict a platform-produced async park returns in place of an answer.
 
@@ -288,16 +338,23 @@ def suspended_interaction_marker(
     defaults to ``None``, which no bound driver may adopt: a marker built without an owner is
     treated as a nested/foreign park rather than silently claimed.
 
-    Disclosure: this field rides the MCP wire wherever a park sentinel is serialized, so it
-    exposes an internal resume-tool NAME to the caller. That caller already receives the
-    interaction's ``continuation_tool`` on the stored question, so the name is not new
-    information to it; the exposure is accepted.
+    ``interaction_ids`` are every ask this park represents (defaulting to the single
+    ``interaction_id``) and ``caller_interaction_ids`` the subset addressed to the caller
+    (``to="caller"``); both ride the wire so a driver reading the marker off a serialized
+    tool result can MERGE them when it surfaces a whole super-step at one tool face.
+
+    Disclosure: the ``resume_owner`` field rides the MCP wire wherever a park sentinel is
+    serialized, so it exposes an internal resume-tool NAME to the caller. That caller already
+    receives the interaction's ``continuation_tool`` on the stored question, so the name is not
+    new information to it; the exposure is accepted.
     """
     return {
         SUSPENDED_INTERACTION_MARKER_KEY: {
             "interaction_id": interaction_id,
             "expiry_at": expiry_at.isoformat() if expiry_at is not None else None,
             "resume_owner": resume_owner,
+            "interaction_ids": list(interaction_ids) if interaction_ids else [interaction_id],
+            "caller_interaction_ids": list(caller_interaction_ids) if caller_interaction_ids else [],
         }
     }
 
@@ -317,7 +374,10 @@ def read_suspended_interaction_marker(content: Any) -> dict[str, Any] | None:
     so a payload that is not a dict, or one carrying no string ``interaction_id`` (``{}``, a
     bare string, an owner-only object a model shaped), yields ``None`` rather than a malformed
     dict a caller would ``KeyError`` on and abort the run over. A park with no valid interaction
-    id names nothing to resume, so it is not a park. ``resume_owner`` is what makes an otherwise
+    id names nothing to resume, so it is not a park. The returned payload MAY also carry
+    ``interaction_ids`` / ``caller_interaction_ids`` (present on a platform-built marker); a
+    consumer reading them defaults to the single ``interaction_id`` when they are absent.
+    ``resume_owner`` is what makes an otherwise
     well-formed marker checkable — a claimer passes it to :func:`assert_park_adoptable`, and a
     marker carrying no owner (e.g. one a model shaped) names no driver entitled
     to claim it, so it is refused there.
@@ -647,6 +707,13 @@ def set_park_completion(tool: str | None = None, context: Mapping[str, Any] | No
     ``tool`` defaults to ``None``: a driver on a run-face that carries no out-of-band
     delivery still binds a completion (typically to reset a prior binding for the nested
     run), naming no delivery tool.
+
+    ADDRESS-TOOL CONTRACT: a ``tool`` bound here is an out-of-band delivery ADDRESS that
+    only the platform's delivery ladder may fire. Every such address tool asserts the
+    platform's delivery-fire context at entry — its first statement is
+    ``tai42_app.interactions.assert_delivery_authorized(completion_id)`` on the payload's
+    ``completion_id`` — so a caller naming it directly at the run-tool door or the MCP edge
+    is refused (:class:`ParkDeliveryUnauthorizedError`) before it delivers anything.
     """
     return _park_completion.set((tool, context))
 

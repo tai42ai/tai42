@@ -41,7 +41,7 @@ def mark_parked_question(exc: BaseException, interaction_id: str, question: str,
     """Stamp the pending question on a cancellation unwinding out of a parked answer wait.
 
     The turn-budget expiry cancels the awaited turn; when that cancellation is
-    unwinding out of an ``ask_user`` answer wait it carries the pending question here
+    unwinding out of an ``ask`` answer wait it carries the pending question here
     so the ``TurnTimeoutError`` can name what the turn was killed waiting on. A
     ``sensitive`` question is stamped too, but its text is redacted in the expiry
     message so a credential prompt never reaches the error string.

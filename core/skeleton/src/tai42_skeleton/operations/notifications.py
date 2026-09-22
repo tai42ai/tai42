@@ -43,7 +43,7 @@ from tai42_contract.channels import (
     check_interactive_composition,
     check_sections,
 )
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
 from tai42_skeleton.channels.notifications_sink import read_notifications
@@ -168,6 +168,24 @@ with warnings.catch_warnings():
                 "and with options, may combine with media."
             ),
         )
+        data: FormData | None = Field(
+            default=None,
+            description=(
+                "Optional per-send form data over schema: values prefills top-level properties and options "
+                "supplies a per-send choice list for a string (or array-of-strings) property (replacing its "
+                "enum for this send). Rides ONLY a form send — present without schema is a 400. A prefill "
+                "against an unknown/ill-typed property, or an option list on a non-string property, is a 400."
+            ),
+        )
+        pages: list[FormPage] | None = Field(
+            default=None,
+            description=(
+                "Optional stepped layout over schema: each page names the top-level properties shown on one "
+                "step, and across the pages every property appears exactly once. Rides ONLY a form send — "
+                "present without schema is a 400. A page that omits, duplicates, or names an unknown property "
+                "is a 400."
+            ),
+        )
 
         # The new rich fields reuse AnswerPart's/ChannelNotification's SAME field validators, so
         # the operator send surface bounds each shape identically to the flow answer path — never
@@ -249,6 +267,8 @@ async def notify_user(
     sections: list[OptionSection] | None = None,
     header: MediaItem | None = None,
     footer: str | None = None,
+    data: FormData | None = None,
+    pages: list[FormPage] | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.
 
@@ -297,6 +317,13 @@ async def notify_user(
     there; ``schema`` alone REQUIRES a channel (a 400 without one) — a stored form nobody
     could submit would be a dead surface, not a notification.
 
+    ``data`` (per-send prefill ``values`` and per-send ``options`` lists) and ``pages`` (the
+    stepped layout) are the ask-less form's per-send extras — the same ``FormData``/``FormPage``
+    an ask carries. They ride ONLY a form send: present without ``schema`` is a 400. When a
+    ``schema`` is present each is cross-checked against it by the same validator the ask door
+    runs — a prefill against an unknown/ill-typed property, a per-send option list on a
+    non-string property, or a page that omits/duplicates/misnames a property is a 400.
+
     ``audience`` addresses the in-app record to an identity's feed; it is honored
     even when a channel also delivers the message (channel push AND in-app record).
     ``sender_identity`` is the sending identity a channel message leaves FROM, which the
@@ -326,6 +353,8 @@ async def notify_user(
             header=header,
             footer=footer,
             schema=schema,
+            data=data,
+            pages=pages,
         )
     except SenderIdentityNotAllowedError as exc:
         raise BadRequestError(str(exc)) from exc

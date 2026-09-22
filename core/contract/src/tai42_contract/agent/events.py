@@ -106,7 +106,7 @@ class StructuredFinal(StreamEvent):
 class SuspendedFinal(StreamEvent):
     """A generic async park surfaced out of a paused agent graph. Terminal.
 
-    The run parked on one or more async ``ask_user`` questions and will resume out
+    The run parked on one or more async ``ask`` questions and will resume out
     of band when their answers (or expiries) arrive — it did NOT fail and did NOT
     stop for a live decision, so a non-streaming drain returns a suspended RECEIPT
     for it rather than raising :class:`~tai42_contract.agent.base.AgentInterruptedError`.

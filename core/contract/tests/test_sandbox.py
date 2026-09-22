@@ -265,23 +265,29 @@ def test_require_sandbox_raises_the_contract_unavailable_type():
     assert issubclass(SandboxUnavailableError, SandboxError)
 
 
-def test_app_interactions_exposes_ask_user_typed_by_the_contract_protocol():
+def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
     import inspect
     from typing import get_type_hints
 
     from tai42_contract.app import AppInteractions
-    from tai42_contract.interactions import AskUser
+    from tai42_contract.interactions import Ask
 
-    assert protocol_members(AppInteractions) == {"ask_user"}
-    # ``ask_user`` is a read property typed as the already-carried AskUser Protocol.
-    prop = inspect.getattr_static(AppInteractions, "ask_user")
+    assert protocol_members(AppInteractions) == {
+        "ask",
+        "check_answer",
+        "assert_resume_authorized",
+        "assert_delivery_authorized",
+        "redelivery_horizon_seconds",
+    }
+    # ``ask`` is a read property typed as the already-carried Ask Protocol.
+    prop = inspect.getattr_static(AppInteractions, "ask")
     assert isinstance(prop, property)
     assert prop.fget is not None
-    assert get_type_hints(prop.fget)["return"] is AskUser
+    assert get_type_hints(prop.fget)["return"] is Ask
 
 
 def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
-    # A double implementing the AppInteractions facet exposes an AskUser callable that
+    # A double implementing the AppInteractions facet exposes an Ask callable that
     # ACCEPTS the per-ask ``on_mismatch``/``mismatch_notice`` kwargs — the settability
     # a caller reaches through the typed protocol. Both protocols are runtime-checkable,
     # and calling the double captures the values, proving the kwargs are part of the
@@ -290,18 +296,18 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
     import inspect
 
     from tai42_contract.app import AppInteractions
-    from tai42_contract.interactions import AnswerMismatchPolicy, AskUser
+    from tai42_contract.interactions import AnswerMismatchPolicy, Ask
 
-    # The kwargs a facet double threads must be part of the CONTRACT's own AskUser
+    # The kwargs a facet double threads must be part of the CONTRACT's own Ask
     # surface — not merely accepted by some impl double — so a caller reaches them
     # through the typed protocol.
-    proto_params = inspect.signature(AskUser.__call__).parameters
+    proto_params = inspect.signature(Ask.__call__).parameters
     assert proto_params["on_mismatch"].default is AnswerMismatchPolicy.RETRY
     assert proto_params["mismatch_notice"].default is None
 
     captured: dict[str, object] = {}
 
-    class _AskUserDouble:
+    class _AskDouble:
         async def __call__(
             self,
             question: str,
@@ -317,18 +323,30 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
 
     class _InteractionsDouble:
         def __init__(self) -> None:
-            self._ask = _AskUserDouble()
+            self._ask = _AskDouble()
 
         @property
-        def ask_user(self) -> AskUser:
+        def ask(self) -> Ask:
             return self._ask
+
+        def check_answer(self, question: object, answer: object) -> None:
+            return None
+
+        async def assert_resume_authorized(self, interaction_id: str) -> None:
+            return None
+
+        def assert_delivery_authorized(self, completion_id: str | None) -> None:
+            return None
+
+        def redelivery_horizon_seconds(self) -> int:
+            return 0
 
     facet = _InteractionsDouble()
     assert isinstance(facet, AppInteractions)
-    assert isinstance(facet.ask_user, AskUser)
+    assert isinstance(facet.ask, Ask)
 
     answer = asyncio.run(
-        facet.ask_user("confirm?", on_mismatch=AnswerMismatchPolicy.BRIDGE, mismatch_notice="try again: {reason}")
+        facet.ask("confirm?", on_mismatch=AnswerMismatchPolicy.BRIDGE, mismatch_notice="try again: {reason}")
     )
     assert answer == "ok"
     assert captured["on_mismatch"] is AnswerMismatchPolicy.BRIDGE

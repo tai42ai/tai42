@@ -113,7 +113,7 @@ class TaiApp(Protocol):
 
     @property
     def interactions(self) -> AppInteractions:
-        """The ``ask_user`` interactions facade."""
+        """The ``ask`` interactions facade."""
         ...
 
     @property

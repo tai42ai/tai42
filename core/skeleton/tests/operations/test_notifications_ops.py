@@ -29,7 +29,14 @@ from tai42_contract.channels import (
     OptionSection,
     ReplyOption,
 )
-from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+from tai42_contract.interactions.models import (
+    FormData,
+    FormOption,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    MediaKind,
+)
 from tai42_contract.manifest import ApiToolsConfig
 
 from tai42_skeleton.access_control.request_scopes import (
@@ -48,7 +55,7 @@ from tai42_skeleton.operations import (
     operation_metadata_of,
 )
 from tai42_skeleton.operations import notifications as notifications_ops
-from tai42_skeleton.operations.projection import project_operations
+from tai42_skeleton.operations.projection import _make_tool, project_operations
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +145,8 @@ async def test_notify_user_forwards_arguments_and_confirms(monkeypatch: pytest.M
                 "header": None,
                 "footer": None,
                 "schema": None,
+                "data": None,
+                "pages": None,
             },
         )
     ]
@@ -168,6 +177,8 @@ async def test_notify_user_defaults_forwarded_and_maps_valueerror(monkeypatch: p
                 "header": None,
                 "footer": None,
                 "schema": None,
+                "data": None,
+                "pages": None,
             },
         )
     ]
@@ -273,6 +284,8 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "header": None,
                 "footer": None,
                 "schema": None,
+                "data": None,
+                "pages": None,
             },
         ),
         (
@@ -289,6 +302,8 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "header": None,
                 "footer": None,
                 "schema": None,
+                "data": None,
+                "pages": None,
             },
         ),
     ]
@@ -387,6 +402,8 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
                 "header": None,
                 "footer": None,
                 "schema": None,
+                "data": None,
+                "pages": None,
             },
         )
     ]
@@ -416,6 +433,8 @@ async def test_notify_user_forwards_schema(monkeypatch: pytest.MonkeyPatch) -> N
                 "header": None,
                 "footer": None,
                 "schema": schema,
+                "data": None,
+                "pages": None,
             },
         )
     ]
@@ -449,9 +468,57 @@ async def test_notify_user_forwards_full_vocabulary(monkeypatch: pytest.MonkeyPa
                 "header": header,
                 "footer": "thanks",
                 "schema": None,
+                "data": None,
+                "pages": None,
             },
         )
     ]
+
+
+async def test_notify_user_forwards_form_data_and_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The ask-less form's per-send data/pages are forwarded verbatim to the channels helper
+    # alongside the schema, exactly as the other richer-send fields are.
+    helper = _RecordingHelper()
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    data = FormData(values={"name": "Ada"}, options={"name": [FormOption(value="Ada")]})
+    pages = [FormPage(title="You", fields=["name"])]
+
+    await notifications_ops.notify_user("fill this in", channel="web", schema=schema, data=data, pages=pages)
+
+    assert helper.calls == [
+        (
+            ("fill this in",),
+            {
+                "channel": "web",
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
+                "schema": schema,
+                "data": data,
+                "pages": pages,
+            },
+        )
+    ]
+
+
+def test_notify_user_projected_tool_carries_form_data_and_pages() -> None:
+    # The MCP-projected tool derives its schema from the operation function signature, so the
+    # appended data/pages parameters ride the projected notify_user tool with no separate wiring.
+    op = operation_metadata_of(notifications_ops.notify_user)
+    projected = _make_tool(op)
+
+    params = projected.__signature__.parameters
+    assert "data" in params
+    assert "pages" in params
+    assert projected.__annotations__["data"] == (FormData | None)
+    assert projected.__annotations__["pages"] == (list[FormPage] | None)
 
 
 def test_notifyuser_model_enforces_composition_matrix() -> None:
@@ -567,7 +634,7 @@ async def test_restricted_notify_rejects_own_owner_as_403(sink_redis) -> None:
 
 class _RecordingChannel:
     """Records every notification handed to ``notify`` — proves whether the channel
-    path was reached. ``notify_user`` never calls ``deliver`` (that is the ``ask_user``
+    path was reached. ``notify_user`` never calls ``deliver`` (that is the ``ask``
     surface), so its protocol stub asserts if ever reached."""
 
     def __init__(self) -> None:

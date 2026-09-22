@@ -9,14 +9,24 @@ from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.data.jq_util import compile_check, get_compiled_jq, run_jq_bounded, run_jq_first
 
 
+def _first(program, data, variables=None):
+    """Evaluate a compiled program over the ``{"v", "d"}`` envelope and take ``.first()``."""
+    return program.input(jq_util._envelope(data, variables)).first()
+
+
+def _all(program, data, variables=None):
+    """Evaluate a compiled program over the ``{"v", "d"}`` envelope and take ``.all()``."""
+    return program.input(jq_util._envelope(data, variables)).all()
+
+
 class TestGetCompiledJq:
     def test_compiles_and_evaluates(self):
         program = get_compiled_jq(".a")
-        assert program.input(text='{"a": 42}').first() == 42
+        assert _first(program, {"a": 42}) == 42
 
     def test_array_iteration(self):
         program = get_compiled_jq(".[] | .n")
-        assert program.input(text='[{"n": 1}, {"n": 2}]').all() == [1, 2]
+        assert _all(program, [{"n": 1}, {"n": 2}]) == [1, 2]
 
     def test_cached_returns_same_object(self):
         # lru_cache means the same expression yields the identical compiled object.
@@ -74,7 +84,7 @@ class TestEnvGuard:
             get_compiled_jq("this is (not valid")
 
     def test_empty_expression_still_raises(self):
-        with pytest.raises(ValueError, match="compile error"):
+        with pytest.raises(ValueError, match="error"):
             get_compiled_jq("")
 
 
@@ -112,7 +122,7 @@ class TestRunJqFirst:
                 time.sleep(1)
                 return None
 
-        monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="": _SlowProgram())
+        monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="", variables=(): _SlowProgram())
         monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
         reset_all_settings()
         try:
@@ -147,6 +157,11 @@ class TestRunJqBounded:
         assert len(result) <= 2
         assert time.monotonic() - start < 0.5
 
+    async def test_binds_named_variables(self):
+        # The bounded stream reads the same per-evaluation variables as run_jq_first.
+        result = await run_jq_bounded(".[] | . + $bump", [1, 2, 3], limit=5, variables={"bump": 10})
+        assert result == [11, 12, 13]
+
     async def test_timeout_raises_named_promptly(self, monkeypatch):
         # A slow evaluation is bounded by JQ_TIMEOUT_SECONDS; the raised TimeoutError
         # names the env var and returns promptly (well under the 1s the fake blocks for).
@@ -158,7 +173,7 @@ class TestRunJqBounded:
                 time.sleep(1)
                 return iter([])
 
-        monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="": _SlowProgram())
+        monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="", variables=(): _SlowProgram())
         monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
         reset_all_settings()
         try:
@@ -173,24 +188,24 @@ class TestRunJqBounded:
 class TestPrelude:
     # ``get_compiled_jq(expression, prelude)`` compiles a run of ``def …;``
     # declarations ahead of the expression so the expression may call them; the
-    # cache key is the (expression, prelude) pair.
+    # cache key is the (expression, prelude, variable-names) triple.
 
     def test_prelude_def_callable_from_expression(self):
         program = get_compiled_jq("double(.a)", prelude="def double($x): $x * 2;")
-        assert program.input(text='{"a": 21}').first() == 42
+        assert _first(program, {"a": 21}) == 42
 
     def test_prelude_def_calling_a_sibling_def(self):
         # A prelude def may call an earlier sibling def by its bare name — the
         # nested-library shape a views prelude emits.
         prelude = "def one: 1;\ndef two: one + one;"
         program = get_compiled_jq(".x + two", prelude=prelude)
-        assert program.input(text='{"x": 40}').first() == 42
+        assert _first(program, {"x": 40}) == 42
 
     def test_prelude_def_placed_after_guard_still_evaluates(self):
-        # The prelude lands after the guard's ``{} as $ENV | (``; a def there must
-        # still resolve and evaluate.
+        # The prelude lands after the guard's ``{} as $ENV | (`` and the variable
+        # bindings; a def there must still resolve and evaluate.
         program = get_compiled_jq("greet", prelude='def greet: "hi";')
-        assert program.input(text="null").first() == "hi"
+        assert _first(program, None) == "hi"
 
     def test_cache_keyed_on_the_pair(self):
         # Same expression, two preludes -> two distinct compiled programs.
@@ -230,9 +245,9 @@ class TestPrelude:
 
     async def test_empty_prelude_is_unchanged_behavior(self):
         # The default empty prelude yields a program identical in behavior to a
-        # bare call (the guard wrapper alone, no extra defs).
+        # bare call (the guard wrapper and variable bindings alone, no extra defs).
         assert await run_jq_first(".a", {"a": 42}, prelude="") == 42
-        assert get_compiled_jq(".a", prelude="").input(text='{"a": 5}').first() == 5
+        assert _first(get_compiled_jq(".a", prelude=""), {"a": 5}) == 5
 
 
 class TestNamedVariables:
@@ -245,6 +260,34 @@ class TestNamedVariables:
         with pytest.raises(ValueError, match=r"\$extra is not defined"):
             await run_jq_first(".a + $extra.b", {"a": 1})
 
+    async def test_prelude_def_reads_a_bound_variable_inside_map(self):
+        # A prelude def, defined after the variable bindings, reads a bound variable
+        # even inside ``map(...)`` where ``.`` is rebound to each item.
+        result = await run_jq_first(
+            "shift",
+            [1, 2, 3],
+            prelude="def shift: map(. + $bump);",
+            variables={"bump": 10},
+        )
+        assert result == [11, 12, 13]
+
+    async def test_same_names_different_values_reuse_one_compile(self, monkeypatch):
+        # The compile is keyed on the variable NAMES, not the values: two evaluations
+        # with the same names and different values compile exactly once.
+        get_compiled_jq.cache_clear()
+        calls = 0
+        real = jq_util._compile_jq
+
+        def _counting(expression, prelude, variable_names):
+            nonlocal calls
+            calls += 1
+            return real(expression, prelude, variable_names)
+
+        monkeypatch.setattr(jq_util, "_compile_jq", _counting)
+        assert await run_jq_first(".a + $bump", {"a": 1}, variables={"bump": 10}) == 11
+        assert await run_jq_first(".a + $bump", {"a": 5}, variables={"bump": 100}) == 105
+        assert calls == 1
+
     def test_compile_check_declares_variables(self):
         compile_check(".a <= $limit", variables=("limit",))
         with pytest.raises(ValueError, match=r"\$limit is not defined"):
@@ -253,6 +296,15 @@ class TestNamedVariables:
     def test_compile_check_still_refuses_a_syntax_error(self):
         with pytest.raises(ValueError, match="syntax error"):
             compile_check(".a <=", variables=("limit",))
+
+    def test_reserved_variable_name_is_refused(self):
+        for name in ("__in", "ENV", "__loc__"):
+            with pytest.raises(ValueError, match="reserved"):
+                compile_check(".", variables=(name,))
+
+    async def test_reserved_variable_name_refused_on_evaluation(self):
+        with pytest.raises(ValueError, match="reserved"):
+            await run_jq_first(".", {}, variables={"__in": 1})
 
 
 class TestPreludePassthrough:

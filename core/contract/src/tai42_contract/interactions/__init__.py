@@ -1,9 +1,9 @@
-"""Interactions contract: the ``ask_user`` human-in-the-loop surface.
+"""Interactions contract: the ``ask`` human-in-the-loop surface.
 
 ``models`` holds the durable request/state and validated response pydantic
 models, the ``SuspendedInteraction`` sentinel an async ask returns, the
 ``AnswerFormat`` enum, and the display-only ``MediaItem``/``MediaKind`` media
-models a question may carry; ``asker`` holds the ``AskUser`` callable Protocol
+models a question may carry; ``asker`` holds the ``Ask`` callable Protocol
 the engine-agnostic helper satisfies and the ``check_ask_timing`` guard;
 ``continuation`` holds the generic driver-continuation context an async ask reads,
 plus the adopt-or-chain guard a caller applies to a returned park sentinel and the
@@ -12,7 +12,8 @@ chained-park vocabulary a caller that parks on a nested CALL composes its bindin
 
 from __future__ import annotations
 
-from tai42_contract.interactions.asker import AskUser, check_ask_timing
+from tai42_contract.interactions.answer_check import AnswerMismatchError, QuestionFormat
+from tai42_contract.interactions.asker import Ask, check_ask_timing
 from tai42_contract.interactions.continuation import (
     CHAINED_PARK_CONTEXT_KEY,
     CHAINED_PARK_KEY_PREFIX,
@@ -24,21 +25,24 @@ from tai42_contract.interactions.continuation import (
     PARK_COMPLETION_THREAD_KEY,
     SUSPENDED_INTERACTION_MARKER_KEY,
     NestedParkOwnershipError,
+    ParkDeliveryUnauthorizedError,
+    ParkResumeFailed,
+    ParkResumeUnauthorizedError,
     assert_park_adoptable,
     attach_chained_park,
     bound_execution_identity_for_fire,
     chained_park_claims,
     chained_park_context,
     current_execution_identity,
-    fire_continuation_abandoned,
+    fire_park_killed,
     get_park_completion,
     get_resume_continuation_tool,
     is_chained_park_key,
     new_chained_park_key,
     read_suspended_interaction_marker,
-    register_continuation_abandonment_handler,
     register_execution_identity_accessor,
     register_execution_identity_binder,
+    register_park_kill_handler,
     repark_notice,
     reset_park_completion,
     reset_resume_continuation_tool,
@@ -70,7 +74,9 @@ from tai42_contract.interactions.models import (
     LocationElement,
     MediaItem,
     MediaKind,
+    ResumeBuffered,
     SuspendedInteraction,
+    check_addressing,
     check_media_list,
     served_media_id,
     validate_action_url,
@@ -98,8 +104,9 @@ __all__ = [
     "PARK_COMPLETION_THREAD_KEY",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "AnswerFormat",
+    "AnswerMismatchError",
     "AnswerMismatchPolicy",
-    "AskUser",
+    "Ask",
     "FormData",
     "FormOption",
     "FormPage",
@@ -110,24 +117,30 @@ __all__ = [
     "MediaItem",
     "MediaKind",
     "NestedParkOwnershipError",
+    "ParkDeliveryUnauthorizedError",
+    "ParkResumeFailed",
+    "ParkResumeUnauthorizedError",
+    "QuestionFormat",
+    "ResumeBuffered",
     "SuspendedInteraction",
     "assert_park_adoptable",
     "attach_chained_park",
     "bound_execution_identity_for_fire",
     "chained_park_claims",
     "chained_park_context",
+    "check_addressing",
     "check_ask_timing",
     "check_media_list",
     "current_execution_identity",
-    "fire_continuation_abandoned",
+    "fire_park_killed",
     "get_park_completion",
     "get_resume_continuation_tool",
     "is_chained_park_key",
     "new_chained_park_key",
     "read_suspended_interaction_marker",
-    "register_continuation_abandonment_handler",
     "register_execution_identity_accessor",
     "register_execution_identity_binder",
+    "register_park_kill_handler",
     "repark_notice",
     "reset_park_completion",
     "reset_resume_continuation_tool",

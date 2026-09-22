@@ -1,4 +1,4 @@
-"""The builtin ``ask_user`` tool: a thin, LLM-facing shim over the interactions ``ask_user`` helper.
+"""The builtin ``ask`` tool: a thin, LLM-facing shim over the interactions ``ask`` helper.
 
 It lets an agent pause mid-run to ask a human a question — in ``mode="sync"`` it blocks
 until the answer (or a timeout) returns; in ``mode="async"`` it PARKS, returning a
@@ -11,7 +11,7 @@ from typing import Any, Literal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import AnswerMismatchPolicy
 
-from tai42_skeleton.interactions import ask_user as _ask_user
+from tai42_skeleton.interactions import ask as _ask
 
 # The answer is returned as ``Any`` — a scalar (text→str, confirm→bool,
 # select→str) or a dict (external/JSON formats) — so FastMCP derives no output
@@ -28,7 +28,7 @@ _ANSWER_SCHEMA: dict[str, Any] = {
 
 
 @tai42_app.tools.tool(output_schema=_ANSWER_SCHEMA, tags={"interactions"})
-async def ask_user(
+async def ask(
     question: str,
     answer_format: str = "text",
     options: list[str] | None = None,
@@ -46,6 +46,9 @@ async def ask_user(
     mismatch_notice: str | None = None,
     data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
+    to: Literal["user", "caller"] = "user",
+    payload: dict[str, Any] | None = None,
+    on_expiry: Literal["kill", "resume"] = "kill",
 ) -> Any:
     """Ask a human a question mid-run.
 
@@ -147,6 +150,15 @@ async def ask_user(
             ``{"title": ..., "fields": [prop, ...]}`` splitting the form into ordered
             steps; every top-level property must appear on exactly one page. Omit for
             a single-page form. The submitted answer is the union of all pages' fields.
+        to: Who the question is addressed to. "user" (the default) is a human answered
+            through the inbox/callback/channel surfaces. "caller" addresses another RUN:
+            the ask carries NO out-of-band delivery — it parks this run and its answer is
+            handed back by the run that resolves it. A "caller" ask is always mode="async".
+        payload: A structured value a "caller" ask hands the resolving run in place of (or
+            beside) ``question``; when given, ``question`` may be empty. Forbidden for "user".
+        on_expiry: What happens when a parked ask's deadline lapses unanswered. "kill" (the
+            default) tears the whole run chain down; "resume" resumes with the expiry marker.
+            Applies only to an async park.
 
     Returns:
         The typed answer (text -> str, confirm -> bool, select -> chosen value,
@@ -164,7 +176,7 @@ async def ask_user(
         RuntimeError: An ``external`` question (or one bound to a ``channel``)
             was asked without ``INTERACTIONS_PUBLIC_BASE_URL`` configured.
     """
-    return await _ask_user(
+    return await _ask(
         question,
         answer_format=answer_format,
         options=options,
@@ -184,4 +196,7 @@ async def ask_user(
         media=media,  # type: ignore[arg-type]
         mode=mode,
         expiry_at=expiry_at,
+        to=to,
+        payload=payload,
+        on_expiry=on_expiry,
     )

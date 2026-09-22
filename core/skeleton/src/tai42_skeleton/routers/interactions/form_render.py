@@ -13,10 +13,10 @@ from .pages import _FORM_SUBMIT_SCRIPT
 class _FormRenderError(Exception):
     """Raised when a stored form question's schema cannot be rendered into a page.
 
-    The schema is outside the channel-deliverable subset (``form_schema``). ``ask_user``
+    The schema is outside the channel-deliverable subset (``form_schema``). ``ask``
     refuses such a schema before persisting, so a form record that reaches the GET
     door MUST render; failing to is a server bug (a record that bypassed
-    ``ask_user``), so it surfaces as a loud 500 with a logged reason, never a blank
+    ``ask``), so it surfaces as a loud 500 with a logged reason, never a blank
     or half-rendered page silently dropping fields.
     """
 
@@ -83,12 +83,12 @@ def _render_field(
 def _render_form_page(format_payload: dict[str, Any] | None) -> str:
     """Render the schema-driven HTML form for a channel-delivered form question.
 
-    Uses the SAME subset walk (``channel_form_fields``) that ``ask_user`` enforces
+    Uses the SAME subset walk (``channel_form_fields``) that ``ask`` enforces
     at ask time. Per-send ``data`` prefills known values and renders per-send option
     lists; ``pages`` split the fields into ordered steps (Back/Next/Submit, one
     visible at a time), the answer being the union of every step's fields. A schema
     outside the subset raises ``_FormRenderError``; the GET door maps that to a loud
-    500 (the server-bug backstop for a record that bypassed ``ask_user``).
+    500 (the server-bug backstop for a record that bypassed ``ask``).
     """
     payload = format_payload or {}
     schema = payload.get("schema")

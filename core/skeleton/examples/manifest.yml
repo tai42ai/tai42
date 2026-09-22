@@ -74,8 +74,8 @@ extensions_modules: []      # modules registering tool extensions
 # https://tai42.ai/concepts/tools-and-extensions):
 #   - title: file-loader
 #     module: tai42_skeleton.tools.builtin.file_loader  # file_loader (url or resource id -> text/media)
-#   - title: ask-user
-#     module: tai42_skeleton.tools.builtin.interactions  # ask_user (human-in-the-loop)
+#   - title: ask
+#     module: tai42_skeleton.tools.builtin.interactions  # ask (human-in-the-loop)
 #   - title: get-pairing-code
 #     module: tai42_skeleton.tools.builtin.get_pairing_code  # get_pairing_code (mint a channel pair code)
 #

@@ -20,7 +20,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from tai42_kit.utils.data.jq_util import get_compiled_jq
+from tai42_kit.utils.data.jq_util import _envelope, get_compiled_jq
 
 from tai42_skeleton.access_control.roles import EDITOR_JQ, VIEWER_JQ
 from tai42_skeleton.authz.token_free import (
@@ -512,7 +512,7 @@ def _jq_outcome(condition: str, context: dict[str, Any]) -> object:
     """What real libjq does with ``condition`` over ``context``: the whole output stream, or
     the error. Errors count — a jq error message quotes the values that produced it."""
     try:
-        return ("values", get_compiled_jq(condition).input(context).all())
+        return ("values", get_compiled_jq(condition).input(_envelope(context)).all())
     except Exception as exc:
         return ("error", f"{type(exc).__name__}: {exc}")
 

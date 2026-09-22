@@ -1,4 +1,4 @@
-"""Pydantic v2 models for the ``ask_user`` interactions capability.
+"""Pydantic v2 models for the ``ask`` interactions capability.
 
 ``InteractionRequest`` is the durable question written to a per-group stream;
 ``InteractionResponse`` is the validated answer pushed onto the reply channel;
@@ -44,10 +44,12 @@ from tai42_contract.interactions.models.request import (
     MISMATCH_NOTICE_MAX_CHARS,
     QUESTION_MAX_CHARS,
     InteractionRequest,
+    check_addressing,
 )
 from tai42_contract.interactions.models.response import (
     InteractionResponse,
     InteractionState,
+    ResumeBuffered,
     SuspendedInteraction,
 )
 
@@ -76,7 +78,9 @@ __all__ = [
     "LocationElement",
     "MediaItem",
     "MediaKind",
+    "ResumeBuffered",
     "SuspendedInteraction",
+    "check_addressing",
     "check_form_data",
     "check_form_pages",
     "check_media_list",

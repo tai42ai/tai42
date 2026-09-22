@@ -118,7 +118,7 @@ class LifecycleState(ABC):
         # worker-bus subscription task above.
         self._reprobe_task: asyncio.Task[None] | None = None
 
-        # The async-park expiry reaper loop, owned by app_context: an async ask_user
+        # The async-park expiry reaper loop, owned by app_context: an async ask
         # has no blocking waiter, so this loop is what fires a parked question's
         # continuation once its expiry passes. Runs until cancelled at shutdown.
         self._interactions_reaper_task: asyncio.Task[None] | None = None

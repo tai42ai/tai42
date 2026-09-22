@@ -513,7 +513,7 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
 
 
 async def test_agent_drain_async_park_is_a_silent_outcome(env, monkeypatch):
-    # The conversation door binds a completion tool around the turn, so an async ask_user
+    # The conversation door binds a completion tool around the turn, so an async ask
     # PARKS: the turn produces no reply now (a silent outcome) and the resumed answer is
     # delivered out of band by the completion continuation.
     route = _api_route()

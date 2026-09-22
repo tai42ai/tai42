@@ -2,7 +2,7 @@
 
 Forwards to the app's :class:`~tai42_skeleton.channels.registry.ChannelRegistry`.
 A channel plugin registers a named deliverer here via an import-only
-``channel_modules`` manifest entry; the ``ask_user`` helper resolves it by name
+``channel_modules`` manifest entry; the ``ask`` helper resolves it by name
 at ask time, and the channels catalog route lists the registered names.
 """
 

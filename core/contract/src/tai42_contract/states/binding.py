@@ -16,10 +16,12 @@ validate-and-attach live in the skeleton, and the wire shape mirrors the Studio 
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tai42_contract.states.models import STATE_NAME_RE
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
 
 class StateInjection(BaseModel):
@@ -34,7 +36,23 @@ class StateInjection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     template_jq: str | None = None
-    jq: TemplatedText | None = None
+    jq: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="injection jq",
+                    blurb="the injection input document",
+                    keys=[
+                        ("record", "the attached record's subtree, or {} when no record exists yet"),
+                        ("input", "the run input the dispatch is about to run on"),
+                    ],
+                    returns="the value placed into the run input at 'into'",
+                    sample={"record": {"count": 3}, "input": {"value": 2}},
+                )
+            }
+        ),
+    ] = None
     into: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -59,9 +77,58 @@ class StateUpdate(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     template_jq: str | None = None
-    jq: TemplatedText | None = None
-    adapter: TemplatedText | None = None
-    op_id: TemplatedText | None = None
+    jq: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="custom update jq",
+                    blurb="the custom-update input document",
+                    keys=[
+                        ("record", "the attached record's subtree, or {} when no record exists yet"),
+                        ("output", "the run's output the update runs after"),
+                        ("input", "the run input the dispatch ran on"),
+                    ],
+                    returns="the op batch (a list of ops) applied to the record",
+                    sample={"record": {"count": 3}, "output": {"ok": True}, "input": {"value": 2}},
+                )
+            }
+        ),
+    ] = None
+    adapter: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="update adapter",
+                    blurb="the update input document",
+                    keys=[
+                        ("output", "the run's output the update runs after"),
+                        ("input", "the run input the dispatch ran on"),
+                    ],
+                    returns="the template program's '.input' object",
+                    sample={"output": {"ok": True}, "input": {"value": 2}},
+                )
+            }
+        ),
+    ] = None
+    op_id: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="op_id expression",
+                    blurb="the update input document",
+                    keys=[
+                        ("output", "the run's output the update runs after"),
+                        ("input", "the run input the dispatch ran on"),
+                    ],
+                    returns="a string idempotency key, or null for no key",
+                    sample={"output": {"ok": True}, "input": {"value": 2}},
+                )
+            }
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> StateUpdate:
@@ -89,8 +156,32 @@ class StateAttach(BaseModel):
 
     state: str
     templates: list[str] = Field(default_factory=list[str])
-    subject_expr: TemplatedText
-    scope_expr: TemplatedText | None = None
+    subject_expr: Annotated[
+        TemplatedText,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="subject expression",
+                    blurb="the run input the dispatch is about to run on",
+                    returns="a full subject object {target_kind, target_name, kind, key}, or a bare key string",
+                    sample={"account_id": "acct_42"},
+                )
+            }
+        ),
+    ]
+    scope_expr: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="scope expression",
+                    blurb="the run input the dispatch is about to run on",
+                    returns="a boolean — false skips this state for the run, true (or absent) engages it",
+                    sample={"account_id": "acct_42"},
+                )
+            }
+        ),
+    ] = None
     input_injections: list[StateInjection] = Field(default_factory=list[StateInjection])
     updates: list[StateUpdate] = Field(default_factory=list[StateUpdate])
 

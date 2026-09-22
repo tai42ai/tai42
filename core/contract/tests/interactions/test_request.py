@@ -1,6 +1,6 @@
 """Validator tests for the durable ``InteractionRequest`` — per-answer-format payload,
 the async park discipline, ``SuspendedInteraction``, the ``check_ask_timing`` guard and the
-``AskUser`` signature, plus naive-datetime rejection."""
+``Ask`` signature, plus naive-datetime rejection."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tai42_contract.interactions.asker import AskUser, check_ask_timing
+from tai42_contract.interactions.asker import Ask, check_ask_timing
 from tai42_contract.interactions.models import (
     QUESTION_MAX_CHARS,
     AnswerFormat,
@@ -218,6 +218,85 @@ def test_interaction_sync_with_continuation_identity_raises_naming_it():
         _interaction(continuation_identity="svc-key-1")
 
 
+# === the ``to`` addressing matrix ==========================================
+
+
+def _caller(**overrides: Any) -> InteractionRequest:
+    """A valid async caller request; ``overrides`` mutate one field to probe a rule."""
+    base: dict[str, Any] = {
+        "to": "caller",
+        "mode": "async",
+        "continuation_tool": "resume_tool",
+        "continuation_identity": "svc-key-1",
+        "expiry_at": _now(),
+    }
+    base.update(overrides)
+    return _interaction(**base)
+
+
+def test_caller_ask_valid_defaults_to_user_elsewhere():
+    assert _interaction().to == "user"
+    req = _caller()
+    assert req.to == "caller"
+
+
+def test_caller_ask_forbids_sync_mode():
+    with pytest.raises(ValueError, match="to='caller' requires mode='async'"):
+        _interaction(to="caller", mode="sync")
+
+
+def test_caller_ask_requires_question_or_payload():
+    # Empty question with no payload leaves the resolving run nothing to act on.
+    with pytest.raises(ValueError, match="requires a question or a payload"):
+        _caller(question="")
+    # A payload substitutes for an empty question.
+    req = _caller(question="", payload={"intent": "review"})
+    assert req.payload == {"intent": "review"}
+
+
+def test_user_ask_forbids_payload():
+    with pytest.raises(ValueError, match="payload is only valid with to='caller'"):
+        _interaction(payload={"x": 1})
+
+
+def test_user_ask_forbids_free_format():
+    with pytest.raises(ValueError, match="answer_format 'free' is only valid with to='caller'"):
+        _interaction(answer_format=AnswerFormat.FREE)
+
+
+def test_caller_ask_allows_free_format_and_optional_schema():
+    assert _caller(answer_format=AnswerFormat.FREE).answer_format is AnswerFormat.FREE
+    req = _caller(answer_format=AnswerFormat.FREE, format_payload={"schema": {"type": "object"}})
+    assert req.format_payload == {"schema": {"type": "object"}}
+
+
+def test_free_format_payload_rejects_extra_keys():
+    with pytest.raises(ValueError, match="free answer_format payload carries only an optional schema"):
+        _caller(answer_format=AnswerFormat.FREE, format_payload={"schema": {}, "bogus": 1})
+
+
+def test_on_expiry_defaults_to_kill_and_round_trips():
+    assert _interaction().on_expiry == "kill"
+    req = _caller(on_expiry="resume")
+    restored = InteractionRequest.model_validate_json(req.model_dump_json())
+    assert restored.on_expiry == "resume"
+
+
+def test_delivery_and_run_delivery_id_round_trip_as_a_tuple():
+    # The run's address is stored as a ``(tool, context)`` pair; JSON round-trips it to a
+    # tuple (never a keyed dict) so the delivery chokepoint can unpack it.
+    req = _caller(run_delivery_id="rid-1", delivery=("deliver_tool", {"thread": "t1"}))
+    restored = InteractionRequest.model_validate_json(req.model_dump_json())
+    assert restored.run_delivery_id == "rid-1"
+    assert restored.delivery == ("deliver_tool", {"thread": "t1"})
+
+
+def test_delivery_defaults_none_for_a_receiverless_run():
+    req = _caller()
+    assert req.delivery is None
+    assert req.run_delivery_id is None
+
+
 # === interactions/models.py — SuspendedInteraction ==========================
 
 
@@ -231,6 +310,30 @@ def test_suspended_interaction_constructs_and_json_round_trips():
 
 def test_suspended_interaction_expiry_defaults_none():
     assert SuspendedInteraction(interaction_id="i1").expiry_at is None
+
+
+def test_suspended_interaction_ids_default_to_the_single_id():
+    s = SuspendedInteraction(interaction_id="i1")
+    assert s.interaction_ids == ["i1"]
+    assert s.caller_interaction_ids == []
+
+
+def test_suspended_interaction_carries_the_caller_subset():
+    s = SuspendedInteraction(interaction_id="i1", interaction_ids=["i1"], caller_interaction_ids=["i1"])
+    restored = SuspendedInteraction.model_validate_json(s.model_dump_json())
+    assert restored.interaction_ids == ["i1"]
+    assert restored.caller_interaction_ids == ["i1"]
+
+
+def test_suspended_interaction_merged_step_lists_survive():
+    # A driver surfacing a whole super-step at one tool face merges the per-ask lists.
+    s = SuspendedInteraction(
+        interaction_id="i1",
+        interaction_ids=["i1", "i2", "i3"],
+        caller_interaction_ids=["i2"],
+    )
+    assert s.interaction_ids == ["i1", "i2", "i3"]
+    assert s.caller_interaction_ids == ["i2"]
 
 
 def test_suspended_interaction_requires_interaction_id():
@@ -256,7 +359,7 @@ def test_suspended_interaction_expiry_at_normalized_to_utc():
     assert s.expiry_at.hour == 10
 
 
-# === interactions/asker.py — check_ask_timing + AskUser signature ===========
+# === interactions/asker.py — check_ask_timing + Ask signature ===========
 
 
 def test_check_ask_timing_allows_timeout_only():
@@ -276,8 +379,8 @@ def test_check_ask_timing_rejects_both():
         check_ask_timing(timeout=5.0, expiry_at=_now())
 
 
-def test_ask_user_signature_has_keyword_only_mode_and_expiry():
-    params = inspect.signature(AskUser.__call__).parameters
+def test_ask_signature_has_keyword_only_mode_and_expiry():
+    params = inspect.signature(Ask.__call__).parameters
     assert params["mode"].kind is inspect.Parameter.KEYWORD_ONLY
     assert params["mode"].default == "sync"
     assert params["expiry_at"].kind is inspect.Parameter.KEYWORD_ONLY

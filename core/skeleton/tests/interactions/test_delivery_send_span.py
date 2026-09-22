@@ -1,4 +1,4 @@
-"""The ask_user channel-delivery send seam (tier 1 of the send-outcome layer): one
+"""The ask channel-delivery send seam (tier 1 of the send-outcome layer): one
 ``send:<channel>`` span PER delivery ATTEMPT, so a retried delivery shows each attempt's
 outcome (attempt 1 failed retryable, attempt 2 accepted) rather than one collapsed span.
 
@@ -18,11 +18,12 @@ from tai42_contract.interactions import (
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
+from tai42_contract.tools import tool_call_frame
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
-from tai42_skeleton.interactions import ask_user
+from tai42_skeleton.interactions import ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
@@ -54,7 +55,8 @@ def _interactions_store_configured(monkeypatch):
 def driver():
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    yield
+    with tool_call_frame():
+        yield
     reset_execution_identity(id_token)
     reset_resume_continuation_tool(tool_token)
 
@@ -95,7 +97,7 @@ async def test_one_span_per_delivery_attempt(monkeypatch, fake_client_ctx, drive
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     channel = register_channel("flaky", _FlakyChannel())
 
-    result = await ask_user(
+    result = await ask(
         "proceed?",
         channel="flaky",
         recipient="+15550001111",

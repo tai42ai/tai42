@@ -1,4 +1,4 @@
-"""Human-messaging facets: webhook verifiers, channels, conversations, and the ask_user facade."""
+"""Human-messaging facets: webhook verifiers, channels, conversations, and the ask facade."""
 
 from __future__ import annotations
 
@@ -8,24 +8,72 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge
 from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt, TargetBindValidator
-from tai42_contract.interactions.asker import AskUser
+from tai42_contract.interactions.answer_check import QuestionFormat
+from tai42_contract.interactions.asker import Ask
 from tai42_contract.interactions.models import LocationElement, MediaItem
 from tai42_contract.webhooks import WebhookVerifier
 
 
 @runtime_checkable
 class AppInteractions(Protocol):
-    """The interactions namespace (``app.interactions``) — the ``ask_user`` facade."""
+    """The interactions namespace (``app.interactions``) — the ``ask`` facade and answer check."""
+
+    def check_answer(self, question: QuestionFormat, answer: Any) -> None:
+        """Validate ``answer`` against ``question`` — the ONE answer check every door reaches.
+
+        ``question`` is a :class:`~tai42_contract.interactions.QuestionFormat` (the answer
+        format plus its payload — no stored request needed). Returns ``None`` when the answer
+        conforms; raises :class:`~tai42_contract.interactions.AnswerMismatchError` (carrying the
+        failing field's dotted path when the fault locates to one) otherwise. The answer door,
+        the callback door, a resumed run's ``visit`` and plugins all validate through this one
+        callable so every surface applies identical rules per format.
+        """
+        ...
+
+    async def assert_resume_authorized(self, interaction_id: str) -> None:
+        """Authorise the caller to resume (or deliver an outcome for) ``interaction_id`` — or raise.
+
+        A driver's continuation face and cross-driver chain-delivery tool call this with the id
+        they are about to resume/deliver-to, BEFORE producing any outcome, because those tools are
+        dispatchable by name at the run-tool door and the MCP edge. Authorised only inside the
+        platform's own resume of that run: it passes iff the ambient run-authorization context
+        names ``interaction_id`` directly (the resume origin) OR the interaction's stored run
+        delivery identity matches the ambient one (a cross-driver chain re-entry of the same run).
+        Raises :class:`~tai42_contract.interactions.ParkResumeUnauthorizedError` for an external
+        caller (no origin) or an id belonging to another run — never a mere presence test.
+        """
+        ...
+
+    def assert_delivery_authorized(self, completion_id: str | None) -> None:
+        """Authorise a door delivery-address tool to fire for ``completion_id`` — or raise.
+
+        A door's out-of-band delivery address is a registered tool the platform's delivery ladder
+        fires; the tool calls this at entry with the payload's ``completion_id`` before delivering
+        anything. It passes iff the ambient delivery-fire context is set AND equals
+        ``completion_id`` — a ``None`` id and a call outside any fire never pass. Raises
+        :class:`~tai42_contract.interactions.ParkDeliveryUnauthorizedError` otherwise, so a caller
+        naming the address tool directly at the run-tool door or the MCP edge delivers nothing.
+        """
+        ...
+
+    def redelivery_horizon_seconds(self) -> int:
+        """The platform's redelivery retention horizon in seconds.
+
+        The continuation-due record ages out at it and the reaper caps its redelivery backoff at
+        it, so no resume redelivery fires past it. A resuming driver derives its own
+        resolution-record retention from this value rather than a hard-coded guess.
+        """
+        ...
 
     @property
-    def ask_user(self) -> AskUser:
-        """The bound, :class:`~tai42_contract.interactions.AskUser`-typed ``ask_user`` callable.
+    def ask(self) -> Ask:
+        """The bound, :class:`~tai42_contract.interactions.Ask`-typed ``ask`` callable.
 
         An in-process plugin asks a human without importing the skeleton:
-        ``await tai42_app.interactions.ask_user(question, ..., mode="async",
-        expiry_at=...)``. The return shape is the ``AskUser`` contract's:
+        ``await tai42_app.interactions.ask(question, ..., mode="async",
+        expiry_at=...)``. The return shape is the ``Ask`` contract's:
         ``mode="sync"`` returns the typed answer, ``mode="async"`` returns a
-        ``SuspendedInteraction``. Its full call signature is the ``AskUser``
+        ``SuspendedInteraction``. Its full call signature is the ``Ask``
         Protocol's, including the per-ask ``on_mismatch`` digression policy and
         ``mismatch_notice`` retry text a channel-delivered ask carries. A facade
         EXPOSURE of the skeleton helper through the already-typed Protocol — no new
@@ -75,7 +123,7 @@ class AppChannels(Protocol):
     def get(self, name: str) -> Channel:
         """Fetch a registered channel by name; raise loudly on an unknown name.
 
-        Resolution happens when ``ask_user`` is called with ``channel=name``,
+        Resolution happens when ``ask`` is called with ``channel=name``,
         BEFORE any interaction state is written, so an unknown name surfaces as
         a loud failure, never a question silently delivered nowhere.
         """

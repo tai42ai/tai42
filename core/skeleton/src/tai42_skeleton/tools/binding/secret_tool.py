@@ -37,7 +37,7 @@ class _SecretRevealingTool(FunctionTool):
         gate = inprocess_reveal_gate.get()
         if gate is not None:
             if isinstance(raw_value, SuspendedInteraction):
-                # An async ask_user through a preset parks the caller and returns this
+                # An async ask through a preset parks the caller and returns this
                 # sentinel. FastMCP's serialization would FLATTEN the pydantic model into
                 # ``structured_content`` (a plain dict), so the dispatch's type-based park
                 # recognition fails and the flow proceeds UN-parked while the delivered
@@ -53,7 +53,7 @@ class _SecretRevealingTool(FunctionTool):
                 return super().convert_result(mask_secrets(raw_value))
             return super().convert_result(raw_value)
         if isinstance(raw_value, SuspendedInteraction):
-            # Unarmed MCP edge: an async ask_user through this tool (or a preset over it)
+            # Unarmed MCP edge: an async ask through this tool (or a preset over it)
             # parked the caller and returned this sentinel. FastMCP's own serialization
             # would FLATTEN the pydantic model into ``structured_content`` (its plain
             # fields), dropping the reserved marker key a dispatch edge recognizes a park
@@ -65,7 +65,13 @@ class _SecretRevealingTool(FunctionTool):
             # tool's output_schema) since the marker is a control signal, not the tool's
             # declared output — it must ride the wire top-level, unwrapped, whatever the
             # base tool's return schema.
-            marker = suspended_interaction_marker(raw_value.interaction_id, raw_value.expiry_at, raw_value.resume_owner)
+            marker = suspended_interaction_marker(
+                raw_value.interaction_id,
+                raw_value.expiry_at,
+                raw_value.resume_owner,
+                interaction_ids=raw_value.interaction_ids,
+                caller_interaction_ids=raw_value.caller_interaction_ids,
+            )
             return ToolResult(structured_content=marker)
         if contains_secrets(raw_value):
             # Unarmed MCP edge: this reveal exposes a secret into ``structured_content``.

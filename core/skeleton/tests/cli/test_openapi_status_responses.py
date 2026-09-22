@@ -394,13 +394,13 @@ def test_callback_documents_html_get_and_json_post(spec: dict) -> None:
 
 def test_callback_documents_its_error_statuses(spec: dict, api_routes: list[RouteMetadata]) -> None:
     # The callback door declares the full set it answers: 400 (malformed JSON body),
-    # 401 (failed verification), 404 (unknown/expired ticket), 413 (oversized
-    # body/query), 500 (verifier error). Pinned as ground truth so a change to the
-    # declared set trips here.
+    # 401 (failed verification), 404 (unknown/expired ticket), 409 (a caller ask,
+    # answerable only by its calling run), 413 (oversized body/query), 500 (verifier
+    # error). Pinned as ground truth so a change to the declared set trips here.
     (callback,) = [m for m in api_routes if m.path == "/api/interactions/callback/{ticket}"]
-    assert set(callback.error_statuses) == {400, 401, 404, 413, 500}
+    assert set(callback.error_statuses) == {400, 401, 404, 409, 413, 500}
     responses = spec["paths"]["/api/interactions/callback/{ticket}"]["post"]["responses"]
-    for status in ("400", "401", "404", "413", "500"):
+    for status in ("400", "401", "404", "409", "413", "500"):
         assert status in responses, f"callback POST is missing the {status} response"
 
 

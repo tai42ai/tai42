@@ -223,7 +223,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
 
     @property
     def interactions(self) -> InteractionsFacet:
-        """The interactions facet (``app.interactions``) — the ``ask_user`` facade."""
+        """The interactions facet (``app.interactions``) — the ``ask`` facade."""
         return self._interactions_facet
 
     @property

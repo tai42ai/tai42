@@ -196,8 +196,8 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                     logger.warning("in-process tool %r failed: %s", tool_obj.name, exc, exc_info=exc)
                     raise ToolException(f"Error calling tool {tool_obj.name!r}: {exc}") from exc
                 if isinstance(result, SuspendedInteraction):
-                    # An async ask_user parked the caller and returned this sentinel. Inside a
-                    # graph the tool task must COMPLETE (so ask_user runs exactly once, never
+                    # An async ask parked the caller and returned this sentinel. Inside a
+                    # graph the tool task must COMPLETE (so ask runs exactly once, never
                     # replayed on resume), so convert the sentinel to the reserved contract
                     # marker: the ToolMessage commits carrying it, and the in-graph park
                     # middleware recognizes the park by this RESULT shape (never a tool name) and
@@ -227,8 +227,15 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                         logger.info("in-process tool %r returned a park this run does not own: %s", tool_obj.name, exc)
                         raise ToolException(str(exc)) from exc
                     # The owner rides the WIRE form too: the driver that later claims this park
-                    # reads it off the serialized ToolMessage, never off the sentinel.
-                    return suspended_interaction_marker(park_key, result.expiry_at, park_owner)
+                    # reads it off the serialized ToolMessage, never off the sentinel. The per-ask
+                    # id lists ride it as well so a driver surfacing a whole step can merge them.
+                    return suspended_interaction_marker(
+                        park_key,
+                        result.expiry_at,
+                        park_owner,
+                        interaction_ids=result.interaction_ids,
+                        caller_interaction_ids=result.caller_interaction_ids,
+                    )
                 # The model never sees a secret value: this adapter feeds the langchain layer (the
                 # model, the checkpoint, the callback trace), so a wrapped secret is masked before
                 # it leaves here.

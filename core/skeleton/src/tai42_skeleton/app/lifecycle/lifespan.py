@@ -66,7 +66,7 @@ class LifespanMixin(LifecycleState):
             # Start the failed-MCP re-probe task so a server that failed its boot
             # probe self-heals on an exponential backoff without a manual reload.
             self._spawn_reprobe_task()
-            # Start the async-park expiry reaper so a parked ask_user's continuation
+            # Start the async-park expiry reaper so a parked ask's continuation
             # fires once its expiry passes even with no blocking waiter to trip it.
             self._spawn_interactions_reaper()
             # Start the sandbox session reap loop, but only when a provider backs the

@@ -172,7 +172,7 @@ class CrossIdentityAudienceError(Exception):
 def clamp_write_audience(audience: str | None) -> str | None:
     """Scope the ``audience`` a write door may address to the caller's own slice.
 
-    The WRITE-side dual of the isolation read clamps, for a write door (``ask_user`` /
+    The WRITE-side dual of the isolation read clamps, for a write door (``ask`` /
     ``notify_user``).
 
     A RESTRICTED caller (:func:`restricted_identity` returns a non-None id — an owned

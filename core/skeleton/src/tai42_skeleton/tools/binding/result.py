@@ -7,7 +7,7 @@ from typing import Any
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic_core import PydanticSerializationError, to_jsonable_python
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.secrets import SecretValue
 
 
@@ -73,11 +73,13 @@ def _serialize_result(result: Any) -> Any:
     one keeps the wrapper through the seam (revealed at the sync door, masked by the
     recorder); every other unserializable type still raises loudly.
     """
-    if isinstance(result, SuspendedInteraction):
-        # An async ask_user parks the caller and returns this sentinel; keep the
-        # object through the direct-run seam (never flattened to a plain dict) so the
-        # turn engine recognizes the park by TYPE and ends the turn silently. Each
-        # edge door that serializes for the wire does so at its own boundary.
+    if isinstance(result, (SuspendedInteraction, ResumeBuffered)):
+        # An async ask parks the caller and returns a ``SuspendedInteraction`` sentinel; a resume
+        # that leaves sibling asks of the same super-step still open returns a ``ResumeBuffered``.
+        # Both are non-terminal park signals: keep the object through the direct-run seam (never
+        # flattened to a plain dict) so the delivery chokepoint and the turn engine recognize the
+        # still-parked run by TYPE rather than mistaking it for a terminal result. Each edge door
+        # that serializes for the wire does so at its own boundary.
         return result
     if isinstance(result, Image):
         result = result.to_image_content()

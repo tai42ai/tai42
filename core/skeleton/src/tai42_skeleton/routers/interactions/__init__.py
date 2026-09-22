@@ -1,4 +1,4 @@
-"""HTTP routes for the ask_user interactions surface — ``/api/interactions/*``.
+"""HTTP routes for the ask interactions surface — ``/api/interactions/*``.
 
 Doors:
 

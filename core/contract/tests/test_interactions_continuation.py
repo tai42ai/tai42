@@ -1,4 +1,4 @@
-"""Tests for the driver-continuation context an async ``ask_user`` reads: the
+"""Tests for the driver-continuation context an async ``ask`` reads: the
 default (no resuming driver bound), the set/get/reset round-trip, nested restore,
 and isolation across concurrent asyncio tasks. The completion continuation (the
 deferred-response delivery tool) is a generic twin with the same discipline, and
@@ -31,13 +31,11 @@ from tai42_contract.interactions import (
     attach_chained_park,
     chained_park_claims,
     chained_park_context,
-    fire_continuation_abandoned,
     get_park_completion,
     get_resume_continuation_tool,
     is_chained_park_key,
     new_chained_park_key,
     read_suspended_interaction_marker,
-    register_continuation_abandonment_handler,
     repark_notice,
     reset_park_completion,
     reset_resume_continuation_tool,
@@ -58,58 +56,6 @@ def test_set_get_reset_round_trip():
     assert get_resume_continuation_tool() == "resume_tool"
     reset_resume_continuation_tool(token)
     assert get_resume_continuation_tool() is None
-
-
-def test_abandonment_handlers_fire_with_the_interaction_id(monkeypatch: pytest.MonkeyPatch):
-    # The abandonment seam invokes every registered handler with the abandoned interaction id.
-    from tai42_contract.interactions import continuation as cont
-
-    monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
-    seen_a: list[str] = []
-    seen_b: list[str] = []
-
-    async def _a(interaction_id: str) -> None:
-        seen_a.append(interaction_id)
-
-    async def _b(interaction_id: str) -> None:
-        seen_b.append(interaction_id)
-
-    register_continuation_abandonment_handler(_a)
-    register_continuation_abandonment_handler(_b)
-    # Idempotent by identity: re-registering the SAME callable adds no duplicate.
-    register_continuation_abandonment_handler(_a)
-    assert vars(cont)["_continuation_abandonment_handlers"] == [_a, _b]
-
-    asyncio.run(fire_continuation_abandoned("i1"))
-    assert seen_a == ["i1"]
-    assert seen_b == ["i1"]
-
-
-def test_abandonment_fire_is_best_effort_per_handler(monkeypatch: pytest.MonkeyPatch):
-    # One handler that raises is logged and swallowed, so it never starves the others or aborts
-    # the fire.
-    from tai42_contract.interactions import continuation as cont
-
-    monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
-    seen: list[str] = []
-
-    async def _poison(interaction_id: str) -> None:
-        raise RuntimeError("boom")
-
-    async def _healthy(interaction_id: str) -> None:
-        seen.append(interaction_id)
-
-    register_continuation_abandonment_handler(_poison)
-    register_continuation_abandonment_handler(_healthy)
-    asyncio.run(fire_continuation_abandoned("i1"))
-    assert seen == ["i1"]
-
-
-def test_abandonment_fire_with_no_handlers_is_a_noop(monkeypatch: pytest.MonkeyPatch):
-    from tai42_contract.interactions import continuation as cont
-
-    monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
-    asyncio.run(fire_continuation_abandoned("i1"))  # no handlers registered — no error
 
 
 def test_execution_identity_bridge_capture_and_bind(monkeypatch: pytest.MonkeyPatch):
@@ -308,11 +254,31 @@ def test_the_refusal_leads_with_the_remedy_and_trails_the_diagnostics():
 
 def test_the_wire_marker_carries_the_park_owner():
     # The marker is the WIRE form a claimer reads off a serialized tool result, so the owner
-    # has to ride it — the sentinel object never reaches that seam.
+    # has to ride it — the sentinel object never reaches that seam. The per-ask id lists ride it
+    # too, defaulting to the single id / empty caller subset when the minter passes none.
     payload = suspended_interaction_marker("i1", None, "agent_resume")[SUSPENDED_INTERACTION_MARKER_KEY]
-    assert payload == {"interaction_id": "i1", "expiry_at": None, "resume_owner": "agent_resume"}
+    assert payload == {
+        "interaction_id": "i1",
+        "expiry_at": None,
+        "resume_owner": "agent_resume",
+        "interaction_ids": ["i1"],
+        "caller_interaction_ids": [],
+    }
     # And it survives the JSON round trip the tool-output serialization puts it through.
     assert read_suspended_interaction_marker(json.dumps({SUSPENDED_INTERACTION_MARKER_KEY: payload})) == payload
+
+
+def test_the_wire_marker_carries_the_step_id_lists():
+    # A driver surfacing a whole super-step passes the merged per-ask lists, and both ride the
+    # wire so a claimer reading a serialized tool result can tell the caller asks apart.
+    payload = suspended_interaction_marker(
+        "i1", None, "agent_resume", interaction_ids=["i1", "i2"], caller_interaction_ids=["i2"]
+    )[SUSPENDED_INTERACTION_MARKER_KEY]
+    assert payload["interaction_ids"] == ["i1", "i2"]
+    assert payload["caller_interaction_ids"] == ["i2"]
+    marker = read_suspended_interaction_marker(json.dumps({SUSPENDED_INTERACTION_MARKER_KEY: payload}))
+    assert marker is not None
+    assert marker["caller_interaction_ids"] == ["i2"]
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,5 @@
 """Tests for ``ChannelDelivery`` — the one question handed to a channel for delivery —
-plus the ``ask_user`` channel-delivery keyword surface."""
+plus the ``ask`` channel-delivery keyword surface."""
 
 from __future__ import annotations
 
@@ -194,7 +194,7 @@ def test_delivery_timeout_must_be_tz_aware():
 def test_channel_delivery_shape():
     from tai42_contract.channels import ChannelDelivery
 
-    # The ask_user delivery path carries the form ``schema``, its per-send ``data`` and
+    # The ask delivery path carries the form ``schema``, its per-send ``data`` and
     # ``pages``, and the question's display ``media`` (full parity with the inbox), but
     # never a ``template`` — a template is an out-of-window notification send, not a
     # question delivery.
@@ -257,10 +257,10 @@ def test_channel_delivery_rejects_form_extras_on_non_form():
         )
 
 
-def test_ask_user_accepts_channel_and_recipient_keywords():
-    from tai42_contract.interactions.asker import AskUser
+def test_ask_accepts_channel_and_recipient_keywords():
+    from tai42_contract.interactions.asker import Ask
 
-    params = inspect.signature(AskUser.__call__).parameters
+    params = inspect.signature(Ask.__call__).parameters
     for name in ("channel", "recipient"):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
         assert params[name].default is None
@@ -273,11 +273,11 @@ def test_ask_user_accepts_channel_and_recipient_keywords():
     assert ordered[ordered.index("mismatch_notice") + 1] == "sensitive"
 
 
-def test_ask_user_accepts_on_mismatch_and_mismatch_notice_keywords():
+def test_ask_accepts_on_mismatch_and_mismatch_notice_keywords():
     from tai42_contract.interactions import AnswerMismatchPolicy
-    from tai42_contract.interactions.asker import AskUser
+    from tai42_contract.interactions.asker import Ask
 
-    params = inspect.signature(AskUser.__call__).parameters
+    params = inspect.signature(Ask.__call__).parameters
     # ``on_mismatch`` is the contract's own policy enum, defaulting to RETRY
     # (today's behavior); ``mismatch_notice`` is optional custom retry text.
     on_mismatch = params["on_mismatch"]

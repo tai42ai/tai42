@@ -1,4 +1,4 @@
-"""The human answer operation for the ask_user interactions surface.
+"""The human answer operation for the ask interactions surface.
 
 ``answer_interaction`` is the authenticated human answer door
 (``POST /api/interactions/{interaction_id}/answer``): the value is validated
@@ -6,38 +6,40 @@ server-side against the stored question's ``answer_format`` before the blocked
 caller is woken; an invalid answer is rejected loudly and the caller stays
 blocked. An EXTERNAL question is answered through its callback URL, never here.
 
-The answer-validation helpers (``_validate_answer``, ``_schema_mismatch``, …),
-the reply-TTL clamp, and the serializer-guarded claim live here because the
-router's still-handler callback door shares the exact same rules — it imports
-them from this module (the store claim, the typed-format validation, the reply
-TTL). The router's HTTP-edge extractor reads/parses the request body (the byte
-cap → 413, invalid JSON / missing ``answer`` → 400) and hands this operation the
-already-parsed ``answer`` value.
+The answer is validated through the shared ``check_answer``
+(``tai42_app.interactions.check_answer`` /
+:mod:`tai42_skeleton.interactions.answer_check`), the one check every door reaches. The
+reply-TTL clamp and the serializer-guarded claim live here because the router's still-handler
+callback door shares them (the store claim, the reply TTL). The router's HTTP-edge extractor
+reads/parses the request body (the byte cap → 413, invalid JSON / missing ``answer`` → 400) and
+hands this operation the already-parsed ``answer`` value.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-import jsonschema
 from pydantic import BaseModel, Field
 from pydantic_core import PydanticSerializationError
 from tai42_contract.interactions import (
     AnswerFormat,
+    AnswerMismatchError,
     InteractionRequest,
     InteractionResponse,
     InteractionState,
+    QuestionFormat,
 )
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
+from tai42_skeleton.interactions.answer_check import check_answer
+from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
-from tai42_skeleton.interactions.form_schema import effective_answer_schema
+from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
-from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.interactions.store import KILL_ACT_ON_PENDING, InteractionStore
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
@@ -59,20 +61,6 @@ from tai42_skeleton.operations.response_models_group_c import (
 _NO_AUTH_ANSWERED_BY = "system:no-auth"
 
 
-class _AnswerInvalidError(Exception):
-    """Raised when a human-door answer fails its stored-format validation.
-
-    ``field`` is the failing answer field's dotted path when the fault is located
-    to one (a form schema mismatch), else ``None``; the callback door surfaces it
-    as the 400 body's optional ``field`` key so a channel can pin the error on the
-    right control.
-    """
-
-    def __init__(self, message: str, *, field: str | None = None) -> None:
-        super().__init__(message)
-        self.field = field
-
-
 class InteractionAnswer(BaseModel):
     """An answer to a pending interaction.
 
@@ -89,119 +77,6 @@ def _reply_ttl(request: InteractionRequest) -> int:
     """
     remaining = int((request.timeout_at - datetime.now(UTC)).total_seconds())
     return max(1, remaining)
-
-
-def _schema_error_field(exc: Exception) -> str | None:
-    """The failing ANSWER field's dotted path for a field-located ``jsonschema.ValidationError``, or ``None``.
-
-    The path is like ``count`` or ``a.b``; ``None`` when the fault has no answer-field location.
-    Only ``jsonschema.ValidationError`` locates a fault in the answer: its ``.json_path``
-    (``$``-rooted, e.g. ``$.count``) names the field. ``SchemaError`` also carries a
-    ``.json_path``, but it points INTO the stored schema (e.g. ``properties.x.type``) — a
-    location no answering human owns — so it is never surfaced; a malformed schema, a root-level
-    ValidationError with ``json_path == "$"``, and ``RecursionError`` all yield ``None``.
-    """
-    json_path = exc.json_path if isinstance(exc, jsonschema.ValidationError) else None
-    if isinstance(json_path, str) and json_path not in ("", "$"):
-        # Drop the ``$`` root and a leading ``.`` so a top-level field reads as
-        # ``count`` rather than ``$.count``; a nested path keeps its dotted shape.
-        return json_path[1:].removeprefix(".")
-    return None
-
-
-def _schema_error_message(exc: Exception) -> str:
-    """The 400 message for a schema mismatch, naming the failing ANSWER field when the error locates one.
-
-    Uses ``_schema_error_field`` so a human on any surface can tell WHICH field failed; a
-    pathless fault falls back to the bare message.
-    """
-    message = getattr(exc, "message", None) or str(exc)
-    field = _schema_error_field(exc)
-    if field is not None:
-        return f"answer does not match schema at {field}: {message}"
-    return f"answer does not match schema: {message}"
-
-
-# Failures of validating/parsing untrusted input convert to a loud 400; any
-# exception outside these sets is a server bug and propagates as a 500.
-# RecursionError covers recursive schemas / deeply-nested answers blowing up the
-# validator.
-_SCHEMA_VALIDATION_ERRORS = (jsonschema.ValidationError, jsonschema.SchemaError, RecursionError)
-
-
-def _schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None:
-    """Validate ``answer`` against ``schema``; return ``(message, field)`` on a validation failure, else ``None``.
-
-    ``message`` is the 400 text, ``field`` the failing answer field's dotted path (``None`` for
-    a root-level or otherwise non-locatable fault). Returns ``None`` when the answer conforms.
-    """
-    try:
-        jsonschema.validate(answer, schema)
-    except _SCHEMA_VALIDATION_ERRORS as exc:
-        return _schema_error_message(exc), _schema_error_field(exc)
-    return None
-
-
-def _validate_text_answer(answer: Any) -> str:
-    """A TEXT answer must be a string."""
-    if not isinstance(answer, str):
-        raise _AnswerInvalidError("answer must be a string")
-    return answer
-
-
-def _validate_confirm_answer(answer: Any) -> bool:
-    """A CONFIRM answer must be a boolean."""
-    if not isinstance(answer, bool):
-        raise _AnswerInvalidError("answer must be a boolean")
-    return answer
-
-
-def _validate_select_answer(request: InteractionRequest, answer: Any) -> Any:
-    """A SELECT answer must be one of the question's offered options."""
-    options = (request.format_payload or {}).get("options", [])
-    if answer not in options:
-        raise _AnswerInvalidError(f"answer must be one of {options}")
-    return answer
-
-
-def _validate_form_answer(request: InteractionRequest, answer: Any) -> Any:
-    """A FORM answer must be an object conforming to the question's stored schema."""
-    if not isinstance(answer, dict):
-        raise _AnswerInvalidError("answer must be an object")
-    payload = request.format_payload or {}
-    schema = payload.get("schema")
-    if not isinstance(schema, dict):
-        raise _AnswerInvalidError("question schema is invalid: missing or non-object schema")
-    # Per-send option lists replace a property's enum for THIS send, so the answer is
-    # judged against the choices the human was shown (the union of all pages' fields).
-    schema = effective_answer_schema(schema, payload.get("data"))
-    mismatch = _schema_mismatch(answer, schema)
-    if mismatch is not None:
-        message, field = mismatch
-        raise _AnswerInvalidError(message, field=field)
-    return answer
-
-
-# Per-format answer validators, keyed by ``AnswerFormat`` — one contract each. EXTERNAL
-# is rejected by the answer door before validation runs, so it is absent here.
-_ANSWER_VALIDATORS: dict[AnswerFormat, Callable[[InteractionRequest, Any], Any]] = {
-    AnswerFormat.TEXT: lambda _request, answer: _validate_text_answer(answer),
-    AnswerFormat.CONFIRM: lambda _request, answer: _validate_confirm_answer(answer),
-    AnswerFormat.SELECT: _validate_select_answer,
-    AnswerFormat.FORM: _validate_form_answer,
-}
-
-
-def _validate_answer(request: InteractionRequest, answer: Any) -> Any:
-    """Validate ``answer`` against the stored format; raise ``_AnswerInvalidError`` (mapped to 400) on mismatch.
-
-    Returns the validated value. An answer_format with no validator (EXTERNAL, or a new member)
-    is a server bug, never a client error.
-    """
-    validator = _ANSWER_VALIDATORS.get(request.answer_format)
-    if validator is None:
-        raise RuntimeError(f"unhandled answer_format: {request.answer_format}")
-    return validator(request, answer)
 
 
 async def _claim_or_serialization_error(
@@ -252,6 +127,10 @@ async def _load_answerable_state(store: InteractionStore, r: Any, interaction_id
     state = await store.get_state(r, interaction_id)
     if state is None:
         raise NotFoundError("Interaction not found")
+    if is_caller_ask(state):
+        # A caller ask is addressed to the calling run and resolved only by that run
+        # resuming; the human answer door never answers it.
+        raise ConflictError(CALLER_ASK_RESOLUTION_REFUSED)
     if state.request.answer_format is AnswerFormat.EXTERNAL:
         raise BadRequestError("external interactions are answered via their callback URL")
     if state.status == "answered":
@@ -307,12 +186,15 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         state = await _load_answerable_state(store, r, interaction_id)
         _authorize_answerer(state, restricted)
         try:
-            validated = _validate_answer(state.request, answer)
-        except _AnswerInvalidError as exc:
+            check_answer(
+                QuestionFormat(answer_format=state.request.answer_format, format_payload=state.request.format_payload),
+                answer,
+            )
+        except AnswerMismatchError as exc:
             raise BadRequestError(str(exc)) from exc
         response = InteractionResponse(
             interaction_id=interaction_id,
-            answer=validated,
+            answer=answer,
             # The authenticated caller; with access control off
             # (ACCESS_CONTROL_ENABLE=false) no identity exists, so the reserved
             # no-auth sentinel is recorded.
@@ -340,7 +222,7 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         # This door claimed the answer: if the question is an async park, fire its
         # stored continuation ONCE (the shared post-claim seam both answer doors run,
         # so the fire happens exactly once regardless of which door claimed).
-        await fire_continuation_after_claim(r, store, state.request, validated)
+        await fire_continuation_after_claim(r, store, state.request, answer)
 
     return {"interaction_id": interaction_id, "status": "answered"}
 
@@ -357,20 +239,21 @@ async def cancel_interaction(interaction_id: str) -> dict:
     """Cancel a pending interaction — WITHDRAW one specific ask without answering or deleting its thread.
 
     The mirror of ``answer_interaction`` for the terminal-without-an-answer case: it
-    tears the pending question down via the store's status-gated ``prune_pending`` (the
-    same primitive the timeout path and the thread-delete cascade use), so NO continuation
-    fires — a parked async flow is never resumed — and the removed event rides tagged
-    ``reason="cancelled"`` so a live operator surface tells a deliberate withdrawal apart
-    from a timeout/expiry removal.
+    tears the pending question down through the status-gated kill seam (``kill_park``), so
+    NO continuation fires — a parked async flow is never resumed — and the removed event
+    rides tagged ``reason="cancelled"`` so a live operator surface tells a deliberate
+    withdrawal apart from a timeout/expiry removal.
 
     Status-gated exactly like the answer door: only a PENDING (or parked) question cancels.
     A question already ``answered`` (its state retained) is a loud ``409`` conflict; a
     question whose state is GONE — expired, already cancelled, or never existed (all
     leave no distinguishable tombstone, the same limit the answer door has) — is a ``404``.
-    Idempotent at the store seam: ``prune_pending`` re-run on a withdrawn question is a
+    Idempotent at the store seam: the teardown re-run on a withdrawn question is a
     clean no-op, so a re-cancel simply reports the question gone (``404``) rather than
-    double-tearing anything down. Unlike the answer door it is answer-format-AGNOSTIC: an
-    EXTERNAL ask is a pending ask an operator may withdraw, so it is cancellable too.
+    double-tearing anything down. It is a TEARDOWN door, so unlike the user-facing answer
+    door it accepts a CALLER ask (``to="caller"``) as well as a user ask, and unlike the
+    answer door it is answer-format-AGNOSTIC: an EXTERNAL ask is a pending ask an operator
+    may withdraw, so it is cancellable too.
 
     Channel-blind by construction: a channel-side pending correlation is NOT proactively
     torn down. A later participant reply forwarded to the callback door finds the state gone and
@@ -402,12 +285,16 @@ async def cancel_interaction(interaction_id: str) -> dict:
                 raise ForbiddenError("restricted identities may cancel only interactions addressed to them")
             if state.request.audience != restricted:
                 raise ForbiddenError("interaction is addressed to another identity")
-        # Status-gated teardown firing NO continuation, tagging the removed event
-        # ``cancelled``. A concurrent answer that claimed first surfaces as ``"answered"``
-        # here (a loud 409 conflict); a state that vanished between the read and the
-        # prune (a raced expiry/cancel) surfaces as ``"gone"`` (a 404, the same terminal
-        # answer the answer door gives for a missing interaction).
-        result = await store.prune_pending(r, interaction_id, state.group_id, reason="cancelled")
+        # Status-gated teardown routed through the kill seam on the single-park precondition
+        # (``KILL_ACT_ON_PENDING``): it fires NO continuation and tags the removed event
+        # ``cancelled``. An answer that committed between the read and the atomic claim leaves the
+        # park to its own continuation — the kill writes nothing and surfaces as ``"answered"`` here
+        # (a loud 409 conflict, no teardown, no FAILED); a state that vanished between the read and
+        # the teardown surfaces as ``"gone"`` (a 404, the same terminal answer the answer door gives
+        # for a missing interaction).
+        result = await kill_park(
+            r, store, interaction_id, state.group_id, reason="cancelled", act_on=KILL_ACT_ON_PENDING
+        )
         if result == "answered":
             raise ConflictError("Interaction already answered")
         if result == "gone":

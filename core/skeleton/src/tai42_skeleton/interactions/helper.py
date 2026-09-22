@@ -1,4 +1,4 @@
-"""The author-facing ``ask_user`` surface — the ``AskUser`` contract impl.
+"""The author-facing ``ask`` surface — the ``Ask`` contract impl.
 
 Engine-agnostic: it reads no engine context and depends on nothing the engine
 threads. Each call generates its own ``interaction_id`` and an optional caller
@@ -38,7 +38,8 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
 
-from tai42_skeleton.interactions.ask import delivery, park, payload, persist, timing, validate, wait
+from tai42_skeleton.interactions.ask import delivery, park, persist, timing, validate, wait
+from tai42_skeleton.interactions.ask import payload as payload_shaping
 from tai42_skeleton.interactions.ask.errors import InteractionLimitError, InteractionTimeoutError
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
@@ -47,9 +48,11 @@ __all__ = [
     "DELIVERY_FAILED_EVENT_TOPIC",
     "InteractionLimitError",
     "InteractionTimeoutError",
-    "ask_user",
+    "ask",
+    "cancel_parks_for_person",
     "cancel_parks_for_thread",
     "client_ctx",
+    "rekey_parks_for_merge",
     "secrets",
 ]
 
@@ -61,16 +64,20 @@ __all__ = [
 DELIVERY_FAILED_EVENT_TOPIC = "interactions_delivery_failed"
 
 
-async def cancel_parks_for_thread(thread_id: str) -> list[str]:
-    """Cancel every async ``ask_user`` park bound to ``thread_id``.
+async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_deleted") -> list[str]:
+    """Whole-chain-kill every async ``ask`` park addressed to ``thread_id``.
 
-    The entry point a conversation thread/person/route delete calls so a parked question the
-    deletion would orphan is torn down (via the store's status-gated ``prune_pending``, firing NO
-    continuation) instead of lingering muted until its expiry deadline. Runs on its own connection.
-    A no-op when the interactions store is unconfigured (nothing could have been parked) or the
-    thread holds no parks. Idempotent — safe to re-run under a delete's retry. Returns the cancelled
-    interaction ids.
+    The entry point a conversation thread/route delete calls so a parked question the deletion would
+    orphan is torn down instead of lingering muted until its expiry deadline. Reaches every park two
+    ways — the thread reverse index (a thread-bound background park) UNION the subject index for
+    ``(kind="thread", key=thread_id)`` (a conversation park on any scope) — and routes each through
+    the ONE whole-chain kill seam (:func:`kill_park`): the driver teardown fires and the run's single
+    FAILED is delivered, never a bare prune. Runs on its own connection. A no-op when the
+    interactions store is unconfigured. Idempotent — safe to re-run under a delete's retry. Returns
+    the interaction ids reached.
     """
+    from tai42_skeleton.interactions.kill import kill_members
+
     settings = interactions_settings()
     if not settings.redis.redis_url:
         # Interactions off: no park could ever have been persisted, so there is nothing
@@ -78,10 +85,69 @@ async def cancel_parks_for_thread(thread_id: str) -> list[str]:
         return []
     store = InteractionStore(settings.key_prefix)
     async with client_ctx(RedisClient, settings.redis) as conn:
-        return await store.cancel_thread_parks(conn, thread_id)
+        thread_members = await store.thread_park_members(conn, thread_id)
+        members = [*thread_members, *await store.subject_members(conn, "thread", thread_id)]
+        reached = await kill_members(conn, store, members, reason=reason)
+        # Reconcile the reverse index: the kill prune already dropped a pruned member, this drops an
+        # orphan whose state had vanished, and a concurrently-added park keeps its member.
+        await store.reconcile_thread_park_members(conn, thread_id, thread_members)
+    return reached
 
 
-async def ask_user(
+async def cancel_parks_for_person(person_id: str, *, reason: str = "person_erased") -> list[str]:
+    """Whole-chain-kill every park a person forget reaches — its aggregated thread AND its person subject.
+
+    A person's parks are addressed both under the aggregated ``bridge:@person:{id}`` thread and under
+    ``(kind="person", key=person_id)``, so the erase kills across both to reach a park on any scope.
+    Runs on one connection; idempotent under retry. Returns the interaction ids reached.
+    """
+    from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
+    from tai42_skeleton.interactions.kill import kill_members
+
+    settings = interactions_settings()
+    if not settings.redis.redis_url:
+        return []
+    store = InteractionStore(settings.key_prefix)
+    thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
+    async with client_ctx(RedisClient, settings.redis) as conn:
+        thread_members = await store.thread_park_members(conn, thread_id)
+        members = [
+            *thread_members,
+            *await store.subject_members(conn, "thread", thread_id),
+            *await store.subject_members(conn, "person", person_id),
+        ]
+        reached = await kill_members(conn, store, members, reason=reason)
+        await store.reconcile_thread_park_members(conn, thread_id, thread_members)
+    return reached
+
+
+async def rekey_parks_for_merge(absorbed_id: str, survivor_id: str) -> None:
+    """Re-key every park/outcome of an absorbed person onto the survivor — the person merge.
+
+    Moves the absorbed person's subject index membership, stored subject descriptors and thread
+    index across for BOTH re-keyed subject keys: the person id ``(kind="person")`` and the aggregated
+    person-thread key ``(kind="thread")``. A no-op when the interactions store is unconfigured or the
+    two ids are equal. Idempotent under retry.
+    """
+    from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
+
+    if absorbed_id == survivor_id:
+        return
+    settings = interactions_settings()
+    if not settings.redis.redis_url:
+        return
+    store = InteractionStore(settings.key_prefix)
+    async with client_ctx(RedisClient, settings.redis) as conn:
+        await store.rekey_subject(conn, kind="person", old_key=absorbed_id, new_key=survivor_id)
+        await store.rekey_subject(
+            conn,
+            kind="thread",
+            old_key=f"{PERSON_THREAD_PREFIX}{absorbed_id}",
+            new_key=f"{PERSON_THREAD_PREFIX}{survivor_id}",
+        )
+
+
+async def ask(
     question: str,
     *,
     answer_format: str = "text",
@@ -102,6 +168,9 @@ async def ask_user(
     media: list[MediaItem | dict[str, Any]] | None = None,
     mode: Literal["sync", "async"] = "sync",
     expiry_at: datetime | None = None,
+    to: Literal["user", "caller"] = "user",
+    payload: dict[str, Any] | None = None,
+    on_expiry: Literal["kill", "resume"] = "kill",
 ) -> Any:
     """Ask a human ``question`` and return their answer.
 
@@ -245,6 +314,19 @@ async def ask_user(
     silently degraded to a blocking wait. ``expiry_at`` is the async park deadline
     (when the parked question expires); it is mutually exclusive with a sync
     ``timeout`` (``check_ask_timing`` enforces it) and forbidden with ``mode="sync"``.
+
+    ``to`` addresses the ask. ``"user"`` (the default) is a human answered through the
+    inbox/callback/channel surfaces. ``"caller"`` addresses another RUN: the ask carries NO
+    out-of-band delivery — no callback ticket, no channel send, no notification — it parks the
+    asking run and its answer is handed back by the run that resolves it. A ``"caller"`` ask is
+    always ``mode="async"`` (a sync one is refused) and requires an ambient state context.
+
+    ``payload`` is a structured value a ``"caller"`` ask hands the resolving run in place of (or
+    beside) ``question``; when given, ``question`` may be empty. Forbidden on a ``"user"`` ask.
+
+    ``on_expiry`` selects what the expiry reaper does when a parked ask's deadline lapses
+    unanswered: ``"kill"`` (the default) tears the whole run chain down; ``"resume"`` resumes the
+    continuation with the expiry marker. Read only for an async park.
     """
     validation = validate.validate_ask_arguments(
         question,
@@ -261,6 +343,8 @@ async def ask_user(
         audience=audience,
         mode=mode,
         expiry_at=expiry_at,
+        to=to,
+        payload=payload,
     )
     fmt = validation.fmt
     schema = validation.schema
@@ -268,14 +352,14 @@ async def ask_user(
 
     settings = interactions_settings()
     # OFF gate — a loud, named raise before any state is written: an unconfigured
-    # interactions store cannot hold the question, so ``ask_user`` fails naming the
+    # interactions store cannot hold the question, so ``ask`` fails naming the
     # env var that turns the feature on rather than reaching for an absent Redis.
     require(settings.redis.redis_url, "the interactions store", "INTERACTIONS_REDIS_URL", "TAI_DEFAULT_REDIS_URL")
 
     # Async resolves its resume continuation up front, before any state is written: an
     # async ask with no bound driver or no identity to rebind it as is a caller error
     # that must fail loudly. A sync ask carries an empty (all-None) binding.
-    park_binding = park.resolve_async_continuation() if mode == "async" else park.AsyncParkBinding()
+    park_binding = park.resolve_async_continuation(to) if mode == "async" else park.AsyncParkBinding()
 
     window = timing.resolve_deadline(mode, timeout, expiry_at, settings)
 
@@ -284,11 +368,22 @@ async def ask_user(
     store = InteractionStore(settings.key_prefix)
     reply_to = store.reply_key(interaction_id)
 
-    # A set channel or the external format bridges the reply back through the public
-    # callback door, so it forces the ticket + callback-URL mint for EVERY answer format.
-    callback = timing.mint_callback_ticket(settings, window, mode, force=validation.is_external or channel is not None)
+    # A ``to="caller"`` ask addresses another RUN, never a human: it performs NO send of any
+    # kind (no callback ticket, no external link, no channel delivery, no re-park notice). Its
+    # question fields are shape-validated above but not acted on; its answer is handed back by
+    # the run that resolves it.
+    caller_addressed = to == "caller"
 
-    if validation.is_external:
+    # A set channel or the external format bridges the reply back through the public
+    # callback door, so it forces the ticket + callback-URL mint for EVERY answer format —
+    # never for a caller-addressed ask, which is not delivered.
+    callback = (
+        None
+        if caller_addressed
+        else timing.mint_callback_ticket(settings, window, mode, force=validation.is_external or channel is not None)
+    )
+
+    if validation.is_external and not caller_addressed:
         if callback is None:
             raise AssertionError
         if channel is not None:
@@ -298,10 +393,10 @@ async def ask_user(
         else:
             # ``link`` is non-None here (validated above); resolve BEFORE any persist so
             # a failed builder leaves zero state.
-            final_url = await payload.resolve_link(link, callback.callback_url)  # type: ignore[arg-type]
-        format_payload = payload.build_payload(fmt, options, schema, url=final_url, verifier=verifier)
+            final_url = await payload_shaping.resolve_link(link, callback.callback_url)  # type: ignore[arg-type]
+        format_payload = payload_shaping.build_payload(fmt, options, schema, url=final_url, verifier=verifier)
     else:
-        format_payload = payload.build_payload(fmt, options, schema, data=data, pages=pages)
+        format_payload = payload_shaping.build_payload(fmt, options, schema, data=data, pages=pages)
 
     stored_media = await persist.persist_question(
         store,
@@ -324,11 +419,15 @@ async def ask_user(
         media=media,
         mode=mode,
         expiry_at=expiry_at,
+        to=to,
+        payload=payload,
+        on_expiry=on_expiry,
     )
 
     # Deliver through the channel AFTER the question is persisted (the callback ticket
     # must be claimable before any human can act on it) and BEFORE the blocking wait.
-    if channel is not None:
+    # A caller-addressed ask is never delivered — it addresses a run, not a human.
+    if channel is not None and not caller_addressed:
         if validation.channel_obj is None:
             raise AssertionError
         if callback is None:
@@ -367,13 +466,21 @@ async def ask_user(
     if mode == "async":
         # A CHAINED caller waiting on this run inherited ITS horizon from the run's
         # previous ask, so tell it this park's deadline. Fired only under a chained
-        # binding and only once the park is persisted.
-        await park.notify_repark(expiry_at, interaction_id=interaction_id)
+        # binding and only once the park is persisted — never for a caller-addressed ask,
+        # which performs no send of any kind.
+        if not caller_addressed:
+            await park.notify_repark(expiry_at, interaction_id=interaction_id)
         # The sentinel names the resume continuation this park was stamped with, so a
         # caller that would adopt the park as its OWN suspended state can check it owns
-        # it instead of parking behind a resume fired elsewhere.
+        # it instead of parking behind a resume fired elsewhere. ``caller_interaction_ids``
+        # names this single ask when it is caller-addressed (empty for a user ask), so a
+        # driver surfacing a whole step can tell the caller asks apart.
         return SuspendedInteraction(
-            interaction_id=interaction_id, expiry_at=expiry_at, resume_owner=park_binding.continuation_tool
+            interaction_id=interaction_id,
+            expiry_at=expiry_at,
+            resume_owner=park_binding.continuation_tool,
+            interaction_ids=[interaction_id],
+            caller_interaction_ids=[interaction_id] if caller_addressed else [],
         )
 
     return await wait.await_answer(

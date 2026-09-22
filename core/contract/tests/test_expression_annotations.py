@@ -119,6 +119,22 @@ def test_builder_emits_every_supplied_entry_in_the_contract_shape() -> None:
     }
 
 
+def test_builder_emits_variables_as_name_blurb_sample_triples() -> None:
+    payload = expression_annotation(
+        blurb="the stanza envelope",
+        variables=[("meter", "the beat count bound for the run", 4), ("rhyme", "the ending scheme", "abab")],
+    )
+    assert payload["variables"] == [
+        {"name": "meter", "blurb": "the beat count bound for the run", "sample": 4},
+        {"name": "rhyme", "blurb": "the ending scheme", "sample": "abab"},
+    ]
+
+
+def test_builder_omits_variables_when_absent_and_emits_empty_list() -> None:
+    assert "variables" not in expression_annotation()
+    assert expression_annotation(variables=[])["variables"] == []
+
+
 def test_builder_distinguishes_empty_keys_and_falsy_samples_from_absent() -> None:
     # ``keys=[]`` states "untyped input" and ``sample=None``/``{}`` are real
     # sample documents — all distinct from omitting the argument.

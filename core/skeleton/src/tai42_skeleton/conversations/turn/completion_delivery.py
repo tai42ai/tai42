@@ -27,7 +27,7 @@ logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 # The registered name of the hidden completion-delivery tool. The conversation door binds it
 # (``set_park_completion``) around an agent turn, carrying this turn's thread as the opaque
-# delivery address, so an async ``ask_user`` may park with a path back to this thread; a resumed
+# delivery address, so an async ``ask`` may park with a path back to this thread; a resumed
 # run's driver fires it with the generic contract payload (that context merged with
 # ``{result, completion_id, status}``) and it mints the answered record + spawns delivery. Must
 # equal the registered tool name.

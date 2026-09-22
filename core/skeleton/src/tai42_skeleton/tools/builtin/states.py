@@ -48,7 +48,7 @@ from tai42_skeleton.tools.attribution import get_run_attribution
 # (a ``state_read`` miss). A permissive wrap schema surfaces EVERY shape — a dict or
 # a null — in ``result.data``: the server wraps it as ``{"result": <value>}`` and the
 # client unwraps it back (a dict stays a dict, a null stays a null), mirroring the
-# ``ask_user`` builtin's answer schema.
+# ``ask`` builtin's answer schema.
 _RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"result": {"title": "Result"}},

@@ -1,4 +1,4 @@
-"""Builtin ``ask_user`` tool: a thin shim over the interactions helper. It must
+"""Builtin ``ask`` tool: a thin shim over the interactions helper. It must
 forward every argument verbatim, return the helper's answer, and never swallow a
 timeout.
 """
@@ -70,11 +70,11 @@ class _RecordingHelper:
         return self._answer
 
 
-async def test_ask_user_forwards_arguments_and_returns_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_arguments_and_returns_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _RecordingHelper(answer="blue")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask_user(
+    result = await builtin_interactions.ask(
         "Favourite colour?",
         answer_format="select",
         options=["red", "blue"],
@@ -105,16 +105,19 @@ async def test_ask_user_forwards_arguments_and_returns_answer(monkeypatch: pytes
                 "media": None,
                 "mode": "sync",
                 "expiry_at": None,
+                "to": "user",
+                "payload": None,
+                "on_expiry": "kill",
             },
         )
     ]
 
 
-async def test_ask_user_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _RecordingHelper(answer="hi")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask_user("Anything?")
+    result = await builtin_interactions.ask("Anything?")
 
     assert result == "hi"
     assert helper.calls == [
@@ -137,50 +140,53 @@ async def test_ask_user_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> N
                 "media": None,
                 "mode": "sync",
                 "expiry_at": None,
+                "to": "user",
+                "payload": None,
+                "on_expiry": "kill",
             },
         )
     ]
 
 
-async def test_ask_user_forwards_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_channel(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _RecordingHelper(answer="ok")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask_user("Ping?", channel="telegram")
+    result = await builtin_interactions.ask("Ping?", channel="telegram")
 
     assert result == "ok"
     assert helper.calls[0][1]["channel"] == "telegram"
 
 
-async def test_ask_user_forwards_recipient(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_recipient(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _RecordingHelper(answer="ok")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask_user("Ping?", channel="telegram", recipient="@ops")
+    result = await builtin_interactions.ask("Ping?", channel="telegram", recipient="@ops")
 
     assert result == "ok"
     assert helper.calls[0][1]["channel"] == "telegram"
     assert helper.calls[0][1]["recipient"] == "@ops"
 
 
-async def test_ask_user_forwards_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     # The tool's ``on_mismatch`` string is coerced to the contract policy enum and
     # forwarded to the helper, so a tool author can set the bridge digression policy.
     helper = _RecordingHelper(answer="ok")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask_user("Ping?", channel="telegram", on_mismatch="bridge")
+    result = await builtin_interactions.ask("Ping?", channel="telegram", on_mismatch="bridge")
 
     assert result == "ok"
     assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.BRIDGE
 
 
-async def test_ask_user_forwards_mismatch_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_mismatch_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     # The custom retry notice is forwarded verbatim; on_mismatch defaults to retry.
     helper = _RecordingHelper(answer="ok")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
-    result = await builtin_interactions.ask_user(
+    result = await builtin_interactions.ask(
         "Ping?", channel="telegram", mismatch_notice="Please answer yes or no ({reason})."
     )
 
@@ -189,13 +195,13 @@ async def test_ask_user_forwards_mismatch_notice(monkeypatch: pytest.MonkeyPatch
     assert helper.calls[0][1]["on_mismatch"] is AnswerMismatchPolicy.RETRY
 
 
-def test_ask_user_tool_schema_advertises_mismatch_fields() -> None:
+def test_ask_tool_schema_advertises_mismatch_fields() -> None:
     # The typed signature fastmcp derives advertises both fields to the LLM: a bounded
     # retry|bridge choice defaulting to retry, and an optional custom notice string.
     # Neither is required, so every existing ask keeps working unchanged.
     from fastmcp.utilities.types import get_cached_typeadapter
 
-    schema = get_cached_typeadapter(builtin_interactions.ask_user).json_schema()
+    schema = get_cached_typeadapter(builtin_interactions.ask).json_schema()
     props = schema["properties"]
     assert props["on_mismatch"]["enum"] == ["retry", "bridge"]
     assert props["on_mismatch"]["default"] == "retry"
@@ -204,36 +210,36 @@ def test_ask_user_tool_schema_advertises_mismatch_fields() -> None:
     assert "mismatch_notice" not in schema.get("required", [])
 
 
-async def test_ask_user_forwards_media(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_media(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _RecordingHelper(answer="ok")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     media = [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "A product"}]
-    result = await builtin_interactions.ask_user("Which?", media=media)
+    result = await builtin_interactions.ask("Which?", media=media)
 
     assert result == "ok"
     assert helper.calls[0][1]["media"] == media
 
 
-async def test_ask_user_forwards_mode_and_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_forwards_mode_and_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import UTC, datetime, timedelta
 
     helper = _RecordingHelper(answer="ok")
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     expiry = datetime.now(UTC) + timedelta(hours=1)
-    await builtin_interactions.ask_user("Ping?", mode="async", expiry_at=expiry)
+    await builtin_interactions.ask("Ping?", mode="async", expiry_at=expiry)
 
     assert helper.calls[0][1]["mode"] == "async"
     assert helper.calls[0][1]["expiry_at"] == expiry
 
 
-async def test_ask_user_propagates_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_propagates_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _RecordingHelper(raise_exc=InteractionTimeoutError("no answer"))
-    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
 
     with pytest.raises(InteractionTimeoutError, match="no answer"):
-        await builtin_interactions.ask_user("Still there?")
+        await builtin_interactions.ask("Still there?")
 
 
 # -- write-side isolation clamp: a restricted caller touches ONLY its own slice ---
@@ -265,13 +271,13 @@ async def _persisted_audience(fake_redis, store: InteractionStore, *, audience: 
         )
 
     answerer = asyncio.create_task(answer_when_asked())
-    result = await builtin_interactions.ask_user("proceed?", audience=audience, timeout=5)
+    result = await builtin_interactions.ask("proceed?", audience=audience, timeout=5)
     await answerer
     assert result == "ok"
     return captured["audience"]
 
 
-async def test_restricted_ask_user_rejects_other_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restricted_ask_rejects_other_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     # A restricted bob addressing alice is a cross-identity inject/exfil attempt: it
     # is rejected loudly as an authorization denial (CrossIdentityAudienceError, the
     # write-side mirror of the answer door's 403) and NO state is written (no redis
@@ -289,11 +295,11 @@ async def test_restricted_ask_user_rejects_other_identity(monkeypatch: pytest.Mo
         _restricted("bob"),
         pytest.raises(CrossIdentityAudienceError, match="a restricted caller may address only its own identity"),
     ):
-        await builtin_interactions.ask_user("proceed?", audience="alice")
+        await builtin_interactions.ask("proceed?", audience="alice")
     assert calls == []
 
 
-async def test_restricted_ask_user_rejects_own_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restricted_ask_rejects_own_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     # Under key-keyed isolation each key is its own island, so the caller's OWN OWNER
     # is a FOREIGN target with no write privilege. A restricted bob (own id bob,
     # owner-claim alice) addressing its owner alice is rejected loudly as a
@@ -312,11 +318,11 @@ async def test_restricted_ask_user_rejects_own_owner(monkeypatch: pytest.MonkeyP
         _restricted("bob", owner="alice"),
         pytest.raises(CrossIdentityAudienceError, match="a restricted caller may address only its own identity"),
     ):
-        await builtin_interactions.ask_user("proceed?", audience="alice")
+        await builtin_interactions.ask("proceed?", audience="alice")
     assert calls == []
 
 
-async def test_restricted_ask_user_scopes_unset_audience_to_self(monkeypatch, fake_redis, fake_client_ctx) -> None:
+async def test_restricted_ask_scopes_unset_audience_to_self(monkeypatch, fake_redis, fake_client_ctx) -> None:
     # An unset audience is scoped to the restricted caller's OWN identity, never its owner.
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
@@ -325,7 +331,7 @@ async def test_restricted_ask_user_scopes_unset_audience_to_self(monkeypatch, fa
     assert persisted == "bob"
 
 
-async def test_restricted_ask_user_allows_own_identity(monkeypatch, fake_redis, fake_client_ctx) -> None:
+async def test_restricted_ask_allows_own_identity(monkeypatch, fake_redis, fake_client_ctx) -> None:
     # Addressing its OWN identity passes unchanged.
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
@@ -334,7 +340,7 @@ async def test_restricted_ask_user_allows_own_identity(monkeypatch, fake_redis, 
     assert persisted == "bob"
 
 
-async def test_unrestricted_ask_user_may_address_any_identity(monkeypatch, fake_redis, fake_client_ctx) -> None:
+async def test_unrestricted_ask_may_address_any_identity(monkeypatch, fake_redis, fake_client_ctx) -> None:
     # Regression guard: an unrestricted caller (no bound owner claim) is NOT clamped
     # — it may address any identity, exactly as before.
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)

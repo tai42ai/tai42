@@ -236,14 +236,32 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "scope expression",
+            "language": "jq",
+            "returns": "a boolean — false skips this state for the run, true (or absent) engages it",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "state": {
           "title": "State",
           "type": "string"
         },
         "subject_expr": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "subject expression",
+            "language": "jq",
+            "returns": "a full subject object {target_kind, target_name, kind, key}, or a bare key string",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "templates": {
           "items": {
@@ -304,7 +322,31 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the injection input document",
+            "keys": [
+              {
+                "gloss": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record"
+              },
+              {
+                "gloss": "the run input the dispatch is about to run on",
+                "name": "input"
+              }
+            ],
+            "label": "injection jq",
+            "language": "jq",
+            "returns": "the value placed into the run input at 'into'",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "record": {
+                "count": 3
+              }
+            }
+          }
         },
         "template_jq": {
           "anyOf": [
@@ -442,7 +484,31 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the update input document",
+            "keys": [
+              {
+                "gloss": "the run's output the update runs after",
+                "name": "output"
+              },
+              {
+                "gloss": "the run input the dispatch ran on",
+                "name": "input"
+              }
+            ],
+            "label": "update adapter",
+            "language": "jq",
+            "returns": "the template program's '.input' object",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "output": {
+                "ok": true
+              }
+            }
+          }
         },
         "jq": {
           "anyOf": [
@@ -453,7 +519,38 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the custom-update input document",
+            "keys": [
+              {
+                "gloss": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record"
+              },
+              {
+                "gloss": "the run's output the update runs after",
+                "name": "output"
+              },
+              {
+                "gloss": "the run input the dispatch ran on",
+                "name": "input"
+              }
+            ],
+            "label": "custom update jq",
+            "language": "jq",
+            "returns": "the op batch (a list of ops) applied to the record",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "output": {
+                "ok": true
+              },
+              "record": {
+                "count": 3
+              }
+            }
+          }
         },
         "op_id": {
           "anyOf": [
@@ -464,7 +561,31 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the update input document",
+            "keys": [
+              {
+                "gloss": "the run's output the update runs after",
+                "name": "output"
+              },
+              {
+                "gloss": "the run input the dispatch ran on",
+                "name": "input"
+              }
+            ],
+            "label": "op_id expression",
+            "language": "jq",
+            "returns": "a string idempotency key, or null for no key",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "output": {
+                "ok": true
+              }
+            }
+          }
         },
         "template_jq": {
           "anyOf": [
@@ -1835,14 +1956,32 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "scope expression",
+            "language": "jq",
+            "returns": "a boolean — false skips this state for the run, true (or absent) engages it",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "state": {
           "title": "State",
           "type": "string"
         },
         "subject_expr": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "subject expression",
+            "language": "jq",
+            "returns": "a full subject object {target_kind, target_name, kind, key}, or a bare key string",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "templates": {
           "items": {
@@ -2005,7 +2144,31 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the injection input document",
+            "keys": [
+              {
+                "gloss": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record"
+              },
+              {
+                "gloss": "the run input the dispatch is about to run on",
+                "name": "input"
+              }
+            ],
+            "label": "injection jq",
+            "language": "jq",
+            "returns": "the value placed into the run input at 'into'",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "record": {
+                "count": 3
+              }
+            }
+          }
         },
         "template_jq": {
           "anyOf": [
@@ -2132,7 +2295,31 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the update input document",
+            "keys": [
+              {
+                "gloss": "the run's output the update runs after",
+                "name": "output"
+              },
+              {
+                "gloss": "the run input the dispatch ran on",
+                "name": "input"
+              }
+            ],
+            "label": "update adapter",
+            "language": "jq",
+            "returns": "the template program's '.input' object",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "output": {
+                "ok": true
+              }
+            }
+          }
         },
         "jq": {
           "anyOf": [
@@ -2143,7 +2330,38 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the custom-update input document",
+            "keys": [
+              {
+                "gloss": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record"
+              },
+              {
+                "gloss": "the run's output the update runs after",
+                "name": "output"
+              },
+              {
+                "gloss": "the run input the dispatch ran on",
+                "name": "input"
+              }
+            ],
+            "label": "custom update jq",
+            "language": "jq",
+            "returns": "the op batch (a list of ops) applied to the record",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "output": {
+                "ok": true
+              },
+              "record": {
+                "count": 3
+              }
+            }
+          }
         },
         "op_id": {
           "anyOf": [
@@ -2154,7 +2372,31 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the update input document",
+            "keys": [
+              {
+                "gloss": "the run's output the update runs after",
+                "name": "output"
+              },
+              {
+                "gloss": "the run input the dispatch ran on",
+                "name": "input"
+              }
+            ],
+            "label": "op_id expression",
+            "language": "jq",
+            "returns": "a string idempotency key, or null for no key",
+            "sample": {
+              "input": {
+                "value": 2
+              },
+              "output": {
+                "ok": true
+              }
+            }
+          }
         },
         "template_jq": {
           "anyOf": [

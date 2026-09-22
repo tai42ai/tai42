@@ -303,7 +303,7 @@ async def test_sync_wrapped_tool_works(monkeypatch, fake_redis, fake_client_ctx)
 
 async def test_author_bound_verifier_lands_in_format_payload(monkeypatch, fake_redis, fake_client_ctx):
     # The AUTHOR-BOUND ``verifier`` (supplied as extension config at build time)
-    # must be threaded through ask_user -> _build_payload into the persisted
+    # must be threaded through ask -> _build_payload into the persisted
     # external ``format_payload`` — regardless of any agent input, since it is not
     # an LLM-facing param.
     settings = InteractionsSettings(public_base_url="https://cb.example")
@@ -311,7 +311,7 @@ async def test_author_bound_verifier_lands_in_format_payload(monkeypatch, fake_r
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     store = InteractionStore(settings.key_prefix)
 
-    # ask_user validates the verifier name against the registry at bind time; stub
+    # ask validates the verifier name against the registry at bind time; stub
     # the lookup so the passthrough plumbing can be exercised without a live app.
     class _Registry:
         def get(self, name: str) -> object:
@@ -375,7 +375,7 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
     # A non-dict verifier, or a name that does not resolve in the registry, is
     # rejected LOUDLY at ask time — never stashed to silently degrade the question
     # into an open, unverified one at the callback door.
-    from tai42_skeleton.interactions.helper import ask_user
+    from tai42_skeleton.interactions.helper import ask
 
     settings = InteractionsSettings(public_base_url="https://cb.example")
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
@@ -388,11 +388,9 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
     monkeypatch.setattr(validate_module, "tai42_app", SimpleNamespace(webhook_verifiers=_Empty()))
 
     with pytest.raises(ValueError, match="verifier must be a dict"):
-        await ask_user(
-            "Sign?", answer_format="external", link="https://x/{callback_url}", verifier=cast(Any, "not-a-dict")
-        )
+        await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier=cast(Any, "not-a-dict"))
     with pytest.raises(ValueError, match="unknown webhook verifier"):
-        await ask_user("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"name": "nope"})
+        await ask("Sign?", answer_format="external", link="https://x/{callback_url}", verifier={"name": "nope"})
 
 
 # --------------------------------------------------------------------------- #
@@ -424,14 +422,14 @@ class _AnswerApp:
     storage = _AnswerStorage()
 
 
-async def test_answer_schema_by_id_is_rendered_and_passed_to_ask_user(monkeypatch) -> None:
+async def test_answer_schema_by_id_is_rendered_and_passed_to_ask(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    async def _fake_ask_user(question, *, answer_format, schema, timeout, link, verifier):
+    async def _fake_ask(question, *, answer_format, schema, timeout, link, verifier):
         captured["schema"] = schema
         return "answered"
 
-    monkeypatch.setitem(ask_external.__globals__, "ask_user", _fake_ask_user)
+    monkeypatch.setitem(ask_external.__globals__, "ask", _fake_ask)
 
     async def make_url(*, callback_url: str) -> str:
         return f"https://ext.example/go?cb={callback_url}"
@@ -444,7 +442,7 @@ async def test_answer_schema_by_id_is_rendered_and_passed_to_ask_user(monkeypatc
 
 
 async def test_answer_schema_by_id_unfetchable_fails_loudly(monkeypatch) -> None:
-    monkeypatch.setitem(ask_external.__globals__, "ask_user", lambda *a, **k: None)
+    monkeypatch.setitem(ask_external.__globals__, "ask", lambda *a, **k: None)
 
     async def make_url(*, callback_url: str) -> str:
         return "https://ext.example/go"
@@ -455,7 +453,7 @@ async def test_answer_schema_by_id_unfetchable_fails_loudly(monkeypatch) -> None
 
 
 async def test_answer_schema_by_id_invalid_json_fails_loudly(monkeypatch) -> None:
-    monkeypatch.setitem(ask_external.__globals__, "ask_user", lambda *a, **k: None)
+    monkeypatch.setitem(ask_external.__globals__, "ask", lambda *a, **k: None)
 
     async def make_url(*, callback_url: str) -> str:
         return "https://ext.example/go"

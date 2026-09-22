@@ -9,10 +9,12 @@ import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from tai42_contract.interactions import AnswerFormat, InteractionRequest
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, SuspendedInteraction
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions import kill as kill_module
 from tai42_skeleton.interactions import reaper as reaper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import interactions as ops
@@ -34,6 +36,12 @@ def make_wired(monkeypatch, fake_redis, fake_client_ctx) -> SimpleNamespace:
     # through the continuation module's seam — point it at the same fake.
     monkeypatch.setattr(continuation_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(continuation_module, "interactions_settings", lambda: settings)
+    # The whole-chain kill opens its own clients (the subject-erase walk, the reaper's kill
+    # redelivery clear) and reads the retention horizon; point both at the same fake/settings.
+    monkeypatch.setattr(kill_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(kill_module, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     store = InteractionStore(settings.key_prefix)
     return SimpleNamespace(settings=settings, store=store, fake=fake_redis)
 
@@ -43,7 +51,9 @@ def make_captured(monkeypatch) -> list[dict]:
     # real execution-identity bind / run_tool machinery.
     calls: list[dict] = []
 
-    async def _stub(identity, fingerprint, tool, interaction_id, answer, park_context=None):
+    async def _stub(
+        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+    ):
         calls.append(
             {
                 "identity": identity,
@@ -52,14 +62,22 @@ def make_captured(monkeypatch) -> list[dict]:
                 "interaction_id": interaction_id,
                 "answer": answer,
                 "park_context": park_context,
+                "park_asked_by": park_asked_by,
             }
         )
+        # A re-park sentinel: non-terminal, so the delivery ladder delivers nothing and the drive
+        # only clears the due record — the fire-recording these suites assert stays isolated.
+        return SuspendedInteraction(interaction_id=interaction_id)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _stub)
     return calls
 
 
-def async_req(store: InteractionStore, *, iid: str, gid: str = "ag", expiry_at: datetime | None = None):
+def async_req(
+    store: InteractionStore, *, iid: str, gid: str = "ag", expiry_at: datetime | None = None, on_expiry: str = "resume"
+):
+    # These continuation suites exercise the RESUME expiry path (the reaper fires the stored
+    # continuation), so ``on_expiry`` defaults to ``"resume"`` here; a kill-path request sets it.
     now = datetime.now(UTC)
     deadline = expiry_at or now + timedelta(hours=1)
     return InteractionRequest(
@@ -74,6 +92,7 @@ def async_req(store: InteractionStore, *, iid: str, gid: str = "ag", expiry_at: 
         continuation_tool="resume_tool",
         continuation_identity="svc-key",
         expiry_at=deadline,
+        on_expiry=on_expiry,  # type: ignore[arg-type]
     )
 
 

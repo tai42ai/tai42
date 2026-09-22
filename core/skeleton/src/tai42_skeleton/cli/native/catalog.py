@@ -42,7 +42,7 @@ _COLUMNS = ["name", "kind", "package", "source", "module", "description"]
 # table to the actual builtin registrations so it cannot rot silently.
 _BUILTIN_ROWS: list[dict[str, str]] = [
     {
-        "name": "ask_user",
+        "name": "ask",
         "kind": "tool",
         "package": "tai42-skeleton",
         "source": "builtin",

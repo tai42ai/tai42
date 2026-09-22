@@ -26,28 +26,64 @@ _GUARD_PREAMBLE = (
     "{} as $ENV | ("
 )
 
+# The two envelope keys every compiled program reads its evaluation input from:
+# ``d`` carries the data the expression is about (its ``.``), ``v`` the map of
+# variable values. The binding preamble unpacks both.
+_ENVELOPE_DATA = "d"
+_ENVELOPE_VARS = "v"
 
-def _compile_jq(expression: str, prelude: str, args: dict[str, Any] | None):
+# Variable names an author may not bind, because the binding mechanism and jq
+# reserve them: ``__in`` is the envelope binding, ``ENV`` the sealed environment
+# object, ``__loc__`` a jq built-in location variable.
+_RESERVED_VARIABLE_NAMES = frozenset({"__in", "ENV", "__loc__"})
+
+
+def _envelope(payload: Any, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The evaluation input every compiled program takes.
+
+    The data lands under ``d`` (the expression's ``.``) and the variable values under
+    ``v``; the binding preamble the compile generates unpacks both back into ``.`` and
+    the named ``$name`` bindings.
+    """
+    return {_ENVELOPE_VARS: dict(variables or {}), _ENVELOPE_DATA: payload}
+
+
+def _binding_preamble(prelude: str, variable_names: tuple[str, ...]) -> str:
+    """The generated jq that unpacks the ``{"v": {…}, "d": data}`` envelope.
+
+    ``.`` starts as the envelope: it is captured as ``$__in``, each name is bound from
+    ``$__in.v.<name>`` to ``$<name>`` (readable anywhere, inside ``map(...)`` too), the
+    ``prelude`` ``def``s follow the bindings so they may read the variables, and
+    ``$__in.d`` restores the data as ``.`` for the expression. The prelude is a run of
+    ``def …;`` and takes NO pipe after it.
+    """
+    bindings = "".join(f"$__in.{_ENVELOPE_VARS}.{name} as ${name} | " for name in variable_names)
+    return f". as $__in | {bindings}{prelude}$__in.{_ENVELOPE_DATA} | "
+
+
+def _compile_jq(expression: str, prelude: str, variable_names: tuple[str, ...]):
     # Opt-in dependency (the "jq" extra) — imported at call time so the module
     # (and the utils.data namespace re-exporting it) stays importable without it.
     import jq
 
     if "$ENV" in expression or "$ENV" in prelude:
         raise ValueError("jq: $ENV is disabled (process environment is not readable from expressions)")
+    reserved = sorted(_RESERVED_VARIABLE_NAMES.intersection(variable_names))
+    if reserved:
+        raise ValueError(f"jq: the variable name(s) {reserved} are reserved and cannot be bound as jq variables")
     # ``prelude`` is a run of ``def …;`` declarations the expression may call. It
     # ends with a newline so the expression's first line is line ``prelude_lines
-    # + 1`` — keeping the raw-compile error's line arithmetic exact below.
+    # + 1`` — keeping the raw-compile error's line arithmetic exact below. The
+    # binding preamble adds no newline, so it does not shift the expression's line.
     if prelude and not prelude.endswith("\n"):
         prelude += "\n"
     prelude_lines = prelude.count("\n")
-    # ``args`` predeclares named ``$name`` variables (the ``--argjson`` equivalent),
-    # bound to their supplied values at compile time. ``None`` binds none.
-    # Raw compile first so a syntax error reports the author's own line/column.
-    # A bare ``expression`` calling a prelude def does not compile alone, so the
-    # raw compile runs over ``prelude + expression``; a prelude shifts the line
-    # numbers, so on error re-raise with the prelude's line count subtracted.
+    binding = _binding_preamble(prelude, variable_names)
+    # Raw compile first so a syntax error (or an undeclared ``$name``) reports the
+    # author's own line/column. A prelude shifts the line numbers, so on error
+    # re-raise with the prelude's line count subtracted.
     try:
-        jq.compile(prelude + expression, args=args)
+        jq.compile(binding + expression)
     except ValueError as exc:
         if not prelude:
             raise
@@ -57,14 +93,24 @@ def _compile_jq(expression: str, prelude: str, args: dict[str, Any] | None):
             return f"{match.group(1)}{int(match.group(2)) - prelude_lines}"
 
         raise ValueError(re.sub(r"(, line )(\d+)", _shift, message)) from exc
-    # The ``\n)`` closes the preamble paren past any trailing line comment.
-    return jq.compile(_GUARD_PREAMBLE + prelude + expression + "\n)", args=args)
+    # The trailing ``\n)`` closes the guard paren past any trailing line comment in
+    # the expression; the ``$__in.d |`` at the tail of ``binding`` already scopes the
+    # whole expression to the data.
+    return jq.compile(_GUARD_PREAMBLE + binding + expression + "\n)")
 
 
 @lru_cache(maxsize=512)
-def get_compiled_jq(expression: str, prelude: str = ""):
-    """Compile ``expression`` (LRU-cached) with an optional ``prelude`` of ``def`` declarations."""
-    return _compile_jq(expression, prelude, None)
+def get_compiled_jq(expression: str, prelude: str = "", variables: tuple[str, ...] = ()):
+    """Compile ``expression`` (LRU-cached) over the ``{"v": …, "d": data}`` envelope.
+
+    ``prelude`` is an optional run of ``def`` declarations the expression may call.
+    ``variables`` is the tuple of variable NAMES the expression may read as ``$name``;
+    the compile is keyed on ``(expression, prelude, variables)`` and the VALUES are
+    delivered per evaluation through the envelope, so one compiled program serves every
+    set of values for the same names. A caller that assembles ``variables`` from an
+    unordered set passes it sorted so the cache keys on a stable name tuple.
+    """
+    return _compile_jq(expression, prelude, variables)
 
 
 def compile_check(expression: str, *, variables: Iterable[str] = ()) -> None:
@@ -73,11 +119,11 @@ def compile_check(expression: str, *, variables: Iterable[str] = ()) -> None:
     jq resolves variable references at compile time, so
     an expression that will read a ``$name`` bound only at evaluation must have that name
     declared here or it fails to compile; the bound VALUES are irrelevant to a compile
-    check (bound to null). Raises ``ValueError`` on a syntax error or a reference to a
-    variable outside ``variables``. Discards the program — a caller wanting to run it
-    compiles (cached) through :func:`run_jq_first`.
+    check. Raises ``ValueError`` on a syntax error or a reference to a
+    variable outside ``variables``. Compiles through the shared (cached) path — a caller
+    wanting to run it later reuses the same compiled program via :func:`run_jq_first`.
     """
-    _compile_jq(expression, "", dict.fromkeys(variables))
+    get_compiled_jq(expression, "", tuple(sorted(set(variables))))
 
 
 class JqSettings(TaiBaseSettings):
@@ -112,12 +158,12 @@ async def run_jq_first(
 
     Bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
 
-    ``variables`` predeclares named jq variables (the ``--argjson`` equivalent): each
-    key ``k`` is readable as ``$k`` in the expression, bound to its value. An expression
-    referencing an undeclared ``$name`` fails loudly (jq: undefined variable), so a
-    caller that omits a variable the expression needs never silently degrades. The
-    values are supplied per call and cannot be hashed for the compile cache, so a call
-    with ``variables`` compiles fresh; the variable-free path stays cached for hot callers.
+    ``variables`` predeclares named jq variables: each key ``k`` is readable as ``$k`` in
+    the expression, bound to its value delivered per call through the evaluation envelope.
+    An expression referencing an undeclared ``$name`` fails loudly at compile (jq: not
+    defined), so a caller that omits a variable the expression needs never silently
+    degrades. The compile is cached on the variable NAMES, so repeated calls with the same
+    names and different VALUES reuse the one compiled program.
 
     On an empty pipeline (``.first()`` raises ``StopIteration``, which cannot cross
     the ``to_thread`` future boundary so it is converted in the worker thread):
@@ -130,14 +176,14 @@ async def run_jq_first(
     finishes on its own; the budget only protects the event loop and the
     caller's latency, and the timeout is raised loudly.
     """
-    program = (
-        get_compiled_jq(expression, prelude) if variables is None else _compile_jq(expression, prelude, dict(variables))
-    )
+    values = variables or {}
+    program = get_compiled_jq(expression, prelude, tuple(sorted(values)))
+    envelope = _envelope(payload, values)
     timeout = jq_settings().timeout_seconds
 
     def _run() -> Any:
         try:
-            return program.input(payload).first()
+            return program.input(envelope).first()
         except StopIteration:
             if default is _NO_DEFAULT:
                 raise ValueError(f"jq expression produced no output (empty pipeline): {expression!r}") from None
@@ -149,11 +195,18 @@ async def run_jq_first(
         raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
 
 
-async def run_jq_bounded(expression: str, payload: Any, limit: int, *, prelude: str = "") -> list[Any]:
+async def run_jq_bounded(
+    expression: str,
+    payload: Any,
+    limit: int,
+    *,
+    prelude: str = "",
+    variables: dict[str, Any] | None = None,
+) -> list[Any]:
     """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker thread.
 
     Bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted values, taken lazily
-    from the program's iterator.
+    from the program's iterator. ``variables`` behaves exactly as in :func:`run_jq_first`.
 
     For a caller that must enforce an exact emit count: it passes its allowed count as
     ``limit`` and reads ``len(result) > limit`` as "emitted too many". The extra slot
@@ -164,11 +217,13 @@ async def run_jq_bounded(expression: str, payload: Any, limit: int, *, prelude: 
     """
     if limit < 1:
         raise ValueError(f"run_jq_bounded limit must be positive, got {limit}")
-    program = get_compiled_jq(expression, prelude)
+    values = variables or {}
+    program = get_compiled_jq(expression, prelude, tuple(sorted(values)))
+    envelope = _envelope(payload, values)
     timeout = jq_settings().timeout_seconds
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(lambda: list(itertools.islice(program.input(payload), limit + 1))), timeout
+            asyncio.to_thread(lambda: list(itertools.islice(program.input(envelope), limit + 1))), timeout
         )
     except TimeoutError as exc:
         raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
