@@ -7,7 +7,7 @@ This is the unified park-completion binding's core new path, end to end on the r
   tool does NOT bind its own probe continuation — it reads the ``deliver_tool_completion``
   binding the conversation door's REAL ``_run_tool_turn`` pins around the dispatch (the opaque
   ``{delivery_thread_id, route_name}`` context), binds a resume continuation, and async-parks on
-  ``ask_user(mode="async")``. So the PRODUCTION completion continuation is what carries the
+  ``ask(mode="async")``. So the PRODUCTION completion continuation is what carries the
   deferred reply back.
 * A visitor's message parks the turn SILENTLY — no synchronous reply is posted, the interaction
   is persisted — mirroring the web round-trip harness of ``test_web_public_chat``.
@@ -20,7 +20,7 @@ This is the unified park-completion binding's core new path, end to end on the r
 * The non-success leg (an aborted/failed resume) delivers the route's UNIFORM client-safe error
   notice — not a mapped reply, not silence.
 
-Generic throughout: the capability under test is the ask_user / tool-target / deliver-back seam,
+Generic throughout: the capability under test is the ask / tool-target / deliver-back seam,
 never a flow or engine.
 """
 
@@ -58,7 +58,7 @@ async def _open_tool_target_web_visitor(bridge: BridgeHarness, uniq: Callable[[s
         execution_key=execution_key,
         channel="web",
         our_identity=identity,
-        payload_expr="{marker: .message}",
+        start_expr="{marker: .message}",
         reply_expr=".result.answer",
     )
     base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
@@ -113,12 +113,12 @@ async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversat
     out_texts = [data["text"] for event, data in delivered if event == "chat.message" and data["direction"] == "out"]
     assert any(answer in text for text in out_texts), f"the resumed reply was not delivered, saw {out_texts!r}"
 
-    # IDEMPOTENT: re-fire the resume out of band with the SAME interaction/answer (an
-    # at-least-once redelivery). deliver_tool_completion is keyed on the completion_id (the
-    # interaction id), so the already-committed record is a benign no-op — no second reply posts.
+    # A resumer call OUTSIDE the platform's delivery ladder produces the terminal but delivers
+    # NOTHING: an address tool fires only inside the ladder's delivery-fire context. Re-firing the
+    # continuation directly returns the same terminal and posts no second reply.
     async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
         again = await mcp.call_tool("e2e_tool_target_deliver", {"interaction_id": interaction_id, "answer": answer})
-    assert again.data["status"] == "succeeded"
+    assert again.data["result"]["answer"] == answer
 
     replay = await web.frames()
     delivered_replies = [

@@ -108,7 +108,7 @@ themselves to.
 ## Ask-less forms
 
 A `notify_user` carrying a `schema` renders an **ask-less form card**: the message is
-the form's prompt, the schema draws the same schema-driven widget an `ask_user` form
+the form's prompt, the schema draws the same schema-driven widget an `ask` form
 question uses — but nothing waits on it. There is no deadline, no timeout, and no
 pending interaction; the card simply sits in the conversation, and a submission enters
 it as an ordinary participant message: the agent sees a `label: value` text (labels come from
@@ -132,7 +132,7 @@ treat typed participant text.
 
 Query parameters on the chat page URL are **captured with the visitor's session**
 and delivered to the turn. A route whose target is a **tool** receives them on
-its payload under a `params` key — string values, reachable from `payload_expr`
+its payload under a `params` key — string values, reachable from `start_expr`
 as `.params.<name>`:
 
 ```
@@ -151,10 +151,10 @@ present on the payload only when the entry carried parameters.
 A link parameter is **transport, nothing more** — no signature, no expiry, no
 interpretation. When a flow must *trust* a value, it issues its own secret token,
 delivers it in the link, and checks it in its own store. jq gating in
-`payload_expr` runs before the tool does:
+`start_expr` runs before the tool does:
 
 ```bash
---payload-expr 'if .params.key then {example_config_kwargs: {message: .message, token: .params.key}} else error("no key") end'
+--start-expr 'if .params.key then {example_config_kwargs: {message: .message, token: .params.key}} else error("no key") end'
 ```
 </Warning>
 

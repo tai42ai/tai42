@@ -7,10 +7,13 @@ CLI derive from those routes, and the MCP tool surface projects from the registr
 (:func:`project_operations`). One source; every management surface derives from it.
 """
 
+import importlib
 import pkgutil
+import sys
+from collections.abc import Iterator
 
 from tai42_skeleton.operations.adapter import OperationResponse, register_operation_route
-from tai42_skeleton.operations.decorator import operation, operation_metadata_of
+from tai42_skeleton.operations.decorator import OPERATION_ATTR, operation, operation_metadata_of
 from tai42_skeleton.operations.errors import (
     BadRequestError,
     ConflictError,
@@ -62,25 +65,50 @@ def operation_leaf_modules() -> list[str]:
 _leaf_snapshot: list[OperationMetadata] | None = None
 
 
+def _loaded_leaf_operations(leaf_names: list[str]) -> Iterator[OperationMetadata]:
+    """Every operation record the currently-loaded leaf modules declare.
+
+    Scans each leaf module — and any loaded submodule of a package leaf, where the
+    declarations live in submodules and are re-exported — for functions carrying the
+    stamped ``__operation__`` record, de-duplicated by identity so a re-exported
+    declaration is yielded once. Reads the records off the modules already in
+    ``sys.modules``, so no module is popped or re-imported.
+    """
+    prefixes = tuple(f"{leaf}." for leaf in leaf_names)
+    leaf_set = set(leaf_names)
+    seen: set[int] = set()
+    for name, module in list(sys.modules.items()):
+        if module is None or (name not in leaf_set and not name.startswith(prefixes)):
+            continue
+        for value in vars(module).values():
+            metadata = getattr(value, OPERATION_ATTR, None)
+            if isinstance(metadata, OperationMetadata) and id(metadata) not in seen:
+                seen.add(id(metadata))
+                yield metadata
+
+
 def reregister_operations() -> list[str]:
     """Repopulate the cleared ``operation_registry`` with this package's leaf operations.
 
-    Returns the leaf module names re-imported (empty after the first call).
+    Returns the leaf module names imported on the FIRST call (empty on every later call).
 
     The registry is process-global and a decorator fires exactly once per interpreter,
     so a plain re-import of a router that merely ``from operations.<domain> import <op>``
     never re-registers a leaf that stayed cached in ``sys.modules`` — and the reload
     path clears the registry, so without this the surface would project nothing.
 
-    The FIRST call pops each leaf from ``sys.modules`` and re-imports it (never this
-    package or its infra, so the singleton is preserved), re-firing every ``@operation``
-    into the cleared registry, then snapshots the registered records. Every LATER call
+    The FIRST call imports each leaf so its ``@operation`` decorators have fired at least
+    once (a leaf not yet loaded — the production boot order, where the routers pull the
+    leaves in only later — registers on this first import), then re-registers every record
+    the loaded leaf tree carries as ``__operation__`` and snapshots them. A leaf is
+    imported in place, NEVER popped and re-imported: popping would mint a new module
+    generation and orphan every reference an already-loaded leaf handed out, splitting the
+    operation record a caller holds from the one the registry serves. Every LATER call
     re-adds that snapshot without touching ``sys.modules``: the leaf modules are static
-    across an in-process reload and the snapshot records are the SAME objects the cached
-    leaf functions carry as ``__operation__``, so the routers re-attach their route
-    templates to the very records now back in the registry. Avoiding the per-reload
-    sys.modules churn keeps the reload off the import machinery's blocking I/O, whose
-    yields would otherwise let a reload's synchronous re-import interleave with the
+    across the process and the snapshot records are the SAME objects the cached leaf
+    functions carry, so the routers re-attach their route templates to the very records
+    now back in the registry. Keeping the reload off the import machinery's blocking I/O
+    also keeps its yields from letting a reload's synchronous re-import interleave with the
     concurrently-running worker-bus subscription task. A leaf import that fails on the first
     call propagates loudly.
     Runs after ``operation_registry.clear()`` and before the routers re-attach their
@@ -94,20 +122,26 @@ def reregister_operations() -> list[str]:
             operation_registry.register(metadata)
         return []
 
-    # Imported lazily: this package is imported very early and by the app package
-    # itself, so a module-level import of the app importer would be circular.
-    from tai42_skeleton.app.importer import import_or_reload_package
+    leaves = operation_leaf_modules()
+    for module in leaves:
+        # Ensure the leaf is loaded so its decorators have fired. An already-loaded leaf
+        # is left at its live generation — the (cached) import is a no-op — so no caller's
+        # reference to it is orphaned; its records are restored below instead.
+        importlib.import_module(module)
 
-    reloaded: list[str] = []
-    for module in operation_leaf_modules():
-        reloaded.extend(import_or_reload_package(module))
-    # Snapshot the write-target generation the re-imports just populated: this
-    # first-and-only import pass runs at boot, before any staged build opens a
-    # pending generation, so the write-target is the committed map here — but reading
-    # it through the staged accessor keeps the snapshot the very records just
-    # registered rather than a prior committed generation.
+    # Re-register every operation the loaded leaves declare. The import above already
+    # registered a leaf it first-loaded; a leaf loaded before this call did not re-fire on
+    # its cached import, so its records are (re-)registered here. Registering a record
+    # already present is idempotent — the same object under the same name.
+    for metadata in _loaded_leaf_operations(leaves):
+        operation_registry.register(metadata)
+
+    # Snapshot the write-target generation just populated: this first-and-only pass runs at
+    # boot, before any staged build opens a pending generation, so the write-target is the
+    # committed map here — but reading it through the staged accessor keeps the snapshot the
+    # very records just registered rather than a prior committed generation.
     _leaf_snapshot = operation_registry.all_staged()
-    return reloaded
+    return list(leaves)
 
 
 __all__ = [

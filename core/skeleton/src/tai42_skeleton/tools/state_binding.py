@@ -146,8 +146,9 @@ async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments
 
     A named ``template_jq`` (input purpose) is evaluated over the subject's record with NO
     params (a named injection carries no param values — a params-declaring input jq is a loud
-    refusal); a custom ``jq`` runs over ``{record, input}``. The value lands at ``into``. An
-    attach whose ``scope_expr`` predicate is ``false`` is skipped.
+    refusal); a custom ``jq`` runs over the record (its ``.``) with the run input bound as
+    ``$input``. The value lands at ``into``. An attach whose ``scope_expr`` predicate is
+    ``false`` is skipped.
     """
     for attach in binding.states:
         if not await _scope_engaged(app, attach, arguments):
@@ -163,21 +164,22 @@ async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments
                 record = await app.states.read(attach.state, subject)
                 data = record.data if record is not None else {}
                 jq = await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq)
-                value = await run_jq_first(jq, {"record": data, "input": arguments})
+                value = await run_jq_first(jq, data, variables={"input": arguments})
             arguments[injection.into] = value
 
 
 async def _resolve_op_id(
     app: TaiMCP, state: str, op_id_expr: TemplatedText | None, run_input: dict[str, Any], output: Any
 ) -> str | None:
-    """Resolve an update's optional ``op_id`` idempotency key from its rendered expression over ``{output, input}``.
+    """Resolve an update's optional ``op_id`` idempotency key from its rendered expression over the tool output.
 
-    ``null`` means no key. A non-string, non-null result is a loud refusal.
+    ``.`` is the tool output; the run input is bound as ``$input``. ``null`` means no key. A
+    non-string, non-null result is a loud refusal.
     """
     if op_id_expr is None:
         return None
     expr = await _render_slot(app, f"op_id expression for state {state!r}", op_id_expr)
-    value = await run_jq_first(expr, {"output": output, "input": run_input})
+    value = await run_jq_first(expr, output, variables={"input": run_input})
     if value is None or isinstance(value, str):
         return value
     raise ValueValidationError(f"state binding op_id expression must yield a string or null, got {value!r}")
@@ -188,10 +190,11 @@ async def apply_binding_updates(
 ) -> None:
     """Apply each attach's ``updates`` through the store AFTER the dispatch.
 
-    A named ``template_jq`` (update purpose) shapes its ``.input`` from the ``adapter`` over
-    ``{output, input}`` (or the run input directly when it declares none) and is applied via
-    :meth:`app.states.apply_template_jq`; a custom ``jq`` authors the whole op batch over
-    ``{record, output, input}`` and is applied via :meth:`app.states.apply`.
+    A named ``template_jq`` (update purpose) shapes its ``.input`` from the ``adapter`` over the
+    tool output (its ``.``) with the run input bound as ``$input`` (or the run input directly
+    when it declares no adapter) and is applied via :meth:`app.states.apply_template_jq`; a
+    custom ``jq`` authors the whole op batch over the tool output (its ``.``) with the run input
+    bound as ``$input`` and the record as ``$record``, applied via :meth:`app.states.apply`.
 
     Single-writer identity: a TEMPLATE update writes as one door-independent writer keyed on
     its resolved program name (the SAME update from any door on one state is one writer); a
@@ -207,7 +210,7 @@ async def apply_binding_updates(
             if update.template_jq is not None:
                 if update.adapter is not None:
                     adapter = await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter)
-                    adapted = await run_jq_first(adapter, {"output": output, "input": arguments})
+                    adapted = await run_jq_first(adapter, output, variables={"input": arguments})
                 else:
                     adapted = arguments
                 await app.states.apply_template_jq(
@@ -224,7 +227,7 @@ async def apply_binding_updates(
                 record = await app.states.read(attach.state, subject)
                 data = record.data if record is not None else {}
                 jq = await _render_slot(app, f"update jq for state {attach.state!r}", update.jq)
-                ops = await run_jq_first(jq, {"record": data, "output": output, "input": arguments})
+                ops = await run_jq_first(jq, output, variables={"input": arguments, "record": data})
                 if not isinstance(ops, list):
                     raise ValueValidationError(
                         f"state binding custom update jq for state {attach.state!r} must return an op batch "
@@ -284,7 +287,10 @@ async def _validate_injections(app: TaiMCP, attach: StateAttach) -> None:
     """Compile each injection's custom jq, or resolve each named ``template_jq`` to an ``"input"`` program."""
     for injection in attach.input_injections:
         if injection.jq is not None:
-            compile_check(await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq))
+            compile_check(
+                await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq),
+                variables=["input"],
+            )
         else:
             if injection.template_jq is None:
                 raise AssertionError
@@ -295,15 +301,24 @@ async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
     """Compile op_id/custom-jq, resolve each named update ``template_jq``, and enforce the adapter-params rule."""
     for update in attach.updates:
         if update.op_id is not None:
-            compile_check(await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id))
+            compile_check(
+                await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id),
+                variables=["input"],
+            )
         if update.jq is not None:
-            compile_check(await _render_slot(app, f"update jq for state {attach.state!r}", update.jq))
+            compile_check(
+                await _render_slot(app, f"update jq for state {attach.state!r}", update.jq),
+                variables=["input", "record"],
+            )
         else:
             if update.template_jq is None:
                 raise AssertionError
             program = await _require_program(app, attach.state, update.template_jq, "update", declared=attach.templates)
             if update.adapter is not None:
-                compile_check(await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter))
+                compile_check(
+                    await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter),
+                    variables=["input"],
+                )
             elif program.params:
                 raise ValueValidationError(
                     f"state binding update {update.template_jq!r} on state {attach.state!r} declares params "

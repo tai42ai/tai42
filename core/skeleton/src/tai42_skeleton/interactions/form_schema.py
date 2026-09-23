@@ -15,7 +15,7 @@ extra constraint keyword riding alongside a scalar ``type`` (``pattern``,
 ``minimum``, an inline ``anyOf``, ...) is not rendered but is enforced when the
 answer is validated.
 
-The ask-time guard (``ask_user``) and the callback form renderer share this ONE
+The ask-time guard (``ask``) and the callback form renderer share this ONE
 walk, so the shared subset is judged by a single rule set. Channel-SPECIFIC limits
 beyond this subset (reserved property names, a medium's own Block Kit / Flow caps)
 are NOT defined here — the named channel's ``validate_form_schema`` hook enforces

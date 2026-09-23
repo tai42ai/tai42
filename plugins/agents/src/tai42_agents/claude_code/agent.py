@@ -34,7 +34,6 @@ from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     SuspendedInteraction,
     current_execution_identity,
-    get_park_completion,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
@@ -47,6 +46,7 @@ from tai42_agents._internal.park import (
     ParkIdentity,
     assert_park_capable,
     bind_resume_per_step,
+    chain_routing_slots,
     persist_park,
     register_agent_resume_tool,
     workspace_lease,
@@ -124,7 +124,7 @@ _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"tools", "presets"})
 def _resume_continuation(threaded: bool) -> Iterator[None]:
     """Bind the agent-resume continuation for the duration of a THREADED drive.
 
-    A platform ``ask_user(mode="async")`` — the agent's OWN async ask (``_park_async_ask``)
+    A platform ``ask(mode="async")`` — the agent's OWN async ask (``_park_async_ask``)
     OR one a proxied tool this drive runs raises — reads the bound continuation to stamp
     ``continuation_tool`` onto the parked interaction, so a later ``agent_resume`` re-enters
     this agent. Without it, the async ask refuses loudly ("async ask requires a resuming
@@ -578,7 +578,7 @@ class ClaudeCodeAgent(Agent):
         if thread_id is None:
             raise AssertionError
         horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
-        completion_tool, completion_context = get_park_completion()
+        completion_tool, completion_context = chain_routing_slots()
         execution_identity, execution_fingerprint = current_execution_identity()
         identity = ParkIdentity(
             agent_name=AGENT_NAME,
@@ -641,7 +641,7 @@ class ClaudeCodeAgent(Agent):
         options_snapshot: dict[str, Any],
     ) -> AsyncIterator[tuple[StreamEvent, bool]]:
         if frame.mode == "sync":
-            answer = await tai42_app.interactions.ask_user(
+            answer = await tai42_app.interactions.ask(
                 frame.question, answer_format=frame.answer_format, options=frame.options, mode="sync"
             )
             await handle.write_stdin(dump_frame(AnswerFrame(ask_id=frame.ask_id, answer=answer)))
@@ -675,7 +675,7 @@ class ClaudeCodeAgent(Agent):
         options_snapshot: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
         horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
-        completion_tool, completion_context = get_park_completion()
+        completion_tool, completion_context = chain_routing_slots()
         execution_identity, execution_fingerprint = current_execution_identity()
         identity = ParkIdentity(
             agent_name=AGENT_NAME,
@@ -689,7 +689,7 @@ class ClaudeCodeAgent(Agent):
             execution_fingerprint=execution_fingerprint,
         )
         assert_park_capable(identity, durable=True, retention_bound=horizon)
-        suspended = await tai42_app.interactions.ask_user(
+        suspended = await tai42_app.interactions.ask(
             frame.question,
             answer_format=frame.answer_format,
             options=frame.options,
@@ -728,7 +728,14 @@ class ClaudeCodeAgent(Agent):
         # instant human answer never waits on the reaper.
         await persist_park(identity, [(interaction_id, {interaction_id: deadline})])
         await handle.write_stdin(dump_frame(StopFrame(reason="park")))
-        yield SuspendedFinal(interaction_ids=[interaction_id], thread_id=thread_id, expiry_at=deadline)
+        yield SuspendedFinal(
+            interaction_ids=[interaction_id],
+            thread_id=thread_id,
+            # The caller subset the parked sentinel carried (``[id]`` for a ``to="caller"`` ask,
+            # empty for a user ask), so the receipt partitions caller from user asks.
+            caller_interaction_ids=suspended.caller_interaction_ids,
+            expiry_at=deadline,
+        )
 
     def _emit_usage(self, frame: ResultFrame, *, settings: ClaudeCodeSettings) -> None:
         """Emit the SDK-reported usage/cost into the ACTIVE trace (its model calls bypass the platform LLM seam).

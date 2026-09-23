@@ -10,6 +10,7 @@ from tai42_contract.conversations import (
     TargetConversationConfig,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils import render as door_contract_module
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
@@ -27,6 +28,7 @@ from .conftest import (
     FakeChannel,
     FakeManager,
     _accepting_callback,
+    _connected,
     _FakeTemplateApp,
     _settle,
     _store,
@@ -95,10 +97,10 @@ async def test_tool_target_none_or_blank_reply_is_silent(env, monkeypatch, reply
     assert channel.sends == []
 
 
-async def test_tool_target_payload_expr_maps_the_kwargs(env, monkeypatch):
+async def test_tool_target_start_expr_maps_the_kwargs(env, monkeypatch):
     # A preset-shaped payload: an expr emitting {"example_config_kwargs": {...}}.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr="{example_config_kwargs: {text: .message, from: .sender}}")
+    route = _tool_channel_route(start_expr="{example_config_kwargs: {text: .message, from: .sender}}")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -108,11 +110,34 @@ async def test_tool_target_payload_expr_maps_the_kwargs(env, monkeypatch):
     assert tools.calls[0]["arguments"] == {"example_config_kwargs": {"text": "run it", "from": "+15550002222"}}
 
 
+async def test_tool_target_parked_bound_as_jq_has_no_null_keys(env, monkeypatch):
+    # A parked entry's unset optional fields are ABSENT from ``$parked``, never null-valued keys:
+    # the door binds the one compact shape.
+    from tai42_contract.interactions import ParkedEntry
+
+    channel = FakeChannel()
+    route = _tool_channel_route(
+        start_expr="{parked_nulls: [$parked[0] | to_entries[] | select(.value == null) | .key]}"
+    )
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    async def _one():
+        return [ParkedEntry(id="i-1", status="asking")]
+
+    monkeypatch.setattr(tool_turn_module, "list_parked", _one)
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"parked_nulls": []}
+
+
 async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
     # Composed accept→turn→dispatch: the routed flow/tool's received kwargs carry the thread_id
     # matching the thread this turn ran under — the same opaque id the thread doors address.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr="{tid: .thread_id}")
+    route = _tool_channel_route(start_expr="{tid: .thread_id}")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -313,9 +338,9 @@ async def test_a_channel_tool_error_falls_back_to_the_default_when_unset(env, mo
     assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
 
 
-async def test_tool_target_payload_expr_multi_emit_is_an_error(env, monkeypatch):
+async def test_tool_target_start_expr_multi_emit_is_an_error(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".message, .sender")  # two emits
+    route = _tool_channel_route(start_expr=".message, .sender")  # two emits
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
@@ -329,9 +354,9 @@ async def test_tool_target_payload_expr_multi_emit_is_an_error(env, monkeypatch)
     assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
 
 
-async def test_tool_target_payload_expr_non_object_is_an_error(env, monkeypatch):
+async def test_tool_target_start_expr_non_object_is_an_error(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".message")  # emits a string, not an object
+    route = _tool_channel_route(start_expr=".message")  # emits a string, not an object
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
@@ -411,11 +436,11 @@ async def test_tool_target_dispatch_is_offloaded_off_the_event_loop(env, monkeyp
     assert tools.calls[0]["offload_sync"] is True
 
 
-async def test_tool_target_payload_expr_reads_our_identity_and_channel(env, monkeypatch):
-    # our_identity and channel reach the tool through payload_expr; on the channel door they
+async def test_tool_target_start_expr_reads_our_identity_and_channel(env, monkeypatch):
+    # our_identity and channel reach the tool through start_expr; on the channel door they
     # carry the route's real values.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr="{oid: .our_identity, ch: .channel}")
+    route = _tool_channel_route(start_expr="{oid: .our_identity, ch: .channel}")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -425,14 +450,16 @@ async def test_tool_target_payload_expr_reads_our_identity_and_channel(env, monk
     assert tools.calls[0]["arguments"] == {"oid": "+15550001111", "ch": "twilio"}
 
 
-async def test_tool_target_payload_expr_our_identity_and_channel_are_null_on_the_api_door(env, monkeypatch):
-    # An api route carries no channel/our_identity, so both read as null through payload_expr.
-    route = _tool_api_route(payload_expr="{oid: .our_identity, ch: .channel}")
+async def test_tool_target_start_expr_our_identity_and_channel_are_null_on_the_api_door(env, monkeypatch):
+    # An api route carries no channel/our_identity, so both read as null through start_expr.
+    route = _tool_api_route(start_expr="{oid: .our_identity, ch: .channel}")
     _wire(monkeypatch, FakeManager(route))
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
-    await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"oid": None, "ch": None}
@@ -451,7 +478,9 @@ async def test_tool_target_over_the_api_door_silent_delivers_a_signed_silent_cal
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=0)
+    result = await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", wait_seconds=0, client_connected=_connected
+    )
     assert result.answer is None  # 202: the outcome is delivered out of band
     await _settle()
 
@@ -481,7 +510,9 @@ async def test_tool_target_over_the_api_door_silent_sync_wait_returns_the_marker
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
 
-    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    result = await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     assert result.answer is not None
@@ -500,7 +531,7 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
     from tai42_contract.tools import current_tool_invocation
 
     binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".thread_id"))])
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
 
     class _Cfg:
         async def get(self, target_kind, target_name):
@@ -508,11 +539,12 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
 
     monkeypatch.setattr(accessors_module, "_config_store", lambda: _Cfg())
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
+    monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
 
     seen: dict = {}
 
     class _RecordingTools:
-        async def run_tool(self, key, arguments, *, offload_sync=False):
+        async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
             inv = current_tool_invocation()
             seen["binding"] = inv.state_binding if inv is not None else None
             return "ok"

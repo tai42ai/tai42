@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from tai42_contract.interactions import AnswerFormat, InteractionRequest, MediaItem
+from tai42_contract.tools import current_call_chain
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.interactions.media import substitute_media
@@ -40,12 +41,16 @@ def build_request(
     park_binding: AsyncParkBinding,
     mode: Literal["sync", "async"],
     expiry_at: Any,
+    to: Literal["user", "caller"],
+    payload: dict[str, Any] | None,
+    on_expiry: Literal["kill", "resume"],
 ) -> InteractionRequest:
     """Build the durable ``InteractionRequest`` for the question.
 
     Carries its answer format + payload, the digression policy/notice, the deadline window,
-    the delivery channel/recipient/audience, the stored media, and (for an async park) the
-    resolved continuation binding.
+    the delivery channel/recipient/audience, the addressing (``to``/``payload``), the expiry
+    disposition, the stored media, and (for an async park) the resolved continuation binding
+    plus the run's captured delivery identity + address.
     """
     return InteractionRequest(
         interaction_id=interaction_id,
@@ -53,6 +58,9 @@ def build_request(
         question=question,
         answer_format=fmt,
         format_payload=format_payload,
+        to=to,
+        payload=payload,
+        on_expiry=on_expiry,
         # The per-ask digression policy + custom retry notice ride the durable record
         # for attribution; the ladder reads them off the Correlation the channel parks.
         on_mismatch=on_mismatch,
@@ -75,6 +83,14 @@ def build_request(
         continuation_tool=park_binding.continuation_tool,
         continuation_identity=park_binding.continuation_identity,
         continuation_state_context=park_binding.continuation_state_context,
+        # The live call chain WITHOUT the ask-performing frame (the innermost entry,
+        # this ask's own tool dispatch), so a resume restores the parking run's chain
+        # and never re-adds the ask frame. Empty outside any tool/agent frame.
+        asked_by=list(current_call_chain()[:-1]),
+        # The RUN's captured delivery identity + address (both None for a sync ask, whose
+        # binding is empty); every ask of a run stores the SAME pair, no ``to`` branch.
+        run_delivery_id=park_binding.run_delivery_id,
+        delivery=park_binding.delivery,
         expiry_at=expiry_at,
     )
 
@@ -101,6 +117,9 @@ async def persist_question(
     media: list[MediaItem | dict[str, Any]] | None,
     mode: Literal["sync", "async"],
     expiry_at: Any,
+    to: Literal["user", "caller"],
+    payload: dict[str, Any] | None,
+    on_expiry: Literal["kill", "resume"],
 ) -> list[MediaItem] | None:
     """Open the persist connection, substitute media, build the request, reserve the slot, and write it.
 
@@ -148,18 +167,37 @@ async def persist_question(
             park_binding=park_binding,
             mode=mode,
             expiry_at=expiry_at,
+            to=to,
+            payload=payload,
+            on_expiry=on_expiry,
         )
         ticket = callback.ticket if callback is not None else None
         ticket_ttl = callback.ticket_ttl if callback is not None else None
-        # Concurrency guard (all formats). ``reserve_open_slot`` prunes stale open
-        # members, refuses at the cap, and reserves this question's open-index member
-        # in ONE atomic step. A reserved slot means ``add`` must skip re-adding it.
-        if settings.max_concurrent is not None:
-            reserved = await store.reserve_open_slot(r, request, settings.max_concurrent)
+        # Concurrency guard (all formats), addressed by ``to`` to its OWN cap and open
+        # index: a caller ask reserves from ``max_concurrent_caller`` and the caller open
+        # zset, a user ask from ``max_concurrent`` and the user open zset — the two are
+        # independent, so a full caller cap never refuses a user ask and vice versa.
+        # ``reserve_open_slot`` prunes stale open members, refuses at the cap, and reserves
+        # this question's open-index member in ONE atomic step; a reserved slot means
+        # ``add`` must skip re-adding it (``open_member_reserved=True``). ``to`` also drives
+        # ``add``'s ``to`` denormalization onto the state hash, which the read/answer
+        # surfaces gate on.
+        cap = settings.max_concurrent_caller if to == "caller" else settings.max_concurrent
+        # The RUN's captured out-of-band address, denormalized onto the state hash as
+        # ``{tool, context}`` alongside the run's ``run_delivery_id``, so the answer path copies
+        # both onto the continuation-due record and the reaper's detached redelivery binds the
+        # run's address + delivery identity without re-reading the request. Both ``None``
+        # for a sync ask or a run started at a receiver-less door.
+        delivery = (
+            {"tool": park_binding.delivery[0], "context": park_binding.delivery[1]}
+            if park_binding.delivery is not None
+            else None
+        )
+        if cap is not None:
+            reserved = await store.reserve_open_slot(r, request, cap, to=to)
             if not reserved:
-                raise InteractionLimitError(
-                    f"ask_user refused: already at the max_concurrent limit ({settings.max_concurrent})"
-                )
+                cap_name = "max_concurrent_caller" if to == "caller" else "max_concurrent"
+                raise InteractionLimitError(f"ask refused: already at the {cap_name} limit ({cap})")
             await store.add(
                 r,
                 request,
@@ -170,6 +208,9 @@ async def persist_question(
                 continuation_fingerprint=park_binding.continuation_fingerprint,
                 expiry_ttl_margin_seconds=window.park_ttl_margin_seconds,
                 thread_id=park_binding.park_thread_id,
+                to=to,
+                delivery=delivery,
+                run_delivery_id=park_binding.run_delivery_id,
             )
         else:
             await store.add(
@@ -181,5 +222,8 @@ async def persist_question(
                 continuation_fingerprint=park_binding.continuation_fingerprint,
                 expiry_ttl_margin_seconds=window.park_ttl_margin_seconds,
                 thread_id=park_binding.park_thread_id,
+                to=to,
+                delivery=delivery,
+                run_delivery_id=park_binding.run_delivery_id,
             )
     return stored_media

@@ -1,11 +1,11 @@
 """End-to-end settability of the per-ask ``on_mismatch`` digression policy: the
-REAL ``ask_user`` helper threads ``on_mismatch``/``mismatch_notice`` into BOTH the
+REAL ``ask`` helper threads ``on_mismatch``/``mismatch_notice`` into BOTH the
 durable ``InteractionRequest`` and the ``ChannelDelivery`` it builds, and a
 bridge-policy ask created through that helper reaches the shared inbound-answer
 ladder (which bridges the mismatched reply) once the channel copies the delivery's
 policy onto the ``Correlation`` it parks — the seam a real correlated channel uses.
 
-Born-red before the fields were threaded: ``ask_user`` did not accept
+Born-red before the fields were threaded: ``ask`` did not accept
 ``on_mismatch`` at all, so a bridge-policy ask could never be expressed and the
 policy could never reach the ladder through this path.
 """
@@ -25,6 +25,7 @@ from tai42_contract.interactions import (
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
+from tai42_contract.tools import tool_call_frame
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
@@ -32,7 +33,7 @@ from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.channels import inbound as inbound_module
 from tai42_skeleton.channels.inbound import InboundAnswerOutcome, InboundBridge, handle_inbound_answer
 from tai42_skeleton.hooks import cache as hooks_cache
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
@@ -101,7 +102,8 @@ def _interactions_store_configured(monkeypatch):
 def driver():
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    yield
+    with tool_call_frame():
+        yield
     reset_execution_identity(id_token)
     reset_resume_continuation_tool(tool_token)
 
@@ -161,7 +163,7 @@ def _stub_forward(monkeypatch, response: httpx.Response):
 async def test_helper_threads_on_mismatch_into_delivery_and_request(wired, fake_redis, driver):
     # The real helper builds a channel-delivered ask with the bridge policy + a custom
     # notice; both fields land on the ChannelDelivery AND the durable InteractionRequest.
-    result = await ask_user(
+    result = await ask(
         "proceed?",
         channel="cap",
         recipient="+15550001111",
@@ -188,7 +190,7 @@ async def test_helper_threads_on_mismatch_into_delivery_and_request(wired, fake_
 async def test_helper_default_on_mismatch_is_retry_on_both_frames(wired, fake_redis, driver):
     # An ask that does not set the policy keeps today's behavior exactly: RETRY on both
     # the delivery and the durable record, and no custom notice.
-    result = await ask_user(
+    result = await ask(
         "proceed?",
         channel="cap",
         recipient="+15550001111",
@@ -214,7 +216,7 @@ async def test_bridge_policy_reaches_the_ladder_through_the_real_helper(wired, f
     # participant reply (door 400 on a live ask) then BRIDGES as a digression through the shared
     # ladder — the ask stays parked and no participant notice is sent. The field carries this
     # settability so the helper can express the policy.
-    result = await ask_user(
+    result = await ask(
         "proceed?",
         channel="cap",
         recipient="+15550001111",

@@ -574,7 +574,7 @@ async function redisGet(redisUrl: string, key: string): Promise<string | null> {
 }
 
 /** The server-side visitor id a web-session cookie token is registered against — the
- * conversation address a web `ask_user` names its recipient by (`<identity>:<visitor>`),
+ * conversation address a web `ask` names its recipient by (`<identity>:<visitor>`),
  * which the public doors never disclose to the client. Read from the SUT Redis. */
 export async function resolveWebVisitorId(token: string): Promise<string> {
   const raw = await redisGet(stackRedisUrl(), `${WEB_SESSION_KEY_PREFIX}${token}`);

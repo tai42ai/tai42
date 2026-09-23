@@ -1,7 +1,7 @@
 """Tool-target person continuity across a linked person's two channels.
 
 One TOOL target (``e2e_record``) reachable on two channel routes (twilio + whatsapp), keyed on
-``person_id``: ``payload_expr`` maps each inbound to ``{key: person_id, value: message}``, so
+``person_id``: ``start_expr`` maps each inbound to ``{key: person_id, value: message}``, so
 the tool writes its flow state under the person the turn ran as. A multichannel tool target's
 payload carries ``person_id`` (stable from first contact; the merge survivor's id after a
 ``/link``), so the probe list keyed on it IS the flow state the second channel joins.
@@ -83,7 +83,7 @@ async def test_tool_state_keys_on_person_id_across_a_link_and_unlink(
         execution_key=exec_tw,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr="null",
     )
     await bridge.create_tool_channel_route(
@@ -92,7 +92,7 @@ async def test_tool_state_keys_on_person_id_across_a_link_and_unlink(
         execution_key=exec_wa,
         channel="whatsapp",
         our_identity=BRIDGE_WHATSAPP_PHONE_ID,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr="null",
     )
 

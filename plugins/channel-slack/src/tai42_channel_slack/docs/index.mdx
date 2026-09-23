@@ -3,7 +3,7 @@ title: Slack channel
 description: Configure the Slack channel — the CHANNEL_SLACK_ env group, the Events API Request URL, and the bot-user-id a bridge route needs.
 ---
 
-Bridge a Slack app to an agent, or deliver `ask_user` questions into Slack. A
+Bridge a Slack app to an agent, or deliver `ask` questions into Slack. A
 message runs an agent turn and the answer posts back in the same conversation.
 
 ## Enable it
@@ -30,7 +30,7 @@ connection-tuning fields) point the plugin-owned correlation store.
 
 `CHANNEL_SLACK_BOT_USER_ID` is **required** for a bridge route — without it, a
 bridge message raises loudly rather than looping the bot on its own posts. An
-`ask_user`-only deployment that runs no bridge route does not need it.
+`ask`-only deployment that runs no bridge route does not need it.
 
 ## Point the Events API at the deployment
 

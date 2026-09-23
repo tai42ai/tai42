@@ -23,7 +23,7 @@ from tai42_contract.app import tai42_app
 
 AGENT_NAME = "e2e_park_agent"
 
-# The baked tool list every run carries. ``e2e_agent_async_ask`` is the async ``ask_user`` the
+# The baked tool list every run carries. ``e2e_agent_async_ask`` is the async ``ask`` the
 # scripted model calls to park the run; ``e2e_record_identity`` lets a resumed turn record the
 # identity it drove under, exactly as the agents park suite reads it.
 BAKED_TOOL_NAMES = ["e2e_agent_async_ask", "e2e_record_identity"]
@@ -44,7 +44,7 @@ class E2eParkAgent(Agent):
     tool_name: ClassVar[str] = AGENT_NAME
     tool_description: ClassVar[str] = (
         "E2E probe agent: a tools_agent carrying the async-ask probe tools, so a conversation "
-        "agent-route turn can park on an async ask_user and deliver its resumed answer out of band."
+        "agent-route turn can park on an async ask and deliver its resumed answer out of band."
     )
     ToolInput: ClassVar[type[BaseModel]] = _ParkAgentInput
 

@@ -61,7 +61,12 @@ class _SpyStore:
         return 4
 
 
-def _row(run_id: str, outcome: RunOutcome = "success", interaction_id: str | None = None) -> RunRow:
+def _row(
+    run_id: str,
+    outcome: RunOutcome = "success",
+    interaction_id: str | None = None,
+    resumed_interactions: list[str] | None = None,
+) -> RunRow:
     return RunRow(
         run_id=run_id,
         preset_name="wx",
@@ -73,6 +78,7 @@ def _row(run_id: str, outcome: RunOutcome = "success", interaction_id: str | Non
         outcome=outcome,
         started_at="2026-01-01T12:00:00+00:00",
         ended_at="2026-01-01T12:00:02+00:00",
+        resumed_interactions=resumed_interactions or [],
     )
 
 
@@ -89,7 +95,10 @@ def store(monkeypatch) -> _SpyStore:
 
 
 async def test_list_returns_rows_and_deep_link_trace_id(store):
-    store.rows = [_row("r1", outcome="parked", interaction_id="i-1"), _row("r2")]
+    store.rows = [
+        _row("r1", outcome="parked", interaction_id="i-1", resumed_interactions=["i-r1", "i-r2"]),
+        _row("r2"),
+    ]
     resp = await router.list_runs(_req(""))
     assert resp.status_code == 200
     data = _json(resp)["data"]
@@ -99,6 +108,9 @@ async def test_list_returns_rows_and_deep_link_trace_id(store):
     # The lifecycle-correlation key rides the wire view (camelCase, None when absent).
     assert data["items"][0]["interactionId"] == "i-1"
     assert data["items"][1]["interactionId"] is None
+    # The resumed-interaction list rides the wire view (camelCase, empty when none).
+    assert data["items"][0]["resumedInteractions"] == ["i-r1", "i-r2"]
+    assert data["items"][1]["resumedInteractions"] == []
 
 
 async def test_list_passes_every_filter_through(store):

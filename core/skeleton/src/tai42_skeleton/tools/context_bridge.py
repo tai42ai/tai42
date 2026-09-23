@@ -4,7 +4,7 @@ An in-process caller (agent, webhook-triggered run, scheduled backend) invokes a
 tool with no connected MCP client, so a tool's injected ``ctx.elicit()`` /
 ``ctx.sample()`` would dead-end. :class:`PlatformBridgeContext` overrides those
 two capabilities to route through the platform's own machinery — elicit through
-the interactions ``ask_user`` channel, sample through the platform LLM — while
+the interactions ``ask`` channel, sample through the platform LLM — while
 inheriting every other Context capability unchanged.
 
 :func:`bridge_context` pushes this context for an in-process invocation ONLY when
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 
 class PlatformBridgeContext(Context):
-    """A FastMCP Context whose ``elicit`` routes to ``ask_user`` and whose ``sample`` falls back to the platform LLM.
+    """A FastMCP Context whose ``elicit`` routes to ``ask`` and whose ``sample`` falls back to the platform LLM.
 
     For the in-process caller path where no elicitation/sampling-capable client
     exists. Every other Context capability is inherited unchanged.
@@ -57,7 +57,7 @@ class PlatformBridgeContext(Context):
         response_title: str | None = None,
         response_description: str | None = None,
     ) -> Any:
-        """Route an elicitation through the platform's ``ask_user`` channel."""
+        """Route an elicitation through the platform's ``ask`` channel."""
         return await resolve_elicit(
             message,
             response_type,

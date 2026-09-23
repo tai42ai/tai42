@@ -17,7 +17,7 @@ def _event_fields(
     # ``reason`` TAGS a removed event with WHY the question left pending (``"cancelled"``
     # for an operator per-interaction cancel), so a live operator surface can tell a
     # deliberate withdrawal apart from a timeout/expiry removal; omitted (untagged) for
-    # every other removal, exactly as before.
+    # every other removal.
     fields = {"type": event_type, "interaction_id": interaction_id, "group_id": group_id}
     if audience is not None:
         fields["audience"] = audience

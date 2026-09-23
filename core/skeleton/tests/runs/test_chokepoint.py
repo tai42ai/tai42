@@ -1,8 +1,10 @@
 """The runs-index lifecycle chokepoint: the START/terminal write pair, the outcome
 decision (success / error / parked / aborted), trace-id capture + backfill, the
 lifecycle-correlation ``interaction_id`` (a park's sentinel id at the terminal write,
-the ambient resume origin at START), attribution capture, and the two safety postures
-(store OFF, and a store failure never breaking the run).
+the ambient resume origin at START), the resumed-interaction collector (every id a
+visit resumes/takes under the run's span rolled up to the terminal write), attribution
+capture, and the two safety postures (store OFF, and a store failure never breaking the
+run).
 
 Drives ``record_outermost_preset_run`` directly with a spy store — the binding gate
 that decides WHICH dispatches enter it (outermost-only, raw tools excluded) is covered
@@ -50,7 +52,9 @@ class _SpyStore:
             }
         )
 
-    async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+    async def update_outcome(
+        self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+    ):
         # Records the attempt BEFORE raising (unlike insert_start), so failure-path
         # tests can assert the terminal write was reached — not that it succeeded.
         self.terminals.append(
@@ -60,6 +64,7 @@ class _SpyStore:
                 "ended_at": ended_at,
                 "trace_id": trace_id,
                 "interaction_id": interaction_id,
+                "resumed_interactions": resumed_interactions,
             }
         )
         if self._terminal_error:
@@ -318,6 +323,47 @@ async def test_noop_backend_leaves_trace_id_null(monkeypatch):
     async with record_outermost_preset_run("wx", 1) as run:
         run.observe("ok")
     assert store.starts[0]["trace_id"] is None
+
+
+async def test_terminal_write_carries_the_collected_resumed_interactions(wire):
+    # A visit under the run's span notes each id it resumed/took through the ambient
+    # collector armed by the record; the terminal write persists that list on the row.
+    store = wire(store=_SpyStore())
+    async with record_outermost_preset_run("wx", 1) as run:
+        chokepoint.note_resumed_interaction("i-a")
+        chokepoint.note_resumed_interaction("i-b")
+        run.observe("ok")
+    assert store.terminals[0]["resumed_interactions"] == ["i-a", "i-b"]
+
+
+async def test_nested_visit_ids_roll_up_to_the_outermost_row(wire):
+    # A nested sub-preset dispatch opens NO row of its own (only the outermost calls the
+    # chokepoint), so a note taken during it appends to the outermost run's collector.
+    store = wire(store=_SpyStore())
+    async with record_outermost_preset_run("outer", 1) as run:
+        chokepoint.note_resumed_interaction("i-outer")
+
+        async def _nested_dispatch() -> None:
+            # The nested preset body runs a visit that resumes an entry — it opens no
+            # record, so its note rolls up to the outermost collector still armed here.
+            chokepoint.note_resumed_interaction("i-nested")
+
+        await _nested_dispatch()
+        run.observe("ok")
+    assert store.terminals[0]["resumed_interactions"] == ["i-outer", "i-nested"]
+
+
+async def test_a_run_that_resumes_nothing_records_an_empty_list(wire):
+    store = wire(store=_SpyStore())
+    async with record_outermost_preset_run("wx", 1) as run:
+        run.observe("ok")
+    assert store.terminals[0]["resumed_interactions"] == []
+
+
+async def test_note_outside_any_record_is_a_no_op_never_raises():
+    # No collector armed (a door driving a visit with no run record open): the note
+    # records nothing and raises nothing — the designed no-record case.
+    chokepoint.note_resumed_interaction("i-orphan")
 
 
 async def test_mcp_wire_park_records_parked(wire):

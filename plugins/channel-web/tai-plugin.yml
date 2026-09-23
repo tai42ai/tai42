@@ -5,7 +5,7 @@ package: tai42-channel-web
 version: 5.0.10
 description: >-
   Public web chat channel plugin for the TAI ecosystem — hosts a visitor chat
-  page, delivers ask_user questions into it, and bridges the reply back.
+  page, delivers ask questions into it, and bridges the reply back.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-web
@@ -18,7 +18,7 @@ tags:
   - chat
   - public
   - visitor
-  - ask-user
+  - ask
   - hitl
 permissions:
   network: true
@@ -29,7 +29,7 @@ provides:
     name: web
     module: tai42_channel_web.register
     description: >-
-      Deliver ask_user questions to a visitor in the public chat page and bridge
+      Deliver ask questions to a visitor in the public chat page and bridge
       the reply back.
     routes:
       base: channels/web

@@ -11,6 +11,7 @@ import sys
 
 import httpx
 import pytest
+from tai42_contract.channels import ChannelDeliveryError
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram import TelegramChannel
@@ -103,18 +104,34 @@ async def test_startup_hook_follows_remapped_mount_base(stub_app, http_recorder,
 async def test_startup_hook_raises_on_ok_false(stub_app, http_recorder):
     _import_register_module(stub_app)
     http_recorder.responder = lambda request: httpx.Response(
-        200, json={"ok": False, "error_code": 401, "description": "Unauthorized"}
+        200,
+        json={"ok": False, "error_code": 401, "description": "Unauthorized", "parameters": {"retry_after": 3}},
     )
-    with pytest.raises(RuntimeError, match="error_code=401") as excinfo:
+    with pytest.raises(ChannelDeliveryError, match="error_code=401") as excinfo:
         await stub_app.lifecycle.startup_hooks[0]()
-    assert "Unauthorized" in str(excinfo.value)
+    # The full documented error rides the message, none dropped.
+    assert "description='Unauthorized'" in str(excinfo.value)
+    assert 'parameters={"retry_after":3}' in str(excinfo.value)
 
 
 async def test_startup_hook_raises_on_http_error(stub_app, http_recorder):
     _import_register_module(stub_app)
-    http_recorder.responder = lambda request: httpx.Response(500, text="server error")
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    # Telegram answers its structured error on the HTTP-error status too — the non-200
+    # arm is a live vendor-error path, so the detail surfaces error_code/description.
+    http_recorder.responder = lambda request: httpx.Response(
+        403, json={"ok": False, "error_code": 403, "description": "Forbidden: bot blocked"}
+    )
+    with pytest.raises(ChannelDeliveryError, match="error_code=403") as excinfo:
         await stub_app.lifecycle.startup_hooks[0]()
+    assert "Forbidden: bot blocked" in str(excinfo.value)
+
+
+async def test_startup_hook_non_json_error_body_falls_back_to_bounded_text(stub_app, http_recorder):
+    _import_register_module(stub_app)
+    http_recorder.responder = lambda request: httpx.Response(502, text="<html>" + "x" * 2000 + "</html>")
+    with pytest.raises(ChannelDeliveryError, match="setWebhook rejected") as excinfo:
+        await stub_app.lifecycle.startup_hooks[0]()
+    assert len(str(excinfo.value)) < 600  # detail bounded to 500 chars
 
 
 async def test_startup_hook_missing_public_base_url_aborts(stub_app, http_recorder, monkeypatch: pytest.MonkeyPatch):

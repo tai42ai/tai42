@@ -69,7 +69,7 @@ def build_sandbox_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="sandbox",
@@ -113,7 +113,7 @@ def build_sandbox_local_stack(res: StackResources, variants: Variants) -> StackC
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="sandbox-local",
@@ -143,7 +143,7 @@ def build_sandbox_local_deep_stack(res: StackResources, variants: Variants) -> S
         ],
         "agents": [_DEEP_AGENT_ENTRY],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _sandbox_local_env(res, variants)
     env.update(_memory_agent_state_env())
@@ -178,7 +178,7 @@ def build_sandbox_local_claude_stack(res: StackResources, variants: Variants) ->
         ],
         "agents": [_CLAUDE_AGENT_ENTRY],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _sandbox_local_env(res, variants)
     env.update(_memory_agent_state_env())
@@ -229,7 +229,7 @@ def build_claude_agent_stack(res: StackResources, variants: Variants) -> StackCo
         ],
         "agents": [_CLAUDE_AGENT_ENTRY],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env.update(_memory_agent_state_env())
@@ -285,7 +285,7 @@ def build_deep_agent_durable_stack(res: StackResources, variants: Variants) -> S
         ],
         "agents": [_DEEP_AGENT_ENTRY],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env.update(_redis_agent_state_env(res))
@@ -293,7 +293,7 @@ def build_deep_agent_durable_stack(res: StackResources, variants: Variants) -> S
     # The agents plugin's durable park index rides the plain feature Redis; the async ask refuses
     # loudly without it, and the per-workspace lease serializes the two replicas over it.
     env["TAI_AGENTS_REDIS_URL"] = res.redis_url
-    # An async ask_user park has no blocking waiter, so its expiry leg only resumes when the reaper
+    # An async ask park has no blocking waiter, so its expiry leg only resumes when the reaper
     # trips; pin its cadence low so it resumes in seconds rather than on the 30s default.
     env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
     # The scripted-stub model wiring (both groups on the stub) is the default; the REAL leg below

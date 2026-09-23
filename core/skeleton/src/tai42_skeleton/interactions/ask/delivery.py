@@ -82,7 +82,7 @@ async def emit_delivery_failed(*, channel: str, interaction_id: str, recipient: 
         await get_hooks_manager().on_event(topic=helper.DELIVERY_FAILED_EVENT_TOPIC, payload=payload)
     except Exception:
         logger.warning(
-            "ask_user: failed to emit %r for the abandoned delivery on channel %r interaction %s",
+            "ask: failed to emit %r for the abandoned delivery on channel %r interaction %s",
             helper.DELIVERY_FAILED_EVENT_TOPIC,
             channel,
             interaction_id,

@@ -563,9 +563,27 @@ async def test_pg_create_rejects_unknown_kwarg():
         await pg_mod.PostgresClient()._create(dsn="postgresql://u@h/db", bogus=1)
 
 
-async def test_pg_create_opens_pool_and_close(monkeypatch):
+async def test_pg_create_proves_connection_then_opens_pool_and_close(monkeypatch):
     pg_mod = _pg_mod()
     captured = {}
+    order = []
+
+    class _FakeProbe:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            self.closed = True
+            return False
+
+    probe = _FakeProbe()
+
+    async def _fake_connect(conninfo):
+        order.append(("probe", conninfo))
+        return probe
 
     class _FakePool:
         @staticmethod
@@ -573,6 +591,7 @@ async def test_pg_create_opens_pool_and_close(monkeypatch):
             pass
 
         def __init__(self, **kwargs):
+            order.append(("pool", None))
             captured.update(kwargs)
             self.opened = False
             self.closed = False
@@ -583,8 +602,12 @@ async def test_pg_create_opens_pool_and_close(monkeypatch):
         async def close(self):
             self.closed = True
 
+    monkeypatch.setattr(pg_mod.AsyncConnection, "connect", _fake_connect)
     monkeypatch.setattr(pg_mod, "AsyncConnectionPool", _FakePool)
     pool = await pg_mod.PostgresClient()._create(dsn="postgresql://u@h/db", min_size=3, max_size=7)
+    # The first connection is proven — with the SAME DSN, closed at once — BEFORE the pool is built.
+    assert order == [("probe", "postgresql://u@h/db"), ("pool", None)]
+    assert probe.closed is True
     assert captured["conninfo"] == "postgresql://u@h/db"
     assert captured["min_size"] == 3
     assert captured["max_size"] == 7

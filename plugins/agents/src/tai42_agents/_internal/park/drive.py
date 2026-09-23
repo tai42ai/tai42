@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
     """Bind the resume continuation for the duration of a park-capable run's drive.
 
-    A flow-blind platform ``ask_user(async)`` raised by a tool this run drives reads the
+    A flow-blind platform ``ask(async)`` raised by a tool this run drives reads the
     bound continuation to stamp ``continuation_tool`` onto the parked interaction, so a
     later answer re-enters through ``agent_resume``. The resume tool name is bound only when
     the run is park-capable AND its face delivers the resume (``bind``); otherwise ``None`` is
@@ -184,6 +184,17 @@ def _park_interactions(value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _park_caller_ids(value: Any) -> list[str]:
+    """The ``to="caller"`` subset a park interrupt's value carries, or ``[]`` when it carries none.
+
+    Absent on a plain HITL interrupt and on a park payload written before the caller subset rode
+    it — either way an empty caller partition, never a raise.
+    """
+    if isinstance(value, dict) and AGENT_PARK_PAYLOAD_KEY in value:
+        return value[AGENT_PARK_PAYLOAD_KEY].get("caller_interaction_ids") or []
+    return []
+
+
 async def finalize_drive(
     agent: Any,
     config: dict[str, Any],
@@ -220,6 +231,11 @@ async def finalize_drive(
     classified = [(iid, value, _park_interactions(value)) for iid, value in pending]
     parks = [(iid, interactions) for iid, _value, interactions in classified if interactions is not None]
     hitl = [(iid, value) for iid, value, interactions in classified if interactions is None]
+    # The caller subset spans every park interrupt of the super-step (parallel subagent parks each
+    # carry their own), unioned here.
+    caller_ids = {
+        iid for _iid, value, interactions in classified if interactions is not None for iid in _park_caller_ids(value)
+    }
 
     events: list[StreamEvent] = []
     if parks:
@@ -236,6 +252,8 @@ async def finalize_drive(
             SuspendedFinal(
                 interaction_ids=sorted(union),
                 thread_id=park.thread_id,
+                # Only the caller asks the index actually holds (the persisted union bounds it).
+                caller_interaction_ids=sorted(caller_ids & set(union)),
                 expiry_at=_earliest_expiry(union),
             )
         )

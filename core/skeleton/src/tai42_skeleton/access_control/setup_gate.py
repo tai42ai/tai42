@@ -40,40 +40,48 @@ class SetupContendedError(RuntimeError):
     """
 
 
-def _setup_serviceable(settings: AccessControlSettings) -> bool:
-    """Whether the ``POST /api/setup`` door can actually initialize.
+# The setup door's serviceability conditions, one source shared by the door (the 501 it
+# answers) and boot-time token minting (which skips a door that would refuse). Each string
+# is the client-facing 501 message, in one voice: the failing condition, then what the door
+# needs. Ordered as the door reports them.
+_ACCESS_CONTROL_OFF = (
+    "the setup door serves access-controlled installs only; it is disabled while "
+    "ACCESS_CONTROL_ENABLE is off (with the gate off there is nothing to initialize)"
+)
+_NO_KEY_MINTING_PROVIDER = (
+    "no configured identity provider can mint api keys; the setup door requires a key-minting provider"
+)
+_ACCESS_CONTROL_REDIS_UNSET = (
+    "the access-control Redis is not configured (ACCESS_CONTROL_REDIS_URL / TAI_DEFAULT_REDIS_URL); "
+    "the setup door requires it for the setup token, throttle, and mint lock"
+)
 
-    Mirrors the door's own self-disable checks so boot never mints a token for a door that
-    would 501. Serviceable iff access control is on, a configured identity provider can
-    mint api keys (the owner needs a first key), and the AC Redis (the home of the token,
-    throttle, and mint lock) is set. A missing piece is logged, never raised: the door
-    already refuses cleanly at request time, so the startup handler does nothing for a
-    deployment that does not use it.
+
+def setup_unserviceable_reason(settings: AccessControlSettings) -> str | None:
+    """The 501 reason the ``POST /api/setup`` door cannot initialize, or ``None`` when it can.
+
+    Serviceable iff access control is on, a configured identity provider can mint api keys
+    (the owner needs a first key), and the AC Redis (the home of the setup token, throttle,
+    and mint lock) is set. The single source of these conditions: the door raises
+    :class:`~tai42_skeleton.operations.errors.NotSupportedError` with this text, and
+    boot-time minting skips a door that would refuse so it never reaches for an absent Redis
+    (see :func:`ensure_setup_token`).
     """
     if not settings.enable:
-        return False
+        return _ACCESS_CONTROL_OFF
     if not any(mintable for _name, mintable in provider_capabilities()):
-        logger.debug(
-            "setup: no configured identity provider can mint api keys; the setup door is "
-            "disabled, nothing to mint at startup"
-        )
-        return False
+        return _NO_KEY_MINTING_PROVIDER
     if not settings.redis.redis_url:
-        logger.debug(
-            "setup: the access-control Redis is not configured "
-            "(ACCESS_CONTROL_REDIS_URL / TAI_DEFAULT_REDIS_URL); the setup door is "
-            "unavailable, nothing to mint at startup"
-        )
-        return False
-    return True
+        return _ACCESS_CONTROL_REDIS_UNSET
+    return None
 
 
 async def ensure_setup_token() -> None:
     """Fix the shared auto-token once at startup (no-op when no token is needed).
 
     Skips entirely when the gate is open, an operator token is set, or the door is not
-    serviceable (see :func:`_setup_serviceable`) — so a deployment that does not use the
-    feature boots without reaching for an absent Redis. Otherwise each worker attempts
+    serviceable (see :func:`setup_unserviceable_reason`) — so a deployment that does not use
+    the feature boots without reaching for an absent Redis. Otherwise each worker attempts
     ``SET key <fresh> NX`` on the shared access-control Redis; the winner fixes the
     effective token and is the only one to log it. ``NX`` makes the fix — and the single
     log line — happen exactly once for the deployment: a later boot finds the token already
@@ -98,7 +106,9 @@ async def ensure_setup_token() -> None:
     # use it. Mint the shared auto-token only when the door is SERVICEABLE — access control
     # on, a key-minting identity provider configured, and the AC Redis present. Otherwise
     # the door self-disables at request time (501), so there is nothing to fix at boot.
-    if not _setup_serviceable(settings):
+    reason = setup_unserviceable_reason(settings)
+    if reason is not None:
+        logger.debug("setup: not minting a startup token — %s", reason)
         return
     candidate = secrets.token_urlsafe(32)
     async with client_ctx(RedisClient, settings.redis) as r:

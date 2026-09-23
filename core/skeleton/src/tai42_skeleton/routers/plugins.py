@@ -21,12 +21,15 @@ callback doors + static Studio UI assets; everything carrying data stays authed)
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 
-ORDERING (load-bearing): the SPA catch-all matches ANY path, and FastMCP matches
-custom routes in registration (import) order, so this router MUST be listed LAST
-in ``manifest.routers_modules`` — otherwise its catch-all shadows sibling routes
-registered after it. The catch-all guards ``/api`` / ``/mcp`` paths (returns 404,
-never index.html) so a misorder surfaces as a visible 404 on those routes rather
-than a silent wrong-serve, but correct ordering is the contract.
+ORDERING (load-bearing): the SPA catch-all matches ANY non-``/api``/``/mcp`` path,
+and FastMCP matches custom routes in registration (import) order, so this router
+MUST be listed LAST in ``manifest.routers_modules`` — otherwise its catch-all
+shadows sibling routes registered after it. The catch-all is upgraded to a
+``SpaFallbackRoute`` (the call at the bottom of this module), whose ``matches()``
+never matches an ``/api`` / ``/mcp`` path: an unknown one falls to the router's
+native 404 (rendered as the shared JSON error envelope) and a known route keeps
+its native method match, so a misorder surfaces as a visible 404 on the shadowed
+route rather than a silent wrong-serve, but correct ordering is the contract.
 """
 
 from __future__ import annotations
@@ -224,8 +227,14 @@ def _serve_static(dist_root: Path, rel: str, target: Path) -> Response:
     )
 
 
+# The Studio SPA history-fallback catch-all. Registered on this path and, at the bottom of
+# this module, upgraded in place to a ``SpaFallbackRoute`` so it never matches an ``/api``/
+# ``/mcp`` path — one spelling, shared by the registration and the upgrade.
+_SPA_CATCH_ALL_PATH = "/{spa_path:path}"
+
+
 @tai42_app.http.custom_route(
-    "/{spa_path:path}",
+    _SPA_CATCH_ALL_PATH,
     methods=["GET"],
     summary="Serve the studio SPA (history fallback + static files)",
     tags=["plugins"],
@@ -236,10 +245,6 @@ def _serve_static(dist_root: Path, rel: str, target: Path) -> Response:
 async def serve_spa(request: Request) -> Response:
     """Serve the studio SPA — history-fallback index or an existing static file — for ``spa_path``."""
     spa_path = request.path_params["spa_path"]
-    # The catch-all must never serve index.html over an API/MCP path: those own
-    # their own routes (an unknown one is a genuine 404, not the SPA shell).
-    if spa_path in ("api", "mcp") or spa_path.startswith(("api/", "mcp/")):
-        return _error("not found", 404)
     dist_path = plugins_settings().studio_dist_path
     if dist_path is None:
         return _error("not found", 404)
@@ -265,3 +270,10 @@ async def serve_spa(request: Request) -> Response:
         if _is_static_asset_request(spa_path):
             return _error("not found", 404)
     return _serve_index(dist_root)
+
+
+# Hold the catch-all out of the ``/api``/``/mcp`` path spaces at the routing layer: its
+# ``matches()`` returns ``Match.NONE`` there, so an unknown ``/api``/``/mcp`` path falls to the
+# router's native 404 (rendered JSON by the base app's handler) and a known route keeps its
+# native 405. Applied AFTER registration, keyed on the catch-all's own path.
+http_surface().use_spa_fallback_route(_SPA_CATCH_ALL_PATH)

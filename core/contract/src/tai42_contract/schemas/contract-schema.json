@@ -236,14 +236,32 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "scope expression",
+            "language": "jq",
+            "returns": "a boolean — false skips this state for the run, true (or absent) engages it",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "state": {
           "title": "State",
           "type": "string"
         },
         "subject_expr": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "subject expression",
+            "language": "jq",
+            "returns": "a full subject object {target_kind, target_name, kind, key}, or a bare key string",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "templates": {
           "items": {
@@ -288,7 +306,7 @@
     },
     "StateInjection": {
       "additionalProperties": false,
-      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for\nan injection — the run-input field the value lands under. Frozen.",
+      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over the record (its ``.``) with the run input bound as\n``$input``. ``into`` IS the adapter for an injection — the run-input field the value lands\nunder. Frozen.",
       "properties": {
         "into": {
           "minLength": 1,
@@ -304,7 +322,25 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the attached record's subtree, or {} when no record exists yet",
+            "label": "injection jq",
+            "language": "jq",
+            "returns": "the value placed into the run input at 'into'",
+            "sample": {
+              "count": 3
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch is about to run on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              }
+            ]
+          }
         },
         "template_jq": {
           "anyOf": [
@@ -354,7 +390,7 @@
     },
     "StateTemplateJq": {
       "additionalProperties": false,
-      "description": "One named jq program on a state template.\n\n``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program\nover ``{record, input}`` returning a template-relative op batch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
+      "description": "One named jq program on a state template.\n\n``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program\nover the record subtree (its ``.``) with ``$input`` bound, returning a template-relative op\nbatch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
       "properties": {
         "description": {
           "default": "",
@@ -431,7 +467,7 @@
     },
     "StateUpdate": {
       "additionalProperties": false,
-      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over ``{output, input}``) shapes from the run's\noutput/input; or ``jq`` is a templated text rendering to a custom program over ``{record,\noutput, input}`` authoring the whole op batch itself (a custom update carries no adapter).\n``op_id`` is an optional templated text rendering to an idempotency-key expression.\nFrozen.",
+      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over the tool output, its ``.``, with the run input bound\nas ``$input``) shapes from the run's output/input; or ``jq`` is a templated text rendering\nto a custom program over the tool output (its ``.``) with the run input bound as ``$input``\nand the record as ``$record``, authoring the whole op batch itself (a custom update carries\nno adapter). ``op_id`` is an optional templated text rendering to an idempotency-key\nexpression. Frozen.",
       "properties": {
         "adapter": {
           "anyOf": [
@@ -442,7 +478,25 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run's output the update runs after",
+            "label": "update adapter",
+            "language": "jq",
+            "returns": "the template program's '.input' object",
+            "sample": {
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              }
+            ]
+          }
         },
         "jq": {
           "anyOf": [
@@ -453,7 +507,32 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run's output the update runs after",
+            "label": "custom update jq",
+            "language": "jq",
+            "returns": "the op batch (a list of ops) applied to the record",
+            "sample": {
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              },
+              {
+                "blurb": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record",
+                "sample": {
+                  "count": 3
+                }
+              }
+            ]
+          }
         },
         "op_id": {
           "anyOf": [
@@ -464,7 +543,25 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run's output the update runs after",
+            "label": "op_id expression",
+            "language": "jq",
+            "returns": "a string idempotency key, or null for no key",
+            "sample": {
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              }
+            ]
+          }
         },
         "template_jq": {
           "anyOf": [
@@ -720,6 +817,11 @@
     "CallbackSchema": {
       "description": "A backend task's follow-up: an optional guard ``condition`` and a follow-up tool kwargs ``expr``.",
       "properties": {
+        "carried_kwargs": {
+          "additionalProperties": true,
+          "title": "Carried Kwargs",
+          "type": "object"
+        },
         "condition": {
           "anyOf": [
             {
@@ -855,6 +957,42 @@
           "default": null,
           "title": "Callback Url"
         },
+        "cancel_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "cancel expression",
+            "language": "jq",
+            "returns": "null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
         "channel": {
           "anyOf": [
             {
@@ -901,6 +1039,42 @@
           "title": "Execution Key Fingerprint",
           "type": "string"
         },
+        "extras_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "extras expression",
+            "language": "jq",
+            "returns": "the extras mapping handed to the started target; null for no extras",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
         "initial_mode": {
           "default": "agent",
           "enum": [
@@ -942,7 +1116,7 @@
             "settle_seconds": 0
           }
         },
-        "payload_expr": {
+        "reply_expr": {
           "anyOf": [
             {
               "$ref": "#/$defs/TemplatedText"
@@ -953,7 +1127,106 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the inbound turn payload the route maps to the tool/flow kwargs",
+            "blurb": "the started run's result (the SUCCESS shape) the route maps to the participant reply; null when the run asked its caller instead of finishing",
+            "label": "reply expression",
+            "language": "jq",
+            "returns": "the reply: null (silent), a string, or a list of answer parts",
+            "variables": [
+              {
+                "blurb": "the turn ids and subject this reply answers ({id, inbound, subject}); null when an out-of-band delivery's originating record has aged out",
+                "name": "turn",
+                "sample": {
+                  "id": "m-1",
+                  "inbound": {
+                    "id": "i-1",
+                    "kind": "message",
+                    "source": "api"
+                  }
+                }
+              },
+              {
+                "blurb": "the run's caller-ask entries when it asked instead of finishing (each the full parked entry); an empty list on a plain result",
+                "name": "asks",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "id": "i-42",
+                    "question": "proceed?"
+                  }
+                ]
+              },
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "resume_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "resume expression",
+            "language": "jq",
+            "returns": "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to take a waiting outcome, or a list of these",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "route_name": {
+          "title": "Route Name",
+          "type": "string"
+        },
+        "start_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the inbound turn payload the route maps to the started run's kwargs",
             "keys": [
               {
                 "gloss": "the inbound message text",
@@ -1016,31 +1289,29 @@
                 "name": "event"
               }
             ],
-            "label": "payload expression",
+            "label": "start expression",
             "language": "jq",
-            "returns": "the JSON object dispatched as the tool/flow kwargs"
+            "returns": "the JSON object dispatched as the started run's kwargs; null starts nothing",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
           }
-        },
-        "reply_expr": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TemplatedText"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "x-tai42-expression": {
-            "blurb": "the tool/flow result (the SUCCESS shape) the route maps to the participant reply",
-            "label": "reply expression",
-            "language": "jq",
-            "returns": "the reply: null (silent), a string, or a list of answer parts"
-          }
-        },
-        "route_name": {
-          "title": "Route Name",
-          "type": "string"
         },
         "target_kind": {
           "enum": [
@@ -1081,7 +1352,7 @@
       "type": "object"
     },
     "ConversationRouteCreate": {
-      "description": "The client-facing create/edit body for a conversation route: the fields a caller supplies.\n\nBinds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to\nan ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``\ntarget may carry a ``payload_expr`` (jq mapping the inbound message to the tool's\nkwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are\ntool-only. ``api`` rows MAY carry an https ``callback_url`` (the answer sink; when absent\nthe caller reads its answer back from the poll door); ``channel`` rows carry the\nregistry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may\nshare a channel, each its own identity). The server-derived ``callback_secret`` and\n``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is\nthis shape plus those. Frozen.",
+      "description": "The client-facing create/edit body for a conversation route: the fields a caller supplies.\n\nBinds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to\nan ``execution_key`` the turn runs AS (bound with pass-role at create). Both target kinds\nmay carry the parkable-door jq (:class:`ParkableDoorMixin`: ``cancel_expr`` / ``resume_expr`` /\n``start_expr`` / ``extras_expr``) plus a ``reply_expr`` (jq mapping the started run's result to\nthe reply): ``start_expr`` builds the run's kwargs (a tool dispatch's kwargs or an agent run's\n``astream`` kwargs), the cancel/resume jqs act on the run's parked interactions, and\n``reply_expr`` maps the terminal to the participant reply. ``api`` rows MAY carry an https\n``callback_url`` (the answer sink; when absent\nthe caller reads its answer back from the poll door); ``channel`` rows carry the\nregistry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may\nshare a channel, each its own identity). The server-derived ``callback_secret`` and\n``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is\nthis shape plus those. Frozen.",
       "properties": {
         "callback_url": {
           "anyOf": [
@@ -1094,6 +1365,42 @@
           ],
           "default": null,
           "title": "Callback Url"
+        },
+        "cancel_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "cancel expression",
+            "language": "jq",
+            "returns": "null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
         },
         "channel": {
           "anyOf": [
@@ -1135,6 +1442,42 @@
           "title": "Execution Key",
           "type": "string"
         },
+        "extras_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "extras expression",
+            "language": "jq",
+            "returns": "the extras mapping handed to the started target; null for no extras",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
         "initial_mode": {
           "default": "agent",
           "enum": [
@@ -1176,7 +1519,7 @@
             "settle_seconds": 0
           }
         },
-        "payload_expr": {
+        "reply_expr": {
           "anyOf": [
             {
               "$ref": "#/$defs/TemplatedText"
@@ -1187,7 +1530,106 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the inbound turn payload the route maps to the tool/flow kwargs",
+            "blurb": "the started run's result (the SUCCESS shape) the route maps to the participant reply; null when the run asked its caller instead of finishing",
+            "label": "reply expression",
+            "language": "jq",
+            "returns": "the reply: null (silent), a string, or a list of answer parts",
+            "variables": [
+              {
+                "blurb": "the turn ids and subject this reply answers ({id, inbound, subject}); null when an out-of-band delivery's originating record has aged out",
+                "name": "turn",
+                "sample": {
+                  "id": "m-1",
+                  "inbound": {
+                    "id": "i-1",
+                    "kind": "message",
+                    "source": "api"
+                  }
+                }
+              },
+              {
+                "blurb": "the run's caller-ask entries when it asked instead of finishing (each the full parked entry); an empty list on a plain result",
+                "name": "asks",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "id": "i-42",
+                    "question": "proceed?"
+                  }
+                ]
+              },
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "resume_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "resume expression",
+            "language": "jq",
+            "returns": "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to take a waiting outcome, or a list of these",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "route_name": {
+          "title": "Route Name",
+          "type": "string"
+        },
+        "start_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the inbound turn payload the route maps to the started run's kwargs",
             "keys": [
               {
                 "gloss": "the inbound message text",
@@ -1250,31 +1692,29 @@
                 "name": "event"
               }
             ],
-            "label": "payload expression",
+            "label": "start expression",
             "language": "jq",
-            "returns": "the JSON object dispatched as the tool/flow kwargs"
+            "returns": "the JSON object dispatched as the started run's kwargs; null starts nothing",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
           }
-        },
-        "reply_expr": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TemplatedText"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "x-tai42-expression": {
-            "blurb": "the tool/flow result (the SUCCESS shape) the route maps to the participant reply",
-            "label": "reply expression",
-            "language": "jq",
-            "returns": "the reply: null (silent), a string, or a list of answer parts"
-          }
-        },
-        "route_name": {
-          "title": "Route Name",
-          "type": "string"
         },
         "target_kind": {
           "enum": [
@@ -1316,6 +1756,42 @@
     "HookParams": {
       "description": "The stored hook record: :class:`HookRegister` plus the server-derived ``execution_key_fingerprint``.\n\nManagers persist this shape, never the request body.",
       "properties": {
+        "cancel_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "cancel expression",
+            "language": "jq",
+            "returns": "null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
         "condition": {
           "anyOf": [
             {
@@ -1345,7 +1821,7 @@
           "title": "Execution Key Fingerprint",
           "type": "string"
         },
-        "expr": {
+        "extras_expr": {
           "anyOf": [
             {
               "$ref": "#/$defs/TemplatedText"
@@ -1356,16 +1832,107 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the declaring surface's input document",
-            "label": "expression",
+            "blurb": "the door's input document",
+            "label": "extras expression",
             "language": "jq",
-            "returns": "the transformed value the declaring surface consumes"
+            "returns": "the extras mapping handed to the started target; null for no extras",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
           }
         },
         "name": {
           "minLength": 1,
           "title": "Name",
           "type": "string"
+        },
+        "resume_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "resume expression",
+            "language": "jq",
+            "returns": "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to take a waiting outcome, or a list of these",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "start_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "start expression",
+            "language": "jq",
+            "returns": "the object dispatched as the started target's kwargs; null starts nothing",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
         },
         "state_binding": {
           "anyOf": [
@@ -1416,8 +1983,44 @@
       "type": "object"
     },
     "HookRegister": {
-      "description": "The client-facing register-a-hook request body: the fields a caller supplies.\n\n``execution_key_fingerprint`` is server-derived at bind and deliberately absent\nhere; :class:`HookParams` is this shape plus that one stored field.",
+      "description": "The client-facing register-a-hook request body: the fields a caller supplies.\n\nA hook is a parkable-driving door: it carries the four :class:`ParkableDoorMixin`\njqs (``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr``\nact on the run's parked interactions; ``extras_expr`` builds the started run's extras),\neach evaluated over the event payload with the run's parked interactions bound as\n``$parked``.\n\n``execution_key_fingerprint`` is server-derived at bind and deliberately absent\nhere; :class:`HookParams` is this shape plus that one stored field.",
       "properties": {
+        "cancel_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "cancel expression",
+            "language": "jq",
+            "returns": "null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
         "condition": {
           "anyOf": [
             {
@@ -1441,7 +2044,7 @@
           "title": "Execution Key",
           "type": "string"
         },
-        "expr": {
+        "extras_expr": {
           "anyOf": [
             {
               "$ref": "#/$defs/TemplatedText"
@@ -1452,16 +2055,107 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the declaring surface's input document",
-            "label": "expression",
+            "blurb": "the door's input document",
+            "label": "extras expression",
             "language": "jq",
-            "returns": "the transformed value the declaring surface consumes"
+            "returns": "the extras mapping handed to the started target; null for no extras",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
           }
         },
         "name": {
           "minLength": 1,
           "title": "Name",
           "type": "string"
+        },
+        "resume_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "resume expression",
+            "language": "jq",
+            "returns": "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to take a waiting outcome, or a list of these",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "start_expr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemplatedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the door's input document",
+            "label": "start expression",
+            "language": "jq",
+            "returns": "the object dispatched as the started target's kwargs; null starts nothing",
+            "variables": [
+              {
+                "blurb": "the run's currently parked interactions on the door's subject — the full entries list_parked() carries, each with its id, status, to, asked_by, question and answer-format fields",
+                "name": "parked",
+                "sample": [
+                  {
+                    "answer_format": "confirm",
+                    "asked_by": [
+                      "main"
+                    ],
+                    "group_id": "g-1",
+                    "id": "i-42",
+                    "question": "proceed?",
+                    "status": "asking",
+                    "to": "caller"
+                  }
+                ]
+              }
+            ]
+          }
         },
         "state_binding": {
           "anyOf": [
@@ -1835,14 +2529,32 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "scope expression",
+            "language": "jq",
+            "returns": "a boolean — false skips this state for the run, true (or absent) engages it",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "state": {
           "title": "State",
           "type": "string"
         },
         "subject_expr": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the run input the dispatch is about to run on",
+            "label": "subject expression",
+            "language": "jq",
+            "returns": "a full subject object {target_kind, target_name, kind, key}, or a bare key string",
+            "sample": {
+              "account_id": "acct_42"
+            }
+          }
         },
         "templates": {
           "items": {
@@ -1989,7 +2701,7 @@
     },
     "StateInjection": {
       "additionalProperties": false,
-      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for\nan injection — the run-input field the value lands under. Frozen.",
+      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over the record (its ``.``) with the run input bound as\n``$input``. ``into`` IS the adapter for an injection — the run-input field the value lands\nunder. Frozen.",
       "properties": {
         "into": {
           "minLength": 1,
@@ -2005,7 +2717,25 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the attached record's subtree, or {} when no record exists yet",
+            "label": "injection jq",
+            "language": "jq",
+            "returns": "the value placed into the run input at 'into'",
+            "sample": {
+              "count": 3
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch is about to run on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              }
+            ]
+          }
         },
         "template_jq": {
           "anyOf": [
@@ -2121,7 +2851,7 @@
     },
     "StateUpdate": {
       "additionalProperties": false,
-      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over ``{output, input}``) shapes from the run's\noutput/input; or ``jq`` is a templated text rendering to a custom program over ``{record,\noutput, input}`` authoring the whole op batch itself (a custom update carries no adapter).\n``op_id`` is an optional templated text rendering to an idempotency-key expression.\nFrozen.",
+      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over the tool output, its ``.``, with the run input bound\nas ``$input``) shapes from the run's output/input; or ``jq`` is a templated text rendering\nto a custom program over the tool output (its ``.``) with the run input bound as ``$input``\nand the record as ``$record``, authoring the whole op batch itself (a custom update carries\nno adapter). ``op_id`` is an optional templated text rendering to an idempotency-key\nexpression. Frozen.",
       "properties": {
         "adapter": {
           "anyOf": [
@@ -2132,7 +2862,25 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run's output the update runs after",
+            "label": "update adapter",
+            "language": "jq",
+            "returns": "the template program's '.input' object",
+            "sample": {
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              }
+            ]
+          }
         },
         "jq": {
           "anyOf": [
@@ -2143,7 +2891,32 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run's output the update runs after",
+            "label": "custom update jq",
+            "language": "jq",
+            "returns": "the op batch (a list of ops) applied to the record",
+            "sample": {
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              },
+              {
+                "blurb": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record",
+                "sample": {
+                  "count": 3
+                }
+              }
+            ]
+          }
         },
         "op_id": {
           "anyOf": [
@@ -2154,7 +2927,25 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the run's output the update runs after",
+            "label": "op_id expression",
+            "language": "jq",
+            "returns": "a string idempotency key, or null for no key",
+            "sample": {
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
+              }
+            ]
+          }
         },
         "template_jq": {
           "anyOf": [

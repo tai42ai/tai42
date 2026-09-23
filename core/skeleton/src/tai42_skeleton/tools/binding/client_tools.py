@@ -17,12 +17,14 @@ from tai42_contract.interactions import (
     suspended_interaction_marker,
 )
 from tai42_contract.secrets import mask_secrets
+from tai42_contract.tools import tool_call_frame
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.tools.binding.arguments import _named_call_arguments
 from tai42_skeleton.tools.binding.branch import _BranchBindingMixin
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
+from tai42_skeleton.tools.binding.result import UnencodableLeafError, _serialize_result, find_lone_surrogate
 from tai42_skeleton.tools.binding.schema import _VAR_PARAM_KINDS
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.tier import enforce_run_tier
@@ -33,6 +35,24 @@ logger = logging.getLogger(__name__)
 # a client-facing tool name is truncated to this length, and a post-truncation
 # collision is a hard error.
 CLIENT_TOOL_NAME_MAX_LEN = 64
+
+
+def _refuse_unencodable_client_result(tool_name: str, result: Any) -> None:
+    """Raise a model-visible ``ToolException`` if ``result`` cannot be JSON-encoded.
+
+    The RAW return is reduced FIRST (so a pydantic/dataclass return cannot slip a surrogate
+    through un-walked) and walked for a lone UTF-16 surrogate; on a hit the model receives a
+    named tool error identifying the tool and the JSON path, never a crash when the langchain
+    layer later encodes the value. A leaf the reduction cannot render at all (an un-encodable
+    model/dataclass) surfaces as ``UnencodableLeafError`` carrying that leaf's path — the same
+    named refusal, never a raw reduction crash.
+    """
+    try:
+        offending_path = find_lone_surrogate(_serialize_result(result))
+    except UnencodableLeafError as exc:
+        offending_path = exc.path
+    if offending_path is not None:
+        raise ToolException(f"tool {tool_name!r} produced a result that cannot be JSON-encoded at {offending_path}")
 
 
 class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
@@ -164,7 +184,7 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
         resolved = without_injected_parameters(base_callable)
         resolved_sig = inspect.signature(resolved)
 
-        async def runnable(*args, **kwargs):
+        async def invoke(*args, **kwargs):
             # Run-time tier fence: this agent tool-dispatch door reaches the tool BODY
             # directly (never the ``run_tool`` seam), so it enforces the same admin fence for
             # a ``fenced``/``secret`` tool here — through the SAME ``enforce_run_tier`` the
@@ -196,8 +216,8 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                     logger.warning("in-process tool %r failed: %s", tool_obj.name, exc, exc_info=exc)
                     raise ToolException(f"Error calling tool {tool_obj.name!r}: {exc}") from exc
                 if isinstance(result, SuspendedInteraction):
-                    # An async ask_user parked the caller and returned this sentinel. Inside a
-                    # graph the tool task must COMPLETE (so ask_user runs exactly once, never
+                    # An async ask parked the caller and returned this sentinel. Inside a
+                    # graph the tool task must COMPLETE (so ask runs exactly once, never
                     # replayed on resume), so convert the sentinel to the reserved contract
                     # marker: the ToolMessage commits carrying it, and the in-graph park
                     # middleware recognizes the park by this RESULT shape (never a tool name) and
@@ -227,12 +247,33 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                         logger.info("in-process tool %r returned a park this run does not own: %s", tool_obj.name, exc)
                         raise ToolException(str(exc)) from exc
                     # The owner rides the WIRE form too: the driver that later claims this park
-                    # reads it off the serialized ToolMessage, never off the sentinel.
-                    return suspended_interaction_marker(park_key, result.expiry_at, park_owner)
+                    # reads it off the serialized ToolMessage, never off the sentinel. The per-ask
+                    # id lists ride it as well so a driver surfacing a whole step can merge them.
+                    return suspended_interaction_marker(
+                        park_key,
+                        result.expiry_at,
+                        park_owner,
+                        interaction_ids=result.interaction_ids,
+                        caller_interaction_ids=result.caller_interaction_ids,
+                    )
+                # Refuse a return no JSON encoder can render (a lone UTF-16 surrogate) so the model
+                # receives a named tool error, never a crash when the langchain layer later encodes
+                # it. A deliberate model-visible refusal, so — like the park-adoption refusal above —
+                # it is raised as its own ToolException.
+                _refuse_unencodable_client_result(tool_obj.name, result)
                 # The model never sees a secret value: this adapter feeds the langchain layer (the
                 # model, the checkpoint, the callback trace), so a wrapped secret is masked before
                 # it leaves here.
                 return mask_secrets(result)
+
+        async def runnable(*args, **kwargs):
+            # This in-process agent tool-dispatch door reaches the tool body directly (never the
+            # ``run_tool`` seam that opens the frame), so it opens the call frame itself: a PUSH of
+            # this tool's own name, so an ask this dispatch raises records it in ``asked_by``. In an
+            # agent drive the outer frame is already open (a non-empty prior chain), so this pushes
+            # rather than re-mints the run-delivery context.
+            with tool_call_frame(name=tool_obj.name):
+                return await invoke(*args, **kwargs)
 
         runnable.__name__ = resolved.__name__
         # langchain reads the runnable's docstring for the client tool's

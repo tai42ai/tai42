@@ -52,7 +52,7 @@ def build_conversations_off_stack(res: StackResources, variants: Variants) -> St
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["CONVERSATIONS_REDIS_URL"] = res.redis_url

@@ -130,6 +130,28 @@ def notify(
             ),
         ),
     ] = None,
+    data: Annotated[
+        str | None,
+        typer.Option(
+            "--data",
+            help=(
+                "JSON object of per-send form data over --schema — ``values`` prefills properties and "
+                "``options`` supplies a per-send choice list per property, e.g. "
+                '\'{"values":{"name":"Ada"},"options":{"tier":[{"value":"gold"}]}}\'.'
+            ),
+        ),
+    ] = None,
+    pages: Annotated[
+        str | None,
+        typer.Option(
+            "--pages",
+            help=(
+                'JSON array of stepped-form pages over --schema, each ``{"title":"…","fields":[…]}`` '
+                "naming the properties on one step (every property appears exactly once), e.g. "
+                '\'[{"title":"You","fields":["name"]}]\'.'
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Send a human a one-way, fire-and-forget notification.
 
@@ -137,18 +159,20 @@ def notify(
     request — a list of ``MediaItem`` for ``--media``, a discriminated ``Option`` list
     (reply/link) for ``--options``, an ``OptionSection`` list for ``--sections``, a
     ``ChannelTemplate`` for ``--template``, a ``LocationElement`` for ``--location``, a
-    ``MediaItem`` for ``--header``, a JSON object for ``--schema`` — so a mis-shaped value
-    (including an unknown template/location/header key, which the contract would otherwise
+    ``MediaItem`` for ``--header``, a JSON object for ``--schema``, a ``FormData`` for ``--data``
+    and a ``FormPage`` list for ``--pages`` — so a mis-shaped value
+    (including an unknown template/location/header/data key, which the contract would otherwise
     silently drop) raises loudly here; the contract's cross-field rules (caps, non-blank,
     the options-XOR-sections choice surface, header/footer requiring a choice surface,
-    template exclusivity, the channel-deliverable form subset) are enforced by the server.
+    template exclusivity, the channel-deliverable form subset, and the form data/pages
+    requiring a schema and matching its properties) are enforced by the server.
 
     Example: ``tai notifications notify "Deploy finished" --channel telegram``
     """
     ctx_obj = app_context(ctx)
     body = build_notify_body(
-        message, channel, recipient, media, template, options, sections, location, header, footer, schema
+        message, channel, recipient, media, template, options, sections, location, header, footer, schema, data, pages
     )
     with ctx_obj.client() as client:
-        data = client.post("/api/notifications", json=body)
-    emit_result(ctx_obj, data)
+        result = client.post("/api/notifications", json=body)
+    emit_result(ctx_obj, result)

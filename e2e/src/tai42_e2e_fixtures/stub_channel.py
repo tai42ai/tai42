@@ -2,7 +2,7 @@
 
 Imported via a manifest ``channel_modules`` entry; on import it runs
 ``tai42_app.channels.register(...)`` exactly as a real channel plugin does, so a
-stack can drive a channel-delivered ``ask_user`` without loading a real medium
+stack can drive a channel-delivered ``ask`` without loading a real medium
 plugin. Delivery is a no-op success (a plain return): the question is persisted
 and its callback ticket minted before ``deliver`` is called, and the test bridges
 the human's reply back by POSTing that ticket to the public callback door itself —

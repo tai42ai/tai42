@@ -125,7 +125,9 @@ async def test_tools_facet_async_forwarding():
     assert await f.get_client_tools(["a"]) == "get_client_tools-result"
     app._tool_binding.get_client_tools.assert_awaited_once_with(["a"])
     assert await f.run_tool("k", {"x": 1}) == "run_tool-result"
-    app._tool_binding.run_tool.assert_awaited_once_with("k", {"x": 1}, offload_sync=False)
+    app._tool_binding.run_tool.assert_awaited_once_with(
+        "k", {"x": 1}, offload_sync=False, continues_chain=None, extras=None
+    )
 
 
 # -- AgentsFacet --------------------------------------------------------------
@@ -451,11 +453,11 @@ def test_sandboxes_facet_sandbox_policy_resolves_from_settings(monkeypatch: pyte
 # -- InteractionsFacet --------------------------------------------------------
 
 
-def test_interactions_facet_ask_user_returns_the_helper():
-    from tai42_skeleton.interactions.helper import ask_user as helper_ask_user
+def test_interactions_facet_ask_returns_the_helper():
+    from tai42_skeleton.interactions.helper import ask as helper_ask
 
     f = InteractionsFacet(_app())
-    assert f.ask_user is helper_ask_user
+    assert f.ask is helper_ask
 
 
 # -- HttpFacet ----------------------------------------------------------------

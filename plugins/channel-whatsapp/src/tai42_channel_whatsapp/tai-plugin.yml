@@ -4,7 +4,7 @@ name: channel-whatsapp
 package: tai42-channel-whatsapp
 version: 4.0.10
 description: >-
-  Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask_user
+  Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask
   questions to a human on WhatsApp and bridges the reply back.
 license: Apache-2.0
 homepage: https://tai42.ai
@@ -17,7 +17,7 @@ tags:
   - whatsapp
   - meta
   - graph-api
-  - ask-user
+  - ask
   - hitl
 permissions:
   network: true
@@ -28,7 +28,7 @@ provides:
     name: whatsapp
     module: tai42_channel_whatsapp.register
     description: >-
-      Deliver ask_user questions to a human on WhatsApp via the Meta Cloud API
+      Deliver ask questions to a human on WhatsApp via the Meta Cloud API
       and bridge the reply back.
     routes:
       base: channels/whatsapp

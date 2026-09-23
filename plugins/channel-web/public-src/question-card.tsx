@@ -1,5 +1,5 @@
 /**
- * The inline card for one `ask_user` question: the prompt, any display media, the
+ * The inline card for one `ask` question: the prompt, any display media, the
  * per-format answer controls, a live countdown, and the settled-state badge.
  *
  * A question is LIVE only while it is neither answered nor past its deadline.

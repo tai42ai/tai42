@@ -97,7 +97,7 @@ class AppSandboxes(Protocol):
         session-create chokepoint.
 
         Available REGARDLESS of whether a provider is registered (it reads operator
-        config, not a provider). Mirrors the ``ask_user`` / ``resolve_connection_auth``
+        config, not a provider). Mirrors the ``ask`` / ``resolve_connection_auth``
         facade accessors that let an in-process plugin read a skeleton-resolved value
         without importing the skeleton; a consumer building a policied spec reads the
         network default and ``scrub_transcript`` here. Implemented in the skeleton,

@@ -6,11 +6,24 @@ import time
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.template import TemplatedText
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.schedule_subject import (
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+    SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_SUBJECT_ARG,
+)
+
+_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
+_FORWARDED = {
+    SCHEDULE_SUBJECT_ARG: _SUBJECT,
+    SCHEDULE_EXECUTION_KEY_ARG: "svc",
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+}
 
 
 async def test_prepare_backend_kwargs_injects_tool_name_and_stamps_capability() -> None:
@@ -111,7 +124,7 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
             time.sleep(1)
             return None
 
-    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="": _SlowProgram())
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="", variables=(): _SlowProgram())
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
     reset_all_settings()
     try:
@@ -122,3 +135,18 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
         assert time.monotonic() - start < 0.5
     finally:
         reset_all_settings()
+
+
+async def test_callback_that_asks_parks_under_the_forwarded_identity(stub_app) -> None:
+    # A callback carrying the followed run's subject/identity re-binds that identity and drives the
+    # receiver-less schedule door; a follow-up that asks hands back the re-park sentinel — never a value.
+    sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
+    stub_app.interactions.park_sentinel = sentinel
+    callback = CallbackSchema(tool="follow", carried_kwargs=dict(_FORWARDED))
+
+    out = await callback_execution({"value": 3}, callback)
+
+    assert out is sentinel
+    assert stub_app.interactions.binds == [("svc", "fp-1")]
+    assert stub_app.interactions.visit_calls[0].receives_outcome is False
+    assert stub_app.interactions.visit_calls[0].context.door == "schedule"

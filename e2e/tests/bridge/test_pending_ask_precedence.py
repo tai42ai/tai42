@@ -1,6 +1,6 @@
-"""Precedence: a pending ask_user question wins over a bridge turn.
+"""Precedence: a pending ask question wins over a bridge turn.
 
-With a pending ask_user on a routed number pair, the human's reply resolves the ASK
+With a pending ask on a routed number pair, the human's reply resolves the ASK
 (existing correlation behavior), NOT a bridge turn; a follow-up uncorrelated message on the
 same pair then starts a bridge turn.
 """
@@ -57,10 +57,10 @@ async def test_pending_ask_resolves_then_uncorrelated_starts_a_turn(
     ask_answer = uniq("l2-ans")
 
     async def ask() -> object:
-        # ask_user delivers over twilio to the operator default recipient (the same human)
+        # ask delivers over twilio to the operator default recipient (the same human)
         # from the deployment number — a Tier-2 pending correlation on that pair.
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
-            result = await mcp.call_tool("ask_user", {"question": question, "channel": "twilio"})
+            result = await mcp.call_tool("ask", {"question": question, "channel": "twilio"})
         return result.data
 
     ask_task = asyncio.create_task(ask())

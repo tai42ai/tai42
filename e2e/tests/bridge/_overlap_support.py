@@ -3,7 +3,7 @@
 The overlap specs drive the ``e2e_overlap_probe`` / ``e2e_overlap_yield`` tool targets over the
 web channel (its own public doors are the medium, and each opened page mints a fresh visitor so
 no per-address cap is shared between specs) and read back the per-turn payloads the probe RPUSHes.
-These helpers build the tool ``payload_expr`` that maps the turn's overlap keys onto the probe
+These helpers build the tool ``start_expr`` that maps the turn's overlap keys onto the probe
 kwargs, open a visitor, send a message, and match a reply frame — the shape every overlap spec
 shares.
 
@@ -20,8 +20,8 @@ from tai42_e2e.webchat import WebChatClient
 from ._bridge_support import BridgeHarness
 
 
-def probe_payload_expr(marker: str, *, hold_seconds: float = 0.0) -> str:
-    """The ``payload_expr`` mapping a turn's overlap keys onto ``e2e_overlap_probe`` kwargs.
+def probe_start_expr(marker: str, *, hold_seconds: float = 0.0) -> str:
+    """The ``start_expr`` mapping a turn's overlap keys onto ``e2e_overlap_probe`` kwargs.
 
     ``message`` is the turn's whole text, ``messages`` / ``superseded`` the ``deliver="all"``
     batch and dropped records (``null`` under ``deliver="one"``), ``key`` the fixed probe marker
@@ -32,8 +32,8 @@ def probe_payload_expr(marker: str, *, hold_seconds: float = 0.0) -> str:
     )
 
 
-def yield_payload_expr(marker: str, *, wait_seconds: float = 8.0) -> str:
-    """The ``payload_expr`` mapping a turn's overlap keys onto ``e2e_overlap_yield`` kwargs."""
+def yield_start_expr(marker: str, *, wait_seconds: float = 8.0) -> str:
+    """The ``start_expr`` mapping a turn's overlap keys onto ``e2e_overlap_yield`` kwargs."""
     return (
         f'{{key: "{marker}", message: .message, messages: .messages, '
         f"superseded: .superseded, wait_seconds: {wait_seconds}}}"
@@ -46,7 +46,7 @@ async def create_web_tool_route(
     tag: str,
     *,
     tool: str,
-    payload_expr: str,
+    start_expr: str,
     overlap: dict[str, object],
 ) -> tuple[str, str]:
     """Create a ``target_kind=tool`` web route carrying an overlap policy; returns
@@ -62,7 +62,7 @@ async def create_web_tool_route(
         execution_key=exec_key,
         channel="web",
         our_identity=identity,
-        payload_expr=payload_expr,
+        start_expr=start_expr,
         overlap=overlap,
     )
     return route_name, identity

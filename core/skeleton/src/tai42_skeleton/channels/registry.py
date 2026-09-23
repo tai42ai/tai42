@@ -2,7 +2,7 @@
 
 A channel plugin registers under a name via an import-only ``channel_modules``
 manifest entry (importing the module runs its ``tai42_app.channels.register(...)``
-call). The ``ask_user`` helper resolves a named channel at ask time.
+call). The ``ask`` helper resolves a named channel at ask time.
 
 The registry is reset on every ``start()`` (like the webhook-verifier registry)
 so a reload re-imports the channel modules and re-registers cleanly; a duplicate

@@ -1,4 +1,4 @@
-"""The durable ``ask_user`` question model.
+"""The durable ``ask`` question model.
 
 ``InteractionRequest`` is the one durable question written to a per-group stream, with
 its per-answer-format payload validation and its sync/async park discipline.
@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import FormData, FormPage, check_form_data, check_form_pages
@@ -65,6 +65,15 @@ def _check_external_payload(payload: dict[str, Any]) -> None:
         raise ValueError("external answer_format requires a non-empty string url in format_payload")
 
 
+def _check_free_payload(payload: dict[str, Any] | None) -> None:
+    # FREE accepts any JSON answer; its only optional payload key is a ``schema`` the
+    # answer is checked against when present. Any other key is a caller bug.
+    if payload is not None:
+        extra = set(payload) - {"schema"}
+        if extra:
+            raise ValueError(f"free answer_format payload carries only an optional schema, got extra {sorted(extra)}")
+
+
 def _check_text_payload(payload: dict[str, Any] | None) -> None:
     # TEXT carries no payload EXCEPT an OPTIONAL ``options`` list of suggested
     # replies: a tapped option submits its own text as the free-text answer, which
@@ -84,6 +93,35 @@ def _check_no_payload(answer_format: AnswerFormat, payload: dict[str, Any] | Non
         raise ValueError(f"{answer_format.value} answer_format carries no format_payload")
 
 
+def check_addressing(*, to: str, mode: str, question: str, payload: dict[str, Any] | None, answer_format: str) -> None:
+    """Reject every bad ``to`` addressing combination — the one rule the model validator and the ask door share.
+
+    A ``caller`` ask parks the asking run and is resolved by another run out of band, so it cannot
+    block synchronously and needs either a question or a payload. A ``user`` ask has no resolving
+    run, so ``payload`` and the unconstrained ``free`` format (a caller-only inter-run shape) are
+    both refused. Each violated rule raises ``ValueError`` loudly, so neither a durable record nor an
+    ask call can ever hold an invalid addressing combination.
+    """
+    if to == "caller":
+        if mode != "async":
+            # A caller ask parks the asking run and is resolved out of band, so a blocking sync wait
+            # can never be answered.
+            raise ValueError("to='caller' requires mode='async' (a caller ask cannot block synchronously)")
+        if not question and payload is None:
+            # A caller ask with no question text carries its intent in ``payload``; both empty leaves
+            # the resolving run nothing to act on.
+            raise ValueError("to='caller' requires a question or a payload")
+    else:
+        if payload is not None:
+            # ``payload`` is the caller-ask channel to another run; a user ask has no resolving run
+            # to hand it to.
+            raise ValueError("payload is only valid with to='caller'")
+        if answer_format == "free":
+            # FREE is the unconstrained inter-run answer shape; a human answer door renders a typed
+            # surface (text/confirm/select/form/external), never free JSON.
+            raise ValueError("answer_format 'free' is only valid with to='caller'")
+
+
 class InteractionRequest(BaseModel):
     """The durable question. One per stream entry."""
 
@@ -92,6 +130,21 @@ class InteractionRequest(BaseModel):
     question: str
     answer_format: AnswerFormat = AnswerFormat.TEXT
     format_payload: dict[str, Any] | None = None
+    # Who the question is addressed to. ``user`` (the default) is a human answered
+    # through the inbox/callback/channel surfaces. ``caller`` is another RUN: the ask
+    # carries no out-of-band delivery — it parks the asking run and its answer is handed
+    # back by the run that resolves it (subject-tracked). A ``caller`` ask is always
+    # async (a sync one is refused) and its every question field is shape-checked but no
+    # delivery/notification is performed.
+    to: Literal["user", "caller"] = "user"
+    # A structured payload a ``caller`` ask hands to the resolving run in place of (or
+    # beside) the question text. Forbidden on a ``user`` ask; when given, ``question``
+    # may be empty. None for a plain question.
+    payload: dict[str, Any] | None = None
+    # What the expiry reaper does when a parked ask's deadline lapses unanswered.
+    # ``kill`` (the default) tears the whole run chain down; ``resume`` resumes the
+    # continuation with the expiry marker. Read only for an async park.
+    on_expiry: Literal["kill", "resume"] = "kill"
     # What a channel-delivered ask does with a participant reply the answer door REJECTS: ``retry``
     # (default — keep the ask parked and tell the participant what's expected) or ``bridge`` (treat an
     # unmatched reply as a digression — keep the ask parked with no notice and hand the reply to
@@ -161,6 +214,26 @@ class InteractionRequest(BaseModel):
     # same door — one generic snapshot (a later resume attribution joins the same
     # field). None when the park ran under no state context.
     continuation_state_context: StateContext | None = None
+    # The ambient tool/agent call chain at ask time, outermost first, WITHOUT the
+    # ask-performing frame itself — the parking run's own chain. A continuation
+    # runner restores it on the one dispatch that resumes the parked run (passed as
+    # ``continues_chain``), so a re-park records exactly this chain and each driver
+    # level matches on the name it knows to any depth. Empty for a run that parked
+    # outside any tool/agent frame.
+    asked_by: list[str] = Field(default_factory=list)
+    # The RUN's durable out-of-band delivery address — the ``(tool, context)`` the door
+    # that STARTED the run bound as its completion, captured from the ambient run-delivery
+    # context at park time. A PER-RUN fact: every ask of the run (``to="user"`` and
+    # ``to="caller"``, nested included) stores the SAME address, so whichever ask drives
+    # the run to its single terminal delivers the outcome to the run's address once. None
+    # when the run started at a receiver-less door (a hook, schedule, background job, or
+    # direct run) — then the outcome falls to the subject rung.
+    delivery: tuple[str | None, dict[str, Any] | None] | None = None
+    # The RUN's single delivery identity (a uuid4 minted once at the outermost run start),
+    # shared by every ask, sibling branch and re-park of the run so its one terminal
+    # delivers exactly once. Captured with ``delivery`` at park time. None for a sync ask
+    # (never parked); an async park always carries it (the persist raises without one).
+    run_delivery_id: str | None = None
     # When the parked question expires. Distinct from ``timeout_at`` (the sync
     # wait budget) and mutually exclusive with a sync ``timeout`` at the ask
     # surface (see ``check_ask_timing``). Required for async (a park always carries
@@ -229,8 +302,22 @@ class InteractionRequest(BaseModel):
             _check_external_payload(self.format_payload or {})
         elif self.answer_format is AnswerFormat.TEXT:
             _check_text_payload(self.format_payload)
+        elif self.answer_format is AnswerFormat.FREE:
+            _check_free_payload(self.format_payload)
         else:
             _check_no_payload(self.answer_format, self.format_payload)
+        return self
+
+    @model_validator(mode="after")
+    def _check_addressing(self) -> InteractionRequest:
+        # The durable record can never hold an invalid addressing combination on ANY construction path.
+        check_addressing(
+            to=self.to,
+            mode=self.mode,
+            question=self.question,
+            payload=self.payload,
+            answer_format=self.answer_format,
+        )
         return self
 
     @model_validator(mode="after")

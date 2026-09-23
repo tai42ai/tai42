@@ -38,6 +38,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     AnswerForwardError,
     ChannelNotification,
+    Correlation,
     CorrelationStore,
     InboundAnswerOutcome,
     InboundAnswerResult,
@@ -360,6 +361,10 @@ async def handle_inbound_answer(
     * The door returns 404 (the ask was withdrawn/expired/cancelled, including the
       post-cascade thread-delete case) -> release, bridge the reply as a fresh
       turn, return :attr:`~InboundAnswerOutcome.BRIDGED`.
+    * The door returns 409 (a caller ask — answerable only by its calling run, never by a
+      person; not reachable through a correlation in normal operation) -> permanent, so
+      release, bridge the reply as a fresh turn, log loudly, return
+      :attr:`~InboundAnswerOutcome.BRIDGED` — never redeliver.
     * The door returns 400 (the LIVE ask rejected this answer's format) -> FIRST read the
       ask's ``on_mismatch`` policy off the correlation entry:
 
@@ -425,98 +430,133 @@ async def handle_inbound_answer(
         # A gone-ask 404 carries no door reason — the ask never judged this answer.
         return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED)
 
-    if status == 400:
-        # THE SPLIT: the LIVE ask rejected this answer's format. The door is the
-        # policy authority — its structured body decides whether the ask is
-        # re-answerable in place. Default RETRYABLE (text/select/confirm/form
-        # wrong-format cases): the participant can answer again on the same ask.
-        error, field, retry_in_place = _parse_rejection(forwarded)
-        if entry.on_mismatch is AnswerMismatchPolicy.BRIDGE:
-            # DIGRESSION policy: an unmatched reply is not a failed answer. KEEP the ask
-            # parked (no participant notice) and hand the reply to the conversation as a fresh
-            # routed turn through the STANDARD bridge path — target-agnostic, so a tool route
-            # and an agent route are handled identically, with the reply's enrichment params
-            # carried exactly as any bridged turn. The ask ends only by a real answer or its
-            # timeout, never by unmatched input (so ``retry_in_place`` does not gate this).
-            # The operator event still fires once, tagged with the ``bridge`` policy.
-            await _emit_answer_rejected(
-                bridge,
-                interaction_id=entry.interaction_id,
-                error=error,
-                field=field,
-                retry_in_place=retry_in_place,
-                notice_owner="none",
-                policy="bridge",
-            )
-            await _bridge(bridge)
-            logger.info(
-                "inbound: answer door rejected the answer for interaction %s on channel %r (400); the ask's "
-                "bridge policy kept the correlation and bridged the reply as a digression turn",
-                entry.interaction_id,
-                channel_id,
-            )
-            return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED_KEPT)
-        if retry_in_place:
-            # KEEP the correlation so the participant's next reply resolves the same ask.
-            # When the channel owns the retry notice (its correction surface is a
-            # re-opened Flow/modal it renders off RETRY_KEPT), core skips its generic
-            # participant notice so the participant is messaged exactly once — but still keeps the
-            # correlation and still emits the operator event (tagged notice_owner).
-            reason = error or "The answer wasn't in the expected format."
-            if not bridge.owns_retry_notice:
-                await _notify_participant(bridge, _retry_notice_text(entry.mismatch_notice, reason))
-            await _emit_answer_rejected(
-                bridge,
-                interaction_id=entry.interaction_id,
-                error=error,
-                field=field,
-                retry_in_place=True,
-                notice_owner="channel" if bridge.owns_retry_notice else "core",
-            )
-            logger.warning(
-                "inbound: answer door rejected the answer for interaction %s on channel %r (400, retry-in-place); "
-                "correlation kept so the participant can answer again (notice owner: %s)",
-                entry.interaction_id,
-                channel_id,
-                "channel" if bridge.owns_retry_notice else "core",
-            )
-            # Carry the door's own (already-truncated) reason/field so a channel that
-            # owns its correction surface can render the door's specific message.
-            return InboundAnswerResult(
-                outcome=InboundAnswerOutcome.RETRY_KEPT, retry_reason=error or None, retry_field=field
-            )
-
-        # Non-retryable hard mismatch: the ask cannot take this answer and cannot be
-        # re-answered in place. The channel's correction surface is moot for a closed
-        # ask, so ``owns_retry_notice`` does not apply here — core ALWAYS sends the
-        # final notice (the participant must be told the question is closed) and owns it.
-        # Release, tell the participant the question is closed, alert the operator, and
-        # bridge the reply as a fresh turn.
-        reason = error or "The answer wasn't accepted."
+    if status == 409:
+        # Terminal and PERMANENT: the door refuses this ask as answerable only by its
+        # calling run (a caller ask — addressed to the calling run, resolved only by it
+        # resuming, never by a person). A channel correlation is only ever created for a
+        # user-facing ask, so this cannot arise in normal operation; if it ever does,
+        # never redeliver (retrying can never succeed) and never lose the reply — release
+        # the correlation, bridge the reply as an ordinary turn, and log loudly.
+        logger.error(
+            "inbound: answer door refused interaction %s on channel %r as answerable only by its calling "
+            "run (409); releasing the correlation and bridging the reply into the conversation",
+            entry.interaction_id,
+            channel_id,
+        )
         await store.release_correlation(correlation_key)
-        await _notify_participant(bridge, ANSWER_REJECTED_FINAL_NOTICE.format(reason=reason))
+        await _bridge(bridge)
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED)
+
+    if status == 400:
+        # THE SPLIT: the LIVE ask rejected this answer's format. Its several outcomes
+        # (digression bridge, retry-in-place, non-retryable) live in one helper.
+        return await _handle_live_rejection(
+            forwarded, entry=entry, store=store, correlation_key=correlation_key, bridge=bridge, channel_id=channel_id
+        )
+
+    # 401/413/5xx ambient failure — keep the correlation and fail loudly so the
+    # channel's webhook redelivery re-runs the ladder.
+    raise AnswerForwardError(f"interactions answer door rejected the answer: HTTP {status}: {forwarded.text[:500]}")
+
+
+async def _handle_live_rejection(
+    forwarded: httpx.Response,
+    *,
+    entry: Correlation,
+    store: CorrelationStore,
+    correlation_key: str,
+    bridge: InboundBridge,
+    channel_id: str,
+) -> InboundAnswerResult:
+    """Resolve a LIVE ask's 400 rejection of an inbound answer.
+
+    The door is the policy authority — its structured body decides whether the ask is
+    re-answerable in place. Default RETRYABLE (text/select/confirm/form wrong-format
+    cases): the participant can answer again on the same ask.
+    """
+    error, field, retry_in_place = _parse_rejection(forwarded)
+    if entry.on_mismatch is AnswerMismatchPolicy.BRIDGE:
+        # DIGRESSION policy: an unmatched reply is not a failed answer. KEEP the ask
+        # parked (no participant notice) and hand the reply to the conversation as a fresh
+        # routed turn through the STANDARD bridge path — target-agnostic, so a tool route
+        # and an agent route are handled identically, with the reply's enrichment params
+        # carried exactly as any bridged turn. The ask ends only by a real answer or its
+        # timeout, never by unmatched input (so ``retry_in_place`` does not gate this).
+        # The operator event still fires once, tagged with the ``bridge`` policy.
         await _emit_answer_rejected(
             bridge,
             interaction_id=entry.interaction_id,
             error=error,
             field=field,
-            retry_in_place=False,
-            notice_owner="core",
+            retry_in_place=retry_in_place,
+            notice_owner="none",
+            policy="bridge",
         )
-        logger.warning(
-            "inbound: answer door rejected the answer for interaction %s on channel %r (400, non-retryable); "
-            "correlation released and the reply bridged",
+        await _bridge(bridge)
+        logger.info(
+            "inbound: answer door rejected the answer for interaction %s on channel %r (400); the ask's "
+            "bridge policy kept the correlation and bridged the reply as a digression turn",
             entry.interaction_id,
             channel_id,
         )
-        await _bridge(bridge)
-        # The door judged this answer's content — carry its reason/field even though the
-        # ask is now closed (a channel may surface it before falling back to the bridge).
-        return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED, retry_reason=error or None, retry_field=field)
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED_KEPT)
+    if retry_in_place:
+        # KEEP the correlation so the participant's next reply resolves the same ask.
+        # When the channel owns the retry notice (its correction surface is a
+        # re-opened Flow/modal it renders off RETRY_KEPT), core skips its generic
+        # participant notice so the participant is messaged exactly once — but still keeps the
+        # correlation and still emits the operator event (tagged notice_owner).
+        reason = error or "The answer wasn't in the expected format."
+        if not bridge.owns_retry_notice:
+            await _notify_participant(bridge, _retry_notice_text(entry.mismatch_notice, reason))
+        await _emit_answer_rejected(
+            bridge,
+            interaction_id=entry.interaction_id,
+            error=error,
+            field=field,
+            retry_in_place=True,
+            notice_owner="channel" if bridge.owns_retry_notice else "core",
+        )
+        logger.warning(
+            "inbound: answer door rejected the answer for interaction %s on channel %r (400, retry-in-place); "
+            "correlation kept so the participant can answer again (notice owner: %s)",
+            entry.interaction_id,
+            channel_id,
+            "channel" if bridge.owns_retry_notice else "core",
+        )
+        # Carry the door's own (already-truncated) reason/field so a channel that
+        # owns its correction surface can render the door's specific message.
+        return InboundAnswerResult(
+            outcome=InboundAnswerOutcome.RETRY_KEPT, retry_reason=error or None, retry_field=field
+        )
 
-    # 401/413/5xx ambient failure — keep the correlation and fail loudly so the
-    # channel's webhook redelivery re-runs the ladder.
-    raise AnswerForwardError(f"interactions answer door rejected the answer: HTTP {status}: {forwarded.text[:500]}")
+    # Non-retryable hard mismatch: the ask cannot take this answer and cannot be
+    # re-answered in place. The channel's correction surface is moot for a closed
+    # ask, so ``owns_retry_notice`` does not apply here — core ALWAYS sends the
+    # final notice (the participant must be told the question is closed) and owns it.
+    # Release, tell the participant the question is closed, alert the operator, and
+    # bridge the reply as a fresh turn.
+    reason = error or "The answer wasn't accepted."
+    await store.release_correlation(correlation_key)
+    await _notify_participant(bridge, ANSWER_REJECTED_FINAL_NOTICE.format(reason=reason))
+    await _emit_answer_rejected(
+        bridge,
+        interaction_id=entry.interaction_id,
+        error=error,
+        field=field,
+        retry_in_place=False,
+        notice_owner="core",
+    )
+    logger.warning(
+        "inbound: answer door rejected the answer for interaction %s on channel %r (400, non-retryable); "
+        "correlation released and the reply bridged",
+        entry.interaction_id,
+        channel_id,
+    )
+    await _bridge(bridge)
+    # The door judged this answer's content — carry its reason/field even though the
+    # ask is now closed (a channel may surface it before falling back to the bridge).
+    return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED, retry_reason=error or None, retry_field=field)
 
 
 def _parse_rejection(response: httpx.Response) -> tuple[str, str | None, bool]:

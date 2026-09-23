@@ -58,7 +58,7 @@ class StartFrame(BaseModel):
 
 
 class AnswerFrame(BaseModel):
-    """Deliver a human's answer to a blocked in-process ``ask_user`` handler."""
+    """Deliver a human's answer to a blocked in-process ``ask`` handler."""
 
     v: int = PROTOCOL_VERSION
     type: Literal["answer"] = "answer"
@@ -109,7 +109,7 @@ class EventFrame(BaseModel):
 
 
 class AskFrame(BaseModel):
-    """The runner's in-process ``ask_user`` tool blocked on a question.
+    """The runner's in-process ``ask`` tool blocked on a question.
 
     ``mode`` selects the sync/async wait discipline (the model chose it, default sync).
     """

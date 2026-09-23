@@ -16,10 +16,12 @@ validate-and-attach live in the skeleton, and the wire shape mirrors the Studio 
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tai42_contract.states.models import STATE_NAME_RE
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
 
 class StateInjection(BaseModel):
@@ -27,14 +29,28 @@ class StateInjection(BaseModel):
 
     Exactly one source is set: ``template_jq`` names an ``input``-purpose template jq
     (``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated
-    text rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for
-    an injection — the run-input field the value lands under. Frozen.
+    text rendering to a custom program over the record (its ``.``) with the run input bound as
+    ``$input``. ``into`` IS the adapter for an injection — the run-input field the value lands
+    under. Frozen.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     template_jq: str | None = None
-    jq: TemplatedText | None = None
+    jq: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="injection jq",
+                    blurb="the attached record's subtree, or {} when no record exists yet",
+                    variables=[("input", "the run input the dispatch is about to run on", {"value": 2})],
+                    returns="the value placed into the run input at 'into'",
+                    sample={"count": 3},
+                )
+            }
+        ),
+    ] = None
     into: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -49,19 +65,62 @@ class StateUpdate(BaseModel):
 
     Exactly one source is set: ``template_jq`` names an ``update``-purpose template jq
     (``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a
-    templated text rendering to a jq over ``{output, input}``) shapes from the run's
-    output/input; or ``jq`` is a templated text rendering to a custom program over ``{record,
-    output, input}`` authoring the whole op batch itself (a custom update carries no adapter).
-    ``op_id`` is an optional templated text rendering to an idempotency-key expression.
-    Frozen.
+    templated text rendering to a jq over the tool output, its ``.``, with the run input bound
+    as ``$input``) shapes from the run's output/input; or ``jq`` is a templated text rendering
+    to a custom program over the tool output (its ``.``) with the run input bound as ``$input``
+    and the record as ``$record``, authoring the whole op batch itself (a custom update carries
+    no adapter). ``op_id`` is an optional templated text rendering to an idempotency-key
+    expression. Frozen.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     template_jq: str | None = None
-    jq: TemplatedText | None = None
-    adapter: TemplatedText | None = None
-    op_id: TemplatedText | None = None
+    jq: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="custom update jq",
+                    blurb="the run's output the update runs after",
+                    variables=[
+                        ("input", "the run input the dispatch ran on", {"value": 2}),
+                        ("record", "the attached record's subtree, or {} when no record exists yet", {"count": 3}),
+                    ],
+                    returns="the op batch (a list of ops) applied to the record",
+                    sample={"ok": True},
+                )
+            }
+        ),
+    ] = None
+    adapter: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="update adapter",
+                    blurb="the run's output the update runs after",
+                    variables=[("input", "the run input the dispatch ran on", {"value": 2})],
+                    returns="the template program's '.input' object",
+                    sample={"ok": True},
+                )
+            }
+        ),
+    ] = None
+    op_id: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="op_id expression",
+                    blurb="the run's output the update runs after",
+                    variables=[("input", "the run input the dispatch ran on", {"value": 2})],
+                    returns="a string idempotency key, or null for no key",
+                    sample={"ok": True},
+                )
+            }
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> StateUpdate:
@@ -69,7 +128,8 @@ class StateUpdate(BaseModel):
             raise ValueError("an update sets exactly one of 'template_jq' or 'jq'")
         if self.jq is not None and self.adapter is not None:
             raise ValueError(
-                "a custom-jq update carries no 'adapter' — it authors the batch over {record, output, input}"
+                "a custom-jq update carries no 'adapter' — it authors the batch over the tool output "
+                "(its .) with $input and $record bound"
             )
         return self
 
@@ -89,8 +149,32 @@ class StateAttach(BaseModel):
 
     state: str
     templates: list[str] = Field(default_factory=list[str])
-    subject_expr: TemplatedText
-    scope_expr: TemplatedText | None = None
+    subject_expr: Annotated[
+        TemplatedText,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="subject expression",
+                    blurb="the run input the dispatch is about to run on",
+                    returns="a full subject object {target_kind, target_name, kind, key}, or a bare key string",
+                    sample={"account_id": "acct_42"},
+                )
+            }
+        ),
+    ]
+    scope_expr: Annotated[
+        TemplatedText | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="scope expression",
+                    blurb="the run input the dispatch is about to run on",
+                    returns="a boolean — false skips this state for the run, true (or absent) engages it",
+                    sample={"account_id": "acct_42"},
+                )
+            }
+        ),
+    ] = None
     input_injections: list[StateInjection] = Field(default_factory=list[StateInjection])
     updates: list[StateUpdate] = Field(default_factory=list[StateUpdate])
 

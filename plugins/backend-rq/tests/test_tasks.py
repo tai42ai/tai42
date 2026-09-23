@@ -3,18 +3,54 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from rq.exceptions import NoSuchJobError
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.backend import CallbackSchema
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.schedule_subject import (
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+    SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_SUBJECT_ARG,
+)
 
 from tai42_backend_rq import tasks
 from tai42_backend_rq.settings import rq_settings
 
 from .conftest import make_client_ctx
+
+_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
+_FORWARDED = {
+    SCHEDULE_SUBJECT_ARG: _SUBJECT,
+    SCHEDULE_EXECUTION_KEY_ARG: "svc",
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+}
+
+
+async def _noop_shutdown() -> None:
+    pass
+
+
+class _FakeQueue:
+    """Records the jobs the enqueue path submits, without touching Redis."""
+
+    def __init__(self, name: str, connection: Any = None) -> None:
+        self.calls: list[SimpleNamespace] = []
+
+    def enqueue(self, func: Any, args: Any = None, kwargs: Any = None, ttl: Any = None, depends_on: Any = None) -> Any:
+        self.calls.append(SimpleNamespace(func=func, args=args, kwargs=kwargs, depends_on=depends_on))
+        return SimpleNamespace(id="job-1")
+
+    def enqueue_at(self, when: Any, func: Any, args: Any = None, kwargs: Any = None, ttl: Any = None) -> Any:
+        return self.enqueue(func, args=args, kwargs=kwargs, ttl=ttl)
+
+    def enqueue_in(self, delta: Any, func: Any, args: Any = None, kwargs: Any = None, ttl: Any = None) -> Any:
+        return self.enqueue(func, args=args, kwargs=kwargs, ttl=ttl)
+
 
 # --- tool_execution ----------------------------------------------------------
 
@@ -351,3 +387,45 @@ async def test_enqueue_task_none_options_are_dropped(queue):
     await tasks.enqueue_task(a=1, countdown=None, eta=None, expires=None, callback_kwargs=None)
     [(kind, _)] = queue.calls
     assert kind == "enqueue"
+
+
+# --- the callback carries the followed run's door context --------------------
+
+
+async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(app, monkeypatch):
+    # A task fired from within a door forwards its subject/identity onto the job; the callback runs as a
+    # SEPARATE dependent job, so the same pair is carried on its spec or the follow-up loses the door.
+    queue = _FakeQueue("q")
+    monkeypatch.setattr(tasks, "Queue", lambda name, connection=None: queue)
+    monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
+    await tasks.enqueue_task(backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), **_FORWARDED)
+    callback_call = queue.calls[1]
+    assert callback_call.func is tasks.callback_job
+    (_, enqueued_callback) = callback_call.args
+    assert enqueued_callback.carried_kwargs == _FORWARDED
+
+
+async def test_enqueue_carries_nothing_onto_a_plain_callback(app, monkeypatch):
+    # A plain background task forwards no door context, so the callback stays a plain follow-up.
+    queue = _FakeQueue("q")
+    monkeypatch.setattr(tasks, "Queue", lambda name, connection=None: queue)
+    monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
+    await tasks.enqueue_task(backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), text="hi")
+    (_, enqueued_callback) = queue.calls[1].args
+    assert enqueued_callback.carried_kwargs == {}
+
+
+async def test_callback_job_that_asks_parks_under_the_forwarded_identity(app, monkeypatch):
+    # A dequeued callback whose tool asks parks under the carried identity + subject and hands back the
+    # re-park sentinel — the ask is never returned as the callback's value.
+    monkeypatch.setattr(tasks, "shutdown_all_clients", _noop_shutdown)
+    _patch_job_fetch(monkeypatch, FakeFetchedJob(value={"value": 3}))
+    sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
+    app.interactions.park_sentinel = sentinel
+
+    out = await tasks.callback_job("job-1", CallbackSchema(tool="follow", carried_kwargs=dict(_FORWARDED)))
+
+    assert out is sentinel
+    assert app.interactions.binds == [("svc", "fp-1")]
+    assert app.interactions.visit_calls[0].receives_outcome is False
+    assert app.interactions.visit_calls[0].context.door == "schedule"

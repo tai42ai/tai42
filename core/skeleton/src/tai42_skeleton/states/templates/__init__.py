@@ -33,11 +33,16 @@ from tai42_skeleton.states.templates.model import (
 )
 from tai42_skeleton.states.templates.parameters import substitute_parameters
 from tai42_skeleton.states.templates.regimes import REGIMES, path_overlaps, regime_for
-from tai42_skeleton.states.templates.validate import DECLARATIONS_CHECK_VARIABLES, validate_template
+from tai42_skeleton.states.templates.validate import (
+    DECLARATIONS_CHECK_VARIABLES,
+    RECONCILE_JQ_VARIABLES,
+    validate_template,
+)
 
 __all__ = [
     "DECLARATIONS_CHECK_VARIABLES",
     "MEMBER_JQ_VARIABLES",
+    "RECONCILE_JQ_VARIABLES",
     "REGIMES",
     "TEMPLATE_KIND",
     "RegimeRule",

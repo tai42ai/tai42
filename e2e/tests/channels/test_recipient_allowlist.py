@@ -26,7 +26,7 @@ async def test_allowlisted_recipient_is_delivered_to(channel_case: ChannelCase, 
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user", {"question": question, "channel": case.name, "recipient": case.allowlisted_recipient}
+                "ask", {"question": question, "channel": case.name, "recipient": case.allowlisted_recipient}
             )
         return result.data
 
@@ -64,7 +64,7 @@ async def test_unlisted_recipient_fails_closed(channel_case: ChannelCase, uniq: 
 
     async with stack.mcp(port=stack.port_a) as mcp:
         result = await mcp.call_tool(
-            "ask_user",
+            "ask",
             {"question": question, "channel": case.name, "recipient": case.unlisted_recipient},
             raise_on_error=False,
         )

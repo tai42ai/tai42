@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
+from tai42_contract.states import StateSubject
 
 # The machine-readable code + message the tool-run OFF refusal carries when the
 # store is unconfigured. Hoisted so the submit refusal reads one way.
@@ -36,13 +37,19 @@ def _now() -> datetime:
 
 
 class ToolRunSubmission(BaseModel):
-    """A background tool-run submission: the ``tool_name`` and its keyword ``arguments``.
+    """A background tool-run submission: the ``tool_name``, its keyword ``arguments``, and an optional subject.
 
     Mirrors the shape ``read_tool_call`` enforces at runtime.
+
+    ``subject`` names the addressed subject the detached run's async parks index under (the
+    supervisor deposits it as the run's ``StateContext``); a run whose tool never parks ignores it.
     """
 
     tool_name: str = Field(min_length=1, description="Registered tool name.")
     arguments: dict[str, object] = Field(default_factory=dict, description="Tool keyword arguments.")
+    subject: StateSubject | None = Field(
+        default=None, description="The addressed subject an async park of the detached run indexes under."
+    )
 
 
 class ToolRunsListQuery(BaseModel):

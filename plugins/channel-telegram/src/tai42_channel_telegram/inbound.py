@@ -10,7 +10,7 @@ ForceReply reply whose question has expired, is a bridge message handed to the
 conversation bridge keyed by this bot's numeric id and the chat id.
 
 Transport authentication runs first on every path; the recipient allowlist and
-the reply shape gate only the ask_user path, never the bridge.
+the reply shape gate only the ask path, never the bridge.
 
 Telegram redelivers until a 2xx, so each branch picks its status deliberately:
 verification failures deny (401/500), an unrouted or out-of-scope update acks
@@ -178,7 +178,7 @@ def _inbound_locale(update: dict[str, object]) -> str | None:
 def _is_recipient_chat(chat: dict[str, object], settings: TelegramSettings) -> bool:
     """Whether ``chat`` is a configured recipient — matched by numeric id or ``@username``.
 
-    Only these chats may ANSWER an ask_user question.
+    Only these chats may ANSWER an ask question.
     """
     recipient_chats = set(settings.allowed_recipients)
     if settings.default_recipient is not None:
@@ -473,7 +473,7 @@ async def inbound(request: Request) -> Response:
     except ChannelDeliveryError as exc:
         logger.warning("telegram inbound: typing action for chat_id=%s failed: %s", chat_id, exc)
 
-    # ask_user wins when a ForceReply reply from a recipient chat matches a
+    # ask wins when a ForceReply reply from a recipient chat matches a
     # still-pending question; a correlation miss (expired/never-ours) falls through to
     # the bridge — the shared ladder returns NO_CORRELATION and the caller bridges.
     reply_to = message.get("reply_to_message")

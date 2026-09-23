@@ -27,6 +27,7 @@ from tai42_skeleton.states.service.rows import _SCHEMA_BODY_ADAPTER, _resolve_st
 from tai42_skeleton.states.templates import (
     DECLARATIONS_CHECK_VARIABLES,
     MEMBER_JQ_VARIABLES,
+    RECONCILE_JQ_VARIABLES,
     StateTemplate,
     compose_effective_schema,
     template_jq_prelude,
@@ -168,9 +169,9 @@ class _TemplateMixin(_StatesServiceBase):
         rendered_inputs = {name: rendered[name] for name, p in programs.items() if p.purpose == "input"}
         prelude = template_jq_prelude(rendered_inputs)
         for name, program in programs.items():
-            variables = (*MEMBER_JQ_VARIABLES, "params") if program.purpose == "input" else MEMBER_JQ_VARIABLES
+            extra = "params" if program.purpose == "input" else "input"
             try:
-                compile_check(prelude + rendered[name], variables=variables)
+                compile_check(prelude + rendered[name], variables=(*MEMBER_JQ_VARIABLES, extra))
             except Exception as exc:
                 raise TemplateValidationError(
                     f"template {template.name!r} template_jq {name!r} is not a valid jq expression: {exc}"
@@ -202,7 +203,7 @@ class _TemplateMixin(_StatesServiceBase):
                     f"which could not be fetched: {exc}"
                 ) from exc
             try:
-                compile_check(rendered)
+                compile_check(rendered, variables=RECONCILE_JQ_VARIABLES[label])
             except Exception as exc:
                 raise TemplateValidationError(
                     f"template {template.name!r} reconcile {label} is not a valid jq expression: {exc}"

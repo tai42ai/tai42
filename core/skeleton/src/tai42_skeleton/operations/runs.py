@@ -67,9 +67,10 @@ def _row_view(row: RunRow) -> dict[str, Any]:
     """The list-row wire view.
 
     Every enumerable field plus the ``trace_id`` a client deep-links to the
-    observability trace view with (``None`` when the run has no trace), and the
+    observability trace view with (``None`` when the run has no trace), the
     ``interactionId`` lifecycle key joining a parked run's row with its resume
-    dispatch's row (``None`` for a plain run).
+    dispatch's row (``None`` for a plain run), and ``resumedInteractions``, the
+    parked ids this run resumed or took across its span (empty when it resumed nothing).
     """
     return {
         "runId": row.run_id,
@@ -82,6 +83,7 @@ def _row_view(row: RunRow) -> dict[str, Any]:
         "outcome": row.outcome,
         "startedAt": row.started_at,
         "endedAt": row.ended_at,
+        "resumedInteractions": row.resumed_interactions,
     }
 
 

@@ -14,15 +14,34 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from redis.asyncio import Redis
+from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.interactions import InteractionRequest, InteractionResponse, InteractionState
-from tai42_contract.states import StateContext
+from tai42_contract.states import StateContext, SubjectCandidates
 
 from . import scripts, serde, ttl
 from .keys import _StoreKeys
-from .records import CONTINUATION_DROPPED, ContinuationDue, ContinuationRetryDrop
+from .records import (
+    CONTINUATION_DROPPED,
+    KILL_DROPPED,
+    ContinuationDue,
+    ContinuationRetryDrop,
+    KillDue,
+    KillRetryDrop,
+    KillTarget,
+    subjects_descriptor,
+)
 
 if TYPE_CHECKING:
     from .writes import PruneResult
+
+
+def _raw_field(raw: dict[str | bytes, str | bytes], field: str) -> str | None:
+    """Read one field from a raw hash mapping, tolerant of a decode / no-decode redis client."""
+    for k, v in raw.items():
+        if serde.as_str(k) == field:
+            return serde.as_str(v)
+    return None
+
 
 # The read-only ``list_pending`` admin audit truncates each question to this many
 # characters so one over-long question can never bloat the audit frame; the full
@@ -110,6 +129,10 @@ class _StoreReads(_StoreKeys):
                 # reaper reconciles it off: the index member is left untouched (that
                 # stays the reaper's job) and the item is skipped, so a listed park is
                 # always live and still awaiting an answer.
+                continue
+            if _raw_field(raw, "to") == "caller":
+                # A caller ask never surfaces on a user-facing audit — it is addressed
+                # to the parent run, answered only by resuming it.
                 continue
             request = state.request
             # ``thread_id`` is a denormalized hash field the cascade feature stamps; it
@@ -266,6 +289,8 @@ class _StoreReads(_StoreKeys):
         it = iter(cast("list[Any]", raw))
         fields = {serde.as_str(k): serde.as_str(v) for k, v in zip(it, it, strict=True)}
         raw_context = fields.get("state_context")
+        raw_asked_by = fields.get("asked_by")
+        raw_delivery = fields.get("delivery")
         return ContinuationDue(
             interaction_id=interaction_id,
             tool=fields["tool"],
@@ -274,7 +299,157 @@ class _StoreReads(_StoreKeys):
             answer=json.loads(fields["answer"]),
             attempts=int(fields["attempts"]),
             state_context=StateContext.model_validate_json(raw_context) if raw_context is not None else None,
+            asked_by=json.loads(raw_asked_by) if raw_asked_by is not None else [],
+            delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+            run_delivery_id=fields.get("run_delivery_id"),
         )
+
+    async def read_kill_target(self, r: Redis, interaction_id: str) -> KillTarget | None:
+        """Read the run's delivery identity + subjects off whichever record survives, for a whole-chain kill.
+
+        Priority: the state hash (a pending park → ``"park"``, an answered/resuming entry →
+        ``"running"``), then the waiting-outcome hash (``"outcome"``, a completed run's result),
+        then the continuation-due record (``"running"``, an entry whose state hash aged out). Returns
+        ``None`` when nothing live names this id. The ``delivery``/``run_delivery_id``/``subjects``
+        are the run's, self-contained so the kill's durable record and FAILED delivery survive the
+        prune.
+        """
+        raw_state = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id)))
+        if raw_state:
+            fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_state.items()}
+            raw_delivery = fields.get("delivery")
+            raw_subjects = fields.get("subjects")
+            return KillTarget(
+                kind="park" if fields.get("status") == "pending" else "running",
+                group_id=fields.get("group_id"),
+                delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+                run_delivery_id=fields.get("run_delivery_id"),
+                subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+            )
+        raw_outcome = await cast(
+            "Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.outcome_key(interaction_id))
+        )
+        if raw_outcome:
+            fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_outcome.items()}
+            raw_subjects = fields.get("subjects")
+            return KillTarget(
+                kind="outcome",
+                group_id=None,
+                delivery=None,
+                run_delivery_id=None,
+                subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+            )
+        raw_due = await cast(
+            "Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.continuation_due_key(interaction_id))
+        )
+        if raw_due:
+            fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_due.items()}
+            raw_delivery = fields.get("delivery")
+            raw_context = fields.get("state_context")
+            subjects = (
+                subjects_descriptor(StateContext.model_validate_json(raw_context).candidates)
+                if raw_context is not None
+                else None
+            )
+            return KillTarget(
+                kind="running",
+                group_id=None,
+                delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+                run_delivery_id=fields.get("run_delivery_id"),
+                subjects=subjects,
+            )
+        return None
+
+    async def due_kills(self, r: Redis, now: datetime) -> list[str]:
+        """The interaction ids of kill-due records whose next-attempt time is at or before ``now``.
+
+        The kill-due reaper leg's work list, mirroring :meth:`due_continuations`. A member survives
+        until the kill's teardown + FAILED delivery commits (``clear_kill_due``), or the reaper
+        gives it up past its deadline.
+        """
+        cutoff = int(now.timestamp() * 1000)
+        raw = await r.zrangebyscore(self.kill_due_index_key, 0, cutoff)
+        return [serde.as_str(member) for member in raw]
+
+    async def claim_kill_retry(
+        self, r: Redis, interaction_id: str, now: datetime, backoff_base_ms: int, backoff_cap_ms: int
+    ) -> KillDue | KillRetryDrop | None:
+        """Atomically claim a due kill-due record for redelivery, advancing its backoff.
+
+        Reuses the continuation retry-claim script (index + record key generic): advances the
+        record's next-attempt score by an exponential backoff and returns it to re-fire, ``None``
+        when not (or no longer) due, and :data:`KILL_DROPPED` when the record hash TTL-expired and
+        the orphan index member is reconciled off. The reaper's ordinary give-up is governed by the
+        record's own ``deadline_ms`` (read here while the record still stands), not by this drop.
+        redis-py's async ``eval`` stub types a non-awaitable return; it is awaitable at runtime.
+        """
+        raw = await cast(
+            "Awaitable[list[Any] | str | bytes | None]",
+            r.eval(
+                scripts._CONTINUATION_RETRY_CLAIM_LUA,
+                2,
+                self.kill_due_index_key,
+                self.kill_due_key(interaction_id),
+                interaction_id,
+                str(int(now.timestamp() * 1000)),
+                str(backoff_base_ms),
+                str(backoff_cap_ms),
+            ),
+        )
+        if not raw:
+            return None
+        if raw in (b"dropped", "dropped"):
+            return KILL_DROPPED
+        it = iter(cast("list[Any]", raw))
+        fields = {serde.as_str(k): serde.as_str(v) for k, v in zip(it, it, strict=True)}
+        raw_delivery = fields.get("delivery")
+        raw_subjects = fields.get("subjects")
+        return KillDue(
+            interaction_id=interaction_id,
+            reason=fields.get("reason", ""),
+            attempts=int(fields["attempts"]),
+            deadline_ms=int(fields["deadline_ms"]),
+            delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+            run_delivery_id=fields.get("run_delivery_id"),
+            subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+        )
+
+    async def due_untaken_outcomes(self, r: Redis, now: datetime, horizon_seconds: int) -> list[str]:
+        """The ``completion_id``s of waiting outcomes older than the retention horizon — the sweep's work list.
+
+        Reads the retention index by score for members created at or before ``now - horizon_seconds``.
+        A member leaves the index when its outcome is taken, killed/erased or swept, so a listed id is
+        an untaken outcome the sweep drops (atomically, via :meth:`claim_outcome`, so a racing take or
+        a concurrent sweep pass resolves to exactly one winner).
+        """
+        cutoff = int(now.timestamp() * 1000) - horizon_seconds * 1000
+        raw = await r.zrangebyscore(self.outcome_retention_index_key, 0, cutoff)
+        return [serde.as_str(member) for member in raw]
+
+    async def subject_members(self, r: Redis, kind: str, key: str) -> list[str]:
+        """Every entry id addressed to ``(kind, key)`` across EVERY scope, de-duplicated.
+
+        Walks the ``(kind, key)`` scopes index to each per-scope subject-parks set and unions their
+        members WITHOUT a SCAN — the id list a subject erasure kills each of, reaching parks,
+        running entries and waiting outcomes on any scope the subject ever parked under. A coarse
+        scopes index may name a scope whose set is already drained, which simply contributes no
+        members.
+        """
+        scope_tokens = [
+            serde.as_str(token)
+            for token in await cast("Awaitable[set[str | bytes]]", r.smembers(self.subject_scopes_key(kind, key)))
+        ]
+        seen: set[str] = set()
+        members: list[str] = []
+        for token in scope_tokens:
+            scope_kind, _, scope_name = token.partition(":")
+            parks_key = self.subject_parks_key(cast("ConversationTargetKind", scope_kind), scope_name, kind, key)
+            for raw_member in await cast("Awaitable[set[str | bytes]]", r.smembers(parks_key)):
+                member = serde.as_str(raw_member)
+                if member not in seen:
+                    seen.add(member)
+                    members.append(member)
+        return members
 
     async def count_open(self, r: Redis) -> int:
         """The live open-question count.
@@ -337,6 +512,10 @@ class _StoreReads(_StoreKeys):
                 state = serde.state_from_raw(raw)
                 if state is None or state.status != "pending":
                     continue
+                if _raw_field(raw, "to") == "caller":
+                    # A caller ask is addressed to the parent run and is answered only
+                    # by resuming it; it never appears on the user-facing pending list.
+                    continue
                 # An async park is NEVER pruned by this sync-deadline path: pruning
                 # it would drop its continuation on the floor. Its lifetime is
                 # governed by the expiry reaper (which fires the continuation) and
@@ -346,6 +525,92 @@ class _StoreReads(_StoreKeys):
                     continue
                 pending.append(req)
         return pending
+
+    async def list_parked_for(self, r: Redis, candidates: SubjectCandidates) -> list[dict[str, Any]]:
+        """Every parked entry addressed to the run's subject — the union over its subject keys, de-duplicated.
+
+        Reads the subject-parks set for each of ``candidates.by_kind``'s keys UNDER the run's own
+        scope ``(target_kind, target_name)``, unions the members and de-duplicates by id.
+        Scope equality is structural: a member only ever lives under a scope-keyed set, so a
+        listing for one scope can never see another scope's parks even when the ``(kind, key)``
+        matches. Each member is resolved to its full entry with a ``status``: ``asking`` (a pending
+        caller/user ask), ``running`` (its continuation-due record stands — answered, resuming),
+        ``finished``/``failed`` (a waiting outcome). A member whose backing record has vanished (a
+        resolved run's stale membership) is skipped. The caller resumes only ``asking`` caller
+        entries and takes ``finished``/``failed`` outcomes; the gate lives at the resume/take door.
+        """
+        seen: set[str] = set()
+        members: list[str] = []
+        for kind, key in candidates.by_kind.items():
+            parks_key = self.subject_parks_key(candidates.target_kind, candidates.target_name, kind, key)
+            for raw_member in await cast("Awaitable[set[str | bytes]]", r.smembers(parks_key)):
+                member = serde.as_str(raw_member)
+                if member not in seen:
+                    seen.add(member)
+                    members.append(member)
+        entries: list[dict[str, Any]] = []
+        for member in members:
+            entry = await self._parked_entry(r, member)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    async def _parked_entry(self, r: Redis, member: str) -> dict[str, Any] | None:
+        """Resolve one subject-index member to its full entry + ``status``, or ``None`` when its record is gone."""
+        raw_state = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(member)))
+        if raw_state:
+            fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_state.items()}
+            if fields.get("status") == "pending":
+                return self._entry_from_state(member, fields, "asking")
+            # Answered: it is ``running`` while its continuation-due record still stands.
+            if await self._record_present(r, self.continuation_due_key(member)):
+                return self._entry_from_state(member, fields, "running")
+            # Answered and resolved with no due record and no outcome under this id — the
+            # run moved on; nothing to list under this stale membership.
+            return None
+        # No state hash: an expired-state entry still resuming, or a waiting outcome
+        # (keyed by the run's completion id, never a state hash).
+        if await self._record_present(r, self.continuation_due_key(member)):
+            return {"id": member, "status": "running"}
+        raw_outcome = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.outcome_key(member)))
+        if raw_outcome:
+            fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_outcome.items()}
+            return {
+                "id": member,
+                "status": fields["status"],
+                "result": json.loads(fields["result"]),
+            }
+        return None
+
+    @staticmethod
+    async def _record_present(r: Redis, key: str) -> bool:
+        """Whether a hash record exists at ``key`` (a non-empty ``HGETALL``)."""
+        raw = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(key))
+        return bool(raw)
+
+    @staticmethod
+    def _entry_from_state(member: str, fields: dict[str, str], status: str) -> dict[str, Any]:
+        """Build a parked-entry dict from a member's state hash, tagged with ``status``."""
+        request = InteractionRequest.model_validate_json(fields["request"])
+        return {
+            "id": member,
+            "status": status,
+            "to": fields.get("to") or "user",
+            "asked_by": json.loads(fields["asked_by"]) if fields.get("asked_by") is not None else None,
+            "question": request.question,
+            "answer_format": request.answer_format.value,
+            "format_payload": request.format_payload,
+            "payload": request.payload,
+            "group_id": fields.get("group_id"),
+            "created_at": request.created_at.isoformat(),
+            "expiry_at": request.expiry_at.isoformat() if request.expiry_at is not None else None,
+            "on_expiry": request.on_expiry,
+            "thread_id": fields.get("thread_id"),
+            "channel": request.channel,
+            "recipient": request.recipient,
+            "audience": request.audience,
+            "media": [item.model_dump(mode="json") for item in request.media] if request.media is not None else None,
+        }
 
     async def wait_for_reply(
         self, r: Redis, reply_to: str, timeout_seconds: float, grace_seconds: float

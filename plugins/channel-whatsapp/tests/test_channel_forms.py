@@ -108,7 +108,7 @@ async def test_form_cache_miss_creates_publishes_then_sends(waba_env, fake_redis
                     # A per-send form navigates to the entry screen and injects the
                     # prefill/option data (here the empty defaults — no per-send data).
                     "flow_action_payload": {
-                        "screen": "SCREEN_0",
+                        "screen": "SCREEN_A",
                         "data": build_flow_data(_FORM_SCHEMA, {}, {}),
                     },
                 },
@@ -164,7 +164,7 @@ async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send
     assert fake_redis.store[_flow_cache_key(ask_hash)] == "flow-multi"
     # The send carries the per-send values/options through the Flow action payload's data.
     action_payload = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]
-    assert action_payload["screen"] == "SCREEN_0"
+    assert action_payload["screen"] == "SCREEN_A"
     assert action_payload["data"]["note__init"] == "hi"
     assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
 
@@ -269,6 +269,53 @@ async def test_form_orphan_delete_failure_is_logged_and_original_error_raised(
 
     assert any("orphaned draft flow flow-1" in record.message for record in caplog.records)
     assert _flow_cache_key(schema_hash) not in fake_redis.store
+
+
+async def test_form_create_with_validation_errors_refuses_and_deletes_draft(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Meta returns HTTP 200 for a create even when the Flow JSON is invalid: the draft
+    # is created but carries validation_errors and can never publish. _resolve_flow_id
+    # refuses loudly with the rendered list BEFORE publish, deletes the stranded draft
+    # through its one cleanup writer, publishes/caches nothing, and frees the pair.
+    import json
+
+    errors = [{"error_type": "INVALID_PROPERTY", "message": "id has a digit", "pointer": "/screens/0/id"}]
+    fake_httpx.responses.append(response(200, json={"id": "flow-bad", "validation_errors": errors}))
+    fake_httpx.responses.append(_published())  # the cleanup delete (its 2xx body is unused)
+
+    with pytest.raises(ChannelDeliveryError, match="validation errors and it can never publish") as excinfo:
+        await WhatsAppChannel().deliver(_form_delivery())
+
+    # The full rendered vendor list rides the message.
+    assert json.dumps(errors, sort_keys=True, separators=(",", ":")) in str(excinfo.value)
+    # Create then delete of the stranded draft — never a publish.
+    assert [call["url"] for call in fake_httpx.calls] == [
+        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
+        "https://graph.facebook.com/v23.0/flow-bad",
+    ]
+    assert ("http_delete", "https://graph.facebook.com/v23.0/flow-bad") in fake_httpx.events
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    assert _flow_cache_key(schema_hash) not in fake_redis.store  # nothing cached
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store  # pair freed
+
+
+async def test_form_clean_create_still_publishes_and_caches(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A create with no validation_errors (an empty array is the clean case) publishes
+    # and caches exactly as before — the refusal is scoped to a non-empty list.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_httpx.responses.append(response(200, json={"id": "flow-ok", "validation_errors": []}))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.FORM"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+
+    assert [call["url"] for call in fake_httpx.calls] == [
+        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
+        "https://graph.facebook.com/v23.0/flow-ok/publish",
+        _MESSAGES_URL,
+    ]
+    assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-ok"
 
 
 async def test_form_missing_waba_id_raises_loudly(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -486,7 +533,7 @@ async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redi
     assert params["flow_id"] == "flow-nf-prefill"
     assert params["flow_token"].startswith(f"{_NF_PREFIX}{schema_hash}:")
     action_payload = params["flow_action_payload"]
-    assert action_payload["screen"] == "SCREEN_0"
+    assert action_payload["screen"] == "SCREEN_A"
     # The prefill value and the per-send option list reach the Flow's screen data model.
     assert action_payload["data"]["note__init"] == "hi"
     assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]

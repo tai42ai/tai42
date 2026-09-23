@@ -20,6 +20,7 @@ from ._harness import (
     _MEDIA_ITEMS,
     _add_ids,
     _AliveRequest,
+    _caller_ask_request,
     _collect_stream,
     _event_ids,
     _events_cursor,
@@ -36,6 +37,17 @@ from ._harness import (
     _tail_collect,
     make_request,
 )
+
+
+async def test_stream_tail_hides_caller_ask_add(wired):
+    # A caller ask is addressed to the calling run and never appears on the user-facing
+    # inbox tail: its add frame is suppressed while a co-added user ask still forwards.
+    async def _inject():
+        await wired.store.add(wired.fake, _caller_ask_request(wired.store, iid="cA", gid="cgA"), idle_ttl=86400)
+        await _seed(wired, iid="uB", gid="ugB")
+
+    frames = await _tail_collect(wired, _inject)
+    assert _add_ids(frames) == ["uB"]
 
 
 async def test_stream_route_returns_streaming_response(wired):

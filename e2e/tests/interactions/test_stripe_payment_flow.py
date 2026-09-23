@@ -164,7 +164,7 @@ async def _setup_flow(stack: TaiStack, api: Any, uniq: Callable[[str], str]) -> 
             "tool": "confirm_stripe_payment",
             "execution_key": exec_user_id,
             "condition": {"content": _CANONICAL_CONDITION},
-            "expr": {"content": _CANONICAL_EXPR},
+            "start_expr": {"content": _CANONICAL_EXPR},
         },
     )
     preset_name = uniq("buyitem")

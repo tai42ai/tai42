@@ -27,7 +27,7 @@ def _auth_manifest(variants: Variants) -> dict:
         "default_routers": "none",
         "lifecycle_modules": [variants.identity.lifecycle_module],
         # A deliver-only stub channel (registers on import, mounts no route) so the
-        # isolation suite can drive a channel-delivered ask_user — the ticket-contained
+        # isolation suite can drive a channel-delivered ask — the ticket-contained
         # mode where the callback URL rides the channel — and pin the add-frame carries
         # no ticket.
         "channel_modules": ["tai42_e2e_fixtures.stub_channel"],
@@ -49,7 +49,7 @@ def _auth_manifest(variants: Variants) -> dict:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
 
 
@@ -70,7 +70,7 @@ def _auth_env(res: StackResources, variants: Variants) -> dict[str, str]:
     # per-identity index/feed must still return the addressed identity's own record).
     env["TAI_TOOL_RUNS_RECENT_RUNS_LIMIT"] = "3"
     env["INTERACTIONS_NOTIFICATIONS_FEED_MAX"] = "5"
-    # A channel-delivered ask_user mints a callback ticket + URL from the public base URL,
+    # A channel-delivered ask mints a callback ticket + URL from the public base URL,
     # so this setting is required; the host is never dialed, but it must be an https value.
     env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
     return env
@@ -153,7 +153,7 @@ def build_setup_stack(res: StackResources, variants: Variants) -> StackConfig:
         "extensions_modules": _EXTENSION_MODULES,
         "tools": [*_builtin_entries()],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
@@ -205,7 +205,7 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
@@ -258,7 +258,7 @@ def build_accounts_fresh_stack(res: StackResources, variants: Variants) -> Stack
         "extensions_modules": _EXTENSION_MODULES,
         "tools": [*_builtin_entries()],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"

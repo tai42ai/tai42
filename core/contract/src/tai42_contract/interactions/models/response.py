@@ -1,4 +1,4 @@
-"""The ``ask_user`` answer and interaction-state models.
+"""The ``ask`` answer and interaction-state models.
 
 ``InteractionResponse`` is the validated answer pushed onto the reply channel;
 ``InteractionState`` is the mutable record the answer endpoint reads;
@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.interactions.models.request import InteractionRequest
@@ -69,6 +69,21 @@ class SuspendedInteraction(BaseModel):
     # An ask that parks always stamps it, so ``None`` means the sentinel was NOT minted by an
     # ask: a nested RUN's park surfaced at its tool face, which no caller may adopt.
     resume_owner: str | None = None
+    # Every ask this park represents. For a single ask it is ``[interaction_id]`` (filled by
+    # default); a driver that surfaces a whole super-step at one tool face MERGES the
+    # per-ask sentinels' lists here.
+    interaction_ids: list[str] = Field(default_factory=list)
+    # The subset of ``interaction_ids`` addressed to the CALLER (``to="caller"``). Empty for
+    # a park of only user asks; a driver merges the per-ask subsets when it surfaces a step.
+    caller_interaction_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _default_interaction_ids(self) -> SuspendedInteraction:
+        # A sentinel always represents at least its own ask, so an unset ``interaction_ids``
+        # defaults to the single id; ``caller_interaction_ids`` stays a caller-only subset.
+        if not self.interaction_ids:
+            self.interaction_ids = [self.interaction_id]
+        return self
 
     @field_validator("expiry_at")
     @classmethod
@@ -82,3 +97,19 @@ class SuspendedInteraction(BaseModel):
         if value.tzinfo is None:
             raise ValueError("datetime must be timezone-aware (UTC)")
         return value.astimezone(UTC)
+
+
+class ResumeBuffered(BaseModel):
+    """A resume that did NOT drive its super-step to a terminal: sibling asks are still open.
+
+    One super-step of a held run can park SEVERAL asks in parallel. Answering one of them
+    buffers that answer and leaves the step suspended until the last sibling resolves. A resuming
+    driver returns this in place of a terminal to say exactly that: ``remaining_ids`` are the
+    still-unanswered asks of the same step. It is NOT terminal — the platform's delivery chokepoint
+    delivers nothing for it (the run stays parked), and ``visit`` normalises it to the caller/user
+    partition of the remaining ids. Generic: it names interaction ids only, no driver
+    or engine state. Kept by TYPE through the run-tool seam alongside ``SuspendedInteraction`` so a
+    caller recognises a still-suspended step rather than mistaking it for a terminal result.
+    """
+
+    remaining_ids: list[str] = Field(default_factory=list)

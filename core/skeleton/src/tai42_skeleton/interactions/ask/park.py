@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
@@ -19,6 +20,7 @@ from tai42_contract.interactions import (
     repark_notice,
 )
 from tai42_contract.states import StateContext
+from tai42_contract.tools import get_run_delivery, get_run_delivery_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +46,23 @@ class AsyncParkBinding:
     continuation_fingerprint: str | None = None
     continuation_state_context: StateContext | None = None
     park_thread_id: str | None = None
+    # The RUN's delivery identity and out-of-band address, read from the ambient
+    # run-delivery context the outermost ``tool_call_frame`` bound. The run_delivery_id
+    # is always present for a parkable run (the persist raises without one); the address
+    # is ``None`` for a receiver-less run. Both are stored verbatim on the request.
+    run_delivery_id: str | None = None
+    delivery: tuple[str | None, dict[str, Any] | None] | None = None
 
 
-def resolve_async_continuation() -> AsyncParkBinding:
+def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncParkBinding:
     """Resolve the async park's resume binding, raising loudly when a driver/identity is missing.
 
     Captures the resume tool + execution identity + fingerprint + state-context +
-    bound thread. An async ask with no bound driver or no identity to rebind it
-    as is a caller error that must fail loudly, never persist a question no
-    answer/expiry could resume.
+    bound thread, and the RUN's delivery identity + address. An async ask with no bound
+    driver, no identity to rebind it as, or (a platform bug) no ambient run-delivery
+    identity is a failure that must fail loudly, never persist a question no answer/expiry
+    could resume or deliver. A ``caller`` ask additionally requires an ambient state context
+    (its outcome is subject-tracked back through the parking run's subject).
     """
     continuation_tool = get_resume_continuation_tool()
     if continuation_tool is None:
@@ -75,16 +85,35 @@ def resolve_async_continuation() -> AsyncParkBinding:
     from tai42_skeleton.interactions.continuation import _current_state_context_for_park
 
     continuation_state_context = _current_state_context_for_park()
+    if to == "caller" and continuation_state_context is None:
+        # A caller ask's outcome is handed back through the parking run's subject, read
+        # from the ambient state context; with none there is no subject to track it on.
+        raise RuntimeError("a caller ask (to='caller') requires an ambient state context")
     # The bound conversation thread (from the turn layer's park-completion / bridge
     # context), so this park joins its thread's reverse index and a thread delete can
     # cancel it. ``None`` outside a bound conversation turn.
     park_thread_id = bound_park_thread_id()
+    # The RUN's delivery identity + address, bound once at the outermost run start on the
+    # ambient run-delivery context. A parkable run ALWAYS started through the frame that
+    # mints it, so a missing id is a platform bug — raise, never persist a park the
+    # delivery chokepoint could not key.
+    run_delivery_id = get_run_delivery_id()
+    if run_delivery_id is None:
+        raise RuntimeError("async ask parked with no ambient run_delivery_id (the run started outside a call frame)")
+    raw_delivery = get_run_delivery()
+    delivery = (
+        (raw_delivery[0], dict(raw_delivery[1]) if raw_delivery[1] is not None else None)
+        if raw_delivery is not None
+        else None
+    )
     return AsyncParkBinding(
         continuation_tool=continuation_tool,
         continuation_identity=identity.user_id,
         continuation_fingerprint=continuation_fingerprint,
         continuation_state_context=continuation_state_context,
         park_thread_id=park_thread_id,
+        run_delivery_id=run_delivery_id,
+        delivery=delivery,
     )
 
 
@@ -117,12 +146,11 @@ def bound_park_thread_id() -> str | None:
       delivery tool's parameter, which this module deliberately does not read, and there is no
       bridge turn context out of band. The asymmetry follows from the opacity rule above rather
       than from any judgement that one deserves indexing more.
-    * a nested park inside an AGENT running as a TOOL route's target. The agent binds its own
-      address over every tool it dispatches, so no nested driver can capture the address the
-      agent's answer is owed to; a tool turn establishes no bridge turn context. Whether such a
-      park is indexed follows from what the agent bound: a CHAINED dispatch composes a context
-      that carries this reserved field up from the one it wrapped, so the nested park is indexed
-      to the same thread; an unchained one clears the binding, and the park is unindexed.
+    * a nested park inside an AGENT running as a TOOL route's target. The door's completion
+      binding flows down through every nested dispatch unchanged (a nested driver binds only
+      its chain routing, never a completion of its own), so the nested park reads the same
+      reserved field the door bound and is indexed to the same thread; a tool turn establishes
+      no bridge turn context, so the thread comes from that binding alone.
 
     Closing the open cases means the resume drive (and the tool-turn door) establishing the thread
     binding in their own right, left to a follow-up.
@@ -143,15 +171,15 @@ def bound_park_thread_id() -> str | None:
 
 
 async def notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> None:
-    """Tell a CHAINED completion binding that the run it addresses just parked on a new ask.
+    """Tell a bound chain routing that the run it addresses just parked on a new ask.
 
     A caller whose own suspension horizon was inherited from that run can then refresh it.
 
-    Fired only when :func:`repark_notice` reports a chained binding — every other completion
-    binding (and no binding at all) is silent, so no delivery tool ever sees a fire it has no
-    horizon to answer. BEST-EFFORT by construction: the notice refreshes a horizon, it never
+    Fired only when :func:`repark_notice` reports a bound chain routing — with no chain routing
+    bound it is silent, so no delivery tool ever sees a fire it has no horizon to answer.
+    BEST-EFFORT by construction: the notice refreshes a horizon, it never
     carries an answer, so a failing notifier is logged and swallowed rather than turning a
-    successfully persisted park into a failed ``ask_user``. The cost of a lost notice is a
+    successfully persisted park into a failed ``ask``. The cost of a lost notice is a
     caller whose horizon stays at the previous ask's deadline.
     """
     notice = repark_notice(expiry_at)
@@ -162,7 +190,7 @@ async def notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> N
         await tai42_app.tools.run_tool(tool, payload)
     except Exception:
         logger.warning(
-            "ask_user: the re-park horizon notice to %r failed for interaction %s; the chained caller "
+            "ask: the re-park horizon notice to %r failed for interaction %s; the chained caller "
             "keeps its previous horizon",
             tool,
             interaction_id,

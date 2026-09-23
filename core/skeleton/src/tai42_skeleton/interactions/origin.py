@@ -1,4 +1,4 @@
-"""The run/thread origin an ``ask_user`` question is attributed to.
+"""The run/thread origin an ``ask`` question is attributed to.
 
 A background tool run binds its run id here for the length of the run, so a
 question raised inside the run's tool body carries that origin on its durable

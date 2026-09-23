@@ -186,7 +186,7 @@ def turn_text(route: ConversationRoute, batch: Batch, lead_text: str) -> str:
     Under ``deliver="one"`` it is the lead's own rendered text, one turn per message with the
     payload unchanged. Under
     ``deliver="all"`` it is the superseded texts then the batch texts, in acceptance order,
-    joined with a blank line — so an agent target, a manual-mode append and a no-``payload_expr``
+    joined with a blank line — so an agent target, a manual-mode append and a no-``start_expr``
     tool all see the whole turn with no new seam.
     """
     if route.overlap.deliver != "all":

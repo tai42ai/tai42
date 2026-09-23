@@ -102,6 +102,27 @@ async def _seed_form_payload(w, *, format_payload, ticket="TKT", iid="i1", gid="
     return iid
 
 
+def _caller_ask_request(store, *, iid="c1", gid="cg", fmt=AnswerFormat.TEXT, payload=None, budget=3600):
+    """A ``to="caller"`` ask: async, addressed to the calling run (never a person)."""
+    now = datetime.now(UTC)
+    future = now + timedelta(seconds=budget)
+    return InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="proceed?",
+        answer_format=fmt,
+        format_payload=payload,
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=future,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=future,
+        to="caller",
+    )
+
+
 def _plain_request(store, fmt, iid="p1", gid="pg", payload=None, audience=None) -> InteractionRequest:
     now = datetime.now(UTC)
     return InteractionRequest(

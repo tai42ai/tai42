@@ -91,9 +91,10 @@ def _compile_template_jq_inline(programs: Mapping[str, StateTemplateJq]) -> None
         if program.jq.content is None:
             raise AssertionError
         # An input program's declared params ride the SINGLE ``$params`` object, never
-        # individual ``$<name>`` args; an update program reads ``{record, input}`` as ``.`` and
-        # declares its ``.input`` keys as ``params`` (validated at apply, not bound here).
-        variables = (*MEMBER_JQ_VARIABLES, "params") if program.purpose == "input" else MEMBER_JQ_VARIABLES
+        # individual ``$<name>`` args; an update program reads the record subtree as ``.`` with
+        # the adapter's input bound as ``$input``, and declares its ``$input`` keys as ``params``
+        # (validated at apply, not bound here).
+        variables = (*MEMBER_JQ_VARIABLES, "params") if program.purpose == "input" else (*MEMBER_JQ_VARIABLES, "input")
         try:
             compile_check(prelude + program.jq.content, variables=variables)
         except Exception as exc:

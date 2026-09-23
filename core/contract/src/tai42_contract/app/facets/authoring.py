@@ -8,6 +8,7 @@ from tai42_contract.app.facets.routing import RouteAction
 from tai42_contract.presets import (
     CARRY_FORWARD,
     CarryForward,
+    PresetBody,
     PresetInputSchemaSupport,
     PresetSeed,
     PresetStore,
@@ -169,6 +170,27 @@ class AppPresets(Protocol):
         """The authoring authz tier ``base_tool`` declared, or ``None`` if it declared none.
 
         When ``None``, authoring keeps the presets' default ``write`` action.
+        """
+        ...
+
+    async def get_active_versioned_body(self, name: str) -> tuple[int, PresetBody]:
+        """One preset's active ``(version, body)`` read TOGETHER in one query.
+
+        The version-aware sibling of ``store.get_active_body``: it captures the active version
+        pointer and the body it points at atomically, so a consumer that needs the version beside
+        the body never risks a skewed second read across a concurrent activation. Raises
+        :class:`~tai42_contract.presets.errors.PresetNotFoundError` for an unknown preset.
+        """
+        ...
+
+    async def used_by(self, name: str) -> list[str]:
+        """The other presets whose active bodies compose preset ``name`` as a tool, sorted.
+
+        Computed over the active preset population (a body's composed tool names intersected with
+        the population, self excluded), so it answers "which saved presets depend on this one" for a
+        rename/delete dependents pass. Raises
+        :class:`~tai42_contract.presets.errors.PresetNotFoundError` for a name that is not a known
+        preset.
         """
         ...
 

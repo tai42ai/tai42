@@ -1,20 +1,23 @@
-"""Interactions contract: the ``ask_user`` human-in-the-loop surface.
+"""Interactions contract: the ``ask`` human-in-the-loop surface.
 
 ``models`` holds the durable request/state and validated response pydantic
 models, the ``SuspendedInteraction`` sentinel an async ask returns, the
 ``AnswerFormat`` enum, and the display-only ``MediaItem``/``MediaKind`` media
-models a question may carry; ``asker`` holds the ``AskUser`` callable Protocol
+models a question may carry; ``asker`` holds the ``Ask`` callable Protocol
 the engine-agnostic helper satisfies and the ``check_ask_timing`` guard;
 ``continuation`` holds the generic driver-continuation context an async ask reads,
 plus the adopt-or-chain guard a caller applies to a returned park sentinel and the
-chained-park vocabulary a caller that parks on a nested CALL composes its binding from.
+chained-park vocabulary a caller that parks on a nested CALL routes through;
+``door_contract`` holds the parkable-door jq mixin and the pure parsers that turn its
+cancel/resume jq results into ``visit`` arguments; ``visit`` holds the ``Visit`` Protocol
+every door drives a parkable run through and the ``VisitOutcome``/``ParkedEntry`` value types.
 """
 
 from __future__ import annotations
 
-from tai42_contract.interactions.asker import AskUser, check_ask_timing
+from tai42_contract.interactions.answer_check import AnswerMismatchError, QuestionFormat
+from tai42_contract.interactions.asker import Ask, check_ask_timing
 from tai42_contract.interactions.continuation import (
-    CHAINED_PARK_CONTEXT_KEY,
     CHAINED_PARK_KEY_PREFIX,
     CHAINED_PARK_TOKEN_KEY,
     EXPIRY_ANSWER,
@@ -23,29 +26,43 @@ from tai42_contract.interactions.continuation import (
     PARK_COMPLETION_SUCCEEDED,
     PARK_COMPLETION_THREAD_KEY,
     SUSPENDED_INTERACTION_MARKER_KEY,
+    ChainedResume,
     NestedParkOwnershipError,
+    ParkDeliveryUnauthorizedError,
+    ParkResumeFailed,
+    ParkResumeUnauthorizedError,
     assert_park_adoptable,
     attach_chained_park,
     bound_execution_identity_for_fire,
     chained_park_claims,
-    chained_park_context,
     current_execution_identity,
-    fire_continuation_abandoned,
+    fire_park_killed,
+    get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
     is_chained_park_key,
     new_chained_park_key,
     read_suspended_interaction_marker,
-    register_continuation_abandonment_handler,
     register_execution_identity_accessor,
     register_execution_identity_binder,
+    register_park_kill_handler,
     repark_notice,
+    reset_chained_resume,
     reset_park_completion,
     reset_resume_continuation_tool,
     resolve_park_adoption,
+    set_chained_resume,
     set_park_completion,
     set_resume_continuation_tool,
     suspended_interaction_marker,
+)
+from tai42_contract.interactions.door_contract import (
+    DoorContractError,
+    ParkableDoorMixin,
+    ResumeItem,
+    TakeItem,
+    parse_cancel_result,
+    parse_resume_result,
 )
 from tai42_contract.interactions.models import (
     FILE_MEDIA_KINDS,
@@ -70,14 +87,25 @@ from tai42_contract.interactions.models import (
     LocationElement,
     MediaItem,
     MediaKind,
+    ResumeBuffered,
     SuspendedInteraction,
+    check_addressing,
     check_media_list,
     served_media_id,
     validate_action_url,
 )
+from tai42_contract.interactions.visit import (
+    ParkableRunFailedError,
+    ParkedEntry,
+    ParkedEntryGoneError,
+    ParkedStatus,
+    UndeclaredExtrasKeyError,
+    Visit,
+    VisitOutcome,
+    VisitRequestError,
+)
 
 __all__ = [
-    "CHAINED_PARK_CONTEXT_KEY",
     "CHAINED_PARK_KEY_PREFIX",
     "CHAINED_PARK_TOKEN_KEY",
     "EXPIRY_ANSWER",
@@ -98,8 +126,11 @@ __all__ = [
     "PARK_COMPLETION_THREAD_KEY",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "AnswerFormat",
+    "AnswerMismatchError",
     "AnswerMismatchPolicy",
-    "AskUser",
+    "Ask",
+    "ChainedResume",
+    "DoorContractError",
     "FormData",
     "FormOption",
     "FormPage",
@@ -110,29 +141,50 @@ __all__ = [
     "MediaItem",
     "MediaKind",
     "NestedParkOwnershipError",
+    "ParkDeliveryUnauthorizedError",
+    "ParkResumeFailed",
+    "ParkResumeUnauthorizedError",
+    "ParkableDoorMixin",
+    "ParkableRunFailedError",
+    "ParkedEntry",
+    "ParkedEntryGoneError",
+    "ParkedStatus",
+    "QuestionFormat",
+    "ResumeBuffered",
+    "ResumeItem",
     "SuspendedInteraction",
+    "TakeItem",
+    "UndeclaredExtrasKeyError",
+    "Visit",
+    "VisitOutcome",
+    "VisitRequestError",
     "assert_park_adoptable",
     "attach_chained_park",
     "bound_execution_identity_for_fire",
     "chained_park_claims",
-    "chained_park_context",
+    "check_addressing",
     "check_ask_timing",
     "check_media_list",
     "current_execution_identity",
-    "fire_continuation_abandoned",
+    "fire_park_killed",
+    "get_chained_resume",
     "get_park_completion",
     "get_resume_continuation_tool",
     "is_chained_park_key",
     "new_chained_park_key",
+    "parse_cancel_result",
+    "parse_resume_result",
     "read_suspended_interaction_marker",
-    "register_continuation_abandonment_handler",
     "register_execution_identity_accessor",
     "register_execution_identity_binder",
+    "register_park_kill_handler",
     "repark_notice",
+    "reset_chained_resume",
     "reset_park_completion",
     "reset_resume_continuation_tool",
     "resolve_park_adoption",
     "served_media_id",
+    "set_chained_resume",
     "set_park_completion",
     "set_resume_continuation_tool",
     "suspended_interaction_marker",

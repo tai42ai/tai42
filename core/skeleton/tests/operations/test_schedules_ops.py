@@ -59,7 +59,7 @@ class _FakeTools:
     async def get_tools(self) -> dict:
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key: str, arguments: dict) -> object:
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None) -> object:
         if self._run_exc is not None:
             raise self._run_exc
         if key not in self._registered:
@@ -67,10 +67,48 @@ class _FakeTools:
         return self._run_result
 
 
+class _FakeScheduleInteractions:
+    """The interactions facade the run-once schedule door drives through: a ``visit`` that deposits
+    the door binding around ``start`` alone and an empty ``$parked`` source."""
+
+    async def list_parked_for(self, context: object) -> list:
+        return []
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        from tai42_contract.interactions import VisitOutcome
+        from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
+
+        result = None
+        if start is not None:
+            token = (
+                set_current_tool_invocation(ToolInvocation(tool_name=target_name, state_binding=state_binding))
+                if state_binding is not None
+                else None
+            )
+            try:
+                result = await start(extras)
+            finally:
+                if token is not None:
+                    reset_current_tool_invocation(token)
+        return VisitOutcome(
+            action="started" if start is not None else "none",
+            kind="result" if start is not None else "none",
+            result=result,
+        )
+
+
 @pytest.fixture
 def install(monkeypatch: pytest.MonkeyPatch):
     def _install(fake: _FakeTools) -> _FakeTools:
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=fake))
+        monkeypatch.setattr(
+            tai42_app,
+            "_impl",
+            SimpleNamespace(
+                tools=fake,
+                interactions=_FakeScheduleInteractions(),
+                storage=SimpleNamespace(resource_manager=None),
+            ),
+        )
         return fake
 
     return _install
@@ -345,6 +383,33 @@ async def test_create_authorizes_the_submitted_tool_with_the_translated_dispatch
     assert arguments["backend_schedule_name"].startswith("send_")
 
 
+async def test_create_binds_the_schedule_create_fire_around_the_recurring_dispatch(install, monkeypatch) -> None:
+    # The recurring branch dispatch runs INSIDE the platform's schedule-create fire, so the branch
+    # preparer trusts the reserved keys stamped just before it. A caller who names the branch directly
+    # reaches that preparer with the marker off (proven at the kit chokepoint) and is refused; here the
+    # create door's own dispatch is proven to carry the marker, and to reset it once the dispatch ends.
+    from tai42_kit.utils.schedule_subject import in_schedule_create_fire
+
+    seen: dict[str, bool] = {}
+
+    class _RecordingTools(_FakeTools):
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None):
+            seen["in_fire"] = in_schedule_create_fire()
+            return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
+
+    install(_RecordingTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
+
+    async def _ok(tool_name, arguments):
+        return None
+
+    monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _ok)
+    assert in_schedule_create_fire() is False
+    out = await schedules_ops.create_schedule("send", {"to": "x"}, {"cron": "* * * * *"})
+    assert out == "ok"
+    assert seen["in_fire"] is True
+    assert in_schedule_create_fire() is False
+
+
 async def test_create_denied_tool_is_refused_before_scheduling(install, monkeypatch) -> None:
     # A denial from the submitted-tool authorization is the caller's 403, raised before the
     # tool is ever dispatched to the scheduling backend.
@@ -494,10 +559,10 @@ async def test_create_refuses_a_malformed_subject_before_dispatch(install) -> No
         await schedules_ops.create_schedule("send", {"subject": {"kind": "person"}}, {"cron": "* * * * *"})
 
 
-async def test_run_once_schedule_deposits_binding_and_does_not_inject_it(install, monkeypatch) -> None:
-    # M1: the run-once shape dispatches the BASE tool immediately, so the door binding must NOT
-    # be injected into its arguments (nothing pops it) — it is deposited on the ambient
-    # invocation around the immediate run_tool, like every other door.
+async def test_run_once_schedule_applies_binding_around_start_without_injecting_it(install, monkeypatch) -> None:
+    # The run-once shape dispatches the BASE tool immediately through the schedule door, so the door
+    # binding must NOT be injected into its arguments (nothing pops it) — ``visit`` deposits it on the
+    # ambient invocation around the started tool alone, like every other door.
     from tai42_contract.states import StateAttach, StateBinding
     from tai42_contract.template import TemplatedText
     from tai42_contract.tools import current_tool_invocation
@@ -506,7 +571,7 @@ async def test_run_once_schedule_deposits_binding_and_does_not_inject_it(install
     seen: dict = {}
 
     class _Tools(_FakeTools):
-        async def run_tool(self, key: str, arguments: dict) -> object:
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None):
             inv = current_tool_invocation()
             seen["binding"] = inv.state_binding if inv is not None else None
             seen["args"] = dict(arguments)
@@ -529,3 +594,88 @@ async def test_run_once_schedule_deposits_binding_and_does_not_inject_it(install
     await schedules_ops.create_schedule("mytool", {}, {}, state_binding=binding)
     assert "state_binding" not in seen["args"]  # NOT leaked into the base tool's arguments
     assert seen["binding"] == binding  # deposited on the ambient invocation for the chokepoint
+
+
+class _OutcomeInteractions(_FakeScheduleInteractions):
+    """A run-once door facade whose ``visit`` returns a fixed ``VisitOutcome`` (never starting a tool).
+
+    Lets a test drive ``create_schedule``'s run-once response mapping (``_run_once_response``) for each
+    ``VisitOutcome.kind`` a fired door can produce.
+    """
+
+    def __init__(self, outcome: object) -> None:
+        self._outcome = outcome
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        return self._outcome
+
+
+def _install_with_interactions(monkeypatch: pytest.MonkeyPatch, tools: _FakeTools, interactions: object) -> None:
+    monkeypatch.setattr(
+        tai42_app,
+        "_impl",
+        SimpleNamespace(
+            tools=tools,
+            interactions=interactions,
+            storage=SimpleNamespace(resource_manager=None),
+        ),
+    )
+
+    async def _noop_authz(name, args) -> None:
+        return None
+
+    monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _noop_authz)
+
+
+async def test_contract_jq_without_execution_key_is_refused_and_a_keyless_no_jq_create_is_accepted(install) -> None:
+    # any of the four contract jqs makes the schedule a parkable-driving door, so a receiver-less
+    # recurring fire needs an ``execution_key`` to rebind a park it raises — a jq with no key is refused
+    # up front, before any dispatch. A create with NO jq and no key stays a plain run-once dispatch.
+    from tai42_contract.template import TemplatedText
+
+    install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
+    with pytest.raises(BadRequestError, match="execution_key"):
+        await schedules_ops.create_schedule("mytool", {}, {}, start_expr=TemplatedText(content="{k: .m}"))
+
+    result = await schedules_ops.create_schedule("mytool", {}, {})
+    assert result == "ran"  # keyless, no jq: accepted as a run-once dispatch
+
+
+async def test_a_forged_reserved_schedule_door_key_is_refused(install) -> None:
+    # The reserved door kwargs (``backend_schedule_subject`` / ``backend_schedule_contract`` / …) are
+    # STAMPED by the platform from validated fields. A create carrying one in its tool arguments could
+    # forge the fire's subject, identity, binding or contract, so any ``backend_schedule_``-prefixed
+    # key (other than the caller's own ``backend_schedule_name``) is a loud 400 before dispatch.
+    install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
+    for forged in ("backend_schedule_subject", "backend_schedule_contract"):
+        with pytest.raises(BadRequestError, match="reserved schedule door key"):
+            await schedules_ops.create_schedule("mytool", {forged: {"x": 1}}, {})
+
+
+async def test_run_once_returns_the_caller_ask_entries_for_an_asks_outcome(monkeypatch) -> None:
+    # A run-once fire whose door asks the caller maps to the parked caller ask entries verbatim.
+    from tai42_contract.interactions import ParkedEntry, VisitOutcome
+
+    ask = ParkedEntry(id="c1", status="asking", to="caller", question="proceed?", answer_format="free")
+    _install_with_interactions(
+        monkeypatch,
+        _FakeTools(set(_MARKERS) | {"mytool"}),
+        _OutcomeInteractions(VisitOutcome(action="started", kind="asks", asks=[ask])),
+    )
+    result = await schedules_ops.create_schedule("mytool", {}, {})
+    assert result == [{"id": "c1", "status": "asking", "to": "caller", "question": "proceed?", "answer_format": "free"}]
+
+
+async def test_run_once_returns_the_park_notice_for_a_parked_outcome(monkeypatch) -> None:
+    # A run-once fire whose door parks a user ask maps to the park notice: the parked interaction ids.
+    from tai42_contract.interactions import SuspendedInteraction, VisitOutcome
+
+    _install_with_interactions(
+        monkeypatch,
+        _FakeTools(set(_MARKERS) | {"mytool"}),
+        _OutcomeInteractions(
+            VisitOutcome(action="started", kind="parked", suspended=SuspendedInteraction(interaction_id="u1"))
+        ),
+    )
+    result = await schedules_ops.create_schedule("mytool", {}, {})
+    assert result == {"parked": ["u1"]}

@@ -55,17 +55,43 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key, arguments):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         if key not in self._registered:
             raise UnknownToolError(key)
         self.run_calls.append((key, arguments))
         return self._run_result
 
 
+class _FakeScheduleInteractions:
+    """The interactions facade a run-once schedule fire drives through: an empty ``$parked`` source
+    and a ``visit`` that runs ``start`` and returns its result outcome."""
+
+    async def list_parked_for(self, context):
+        return []
+
+    async def visit(self, *, target_name, cancel, resume, start, extras, state_binding=None, receives_outcome=True):
+        from tai42_contract.interactions import VisitOutcome
+
+        result = await start(extras) if start is not None else None
+        return VisitOutcome(
+            action="started" if start is not None else "none",
+            kind="result" if start is not None else "none",
+            result=result,
+        )
+
+
 @pytest.fixture
 def install(monkeypatch):
     def _install(fake_tools: _FakeTools):
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=fake_tools))
+        monkeypatch.setattr(
+            tai42_app,
+            "_impl",
+            SimpleNamespace(
+                tools=fake_tools,
+                interactions=_FakeScheduleInteractions(),
+                storage=SimpleNamespace(resource_manager=None),
+            ),
+        )
         return fake_tools
 
     return _install
@@ -157,7 +183,7 @@ async def test_create_maps_unknown_tool_raised_for_another_name_to_structured_50
     # name, and never an unstructured propagation out of the door.
     fake = install(_FakeTools(_MARKERS | {"send_report"}))
 
-    async def _run_tool(key, arguments):
+    async def _run_tool(key, arguments, *, offload_sync=False, extras=None):
         raise UnknownToolError("some_inner_tool")
 
     monkeypatch.setattr(fake, "run_tool", _run_tool)
@@ -199,6 +225,48 @@ async def test_create_schedule_kwargs_not_object_400(install):
     resp = await router.create_schedule(_body_req(b'{"tool_name": "t", "schedule_kwargs": 5}'))
     assert resp.status_code == 400
     assert "schedule_kwargs" in _json(resp)["error"]
+
+
+async def test_extract_create_forwards_execution_key_and_contract():
+    # The HTTP edge must carry the execution key and every door-contract jq to the operation;
+    # the extractor's returned dict is exactly what ``create_schedule`` is called with.
+    body = (
+        b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
+        b' "schedule_kwargs": {"cron": "0 9 * * *"}, "execution_key": "k-42",'
+        b' "start_expr": {"content": "start"}, "cancel_expr": {"content": "cancel"},'
+        b' "resume_expr": {"content": "resume"}, "extras_expr": {"content": "extras"}}'
+    )
+    kwargs = await router._extract_create(_body_req(body))
+    assert kwargs["execution_key"] == "k-42"
+    assert kwargs["start_expr"].content == "start"
+    assert kwargs["cancel_expr"].content == "cancel"
+    assert kwargs["resume_expr"].content == "resume"
+    assert kwargs["extras_expr"].content == "extras"
+    assert kwargs["tool_name"] == "send_report"
+    assert kwargs["tool_kwargs"] == {"to": "a"}
+    assert kwargs["schedule_kwargs"] == {"cron": "0 9 * * *"}
+
+
+async def test_extract_create_absent_contract_fields_are_none():
+    kwargs = await router._extract_create(_body_req(b'{"tool_name": "send_report"}'))
+    assert kwargs["execution_key"] is None
+    assert kwargs["state_binding"] is None
+    for field in ("start_expr", "cancel_expr", "resume_expr", "extras_expr"):
+        assert kwargs[field] is None
+    assert kwargs["tool_kwargs"] == {}
+    assert kwargs["schedule_kwargs"] == {}
+
+
+async def test_extract_create_contract_jq_without_execution_key_400():
+    # ``ScheduleCreate`` refuses a contract jq with no execution key; the edge surfaces it as a 400.
+    with pytest.raises(router.BadRequestError):
+        await router._extract_create(_body_req(b'{"tool_name": "t", "start_expr": {"content": "x"}}'))
+
+
+async def test_extract_create_bad_state_binding_400():
+    with pytest.raises(router.BadRequestError) as excinfo:
+        await router._extract_create(_body_req(b'{"tool_name": "t", "state_binding": 5}'))
+    assert "state_binding" in str(excinfo.value)
 
 
 # -- GET /api/schedules/server-datetime --------------------------------------

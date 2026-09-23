@@ -267,7 +267,7 @@ _GATED_FEATURES: list[GatedFeature] = [
         enabling_var=lambda: "INTERACTIONS_REDIS_URL",
         off_behavior=(
             "The notification feed and stream refuse 501 interactions-not-configured "
-            "(ask_user refuses as a tool error); feed reads answer 200 empty."
+            "(ask refuses as a tool error); feed reads answer 200 empty."
         ),
     ),
     GatedFeature(

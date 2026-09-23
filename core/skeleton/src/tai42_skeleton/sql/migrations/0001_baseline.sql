@@ -460,6 +460,10 @@ CREATE TABLE IF NOT EXISTS run_index (
     outcome        TEXT         NOT NULL DEFAULT 'running',
     started_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
     ended_at       TIMESTAMPTZ,
+    -- The parked interaction ids this run resumed or took across its dispatch span
+    -- (nested inline resumes roll up here, as they open no row of their own). Written
+    -- at the terminal write; `[]` for a run that resumed nothing.
+    resumed_interactions JSONB   NOT NULL DEFAULT '[]'::jsonb,
     PRIMARY KEY (run_id),
     CONSTRAINT run_index_outcome_check
         CHECK (outcome IN ('running', 'success', 'error', 'parked', 'aborted'))

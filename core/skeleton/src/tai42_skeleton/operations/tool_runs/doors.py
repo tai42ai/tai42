@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import secrets
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.states import StateSubject
 from tai42_kit.clients.impl.redis import RedisClient
 
 import tai42_skeleton.operations.tool_runs as _pkg
@@ -25,8 +25,6 @@ from . import reconcile, supervisor, views
 from .models import _NOT_CONFIGURED_CODE, _NOT_CONFIGURED_MESSAGE, _RUNNING, ToolRunsListQuery, ToolRunSubmission
 from .store import ToolRunStore
 
-logger = logging.getLogger(__name__)
-
 # The package this door submodule belongs to; the package-alias seam symbols
 # (``client_ctx``, ``tool_runs_settings``, ``authorize_submitted_tool``,
 # ``request_identity``, ``_now``) are read THROUGH it at call time so a test's
@@ -44,7 +42,7 @@ logger = logging.getLogger(__name__)
     request_model=ToolRunSubmission,
     response_model=RunSubmitted,
 )
-async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
+async def submit_run(tool_name: str, arguments: dict[str, object], subject: StateSubject | None = None) -> dict:
     """Submit a tool for background execution — returns ``202 {run_id}`` at once.
 
     Runs the tool through the same seam the sync door uses.
@@ -52,6 +50,10 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     The submitted tool is authorized against the caller with the full tool-edge decision
     before anything is recorded, so a fenced/secret target is admin-only here exactly as
     at the sync door and the MCP edge.
+
+    ``subject`` names the addressed subject the detached run's async parks index under: it is
+    handed to the spawned supervisor, which deposits it as the run's ``door="api"``
+    ``StateContext`` so a park is findable and resumable by a later run on the same subject.
     """
     # OFF gate — before ANY side effect (the concurrency slot, the authorize
     # decision, the registry read): with no store configured the surface is cleanly
@@ -96,61 +98,40 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     # fire's binding and is left untouched). Bind the caller's OWN key — the same
     # rebuild the crash-resume re-drive uses, live grants and all — around the spawn
     # so the copied context carries it; a key whose grants carry no authority binds
-    # nothing and the run behaves exactly as before.
-    from tai42_skeleton.authz.execution_identity import (
-        get_execution_identity,
-        reset_execution_identity,
-        set_execution_identity,
-    )
-
-    bind_token = None
-    if get_execution_identity() is None and owning_identity is not None:
-        from tai42_skeleton.authz.execution import rebuild_execution_identity
-
-        try:
-            caller_identity = await rebuild_execution_identity(owning_identity)
-        except Exception:
-            # The bind is opportunistic — it ENABLES an async-parking tool, it is not
-            # this door's authz gate (the route decision already ran). A rebuild the
-            # infrastructure cannot answer degrades to the pre-bind behavior (unbound,
-            # the parking seam fail-closes loudly) instead of failing the submit.
-            logger.warning("tool-run submit: could not rebuild the caller's execution identity", exc_info=True)
-            caller_identity = None
-        if caller_identity is not None:
-            bind_token = set_execution_identity(caller_identity)
-
-    # Deposit the caller's identity as this run's attribution around the spawn so the
-    # supervisor's copied context carries it: a runs-index row the detached dispatch
-    # registers (a preset target) is then born with a ``user_id`` rather than NULL. Reset
-    # after the spawn — the supervisor already copied it — exactly like the bind above.
+    # nothing and the run has no subject context. The scope resets after the spawn,
+    # by which point the supervisor already copied the identity into its own context.
     from tai42_contract.monitoring import RunAttribution
 
+    from tai42_skeleton.states.api_context import caller_execution_identity
     from tai42_skeleton.tools.attribution import reset_run_attribution, set_run_attribution
 
-    attribution_token = (
-        set_run_attribution(RunAttribution(user_id=owning_identity)) if owning_identity is not None else None
-    )
+    async with caller_execution_identity(owning_identity):
+        # Deposit the caller's identity as this run's attribution around the spawn so the
+        # supervisor's copied context carries it: a runs-index row the detached dispatch
+        # registers (a preset target) is then born with a ``user_id`` rather than NULL. Reset
+        # after the spawn — the supervisor already copied it — exactly like the bind above.
+        attribution_token = (
+            set_run_attribution(RunAttribution(user_id=owning_identity)) if owning_identity is not None else None
+        )
 
-    run_id = secrets.token_urlsafe(16)
-    started = _pkg._now()
-    try:
-        async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-            await store.create_run(
-                r, run_id, tool_name, started.isoformat(), started.timestamp(), settings, user_id=owning_identity
-            )
-        supervisor._spawn_supervisor(run_id, tool_name, arguments)
-    except Exception:
-        # The record never became a live run (no supervisor owns the slot), so
-        # return the reserved slot here and re-raise loudly.
-        supervisor.release_active_slot()
-        raise
-    finally:
-        # Release the submit-scope binding + attribution: the spawned supervisor already
-        # copied both into its own context, and this request must not stay bound past the submit.
-        if bind_token is not None:
-            reset_execution_identity(bind_token)
-        if attribution_token is not None:
-            reset_run_attribution(attribution_token)
+        run_id = secrets.token_urlsafe(16)
+        started = _pkg._now()
+        try:
+            async with _pkg.client_ctx(RedisClient, settings.redis) as r:
+                await store.create_run(
+                    r, run_id, tool_name, started.isoformat(), started.timestamp(), settings, user_id=owning_identity
+                )
+            supervisor._spawn_supervisor(run_id, tool_name, arguments, subject)
+        except Exception:
+            # The record never became a live run (no supervisor owns the slot), so
+            # return the reserved slot here and re-raise loudly.
+            supervisor.release_active_slot()
+            raise
+        finally:
+            # Release the submit-scope attribution: the spawned supervisor already copied it
+            # into its own context, and this request must not stay stamped past the submit.
+            if attribution_token is not None:
+                reset_run_attribution(attribution_token)
     return {"run_id": run_id}
 
 

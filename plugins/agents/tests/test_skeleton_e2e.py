@@ -21,6 +21,15 @@ the full authoring path the skeleton exposes:
   run kwarg — the ``from_tool_input`` override this package delivers — and whose
   scripted events arrive as ordered SSE frames.
 
+It also proves the door-level authorization of the two hidden continuation tools this
+agent binds: registering ``tools_agent`` binds ``agent_resume`` and ``deliver_chained_park``
+into the real tool registry, so a dispatch of either BY NAME through
+``app.tools.run_tool`` — the way the run-tool door and the MCP edge dispatch — reaches the
+tool and, with no platform resume drive on the stack, is refused with
+``ParkResumeUnauthorizedError``. This is the edge the ``test_agent_resume_contract`` face
+tests cannot reach (they call the functions directly): it proves the names ARE dispatchable
+at those edges and refused there.
+
 tai42-skeleton is a DEV/TEST-only dependency (see ``pyproject.toml``); the shipped
 wheel never imports it. Determinism: the LLM seam (``astream_tools_agent_events``)
 is scripted so no model or network is touched, the preset is registered in memory
@@ -48,12 +57,16 @@ from tai42_contract.access_control.registry import (
 )
 from tai42_contract.agent.events import MessageFinal, StructuredFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import ParkResumeUnauthorizedError
 
 # Safe under any binding — these modules touch no tai42_app HTTP decorators at import
 # (unlike the routers, which are imported only after the skeleton app is bound).
 from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.app import instance, lifecycle
 from tai42_skeleton.manifest import Manifest
+
+from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
+from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
 
 from .conftest import APP as RECORDING_APP
 
@@ -458,5 +471,36 @@ def test_boot_fails_loudly_when_no_identity_provider_registered(skeleton: Any, m
         with pytest.raises(RuntimeError, match=r"probe_identity_provider: KeyError.*Unknown identity provider"):
             async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
                 raise AssertionError("boot must not succeed with no identity provider registered")
+
+    asyncio.run(run())
+
+
+def test_hidden_continuation_tools_dispatch_through_the_registry_and_refuse_without_a_resume_drive(
+    skeleton: Any,
+) -> None:
+    """The two hidden continuation tools ``tools_agent`` binds are dispatchable BY NAME through the
+    tool registry — the surface the run-tool door and the MCP edge dispatch on — and, with no
+    platform resume drive on the stack, each refuses with ``ParkResumeUnauthorizedError`` before it
+    reads any park state.
+
+    An external caller naming either continuation is exactly the case the face's authorization guards
+    against, reached here through the registry rather than a direct function call: ``agent_resume``
+    over ``{interaction_id, answer}`` and ``deliver_chained_park`` over a chain token both assert the
+    platform's resume authorization first, and the ambient resume origin is ``None``, so both raise.
+    Reaching that refusal proves the names ARE registered and dispatchable at those edges.
+    """
+
+    async def run() -> None:
+        async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
+            tools = await instance.app.tools.get_tools()
+            assert AGENT_RESUME_TOOL_NAME in tools, AGENT_RESUME_TOOL_NAME
+            assert CHAINED_PARK_DELIVERY_TOOL_NAME in tools, CHAINED_PARK_DELIVERY_TOOL_NAME
+
+            with pytest.raises(ParkResumeUnauthorizedError):
+                await instance.app.tools.run_tool(AGENT_RESUME_TOOL_NAME, {"interaction_id": "i-x", "answer": "late"})
+            with pytest.raises(ParkResumeUnauthorizedError):
+                await instance.app.tools.run_tool(
+                    CHAINED_PARK_DELIVERY_TOOL_NAME, {"chain_token": "tai42:chained-park:x", "result": "y"}
+                )
 
     asyncio.run(run())

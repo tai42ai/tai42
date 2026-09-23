@@ -127,7 +127,8 @@ class _ReconcileMixin(_StatesServiceBase):
             ops = await self._run_reconcile_jq(
                 "close",
                 reconcile.close,
-                {"data": subtree, "id": item["id"], "resolution": resolution},
+                subtree,
+                variables={"id": item["id"], "resolution": resolution},
                 template_name=context.template.name,
             )
             if not isinstance(ops, list):
@@ -146,7 +147,8 @@ class _ReconcileMixin(_StatesServiceBase):
         result = await self._run_reconcile_jq(
             "orphans",
             reconcile.orphans,
-            {"previous": previous, "new": new, "data": subtree},
+            subtree,
+            variables={"previous": previous, "new": new},
             template_name=template_name,
         )
         if not isinstance(result, list):
@@ -164,7 +166,7 @@ class _ReconcileMixin(_StatesServiceBase):
                 'options.orphans="close" needs options.resolution naming a not-done resolution'
             )
         declared = await self._run_reconcile_jq(
-            "resolutions", reconcile.resolutions, {"new": new}, template_name=context.template.name
+            "resolutions", reconcile.resolutions, new, template_name=context.template.name
         )
         names = declared if isinstance(declared, list) else []
         if resolution not in names:
@@ -174,8 +176,16 @@ class _ReconcileMixin(_StatesServiceBase):
                 f"(declared: {sorted(str(n) for n in names)})"
             )
 
-    async def _run_reconcile_jq(self, label: str, text: TemplatedText, payload: Any, *, template_name: str) -> Any:
-        """One reconcile jq program over its input payload.
+    async def _run_reconcile_jq(
+        self,
+        label: str,
+        text: TemplatedText,
+        data: Any,
+        *,
+        variables: dict[str, Any] | None = None,
+        template_name: str,
+    ) -> Any:
+        """One reconcile jq program over its ``.`` (``data``) with the per-label ``variables`` bound as ``$name``.
 
         Its body is a templated text rendered to jq text IMMEDIATELY before it runs — a by-id body whose stored
         resource cannot be fetched is a LOUD refusal naming the program and the id. Loud, too, on an evaluation
@@ -189,6 +199,6 @@ class _ReconcileMixin(_StatesServiceBase):
                 f"which could not be fetched: {exc}"
             ) from exc
         try:
-            return await run_jq_first(expr, payload)
+            return await run_jq_first(expr, data, variables=variables)
         except Exception as exc:
             raise TemplateValidationError(f"reconcile {label} failed to evaluate: {exc}") from exc

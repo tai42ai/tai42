@@ -1,19 +1,26 @@
 """The abstract hooks-manager base: hook registration, event fan-out, and replay defense."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tai42_kit.interactions import DoorContractOutcome
 
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks.models import HookParams, HookSubject
+from tai42_contract.interactions.door_contract import PARKED_VARIABLE
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
 from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
+from tai42_kit.interactions import evaluate_door_contract, parked_entries_for_jq
 from tai42_kit.utils.data import run_jq_first
-from tai42_kit.utils.data.jq_util import get_compiled_jq
+from tai42_kit.utils.data.jq_util import compile_check, get_compiled_jq
 
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.settings import HooksSettings
@@ -43,17 +50,24 @@ class BaseHooksManager(ABC):
     def validate_jq_fields(params: HookParams) -> None:
         """Reject inline jq that does not compile, at registration time.
 
-        A broken condition/expr would otherwise surface only as a hook that
-        never fires (indistinguishable from a false condition). A templated text
-        naming a stored resource renders per event and cannot be compiled here —
-        its failures surface loudly at fire time instead.
+        A broken condition or door-contract expression would otherwise surface only as a hook
+        that never fires (indistinguishable from a false condition). A templated text naming a
+        stored resource renders per event and cannot be compiled here — its failures surface
+        loudly at fire time instead. The four door-contract expressions read the run's parked
+        interactions as ``$parked``, so they are compiled with that variable declared.
         """
-        for field in ("condition", "expr"):
+        condition: TemplatedText | None = params.condition
+        if condition is not None and condition.content:
+            try:
+                get_compiled_jq(condition.content)
+            except Exception as exc:
+                raise ValueError(f"hook {params.name!r}: condition is not valid jq: {exc}") from exc
+        for field in ("start_expr", "cancel_expr", "resume_expr", "extras_expr"):
             text: TemplatedText | None = getattr(params, field)
             if text is None or not text.content:
                 continue
             try:
-                get_compiled_jq(text.content)
+                compile_check(text.content, variables=(PARKED_VARIABLE,))
             except Exception as exc:
                 raise ValueError(f"hook {params.name!r}: {field} is not valid jq: {exc}") from exc
 
@@ -108,38 +122,33 @@ class BaseHooksManager(ABC):
                 # substitute. Refuse before any work.
                 raise PermissionDeniedError(f"hook {hook.name!r} binds no execution key; refusing to fire")
 
-            rendered_expr = (
-                await tai42_app.storage.resource_manager.render_templated_text(hook.expr)
-                if hook.expr is not None
-                else ""
-            )
-            event_input = (await run_jq_first(rendered_expr, payload)) if rendered_expr else {}
-            # Shallow top-level merge, strongest last: expr input, then the per-link
-            # override, then the hook author's static ``tool_kwargs``. The author's pinned
-            # keys must stay unoverridable — they are the hook's only lock against a link
-            # minted by someone with no relation to the topic.
-            tool_input = {**event_input, **(tool_kwargs_override or {}), **(hook.tool_kwargs or {})}
             hook_context = await _hook_state_context(hook, payload)
             context_scope: AbstractContextManager[Any] = (
                 state_context(hook_context) if hook_context is not None else nullcontext()
             )
-            # Deposit the hook's door binding on the ambient dispatch context (beside the
-            # state context) so the dispatch chokepoint carries it forward and applies it
-            # around the fired tool; a hook without a binding deposits nothing.
-            binding_token = (
-                set_current_tool_invocation(ToolInvocation(tool_name=hook.tool, state_binding=hook.state_binding))
-                if hook.state_binding is not None
-                else None
-            )
-            try:
-                async with bind_execution_identity(
-                    hook.execution_key, bound_fingerprint=hook.execution_key_fingerprint
-                ):
-                    with context_scope:
-                        await run_recorded(hook.tool, tool_input)
-            finally:
-                if binding_token is not None:
-                    reset_current_tool_invocation(binding_token)
+            async with bind_execution_identity(hook.execution_key, bound_fingerprint=hook.execution_key_fingerprint):
+                with context_scope:
+                    # The door contract reads the run's own parked interactions as ``$parked``;
+                    # fetch them once over the hook's own state context and feed them to the pure
+                    # evaluator, so the cancel/resume/start/extras it yields are a function of the
+                    # event payload and that injected list.
+                    parked = await tai42_app.interactions.list_parked_for(hook_context)
+                    outcome = await evaluate_door_contract(hook, payload, parked_entries_for_jq(parked))
+                    start = _hook_start(hook, outcome, tool_kwargs_override, run_recorded)
+                    # ``receives_outcome=False``: a hook is a receiver-less door — a started target
+                    # that async-parks is subject-tracked, and a ``resume_expr`` resume of a
+                    # ``to="caller"`` entry fires the run's own delivery rather than returning inline.
+                    # ``visit`` deposits ``state_binding`` around ``start`` alone (never around a
+                    # resume's continuation), so the hook keeps no ambient tool-invocation deposit.
+                    await tai42_app.interactions.visit(
+                        target_name=hook.tool,
+                        cancel=outcome.cancel,
+                        resume=outcome.resume,
+                        start=start,
+                        extras=outcome.extras,
+                        state_binding=hook.state_binding,
+                        receives_outcome=False,
+                    )
 
     async def _run_hook_with_limit(
         self, hook: HookParams, payload: dict[str, Any], tool_kwargs_override: dict[str, Any] | None = None
@@ -256,6 +265,35 @@ class BaseHooksManager(ABC):
                         result,
                         exc_info=result,
                     )
+
+
+def _hook_start(
+    hook: HookParams,
+    outcome: DoorContractOutcome,
+    tool_kwargs_override: dict[str, Any] | None,
+    run_recorded: Callable[..., Awaitable[None]],
+) -> Callable[[Mapping[str, Any]], Awaitable[None]] | None:
+    """The ``visit`` start callable for a hook fire, or ``None`` when the contract starts nothing.
+
+    ``None`` means a declared ``start_expr`` yielded null — nothing is started (the run's parked
+    interactions may still be cancelled or resumed). Otherwise the fired tool's kwargs are the merge
+    (strongest last) of the contract's start input (its own default empty object when the hook
+    declares no ``start_expr``), the per-link override, and the hook author's static ``tool_kwargs``
+    — the author's pinned keys stay unoverridable, the hook's only lock against a link minted by
+    someone with no relation to the topic. The ``extras`` ``visit`` hands the callable reach the
+    started run through ``run_recorded``, which threads them to the target's dispatch.
+    """
+    if outcome.start is None:
+        return None
+    # A declared ``start_expr`` yielded an object (a ``dict``) → its own kwargs; no ``start_expr``
+    # (``DOOR_START_DEFAULT``) → the empty default the static ``tool_kwargs`` fill in.
+    event_input = outcome.start if isinstance(outcome.start, dict) else {}
+    tool_input = {**event_input, **(tool_kwargs_override or {}), **(hook.tool_kwargs or {})}
+
+    async def _start(extras: Mapping[str, Any]) -> None:
+        await run_recorded(hook.tool, tool_input, extras=extras)
+
+    return _start
 
 
 async def _hook_state_context(hook: HookParams, payload: dict[str, Any]) -> StateContext | None:

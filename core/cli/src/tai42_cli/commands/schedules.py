@@ -15,6 +15,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_result,
     load_kwargs_arg,
+    parse_json_object,
     parse_kwargs,
     seg,
 )
@@ -74,13 +75,42 @@ def create_schedule(
     schedule_kw: Annotated[
         list[str] | None, typer.Option("--schedule-kw", help="A key=value schedule param (repeatable).")
     ] = None,
+    execution_key: Annotated[
+        str | None,
+        typer.Option(
+            "--execution-key",
+            help="The api-key user id a contract-bearing recurring fire runs as (required with any contract jq).",
+        ),
+    ] = None,
+    start_expr: Annotated[
+        str | None,
+        typer.Option(
+            "--start-expr", help="jq building the fired tool's kwargs over the tool arguments; null starts nothing."
+        ),
+    ] = None,
+    cancel_expr: Annotated[
+        str | None, typer.Option("--cancel-expr", help="jq naming the parked interaction ids to cancel.")
+    ] = None,
+    resume_expr: Annotated[
+        str | None, typer.Option("--resume-expr", help="jq naming the parked interactions to resume or take.")
+    ] = None,
+    extras_expr: Annotated[
+        str | None, typer.Option("--extras-expr", help="jq building the extras mapping handed to the started target.")
+    ] = None,
+    state_binding: Annotated[
+        str | None, typer.Option("--state-binding", help="The door-layer state binding as a JSON object.")
+    ] = None,
 ) -> None:
     """Create a schedule that periodically runs a tool.
+
+    The four door-contract jqs (``--start-expr`` / ``--cancel-expr`` / ``--resume-expr`` /
+    ``--extras-expr``) make the schedule a parkable-driving door; any of them requires
+    ``--execution-key``.
 
     Example: ``tai schedules add report --schedule-kw cron='0 9 * * *'``
     """
     ctx_obj = app_context(ctx)
-    body = {
+    body: dict = {
         "tool_name": tool_name,
         "tool_kwargs": load_kwargs_arg(
             tool_kwargs,
@@ -92,6 +122,18 @@ def create_schedule(
         ),
         "schedule_kwargs": parse_kwargs(schedule_kwargs, schedule_kw),
     }
+    if execution_key is not None:
+        body["execution_key"] = execution_key
+    for field, value in (
+        ("start_expr", start_expr),
+        ("cancel_expr", cancel_expr),
+        ("resume_expr", resume_expr),
+        ("extras_expr", extras_expr),
+    ):
+        if value is not None:
+            body[field] = {"content": value}
+    if state_binding is not None:
+        body["state_binding"] = parse_json_object(state_binding, param_hint="--state-binding")
     with ctx_obj.client() as client:
         data = client.post("/api/schedules", json=body)
     emit_result(ctx_obj, data)

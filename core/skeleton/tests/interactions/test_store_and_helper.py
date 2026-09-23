@@ -1,5 +1,5 @@
 """Behavior: a write -> read -> mark cycle against the fake pooled redis, and the
-blocking ``ask_user`` helper resolving when an answer lands on the reply channel.
+blocking ``ask`` helper resolving when an answer lands on the reply channel.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.secrets import SecretValue
 
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
 
@@ -364,7 +364,7 @@ async def test_write_read_mark_cycle(fake_redis):
     assert delivered.answer == "go"
 
 
-async def test_ask_user_blocks_until_answer(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_blocks_until_answer(monkeypatch, fake_redis, fake_client_ctx):
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
 
@@ -383,13 +383,13 @@ async def test_ask_user_blocks_until_answer(monkeypatch, fake_redis, fake_client
         )
 
     answerer = asyncio.create_task(answer_when_asked())
-    result = await ask_user("anything?", timeout=5)
+    result = await ask("anything?", timeout=5)
     await answerer
 
     assert result == "hello human"
 
 
-async def test_ask_user_sensitive_returns_secret_value(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_sensitive_returns_secret_value(monkeypatch, fake_redis, fake_client_ctx):
     # A sensitive ask hands the caller the answer WRAPPED: the real value is reached
     # only through ``reveal()``, and repr/str never expose it.
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
@@ -410,7 +410,7 @@ async def test_ask_user_sensitive_returns_secret_value(monkeypatch, fake_redis, 
         )
 
     answerer = asyncio.create_task(answer_when_asked())
-    result = await ask_user("your password?", timeout=5, sensitive=True)
+    result = await ask("your password?", timeout=5, sensitive=True)
     await answerer
 
     assert isinstance(result, SecretValue)
@@ -439,7 +439,7 @@ async def _answer_and_report_origin(fake_redis, store) -> str | None:
     return state.request.origin
 
 
-async def test_ask_user_stamps_origin_from_bound_context(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_stamps_origin_from_bound_context(monkeypatch, fake_redis, fake_client_ctx):
     # A question raised inside a bound run carries that run's origin on its durable record.
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
@@ -447,37 +447,37 @@ async def test_ask_user_stamps_origin_from_bound_context(monkeypatch, fake_redis
     token = set_interaction_origin("run-42")
     try:
         answerer = asyncio.create_task(_answer_and_report_origin(fake_redis, store))
-        await ask_user("bound?", timeout=5)
+        await ask("bound?", timeout=5)
         assert await answerer == "run-42"
     finally:
         reset_interaction_origin(token)
 
 
-async def test_ask_user_origin_none_outside_bound_context(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_origin_none_outside_bound_context(monkeypatch, fake_redis, fake_client_ctx):
     # Outside any bound run the origin is None (an unattributed ask).
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
 
     answerer = asyncio.create_task(_answer_and_report_origin(fake_redis, store))
-    await ask_user("unbound?", timeout=5)
+    await ask("unbound?", timeout=5)
     assert await answerer is None
 
 
-async def test_ask_user_times_out(monkeypatch, fake_client_ctx):
+async def test_ask_times_out(monkeypatch, fake_client_ctx):
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     with pytest.raises(helper_module.InteractionTimeoutError):
-        await ask_user("no one answers", timeout=0.05)
+        await ask("no one answers", timeout=0.05)
 
 
 @pytest.mark.parametrize("audience", ["", "  "])
-async def test_ask_user_blank_audience_raises(audience):
+async def test_ask_blank_audience_raises(audience):
     # A blank/whitespace audience can never address a real identity — rejected loudly
     # up front (mirroring notify_user), before any state is written.
     with pytest.raises(ValueError, match="audience must be a non-empty identity"):
-        await ask_user("anything?", audience=audience)
+        await ask("anything?", audience=audience)
 
 
-async def test_ask_user_zero_timeout_raises_before_redis(monkeypatch):
+async def test_ask_zero_timeout_raises_before_redis(monkeypatch):
     # Redis BLPOP treats 0 as "block forever", so a non-positive budget must
     # raise ValueError up front — before any redis connection is opened.
     calls: list = []
@@ -489,5 +489,5 @@ async def test_ask_user_zero_timeout_raises_before_redis(monkeypatch):
 
     monkeypatch.setattr(helper_module, "client_ctx", tracking_ctx)
     with pytest.raises(ValueError, match="timeout must be positive"):
-        await ask_user("too impatient", timeout=0)
+        await ask("too impatient", timeout=0)
     assert calls == []

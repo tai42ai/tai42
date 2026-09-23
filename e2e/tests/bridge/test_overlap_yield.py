@@ -21,7 +21,7 @@ from ._overlap_support import (
     open_visitor,
     reply_matching,
     send_web,
-    yield_payload_expr,
+    yield_start_expr,
 )
 
 _WAIT_SECONDS = 5.0
@@ -36,7 +36,7 @@ async def test_a_tool_that_yields_hands_its_turn_to_the_newer_message(
         uniq,
         "ov-yield",
         tool="e2e_overlap_yield",
-        payload_expr=yield_payload_expr(marker, wait_seconds=_WAIT_SECONDS),
+        start_expr=yield_start_expr(marker, wait_seconds=_WAIT_SECONDS),
         overlap={"running": "continue", "deliver": "all"},
     )
     web = await open_visitor(bridge, identity)

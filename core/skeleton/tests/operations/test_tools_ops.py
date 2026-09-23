@@ -52,11 +52,45 @@ class _Tools:
             raise UnknownToolError(key)
         return SimpleNamespace(name=key)
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False) -> object:
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None) -> object:
         self.run_calls.append((key, arguments, offload_sync))
         if self._run_exc is not None:
             raise self._run_exc
         return self._run_result
+
+
+class _Interactions:
+    """A passthrough ``visit`` fake: runs the door's ``start`` and wraps its return as a ``VisitOutcome``.
+
+    The synchronous run-tool door drives its dispatch through ``tai42_app.interactions.visit``; this
+    fake keeps the op's identity/error/secret behavior exactly as the door drives it, classifying a
+    ``SuspendedInteraction`` return as a park and any other value as a result.
+    """
+
+    async def visit(
+        self,
+        *,
+        target_name: str,
+        cancel: list[str],
+        resume: list[Any],
+        start: Any,
+        extras: dict[str, Any],
+        state_binding: Any = None,
+        receives_outcome: bool = True,
+    ) -> Any:
+        from tai42_contract.interactions import SuspendedInteraction, VisitOutcome
+
+        result = await start(extras)
+        if isinstance(result, SuspendedInteraction):
+            return VisitOutcome(action="started", cancelled=list(cancel), kind="parked", suspended=result)
+        return VisitOutcome(action="started", cancelled=list(cancel), kind="result", result=result)
+
+    def park_answer(self, outcome: Any) -> Any:
+        # The sync door shapes a park through the real pure shaper — the same callable the
+        # background submit records with, so the door's receipt matches the recorded one.
+        from tai42_skeleton.interactions.visit import park_answer
+
+        return park_answer(outcome)
 
 
 class _Admin:
@@ -76,7 +110,9 @@ def _install(
     admin: _Admin | None = None,
     bus: FakeBus | None = None,
 ) -> FakeBus:
-    impl = SimpleNamespace(tools=tools, admin=admin, backends=SimpleNamespace(backend=None))
+    impl = SimpleNamespace(
+        tools=tools, admin=admin, backends=SimpleNamespace(backend=None), interactions=_Interactions()
+    )
     monkeypatch.setattr(tai42_app, "_impl", impl)
     bus = bus or FakeBus()
     monkeypatch.setattr(instance.app, "_bus", bus)
@@ -147,10 +183,12 @@ async def test_run_tool_deposits_caller_identity_as_run_attribution(monkeypatch:
     seen: dict[str, str | None] = {}
 
     class _AttrTools(_Tools):
-        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False) -> object:
+        async def run_tool(
+            self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None
+        ) -> object:
             attribution = get_run_attribution()
             seen["user_id"] = attribution.user_id if attribution is not None else None
-            return await super().run_tool(key, arguments, offload_sync=offload_sync)
+            return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
 
     tools = _AttrTools({"calc"}, run_result={"ok": True})
     _install(monkeypatch, tools=tools)
@@ -189,6 +227,81 @@ async def test_run_tool_of_a_secret_preset_reveals_to_the_live_caller() -> None:
             await app.preset_manager.remove("acme_vault")
 
     assert result == {"account": "acme", "token": "tok-acme"}
+
+
+async def test_run_tool_unencodable_result_is_a_502_bad_tool_output(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    # A tool whose reduced result cannot be JSON-encoded (a lone surrogate) is refused at the
+    # dispatch seam with a named ``ToolResultEncodingError``; the sync door maps it to a 502
+    # naming the tool and the offending JSON path — the tool's OUTPUT is at fault, never the
+    # 500 the wire encode would otherwise trigger.
+    from tai42_skeleton.operations.errors import UpstreamError
+    from tai42_skeleton.tools.binding import ToolResultEncodingError
+
+    tools = _Tools({"emits"}, run_exc=ToolResultEncodingError("emits", "$.token"))
+    _install(monkeypatch, tools=tools)
+
+    with (
+        caplog.at_level(logging.WARNING, logger=tools_ops.logger.name),
+        pytest.raises(UpstreamError) as excinfo,
+    ):
+        await tools_ops.run_tool("emits", {})
+
+    assert excinfo.value.status == 502
+    assert excinfo.value.extra == {"tool": "emits", "path": "$.token"}
+    assert "emits" in excinfo.value.message
+    assert "$.token" in excinfo.value.message
+
+
+async def test_run_tool_unencodable_key_502_body_is_ascii_safe_and_encodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A surrogate in a dict KEY is named ASCII-safely (``ascii()``), so the 502 body the door
+    # emits from the mapped error is itself encodable — the refusal never re-introduces the
+    # 500 it guards against.
+    import json
+
+    from tai42_skeleton.operations.errors import UpstreamError
+    from tai42_skeleton.tools.binding import ToolResultEncodingError
+
+    safe_key_path = f"$.{chr(0xD83D)!a}"
+    tools = _Tools({"emits"}, run_exc=ToolResultEncodingError("emits", safe_key_path))
+    _install(monkeypatch, tools=tools)
+
+    with pytest.raises(UpstreamError) as excinfo:
+        await tools_ops.run_tool("emits", {})
+
+    assert excinfo.value.status == 502
+    assert excinfo.value.extra == {"tool": "emits", "path": safe_key_path}
+    body = {"error": excinfo.value.message, **excinfo.value.extra}
+    json.dumps(body).encode("utf-8")
+
+
+async def test_run_tool_of_an_unencodable_model_leaf_is_a_502_with_the_field_path() -> None:
+    # A tool whose result holds a model the encoder cannot render (a surrogate dict key inside) is
+    # refused at the real dispatch seam and mapped by the sync door to a 502 naming the tool and
+    # the FIELD path — the model is not deep-reduced, and the reduction never fails into a 500.
+    import json
+
+    from pydantic import BaseModel
+
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+    from tai42_skeleton.operations.errors import UpstreamError
+
+    class _Model(BaseModel):
+        data: dict
+
+    async with app.app_context(Manifest.model_validate({})):
+
+        @app.tools.tool(force=True)
+        async def emit_model() -> dict:
+            """A tool whose payload field is a model the encoder cannot render."""
+            return {"payload": _Model(data={chr(0xD83D): "v"})}
+
+        with pytest.raises(UpstreamError) as excinfo:
+            await tools_ops.run_tool("emit_model", {})
+
+    assert excinfo.value.status == 502
+    assert excinfo.value.extra == {"tool": "emit_model", "path": "$.payload"}
+    json.dumps({"error": excinfo.value.message, **excinfo.value.extra}).encode("utf-8")
 
 
 async def test_run_tool_unknown_is_404(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
@@ -424,11 +537,11 @@ class _IdentityReadingTools(_Tools):
         super().__init__({"calc"}, run_result={"ok": 1})
         self.seen_identities: list[object] = []
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         from tai42_skeleton.authz.execution_identity import get_execution_identity
 
         self.seen_identities.append(get_execution_identity())
-        return await super().run_tool(key, arguments, offload_sync=offload_sync)
+        return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
 
 
 def _wire_caller(monkeypatch: pytest.MonkeyPatch, identity_result) -> None:
@@ -538,3 +651,47 @@ async def test_run_tool_unauthenticated_binds_nothing(monkeypatch: pytest.Monkey
     await tools_ops.run_tool("calc", {"a": 1})
 
     assert tools.seen_identities == [None]
+
+
+# -- the direct run-tool door parks and deposits the subject context ------
+
+
+async def test_run_tool_async_park_returns_a_park_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A tool whose async ask parks returns a park receipt (the suspended sentinel's interaction ids),
+    # not a 500 — the door starts through the shared visit, which classifies the park.
+    from tai42_contract.interactions import SuspendedInteraction
+
+    tools = _Tools({"parky"}, run_result=SuspendedInteraction(interaction_id="i1", interaction_ids=["i1"]))
+    _install(monkeypatch, tools=tools)
+
+    result = await tools_ops.run_tool("parky", {})
+
+    assert isinstance(result, dict)
+    assert result["interaction_id"] == "i1"
+    assert result["interaction_ids"] == ["i1"]
+
+
+async def test_run_tool_deposits_the_api_subject_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A named subject deposits the ``door="api"`` state context around the dispatch, so an async park
+    # of the run would index under the caller's subject.
+    from tai42_contract.states import StateSubject
+
+    from tai42_skeleton.states.context import current_state_context
+
+    seen: dict[str, Any] = {}
+
+    class _CtxTools(_Tools):
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None):
+            ctx = current_state_context()
+            seen["door"] = ctx.door if ctx is not None else None
+            seen["by_kind"] = dict(ctx.candidates.by_kind) if ctx is not None else None
+            return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
+
+    tools = _CtxTools({"calc"}, run_result={"ok": 1})
+    _install(monkeypatch, tools=tools)
+    subject = StateSubject(target_kind="tool", target_name="calc", kind="thread", key="t-1")
+
+    await tools_ops.run_tool("calc", {}, subject=subject)
+
+    assert seen["door"] == "api"
+    assert seen["by_kind"] == {"thread": "t-1"}

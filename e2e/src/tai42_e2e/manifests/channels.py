@@ -112,7 +112,7 @@ def _slack_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
     if real:
         # HARNESS-MAP: TEST_CHANNEL_ID -> default + sole allowlisted recipient.
         # BOT_USER_ID is the operator-copied ``U…`` the bridge route's self-message
-        # filter needs; passed through only when set (notify / ask_user / signature
+        # filter needs; passed through only when set (notify / ask / signature
         # verification need it not). No API_BASE_URL (default = real slack.com).
         channel = os.environ["CHANNEL_SLACK_TEST_CHANNEL_ID"]
         env = {
@@ -228,7 +228,7 @@ def _channel_env(res: StackResources, variants: Variants) -> dict[str, str]:
 def _channel_public_keys(switch: HarnessSettings) -> list[str]:
     """The public-base-URL env keys the channel stack routes to ``E2E_PUBLIC_BASE_URL``
     when a channel is real inbound: telegram's setWebhook origin
-    (``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``) when telegram is real, and the ask_user
+    (``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``) when telegram is real, and the ask
     callback origin (``INTERACTIONS_PUBLIC_BASE_URL``) minted into a real medium's
     outbound whenever any channel is real. Empty on the all-mock default, so the
     loopback replica-B fill is unchanged."""
@@ -249,7 +249,7 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
     is the visitor's session cookie. Two replicas give the deterministic act-on-A /
     inbound-on-B addressing the loop needs; ``run_backend=False`` makes the module honestly
     ``backendless``, so it runs on the default backend leg only. Auth off. Carries
-    ``ask_user`` and ``notify_user`` plus the interactions callback door and the
+    ``ask`` and ``notify_user`` plus the interactions callback door and the
     notifications read router.
 
     No conversations backend here, so web's message door (which bridges through
@@ -262,6 +262,9 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
             "tai42_channel_slack.register",
             "tai42_channel_twilio.register",
             "tai42_channel_web.register",
+            # A deliver-and-notify channel that captures the form a notify_user send carries — the
+            # fake path proving a delivered form's prefilled values and pages without a bot medium.
+            "tai42_e2e_fixtures.stub_form_channel",
         ],
         "routers_modules": [
             "tai42_skeleton.routers.health",
@@ -271,11 +274,11 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
             "tai42_skeleton.routers.notifications",
         ],
         # reload_config + notify_user project via ``api_tools`` (the notifications router
-        # registers the notify_user op); ask_user loads as a builtin module. So tools[]
+        # registers the notify_user op); ask loads as a builtin module. So tools[]
         # carries only the interactions entry.
         "tools": [_INTERACTIONS_ENTRY],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "notify_user", "reload_config"],
+        "user_tools": ["ask", "notify_user", "reload_config"],
     }
     switch = _switch()
     return StackConfig(

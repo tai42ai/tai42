@@ -1,6 +1,6 @@
 """Telegram channel plugin.
 
-A :class:`~tai42_contract.channels.Channel` that delivers ``ask_user`` questions
+A :class:`~tai42_contract.channels.Channel` that delivers ``ask`` questions
 to a configured Telegram chat (ForceReply for typed text/select, a URL button to
 the callback door for confirm/external) and bridges typed replies back through
 its own webhook route. Importing this package does NOT register anything (library

@@ -29,7 +29,14 @@ from tai42_contract.channels import (
     ReplyOption,
 )
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX
-from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+from tai42_contract.interactions.models import (
+    FormData,
+    FormOption,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    MediaKind,
+)
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import notifications_sink
@@ -633,6 +640,127 @@ async def test_channel_send_with_audience_records_schema_on_feed(register_channe
     assert len(own) == 1
     assert own[0]["schema"] == _FORM_SCHEMA
     assert own[0]["template"] is None
+
+
+# -- form data/pages: the per-send extras over an ask-less form's schema ----------
+
+
+_FORM_DATA = FormData(
+    values={"name": "Ada"},
+    options={"name": [FormOption(value="Ada"), FormOption(value="Bob")]},
+)
+_FORM_PAGES = [FormPage(title="You", fields=["name"])]
+
+
+async def test_notify_threads_form_data_and_pages_to_a_capable_channel(register_channel):
+    # A form notification carrying per-send prefill/options (data) and a stepped layout
+    # (pages) reaches the channel's notify with BOTH on its ChannelNotification.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, data=_FORM_DATA, pages=_FORM_PAGES)
+
+    assert channel.notifications == [
+        ChannelNotification(message="fill this in", schema=_FORM_SCHEMA, data=_FORM_DATA, pages=_FORM_PAGES)
+    ]
+
+
+async def test_notify_coerces_form_data_and_pages_from_dicts(register_channel):
+    # A direct caller may pass plain dicts; the helper coerces each to the typed model once,
+    # so the channel receives the same FormData/FormPage the operation door hands typed.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user(
+        "fill this in",
+        channel="rich",
+        schema=_FORM_SCHEMA,
+        data={"values": {"name": "Ada"}},
+        pages=[{"title": "You", "fields": ["name"]}],
+    )
+
+    note = channel.notifications[0]
+    assert note.data == FormData(values={"name": "Ada"})
+    assert note.pages == [FormPage(title="You", fields=["name"])]
+
+
+async def test_form_data_prefill_against_unknown_property_raises(register_channel):
+    # The deep prefill cross-check (the ONE validator the ask door runs) refuses a value
+    # keyed to a property the schema does not declare — a ValueError (→ 400) before the send.
+    channel = register_channel("rich", RichChannel())
+    bad = FormData(values={"nope": "x"})
+
+    with pytest.raises(ValueError, match="unknown property"):
+        await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, data=bad)
+    assert channel.notifications == []
+
+
+async def test_form_page_duplicate_property_raises(register_channel):
+    # The pages cross-check refuses a property that appears on more than one page — a
+    # ValueError (→ 400) before the send.
+    channel = register_channel("rich", RichChannel())
+    dup = [FormPage(title="A", fields=["name"]), FormPage(title="B", fields=["name"])]
+
+    with pytest.raises(ValueError, match="more than one page"):
+        await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, pages=dup)
+    assert channel.notifications == []
+
+
+async def test_form_data_without_schema_on_channel_raises(register_channel):
+    # data rides ONLY a form send: on a named channel with no schema the ChannelNotification
+    # presence rule refuses it loudly (→ 400), never a silent drop, before the send.
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValueError, match="no schema carries no form data"):
+        await notify_user("hi", channel="rich", data=_FORM_DATA)
+    assert channel.notifications == []
+
+
+async def test_form_pages_without_schema_on_channel_raises(register_channel):
+    # pages rides ONLY a form send: on a named channel with no schema the presence rule
+    # refuses it loudly (→ 400), before the send.
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValueError, match="no schema carries no form pages"):
+        await notify_user("hi", channel="rich", pages=_FORM_PAGES)
+    assert channel.notifications == []
+
+
+async def test_form_data_on_the_sink_path_is_refused(sink_redis):
+    # The sink path carries no schema (a form needs a channel), so threading data there hits
+    # the contract's presence rule and raises loudly (→ 400) — no phantom feed entry.
+    with pytest.raises(ValueError, match="no schema carries no form data"):
+        await notify_user("hi", data=_FORM_DATA)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_form_pages_on_the_sink_path_is_refused(sink_redis):
+    # Same for pages on the sink path — refused loudly before any feed write.
+    with pytest.raises(ValueError, match="no schema carries no form pages"):
+        await notify_user("hi", pages=_FORM_PAGES)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_channel_send_with_audience_records_form_data_and_pages_on_feed(register_channel, sink_redis):
+    # Feed parity: the audience-addressed form send stores data/pages beside the schema, so
+    # the in-app record shows the same per-send form the channel delivered.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user(
+        "fill this in",
+        channel="rich",
+        schema=_FORM_SCHEMA,
+        data=_FORM_DATA,
+        pages=_FORM_PAGES,
+        audience="alice",
+    )
+
+    assert channel.notifications == [
+        ChannelNotification(message="fill this in", schema=_FORM_SCHEMA, data=_FORM_DATA, pages=_FORM_PAGES)
+    ]
+    own = await notifications_sink.read_notifications(audience="alice")
+    assert len(own) == 1
+    assert own[0]["schema"] == _FORM_SCHEMA
+    assert own[0]["data"] == _FORM_DATA.model_dump(mode="json")
+    assert own[0]["pages"] == [page.model_dump(mode="json") for page in _FORM_PAGES]
 
 
 # -- data: image substitution: stored by reference, absolute url minted here -----

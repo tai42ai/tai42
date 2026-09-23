@@ -102,11 +102,11 @@ def test_sync_ask_is_answered_adapter_side(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(SYNC_ASK))
     asked: list[str] = []
 
-    async def ask_user(question: str, **_: Any) -> Any:
+    async def ask(question: str, **_: Any) -> Any:
         asked.append(question)
         return "blue"
 
-    events = _run(build_local_app(ask_user=ask_user), user_message=TemplatedText(content="hi"))
+    events = _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
     assert asked == ["color?"]
     assert any(isinstance(e, MessageFinal) and "answer=blue" in e.text for e in events)
 

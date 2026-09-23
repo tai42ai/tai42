@@ -16,6 +16,7 @@ from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.app.epoch import mark_current_request_drain_exempt
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
+from tai42_skeleton.interactions.caller_ask import is_caller_ask
 from tai42_skeleton.interactions.settings import (
     INTERACTIONS_NOT_CONFIGURED_CODE,
     INTERACTIONS_NOT_CONFIGURED_MESSAGE,
@@ -141,6 +142,13 @@ async def _frame_for_event(
         # A state pruned/expired between the event and this read has nothing left to
         # show — the add frame is skipped, matching the pending-only filter.
         if state is None:
+            return None
+        if is_caller_ask(state):
+            # A caller ask is addressed to the calling run and resolved only by that
+            # run resuming; it never appears on the user-facing inbox tail. Suppressing
+            # its add frame keeps the tail free of it — the client only ever renders a
+            # card off an add, so the later answered/removed frames reference an id it
+            # never learned and are inert.
             return None
         if restricted and state.request.audience != restricted_id:
             return None

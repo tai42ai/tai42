@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX, InteractionResponse
 
-from tai42_skeleton.interactions import ask_user
+from tai42_skeleton.interactions import ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.media import read_media
 from tai42_skeleton.routers import interactions as router
@@ -46,7 +46,7 @@ async def test_media_route_off_store_is_uniform_404(wired, monkeypatch):
     assert resp.status_code == 404
 
 
-async def test_ask_user_data_image_stored_by_reference(wired):
+async def test_ask_data_image_stored_by_reference(wired):
     # The ASK door substitutes a data:image BEFORE the request is built: the durable
     # record carries a same-origin served reference (never inline bytes), and the bytes
     # are readable by that id — the media round-trips through the store by reference.
@@ -66,7 +66,7 @@ async def test_ask_user_data_image_stored_by_reference(wired):
         )
 
     answerer = asyncio.create_task(answer_when_asked())
-    await ask_user("Pick", answer_format="text", media=[{"kind": "image", "url": _DATA_PNG}], timeout=5)
+    await ask("Pick", answer_format="text", media=[{"kind": "image", "url": _DATA_PNG}], timeout=5)
     await answerer
 
     req = captured["req"]

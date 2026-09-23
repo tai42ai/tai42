@@ -160,8 +160,10 @@ class BridgeHarness:
         execution_key: str,
         channel: str,
         our_identity: str,
-        payload_expr: str | None = None,
+        start_expr: str | None = None,
         reply_expr: str | None = None,
+        resume_expr: str | None = None,
+        cancel_expr: str | None = None,
         overlap: dict[str, Any] | None = None,
         token: str | None = None,
         expect: int = 200,
@@ -174,10 +176,14 @@ class BridgeHarness:
             "channel": channel,
             "our_identity": our_identity,
         }
-        if payload_expr is not None:
-            body["payload_expr"] = {"content": payload_expr}
+        if start_expr is not None:
+            body["start_expr"] = {"content": start_expr}
         if reply_expr is not None:
             body["reply_expr"] = {"content": reply_expr}
+        if resume_expr is not None:
+            body["resume_expr"] = {"content": resume_expr}
+        if cancel_expr is not None:
+            body["cancel_expr"] = {"content": cancel_expr}
         if overlap is not None:
             body["overlap"] = overlap
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
@@ -211,7 +217,7 @@ class BridgeHarness:
         tool: str,
         execution_key: str,
         callback_url: str,
-        payload_expr: str | None = None,
+        start_expr: str | None = None,
         reply_expr: str | None = None,
         overlap: dict[str, Any] | None = None,
         token: str | None = None,
@@ -224,8 +230,8 @@ class BridgeHarness:
             "execution_key": execution_key,
             "callback_url": callback_url,
         }
-        if payload_expr is not None:
-            body["payload_expr"] = {"content": payload_expr}
+        if start_expr is not None:
+            body["start_expr"] = {"content": start_expr}
         if reply_expr is not None:
             body["reply_expr"] = {"content": reply_expr}
         if overlap is not None:

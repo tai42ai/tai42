@@ -41,7 +41,7 @@ from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import target as target_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import rendered_user_message
+from .conftest import _connected, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -143,7 +143,7 @@ def _channel_route(initial_mode: str = "agent", *, target_kind: str = "agent") -
         door="channel",
         target_kind=target_kind,  # pyright: ignore[reportArgumentType]
         target_name="echo",
-        payload_expr=None,
+        start_expr=None,
         reply_expr=None,
         execution_key="svc",
         channel="twilio",
@@ -254,7 +254,7 @@ async def test_manual_channel_tool_appends_nothing_and_dispatches_no_tool(env, m
     dispatched: list = []
 
     class _Tools:
-        async def run_tool(self, key, arguments, *, offload_sync=False):
+        async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
             dispatched.append((key, arguments))
             return "unexpected"
 
@@ -427,7 +427,9 @@ async def test_manual_api_agent_delivers_the_silent_marker(env, monkeypatch):
     agent = ManualAgent()
     _wire(monkeypatch, FakeManager(_api_route(initial_mode="manual")), agent)
 
-    result = await turn_module.submit_api_message("chat", "u1", "help", "caller-1", wait_seconds=5)
+    result = await turn_module.submit_api_message(
+        "chat", "u1", "help", "caller-1", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     # The sync-wait returns the silent marker (no answer text), the turn never ran, and the

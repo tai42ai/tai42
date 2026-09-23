@@ -29,7 +29,8 @@ _ORIGIN = WriteOrigin(consumer="c")
 # fetch-failure door. Reset by the ``svc`` fixture.
 _STORED_PROGRAMS_BASE = {
     "stored-anything-due": "(.ledger // []) | length > 0",
-    "stored-orphans": ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]",
+    "stored-add": '[{op: "set", path: ["ledger"], value: ((.ledger // []) + [$input])}]',
+    "stored-orphans": "$new.allowed as $a|[(.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]",
     "stored-resolutions": '["closed"]',
     "stored-close": '[{op: "set", path: ["ledger"], value: []}]',
 }
@@ -83,11 +84,11 @@ _TEMPLATE = StateTemplateDocument.model_validate(
             },
             "count": {"purpose": "input", "jq": {"content": "(.ledger // []) | length"}},
             "due": {"purpose": "input", "jq": {"content": "tjq_anything_due({})"}},  # input calling a sibling input
-            # update-purpose programs map {record, input} to an op batch
+            # update-purpose programs map the record subtree (its .) plus $input to an op batch
             "add": {
                 "purpose": "update",
                 "writes": [["ledger"]],
-                "jq": {"content": '[{op: "set", path: ["ledger"], value: ((.record.ledger // []) + [.input])}]'},
+                "jq": {"content": '[{op: "set", path: ["ledger"], value: ((.ledger // []) + [$input])}]'},
             },
             "bad_shape": {"purpose": "update", "writes": [["ledger"]], "jq": {"content": '"not a list"'}},
         },
@@ -228,7 +229,7 @@ _PARAMS_TEMPLATE = StateTemplateDocument.model_validate(
                 "purpose": "update",
                 "params": ["id", "label"],
                 "writes": [["ledger"]],
-                "jq": {"content": '[{op: "set", path: ["ledger"], value: ((.record.ledger // []) + [.input])}]'},
+                "jq": {"content": '[{op: "set", path: ["ledger"], value: ((.ledger // []) + [$input])}]'},
             }
         },
     }
@@ -325,7 +326,7 @@ _RECON_TEMPLATE = StateTemplateDocument.model_validate(
         "reconcile": {
             "orphans": {
                 "content": (
-                    ".new.allowed as $a|[(.data.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
+                    "$new.allowed as $a|[(.ledger//[])[]|select(.id as $i|($a|index($i))==null)|{id,label:.id}]"
                 )
             },
             "resolutions": {"content": '["closed"]'},
@@ -465,6 +466,45 @@ async def test_input_program_by_id_resolves_and_evaluates(svc: StatesService) ->
     await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}]}, origin=_ORIGIN)
     result = await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
     assert result.value is True
+
+
+async def test_update_program_by_id_reads_input_variable_and_applies(svc: StatesService) -> None:
+    # A by-id UPDATE program renders to its jq immediately before it applies; its ``.`` is the
+    # record subtree and the adapter's input is bound as ``$input`` (the shipped ``agenda``
+    # template is all inline, so the by-id update path is exercised only here). It uploads
+    # (compiles with ``$input`` declared) and runs, folding ``$input`` into the record.
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "byid",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {"add": {"purpose": "update", "writes": [["ledger"]], "jq": {"id": "stored-add"}}},
+        }
+    )
+    await svc.put_declaration(_STATE)
+    await svc.put_template(template, replace=False)
+    await svc.attach(_STATE.name, "byid", AttachBody(path=[]))
+    await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}]}, origin=_ORIGIN)
+    result = await svc.apply_template_jq(_STATE.name, _subject(), "add", {"id": "b"}, op_id=None, origin=_ORIGIN)
+    assert result.applied is True
+    view = await svc.read(_STATE.name, _subject())
+    assert view is not None
+    assert view.data["ledger"] == [{"id": "a"}, {"id": "b"}]
+
+
+async def test_input_program_naming_input_variable_is_refused(svc: StatesService) -> None:
+    # An input-purpose program's variable set is its ``$params``/``$parameters``/``$declarations``
+    # only — never ``$input`` (that belongs to the update purpose). Naming ``$input`` is an
+    # undeclared reference the compile refuses at upload, loudly.
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "byid",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {"peek": {"purpose": "input", "jq": {"content": "$input.id"}}},
+        }
+    )
+    await svc.put_declaration(_STATE)
+    with pytest.raises(TemplateValidationError, match="template_jq 'peek' jq is not a valid jq expression"):
+        await svc.put_template(template, replace=False)
 
 
 async def test_input_program_by_id_unfetchable_is_loud_at_save(svc: StatesService) -> None:

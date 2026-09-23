@@ -17,7 +17,7 @@ from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
 from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import TWILIO_INBOUND_PATH, BridgeHarness, post_inbound, wait_probe_record, wait_send_to
-from ._overlap_support import probe_payload_expr
+from ._overlap_support import probe_start_expr
 
 # FakeTwilio's signed inbound is the 'twilio' mock leg; the tool target runs directly (no LLM).
 pytestmark = pytest.mark.skipif(
@@ -54,7 +54,7 @@ async def test_a_marker_a_sibling_worker_set_cancels_the_held_turn(
         execution_key=exec_key,
         channel="twilio",
         our_identity=identity,
-        payload_expr=probe_payload_expr(marker, hold_seconds=_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "one"},
     )
 

@@ -37,6 +37,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import CompletionDeliveryError, deliver_agent_completion
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
+from tai42_skeleton.runs.chokepoint import delivery_fire
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
@@ -142,12 +143,15 @@ def _completion_warnings(caplog, completion_id: str) -> list[str]:
     ]
 
 
-def _fire(thread_id: str | None, result: object, completion_id: str, status: str | None = PARK_COMPLETION_SUCCEEDED):
-    """Drive the delivery tool exactly as a resuming driver does: the bound completion context
-    (``{thread_id}``) merged with the terminal outcome ``{result, completion_id, status}`` — the
-    generic payload shape the contract pins."""
+async def _fire(
+    thread_id: str | None, result: object, completion_id: str, status: str | None = PARK_COMPLETION_SUCCEEDED
+):
+    """Drive the delivery tool exactly as a resuming driver does: inside the platform's delivery-fire
+    context (as the ladder sets it), the bound completion context (``{thread_id}``) merged with the
+    terminal outcome ``{result, completion_id, status}`` — the generic payload shape the contract pins."""
     context = {} if thread_id is None else {"thread_id": thread_id}
-    return deliver_agent_completion(**context, result=result, completion_id=completion_id, status=status)
+    with delivery_fire(completion_id):
+        return await deliver_agent_completion(**context, result=result, completion_id=completion_id, status=status)
 
 
 async def test_completion_delivers_the_resumed_answer_into_the_thread(env, monkeypatch):
@@ -238,7 +242,7 @@ async def test_completion_success_with_no_result_delivers_the_notice_and_warns(e
     route = _channel_route()
     _wire(monkeypatch, FakeManager(route), channel)
 
-    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER), delivery_fire("cmpl-no-result"):
         out = await deliver_agent_completion(
             thread_id="bridge:line:+15550002222",
             completion_id="cmpl-no-result",
@@ -346,7 +350,7 @@ async def test_completion_unstamped_fire_delivers_the_notice_and_warns(env, monk
     route = _channel_route()
     _wire(monkeypatch, FakeManager(route), channel)
 
-    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER), delivery_fire("cmpl-unstamped"):
         out = await deliver_agent_completion(
             thread_id="bridge:line:+15550002222", result="would-deliver-if-success", completion_id="cmpl-unstamped"
         )
@@ -412,7 +416,10 @@ async def test_completion_without_a_bound_thread_is_a_logged_no_op(env, monkeypa
         out = await _fire(None, "the orphaned answer", "cmpl-no-thread")
         # A BLANK address is the same non-address, guarded on falsiness exactly as the
         # completion-id guard is — never a thread id the reversal would then reject.
-        blank = await deliver_agent_completion(thread_id="", result="also orphaned", completion_id="cmpl-blank-thread")
+        with delivery_fire("cmpl-blank-thread"):
+            blank = await deliver_agent_completion(
+                thread_id="", result="also orphaned", completion_id="cmpl-blank-thread"
+            )
     await _settle()
 
     assert out == {"message_id": None}
@@ -426,11 +433,14 @@ async def test_completion_without_a_bound_thread_is_a_logged_no_op(env, monkeypa
 
 async def test_completion_without_a_completion_id_raises(env, monkeypatch):
     # The idempotency id is the exactly-once key; a fire without one is a malformed payload, not
-    # something to deliver under a guessed id.
+    # something to deliver under a guessed id. With no id the delivery-authorisation guard refuses
+    # the fire before any mint.
+    from tai42_contract.interactions import ParkDeliveryUnauthorizedError
+
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
 
-    with pytest.raises(ValueError, match="completion_id"):
+    with pytest.raises(ParkDeliveryUnauthorizedError):
         await deliver_agent_completion(thread_id="bridge:line:+15550002222", result="hi")
     assert channel.sends == []
 

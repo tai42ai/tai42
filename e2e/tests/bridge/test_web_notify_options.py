@@ -38,7 +38,7 @@ async def _web_record_route(bridge: BridgeHarness, uniq: Callable[[str], str], t
         execution_key=exec_key,
         channel="web",
         our_identity=identity,
-        payload_expr="{key: .message, value: .message}",
+        start_expr="{key: .message, value: .message}",
         reply_expr="null",
     )
     return identity

@@ -25,6 +25,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
+from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
 from tai42_backend_rq.schedules import apply_normalized_schedule
 from tai42_backend_rq.settings import rq_settings
@@ -114,7 +115,9 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
 
-    sig = add_signature_params(func, RQ_SCHEDULE_OPTS, exclude_fastmcp_ctx=True)
+    # The branch accepts its own schedule opts PLUS the reserved keys the create door stamps
+    # (identity + contract), or the tool binding refuses the stamped dispatch as unexpected kwargs.
+    sig = add_signature_params(func, {**RQ_SCHEDULE_OPTS, **SCHEDULE_STAMPED_DOOR_OPTS}, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> None:
         kwargs = await prepare_backend_kwargs(func, rq_settings().tool_name_arg, name, kwargs, scheduled=True)

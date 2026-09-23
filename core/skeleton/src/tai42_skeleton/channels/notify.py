@@ -1,6 +1,6 @@
 """The author-facing ``notify_user`` surface — one fire-and-forget message to a human, no reply expected.
 
-Unlike ``ask_user`` there is no interaction, no ticket, no callback and no
+Unlike ``ask`` there is no interaction, no ticket, no callback and no
 blocking wait: the named channel sends the message and the call returns as soon
 as the medium accepts it ("sent" means accepted by the medium, not seen by a
 human). One send attempt, no retry; every failure raises loudly
@@ -17,7 +17,7 @@ message — distinct from ``recipient`` (a channel delivery address). It is hono
 even when a channel is set: an ``audience``-addressed call records the in-app entry
 (shared + per-identity feed) REGARDLESS of whether a channel also delivers it, so
 ``notify_user(channel="sms", recipient=…, audience=A)`` both pushes to SMS AND lands
-in A's in-app feed (matching ``ask_user``, which always persists). An UNRESTRICTED
+in A's in-app feed (matching ``ask``, which always persists). An UNRESTRICTED
 caller's channel send with no audience stores nothing; a RESTRICTED caller's audience
 is clamped to its OWN identity, so its channel send ALWAYS records to its own feed too
 (in addition to the channel push) — a channel send storing nothing is the unrestricted-caller
@@ -39,7 +39,16 @@ from tai42_contract.channels import (
     Option,
     OptionSection,
 )
-from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX, LocationElement, MediaItem, MediaKind
+from tai42_contract.interactions.models import (
+    MEDIA_ROUTE_PREFIX,
+    FormData,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    MediaKind,
+    check_form_data,
+    check_form_pages,
+)
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -68,7 +77,7 @@ class SenderIdentityNotAllowedError(Exception):
 def _resolve_channel(channel: str) -> Channel:
     """Resolve a named channel loudly — an unknown name raises ``ValueError``.
 
-    Mirrors the ``ask_user`` helper's channel guard, never a soft ignore.
+    Mirrors the ``ask`` helper's channel guard, never a soft ignore.
     """
     if not isinstance(channel, str) or not channel:
         raise ValueError("channel must be a non-empty string")
@@ -129,6 +138,40 @@ def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message
         validate_form_schema(schema, message)
 
 
+def _coerce_form_extras(
+    data: FormData | dict[str, Any] | None,
+    pages: list[FormPage] | list[dict[str, Any]] | None,
+) -> tuple[FormData | None, list[FormPage] | None]:
+    """Coerce the per-send form extras to their typed models once.
+
+    The operation door hands them typed already; a direct in-process caller may pass plain
+    dicts. The same coercion ``ChannelNotification`` applies to its own fields, done here so
+    the feed record and the deep form check both work on one typed shape.
+    """
+    typed_data = FormData.model_validate(data) if data is not None and not isinstance(data, FormData) else data
+    typed_pages = (
+        None
+        if pages is None
+        else [page if isinstance(page, FormPage) else FormPage.model_validate(page) for page in pages]
+    )
+    return typed_data, typed_pages
+
+
+def _validate_channel_form_extras(schema: dict[str, Any], data: FormData | None, pages: list[FormPage] | None) -> None:
+    """Deep-check the per-send form extras against the send's schema.
+
+    The ONE validator the ask door runs (``check_form_data`` / ``check_form_pages``), never a
+    second rule set: a bad prefill (unknown/ill-typed property, a per-send option list on a
+    non-string property) or a page that omits/duplicates a property raises ``ValueError``
+    (→ 400). ``data``/``pages`` with no schema never reach here — the ``ChannelNotification``
+    presence rule refuses them loudly.
+    """
+    if data is not None:
+        check_form_data(schema, data)
+    if pages is not None:
+        check_form_pages(schema, pages)
+
+
 async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaItem]:
     """Rewrite the send's media for a channel, mirroring the ask path (``substitute_media``).
 
@@ -180,6 +223,8 @@ async def _record_feed(notification: ChannelNotification, audience: str | None) 
         header=notification.header,
         footer=notification.footer,
         schema=notification.schema,
+        data=notification.data,
+        pages=notification.pages,
     )
 
 
@@ -232,6 +277,8 @@ async def notify_user(
     header: MediaItem | None = None,
     footer: str | None = None,
     schema: dict[str, Any] | None = None,
+    data: FormData | dict[str, Any] | None = None,
+    pages: list[FormPage] | list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Notify a human of ``message``, fire-and-forget.
 
@@ -298,6 +345,19 @@ async def notify_user(
     ``audience``-addressed channel send stores the schema on the in-app feed record too
     (feed parity with the other rich fields).
 
+    ``data`` and ``pages`` are the ask-less form's per-send extras over ``schema`` — the same
+    ``FormData``/``FormPage`` an ask carries: ``data`` prefills top-level properties (``values``)
+    and supplies per-send option lists (``options``); ``pages`` is the stepped layout. They ride
+    ONLY a form send, so each is refused loudly (a ``ValueError`` → 400) without a ``schema`` — on
+    a named channel by the ``ChannelNotification`` presence rule and on the internal sink
+    (``channel=None``, where a schema is already refused) alike. Passed as the typed models or as
+    plain dicts, they are coerced once. When a ``schema`` is present each is cross-checked against
+    it by the ONE validator the ask door runs (``check_form_data`` / ``check_form_pages``): a
+    prefill against an unknown/ill-typed property, a per-send option list on a non-string property,
+    or a page that omits/duplicates a property raises ``ValueError`` (→ 400) before the send. On a
+    named channel they thread onto the ``ChannelNotification`` the channel receives, and an
+    ``audience``-addressed send stores them on the in-app feed record too (feed parity).
+
     The notification carries no ``sender_identity`` — that field is the conversation
     bridge's — so the channel sends from its own configured identity.
 
@@ -305,7 +365,10 @@ async def notify_user(
     carry it (the contract admits a blank ``message`` ONLY for a media-only send), an
     unknown channel name, a blank
     ``recipient``/``audience``, a ``schema`` with ``channel=None`` or one outside the
-    channel-deliverable subset (or refused by the channel's own hook), or a
+    channel-deliverable subset (or refused by the channel's own hook), a ``data``/``pages``
+    with no ``schema`` or one that fails its schema (a prefill against an unknown/ill-typed
+    property, a per-send option list on a non-string property, a page that omits/duplicates a
+    property), or a
     ``media``/``template``/``options``/``schema`` combination the
     contract refuses (a present-but-empty list/dict, an over-cap value, options or a schema on a
     media-only send, or the mutually
@@ -342,6 +405,9 @@ async def notify_user(
     # caller is unchanged. The cross-identity rejection is an authorization denial the
     # operation door maps to a 403 (the write-side mirror of the read door).
     audience = clamp_write_audience(audience)
+    # Coerce the form extras to their typed models once, so the feed record and the deep
+    # form check below both work on one typed shape.
+    data, pages = _coerce_form_extras(data, pages)
     if channel is None and schema is not None:
         # A form notification NEEDS a channel: the sink has no delivery vehicle to render
         # the form and no submission door for the answers, so a feed entry carrying a
@@ -372,6 +438,8 @@ async def notify_user(
             sections=sections,
             header=header,
             footer=footer,
+            data=data,
+            pages=pages,
         )
         await _record_feed(sink_notification, audience)
         return []
@@ -390,6 +458,7 @@ async def notify_user(
     )
     if schema is not None:
         _validate_channel_form(channel_obj, schema, message)
+        _validate_channel_form_extras(schema, data, pages)
     if media is not None:
         media = await _prepare_channel_media(media, interactions_settings())
     # Construct (and thereby validate) the notification BEFORE the in-app feed record.
@@ -409,9 +478,11 @@ async def notify_user(
         header=header,
         footer=footer,
         schema=schema,
+        data=data,
+        pages=pages,
     )
     # An addressed notification lands in the identity's in-app feed even on the
-    # channel path, matching ``ask_user`` (which always persists). After the clamp a
+    # channel path, matching ``ask`` (which always persists). After the clamp a
     # restricted caller always has an audience here (scoped to its own identity), so
     # its channel send records to its own feed too; only an unrestricted caller's send
     # with no audience stores nothing. The record carries the SAME rich fields the

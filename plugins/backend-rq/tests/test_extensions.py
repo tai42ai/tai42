@@ -8,6 +8,13 @@ from typing import Any
 import pytest
 from rq.exceptions import NoSuchJobError
 from rq.job import JobStatus
+from tai42_kit.utils.schedule_subject import (
+    SCHEDULE_CONTRACT_ARG,
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+    SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_STAMPED_DOOR_OPTS,
+    schedule_create_fire,
+)
 
 from tai42_backend_rq import extensions
 from tai42_backend_rq.settings import rq_settings
@@ -147,7 +154,10 @@ async def test_schedule_task_branch_applies_schedule(monkeypatch):
     params = inspect.signature(branch).parameters
     assert {"backend_schedule_name", "backend_schedule"} <= set(params)
 
-    await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
+    # The create door wraps the branch dispatch in this marker; a ``schedule_task`` branch dispatched
+    # outside it is refused, so a registration test drives it under the marker like the create door does.
+    with schedule_create_fire():
+        await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
 
     [(norm, func, _args, kwargs, name)] = applied
     assert norm == {"__type__": "interval", "every": 3600.0, "relative": False}
@@ -156,6 +166,43 @@ async def test_schedule_task_branch_applies_schedule(monkeypatch):
     # The queued job dispatches back onto the original tool by name.
     assert kwargs[rq_settings().tool_name_arg] == "sample_tool"
     assert kwargs["x"] == 7
+
+
+async def test_schedule_task_carries_the_create_stamped_keys(monkeypatch):
+    # The create door stamps the firing identity + door contract onto the recurring dispatch. The
+    # branch signature must declare them (else the tool binding refuses the dispatch as unexpected
+    # kwargs) and the fire must carry them into the scheduled job so the worker's ``backend_fire`` pop
+    # reads them back.
+    applied: list[tuple[Any, ...]] = []
+
+    async def fake_apply(scheduler: Any, norm: Any, func: Any, args: Any, kwargs: Any, name: Any) -> None:
+        applied.append((norm, func, args, kwargs, name))
+
+    monkeypatch.setattr(extensions, "apply_normalized_schedule", fake_apply)
+    monkeypatch.setattr(extensions, "client_ctx", make_client_ctx(object()))
+    monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
+
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    params = inspect.signature(branch).parameters
+    assert set(SCHEDULE_STAMPED_DOOR_OPTS) <= set(params)
+
+    contract = {"resume_expr": {"content": "."}}
+    with schedule_create_fire():
+        await branch(
+            x=7,
+            backend_schedule_name="nightly",
+            backend_schedule=3600,
+            **{
+                SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
+                SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+                SCHEDULE_CONTRACT_ARG: contract,
+            },
+        )
+
+    [(_norm, _func, _args, kwargs, _name)] = applied
+    assert kwargs[SCHEDULE_EXECUTION_KEY_ARG] == "svc-key"
+    assert kwargs[SCHEDULE_EXECUTION_FINGERPRINT_ARG] == "fp-1"
+    assert kwargs[SCHEDULE_CONTRACT_ARG] == contract
 
 
 async def test_schedule_task_binds_the_settings_queue_name(monkeypatch):
@@ -179,16 +226,17 @@ async def test_schedule_task_binds_the_settings_queue_name(monkeypatch):
     monkeypatch.setattr(extensions, "Scheduler", fake_scheduler)
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
+    with schedule_create_fire():
+        await branch(x=7, backend_schedule_name="nightly", backend_schedule=3600)
 
     assert captured["queue_name"] == "tai42_e2e_abc123:default"
 
 
 async def test_schedule_task_requires_name_and_schedule():
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    with pytest.raises(ValueError, match="backend_schedule_name is required"):
+    with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule_name is required"):
         await branch(x=1, backend_schedule=30)
-    with pytest.raises(ValueError, match="backend_schedule is required"):
+    with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule is required"):
         await branch(x=1, backend_schedule_name="nightly")
 
 
@@ -197,5 +245,5 @@ async def test_schedule_task_rejects_bad_schedule(monkeypatch):
     monkeypatch.setattr(extensions, "Scheduler", lambda queue_name=None, connection=None: object())
 
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    with pytest.raises(ValueError, match="Unsupported schedule format"):
+    with schedule_create_fire(), pytest.raises(ValueError, match="Unsupported schedule format"):
         await branch(x=1, backend_schedule_name="s", backend_schedule={"type": "bogus"})

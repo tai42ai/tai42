@@ -125,16 +125,18 @@ def _sentinel() -> StackResources:
 
 def test_channel_modules_render_per_profile() -> None:
     variants = resolve_variants(HarnessSettings())
-    # The channel profile carries its four medium plugins.
+    # The channel profile carries its four medium plugins plus the form-capturing stub
+    # channel that proves a delivered form's prefilled values and pages.
     channel = build_channel_stack(_sentinel(), variants)
     assert channel.manifest["channel_modules"] == [
         "tai42_channel_telegram.register",
         "tai42_channel_slack.register",
         "tai42_channel_twilio.register",
         "tai42_channel_web.register",
+        "tai42_e2e_fixtures.stub_form_channel",
     ]
     # The auth profile carries the deliver-only stub channel: its channel-delivered
-    # ask_user pin needs a registered channel, but no real medium plugin.
+    # ask pin needs a registered channel, but no real medium plugin.
     auth = build_auth_stack(_sentinel(), variants)
     assert auth.manifest["channel_modules"] == ["tai42_e2e_fixtures.stub_channel"]
     # A bare profile omits the key entirely (the SUT's contract manifest defaults it

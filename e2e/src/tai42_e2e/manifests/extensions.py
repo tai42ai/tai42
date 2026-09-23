@@ -75,10 +75,10 @@ def build_extensions_stack(res: StackResources, variants: Variants) -> StackConf
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
-    # ask_external opens an external-format ask_user, which mints a callback ticket from a
+    # ask_external opens an external-format ask, which mints a callback ticket from a
     # public base URL (the host is never dialed).
     env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
     return StackConfig(

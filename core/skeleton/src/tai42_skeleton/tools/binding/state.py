@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
     from tai42_skeleton.extensions import ExtensionRegistry
     from tai42_skeleton.manifest import Manifest
+    from tai42_skeleton.tools.extras import ToolExtrasRegistry
     from tai42_skeleton.tools.registry import ToolRegistry
     from tai42_skeleton.tools.retry import ToolRetryRegistry
     from tai42_skeleton.tools.tier import ToolTierRegistry
@@ -57,6 +58,10 @@ class _ToolBindingBase:
     @property
     def _tool_retry_registry(self) -> "ToolRetryRegistry":
         return self._app._tool_retry_registry
+
+    @property
+    def _tool_extras_registry(self) -> "ToolExtrasRegistry":
+        return self._app._tool_extras_registry
 
     @property
     def _registration_tier_registry(self) -> "ToolTierRegistry":

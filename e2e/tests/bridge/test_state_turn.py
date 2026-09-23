@@ -105,7 +105,7 @@ async def test_web_participant_turn_keys_state_on_thread_and_ledgers_the_convers
         execution_key=execution_key,
         channel="web",
         our_identity=identity,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr="null",
     )
 
@@ -175,7 +175,7 @@ async def test_multichannel_target_turn_keys_state_on_person(bridge: BridgeHarne
         execution_key=execution_key,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr="null",
     )
 

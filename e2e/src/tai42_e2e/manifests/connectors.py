@@ -180,7 +180,7 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     # The connector store binds to the ``default`` database (skeleton component) _base_env
@@ -286,7 +286,7 @@ def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> S
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     # The connector store binds to the ``default`` database (skeleton component) _base_env

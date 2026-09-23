@@ -247,21 +247,22 @@ tool body runs; and a resolved target with `multichannel` off is refused with no
 code minted.
 
 **Wiring it as a tool-target route.** A `tool` route maps the inbound message to
-the tool's kwargs with a `payload_expr` (jq) and the result to the reply with a
+the tool's kwargs with a `start_expr` (jq) and the result to the reply with a
 `reply_expr` (jq). The payload the expr runs over is
 `{message, sender, our_identity, channel}` — `our_identity` and `channel` are the
-route's, `sender` is the conversation address. Map those onto the tool's own
-parameter names and pull `.code` out of the result:
+route's, `sender` is the conversation address — with the run's parked interactions
+bound as `$parked`. Map those onto the tool's own parameter names and pull `.code`
+out of the result:
 
 ```bash
 tai conversations create pair-mint --door channel --target-kind tool \
   --target-name get_pairing_code --execution-key svc \
   --channel telegram --identity <bot-id> \
-  --payload-expr '{channel: .channel, our_identity: .our_identity, sender: .sender}' \
+  --start-expr '{channel: .channel, our_identity: .our_identity, sender: .sender}' \
   --reply-expr '.code'
 ```
 
-`payload_expr` must emit exactly one JSON object; `reply_expr` must emit null or a
+`start_expr` must emit exactly one JSON object (or null to start nothing); `reply_expr` must emit null or a
 string — here the raw code — so the route replies with just the code. The tool
 mints for the conversation named by `(channel, our_identity)`, whose resolved
 target must itself have `multichannel` on.

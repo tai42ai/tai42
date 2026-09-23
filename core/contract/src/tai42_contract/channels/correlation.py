@@ -13,7 +13,7 @@ from tai42_contract.interactions.models import AnswerMismatchPolicy
 class Correlation(BaseModel):
     """The per-address record a channel keeps while ONE parked ask awaits a reply.
 
-    When ``ask_user`` is delivered on a medium whose reply arrives as a fresh
+    When ``ask`` is delivered on a medium whose reply arrives as a fresh
     inbound message (not a tap on a signed link), the channel stores this record
     against a channel-computed correlation key and, when the participant's next reply
     lands on that key, forwards it to ``callback_url`` (the delivery's public
@@ -53,7 +53,7 @@ class Correlation(BaseModel):
 class CorrelationStore(Protocol):
     """Storage primitives ONLY for the one-pending-per-address correlation record — no policy.
 
-    A channel that delivers ``ask_user`` questions whose replies arrive as fresh
+    A channel that delivers ``ask`` questions whose replies arrive as fresh
     inbound messages keeps a :class:`Correlation` per waiting address so the
     participant's next reply resolves the right parked ask. This port is the minimal
     set/get/release surface over that store; the LADDER that interprets a

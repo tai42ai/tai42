@@ -54,7 +54,7 @@ def build_checkpoint_stack(res: StackResources, variants: Variants, *, provider:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["LLM_PROVIDER_CHECKPOINT"] = provider

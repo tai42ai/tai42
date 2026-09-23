@@ -9,6 +9,7 @@ from tai42_contract.conversations import (
     ConversationRoute,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils import render as door_contract_module
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
@@ -24,6 +25,7 @@ from .conftest import (
     FakeChannel,
     FakeManager,
     _accepting_callback,
+    _connected,
     _FakeTemplateApp,
     _settle,
     _store,
@@ -35,12 +37,13 @@ from .conftest import (
 
 
 async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatch):
-    # Unit on the payload builder: the payload the ``payload_expr`` sees always carries this
+    # Unit on the payload builder: the payload the ``start_expr`` sees always carries this
     # turn's canonical thread_id alongside the message/sender/channel/our_identity fields. An
     # identity expr (".") surfaces the whole payload as the dispatched kwargs.
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
+    monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
     record = record_module._new_record(
         route=route,
         message_id="m-x",
@@ -81,15 +84,15 @@ async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatc
     }
 
 
-async def test_tool_payload_expr_by_id_renders_then_maps(env, monkeypatch):
-    # A by-id payload_expr is rendered through the bound resource manager to its jq program
+async def test_tool_start_expr_by_id_renders_then_maps(env, monkeypatch):
+    # A by-id start_expr is rendered through the bound resource manager to its jq program
     # IMMEDIATELY before the map runs, so the tool receives the mapped kwargs.
     route = ConversationRoute(
         route_name="tool-line",
         door="channel",
         target_kind="tool",
         target_name="echo-tool",
-        payload_expr=TemplatedText(id="route-payload"),
+        start_expr=TemplatedText(id="route-payload"),
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111",
@@ -97,6 +100,7 @@ async def test_tool_payload_expr_by_id_renders_then_maps(env, monkeypatch):
     )
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp({"route-payload": "{echoed: .message}"}))
+    monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp({"route-payload": "{echoed: .message}"}))
     record = record_module._new_record(
         route=route,
         message_id="m-x",
@@ -256,7 +260,7 @@ async def test_tool_route_malformed_part_object_is_a_loud_error(env, monkeypatch
 
 async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")  # pass the whole payload through as kwargs
+    route = _tool_channel_route(start_expr=".")  # pass the whole payload through as kwargs
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -284,7 +288,7 @@ async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
 @pytest.mark.parametrize("params", [None, {}])
 async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, params):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -312,7 +316,7 @@ async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, pa
 
 async def test_a_param_named_like_a_root_field_stays_under_params_only(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
@@ -337,12 +341,14 @@ async def test_a_param_named_like_a_root_field_stays_under_params_only(env, monk
 
 
 async def test_api_path_params_reach_the_tool_payload(env, monkeypatch):
-    route = _tool_api_route(payload_expr=".")
+    route = _tool_api_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route))
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
-    await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", 5, {"token": "xyz"})
+    await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", 5, {"token": "xyz"}, client_connected=_connected
+    )
     await _settle()
 
     assert tools.calls[0]["arguments"]["params"] == {"token": "xyz"}
@@ -352,7 +358,7 @@ async def test_payload_mapping_failure_is_value_free_in_log_and_record(env, monk
     channel = FakeChannel()
     # A jq runtime error (string + number) whose text embeds the offending input value; the
     # platform's mapping-error path must persist and log the error CLASS only.
-    route = _tool_channel_route(payload_expr=".params.secret + 1")
+    route = _tool_channel_route(start_expr=".params.secret + 1")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
@@ -405,7 +411,9 @@ async def test_turn_block_on_the_api_door(env, monkeypatch):
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
-    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    result = await turn_module.submit_api_message(
+        "tool-api", "user-7", "hi", "alice", wait_seconds=5, client_connected=_connected
+    )
     await _settle()
 
     kwargs = tools.calls[-1]["arguments"]

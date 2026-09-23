@@ -1,7 +1,7 @@
 """The reaper's continuation-due redelivery: the ``due_continuations`` scan, the
 ``claim_continuation_retry`` backoff (idempotent within a window), orphan
-reconciliation (``CONTINUATION_DROPPED``) with the loud terminal give-up + the
-abandonment-handler fire, and per-pass resilience to a poison member.
+reconciliation (``CONTINUATION_DROPPED``) with the loud terminal give-up, and
+per-pass resilience to a poison member.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from tai42_contract.interactions import SuspendedInteraction
 
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import reaper as reaper_module
@@ -46,11 +47,14 @@ async def test_crash_before_run_tool_is_redelivered_by_reaper(wired, monkeypatch
     applied: list[Any] = []
     attempts = {"n": 0}
 
-    async def _flaky(identity, fingerprint, tool, interaction_id, answer, park_context=None):
+    async def _flaky(
+        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+    ):
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise RuntimeError("worker crashed mid-resume")
         applied.append({"identity": identity, "tool": tool, "answer": answer})
+        return SuspendedInteraction(interaction_id=interaction_id)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _flaky)
     await wired.store.add(wired.fake, async_req(wired.store, iid="d1"), idle_ttl=86400, continuation_fingerprint="fp-1")
@@ -121,53 +125,6 @@ async def test_redelivery_pass_logs_loud_terminal_drop(wired, caplog):
     assert await reaper_module.redeliver_due_continuations_once() == 0
     assert any("ghost" in rec.message and "permanently dropped" in rec.message for rec in caplog.records)
     assert await wired.store.due_continuations(wired.fake, now + timedelta(hours=1)) == []
-
-
-async def test_redelivery_drop_fires_the_continuation_abandonment_handler(wired, monkeypatch):
-    # The terminal give-up is not just LOGGED — it notifies every registered
-    # continuation-abandonment handler by interaction id, so a resuming driver can close the
-    # tail (fire its own non-success completion) instead of leaving the bound caller waiting to
-    # its own deadline. Fired exactly once, after the drop is reconciled.
-    from tai42_contract.interactions import continuation as contract_cont
-
-    seen: list[str] = []
-
-    async def _handler(interaction_id: str) -> None:
-        seen.append(interaction_id)
-
-    monkeypatch.setattr(contract_cont, "_continuation_abandonment_handlers", [_handler])
-
-    now = datetime.now(UTC)
-    now_ms = int(now.timestamp() * 1000)
-    # An orphan index member whose record hash has TTL-expired: the retry claim reports the
-    # permanent drop, and the reaper fires the abandonment notice for it.
-    await wired.fake.zadd(wired.store.continuation_due_index_key, {"ghost": now_ms - 1000})
-    assert await reaper_module.redeliver_due_continuations_once() == 0
-    assert seen == ["ghost"]
-
-
-async def test_redelivery_drop_survives_a_raising_abandonment_handler(wired, monkeypatch, caplog):
-    # A handler that raises must never abort the reaper pass or the drop reconciliation: it is
-    # logged and swallowed, the healthy handler still fires, and the pass completes.
-    from tai42_contract.interactions import continuation as contract_cont
-
-    seen: list[str] = []
-
-    async def _poison(interaction_id: str) -> None:
-        raise RuntimeError("handler boom")
-
-    async def _healthy(interaction_id: str) -> None:
-        seen.append(interaction_id)
-
-    monkeypatch.setattr(contract_cont, "_continuation_abandonment_handlers", [_poison, _healthy])
-
-    now = datetime.now(UTC)
-    now_ms = int(now.timestamp() * 1000)
-    await wired.fake.zadd(wired.store.continuation_due_index_key, {"ghost": now_ms - 1000})
-    caplog.set_level(logging.WARNING)
-    assert await reaper_module.redeliver_due_continuations_once() == 0
-    assert seen == ["ghost"]
-    assert any("abandonment handler raised" in rec.message for rec in caplog.records)
 
 
 async def test_redelivery_pass_survives_a_poison_member(wired, monkeypatch, caplog):

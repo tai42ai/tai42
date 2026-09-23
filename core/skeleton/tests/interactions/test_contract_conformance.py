@@ -1,5 +1,5 @@
 """The skeleton interactions impl conforms to the ``tai42_contract.interactions``
-surface: the ``ask_user`` helper satisfies the ``AskUser`` protocol with the
+surface: the ``ask`` helper satisfies the ``Ask`` protocol with the
 exact call signature, and the models round-trip through JSON.
 """
 
@@ -10,27 +10,27 @@ from datetime import UTC, datetime
 
 from tai42_contract.interactions import (
     AnswerFormat,
-    AskUser,
+    Ask,
     InteractionRequest,
     InteractionResponse,
     InteractionState,
 )
 
 from tai42_skeleton import interactions as _skeleton_interactions
-from tai42_skeleton.interactions import ask_user
+from tai42_skeleton.interactions import ask
 
 # Re-exported through the skeleton namespace; reference via the module so the
 # re-export identity assertion below stays meaningful.
 SkeletonInteractionRequest = _skeleton_interactions.InteractionRequest
 
 
-def test_ask_user_satisfies_protocol():
-    assert isinstance(ask_user, AskUser)
+def test_ask_satisfies_protocol():
+    assert isinstance(ask, Ask)
 
 
-def test_ask_user_signature_matches_protocol():
-    impl = inspect.signature(ask_user)
-    proto = inspect.signature(AskUser.__call__)
+def test_ask_signature_matches_protocol():
+    impl = inspect.signature(ask)
+    proto = inspect.signature(Ask.__call__)
     proto_params = [p for name, p in proto.parameters.items() if name != "self"]
     assert list(impl.parameters.values()) == proto_params
 

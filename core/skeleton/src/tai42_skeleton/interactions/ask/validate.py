@@ -1,4 +1,4 @@
-"""Up-front argument/combo validation for ``ask_user``.
+"""Up-front argument/combo validation for ``ask``.
 
 Reject every bad argument combination and resolve the derived values (``fmt``, ``channel_obj``,
 clamped ``audience``, normalized ``schema``) before any state is written.
@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel
-from tai42_contract.interactions import AnswerFormat, check_ask_timing
+from tai42_contract.interactions import AnswerFormat, check_addressing, check_ask_timing
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
@@ -53,12 +53,15 @@ def validate_ask_arguments(
     audience: str | None,
     mode: Literal["sync", "async"],
     expiry_at: datetime | None,
+    to: Literal["user", "caller"],
+    payload: dict[str, Any] | None,
 ) -> AskValidation:
     """Reject every bad argument/combo before any state; resolve the derived values.
 
     Resolves ``fmt``, ``channel_obj``, the write-clamped ``audience`` and the normalized
     ``schema``.
     """
+    check_addressing(to=to, mode=mode, question=question, payload=payload, answer_format=answer_format)
     fmt = _validate_timing_and_format(mode, timeout, expiry_at, answer_format, options, data, pages)
     is_external = fmt is AnswerFormat.EXTERNAL
     # ``audience`` (the addressed identity) is validated loud and up front — a

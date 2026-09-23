@@ -41,7 +41,13 @@ if TYPE_CHECKING:
         StatesService,
     )
     from tai42_skeleton.template import ResourceManager
-    from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry, ToolTierRegistry
+    from tai42_skeleton.tools import (
+        ToolExtrasRegistry,
+        ToolRefsRegistry,
+        ToolRegistry,
+        ToolRetryRegistry,
+        ToolTierRegistry,
+    )
     from tai42_skeleton.tools.binding import ToolBinding
     from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
     from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
@@ -118,7 +124,7 @@ class LifecycleState(ABC):
         # worker-bus subscription task above.
         self._reprobe_task: asyncio.Task[None] | None = None
 
-        # The async-park expiry reaper loop, owned by app_context: an async ask_user
+        # The async-park expiry reaper loop, owned by app_context: an async ask
         # has no blocking waiter, so this loop is what fires a parked question's
         # continuation once its expiry passes. Runs until cancelled at shutdown.
         self._interactions_reaper_task: asyncio.Task[None] | None = None
@@ -202,6 +208,7 @@ class LifecycleState(ABC):
     _registration_tier_registry: "ToolTierRegistry"
     _tool_refs_registry: "ToolRefsRegistry"
     _tool_retry_registry: "ToolRetryRegistry"
+    _tool_extras_registry: "ToolExtrasRegistry"
     _rename_referee_registry: "ToolRenameRefereeRegistry"
     _delete_referee_registry: "ToolDeleteRefereeRegistry"
     _detach_referee_registry: "StateTemplateDetachRefereeRegistry"

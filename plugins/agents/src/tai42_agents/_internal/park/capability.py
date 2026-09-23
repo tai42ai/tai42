@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from tai42_contract.interactions import current_execution_identity
+from tai42_contract.interactions import ChainedResume, current_execution_identity, get_chained_resume
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents.settings import agents_park_redis_settings
@@ -42,12 +42,12 @@ class ParkIdentity:
 
     ``bind`` gates whether an async ask under this run may park at all: it binds the resume
     continuation so a parked ask re-enters through ``agent_resume``. Both the ``run`` and
-    ``astream`` faces return the park RECEIPT to their caller and resume out of band. Whether
-    the resumed run's FINAL text is delivered anywhere is a SEPARATE matter of the completion
-    tool: with none bound the resumed run's side effects are its only product and the final
-    text is delivered nowhere; a caller that needs the answer must invoke through a
-    completion-bound door (e.g. the conversation turn). A run with no resume path bound refuses
-    an async ask loudly pre-persist rather than parking with no way to resume.
+    ``astream`` faces return the park RECEIPT to their caller and resume out of band. The
+    resumed run's FINAL outcome is delivered by the PLATFORM to the run's own address (captured
+    on the interaction at ask time); this driver's only out-of-band fire is the CROSS-DRIVER
+    chain routing (``completion_tool`` / ``completion_context`` below), fired at its terminal to
+    re-enter an ancestor run that waited on it. A run with no resume path bound refuses an async
+    ask loudly pre-persist rather than parking with no way to resume.
     """
 
     __slots__ = (
@@ -79,21 +79,22 @@ class ParkIdentity:
         self.thread_id = thread_id
         self.rebuild_kwargs = rebuild_kwargs
         self.bind = bind
-        # The registered tool a clean terminal drive fires with the final answer, so a
-        # deferred response is delivered out of band. ``None`` = the driver's caller
-        # receives the resumed result directly (the run face), no completion fire.
+        # The cross-driver CHAIN-DELIVERY tool this run's terminal fires to re-enter an ancestor
+        # run that waited on it across drivers (the captured ``chained_resume`` delivery tool).
+        # ``None`` = this run is the outermost (or its caller bound no chain), so its terminal
+        # fires nothing and the platform delivers to the run's own address.
         self.completion_tool = completion_tool
-        # The OPAQUE context the binder paired with that tool — the address the delivery tool
-        # reads to route the answer. Carried verbatim (never interpreted here) and merged into
-        # the completion fire, so this driver names no delivery tool's routing arguments.
+        # The chain routing that tool needs: ``{"chain_key", "asked_by"}`` — the ancestor's park
+        # key the fire reverses to, and the ancestor's own call chain passed as ``continues_chain``
+        # on the re-entry. ``None`` when unchained. Carried forward onto every re-park so the
+        # terminal always reaches the same ancestor.
         self.completion_context = completion_context
         # The latest wall-time every store backing this park is guaranteed to still hold it;
         # ``None`` = keep-forever. Gated against each ask deadline at persist time.
         self.retention_bound = retention_bound
-        # The execution identity this run is authorized as — its ``(key, fingerprint)`` — so an
-        # OUT-OF-BAND completion fired for the park later (the abandonment fire) runs under the same
-        # identity a normal resume would, never fail-open. ``None`` key = no identity was bound (or
-        # the host has no identity system); the fire then runs unbound.
+        # The execution identity this run is authorized as — its ``(key, fingerprint)`` — carried
+        # forward onto every entry so a later resume drive re-binds it, never fail-open. ``None``
+        # key = no identity was bound (or the host has no identity system).
         self.execution_identity = execution_identity
         self.execution_fingerprint = execution_fingerprint
 
@@ -112,6 +113,20 @@ def _min_horizon(left: datetime | None, right: datetime | None) -> datetime | No
     if right is None:
         return left
     return min(left, right)
+
+
+def park_index_configured() -> bool:
+    """Whether the agents plugin's durable park index has a Redis to reach.
+
+    The index is an OPTIONAL feature dependency: a deployment that never async-parks configures no
+    ``TAI_AGENTS_REDIS_URL`` and owns no parks. A park read/write goes through the park client, which
+    raises loudly when it is unset; the two callers that must tolerate an unconfigured index gate on
+    this first — the park-capability gate (so an async ask refuses cleanly rather than half-parking)
+    and the globally registered park-kill handler (which fires for EVERY driver's kill, so a
+    deployment with the plugin loaded but no park redis is not crashed by a kill it does not own). A
+    CONFIGURED index that then fails a read still raises.
+    """
+    return agents_park_redis_settings().redis_url is not None
 
 
 def build_park_identity(
@@ -151,7 +166,7 @@ def build_park_identity(
     resolved_provider = checkpoint_provider or llm_provider_settings().checkpoint
     if resolved_provider not in DURABLE_CHECKPOINT_PROVIDERS:
         return None
-    if agents_park_redis_settings().redis_url is None:
+    if not park_index_configured():
         # No durable park index to record the park into — refuse capability so the async
         # ask refuses loudly pre-persist rather than parking into a store that cannot hold
         # it (a half-park with no way to resume).
@@ -240,3 +255,35 @@ def assert_park_capable(identity: ParkIdentity, *, durable: bool, retention_boun
         )
     # Retain the caller-computed bound reference (the deadline gate runs in persist_park).
     _ = retention_bound
+
+
+def chain_routing_slots() -> tuple[str | None, dict[str, Any] | None]:
+    """The park-entry ``(completion_tool, completion_context)`` slots capturing the ambient chain routing.
+
+    Reads the ``chained_resume`` an ancestor driver bound around the nested dispatch that reached
+    this run: a run dispatched as a nested tool of another driver's chained call captures that
+    routing so its OWN terminal can fire the ancestor's chain-delivery tool and return the outermost
+    outcome up. ``(None, None)`` when unchained — this run is the outermost, or its caller bound no
+    chain — so the terminal fires nothing and the platform delivers to the run's own address.
+    """
+    routing = get_chained_resume()
+    if routing is None:
+        return None, None
+    return routing.delivery_tool, {"chain_key": routing.chain_key, "asked_by": list(routing.asked_by)}
+
+
+def chained_resume_from_entry(entry: Mapping[str, Any]) -> ChainedResume | None:
+    """Reconstruct the cross-driver chain routing a park entry captured, or ``None`` when unchained.
+
+    Reads the repurposed ``completion_tool`` / ``completion_context`` slots the park was persisted
+    with. ``None`` (an unchained park — this run was outermost) means the terminal fires nothing.
+    """
+    tool = entry["completion_tool"]
+    if tool is None:
+        return None
+    context = entry["completion_context"] or {}
+    return ChainedResume(
+        delivery_tool=tool,
+        chain_key=context["chain_key"],
+        asked_by=tuple(context.get("asked_by") or ()),
+    )

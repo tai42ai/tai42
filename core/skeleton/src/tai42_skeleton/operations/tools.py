@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import OpaqueJson
 from tai42_contract.secrets import unwrap_secrets
+from tai42_contract.states import StateSubject
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.operations import (
@@ -55,6 +56,7 @@ from tai42_skeleton.operations import (
     OperationError,
     OperationFailedError,
     PermissionDeniedError,
+    UpstreamError,
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast
@@ -64,22 +66,29 @@ from tai42_skeleton.operations.response_models_group_b import (
     ToolsSchemaMap,
     ToolTagListResponse,
 )
-from tai42_skeleton.tools.binding import UnknownToolError
+from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
+    from tai42_contract.interactions import VisitOutcome
 
 logger = logging.getLogger(__name__)
 
 
 class RunToolRequest(BaseModel):
-    """A synchronous tool-run request: the ``tool_name`` and its keyword ``arguments``.
+    """A synchronous tool-run request: the ``tool_name``, its keyword ``arguments``, and an optional subject.
 
     Mirrors the shape ``read_tool_call`` enforces at runtime.
+
+    ``subject`` names the addressed subject this run's async parks index under (the door
+    deposits it as the run's ``StateContext``); a run whose tool never parks ignores it.
     """
 
     tool_name: str = Field(min_length=1, description="Registered tool name.")
     arguments: dict[str, object] = Field(default_factory=dict, description="Tool keyword arguments.")
+    subject: StateSubject | None = Field(
+        default=None, description="The addressed subject an async park of this run indexes under."
+    )
 
 
 class ToolReloadRequest(BaseModel):
@@ -170,17 +179,29 @@ async def tools_schema() -> dict:
     return {name: _tool_schema(tool) for name, tool in tools.items()}
 
 
+def _run_tool_return(outcome: VisitOutcome) -> Any:
+    """The synchronous door's body for a visit outcome.
+
+    A plain result is the tool's own value, its wrapped secrets revealed here for the one live
+    caller; every other kind is the shared park answer (the caller ask entries, the suspended
+    sentinel, or null), which reveals no secret — only this door does.
+    """
+    if outcome.kind == "result":
+        return unwrap_secrets(outcome.result)
+    return tai42_app.interactions.park_answer(outcome)
+
+
 @operation(
     summary="Run a registered tool synchronously",
     tags=["tools"],
     destructive=True,
     reload_gated=True,
     meta_executor=True,
-    errors=[BadRequestError, NotFoundError, PermissionDeniedError, OperationFailedError],
+    errors=[BadRequestError, NotFoundError, PermissionDeniedError, UpstreamError, OperationFailedError],
     request_model=RunToolRequest,
     response_model=OpaqueJson,
 )
-async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
+async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateSubject | None = None) -> Any:
     """Execute an arbitrary registered tool with REAL side effects.
 
     Reaching this route is full-execution privilege — the Studio key runs any
@@ -191,7 +212,12 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     route's own authz — it can only deny more, never less), and a connector-backed
     tool resolves its managed credential exactly as a fire would. Both are
     fire-parity, not new privilege; when the bind degrades to unbound the dispatch
-    behaves exactly as before this seam existed.
+    runs with no subject context.
+
+    The tool starts through the shared :func:`~tai42_skeleton.interactions.visit.visit`, under
+    the ``door="api"`` :class:`StateContext` the caller's named ``subject`` deposits: a tool
+    whose async ask parks then indexes under that subject and returns a park receipt rather
+    than raising. A tool that never parks returns its result.
     """
     # Resolve the name first: an unknown tool is a loud 404 (matching the schema route),
     # told apart from a tool that raises DURING execution. Only the unknown-tool error is
@@ -207,7 +233,7 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
         raise NotFoundError(f"unknown tool: {tool_name}") from exc
 
     # A synchronous door call carries no execution identity, so an async-parking tool
-    # (a flow/agent whose ask_user parks) could never rebind its continuation and
+    # (a flow/agent whose ask parks) could never rebind its continuation and
     # 500'd instead of parking. Bind the caller's OWN key for the dispatch — the same
     # live-grants rebuild the crash-resume re-drive and the background submit use; a
     # caller whose key carries no authority binds nothing and behaves exactly as
@@ -219,67 +245,66 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     from tai42_contract.monitoring import RunAttribution
 
     from tai42_skeleton.access_control.user import request_identity
-    from tai42_skeleton.authz.execution_identity import (
-        get_execution_identity,
-        reset_execution_identity,
-        set_execution_identity,
-    )
+    from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
     from tai42_skeleton.tools.attribution import run_attribution
 
     # The caller's own principal, resolved once: it both attributes the run and (when no
-    # execution identity is bound yet) is the key rebound below.
+    # execution identity is bound yet) is the key the dispatch's identity is rebuilt from.
     caller_key, _restricted = request_identity()
-    bind_token = None
-    if get_execution_identity() is None and caller_key is not None:
-        from tai42_skeleton.authz.execution import rebuild_execution_identity
-
+    async with caller_execution_identity(caller_key):
         try:
-            caller_identity = await rebuild_execution_identity(caller_key)
-        except Exception:
-            # Opportunistic bind, not this door's authz gate (the route decision
-            # already ran): a rebuild the infrastructure cannot answer degrades to
-            # the pre-bind behavior (unbound; the parking seam fail-closes loudly)
-            # instead of failing every tool call.
-            logger.warning("run-tool: could not rebuild the caller's execution identity", exc_info=True)
-            caller_identity = None
-        if caller_identity is not None:
-            bind_token = set_execution_identity(caller_identity)
-    try:
-        # Deposit the caller's identity as this run's attribution so a runs-index row the
-        # dispatch registers (a preset target) is born with a ``user_id`` rather than NULL;
-        # ``run_tool``'s attribution stamp reads it. With no resolved caller the deposit is
-        # skipped and the row's identity stays unset, exactly as before.
-        attribution = run_attribution(RunAttribution(user_id=caller_key)) if caller_key is not None else nullcontext()
-        # This envelope serves ONLY the live synchronous caller (a background submit
-        # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
-        # secret in the result is revealed here for the one door that hands the caller
-        # the real value; every recorder masks its own copy instead.
-        with attribution:
-            return unwrap_secrets(await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True))
-    except UnknownToolError as exc:
-        # Discriminate by NAME: the requested tool vanishing between lookup and dispatch
-        # (a concurrent reload) is still a 404, warned because the caller sees only a
-        # plain 404; a DIFFERENT tool failing to resolve is a raise DURING execution and
-        # takes the structured-500 path, never the requested tool's 404.
-        if exc.tool_name == tool_name:
-            logger.warning("run-tool: %r resolved at lookup but did not resolve at dispatch; answering 404", tool_name)
-            raise NotFoundError(f"unknown tool: {tool_name}") from exc
-        logger.exception("run-tool %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
-        raise OperationFailedError(str(exc)) from exc
-    except OperationError:
-        # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
-        # flattening it into ``OperationFailedError`` would report a refusal as a crash.
-        raise
-    except Exception as exc:
-        logger.exception("run-tool %r raised during execution", tool_name)
-        # A bare raise stringifies to ""; the class-name fallback keeps the envelope
-        # from emitting {"error": ""}.
-        raise OperationFailedError(str(exc) or type(exc).__name__) from exc
-    finally:
-        # The binding must not outlive this dispatch — a later op on the same request
-        # context must see the request-scope world, not a lingering execution identity.
-        if bind_token is not None:
-            reset_execution_identity(bind_token)
+            # Deposit the caller's identity as this run's attribution so a runs-index row the
+            # dispatch registers (a preset target) is born with a ``user_id`` rather than NULL;
+            # ``run_tool``'s attribution stamp reads it. With no resolved caller the deposit is
+            # skipped and the row's identity stays unset.
+            attribution = (
+                run_attribution(RunAttribution(user_id=caller_key)) if caller_key is not None else nullcontext()
+            )
+            # This envelope serves ONLY the live synchronous caller (a background submit
+            # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
+            # secret in the result is revealed here for the one door that hands the caller
+            # the real value; every recorder masks its own copy instead.
+            with attribution, api_state_context(subject, caller_key):
+                outcome = await tai42_app.interactions.visit(
+                    target_name=tool_name,
+                    cancel=[],
+                    resume=[],
+                    start=lambda extras: tai42_app.tools.run_tool(
+                        tool_name, arguments, offload_sync=True, extras=extras
+                    ),
+                    extras={},
+                    receives_outcome=True,
+                )
+                return _run_tool_return(outcome)
+        except ToolResultEncodingError as exc:
+            # The tool ran but produced output no JSON encoder can render (a lone UTF-16
+            # surrogate). That is the tool's OUTPUT at fault, not the caller's request (never a
+            # 4xx) and not an unexpected server bug (never the 500 the wire encode would otherwise
+            # trigger): a 502 naming the tool and the offending JSON path. Caught before the
+            # generic handler so it maps to the bad-tool-output error rather than a flat failure.
+            logger.warning("run-tool: %r produced a result that cannot be JSON-encoded at %s", tool_name, exc.json_path)
+            raise UpstreamError(str(exc), extra={"tool": exc.tool_name, "path": exc.json_path}) from exc
+        except UnknownToolError as exc:
+            # Discriminate by NAME: the requested tool vanishing between lookup and dispatch
+            # (a concurrent reload) is still a 404, warned because the caller sees only a
+            # plain 404; a DIFFERENT tool failing to resolve is a raise DURING execution and
+            # takes the structured-500 path, never the requested tool's 404.
+            if exc.tool_name == tool_name:
+                logger.warning(
+                    "run-tool: %r resolved at lookup but did not resolve at dispatch; answering 404", tool_name
+                )
+                raise NotFoundError(f"unknown tool: {tool_name}") from exc
+            logger.exception("run-tool %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
+            raise OperationFailedError(str(exc)) from exc
+        except OperationError:
+            # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
+            # flattening it into ``OperationFailedError`` would report a refusal as a crash.
+            raise
+        except Exception as exc:
+            logger.exception("run-tool %r raised during execution", tool_name)
+            # A bare raise stringifies to ""; the class-name fallback keeps the envelope
+            # from emitting {"error": ""}.
+            raise OperationFailedError(str(exc) or type(exc).__name__) from exc
 
 
 @operation(

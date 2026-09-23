@@ -1,7 +1,7 @@
-"""The AGENT async ``ask_user`` park lifecycle end to end, across a worker boundary.
+"""The AGENT async ``ask`` park lifecycle end to end, across a worker boundary.
 
 A real ``tools_agent`` run drives the ``e2e_agent_async_ask`` probe tool, whose async
-``ask_user`` PARKS the run on replica A and returns a suspended receipt. The agents
+``ask`` PARKS the run on replica A and returns a suspended receipt. The agents
 plugin's own durable park index reverses the parked interaction id back to the run, and a
 resolution on replica B — an answer through B's ``/answer`` door, or B's expiry reaper —
 fires the hidden ``agent_resume`` continuation, which rebuilds the same graph on the other
@@ -13,7 +13,7 @@ Two legs, mirroring the flow-driver ``interactions/test_async_park_resume`` legs
 * park -> expiry -> resume: no answer arrives; the park is brought to its deadline and the 1s
   expiry reaper fires ``agent_resume``.
 
-Each leg proves the parked tool's ``ask_user`` ran EXACTLY ONCE (a resume substitutes the
+Each leg proves the parked tool's ``ask`` ran EXACTLY ONCE (a resume substitutes the
 answer, never re-runs the tool) and that the resumed drive ran REBOUND to the STORED park
 identity — a synthetic value (``e2e-async-driver``) the auth-off default execution identity
 (``None``) never produces — recorded by the ``e2e_record_identity`` tool the scripted model
@@ -21,7 +21,7 @@ calls on the resumed turn.
 
 The ``tools_agent`` is the real consumer here: its OWN park machinery binds the
 ``agent_resume`` continuation around the drive. The probe tools stand in only for the
-authed caller identity ``ask_user`` needs (the auth-off stack carries none) and for the
+authed caller identity ``ask`` needs (the auth-off stack carries none) and for the
 resumed model turns; the park index, the interrupt barrier, and the resume drive are the
 platform/agents-plugin components under test.
 
@@ -70,6 +70,27 @@ async def _resume_record(stack: TaiStack, thread_id: str) -> dict | None:
         return None
     assert len(records) == 1, f"the resumed drive recorded more than once: {records}"
     return json.loads(records[0])
+
+
+async def _await_resume_drive_finished(llm_stub: LlmStub, scripted_turns: int) -> None:
+    """Wait until the resume drive has consumed the whole scripted script — i.e. reached its terminal.
+
+    The scripted LLM is one shared, order-only queue with no per-run isolation. A leg's assertions
+    pass as soon as the resumed drive records its identity (an intermediate turn), but the drive
+    keeps pulling later turns until it terminates. If the leg returned then, the still-running drive
+    would consume the NEXT leg's freshly-scripted turns (or drive a spurious re-park off them),
+    corrupting it. The served-completion count reaching the leg's turn count means the drive has
+    consumed its whole script and terminated, so the next leg scripts a quiet stub.
+    """
+
+    async def _script_consumed() -> bool | None:
+        return (len(llm_stub.requests) >= scripted_turns) or None
+
+    await wait_for_async(
+        _script_consumed,
+        deadline=20.0,
+        message=f"the resume drive never consumed its {scripted_turns} scripted turns",
+    )
 
 
 async def _park_agent_run(stack: TaiStack, thread_id: str, question: str) -> str:
@@ -140,6 +161,10 @@ async def test_agent_park_answer_resumes_across_workers(
     # re-ran the tool.
     assert len(agent_async_park_stack.records(f"agent_async_ask:{interaction_id}")) == 1
 
+    # Let the resume drive reach its terminal (consume all three scripted turns) before the module's
+    # next leg resets the shared scripted LLM — a drive still in flight would eat that leg's turns.
+    await _await_resume_drive_finished(llm_stub, 3)
+
 
 async def test_agent_park_expiry_resumes(
     agent_async_park_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
@@ -149,8 +174,14 @@ async def test_agent_park_expiry_resumes(
     llm_stub.reset()
     llm_stub.script(
         [
-            # Turn 1 (replica A): park with a far deadline the submit always observes first, never answer.
-            {"tool_call": {"name": "e2e_agent_async_ask", "arguments": {"question": question, "expiry_seconds": 3600}}},
+            # Turn 1 (replica A): park under ``on_expiry="resume"`` with a far deadline the submit
+            # always observes first, never answer.
+            {
+                "tool_call": {
+                    "name": "e2e_agent_async_ask",
+                    "arguments": {"question": question, "expiry_seconds": 3600, "on_expiry": "resume"},
+                }
+            },
             # Turns 2 + 3 (resumed by the expiry reaper): record the identity, then finish.
             {"tool_call": {"name": "e2e_record_identity", "arguments": {"thread_id": thread_id}}},
             {"content": "resumed on expiry"},
@@ -186,3 +217,7 @@ async def test_agent_park_expiry_resumes(
         json={"answer": "too-late"},
     )
     assert late.status_code == 409, late.text
+
+    # Let the resume drive reach its terminal before the module ends, so it never survives into a
+    # later leg's shared scripted LLM (order-independent isolation, matching the answer leg).
+    await _await_resume_drive_finished(llm_stub, 3)

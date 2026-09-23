@@ -1,4 +1,4 @@
-"""``INTERACTIONS_*`` config for the ask_user capability.
+"""``INTERACTIONS_*`` config for the ask capability.
 
 Settings are co-located with the impl and de-mixed: the Redis connection is a
 field composed from the kit connection shape (not a base the feature config
@@ -65,7 +65,7 @@ class InteractionsSettings(TaiBaseSettings):
     # the operator inbox after a quiet period. Must be positive.
     notifications_feed_ttl_seconds: int = Field(default=30 * 86400, gt=0)
 
-    # Default wait budget for a blocked ask_user before it raises (1h); a caller
+    # Default wait budget for a blocked ask before it raises (1h); a caller
     # may override per call. Must be positive.
     answer_timeout_seconds: int = Field(default=3600, gt=0)
 
@@ -95,13 +95,22 @@ class InteractionsSettings(TaiBaseSettings):
     # Oversized -> 413, loudly — never truncated. Must be positive.
     callback_max_body_bytes: int = Field(default=65536, gt=0)
 
-    # Open-questions guard: refuse new ask_user calls once this many questions are
+    # Open-questions guard: refuse new ask calls once this many questions are
     # open platform-wide (the atomic reserve-and-check in ``reserve_open_slot``).
     # A finite ceiling by default so pending human questions cannot grow without
     # bound; well above any realistic live count and on the same scale as this
     # file's other retention ceiling (``notifications_feed_max``). Set ``None`` for
     # unlimited; a set value must be positive.
     max_concurrent: int | None = Field(default=1000, gt=0)
+
+    # Open-callers guard: the independent ceiling on ``to="caller"`` asks and the
+    # waiting outcomes they leave behind, held in the ``open:caller`` index (distinct
+    # from ``max_concurrent``, which bounds ``to="user"`` asks). A caller ask at the
+    # cap is refused loudly, exactly as a user ask is at ``max_concurrent``; a finished
+    # run's waiting outcome is counted here but NEVER refused, so a result is never
+    # lost. Sized well above any realistic live caller-park count. Set ``None`` for
+    # unlimited; a set value must be positive.
+    max_concurrent_caller: int | None = Field(default=10000, gt=0)
 
     # Total channel-delivery attempts per ask, retries included: a transiently
     # failing send (a medium 5xx, a rate limit, a transport fault) is attempted

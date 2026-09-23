@@ -487,7 +487,9 @@ class RunView(BaseModel):
 
     ``traceId`` deep-links the observability trace (``null`` when the run opened
     none); ``interactionId`` joins a parked run with its resume row (``null`` for
-    a plain run); ``endedAt`` is ``null`` while the run is still running.
+    a plain run); ``endedAt`` is ``null`` while the run is still running;
+    ``resumedInteractions`` is the parked ids this run resumed or took across its
+    span (empty when it resumed nothing).
     """
 
     runId: str
@@ -500,6 +502,7 @@ class RunView(BaseModel):
     outcome: str
     startedAt: str
     endedAt: str | None = None
+    resumedInteractions: list[str]
 
 
 class RunsPage(BaseModel):

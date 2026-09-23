@@ -37,6 +37,7 @@ from .conftest import (
     FakeManager,
     _accepting_callback,
     _channel_route,
+    _connected,
     _settle,
     _store,
     _tool_api_route,
@@ -84,7 +85,7 @@ async def test_turn_block_on_the_event_door(env, monkeypatch):
 
     tools = _wire_tool(monkeypatch, lambda kw: "handled")
     submission = _event_submission(address="+15550002222", event=_event(payload={"amount": 5}))
-    result = await turn_module.submit_event("tool-line", submission, "svc-int")
+    result = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await _settle()
 
     kwargs = tools.calls[-1]["arguments"]
@@ -115,7 +116,7 @@ async def test_event_channel_thread_delivers_the_reply_to_the_address(env, monke
 
     _wire_tool(monkeypatch, lambda kw: f"event {kw['event']['kind']} handled")
     submission = _event_submission(address="+15550002222", event=_event())
-    result = await turn_module.submit_event("tool-line", submission, "svc-int")
+    result = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await _settle()
 
     record = await _store().get_record(result.message_id)
@@ -136,7 +137,7 @@ async def test_event_channel_record_carries_no_caller_principal_and_a_submitted_
     _wire_tool(monkeypatch, lambda kw: "ok")
 
     result = await turn_module.submit_event(
-        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int"
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
     )
     await _settle()
 
@@ -155,9 +156,9 @@ async def test_event_redelivery_returns_the_original_id_and_runs_one_turn(env, m
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     submission = _event_submission(address="+15550002222", event=_event(event_id="evt-42"))
-    first = await turn_module.submit_event("tool-line", submission, "svc-int")
+    first = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await _settle()
-    second = await turn_module.submit_event("tool-line", submission, "svc-int")
+    second = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await _settle()
 
     assert first.message_id == second.message_id
@@ -170,7 +171,7 @@ async def test_event_api_thread_posts_a_signed_callback(env, monkeypatch):
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
     # Open the api thread with an ordinary api message.
     _wire_tool(monkeypatch, lambda kw: "seed")
-    await turn_module.submit_api_message("tool-api", "u-7", "hi", "alice", wait_seconds=0)
+    await turn_module.submit_api_message("tool-api", "u-7", "hi", "alice", wait_seconds=0, client_connected=_connected)
     await _settle()
 
     posted: list = []
@@ -181,7 +182,9 @@ async def test_event_api_thread_posts_a_signed_callback(env, monkeypatch):
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
     _wire_tool(monkeypatch, lambda kw: "event answer")
-    result = await turn_module.submit_event("tool-api", _event_submission(address="u-7", event=_event()), "alice")
+    result = await turn_module.submit_event(
+        "tool-api", _event_submission(address="u-7", event=_event()), "alice", client_connected=_connected
+    )
     assert result.answer is None  # 202: the answer is delivered out of band
     await _settle()
 
@@ -202,7 +205,7 @@ async def test_event_api_thread_inline_wait_returns_the_answer_and_suppresses_th
     env.seed_route("tool-api")
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
     _wire_tool(monkeypatch, lambda kw: "seed")
-    await turn_module.submit_api_message("tool-api", "u-7", "hi", "alice", wait_seconds=0)
+    await turn_module.submit_api_message("tool-api", "u-7", "hi", "alice", wait_seconds=0, client_connected=_connected)
     await _settle()
 
     posted: list = []
@@ -214,13 +217,52 @@ async def test_event_api_thread_inline_wait_returns_the_answer_and_suppresses_th
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
     _wire_tool(monkeypatch, lambda kw: "inline answer")
     result = await turn_module.submit_event(
-        "tool-api", _event_submission(address="u-7", event=_event(), wait_seconds=5), "alice"
+        "tool-api",
+        _event_submission(address="u-7", event=_event(), wait_seconds=5),
+        "alice",
+        client_connected=_connected,
     )
     await _settle()
 
     assert result.answer is not None
     assert result.answer.answer == "inline answer"
     assert posted == []  # the sync wait delivered it; no callback fired
+
+
+async def test_event_api_thread_gone_client_falls_to_the_callback(env, monkeypatch):
+    # The event turn finishes inside the window but the client has hung up (probe False): the
+    # inline claim is NOT taken, so no inline answer is returned and the answer is delivered by
+    # exactly one signed callback — the same precondition the message door applies.
+    _wire(monkeypatch, FakeManager(_tool_api_route()))
+    env.seed_route("tool-api")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+    _wire_tool(monkeypatch, lambda kw: "seed")
+    await turn_module.submit_api_message("tool-api", "u-7", "hi", "alice", wait_seconds=0, client_connected=_connected)
+    await _settle()
+
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append((url, signature))
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+    _wire_tool(monkeypatch, lambda kw: "event answer")
+
+    async def _gone() -> bool:
+        return False
+
+    result = await turn_module.submit_event(
+        "tool-api",
+        _event_submission(address="u-7", event=_event(), wait_seconds=5),
+        "alice",
+        client_connected=_gone,
+    )
+    await _settle()
+
+    assert result.answer is None  # no inline answer written to a gone client
+    assert len(posted) == 1  # delivered by exactly one signed callback
+    assert posted[0][1].startswith("sha256=")
 
 
 async def test_event_channel_thread_never_posts_a_callback(env, monkeypatch):
@@ -235,7 +277,9 @@ async def test_event_channel_thread_never_posts_a_callback(env, monkeypatch):
         return 200
 
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
-    await turn_module.submit_event("tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int")
+    await turn_module.submit_event(
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
+    )
     await _settle()
 
     assert posted == []  # a channel-target event delivers to the address, never a callback
@@ -246,7 +290,10 @@ async def test_event_unknown_thread_raises_thread_not_found(env, monkeypatch):
     _wire_tool(monkeypatch, lambda kw: "ok")
     with pytest.raises(turn_module.ThreadNotFoundError):
         await turn_module.submit_event(
-            "tool-line", _event_submission(address="+15559998888", event=_event()), "svc-int"
+            "tool-line",
+            _event_submission(address="+15559998888", event=_event()),
+            "svc-int",
+            client_connected=_connected,
         )
 
 
@@ -255,7 +302,10 @@ async def test_event_unknown_thread_id_raises_thread_not_found(env, monkeypatch)
     _wire_tool(monkeypatch, lambda kw: "ok")
     with pytest.raises(turn_module.ThreadNotFoundError):
         await turn_module.submit_event(
-            "tool-line", _event_submission(thread_id="bridge:tool-line:nobody", event=_event()), "svc-int"
+            "tool-line",
+            _event_submission(thread_id="bridge:tool-line:nobody", event=_event()),
+            "svc-int",
+            client_connected=_connected,
         )
 
 
@@ -263,7 +313,9 @@ async def test_event_agent_target_route_refuses(env, monkeypatch):
     # An agent target is refused at route lookup, before any thread resolution.
     _wire(monkeypatch, FakeManager(_channel_route()))  # an AGENT route ("line")
     with pytest.raises(turn_module.EventTargetNotToolError):
-        await turn_module.submit_event("line", _event_submission(address="+15550002222", event=_event()), "svc-int")
+        await turn_module.submit_event(
+            "line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
+        )
 
 
 def _seed_multichannel_linked_person(monkeypatch, fake, *, pid: str = "person-xyz") -> Person:
@@ -298,7 +350,7 @@ def _seed_multichannel_linked_person(monkeypatch, fake, *, pid: str = "person-xy
 
 async def test_event_on_a_linked_person_thread_carries_the_person_fields_like_a_message(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")  # identity expr surfaces the whole payload
+    route = _tool_channel_route(start_expr=".")  # identity expr surfaces the whole payload
     _wire(monkeypatch, FakeManager(route), channel)
     _seed_multichannel_linked_person(monkeypatch, env)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
@@ -314,7 +366,7 @@ async def test_event_on_a_linked_person_thread_carries_the_person_fields_like_a_
 
     # An event to the SAME thread carries identical person fields.
     result = await turn_module.submit_event(
-        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int"
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
     )
     await _settle()
     event_kwargs = tools.calls[-1]["arguments"]
@@ -326,7 +378,7 @@ async def test_event_on_a_linked_person_thread_carries_the_person_fields_like_a_
 
 async def test_event_on_a_linked_person_thread_never_writes_greets_or_classifies(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     _seed_multichannel_linked_person(monkeypatch, env)
 
@@ -372,7 +424,9 @@ async def test_event_on_a_linked_person_thread_never_writes_greets_or_classifies
 
     # The event turn resolves the SAME person READ-ONLY: no provisional write, no greeting, no
     # classify — a structured event has no human sender to admit.
-    await turn_module.submit_event("tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int")
+    await turn_module.submit_event(
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
+    )
     await _settle()
     assert ensure_calls == []
     assert classify_calls == []
@@ -382,13 +436,15 @@ async def test_event_on_a_linked_person_thread_never_writes_greets_or_classifies
 
 async def test_event_on_a_plain_thread_carries_no_person_fields(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr=".")
+    route = _tool_channel_route(start_expr=".")
     _wire(monkeypatch, FakeManager(route), channel)
     # A plain (non-multichannel) thread: no person exists, so neither door carries person fields.
     await _seed_channel_thread(monkeypatch, env, channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.submit_event("tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int")
+    await turn_module.submit_event(
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
+    )
     await _settle()
     kwargs = tools.calls[-1]["arguments"]
     assert not kwargs["thread_id"].startswith(PERSON_THREAD_PREFIX)
@@ -406,7 +462,7 @@ class _OrderedBlockingTools:
         self.gate = asyncio.Event()
         self.calls: list[dict] = []
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False):
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None):
         self.calls.append(arguments)
         kind = arguments["turn"]["inbound"]["kind"]
         self.order.append(kind)
@@ -428,7 +484,9 @@ async def test_event_runs_after_an_in_flight_message_turn_on_the_thread(env, mon
     await asyncio.wait_for(tools.first_entered.wait(), timeout=2.0)
 
     # The event submits behind the FIFO while the message turn holds the lease.
-    await turn_module.submit_event("tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int")
+    await turn_module.submit_event(
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
+    )
     # The event turn cannot have run yet — it is queued behind the in-flight message.
     assert tools.order == ["message"]
 
@@ -437,15 +495,18 @@ async def test_event_runs_after_an_in_flight_message_turn_on_the_thread(env, mon
     assert tools.order == ["message", "event"]  # the event ran only after the message finished
 
 
-async def test_payload_expr_sees_turn_and_event(env, monkeypatch):
+async def test_start_expr_sees_turn_and_event(env, monkeypatch):
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr="{tid: .turn.id, ik: .turn.inbound.kind, ev: .event}")
+    route = _tool_channel_route(start_expr="{tid: .turn.id, ik: .turn.inbound.kind, ev: .event}")
     _wire(monkeypatch, FakeManager(route), channel)
     await _seed_channel_thread(monkeypatch, env, channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     result = await turn_module.submit_event(
-        "tool-line", _event_submission(address="+15550002222", event=_event(payload={"n": 1})), "svc-int"
+        "tool-line",
+        _event_submission(address="+15550002222", event=_event(payload={"n": 1})),
+        "svc-int",
+        client_connected=_connected,
     )
     await _settle()
 
@@ -515,7 +576,7 @@ class _PresetTools:
     def __init__(self, tool: Tool) -> None:
         self._tool = tool
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False):
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None):
         result = await self._tool.run(arguments)
         return result.structured_content
 
@@ -531,7 +592,10 @@ async def test_preset_target_sees_turn_and_event_under_its_payload_arg(env, monk
     monkeypatch.setattr(accessors_module, "_tools", lambda: _PresetTools(tool))
 
     result = await turn_module.submit_event(
-        "tool-line", _event_submission(address="+15550002222", event=_event(payload={"n": 1})), "svc-int"
+        "tool-line",
+        _event_submission(address="+15550002222", event=_event(payload={"n": 1})),
+        "svc-int",
+        client_connected=_connected,
     )
     await _settle()
 
@@ -568,14 +632,14 @@ async def test_a_rate_capped_event_never_burns_the_idempotency_key(env, monkeypa
     assert caps.admit_address(keys_module._api_bucket_key("tool-line", "svc-int")) is AddressAdmission.ADMIT
     submission = _event_submission(address="+15550002222", event=_event(event_id="evt-99"))
     with pytest.raises(caps_module.AddressRateLimitedError):
-        await turn_module.submit_event("tool-line", submission, "svc-int")
+        await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
 
     # The refused admission wrote nothing — the key is unclaimed.
     assert await _store().get_event_owner("tool-line", "evt-99") is None
 
     # A retry with a fresh budget runs exactly one turn (the key was never burned).
     caps_module._CAPS_CACHE.clear()
-    result = await turn_module.submit_event("tool-line", submission, "svc-int")
+    result = await turn_module.submit_event("tool-line", submission, "svc-int", client_connected=_connected)
     await _settle()
     assert len(tools.calls) == 1
     record = await _store().get_record(result.message_id)
@@ -589,16 +653,20 @@ async def test_an_api_address_from_another_principal_is_a_404_while_its_thread_i
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
     _wire_tool(monkeypatch, lambda kw: "ok")
     # alice opens an api thread naming end user u-7.
-    seed = await turn_module.submit_api_message("tool-api", "u-7", "hi", "alice", wait_seconds=0)
+    seed = await turn_module.submit_api_message(
+        "tool-api", "u-7", "hi", "alice", wait_seconds=0, client_connected=_connected
+    )
     await _settle()
 
     # bob addressing the same end-user id composes a DIFFERENT (bob-qualified) thread → 404.
     with pytest.raises(turn_module.ThreadNotFoundError):
-        await turn_module.submit_event("tool-api", _event_submission(address="u-7", event=_event()), "bob")
+        await turn_module.submit_event(
+            "tool-api", _event_submission(address="u-7", event=_event()), "bob", client_connected=_connected
+        )
 
     # bob CAN reach alice's thread by its listed thread_id — the trusted-integration surface.
     result = await turn_module.submit_event(
-        "tool-api", _event_submission(thread_id=seed.thread_id, event=_event()), "bob"
+        "tool-api", _event_submission(thread_id=seed.thread_id, event=_event()), "bob", client_connected=_connected
     )
     await _settle()
     record = await _store().get_record(result.message_id)
@@ -619,7 +687,7 @@ async def test_event_in_manual_mode_is_recorded_and_runs_no_turn(env, monkeypatc
     tools = _wire_tool(monkeypatch, lambda kw: "should not run")
 
     result = await turn_module.submit_event(
-        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int"
+        "tool-line", _event_submission(address="+15550002222", event=_event()), "svc-int", client_connected=_connected
     )
     await _settle()
 
@@ -634,10 +702,14 @@ async def test_event_in_manual_mode_is_recorded_and_runs_no_turn(env, monkeypatc
 async def test_event_on_an_unknown_route_is_refused(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()))
     with pytest.raises(turn_module.ConversationRouteResolutionError):
-        await turn_module.submit_event("no-such-route", _event_submission(address="x", event=_event()), "svc-int")
+        await turn_module.submit_event(
+            "no-such-route", _event_submission(address="x", event=_event()), "svc-int", client_connected=_connected
+        )
 
 
 async def test_event_with_no_caller_principal_is_refused(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()))
     with pytest.raises(turn_module.UnauthenticatedApiCallerError):
-        await turn_module.submit_event("tool-line", _event_submission(address="x", event=_event()), None)
+        await turn_module.submit_event(
+            "tool-line", _event_submission(address="x", event=_event()), None, client_connected=_connected
+        )

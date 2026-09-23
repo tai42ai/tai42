@@ -60,6 +60,45 @@ class AgentResumeDriveInProgressError(RuntimeError):
         super().__init__(f"agent resume drive already in progress for thread {thread_id!r} super-step {superstep_id!r}")
 
 
+class AgentSuperstepLeaseLostError(RuntimeError):
+    """The caller no longer holds the super-step drive lease its write is guarded by.
+
+    A super-step's terminal finalize is guarded by the caller's drive-lease token: the write
+    lands only while the claim key still holds that token. When another writer (a whole-chain
+    kill that reclaimed a lapsed lease) has taken the lease, the finalize is refused and this
+    raises — so the winning writer's resolution record is never overwritten. The drive also raises
+    it when a re-check between the drive and its terminal chain fire finds the lease gone, so it
+    fires no chain routing for a super-step it no longer owns. Raised (never a silent return) so
+    the platform redelivers and the redrive lands on the winner's resolution.
+    """
+
+    def __init__(self, thread_id: str, superstep_id: str) -> None:
+        self.thread_id = thread_id
+        self.superstep_id = superstep_id
+        super().__init__(
+            f"agent super-step drive lease lost for thread {thread_id!r} super-step {superstep_id!r}; "
+            "another writer holds it"
+        )
+
+
+class ParkKillNotReadyError(RuntimeError):
+    """A whole-chain kill reached a live super-step whose drive lease another worker holds.
+
+    The kill claims the super-step's drive lease before finalizing it ``aborted``, so it never
+    stomps an in-flight resume drive. When a live drive holds the lease the claim loses and this
+    raises, so the driver teardown propagates: the platform keeps the kill-due record and the
+    reaper redelivers the kill, which lands once the drive completes or its lease TTL expires.
+    """
+
+    def __init__(self, thread_id: str, superstep_id: str) -> None:
+        self.thread_id = thread_id
+        self.superstep_id = superstep_id
+        super().__init__(
+            f"whole-chain kill deferred for thread {thread_id!r} super-step {superstep_id!r}; "
+            "a live resume drive holds its lease"
+        )
+
+
 class AgentParkMarkerError(RuntimeError):
     """A parked ToolMessage could not be reconciled with the resume answers.
 

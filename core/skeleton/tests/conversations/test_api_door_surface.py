@@ -61,6 +61,8 @@ class _Engine:
         attachments=None,
         location=None,
         locale=None,
+        *,
+        client_connected,
     ):
         self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale))
         if self._raises is not None:
@@ -294,7 +296,7 @@ class _EventEngine:
         self._raises = raises
         self.calls: list[tuple] = []
 
-    async def __call__(self, route_name, submission, caller_principal):
+    async def __call__(self, route_name, submission, caller_principal, *, client_connected):
         self.calls.append((route_name, submission, caller_principal))
         if self._raises is not None:
             raise self._raises

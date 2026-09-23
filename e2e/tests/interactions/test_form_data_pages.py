@@ -1,6 +1,6 @@
 """Per-send form data + pages — the composed callback-form-page path.
 
-A channel-delivered ``ask_user(answer_format="form", data=..., pages=...)`` mints the
+A channel-delivered ``ask(answer_format="form", data=..., pages=...)`` mints the
 callback form page; this exercises the whole seam a participant's traffic takes:
 
 * the GET renders the page with the ``values`` prefilled into their controls, the
@@ -95,7 +95,7 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {
                     "question": question,
                     "channel": "stub",
@@ -172,7 +172,7 @@ async def test_bad_form_data_and_pages_are_refused_at_the_ask_door_before_any_st
 
     async def ask(arguments: dict) -> CallToolResult:
         async with stack.mcp(port=stack.port_a) as mcp:
-            return await mcp.call_tool("ask_user", arguments, raise_on_error=False, retry_on_reloading=True)
+            return await mcp.call_tool("ask", arguments, raise_on_error=False, retry_on_reloading=True)
 
     # A ``values`` key naming a property the schema does not declare is refused at the ask
     # door, naming the field, BEFORE any state is written (nothing pending).

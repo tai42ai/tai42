@@ -119,6 +119,9 @@ def test_channel_route_requires_channel_and_identity_forbids_callback():
         ConversationRouteCreate(**_route_kwargs(callback_url="https://host.example/hook"))
 
 
+_DOOR_EXPR_FIELDS = ("start_expr", "cancel_expr", "resume_expr", "extras_expr", "reply_expr")
+
+
 def test_tool_target_carries_optional_exprs():
     from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import TemplatedText
@@ -127,12 +130,17 @@ def test_tool_target_carries_optional_exprs():
         **_route_kwargs(
             target_kind="tool",
             target_name="echo",
-            payload_expr={"content": "{message: .message}"},
+            start_expr={"content": "{message: .message}"},
+            cancel_expr={"content": "$parked | map(.id)"},
+            resume_expr={"content": "null"},
+            extras_expr={"content": "{k: 1}"},
             reply_expr={"content": ".x"},
         )
     )
     assert route.target_kind == "tool"
-    assert route.payload_expr == TemplatedText(content="{message: .message}")
+    assert route.start_expr == TemplatedText(content="{message: .message}")
+    assert route.cancel_expr == TemplatedText(content="$parked | map(.id)")
+    assert route.extras_expr == TemplatedText(content="{k: 1}")
     assert route.reply_expr == TemplatedText(content=".x")
 
 
@@ -144,19 +152,38 @@ def test_tool_target_carries_exprs_by_id():
         **_route_kwargs(
             target_kind="tool",
             target_name="echo",
-            payload_expr={"id": "route-payload", "kwargs": {"k": "v"}},
+            start_expr={"id": "route-start", "kwargs": {"k": "v"}},
             reply_expr={"id": "route-reply"},
         )
     )
-    assert route.payload_expr == TemplatedText(id="route-payload", kwargs={"k": "v"})
+    assert route.start_expr == TemplatedText(id="route-start", kwargs={"k": "v"})
     assert route.reply_expr == TemplatedText(id="route-reply")
 
 
-@pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
+def test_agent_target_carries_the_door_exprs():
+    # An agent target may carry the parkable-door jqs and a reply_expr: the run's start kwargs, its
+    # cancel/resume over parked interactions, its extras, and the reply mapping are all valid on an
+    # agent route (the turn engine evaluates them the same way it does for a tool target).
+    from tai42_contract.conversations import ConversationRouteCreate
+    from tai42_contract.template import TemplatedText
+
+    route = ConversationRouteCreate(
+        **_route_kwargs(
+            target_kind="agent",
+            target_name="assistant",
+            start_expr={"content": "{user_message: {content: .message}}"},
+            reply_expr={"content": ".answer"},
+        )
+    )
+    assert route.start_expr == TemplatedText(content="{user_message: {content: .message}}")
+    assert route.reply_expr == TemplatedText(content=".answer")
+
+
+@pytest.mark.parametrize("field", _DOOR_EXPR_FIELDS)
 def test_route_exprs_carry_the_jq_expression_annotation(field: str):
-    # ``payload_expr``/``reply_expr`` are jq-typed templated texts, so each declares itself in
-    # the generated JSON schema under the shared ``x-tai42-expression`` vendor key (language
-    # jq) for a schema-driven UI to auto-render the jq editor.
+    # Each door jq (and the reply_expr) is a jq-typed templated text, so each declares itself in the
+    # generated JSON schema under the shared ``x-tai42-expression`` vendor key (language jq) for a
+    # schema-driven UI to auto-render the jq editor.
     from tai42_contract.conversations import ConversationRouteCreate
     from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
 
@@ -175,11 +202,11 @@ def test_route_expr_annotation_keeps_the_none_default_additive():
     from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
 
     route = ConversationRouteCreate(**_route_kwargs(target_kind="tool", target_name="echo"))
-    assert route.payload_expr is None
+    assert route.start_expr is None
     assert route.reply_expr is None
 
     schema = ConversationRouteCreate.model_json_schema()
-    for field in ("payload_expr", "reply_expr"):
+    for field in _DOOR_EXPR_FIELDS:
         prop = dict(schema["properties"][field])
         prop.pop(EXPRESSION_ANNOTATION_KEY)
         # Once the vendor key is removed, the schema is a plain nullable templated text
@@ -187,14 +214,6 @@ def test_route_expr_annotation_keeps_the_none_default_additive():
         # default intact.
         assert prop["default"] is None
         assert prop["anyOf"] == [{"$ref": "#/$defs/TemplatedText"}, {"type": "null"}]
-
-
-@pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
-def test_agent_target_forbids_exprs(field: str):
-    from tai42_contract.conversations import ConversationRouteCreate
-
-    with pytest.raises(ValidationError, match="no payload_expr/reply_expr"):
-        ConversationRouteCreate(**_route_kwargs(**{field: {"content": ".x"}}))
 
 
 def test_turns_per_hour_override_defaults_to_none_and_must_be_positive():

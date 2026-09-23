@@ -96,6 +96,79 @@ def resume_origin(interaction_id: str) -> Iterator[None]:
         _resume_origin.reset(token)
 
 
+# The ambient delivery-fire deposit: the interactions delivery ladder sets the run's
+# ``completion_id`` around the ONE ``run_tool`` that fires a door's out-of-band delivery-address
+# tool, so that tool can assert it is being fired by the platform for the outcome it is about to
+# deliver (``assert_delivery_authorized``). ``None`` outside a delivery fire; the value is the
+# delivery id of the run whose terminal is being delivered.
+_delivery_fire: ContextVar[str | None] = ContextVar("tai42_runs_delivery_fire", default=None)
+
+
+def get_delivery_fire() -> str | None:
+    """The ``completion_id`` of the delivery the platform is currently firing, or ``None``.
+
+    A plain contextvar read, never raises.
+    """
+    return _delivery_fire.get()
+
+
+@contextmanager
+def delivery_fire(completion_id: str) -> Iterator[None]:
+    """Deposit ``completion_id`` as the ambient delivery fire for the wrapped delivery-tool dispatch.
+
+    The interactions delivery ladder wraps its single address-fire ``run_tool`` in this, so a door
+    delivery-address tool it invokes passes ``assert_delivery_authorized(completion_id)``. Resets
+    in a ``finally`` (token discipline).
+    """
+    token = _delivery_fire.set(completion_id)
+    try:
+        yield
+    finally:
+        _delivery_fire.reset(token)
+
+
+# The ambient resumed-interaction collector: a run-lifecycle record (this chokepoint's
+# outermost-preset-run span, or the tool-runs supervisor's dispatch span) arms a fresh
+# list for the span of the dispatch it records, and every visit that resumes or takes a
+# parked entry under that span appends the interaction id it acted on through
+# ``note_resumed_interaction``. An inline resume is a NESTED dispatch that opens no
+# runs-index row of its own, so its lifecycle is recorded on the RESUMER's row — the
+# collected list is written at that row's terminal write. ``None`` when no collector is
+# armed: a door driving a visit with no record open records nothing (the designed
+# no-record case, not an error). Contextvar discipline gives innermost-wins nesting — a
+# record span nested inside another (a preset dispatched BY the supervisor) collects its
+# own resumes onto its own row.
+_resumed_collector: ContextVar[list[str] | None] = ContextVar("tai42_runs_resumed_collector", default=None)
+
+
+def note_resumed_interaction(interaction_id: str) -> None:
+    """Append ``interaction_id`` to the ambient resumed-interaction collector when one is armed.
+
+    Called by the shared visit after it has resumed or taken a parked entry. With no
+    collector armed (a door driving a visit outside any recorded run) nothing is recorded —
+    the designed no-record case, never an error. A plain contextvar read plus list append.
+    """
+    collector = _resumed_collector.get()
+    if collector is not None:
+        collector.append(interaction_id)
+
+
+@contextmanager
+def collect_resumed_interactions() -> Iterator[list[str]]:
+    """Arm a fresh resumed-interaction collector for the wrapped dispatch span.
+
+    Yields the list the record writes at its terminal write; resets the contextvar in a
+    ``finally`` (token discipline). A record span nested inside another arms its own list,
+    so each record collects the resumes of its own span (innermost wins).
+    """
+    collector: list[str] = []
+    token = _resumed_collector.set(collector)
+    try:
+        yield collector
+    finally:
+        _resumed_collector.reset(token)
+
+
 def _safe_trace_id() -> str | None:
     """The active monitoring trace id, or ``None`` — a guard query that never raises.
 
@@ -192,8 +265,13 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
     ``running`` START row. On exit: UPDATE the terminal outcome — ``aborted`` if a
     cancellation escaped the block, ``error`` if anything else raised, else the
     observed outcome (``success`` / ``parked``, a park carrying its interaction id) —
-    with ``ended_at`` and a backfilled trace id. A no-op (still yields a handle) when
-    the store is OFF or the START write fails.
+    with ``ended_at``, a backfilled trace id, and the interaction ids this run resumed or
+    took. A no-op (still yields a handle) when the store is OFF or the START write fails.
+
+    RESUMED-INTERACTION ROLL-UP — every visit under this run's span, nested sub-preset
+    dispatches included, appends its resumed/taken interaction ids to the ONE collector
+    armed here, because a nested dispatch opens no runs-index row of its own; the outermost
+    row records the whole span's list at its terminal write.
     """
     record = RunRecord()
     if not component_store_configured(SKELETON_COMPONENT):
@@ -243,38 +321,48 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
 
         record.recorded = True
         escape_outcome: RunOutcome | None = None
-        try:
-            yield record
-        except asyncio.CancelledError:
-            # A cancellation (user abort, shutdown drain, epoch retire) is a distinct
-            # terminal ``aborted`` — cancelled is not failed — and MUST propagate
-            # immediately: recorded in the ``finally`` below, never swallowed here.
-            escape_outcome = "aborted"
-            raise
-        except BaseException:
-            # Any other escape (tool failure, SystemExit) is a terminal ``error`` for
-            # this run — recorded before the exception propagates.
-            escape_outcome = "error"
-            raise
-        finally:
-            outcome: RunOutcome = escape_outcome if escape_outcome is not None else record.outcome
-            ended = datetime.now(UTC)
-            # Backfill the trace id only when START missed it — a body that opened its trace
-            # after START may make it sampleable now.
-            end_trace_id = None if start_trace_id is not None else _safe_trace_id()
+        # Arm the resumed-interaction collector for the dispatch span: every visit that
+        # resumes or takes a parked entry under this run — nested sub-preset dispatches
+        # included, since they open no row of their own — appends to this list, written at
+        # the terminal below. The contextvar token resets when the ``with`` block exits.
+        with collect_resumed_interactions() as resumed:
             try:
-                # On the ``aborted`` path this write runs while the CancelledError is
-                # propagating — a best-effort UNSHIELDED attempt, the tool-run drain
-                # idiom (a drain cancels each task exactly once, then waits, so the
-                # await normally completes). Deliberately no shield: recording must
-                # never block a cancellation. If a second cancellation lands mid-write,
-                # the ``except Exception`` below does not catch it, the CancelledError
-                # propagates, and the row honestly stays ``running`` (the same
-                # crash-interrupted posture an abrupt process death leaves).
-                await store.update_outcome(
-                    run_id, outcome, ended.isoformat(), trace_id=end_trace_id, interaction_id=record.interaction_id
-                )
-            except Exception:
-                logger.warning(
-                    "runs-index: failed to record terminal outcome %r for run %s", outcome, run_id, exc_info=True
-                )
+                yield record
+            except asyncio.CancelledError:
+                # A cancellation (user abort, shutdown drain, epoch retire) is a distinct
+                # terminal ``aborted`` — cancelled is not failed — and MUST propagate
+                # immediately: recorded in the ``finally`` below, never swallowed here.
+                escape_outcome = "aborted"
+                raise
+            except BaseException:
+                # Any other escape (tool failure, SystemExit) is a terminal ``error`` for
+                # this run — recorded before the exception propagates.
+                escape_outcome = "error"
+                raise
+            finally:
+                outcome: RunOutcome = escape_outcome if escape_outcome is not None else record.outcome
+                ended = datetime.now(UTC)
+                # Backfill the trace id only when START missed it — a body that opened its trace
+                # after START may make it sampleable now.
+                end_trace_id = None if start_trace_id is not None else _safe_trace_id()
+                try:
+                    # On the ``aborted`` path this write runs while the CancelledError is
+                    # propagating — a best-effort UNSHIELDED attempt, the tool-run drain
+                    # idiom (a drain cancels each task exactly once, then waits, so the
+                    # await normally completes). Deliberately no shield: recording must
+                    # never block a cancellation. If a second cancellation lands mid-write,
+                    # the ``except Exception`` below does not catch it, the CancelledError
+                    # propagates, and the row honestly stays ``running`` (the same
+                    # crash-interrupted posture an abrupt process death leaves).
+                    await store.update_outcome(
+                        run_id,
+                        outcome,
+                        ended.isoformat(),
+                        trace_id=end_trace_id,
+                        interaction_id=record.interaction_id,
+                        resumed_interactions=list(resumed),
+                    )
+                except Exception:
+                    logger.warning(
+                        "runs-index: failed to record terminal outcome %r for run %s", outcome, run_id, exc_info=True
+                    )

@@ -31,6 +31,7 @@ from tai42_skeleton.access_control.request_scopes import (
     set_request_identity_claims,
 )
 from tai42_skeleton.app import server as server_module
+from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.operations import tool_runs as ops
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers import tool_runs as router
@@ -41,6 +42,19 @@ from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.tools.retry import ToolRetryRegistry
 
 from .._fakes.tool_runs_redis import FakeRedis
+
+
+def _interactions_double() -> SimpleNamespace:
+    """The ``app.interactions`` seam the submit path reaches: the real visit + its shaping helpers.
+
+    The interactions store is unconfigured in these router tests, so a non-parking run normalises
+    to its plain result.
+    """
+    return SimpleNamespace(
+        visit=visit_module.visit,
+        park_answer=visit_module.park_answer,
+        normalise_started=visit_module.normalise_started,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +128,7 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.calls.append((key, arguments, offload_sync))
         if self.gate is not None:
             await self.gate.wait()
@@ -145,7 +159,9 @@ def wired(monkeypatch):
 
     def install_tools(registered: set[str] | None = None) -> _FakeTools:
         tools = _FakeTools(registered)
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+        # The submit path drives the shared visit through ``tai42_app.interactions``, so the
+        # fake impl carries that seam.
+        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools, interactions=_interactions_double()))
         return tools
 
     yield SimpleNamespace(
@@ -769,7 +785,9 @@ async def test_slow_sync_tool_over_liveness_ttl_is_not_marked_lost(monkeypatch):
         time.sleep(2.0)
         return {"echo": x}
 
-    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_real_binding_for(slow_sync)))
+    monkeypatch.setattr(
+        tai42_app, "_impl", SimpleNamespace(tools=_real_binding_for(slow_sync), interactions=_interactions_double())
+    )
 
     try:
         run_id = _json(await router.submit_run(_post(b'{"tool_name": "slow", "arguments": {"x": 9}}')))["data"][
@@ -790,3 +808,55 @@ async def test_slow_sync_tool_over_liveness_ttl_is_not_marked_lost(monkeypatch):
         # No supervisor may outlive the test.
         for task in list(ops._SUPERVISORS):
             task.cancel()
+
+
+# -- the submit door parses the subject through to the spawned supervisor -----
+
+
+async def test_submit_parses_subject_to_the_supervisor(wired):
+    """A body carrying a ``subject`` reaches ``_spawn_supervisor`` as the validated
+    ``StateSubject`` (which later deposits it as the detached run's ``door="api"`` context)."""
+    from tai42_contract.states import StateSubject
+
+    from tai42_skeleton.operations.tool_runs import supervisor as supervisor_module
+
+    wired.install_tools()
+    captured: list = []
+
+    def _spy(run_id, tool_name, arguments, subject=None):
+        captured.append(subject)
+
+    wired.monkeypatch.setattr(supervisor_module, "_spawn_supervisor", _spy)
+    body = (
+        b'{"tool_name": "alpha", "arguments": {},'
+        b' "subject": {"target_kind": "tool", "target_name": "acct-42", "kind": "thread", "key": "t-1"}}'
+    )
+    resp = await router.submit_run(_post(body))
+    assert resp.status_code == 202
+    assert captured == [StateSubject(target_kind="tool", target_name="acct-42", kind="thread", key="t-1")]
+
+
+async def test_submit_without_subject_spawns_with_none(wired):
+    from tai42_skeleton.operations.tool_runs import supervisor as supervisor_module
+
+    wired.install_tools()
+    captured: list = []
+
+    def _spy(run_id, tool_name, arguments, subject=None):
+        captured.append(subject)
+
+    wired.monkeypatch.setattr(supervisor_module, "_spawn_supervisor", _spy)
+    resp = await router.submit_run(_post(b'{"tool_name": "alpha", "arguments": {}}'))
+    assert resp.status_code == 202
+    assert captured == [None]
+
+
+async def test_submit_malformed_subject_is_400(wired):
+    # A subject the contract model rejects is a loud 400 at the edge — no slot reserved,
+    # no record written, no supervisor spawned.
+    wired.install_tools()
+    bad = '{"target_kind": "nope", "target_name": "x", "kind": "thread", "key": "k"}'
+    body = ('{"tool_name": "alpha", "subject": ' + bad + "}").encode()
+    resp = await router.submit_run(_post(body))
+    assert resp.status_code == 400
+    assert "subject" in _json(resp)["error"]

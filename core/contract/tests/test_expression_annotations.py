@@ -16,7 +16,7 @@ import json
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tai42_contract.access_control import AccessPolicy, RoleDefinition
 from tai42_contract.backend import CallbackSchema
@@ -119,6 +119,22 @@ def test_builder_emits_every_supplied_entry_in_the_contract_shape() -> None:
     }
 
 
+def test_builder_emits_variables_as_name_blurb_sample_triples() -> None:
+    payload = expression_annotation(
+        blurb="the stanza envelope",
+        variables=[("meter", "the beat count bound for the run", 4), ("rhyme", "the ending scheme", "abab")],
+    )
+    assert payload["variables"] == [
+        {"name": "meter", "blurb": "the beat count bound for the run", "sample": 4},
+        {"name": "rhyme", "blurb": "the ending scheme", "sample": "abab"},
+    ]
+
+
+def test_builder_omits_variables_when_absent_and_emits_empty_list() -> None:
+    assert "variables" not in expression_annotation()
+    assert expression_annotation(variables=[])["variables"] == []
+
+
 def test_builder_distinguishes_empty_keys_and_falsy_samples_from_absent() -> None:
     # ``keys=[]`` states "untyped input" and ``sample=None``/``{}`` are real
     # sample documents — all distinct from omitting the argument.
@@ -178,9 +194,7 @@ def test_annotation_is_purely_additive_to_a_plain_declaration() -> None:
     ("model", "field", "payload"),
     [
         (HookRegister, "condition", GENERIC_CONDITION_PAYLOAD),
-        (HookRegister, "expr", GENERIC_EXPR_PAYLOAD),
         (HookParams, "condition", GENERIC_CONDITION_PAYLOAD),
-        (HookParams, "expr", GENERIC_EXPR_PAYLOAD),
         (AccessPolicy, "condition", ACCESS_CONDITION_PAYLOAD),
         (RoleDefinition, "condition", ACCESS_CONDITION_PAYLOAD),
         (CallbackSchema, "condition", CALLBACK_CONDITION_PAYLOAD),
@@ -206,6 +220,7 @@ def test_callback_override_changes_only_the_annotation_payload() -> None:
 
     class PlainCallbackSchema(PlainMixinCondition, PlainMixinExpr):
         tool: str = ""
+        carried_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     PlainCallbackSchema.__doc__ = CallbackSchema.__doc__
 

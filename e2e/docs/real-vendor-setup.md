@@ -82,7 +82,7 @@ public host. No API automates the registration.
   (C…, a test channel the bot is invited to — becomes the recipient allowlist).
 - Bridge route only: `CHANNEL_SLACK_BOT_USER_ID` (U…, the bot's own member id
   from App Home / `auth.test`) — the self-message filter and `our_identity`.
-  Notify / ask_user / signature verification run without it.
+  Notify / ask / signature verification run without it.
 
 ### twilio — `TAI_E2E_REAL=twilio`
 

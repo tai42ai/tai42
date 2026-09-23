@@ -21,7 +21,7 @@ endpoints, not ``/messages``.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from tai42_contract.app import tai42_app
@@ -370,20 +370,36 @@ async def send_template(phone_number_id: str, to: str, template: ChannelTemplate
     return await _post(phone_number_id, payload)
 
 
-async def create_flow(waba_id: str, name: str, flow_json: dict[str, Any]) -> str:
-    """Create a Flow under ``waba_id`` from ``flow_json``; return its flow id.
+class FlowCreateResult(NamedTuple):
+    """The create response the Flow lifecycle owner acts on.
+
+    ``flow_id`` is the new draft's id; ``validation_errors`` is the vendor's
+    top-level array — empty when the Flow JSON is valid, non-empty when Meta
+    created the draft anyway but it can never publish. The lifecycle owner
+    (``_resolve_flow_id``) decides whether to publish or delete.
+    """
+
+    flow_id: str
+    validation_errors: list[dict[str, Any]]
+
+
+async def create_flow(waba_id: str, name: str, flow_json: dict[str, Any]) -> FlowCreateResult:
+    """Create a Flow under ``waba_id`` from ``flow_json``; return its create result.
 
     POSTs ``{name, categories: ["OTHER"], flow_json: <json string>}`` to
     ``{api}/{waba_id}/flows``. A 2xx that carries no ``id`` raises loudly (mirrors
-    the no-message-id guard on the send path).
+    the no-message-id guard on the send path). A pure Graph wrapper: it returns
+    both handles Meta returned (the draft id and any ``validation_errors``); the
+    lifecycle owner acts on them.
     """
     url = f"{whatsapp_settings().api_base_url}/{waba_id}/flows"
     payload = {"name": name, "categories": ["OTHER"], "flow_json": json.dumps(flow_json)}
     response = await _send(url, payload)
-    flow_id = response.json().get("id")
+    body = response.json()
+    flow_id = body.get("id")
     if not flow_id:
         raise ChannelDeliveryError("WhatsApp accepted the flow create but returned no flow id")
-    return flow_id
+    return FlowCreateResult(flow_id=flow_id, validation_errors=body.get("validation_errors") or [])
 
 
 async def publish_flow(flow_id: str) -> None:
@@ -409,8 +425,8 @@ async def send_flow(
     body_text: str,
     flow_id: str,
     flow_token: str,
-    screen: str = "FORM",
-    data: dict[str, Any] | None = None,
+    screen: str,
+    data: dict[str, Any],
 ) -> str:
     """Send an interactive Flow message opening the published ``flow_id``; return its ``wamid``.
 
@@ -421,13 +437,10 @@ async def send_flow(
     inbound as an ``nfm_reply`` carrying this token.
 
     ``data`` is the per-send ``flow_action_payload.data`` — the prefilled values and
-    the dynamic option data-sources a stepped/per-send form's screen reads. It is
-    omitted from the payload when ``None`` (an ask-less form carries none), so a plain
-    Flow send is byte-identical to before.
+    the dynamic option data-sources the entry screen reads; the builder always emits
+    a ``data`` model, so every caller passes it.
     """
-    flow_action_payload: dict[str, Any] = {"screen": screen}
-    if data is not None:
-        flow_action_payload["data"] = data
+    flow_action_payload: dict[str, Any] = {"screen": screen, "data": data}
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -459,17 +472,45 @@ def _parse_json(response: httpx.Response) -> Any:
         return None
 
 
-def _error_detail(response: httpx.Response, payload: Any) -> str:
-    """Meta's ``error.code``/``error.message`` from the parsed body, else raw text.
+# Meta's Graph ``error`` object fields, in the vendor's documented order — every
+# one the operator's diagnostic needs, none dropped.
+_ERROR_FIELDS = (
+    "code",
+    "error_subcode",
+    "type",
+    "message",
+    "error_user_title",
+    "error_user_msg",
+    "error_data",
+    "fbtrace_id",
+)
 
-    Bounded to 500 chars so an HTML error page cannot flood the exception.
+
+def _error_detail(response: httpx.Response, payload: Any) -> str:
+    """Meta's full documented ``error`` object from the parsed body, else raw text.
+
+    Each present field renders as a ``name=<render>`` token in the vendor's fixed
+    order — ``repr(value)`` for a scalar, compact sorted JSON for ``error_data`` —
+    joined by one space; the whole is bounded to 500 chars so an HTML error page
+    cannot flood the exception. A non-JSON body, or an ``error`` that is absent or
+    not a dict, falls back to the raw response text (also bounded).
     """
     if not isinstance(payload, dict):
         return response.text[:500]
     error = payload.get("error")
     if not isinstance(error, dict):
         return response.text[:500]
-    return f"code={error.get('code')} message={error.get('message')!r}"[:500]
+    tokens: list[str] = []
+    for name in _ERROR_FIELDS:
+        if name not in error:
+            continue
+        value = error[name]
+        if isinstance(value, (list, dict)):
+            render = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        else:
+            render = repr(value)
+        tokens.append(f"{name}={render}")
+    return " ".join(tokens)[:500]
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

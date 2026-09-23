@@ -1,5 +1,5 @@
-"""The ``ask_user`` argument-shaping logic: ``build_payload`` per answer format,
-and the unknown-format guard at the top of ``ask_user``.
+"""The ``ask`` argument-shaping logic: ``build_payload`` per answer format,
+and the unknown-format guard at the top of ``ask``.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.interactions import AnswerFormat
 
-from tai42_skeleton.interactions import ask_user
+from tai42_skeleton.interactions import ask
 from tai42_skeleton.interactions.ask.payload import build_payload
 
 
@@ -83,13 +83,13 @@ def test_form_payload_omits_absent_data_and_pages():
     assert build_payload(AnswerFormat.FORM, None, schema) == {"schema": schema}
 
 
-async def test_ask_user_rejects_data_on_non_form():
+async def test_ask_rejects_data_on_non_form():
     with pytest.raises(ValueError, match="data and pages are not valid"):
-        await ask_user("q", answer_format="text", data={"values": {}})
+        await ask("q", answer_format="text", data={"values": {}})
     with pytest.raises(ValueError, match="data and pages are not valid"):
-        await ask_user("q", answer_format="select", options=["a"], pages=[{"title": "A", "fields": ["a"]}])
+        await ask("q", answer_format="select", options=["a"], pages=[{"title": "A", "fields": ["a"]}])
 
 
-async def test_ask_user_rejects_unknown_format():
+async def test_ask_rejects_unknown_format():
     with pytest.raises(ValueError, match="unknown answer_format"):
-        await ask_user("q", answer_format="telepathy")
+        await ask("q", answer_format="telepathy")

@@ -14,7 +14,15 @@ def test_runs_list(monkeypatch: pytest.MonkeyPatch) -> None:
         assert request.url.path == "/api/runs"
         return data_response(
             {
-                "items": [{"runId": "run_1", "preset": "support", "outcome": "parked", "interactionId": "i_42"}],
+                "items": [
+                    {
+                        "runId": "run_1",
+                        "preset": "assistant",
+                        "outcome": "parked",
+                        "interactionId": "i_42",
+                        "resumedInteractions": ["i_7"],
+                    }
+                ],
                 "page": 1,
                 "nextPage": None,
             }
@@ -24,13 +32,14 @@ def test_runs_list(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
     assert "run_1" in result.output
     assert "i_42" in result.output  # the lifecycle-correlation column is listed
+    assert "i_7" in result.output  # the resumed-interaction column is listed
 
 
 def test_runs_list_passes_all_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/runs"
         params = request.url.params
-        assert params.get("preset") == "support"
+        assert params.get("preset") == "assistant"
         assert params.get("version") == "3"
         assert params.get("user") == "u1"
         assert params.get("session") == "s1"
@@ -49,7 +58,7 @@ def test_runs_list_passes_all_filters(monkeypatch: pytest.MonkeyPatch) -> None:
             "runs",
             "list",
             "--preset",
-            "support",
+            "assistant",
             "--version",
             "3",
             "--user",

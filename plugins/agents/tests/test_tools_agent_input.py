@@ -162,7 +162,7 @@ def test_from_tool_input_rejects_both_system_prompt_and_system_message() -> None
 # handed. Each is rejected loudly on BOTH faces rather than silently dropped, so
 # dropping any one from the guard call site fails a test here.
 # ``response_format`` is NOT here — it is honored (forces structured output).
-# ``resume`` is NOT here either — an async ``ask_user`` park makes a run resumable, so
+# ``resume`` is NOT here either — an async ``ask`` park makes a run resumable, so
 # a caller-driven ``Command(resume=...)`` is honored (see
 # ``test_run_honors_a_caller_driven_resume``).
 _UNHONORED_CASES = [

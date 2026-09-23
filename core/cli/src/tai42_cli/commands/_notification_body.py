@@ -7,13 +7,14 @@ from typing import Any
 import typer
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
-from tai42_contract.interactions.models import LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem
 
 from tai42_cli.commands._common import compact, parse_json_value
 
 _MEDIA_ADAPTER = TypeAdapter(list[MediaItem])
 _OPTIONS_ADAPTER = TypeAdapter(list[Option])
 _SECTIONS_ADAPTER = TypeAdapter(list[OptionSection])
+_PAGES_ADAPTER = TypeAdapter(list[FormPage])
 
 
 def _reject_unknown_keys(raw: object, model: type[BaseModel], *, param_hint: str) -> dict[str, Any]:
@@ -87,6 +88,8 @@ def build_notify_body(
     header: str | None,
     footer: str | None,
     schema: str | None,
+    data: str | None,
+    pages: str | None,
 ) -> dict[str, object]:
     """Build the ``POST /api/notifications`` body from the ``notify`` command's flags.
 
@@ -101,6 +104,7 @@ def build_notify_body(
         ("media", media, _MEDIA_ADAPTER, "media item(s)", "--media"),
         ("options", options, _OPTIONS_ADAPTER, "options", "--options"),
         ("sections", sections, _SECTIONS_ADAPTER, "sections", "--sections"),
+        ("pages", pages, _PAGES_ADAPTER, "form pages", "--pages"),
     ):
         if raw is not None:
             body[key] = _list_field(raw, adapter, label, param_hint=param_hint)
@@ -108,6 +112,7 @@ def build_notify_body(
         ("template", template, ChannelTemplate, "template", "--template"),
         ("location", location, LocationElement, "location", "--location"),
         ("header", header, MediaItem, "header", "--header"),
+        ("data", data, FormData, "form data", "--data"),
     ):
         if raw is not None:
             body[key] = _model_field(raw, model, label, param_hint=param_hint)

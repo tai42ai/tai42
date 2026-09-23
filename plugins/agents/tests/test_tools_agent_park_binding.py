@@ -24,6 +24,7 @@ from tai42_contract.interactions import (
     suspended_interaction_marker,
 )
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import tool_call_frame
 from tests._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
@@ -164,11 +165,12 @@ def test_tools_agent_run_refuses_live_tools(
     asyncio.run(go())
 
 
-def test_tools_agent_astream_refuses_async_ask_without_completion(
+def test_tools_agent_astream_refuses_async_ask_without_a_run_delivery_context(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # The astream face binds NO resume path when no completion tool is bound (a direct SSE
-    # run), so an async ask refuses loudly pre-persist — the option-ii boundary is unchanged.
+    # A stream driven under NO run-delivery context has no receiver at all, so the astream face
+    # binds no resume path and an async ask refuses loudly pre-persist. (No frame is opened here,
+    # so no run-delivery id is ambient.)
     saver = InMemorySaver()
     ask = _AskStandIn("i1")
     model = ScriptedChatModel([_ask_call(), AIMessage(content="unreached")])
@@ -187,6 +189,43 @@ def test_tools_agent_astream_refuses_async_ask_without_completion(
             ):
                 pass
         assert await idx.read_park_entry("i1") is None
+
+    asyncio.run(go())
+
+
+def test_tools_agent_astream_parks_under_a_run_delivery_context_without_an_address(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # Under a run-delivery context (the door opened the minting call frame) but NO out-of-band
+    # completion address, the astream face is park-capable: a live receiver takes the outcome
+    # inline, so an async ask PARKS instead of refusing. The park stores no delivery tool.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="unreached")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        # The frame mints a run-delivery id with NO address bound (no ``set_park_completion``).
+        with tool_call_frame(name="agent"):
+            events = [
+                event
+                async for event in agent.astream(
+                    tool_names=["ask"],
+                    checkpoint_provider="redis",
+                    user_message=TemplatedText(content="go"),
+                    thread_id="t-astream-ctx",
+                )
+            ]
+        # The ask ran exactly once and parked; the stream reached the suspended terminal.
+        assert ask.calls == 1
+        assert [event for event in events if isinstance(event, SuspendedFinal)], events
+        entry = await idx.read_park_entry("i1")
+        assert entry is not None
+        # Receiver-less: no out-of-band delivery tool is stored on the park.
+        assert entry["completion_tool"] is None
 
     asyncio.run(go())
 

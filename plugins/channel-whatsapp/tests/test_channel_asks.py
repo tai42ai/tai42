@@ -560,6 +560,34 @@ async def test_non_dict_error_value_uses_raw_text_and_stays_non_retryable(fake_h
     assert excinfo.value.retryable is False
 
 
+async def test_error_detail_surfaces_every_documented_graph_field(fake_httpx: FakeHttpx):
+    # The vendor's full error object is kept, in Meta's documented field order, none
+    # dropped: each present field a name=<render> token (repr for a scalar, compact
+    # sorted JSON for error_data), joined by one space — the operator's diagnostic.
+    body = {
+        "error": {
+            "code": 131009,
+            "error_subcode": 4016011,
+            "type": "OAuthException",
+            "message": "bad flow",
+            "error_user_title": "Title",
+            "error_user_msg": "User message",
+            "error_data": {"z": 1, "a": 2},
+            "fbtrace_id": "trace-xyz",
+        }
+    }
+    fake_httpx.responses.append(response(400, json=body))
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await send_message(PHONE_NUMBER_ID, ALLOWED_A, "hi")
+
+    assert (
+        "code=131009 error_subcode=4016011 type='OAuthException' message='bad flow' "
+        "error_user_title='Title' error_user_msg='User message' error_data={\"a\":2,\"z\":1} "
+        "fbtrace_id='trace-xyz'"
+    ) in str(excinfo.value)
+
+
 async def test_missing_access_token_is_not_retryable(fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch):
     from tai42_kit.settings import reset_all_settings
 

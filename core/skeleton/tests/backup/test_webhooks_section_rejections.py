@@ -184,7 +184,7 @@ async def test_hook_with_non_compiling_jq_per_record_rest_restored(store) -> Non
                 "tool": "notify",
                 "execution_key": "k-fire",
                 "execution_key_fingerprint": "fp",
-                "expr": {"content": ".foo |"},
+                "start_expr": {"content": ".foo |"},
             },
             {
                 "name": "sound",

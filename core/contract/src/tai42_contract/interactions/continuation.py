@@ -1,10 +1,10 @@
-"""The driver-continuation context for an async ``ask_user``.
+"""The driver-continuation context for an async ``ask``.
 
 Two generic context variables naming registered tools a resuming driver binds:
 
 * the RESUME continuation — the tool that resumes the CURRENT driver when a tool
   async-suspends. The resuming driver SETS it around a tool dispatch; the platform
-  READS it when an ``ask_user`` is raised with ``mode="async"``, stamping the value
+  READS it when an ``ask`` is raised with ``mode="async"``, stamping the value
   onto the parked interaction as its ``continuation_tool``.
 * the COMPLETION continuation — the tool a driver fires with the FINAL answer when a
   resumed run drives to a clean terminal (not a re-park), so a deferred response is
@@ -29,11 +29,11 @@ at all, so a same-named sibling is refused on that, never on a name comparison h
 differ.
 
 Refusing is not the only answer to a park this caller does not own. :func:`resolve_park_adoption`
-is the OBJECT seams' form of the guard, and it answers adopt-your-own or CHAIN: a caller that
-bound a CHAINED completion around the nested dispatch parks on the nested CALL — a key of its
-own, owned by its own resume continuation — while the nested run keeps its park and its resume,
-and its terminal re-enters the caller through that binding's delivery tool. A caller that chained
-nothing still gets the loud refusal. The CLAIM point cannot chain: a park reaching it as content
+is the OBJECT seams' form of the guard, and it answers adopt-your-own or CHAIN: a nested dispatch
+a CHAIN routing was bound around parks on the nested CALL — a key of its own, owned by its own
+resume continuation — while the nested run keeps its park and its resume, and its terminal
+re-enters the caller through the routing's delivery tool. A dispatch nothing chained still gets
+the loud refusal. The CLAIM point cannot chain: a park reaching it as content
 belongs to no dispatch it could attribute the call to, so there it is adopt-or-refuse.
 
 The resume continuation is a bare tool name; the completion continuation is a tool name
@@ -54,14 +54,13 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapp
 from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar, Token
 from datetime import datetime
-from typing import Any, Final, cast
+from typing import Any, Final, NamedTuple, cast
 
 from tai42_contract.errors import ErrorKind
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "CHAINED_PARK_CONTEXT_KEY",
     "CHAINED_PARK_KEY_PREFIX",
     "CHAINED_PARK_TOKEN_KEY",
     "EXPIRY_ANSWER",
@@ -70,26 +69,32 @@ __all__ = [
     "PARK_COMPLETION_SUCCEEDED",
     "PARK_COMPLETION_THREAD_KEY",
     "SUSPENDED_INTERACTION_MARKER_KEY",
+    "ChainedResume",
     "NestedParkOwnershipError",
+    "ParkDeliveryUnauthorizedError",
+    "ParkResumeFailed",
+    "ParkResumeUnauthorizedError",
     "assert_park_adoptable",
     "attach_chained_park",
     "bound_execution_identity_for_fire",
     "chained_park_claims",
-    "chained_park_context",
     "current_execution_identity",
-    "fire_continuation_abandoned",
+    "fire_park_killed",
+    "get_chained_resume",
     "get_park_completion",
     "get_resume_continuation_tool",
     "is_chained_park_key",
     "new_chained_park_key",
     "read_suspended_interaction_marker",
-    "register_continuation_abandonment_handler",
     "register_execution_identity_accessor",
     "register_execution_identity_binder",
+    "register_park_kill_handler",
     "repark_notice",
+    "reset_chained_resume",
     "reset_park_completion",
     "reset_resume_continuation_tool",
     "resolve_park_adoption",
+    "set_chained_resume",
     "set_park_completion",
     "set_resume_continuation_tool",
     "suspended_interaction_marker",
@@ -105,61 +110,98 @@ _ParkCompletion = tuple[str | None, Mapping[str, Any] | None]
 _park_completion: ContextVar[_ParkCompletion] = ContextVar("tai42_park_completion", default=(None, None))
 
 
-# --- the continuation-abandonment seam ---------------------------------------------------
-#
-# An async park's resume is delivered AT-LEAST-ONCE: a resuming driver whose resume raises leaves
-# the durable continuation-due record for the platform to redeliver. That redelivery is not
-# unbounded — a record whose retention horizon lapses is dropped for good, a PERMANENT give-up
-# after which no redelivery will ever fire the resume again. The bound caller waiting on that run
-# (a conversation turn, a chained park) would otherwise learn nothing until its OWN deadline.
-#
-# This is the seam a resuming driver registers a handler on to be told of THAT terminus by
-# interaction id, so it can fire its own non-success completion (the FAILED terminal) exactly
-# once — at the one point where no later success can be deduped away, since the record is gone and
-# nothing can re-drive the run. Generic and flow-blind: the platform names the abandoned
-# interaction; the driver owns what an abandoned park means and how to close it.
-_ContinuationAbandonmentHandler = Callable[[str], Awaitable[None]]
+class ChainedResume(NamedTuple):
+    """The cross-driver chain routing a nested driver captures at park time.
 
-_continuation_abandonment_handlers: list[_ContinuationAbandonmentHandler] = []
+    A run whose nested tool ran on ANOTHER driver re-enters that waiting run ACROSS drivers by
+    firing a chain-delivery tool at its own terminal. The three facts that fire needs ride this
+    contextvar, bound by the platform around the nested dispatch and captured by the nested driver
+    onto its own park index (never on ``_park_completion``, which is left carrying only the door's
+    out-of-band address so it flows down unchanged):
 
-
-def register_continuation_abandonment_handler(handler: _ContinuationAbandonmentHandler) -> None:
-    """Register ``handler`` to fire with the interaction id when a park's resume is abandoned.
-
-    The abandonment is PERMANENT: the durable continuation-due record was dropped past its
-    retention horizon, so no redelivery will ever fire it again.
-
-    Idempotent by handler identity: a resuming driver's registration site may run per reload epoch
-    and from several agents, so re-registering the SAME callable is a no-op rather than a duplicate
-    fire.
+    * ``delivery_tool`` — the chain-delivery tool the terminal fires to re-enter the ancestor;
+    * ``chain_key`` — the key the ancestor's park is recorded under and the fire reverses back to it;
+    * ``asked_by`` — the ANCESTOR's own call chain, passed on the chain re-entry as
+      ``continues_chain`` so the ancestor's re-park records its OWN chain, not the descendant's plus
+      the chain tool's name.
     """
-    if handler not in _continuation_abandonment_handlers:
-        _continuation_abandonment_handlers.append(handler)
+
+    delivery_tool: str
+    chain_key: str
+    asked_by: tuple[str, ...]
 
 
-async def fire_continuation_abandoned(interaction_id: str) -> None:
-    """Notify every registered handler that ``interaction_id``'s resume is permanently abandoned.
+_chained_resume: ContextVar[ChainedResume | None] = ContextVar("tai42_chained_resume", default=None)
 
-    Best-effort per handler: one that raises is logged and swallowed, so a single driver's failure
-    never starves the other handlers or aborts the reaper pass that fired them. A process with no
-    resuming driver loaded holds no handlers and this is a no-op.
+
+def get_chained_resume() -> ChainedResume | None:
+    """The chain routing bound around the current nested dispatch, or ``None`` when unchained."""
+    return _chained_resume.get()
+
+
+def set_chained_resume(routing: ChainedResume | None) -> Token[ChainedResume | None]:
+    """Bind ``routing`` as the current nested dispatch's chain routing and return the reset token."""
+    return _chained_resume.set(routing)
+
+
+def reset_chained_resume(token: Token[ChainedResume | None]) -> None:
+    """Restore the chain routing to the value captured in ``token``."""
+    _chained_resume.reset(token)
+
+
+# --- the platform delivery signals ------------------------------------------------------
+#
+# A resuming driver's continuation face RETURNS the outermost run's next outcome; the platform's
+# delivery chokepoint reads that return and delivers it. Two exception signals cross that seam.
+
+
+class ParkResumeFailed(Exception):  # noqa: N818 (a control-flow signal, not an *Error condition)
+    """A resumed run reached a TERMINAL that must be delivered FAILED — do NOT retry.
+
+    A resuming driver RAISES this from its continuation face for a mid-drive ABORT or SUPERSEDE
+    terminal, carrying the failed ``outcome``. The delivery chokepoint catches it, CLEARS the
+    continuation-due record (no redelivery), and delivers ``outcome`` through the ladder with a
+    FAILED status. Distinct from a PLAIN raise, which means "transient — retain the due record and
+    redeliver", and from an ordinary business-error terminal, which the face RETURNS as a
+    FAILED-status outcome rather than raising.
     """
-    for handler in _continuation_abandonment_handlers:
-        try:
-            await handler(interaction_id)
-        except Exception:
-            logger.warning(
-                "a continuation-abandonment handler raised for interaction %s; suppressed so it cannot "
-                "abort the abandonment fire or starve the other handlers",
-                interaction_id,
-                exc_info=True,
-            )
+
+    def __init__(self, outcome: Any) -> None:
+        """Carry the failed terminal ``outcome`` the ladder delivers with a FAILED status."""
+        super().__init__("park resume reached a terminal to deliver FAILED")
+        self.outcome = outcome
+
+
+class ParkResumeUnauthorizedError(Exception):
+    """A driver continuation face was invoked outside its run's own resume drive.
+
+    A driver's resume face and cross-driver chain-delivery tool are dispatchable by name at the
+    run-tool door and the MCP edge, so the platform gates them: a face may produce a run's outcome
+    ONLY inside the platform's resume of that run. Raised when the ambient run-authorization
+    context does not name the resumed interaction (or its run's delivery identity).
+    """
+
+    # A refusal to authorize the caller, not a caller input error or a transient unavailability.
+    __tai_error_kind__ = ErrorKind.UNAUTHORIZED
+
+
+class ParkDeliveryUnauthorizedError(Exception):
+    """A door's delivery-address tool was invoked outside the platform's own delivery fire.
+
+    A door's out-of-band delivery address is a registered tool, dispatchable by name at the
+    run-tool door and the MCP edge; only the platform's delivery ladder may fire it. Raised when
+    the ambient delivery-fire context is absent or names a different ``completion_id`` than the one
+    the tool was asked to deliver.
+    """
+
+    # A refusal to authorize the caller, not a caller input error or a transient unavailability.
+    __tai_error_kind__ = ErrorKind.UNAUTHORIZED
 
 
 # --- the execution-identity bridge -------------------------------------------------------
 #
 # A park records the execution identity its run is authorized as, so an OUT-OF-BAND completion
-# fired for it later (the abandonment fire) runs under that same identity — never fail-open. The
+# fired for it later runs under that same identity — never fail-open. The
 # identity machinery is a HOST concern (it reads live stored grants), so this contract holds only
 # a pair of registration slots a host fills: an ACCESSOR to read the current identity as
 # ``(execution key, fingerprint)`` when a park records it, and a BINDER to bind that identity
@@ -222,6 +264,51 @@ async def bound_execution_identity_for_fire(execution_key: str | None, fingerpri
         yield
 
 
+# --- the whole-chain kill teardown seam --------------------------------------------------
+#
+# A whole-chain kill tears a parked (or running) run down for good: the platform prunes its
+# park index and clears its continuation-due record, and each driver that owns durable run state
+# tears its OWN state down (its checkpoint, its resolution records, and every run it linked above
+# it). The platform holds only registration slots the drivers fill; it FIRES them from
+# ``kill_park`` with the run-authorization context bound around the fire (so a handler's
+# cross-driver teardown notify authorizes on the killed run's shared delivery identity), and it —
+# never a driver — delivers the run's single FAILED afterward.
+#
+# A handler is fired with ``(interaction_id, reason)`` and returns None. It owns ONLY its driver's
+# teardown: a handler that does not own the interaction is a no-op. A handler that cannot finish
+# yet (its own park record is not written, a link is still in flight, or a cross-driver teardown
+# notify failed) RAISES; the raise propagates so ``kill_park`` keeps the durable kill-due record
+# and the reaper redelivers the kill idempotently. What stays best-effort inside a driver's abort
+# layer is only the LOCAL finalize of already-dead local state.
+_ParkKillHandler = Callable[[str, str], Awaitable[None]]
+
+_park_kill_handlers: list[_ParkKillHandler] = []
+
+
+def register_park_kill_handler(handler: _ParkKillHandler) -> None:
+    """Register a driver teardown fired when a parked/running run is killed whole-chain.
+
+    Every registered handler is fired (in registration order) with the killed
+    ``(interaction_id, reason)``; a handler that does not own the interaction is a no-op. A driver
+    registers once at import. Handlers accumulate — each driver that resumes parks registers its
+    own — so the platform reaches every driver's teardown from one fire.
+    """
+    _park_kill_handlers.append(handler)
+
+
+async def fire_park_killed(interaction_id: str, reason: str) -> None:
+    """Fire every registered driver teardown for a killed run, in registration order.
+
+    Called by the platform's ``kill_park`` with the run-authorization context already bound. A
+    handler that RAISES propagates immediately (a later handler is not fired this pass); the caller
+    keeps the durable kill-due record and the reaper redelivers, re-firing every handler — so each
+    driver's teardown must be idempotent. With no handler registered this is a no-op (a host with
+    no resuming driver has nothing to tear down).
+    """
+    for handler in _park_kill_handlers:
+        await handler(interaction_id, reason)
+
+
 # The answer value a continuation receives when its interaction expired unanswered — the
 # generic marker a resuming consumer reads to run its expiry branch instead of a real answer.
 EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
@@ -259,15 +346,14 @@ PARK_COMPLETION_REPARKED: Final[str] = "reparked"
 
 # The ONE reserved field inside an otherwise-opaque completion context: the conversation
 # thread the addressed park belongs to. The platform's park-by-thread index reads it (so a
-# thread delete can cascade-cancel the parks it would orphan), which is why any party that
-# COMPOSES a completion context over another one carries it up to the new context's top level
-# — see :func:`chained_park_context`. Everything else in a context stays opaque here.
+# thread delete can cascade-cancel the parks it would orphan). Everything else in a context
+# stays opaque here.
 PARK_COMPLETION_THREAD_KEY: Final[str] = "delivery_thread_id"
 
 
 # The reserved key a platform-produced async-park RESULT carries in place of an answer,
 # so a resuming driver recognizes the park by the RESULT shape (never a tool name). The
-# in-process client-tool seam stamps it onto the tool result when an async ``ask_user``
+# in-process client-tool seam stamps it onto the tool result when an async ``ask``
 # returns its ``SuspendedInteraction`` sentinel; a resuming driver reads it back off the
 # serialized tool output. Generic: it carries the parked interaction id, its deadline, and
 # the park's resume OWNER — no driver or engine state.
@@ -275,7 +361,11 @@ SUSPENDED_INTERACTION_MARKER_KEY: Final[str] = "tai42:suspended_interaction"
 
 
 def suspended_interaction_marker(
-    interaction_id: str, expiry_at: datetime | None, resume_owner: str | None = None
+    interaction_id: str,
+    expiry_at: datetime | None,
+    resume_owner: str | None = None,
+    interaction_ids: list[str] | None = None,
+    caller_interaction_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the reserved marker dict a platform-produced async park returns in place of an answer.
 
@@ -288,16 +378,23 @@ def suspended_interaction_marker(
     defaults to ``None``, which no bound driver may adopt: a marker built without an owner is
     treated as a nested/foreign park rather than silently claimed.
 
-    Disclosure: this field rides the MCP wire wherever a park sentinel is serialized, so it
-    exposes an internal resume-tool NAME to the caller. That caller already receives the
-    interaction's ``continuation_tool`` on the stored question, so the name is not new
-    information to it; the exposure is accepted.
+    ``interaction_ids`` are every ask this park represents (defaulting to the single
+    ``interaction_id``) and ``caller_interaction_ids`` the subset addressed to the caller
+    (``to="caller"``); both ride the wire so a driver reading the marker off a serialized
+    tool result can MERGE them when it surfaces a whole super-step at one tool face.
+
+    Disclosure: the ``resume_owner`` field rides the MCP wire wherever a park sentinel is
+    serialized, so it exposes an internal resume-tool NAME to the caller. That caller already
+    receives the interaction's ``continuation_tool`` on the stored question, so the name is not
+    new information to it; the exposure is accepted.
     """
     return {
         SUSPENDED_INTERACTION_MARKER_KEY: {
             "interaction_id": interaction_id,
             "expiry_at": expiry_at.isoformat() if expiry_at is not None else None,
             "resume_owner": resume_owner,
+            "interaction_ids": list(interaction_ids) if interaction_ids else [interaction_id],
+            "caller_interaction_ids": list(caller_interaction_ids) if caller_interaction_ids else [],
         }
     }
 
@@ -317,7 +414,10 @@ def read_suspended_interaction_marker(content: Any) -> dict[str, Any] | None:
     so a payload that is not a dict, or one carrying no string ``interaction_id`` (``{}``, a
     bare string, an owner-only object a model shaped), yields ``None`` rather than a malformed
     dict a caller would ``KeyError`` on and abort the run over. A park with no valid interaction
-    id names nothing to resume, so it is not a park. ``resume_owner`` is what makes an otherwise
+    id names nothing to resume, so it is not a park. The returned payload MAY also carry
+    ``interaction_ids`` / ``caller_interaction_ids`` (present on a platform-built marker); a
+    consumer reading them defaults to the single ``interaction_id`` when they are absent.
+    ``resume_owner`` is what makes an otherwise
     well-formed marker checkable — a claimer passes it to :func:`assert_park_adoptable`, and a
     marker carrying no owner (e.g. one a model shaped) names no driver entitled
     to claim it, so it is refused there.
@@ -358,26 +458,20 @@ class NestedParkOwnershipError(RuntimeError):
 
 # --- chained parks ---------------------------------------------------------------------
 #
-# A CHAINED call is a nested dispatch its caller binds a completion around: the caller parks
-# on the CALL rather than on whatever interaction the nested run parks on, and the nested
-# run's terminal fires the bound delivery tool, which re-enters the caller with that terminal.
-# The three pieces of shared vocabulary live here because three parties touch them: the
-# caller-side binder that composes the context, the platform seam that converts a returned
-# park sentinel, and the delivery tool that reads the fire back.
+# A CHAINED call is a nested dispatch a chain routing is bound around: the caller parks on the
+# CALL rather than on whatever interaction the nested run parks on, and the nested run's terminal
+# fires the routing's delivery tool, which re-enters the caller with that terminal. The shared
+# vocabulary lives here because several parties touch it: the platform seam that binds the
+# routing, the seam that converts a returned park sentinel onto the chain key, and the delivery
+# tool that reads the fire back.
 
 # Namespace prefix on every chained resume key, so a key naming a CALL is never mistaken for a
 # platform interaction id (they share one key space wherever a driver indexes its parks).
 CHAINED_PARK_KEY_PREFIX: Final[str] = "tai42:chained-park:"
 
-# The chained resume key, carried at the top level of the chain's completion context: the key
-# the CALLER's park is recorded under and the delivery tool reverses back to it.
+# The chained resume key, carried under this key in every chain fire's payload: the key the
+# CALLER's park is recorded under and the delivery tool reverses back to it.
 CHAINED_PARK_TOKEN_KEY: Final[str] = "chain_token"  # noqa: S105 constant identifier, not a secret value
-
-# The completion binding the chain's own context WRAPS — the caller's binding at the moment it
-# chained, embedded whole (``{"tool": ..., "context": ...}``, or ``None`` when nothing was
-# bound). A completion context is replaced, never merged, so embedding is how the replaced
-# binding survives the composition instead of being lost.
-CHAINED_PARK_CONTEXT_KEY: Final[str] = "chained_context"
 
 
 _chained_park_claims: ContextVar[set[str] | None] = ContextVar("tai42_chained_park_claims", default=None)
@@ -401,45 +495,13 @@ def is_chained_park_key(key: str) -> bool:
     return key.startswith(CHAINED_PARK_KEY_PREFIX)
 
 
-def chained_park_context(key: str, wrapped: _ParkCompletion) -> dict[str, Any]:
-    """Compose the completion context for a chained dispatch.
-
-    Carries the chained resume ``key``, the caller's own ``wrapped`` binding embedded whole,
-    and the reserved :data:`PARK_COMPLETION_THREAD_KEY` hoisted to the top level when the
-    wrapped context carried one.
-
-    The hoist is what keeps the platform's park-by-thread index working across the
-    composition: that index reads the ONE reserved field off whatever context is bound, and a
-    chained dispatch replaces the caller's context with this one. Everything else the wrapped
-    context holds stays opaque and untouched inside the embedding. JSON-serializable by
-    construction, as every completion context must be.
-    """
-    wrapped_tool, wrapped_context = wrapped
-    context: dict[str, Any] = {
-        CHAINED_PARK_TOKEN_KEY: key,
-        CHAINED_PARK_CONTEXT_KEY: (
-            {"tool": wrapped_tool, "context": dict(wrapped_context) if wrapped_context is not None else None}
-            if wrapped_tool is not None or wrapped_context is not None
-            else None
-        ),
-    }
-    if wrapped_context is not None:
-        thread_id = wrapped_context.get(PARK_COMPLETION_THREAD_KEY)
-        if thread_id is not None:
-            context[PARK_COMPLETION_THREAD_KEY] = thread_id
-    return context
-
-
 def _bound_chained_park_key() -> str | None:
     """The chained resume key bound around the CURRENT nested dispatch, or ``None`` if unchained.
 
-    Unchained means nothing bound, or a completion that is not a chain.
+    Unchained means no chain routing is bound.
     """
-    _tool, context = get_park_completion()
-    if context is None:
-        return None
-    key = context.get(CHAINED_PARK_TOKEN_KEY)
-    return key if isinstance(key, str) and key else None
+    routing = get_chained_resume()
+    return routing.chain_key if routing is not None else None
 
 
 @contextlib.contextmanager
@@ -491,8 +553,8 @@ def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool
 
     * the park is adoptable here (raised under the continuation bound HERE) — it is this run's
       own park, returned unchanged, and the platform resumes it directly;
-    * otherwise, if this dispatch was CHAINED (its caller bound a chained completion around it,
-      :func:`chained_park_context`), the run parks on the chained resume KEY instead, owned by
+    * otherwise, if this dispatch was CHAINED (a chain routing was bound around it,
+      :func:`get_chained_resume`), the run parks on the chained resume KEY instead, owned by
       this run's OWN resume continuation — because that park is genuinely this run's: it waits
       on the CALL, while the nested run keeps its own park and its own resume and re-enters
       here through the chain's delivery tool when it terminates. The key is recorded in the
@@ -519,25 +581,25 @@ def resolve_park_adoption(resume_owner: str | None, *, interaction_id: str, tool
 
 
 def repark_notice(expiry_at: datetime | None) -> tuple[str, dict[str, Any]] | None:
-    """The ``(tool, payload)`` fired when a park is raised under a CHAINED completion binding.
+    """The ``(tool, payload)`` fired when a park is raised under a bound chain routing.
 
-    Returns ``None`` when the bound completion is not a chain (every other binding, and no
-    binding at all).
+    Returns ``None`` when no chain routing is bound around the current dispatch.
 
     A chained caller's own suspension horizon is INHERITED from the nested run's current ask,
     so when that run re-parks on a new ask the caller's horizon must move with it. The notice
-    is that signal: the bound context merged with ``{"expiry_at": <iso>, "status":
-    PARK_COMPLETION_REPARKED}`` — the same generic shape a completion fire takes, under the one
-    non-terminal status, carrying the new deadline in place of a result. It resolves nothing;
-    the completion still fires later under a terminal status.
+    is that signal: the routing's ``delivery_tool`` paired with ``{CHAINED_PARK_TOKEN_KEY:
+    routing.chain_key, "expiry_at": <iso>, "status": PARK_COMPLETION_REPARKED}`` — the one
+    non-terminal status, carrying the new deadline in place of a result and the chain key the
+    delivery tool reverses back to the caller's park. It resolves nothing; the completion still
+    fires later under a terminal status.
 
-    Only a chained binding is notified, so no other delivery tool ever sees this fire.
+    Only a bound chain routing is notified, so no other delivery tool ever sees this fire.
     """
-    tool, context = get_park_completion()
-    if tool is None or _bound_chained_park_key() is None:
+    routing = get_chained_resume()
+    if routing is None:
         return None
-    return tool, {
-        **(context or {}),
+    return routing.delivery_tool, {
+        CHAINED_PARK_TOKEN_KEY: routing.chain_key,
         "expiry_at": expiry_at.isoformat() if expiry_at is not None else None,
         "status": PARK_COMPLETION_REPARKED,
     }
@@ -647,6 +709,13 @@ def set_park_completion(tool: str | None = None, context: Mapping[str, Any] | No
     ``tool`` defaults to ``None``: a driver on a run-face that carries no out-of-band
     delivery still binds a completion (typically to reset a prior binding for the nested
     run), naming no delivery tool.
+
+    ADDRESS-TOOL CONTRACT: a ``tool`` bound here is an out-of-band delivery ADDRESS that
+    only the platform's delivery ladder may fire. Every such address tool asserts the
+    platform's delivery-fire context at entry — its first statement is
+    ``tai42_app.interactions.assert_delivery_authorized(completion_id)`` on the payload's
+    ``completion_id`` — so a caller naming it directly at the run-tool door or the MCP edge
+    is refused (:class:`ParkDeliveryUnauthorizedError`) before it delivers anything.
     """
     return _park_completion.set((tool, context))
 

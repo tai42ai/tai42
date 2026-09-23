@@ -394,13 +394,13 @@ def test_callback_documents_html_get_and_json_post(spec: dict) -> None:
 
 def test_callback_documents_its_error_statuses(spec: dict, api_routes: list[RouteMetadata]) -> None:
     # The callback door declares the full set it answers: 400 (malformed JSON body),
-    # 401 (failed verification), 404 (unknown/expired ticket), 413 (oversized
-    # body/query), 500 (verifier error). Pinned as ground truth so a change to the
-    # declared set trips here.
+    # 401 (failed verification), 404 (unknown/expired ticket), 409 (a caller ask,
+    # answerable only by its calling run), 413 (oversized body/query), 500 (verifier
+    # error). Pinned as ground truth so a change to the declared set trips here.
     (callback,) = [m for m in api_routes if m.path == "/api/interactions/callback/{ticket}"]
-    assert set(callback.error_statuses) == {400, 401, 404, 413, 500}
+    assert set(callback.error_statuses) == {400, 401, 404, 409, 413, 500}
     responses = spec["paths"]["/api/interactions/callback/{ticket}"]["post"]["responses"]
-    for status in ("400", "401", "404", "413", "500"):
+    for status in ("400", "401", "404", "409", "413", "500"):
         assert status in responses, f"callback POST is missing the {status} response"
 
 
@@ -505,9 +505,10 @@ def test_scope_url_delete_doors_document_the_400(
 # below holds none. That status belongs to the inner tool, not to the door's contract —
 # the equality is over what each door DECLARES, which is what a client reads off the spec.
 _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
-    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, OperationFailedError. Its
+    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, UpstreamError (502 — a
+    # tool result no JSON encoder can render is a bad-tool-output fault), OperationFailedError. Its
     # only 503 is the reload gate's, so none is declared here.
-    ("POST", "/api/run-tool"): {400, 401, 403, 404, 500},
+    ("POST", "/api/run-tool"): {400, 401, 403, 404, 500, 502},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — these two doors are not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},

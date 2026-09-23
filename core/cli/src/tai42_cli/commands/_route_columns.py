@@ -90,11 +90,14 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("GET", "/api/conversations"): RouteShape(
         items_key="items",
         columns=(
+            "cancel_expr",
+            "resume_expr",
+            "start_expr",
+            "extras_expr",
             "route_name",
             "door",
             "target_kind",
             "target_name",
-            "payload_expr",
             "reply_expr",
             "initial_mode",
             "execution_key",
@@ -225,7 +228,10 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("GET", "/api/hooks"): RouteShape(
         items_key="items",
         columns=(
-            "expr",
+            "cancel_expr",
+            "resume_expr",
+            "start_expr",
+            "extras_expr",
             "condition",
             "name",
             "topic",
@@ -367,6 +373,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "outcome",
             "startedAt",
             "endedAt",
+            "resumedInteractions",
         ),
     ),
     ("GET", "/api/state-templates"): RouteShape(

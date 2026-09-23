@@ -40,6 +40,17 @@ from tai42_skeleton.states.templates.regimes import REGIMES, _validate_regime_pa
 # upload and every evaluator binds the same set.
 DECLARATIONS_CHECK_VARIABLES: tuple[str, ...] = ("parameters",)
 
+# The named jq variables each reconcile program reads beside its ``.``, per program. ``.``
+# holds the one thing the program maps (``orphans``/``close`` the record subtree,
+# ``resolutions`` the new declarations); everything else the reconciler supplies is a named
+# variable. Declared here so a program compiles at upload and the reconcile evaluator binds
+# the same set for each label.
+RECONCILE_JQ_VARIABLES: dict[str, tuple[str, ...]] = {
+    "orphans": ("previous", "new"),
+    "close": ("id", "resolution"),
+    "resolutions": (),
+}
+
 _TEMPLATE_KEYS = frozenset(
     {
         "kind",
@@ -251,8 +262,8 @@ def _parse_reconcile(raw: Any) -> StateTemplateReconcile:
     """Parse the ``reconcile`` section ``{orphans, close, resolutions}`` — three jq programs.
 
     Each is a :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``)
-    over its own input payload (no ``$`` bindings). An inline body compiles here; a by-id body
-    defers its compile to the save door
+    over its own ``.`` with the per-label :data:`RECONCILE_JQ_VARIABLES` bound as ``$name``
+    beside it. An inline body compiles here; a by-id body defers its compile to the save door
     (:meth:`~tai42_skeleton.states.service.StatesService._compile_by_id_reconcile`), the point
     that can render the stored resource.
     """
@@ -263,7 +274,7 @@ def _parse_reconcile(raw: Any) -> StateTemplateReconcile:
         text = _parse_program_body(raw.get(label), where=f"reconcile {label}")
         if text.content is not None:
             try:
-                compile_check(text.content)
+                compile_check(text.content, variables=RECONCILE_JQ_VARIABLES[label])
             except Exception as exc:
                 raise TemplateValidationError(f"reconcile {label} is not a valid jq expression: {exc}") from exc
         programs[label] = text

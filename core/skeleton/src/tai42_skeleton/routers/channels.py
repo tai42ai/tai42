@@ -1,7 +1,7 @@
 """HTTP surface for the channels feature — the authed catalog door the Studio admin surface consumes.
 
 - ``GET /api/channels`` (AUTHED) — list the registered channel names, i.e. the
-  delivery media ``ask_user(channel=...)`` can currently resolve. Registration
+  delivery media ``ask(channel=...)`` can currently resolve. Registration
   itself is import-only (a manifest ``channel_modules`` entry); this door is
   read-only. Success bodies are ``{"data": ...}``.
 

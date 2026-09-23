@@ -125,6 +125,36 @@ class _ResolutionMixin(_ToolBindingBase):
             return None
         return self._retry_policy_for(key, mcp_tool)
 
+    async def declared_extras(self, name: str) -> frozenset[str]:
+        """The door ``extras`` keys a dispatch of ``name`` is declared to read, resolved from the live target.
+
+        An AGENT target declares its keys through its ``extras_keys`` class attribute, so a name that
+        resolves to a registered agent answers from that attribute (an agent is not a tool). For a
+        tool, declared keys key on the REGISTERED tool name (the ``extras_keys`` parameter of
+        ``@app.tools.tool``). A preset-backed dispatch carries its own name but runs the base tool's
+        body, so an undeclared transformed tool walks its ``parent_tool`` chain and inherits the
+        first declared ancestor's keys — the base tool's declared read surface travels with the
+        body. A target with no declaration anywhere in its chain reads no extras (an empty set). An
+        unknown name reads none — the caller's own dispatch surfaces the not-found, never this
+        lookup.
+        """
+        agent = self._app._agent_binding.all_agents().get(name)
+        if agent is not None:
+            return agent.extras_keys
+        declared = self._tool_extras_registry.get(name)
+        if declared is not None:
+            return declared
+        try:
+            tool_obj: Tool = await self._resolve_run_target(name)
+        except UnknownToolError:
+            return frozenset()
+        while isinstance(tool_obj, TransformedTool):
+            tool_obj = tool_obj.parent_tool
+            declared = self._tool_extras_registry.get(tool_obj.name)
+            if declared is not None:
+                return declared
+        return frozenset()
+
     def _retry_policy_for(self, key: str, mcp_tool: Tool) -> ToolRetryPolicy | None:
         """The declared retry policy governing a dispatch of ``key``, or ``None``.
 

@@ -22,6 +22,7 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_kit.backend import prepare_backend_kwargs
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
+from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
 from tai42_backend_arq.pool import RedisPoolManager
 from tai42_backend_arq.records import derive_cron_or_interval, next_run_after
@@ -79,7 +80,9 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
 
-    sig = add_signature_params(func, ARQ_SCHEDULE_OPTS, exclude_fastmcp_ctx=True)
+    # The branch accepts its own schedule opts PLUS the reserved keys the create door stamps
+    # (identity + contract), or the tool binding refuses the stamped dispatch as unexpected kwargs.
+    sig = add_signature_params(func, {**ARQ_SCHEDULE_OPTS, **SCHEDULE_STAMPED_DOOR_OPTS}, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> None:
         kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs, scheduled=True)

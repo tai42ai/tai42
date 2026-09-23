@@ -75,7 +75,7 @@ parked_question_parked = asyncio.Event()
 @tai42_app.tools.tool
 async def parked_question_tool(seconds: float = 0.0) -> str:
     """Block ``seconds`` with a question parked; on the turn-budget cancellation stamp the
-    pending ``(interaction_id, question)`` on the CancelledError exactly as the ``ask_user``
+    pending ``(interaction_id, question)`` on the CancelledError exactly as the ``ask``
     answer wait does, so the expiry error names what the turn was killed waiting on. Signal
     ``parked_question_parked`` on reaching the wait so the cancellation is delivered while
     parked, not mid-dispatch. A run cancelled on expiry leaves the completion flag False."""
@@ -98,7 +98,7 @@ parked_sensitive_parked = asyncio.Event()
 @tai42_app.tools.tool
 async def parked_sensitive_question_tool(seconds: float = 0.0) -> str:
     """Block ``seconds`` with a SENSITIVE question parked; on the turn-budget cancellation
-    stamp the pending question with ``sensitive=True`` exactly as the ``ask_user`` answer
+    stamp the pending question with ``sensitive=True`` exactly as the ``ask`` answer
     wait does for a credential prompt, so the expiry error redacts the question text. Signal
     ``parked_sensitive_parked`` on reaching the wait so the cancellation is delivered while
     parked, not mid-dispatch. A run cancelled on expiry leaves the completion flag False."""

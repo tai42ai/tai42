@@ -8,6 +8,7 @@ import time
 from typing import Any, cast
 
 import pytest
+from tai42_contract.conversations import ConversationRouteCreate
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
@@ -424,7 +425,7 @@ async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
         door="api",
         target_kind="tool",
         target_name="echo-tool",
-        payload_expr=TemplatedText(content="{message: .message, who: .sender}"),
+        start_expr=TemplatedText(content="{message: .message, who: .sender}"),
         reply_expr=TemplatedText(content=".reply // null"),
         execution_key="svc",
         callback_url="https://example.com/cb",
@@ -433,7 +434,7 @@ async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
     row = wired.rows["chat"]
     assert row.target_kind == "tool"
     assert row.target_name == "echo-tool"
-    assert row.payload_expr == TemplatedText(content="{message: .message, who: .sender}")
+    assert row.start_expr == TemplatedText(content="{message: .message, who: .sender}")
     assert row.reply_expr == TemplatedText(content=".reply // null")
 
 
@@ -443,7 +444,7 @@ async def test_create_tool_route_renders_and_stores_by_id_exprs(wired):
         door="api",
         target_kind="tool",
         target_name="echo-tool",
-        payload_expr=TemplatedText(id="route-payload"),
+        start_expr=TemplatedText(id="route-payload"),
         reply_expr=TemplatedText(id="route-reply"),
         execution_key="svc",
         callback_url="https://example.com/cb",
@@ -452,18 +453,18 @@ async def test_create_tool_route_renders_and_stores_by_id_exprs(wired):
     row = wired.rows["chat"]
     # The stored shape holds the templated text by id; the create rendered it (through the
     # bound resource manager) only to compile-check the jq it resolves to.
-    assert row.payload_expr == TemplatedText(id="route-payload")
+    assert row.start_expr == TemplatedText(id="route-payload")
     assert row.reply_expr == TemplatedText(id="route-reply")
 
 
-async def test_create_rejects_unfetchable_by_id_payload_expr(wired):
-    with pytest.raises(BadRequestError, match="payload_expr references stored id 'ghost'"):
+async def test_create_rejects_unfetchable_by_id_start_expr(wired):
+    with pytest.raises(BadRequestError, match="start_expr references stored id 'ghost'"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
             target_kind="tool",
             target_name="echo-tool",
-            payload_expr=TemplatedText(id="ghost"),
+            start_expr=TemplatedText(id="ghost"),
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -481,14 +482,14 @@ async def test_create_rejects_unknown_tool(wired):
         )
 
 
-async def test_create_rejects_invalid_payload_expr(wired):
-    with pytest.raises(BadRequestError, match="invalid payload_expr"):
+async def test_create_rejects_invalid_start_expr(wired):
+    with pytest.raises(BadRequestError, match="invalid start_expr"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
             target_kind="tool",
             target_name="echo-tool",
-            payload_expr=TemplatedText(content="{unterminated"),
+            start_expr=TemplatedText(content="{unterminated"),
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -507,17 +508,57 @@ async def test_create_rejects_invalid_reply_expr(wired):
         )
 
 
-async def test_create_rejects_exprs_on_agent_target(wired):
-    with pytest.raises(BadRequestError, match="no payload_expr/reply_expr"):
+async def test_create_compiles_the_door_exprs_with_their_declared_variables(wired):
+    # The four door jqs read ``$parked`` and ``reply_expr`` additionally reads ``$turn`` and
+    # ``$asks``; each is declared at create-time compilation, so a create referencing them succeeds.
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="tool",
+        target_name="echo-tool",
+        start_expr=TemplatedText(content="{ids: [$parked[].id]}"),
+        cancel_expr=TemplatedText(content='[$parked[] | select(.status == "asking") | .id]'),
+        resume_expr=TemplatedText(content="null"),
+        extras_expr=TemplatedText(content="{n: ($parked | length)}"),
+        reply_expr=TemplatedText(content="{t: $turn.id, a: ($asks | length), p: ($parked | length)}"),
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True
+
+
+async def test_create_rejects_a_reply_expr_reading_an_undeclared_variable(wired):
+    # ``$asks`` is a reply_expr variable, not a start_expr one: a start_expr referencing it is an
+    # undeclared reference and fails to compile, proving the declarations are scoped per field.
+    with pytest.raises(BadRequestError, match="invalid start_expr"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
-            target_kind="agent",
-            target_name="relay",
-            reply_expr=TemplatedText(content=".reply"),
+            target_kind="tool",
+            target_name="echo-tool",
+            start_expr=TemplatedText(content="{a: $asks}"),
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
+
+
+async def test_create_accepts_the_door_exprs_on_an_agent_target(wired):
+    # Both target kinds may carry the parkable-door jqs and a reply_expr: the turn engine evaluates
+    # them the same way for an agent run as for a tool dispatch.
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        start_expr=TemplatedText(content="{user_message: {content: .message}}"),
+        reply_expr=TemplatedText(content=".reply"),
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True
+    assert result["route"]["target_kind"] == "agent"
+    assert result["route"]["start_expr"]["content"] == "{user_message: {content: .message}}"
+    assert result["route"]["reply_expr"]["content"] == ".reply"
 
 
 async def test_create_rejects_a_colon_route_name(wired):
@@ -834,6 +875,51 @@ async def test_delete_route_cascade_cancels_every_thread_park(wired, record_redi
     await _assert_park_cancelled(store, fake, interaction_id="ib", thread_id=thread_b)
 
 
+async def test_delete_route_cancels_parks_before_removing_the_routing_row(
+    wired, record_redis, interactions_parks, monkeypatch
+):
+    # A park's whole-chain kill delivers the run's FAILED, which resolves the park's thread back to
+    # its route+address — reachable only while the routing row stands. So the delete cancels every
+    # thread park BEFORE it removes the row; removing the row first would leave that delivery unable
+    # to resolve the now-gone route and fail the delete.
+    manager = wired
+    store, fake = interactions_parks
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    thread = "bridge:chat:alice/user-0"
+    await _seed_thread_on("chat", door="api", thread_id=thread)
+    await _seed_park(store, fake, interaction_id="ia", group_id="ga", thread_id=thread)
+
+    from tai42_skeleton.interactions import helper as interactions_helper
+
+    order: list[str] = []
+    real_cancel = interactions_helper.cancel_parks_for_thread
+    real_delete = manager.delete_route
+
+    async def _cancel(thread_id: str, *, reason: str = "thread_deleted"):
+        order.append("cancel")
+        return await real_cancel(thread_id, reason=reason)
+
+    async def _delete(route_name: str):
+        order.append("delete_route")
+        return await real_delete(route_name)
+
+    monkeypatch.setattr(interactions_helper, "cancel_parks_for_thread", _cancel)
+    monkeypatch.setattr(manager, "delete_route", _delete)
+
+    assert (await ops.delete_conversation_route("chat"))["removed"] is True
+
+    # The park cancel ran before the routing row was removed, and the park is gone.
+    assert order == ["cancel", "delete_route"]
+    await _assert_park_cancelled(store, fake, interaction_id="ia", thread_id=thread)
+
+
 # -- the registered target bind validator (warn-then-error at bind) --------
 
 
@@ -843,9 +929,9 @@ async def test_create_consults_the_registered_target_validator_and_refuses_on_me
     state no binding supplies) is caught at bind, not deferred to run time."""
     from tai42_skeleton.app import instance
 
-    async def _validator(target_name: str) -> list[str]:
+    async def _validator(create: ConversationRouteCreate) -> list[str]:
         return [
-            f"state acct is read by n1.jq (.acct) but flow {target_name} binds no such state "
+            f"state acct is read by n1.jq (.acct) but flow {create.target_name} binds no such state "
             "— bind it on the flow's Bindings tab"
         ]
 
@@ -866,7 +952,7 @@ async def test_create_consults_the_registered_target_validator_and_refuses_on_me
 async def test_create_passes_when_the_target_validator_returns_no_messages(wired):
     from tai42_skeleton.app import instance
 
-    async def _validator(target_name: str) -> list[str]:
+    async def _validator(create: ConversationRouteCreate) -> list[str]:
         return []
 
     instance.app.conversations.register_target_validator("tool", _validator)
@@ -887,7 +973,7 @@ async def test_a_tool_validator_does_not_fire_for_an_agent_target(wired):
     for an ``agent`` route."""
     from tai42_skeleton.app import instance
 
-    async def _validator(target_name: str) -> list[str]:
+    async def _validator(create: ConversationRouteCreate) -> list[str]:
         raise AssertionError("the tool validator must not run for an agent target")
 
     instance.app.conversations.register_target_validator("tool", _validator)
@@ -906,12 +992,126 @@ async def test_a_tool_validator_does_not_fire_for_an_agent_target(wired):
 async def test_registering_two_validators_for_one_kind_raises(wired):
     from tai42_skeleton.app import instance
 
-    async def _one(target_name: str) -> list[str]:
+    async def _one(create: ConversationRouteCreate) -> list[str]:
         return []
 
-    async def _two(target_name: str) -> list[str]:
+    async def _two(create: ConversationRouteCreate) -> list[str]:
         return []
 
     instance.app.conversations.register_target_validator("tool", _one)
     with pytest.raises(ValueError, match="already registered"):
         instance.app.conversations.register_target_validator("tool", _two)
+
+
+async def test_registered_validator_receives_the_full_route_model(wired):
+    """The bind validator is handed the whole ``ConversationRouteCreate`` — not just the target
+    name — so it can judge the target against the route's own door fields."""
+    from tai42_skeleton.app import instance
+
+    seen: dict[str, object] = {}
+
+    async def _validator(create: ConversationRouteCreate) -> list[str]:
+        seen["model"] = create
+        return [f"reading start_expr {create.start_expr!r} on route {create.route_name!r}"]
+
+    instance.app.conversations.register_target_validator("tool", _validator)
+
+    with pytest.raises(ValidationRejectedError, match="reading start_expr"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+            start_expr=TemplatedText(content="{message: .message}"),
+        )
+    model = seen["model"]
+    assert isinstance(model, ConversationRouteCreate)
+    assert model.route_name == "chat"
+    assert model.target_name == "echo-tool"
+    assert model.start_expr is not None
+    assert model.start_expr.content == "{message: .message}"
+    assert "chat" not in wired.rows
+
+
+async def test_platform_agent_validator_refuses_an_asking_agent_with_no_reply_resume(wired):
+    """With no consumer validator registered, the platform's own ``agent`` validator alone runs:
+    an agent whose tool_names include ``ask`` bound with neither ``reply_expr`` nor ``resume_expr``
+    is refused, and no row is written."""
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
+
+    register_platform_target_validators(instance.app._target_validator_registry)
+
+    with pytest.raises(ValidationRejectedError, match="no reply_expr and no resume_expr"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="agent",
+            target_name="asker",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert "chat" not in wired.rows
+
+
+async def test_platform_agent_validator_refuses_when_only_one_expr_is_present(wired):
+    """The asking agent needs BOTH exprs: a route giving only ``reply_expr`` is still refused,
+    the message naming the one still missing."""
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
+
+    register_platform_target_validators(instance.app._target_validator_registry)
+
+    with pytest.raises(ValidationRejectedError, match="no resume_expr"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="agent",
+            target_name="asker",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+            reply_expr=TemplatedText(content=".result"),
+        )
+    assert "chat" not in wired.rows
+
+
+async def test_platform_agent_validator_passes_an_asking_agent_with_reply_and_resume(wired):
+    """The asking agent binds cleanly once the route carries both ``reply_expr`` and
+    ``resume_expr`` — the platform check is satisfied and the row is written."""
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
+
+    register_platform_target_validators(instance.app._target_validator_registry)
+
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="asker",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+        reply_expr=TemplatedText(content=".result"),
+        resume_expr=TemplatedText(content="$parked[0].id"),
+    )
+    assert result["created"] is True
+
+
+async def test_platform_agent_validator_ignores_a_non_asking_agent(wired):
+    """The platform check only fires for an agent that can ask: a plain agent (no ``ask`` in its
+    tool_names) binds with no exprs at all."""
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
+
+    register_platform_target_validators(instance.app._target_validator_registry)
+
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True

@@ -32,7 +32,7 @@ BRIDGE_TWILIO_FROM_B = "+15550100002"
 
 
 # The human on the far end of a twilio conversation (the ``client_address``). Doubles as the
-# ask_user default recipient so a pending ask and a bridge turn share one number pair.
+# ask default recipient so a pending ask and a bridge turn share one number pair.
 BRIDGE_TWILIO_CLIENT = "+15559001111"
 
 
@@ -49,7 +49,7 @@ BRIDGE_WHATSAPP_PHONE_ID_B = "222000222000222"
 BRIDGE_WHATSAPP_PHONE_ID_C = "333000333000333"
 
 
-# The human wa_id on the far end (the ``client_address``); allowlisted so an ask_user over
+# The human wa_id on the far end (the ``client_address``); allowlisted so an ask over
 # whatsapp can deliver to it.
 BRIDGE_WHATSAPP_CLIENT = "15559003333"
 
@@ -127,7 +127,7 @@ def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
 def _bridge_channel_env(res: StackResources) -> dict[str, str]:
     """The twilio + whatsapp + web ``CHANNEL_*`` env for the bridge profile: per-plugin
     credential, a random per-stack inbound secret, the API base URL pointed at that medium's
-    recording stub, the correlation store on this stack's Redis DB, and the ask_user
+    recording stub, the correlation store on this stack's Redis DB, and the ask
     recipient policy (a default twilio recipient; an allowlisted whatsapp wa_id).
 
     twilio / whatsapp are independently mock-or-real (``TAI_E2E_REAL``): a real medium
@@ -179,6 +179,9 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
             # deployment does: the bridge suite drives it as a tool-target route to prove the
             # {code, expires_at} contract end to end.
             {"title": "builtin-pairing", "module": "tai42_skeleton.tools.builtin.get_pairing_code"},
+            # The in-process conversation door tools (send_conversation_message / _event): a run
+            # posts to a route or an existing thread under the deployment's own identity.
+            {"title": "builtin-doors", "module": "tai42_skeleton.tools.builtin.doors"},
         ],
         "agents": [
             {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},
@@ -191,7 +194,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
         "api_tools": _PROJECTED_API_TOOLS,
         # notify_user rides the mounted notifications router (projected via api_tools): the
         # bridge suite drives it for the whatsapp media/template and recipient-policy legs.
-        "user_tools": ["ask_user", "notify_user", "reload_config"],
+        "user_tools": ["ask", "notify_user", "reload_config"],
     }
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
@@ -215,7 +218,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"
     env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__BURST"] = "100000"
     switch = _switch()
-    # A real inbound channel (twilio/whatsapp) mints the ask_user callback into its
+    # A real inbound channel (twilio/whatsapp) mints the ask callback into its
     # outbound over the public origin instead of replica-B loopback; empty on all-mock.
     bridge_public_keys = (
         ["INTERACTIONS_PUBLIC_BASE_URL"] if any(switch.is_real(s) for s in ("twilio", "whatsapp")) else []

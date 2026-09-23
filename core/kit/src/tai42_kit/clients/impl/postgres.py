@@ -36,6 +36,20 @@ class PostgresClient(PooledClient[_Pool]):
             raise ValueError("Postgres client 'dsn' must be a non-empty string")
         reject_unknown_connection_kwargs("Postgres client", kwargs, _ALLOWED_KWARGS)
 
+        # Prove the first connection with the driver itself BEFORE the pool is built and
+        # handed out. An ``AsyncConnectionPool`` opened non-blocking fills from background
+        # workers that only log and reschedule a refused / unreachable / unauthorized /
+        # TLS-timeout connect, so a caller would block the pool's checkout timeout and then
+        # see a pool error, never the real driver failure. One bounded ``connect`` — bounded
+        # by the DSN's own ``connect_timeout``, which libpq applies across the whole
+        # establishment including the TLS handshake — surfaces that failure here as the real
+        # ``psycopg.OperationalError``, propagated unwrapped to the ``client_ctx`` caller with
+        # no pool built and no worker left retrying. A ``min_size > 1`` fill then proceeds in
+        # the background: the server is proven reachable, and a later fill failure is what the
+        # pool's own retry and checkout-time ``check`` exist for.
+        async with await AsyncConnection.connect(dsn):
+            pass
+
         pool = AsyncConnectionPool(
             conninfo=dsn,
             min_size=kwargs.get("min_size", 2),

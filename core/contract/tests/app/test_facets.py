@@ -28,12 +28,12 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 118 (sub-protocol, member) pairs over 114
+# The frozen facade surface: the 136 (sub-protocol, member) pairs over 132
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (114) is four
-# fewer than the pair count (118).
+# (webhook_verifiers + channels), so the distinct-name union is four
+# fewer than the pair count.
 EXPECTED_FACADE = {
     # tools (16)
     "tool",
@@ -53,6 +53,8 @@ EXPECTED_FACADE = {
     "tool_refs_extractor",
     "register_tier",
     "tier",
+    "extras",
+    "declared_extras",
     # agents (3)
     "agent",
     "get_agent",
@@ -93,8 +95,23 @@ EXPECTED_FACADE = {
     "register_monitoring",
     "active",
     # sandboxes and interactions expose the facade seams a plugin reads without
-    # importing the skeleton; ``ask_user`` is the interactions facet's one member.
-    "ask_user",
+    # importing the skeleton; ``ask`` and ``check_answer`` are the interactions facet's members,
+    # ``visit`` and the generic ``list_parked``/``resume_parked``/``cancel_parked`` drive parked
+    # runs, and the platform's resume/delivery authorization + redelivery-horizon facets a driver reaches.
+    "ask",
+    "check_answer",
+    "visit",
+    "park_answer",
+    "normalise_started",
+    "list_parked",
+    "list_parked_for",
+    "resume_parked",
+    "cancel_parked",
+    "current_fire_identity",
+    "bound_execution_identity_for_fire",
+    "assert_resume_authorized",
+    "assert_delivery_authorized",
+    "redelivery_horizon_seconds",
     # extensions (2)
     "extension",
     "available_extensions",
@@ -144,6 +161,8 @@ EXPECTED_FACADE = {
     "input_schema_support",
     "register_registration_tier",
     "registration_tier",
+    "get_active_versioned_body",
+    "used_by",
     # tool_meta (2) — `store` shared with versioning and presets above
     "patch",
     # states (28)
@@ -254,11 +273,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 119 (sub-protocol, member) pairs over 115 distinct names — ``store`` is exposed
+    # 136 (sub-protocol, member) pairs over 132 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 115, f"union={len(union)}"
-    assert total == 119 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 132, f"union={len(union)}"
+    assert total == 136 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_four_namespaces():

@@ -259,7 +259,7 @@ def test_catalog_table_renders_builtin_source(monkeypatch: pytest.MonkeyPatch) -
     assert result.exit_code == 0, result.output
     assert "source" in result.output
     assert "builtin" in result.output
-    assert "ask_user" in result.output
+    assert "ask" in result.output
 
 
 def test_offline_registry_is_a_loud_cli_error(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -196,8 +196,9 @@ class AppStates(Protocol):
     ) -> TemplateJqApplyResult:
         """Apply an ``update``-purpose ``template_jq`` program ``name`` to ``subject``.
 
-        Its jq maps ``{record, input}`` to a template-relative op batch, rebased under the attachment
-        path and applied through the same chokepoint as :meth:`apply` — so regimes, the
+        Its jq maps the record subtree (its ``.``) with ``$input`` bound to a template-relative op
+        batch, rebased under the attachment path and applied through the same chokepoint as
+        :meth:`apply` — so regimes, the
         composing-shape guard, trace stamping and ``op_id`` idempotency all hold. ``name``
         resolves as for :meth:`eval_template_jq`. An unknown name is a
         :class:`~tai42_contract.states.StateNotFoundError`; an ambiguous unqualified name, an

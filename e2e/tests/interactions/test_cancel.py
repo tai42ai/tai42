@@ -78,7 +78,7 @@ async def test_cancel_withdraws_a_pending_ask_and_a_later_reply_bridges_fresh(
         # caller blocks on the callback exactly as a text ask blocks on POST /answer.
         async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {
                     "question": question,
                     "answer_format": "external",

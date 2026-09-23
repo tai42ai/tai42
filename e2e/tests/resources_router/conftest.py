@@ -50,7 +50,7 @@ def build_resources_stack(res: StackResources, variants: Variants) -> StackConfi
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="resources",

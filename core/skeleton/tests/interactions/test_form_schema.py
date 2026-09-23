@@ -1,5 +1,5 @@
 """The channel-deliverable form-schema subset — ``validate_channel_form_schema``
-and the shared ``channel_form_fields`` walk that both ``ask_user`` and the callback
+and the shared ``channel_form_fields`` walk that both ``ask`` and the callback
 form renderer use as the ONE definition of the subset.
 """
 

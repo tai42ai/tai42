@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
 from .models import _RUNNING
+
+if TYPE_CHECKING:
+    from tai42_contract.states import StateContext
 
 # Atomic compare-and-set terminal write. ``lost`` is one-way: a reader that finds
 # a still-``running`` record whose liveness key has expired writes ``lost``, and
@@ -73,6 +77,8 @@ class ToolRunStore:
         settings: ToolRunsSettings,
         user_id: str | None = None,
         arguments: dict[str, Any] | None = None,
+        extras: Mapping[str, Any] | None = None,
+        state_context: StateContext | None = None,
         crash_resume: bool = False,
     ) -> None:
         """Persist a new ``running`` record, prime its liveness key, and index it in the recent-runs ZSET.
@@ -100,14 +106,22 @@ class ToolRunStore:
         if user_id is not None:
             record["user_id"] = user_id
         # Crash-resume seam: a run whose registration declared the generic crash-resume
-        # flag persists its ``arguments`` (JSON) and a generic ``crash_resume`` marker, so
-        # the liveness→lost reconciler can replay it FROM SCRATCH under the principal's
-        # current live grants. An un-flagged run stores neither, writing only the base
-        # record. The arguments are stored raw (not masked) because a from-scratch
-        # replay must fire the exact recorded input.
+        # flag persists its ``arguments`` and door ``extras`` (both JSON), a generic
+        # ``crash_resume`` marker, and — when the fire ran under a named subject — the
+        # ambient ``state_context`` (JSON), so the liveness→lost reconciler can replay it
+        # FROM SCRATCH under the principal's current live grants AND under the same subject
+        # the fire ran under: the re-drive's park indexes where the original's would have.
+        # An un-flagged run stores none of them, writing only the base record; a fire with
+        # no subject stores no ``state_context`` (its re-drive deposits none). Arguments and
+        # extras are stored raw (not masked) because a from-scratch replay must fire the
+        # exact recorded input — a warm-started run re-driven without its ``extras`` would
+        # run the nodes its author filled.
         if crash_resume:
             record["crash_resume"] = "1"
             record["arguments"] = json.dumps(arguments or {})
+            record["extras"] = json.dumps(dict(extras or {}))
+            if state_context is not None:
+                record["state_context"] = json.dumps(state_context.model_dump(mode="json"))
         pipe = r.pipeline()
         pipe.hset(run_key, mapping=record)
         pipe.expire(run_key, settings.result_ttl_seconds)

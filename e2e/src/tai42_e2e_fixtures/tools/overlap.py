@@ -53,7 +53,7 @@ async def e2e_overlap_probe(
 ) -> str:
     """Record the turn payload this tool target was dispatched with, then optionally hold the turn.
 
-    Runs as a ``target_kind=tool`` conversation route whose ``payload_expr`` maps the turn's
+    Runs as a ``target_kind=tool`` conversation route whose ``start_expr`` maps the turn's
     ``message`` / ``messages`` / ``superseded`` keys onto these kwargs. It RPUSHes
     ``{message, messages, superseded, pid}`` onto ``e2e:rec:{key}`` — one entry per turn, in turn
     order — so a spec reads back the whole text, the ordered ``deliver="all"`` batch, and the

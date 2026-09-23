@@ -255,6 +255,27 @@ async def test_404_releases_and_bridges(wired, monkeypatch):
     assert wired.events == []
 
 
+async def test_409_caller_ask_refusal_releases_and_bridges(wired, monkeypatch):
+    # The door refuses the ask as answerable only by its calling run (a caller ask, 409).
+    # A correlation is never created for such an ask, so this cannot arise in normal
+    # operation; if it ever does the refusal is PERMANENT — never redeliver (no raise),
+    # never lose the reply: release the correlation and bridge the reply as a fresh turn.
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(409, json={"error": "answerable only by the calling run"}))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="please answer", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.BRIDGED
+    assert store.released == ["k"]
+    assert len(wired.accept_calls) == 1
+    assert wired.accept_calls[0].text == "hello there"
+    # A refused caller ask needs no participant notice or operator event — it is a bridge.
+    assert wired.channel.notifications == []
+    assert wired.events == []
+
+
 # -- 4. 400 retryable: KEPT + participant notice + one alert ---------------------------
 
 

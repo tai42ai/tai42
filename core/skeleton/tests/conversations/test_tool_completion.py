@@ -13,6 +13,8 @@ from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import completion_delivery as completion_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
+from tai42_skeleton.conversations.turn import record as record_module
+from tai42_skeleton.runs.chokepoint import delivery_fire
 
 from .conftest import (
     _TURN_LOGGER,
@@ -27,6 +29,30 @@ from .conftest import (
     _wire,
     _wire_tool,
 )
+
+
+async def _fire_tool(**kw):
+    """Fire ``deliver_tool_completion`` inside the platform's delivery-fire context, as the ladder does.
+
+    The real delivery ladder wraps every address-tool fire in ``delivery_fire(completion_id)``; a
+    test firing the tool directly reproduces that so the tool's delivery-authorisation guard passes. A
+    missing/blank id is fired WITHOUT a context (the ladder never fires an id-less completion), so the
+    guard refuses it.
+    """
+    cid = kw.get("completion_id")
+    if not isinstance(cid, str) or not cid:
+        return await turn_module.deliver_tool_completion(**kw)
+    with delivery_fire(cid):
+        return await turn_module.deliver_tool_completion(**kw)
+
+
+async def _fire_agent(**kw):
+    """Fire ``deliver_agent_completion`` inside the platform's delivery-fire context, as the ladder does."""
+    cid = kw.get("completion_id")
+    if not isinstance(cid, str) or not cid:
+        return await turn_module.deliver_agent_completion(**kw)
+    with delivery_fire(cid):
+        return await turn_module.deliver_agent_completion(**kw)
 
 
 async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env, monkeypatch):
@@ -69,7 +95,7 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
     # The resumer drives to a clean terminal out of band and fires the completion; reply_expr
     # maps the terminal outcome and it is delivered back into the thread.
-    out = await turn_module.deliver_tool_completion(
+    out = await _fire_tool(
         delivery_thread_id=thread_id,
         completion_id="c1",
         result={"result": {"reply": "the deferred answer"}},
@@ -85,7 +111,7 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
     # Idempotent: a redelivered fire under the same completion_id delivers nothing new.
     sends_before = len(channel.sends)
-    out2 = await turn_module.deliver_tool_completion(
+    out2 = await _fire_tool(
         delivery_thread_id=thread_id,
         completion_id="c1",
         result={"result": {"reply": "SECOND"}},
@@ -111,7 +137,7 @@ async def test_deliver_tool_completion_non_success_delivers_error_notice(env, mo
     _wire(monkeypatch, FakeManager(route, origin), channel)
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
-        out = await turn_module.deliver_tool_completion(
+        out = await _fire_tool(
             delivery_thread_id="bridge:tool-line:+15550002222",
             completion_id="e1",
             result={"detail": "internal"},
@@ -141,7 +167,7 @@ async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(
     route = _tool_channel_route(reply_expr=".result.reply", error_reply_text=spanish)
     _wire(monkeypatch, FakeManager(route), channel)
 
-    out = await turn_module.deliver_tool_completion(
+    out = await _fire_tool(
         delivery_thread_id="bridge:tool-line:+15550002222",
         completion_id="u1",
         result={"result": {"reply": {"not": "a string"}}},
@@ -162,7 +188,7 @@ async def test_deliver_tool_completion_silent_reply_delivers_nothing(env, monkey
     route = _tool_channel_route(reply_expr=".result.reply // null")
     _wire(monkeypatch, FakeManager(route), channel)
 
-    out = await turn_module.deliver_tool_completion(
+    out = await _fire_tool(
         delivery_thread_id="bridge:tool-line:+15550002222",
         completion_id="s1",
         result={"result": {}},
@@ -180,32 +206,26 @@ async def test_deliver_tool_completion_unresolvable_thread_raises(env, monkeypat
     # retriable case — a route can be restored — unlike an ABSENT address, which is dropped.
     _wire(monkeypatch, FakeManager(_tool_channel_route()))
     with pytest.raises(turn_module.CompletionDeliveryError):
-        await turn_module.deliver_tool_completion(
-            delivery_thread_id="not-a-bridge-thread", completion_id="x1", result="hi"
-        )
+        await _fire_tool(delivery_thread_id="not-a-bridge-thread", completion_id="x1", result="hi")
 
 
 async def test_deliver_tool_completion_without_a_completion_id_raises(env, monkeypatch):
-    # The idempotency id is the exactly-once key. A key-less fire must not deliver under a
-    # guessed id: a blank id would key EVERY key-less terminal onto ONE record, so the second
-    # such fire — from an unrelated park — would read the first as already delivered and vanish.
+    # The idempotency id is the exactly-once key. A key-less (or blank-id) fire is never a
+    # legitimate ladder fire — nothing authorized it — so the delivery-authorisation guard refuses
+    # it before any mint, never delivering under a guessed id.
+    from tai42_contract.interactions import ParkDeliveryUnauthorizedError
+
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
 
-    with pytest.raises(ValueError, match="completion_id"):
-        await turn_module.deliver_tool_completion(
-            delivery_thread_id="bridge:tool-line:+15550002222",
-            completion_id=None,
-            result={"result": {"reply": "hi"}},
-            status=PARK_COMPLETION_SUCCEEDED,
-        )
-    with pytest.raises(ValueError, match="completion_id"):
-        await turn_module.deliver_tool_completion(
-            delivery_thread_id="bridge:tool-line:+15550002222",
-            completion_id="",
-            result={"result": {"reply": "hi"}},
-            status=PARK_COMPLETION_SUCCEEDED,
-        )
+    for missing in (None, ""):
+        with pytest.raises(ParkDeliveryUnauthorizedError):
+            await _fire_tool(
+                delivery_thread_id="bridge:tool-line:+15550002222",
+                completion_id=missing,
+                result={"result": {"reply": "hi"}},
+                status=PARK_COMPLETION_SUCCEEDED,
+            )
     await _settle()
     assert channel.sends == []
 
@@ -218,13 +238,13 @@ async def test_deliver_tool_completion_without_an_address_is_a_logged_no_op(env,
     _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
 
     with caplog.at_level(logging.ERROR, logger=_TURN_LOGGER):
-        out = await turn_module.deliver_tool_completion(
+        out = await _fire_tool(
             delivery_thread_id=None,
             completion_id="orphan-1",
             result={"result": {"reply": "the orphaned outcome"}},
             status=PARK_COMPLETION_SUCCEEDED,
         )
-        blank = await turn_module.deliver_tool_completion(
+        blank = await _fire_tool(
             delivery_thread_id="",
             completion_id="orphan-2",
             result={"result": {"reply": "also orphaned"}},
@@ -252,7 +272,7 @@ async def test_deliver_tool_completion_omitted_status_delivers_notice_and_warns(
     _wire(monkeypatch, FakeManager(route), channel)
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
-        out = await turn_module.deliver_tool_completion(
+        out = await _fire_tool(
             delivery_thread_id="bridge:tool-line:+15550002222",
             completion_id="d1",
             result={"result": {"reply": "would-map-if-success"}},
@@ -277,7 +297,7 @@ async def test_deliver_tool_completion_explicit_none_status_warns_as_unstamped(e
     _wire(monkeypatch, FakeManager(route), channel)
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
-        out = await turn_module.deliver_tool_completion(
+        out = await _fire_tool(
             delivery_thread_id="bridge:tool-line:+15550002222",
             completion_id="n1",
             result={"result": {"reply": "would-map-if-success"}},
@@ -302,7 +322,7 @@ async def test_deliver_tool_completion_unrecognized_status_delivers_notice_and_w
     _wire(monkeypatch, FakeManager(route), channel)
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
-        out = await turn_module.deliver_tool_completion(
+        out = await _fire_tool(
             delivery_thread_id="bridge:tool-line:+15550002222",
             completion_id="w1",
             result={"result": {"reply": "would-map-if-success"}},
@@ -326,7 +346,7 @@ async def test_deliver_tool_completion_success_maps_the_reply_and_warns_nothing(
     _wire(monkeypatch, FakeManager(route), channel)
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
-        out = await turn_module.deliver_tool_completion(
+        out = await _fire_tool(
             delivery_thread_id="bridge:tool-line:+15550002222",
             completion_id="ok1",
             result={"result": {"reply": "the deferred answer"}},
@@ -357,7 +377,7 @@ async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env
 
     monkeypatch.setattr(completion_module, "_resolve_completion_target", _resolve_to_b)
 
-    out = await turn_module.deliver_tool_completion(
+    out = await _fire_tool(
         delivery_thread_id="bridge:@person:PID1",
         completion_id="p1",
         result={"a": {"text": "via-A"}, "b": {"text": "via-B"}},
@@ -382,7 +402,7 @@ async def test_deliver_tool_completion_raises_on_vanished_originating_route(env,
     _wire(monkeypatch, FakeManager(route), channel)
 
     with pytest.raises(turn_module.CompletionDeliveryError):
-        await turn_module.deliver_tool_completion(
+        await _fire_tool(
             delivery_thread_id="bridge:tool-live:+15550002222",
             completion_id="v1",
             result={"result": {"reply": "x"}},
@@ -430,11 +450,13 @@ async def test_agent_route_park_binds_the_thread_as_the_completion_context(env, 
     tool_name, context = bound[0]
     assert tool_name == turn_module.COMPLETION_TOOL_NAME
     assert context is not None
-    assert dict(context) == {"thread_id": "bridge:line:+15550002222"}
+    # The completion context carries this turn's thread AND its intake ``message_id``, so the
+    # late-path deliverer can rebuild ``$turn`` from the stored record.
+    assert dict(context) == {"thread_id": "bridge:line:+15550002222", "message_id": message_id}
 
     # The contract payload a resuming driver fires — the bound context merged with the terminal
     # outcome — is exactly what the bound tool accepts, and it delivers the answer back.
-    out = await turn_module.deliver_agent_completion(
+    out = await _fire_agent(
         **context, result="the deferred answer", completion_id="ac1", status=PARK_COMPLETION_SUCCEEDED
     )
     await _settle()
@@ -443,3 +465,86 @@ async def test_agent_route_park_binds_the_thread_as_the_completion_context(env, 
     assert delivered is not None
     assert delivered.answer == "the deferred answer"
     assert [n.message for n in channel.sends] == ["the deferred answer"]
+
+
+async def test_completion_tools_refuse_outside_the_delivery_fire(env, monkeypatch):
+    # an address tool delivers ONLY inside the platform's delivery-fire context for its own
+    # completion. Named at the run-tool door or the MCP edge (no ambient fire), BOTH tools refuse a
+    # well-formed fire before any record read or mint; from the ladder's context the tool delivers.
+    from tai42_contract.interactions import ParkDeliveryUnauthorizedError
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
+
+    with pytest.raises(ParkDeliveryUnauthorizedError):
+        await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="c-unauth",
+            result={"result": {"reply": "hi"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+    with pytest.raises(ParkDeliveryUnauthorizedError):
+        await turn_module.deliver_agent_completion(
+            thread_id="bridge:tool-line:+15550002222",
+            completion_id="c-unauth-2",
+            result="hi",
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+    assert channel.sends == []
+
+    out = await _fire_tool(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="c-ok",
+        result={"result": {"reply": "delivered once"}},
+        status=PARK_COMPLETION_SUCCEEDED,
+    )
+    await _settle()
+    assert out == {"message_id": "c-ok"}
+    assert [n.message for n in channel.sends] == ["delivered once"]
+
+
+async def test_deliver_tool_completion_reply_reads_turn_rebuilt_from_the_intake_record(env, monkeypatch):
+    # the late path rebuilds ``$turn`` from the originating intake record the completion
+    # binding's ``message_id`` names, so a resumed reply reads ``$turn`` symmetric to a live turn;
+    # a record that has aged out reads ``$turn`` as null.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr='$turn.id // "no-turn"')
+    _wire(monkeypatch, FakeManager(route), channel)
+    intake = record_module._new_record(
+        route=route,
+        message_id="intake-1",
+        thread_id="bridge:tool-line:+15550002222",
+        client_address="+15550002222",
+        caller_principal=None,
+        provider_message_id="PID1",
+        inbound_text="hi",
+        delivery_status=DeliveryStatus.SILENT,
+    )
+    await _store().create_record(intake)
+
+    out = await _fire_tool(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="c-turn",
+        result={"x": 1},
+        status=PARK_COMPLETION_SUCCEEDED,
+        message_id="intake-1",
+    )
+    await _settle()
+    assert out == {"message_id": "c-turn"}
+    delivered = await _store().get_record("c-turn")
+    assert delivered is not None
+    assert delivered.answer == "intake-1"
+
+    # A gone (absent) record → ``$turn`` is null → the reply's own fallback.
+    out2 = await _fire_tool(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="c-gone",
+        result={"x": 1},
+        status=PARK_COMPLETION_SUCCEEDED,
+        message_id="does-not-exist",
+    )
+    await _settle()
+    assert out2 == {"message_id": "c-gone"}
+    gone = await _store().get_record("c-gone")
+    assert gone is not None
+    assert gone.answer == "no-turn"

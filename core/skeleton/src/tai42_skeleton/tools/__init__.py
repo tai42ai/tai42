@@ -6,8 +6,10 @@ each mapped to its structured extension combos, backing the app facade's
 ``ToolRefsRegistry`` (a base tool's declared composed-tool-names extractor), the
 ``ToolRetryRegistry`` (a base tool's declared retry policy, consumed at the
 dispatch seam), the ``ToolTierRegistry`` (a base tool's declared registration
-tier, shared by the preset-authoring gate and the run-time fence), and the
-tool-dispatch adapters that turn a vendor tool into a callable.
+tier, shared by the preset-authoring gate and the run-time fence), the
+``ToolExtrasRegistry`` (a base tool's declared door-``extras`` keys, checked by
+the visit before a start), and the tool-dispatch adapters that turn a vendor
+tool into a callable.
 """
 
 from tai42_skeleton.tools.adapters import (
@@ -15,12 +17,14 @@ from tai42_skeleton.tools.adapters import (
     mcp_tool_call_wrapper,
     mcp_tool_to_func,
 )
+from tai42_skeleton.tools.extras import ToolExtrasRegistry
 from tai42_skeleton.tools.registry import ToolRegistry
 from tai42_skeleton.tools.retry import ToolRetryRegistry
 from tai42_skeleton.tools.tier import ToolTierRegistry
 from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
 __all__ = [
+    "ToolExtrasRegistry",
     "ToolRefsRegistry",
     "ToolRegistry",
     "ToolRetryRegistry",

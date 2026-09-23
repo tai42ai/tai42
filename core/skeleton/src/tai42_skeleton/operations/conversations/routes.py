@@ -14,7 +14,7 @@ from typing import Any
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate, OverlapPolicy
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.data import get_compiled_jq
+from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
@@ -75,32 +75,50 @@ async def _assert_target_exists(target_kind: str, target_name: str) -> None:
         raise NotFoundError(f"tool not found: {target_name!r}") from exc
 
 
-async def _assert_target_bindable(target_kind: str, target_name: str) -> None:
+async def _assert_target_bindable(create: ConversationRouteCreate) -> None:
     """Consult the registered bind validator for the target's kind, once the target exists.
 
-    A plugin registers a validator through ``app.conversations.register_target_validator``;
-    a validator returning message lines refuses the route with them (a 422), so a defect
-    the target carries — reading a state no binding supplies — is caught at bind, never
+    The validator receives the FULL create model, so it can judge the target against the
+    route's own door fields. The platform registers the ``agent`` kind's validator (an
+    asking agent needs a reply/resume path); a plugin registers others through
+    ``app.conversations.register_target_validator``. A validator returning message lines
+    refuses the route with them (a 422), so a defect the target carries — reading a state no
+    binding supplies, an asking agent with no reply/resume path — is caught at bind, never
     deferred to run time. No validator for the kind leaves the create unchanged.
     """
     from tai42_skeleton.app import instance
 
-    validator = instance.app.conversations.target_validator(target_kind)
+    validator = instance.app.conversations.target_validator(create.target_kind)
     if validator is None:
         return
-    messages = await validator(target_name)
+    messages = await validator(create)
     if messages:
         raise ValidationRejectedError("\n".join(messages))
 
 
-async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
-    """Render a tool target's templated jq programs and compile each at create.
+# The named jq variables each expression may read, declared at create-time compilation so an author
+# referencing one passes (jq resolves ``$name`` references at compile). The four door jqs read the
+# run's parked interactions as ``$parked``; ``reply_expr`` additionally reads the turn ids/subject
+# as ``$turn`` and the caller ask entries as ``$asks``.
+_DOOR_EXPR_VARIABLES = ("parked",)
+_REPLY_EXPR_VARIABLES = ("asks", "parked", "turn")
 
-    An invalid one is refused here, not at the first message. A by-id text whose stored
-    resource cannot be fetched fails the create loudly, naming the field and the id. The
-    model already forbids exprs on an ``agent`` target.
+
+async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
+    """Render each templated jq program and compile it at create, declaring the variables it may read.
+
+    An invalid one is refused here, not at the first message. A by-id text whose stored resource
+    cannot be fetched fails the create loudly, naming the field and the id. Both target kinds may
+    carry the door jqs.
     """
-    for field, text in (("payload_expr", create.payload_expr), ("reply_expr", create.reply_expr)):
+    exprs = (
+        ("start_expr", create.start_expr, _DOOR_EXPR_VARIABLES),
+        ("cancel_expr", create.cancel_expr, _DOOR_EXPR_VARIABLES),
+        ("resume_expr", create.resume_expr, _DOOR_EXPR_VARIABLES),
+        ("extras_expr", create.extras_expr, _DOOR_EXPR_VARIABLES),
+        ("reply_expr", create.reply_expr, _REPLY_EXPR_VARIABLES),
+    )
+    for field, text, variables in exprs:
         if text is None:
             continue
         try:
@@ -110,7 +128,7 @@ async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
                 f"{field} references stored id {text.id!r}, which could not be fetched: {exc}"
             ) from exc
         try:
-            get_compiled_jq(program)
+            compile_check(program, variables=variables)
         except Exception as exc:
             raise BadRequestError(f"invalid {field}: {exc}") from exc
 
@@ -208,7 +226,10 @@ async def create_conversation_route(
     target_kind: str,
     target_name: str,
     execution_key: str,
-    payload_expr: TemplatedText | None = None,
+    start_expr: TemplatedText | None = None,
+    cancel_expr: TemplatedText | None = None,
+    resume_expr: TemplatedText | None = None,
+    extras_expr: TemplatedText | None = None,
     reply_expr: TemplatedText | None = None,
     initial_mode: str = "agent",
     channel: str | None = None,
@@ -228,9 +249,10 @@ async def create_conversation_route(
     to delegate it and it must be usable by a tokenless fire, both decided BEFORE the write
     so a refusal leaves any existing row untouched. ``target_name`` must merely EXIST — the
     agent (``target_kind=agent``) or tool (``target_kind=tool``) — the key's live grants
-    bound the turn at fire. A tool target's ``payload_expr``/``reply_expr`` templated jq
-    programs, when given, are rendered and compiled here so an invalid one — or a by-id text
-    whose stored resource cannot be fetched — is refused at create, not at first message. A
+    bound the turn at fire. The door jqs (``start_expr``/``cancel_expr``/``resume_expr``/
+    ``extras_expr``) and ``reply_expr``, when given, are rendered and compiled here so an invalid one
+    — or a by-id text whose stored resource cannot be fetched — is refused at create, not at first
+    message. A
     ``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed
     on that channel. An edit that would change the ``door`` of a route already HOLDING
     threads is refused: the two doors key their threads differently, so the held threads
@@ -258,7 +280,10 @@ async def create_conversation_route(
             door=door,  # pyright: ignore[reportArgumentType]
             target_kind=target_kind,  # pyright: ignore[reportArgumentType]
             target_name=target_name,
-            payload_expr=payload_expr,
+            start_expr=start_expr,
+            cancel_expr=cancel_expr,
+            resume_expr=resume_expr,
+            extras_expr=extras_expr,
             reply_expr=reply_expr,
             initial_mode=initial_mode,  # pyright: ignore[reportArgumentType]
             execution_key=execution_key,
@@ -276,7 +301,7 @@ async def create_conversation_route(
     manager = _require_backend()
 
     await _assert_target_exists(create.target_kind, create.target_name)
-    await _assert_target_bindable(create.target_kind, create.target_name)
+    await _assert_target_bindable(create)
     await _assert_exprs_compile(create)
 
     stored = create.model_dump()
@@ -365,23 +390,25 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
     store = ConversationRecordStore(ConversationsSettings())
-    removed = await manager.delete_route(route_name)
-    if not removed and await store.count_route_threads(route_name) == 0:
-        raise NotFoundError(f"conversation route not found: {route_name!r}")
-    # After the routing row, never before: no further message can open a thread on a name
-    # that no longer routes. A turn already IN FLIGHT still completes behind this, which is
-    # why the create writes the thread indexes only while the row stands and the completion
-    # write re-stamps the route index only while the thread's own index still holds
-    # members — either one unguarded would re-create a pair nothing walks and no TTL expires.
-    #
-    # Cancel every async ``ask_user`` parked on each of the route's threads BEFORE the
-    # indexes go, so deleting the route does not orphan a park (its expiry reaper would
-    # later fire a continuation into a thread whose route is gone, and its channel
-    # correlation would stay muted until the deadline). Enumerated up front from the route
-    # thread index; idempotent, so this door's own retry re-runs it cleanly.
+    # Cancel every async ``ask`` parked on each of the route's threads FIRST, while the routing row
+    # still stands. Each cancel whole-chain-kills the park and delivers the run's single door FAILED,
+    # and that delivery resolves the park's thread back to its route+address — which only exists while
+    # the row is present. Removing the row first would leave the kill's FAILED delivery unable to
+    # resolve the now-gone route (a ``CompletionDeliveryError``), failing the delete and stranding the
+    # route's thread indexes. Cancelling first also stops the expiry reaper later firing a continuation
+    # into a thread whose route is gone. Enumerated up front from the route thread index; idempotent,
+    # so this door's own retry re-runs it cleanly.
     from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
     for thread_id in await store.route_thread_ids(route_name):
-        await cancel_parks_for_thread(thread_id)
+        await cancel_parks_for_thread(thread_id, reason="route_deleted")
+    removed = await manager.delete_route(route_name)
+    if not removed and await store.count_route_threads(route_name) == 0:
+        raise NotFoundError(f"conversation route not found: {route_name!r}")
+    # Drop the thread indexes only after the routing row, never before: no further message can open a
+    # thread on a name that no longer routes. A turn already IN FLIGHT still completes behind this,
+    # which is why the create writes the thread indexes only while the row stands and the completion
+    # write re-stamps the route index only while the thread's own index still holds members — either
+    # one unguarded would re-create a pair nothing walks and no TTL expires.
     await store.drop_route_threads(route_name)
     return {"removed": removed, "route_name": route_name}

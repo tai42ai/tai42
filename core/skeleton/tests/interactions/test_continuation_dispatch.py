@@ -19,7 +19,7 @@ from typing import cast
 import pytest
 from redis.asyncio import Redis
 from tai42_contract.access_control import reset_request_user_id, set_request_user_id
-from tai42_contract.interactions import AnswerFormat, InteractionRequest
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, SuspendedInteraction
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import continuation as continuation_module
@@ -151,6 +151,7 @@ async def test_reaper_emits_ask_expired_unanswered_with_payload(wired, captured,
         continuation_tool="resume_tool",
         continuation_identity="svc-key",
         expiry_at=past,
+        on_expiry="resume",
         channel="telegram",
         recipient="@ops",
     )
@@ -289,7 +290,7 @@ async def test_run_continuation_runs_tool_under_stored_identity(wired, monkeypat
 
     seen: list[dict] = []
 
-    async def _fake_run_tool(tool, arguments):
+    async def _fake_run_tool(tool, arguments, *, continues_chain=None):
         identity = get_execution_identity()
         seen.append({"tool": tool, "arguments": arguments, "user_id": identity.user_id if identity else None})
         return {"ran": True}
@@ -328,7 +329,7 @@ async def test_run_continuation_deposits_resume_origin_for_lifecycle_correlation
 
     seen: list[str | None] = []
 
-    async def _fake_run_tool(tool, arguments):
+    async def _fake_run_tool(tool, arguments, *, continues_chain=None):
         seen.append(get_resume_origin())
         return {"ran": True}
 
@@ -354,9 +355,12 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _slow(identity, fingerprint, tool, interaction_id, answer, park_context=None):
+    async def _slow(
+        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+    ):
         started.set()
         await release.wait()
+        return SuspendedInteraction(interaction_id=interaction_id)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _slow)
 
@@ -467,8 +471,11 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
     # violation. The fire clears the record once ``run_tool`` returns.
     release = asyncio.Event()
 
-    async def _block(identity, fingerprint, tool, interaction_id, answer, park_context=None):
+    async def _block(
+        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+    ):
         await release.wait()
+        return SuspendedInteraction(interaction_id=interaction_id)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _block)
     await wired.store.add(
@@ -496,7 +503,7 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
 def test_execution_identity_bridge_reflects_the_bound_skeleton_identity():
     # Importing the skeleton continuation module wires skeleton's execution identity into the
     # contract park bridge: the accessor reads the CURRENTLY bound identity as (key, fingerprint)
-    # — what a park records — and the binder is registered for the out-of-band abandonment fire.
+    # — what a park records — and the binder is registered for an out-of-band fire.
     from tai42_contract.interactions import continuation as contract_cont
     from tai42_contract.interactions import current_execution_identity
 
@@ -594,7 +601,7 @@ async def test_continuation_resume_runs_detached(monkeypatch):
     monkeypatch.setattr(continuation_module, "bind_execution_identity", _fake_bind)
 
     class _Tools:
-        async def run_tool(self, key, arguments, *, offload_sync=False):
+        async def run_tool(self, key, arguments, *, offload_sync=False, continues_chain=None):
             seen["detached"] = in_detached_run()
             return None
 

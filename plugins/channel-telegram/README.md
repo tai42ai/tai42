@@ -2,7 +2,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A Telegram `Channel` plugin for the TAI ecosystem. It delivers an `ask_user`
+A Telegram `Channel` plugin for the TAI ecosystem. It delivers an `ask`
 question to a Telegram chat as a `sendMessage` — the caller's requested
 recipient if it is on the operator allowlist, otherwise the operator-configured
 default chat — a
@@ -18,7 +18,7 @@ Telegram SDK dependency (the Bot API is flat JSON-over-HTTPS).
 TAI is an open-source runtime for MCP tools, agents, and workflows. A `Channel`
 is a registered deliverer that pushes an interaction question to a human on a
 specific medium and bridges the reply back into the interactions store — so
-`ask_user` can reach a person out-of-band instead of only showing the question
+`ask` can reach a person out-of-band instead of only showing the question
 in the Studio inbox. This package is one such channel (Telegram); siblings back
 the same contract with Slack or Twilio SMS/WhatsApp. The ecosystem is
 open-ended: any package can back the same contract, so this repo is this
@@ -98,7 +98,7 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
 
 ## How an answer travels
 
-1. A tool calls `ask_user(question, channel="telegram", ...)`. The runtime
+1. A tool calls `ask(question, channel="telegram", ...)`. The runtime
    persists the interaction, mints a public callback ticket, and calls this
    plugin's `deliver` with the question and its `callback_url`.
 2. `deliver` resolves the recipient chat: a caller-supplied recipient must be
@@ -142,7 +142,7 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
    forwarded as the JSON object `{"answer": "<typed text>"}` — the callback
    door validates it against the question's stored `answer_format` and records
    it.
-5. The blocked `ask_user` call returns the recorded answer.
+5. The blocked `ask` call returns the recorded answer.
 
 Telegram redelivers an update until it gets a 2xx, so the inbound status code
 is the retry contract:

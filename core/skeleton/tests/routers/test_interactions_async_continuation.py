@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, InteractionRequest
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, SuspendedInteraction
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import continuation as continuation_module
@@ -41,8 +41,11 @@ def wired(monkeypatch, fake_redis, fake_client_ctx):
 def captured(monkeypatch):
     calls: list[dict] = []
 
-    async def _stub(identity, fingerprint, tool, interaction_id, answer, park_context=None):
+    async def _stub(
+        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+    ):
         calls.append({"identity": identity, "fingerprint": fingerprint, "answer": answer})
+        return SuspendedInteraction(interaction_id=interaction_id)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _stub)
     return calls

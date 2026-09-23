@@ -34,10 +34,10 @@ async def register_record_hook(
     name: str,
     execution_key: str,
     tool_kwargs: dict[str, Any] | None = None,
-    expr: str | None = None,
+    start_expr: str | None = None,
 ) -> None:
     """Register an ``e2e_record`` hook on ``topic`` — the recording tool whose Redis
-    side effect the suite observes. An ``expr`` maps the scan payload into the tool
+    side effect the suite observes. A ``start_expr`` maps the scan payload into the tool
     input (without one the scan payload never reaches the tool). ``execution_key`` is
     the key user_id the fire runs as; the admin caller may bind any existing key."""
     body: dict[str, Any] = {
@@ -47,8 +47,8 @@ async def register_record_hook(
         "tool_kwargs": tool_kwargs or {},
         "execution_key": execution_key,
     }
-    if expr is not None:
-        body["expr"] = {"content": expr}
+    if start_expr is not None:
+        body["start_expr"] = {"content": start_expr}
     await admin.post("/api/hooks", json=body)
 
 

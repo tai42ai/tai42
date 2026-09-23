@@ -113,7 +113,7 @@ def test_preset_over_a_parking_tool_stamps_the_park_marker():
     class _ParkingTools(FakeTools):
         async def run_tool(self, key, arguments):
             self.run_tool_calls.append((key, arguments))
-            # Faithful to ``ask_user(mode="async")``: the park names the continuation bound
+            # Faithful to ``ask(mode="async")``: the park names the continuation bound
             # around this drive as its owner, so this run may adopt it.
             return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())
 
@@ -442,14 +442,15 @@ def test_preset_park_refusal_keeps_its_own_typed_message():
 
 
 def test_preset_park_refusal_fires_on_the_delivery_scoped_copy():
-    # The two ownership rules compose on the ONE object the model is given: resolution hands
-    # back a delivery-scoped copy (its body runs with the park-completion binding cleared), and
-    # the park-adoption refusal is inside that body — so a nested driver reached through a
-    # preset can neither claim the agent's deferred-answer ADDRESS nor hand the agent a park it
-    # would never be resumed for. The caller's own binding survives the dispatch untouched.
+    # The two rules compose on the ONE object the model is given: resolution hands back a
+    # delivery-scoped copy (its body runs under a nested-dispatch scope that binds no chain when
+    # this run cannot park), and the park-adoption refusal is inside that body — so a nested driver
+    # reached through a preset that the run cannot wait on is refused loudly rather than stranding
+    # the run. The door's out-of-band address flows DOWN unchanged (the platform delivers it).
     from langchain_core.tools import ToolException
     from tai42_contract.interactions import (
         SuspendedInteraction,
+        get_chained_resume,
         get_park_completion,
         reset_park_completion,
         set_park_completion,
@@ -459,7 +460,7 @@ def test_preset_park_refusal_fires_on_the_delivery_scoped_copy():
 
     class _NestedParkTools(FakeTools):
         async def run_tool(self, key, arguments):
-            seen.append(get_park_completion())
+            seen.append(get_chained_resume())
             return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
 
     bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
@@ -470,8 +471,9 @@ def test_preset_park_refusal_fires_on_the_delivery_scoped_copy():
     try:
         with pytest.raises(ToolException, match=r"different run's resume binding"):
             asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+        # The door's out-of-band address survives the dispatch untouched.
         assert get_park_completion() == bound
     finally:
         reset_park_completion(token)
-    # The base tool ran with NO completion bound (delivery scope), and the refusal still fired.
-    assert seen == [(None, None)]
+    # The base tool ran with NO chain bound (this run cannot park), and the refusal still fired.
+    assert seen == [None]

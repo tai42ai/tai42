@@ -4,7 +4,7 @@ from typing import Any
 
 from fastmcp.tools.base import ToolResult
 from fastmcp.tools.function_tool import FunctionTool
-from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.secrets import contains_secrets, mask_secrets, unwrap_secrets
 
 from tai42_skeleton.tools.reveal_gate import inprocess_reveal_gate, note_secret_reveal
@@ -36,13 +36,14 @@ class _SecretRevealingTool(FunctionTool):
     def convert_result(self, raw_value: Any) -> ToolResult:
         gate = inprocess_reveal_gate.get()
         if gate is not None:
-            if isinstance(raw_value, SuspendedInteraction):
-                # An async ask_user through a preset parks the caller and returns this
-                # sentinel. FastMCP's serialization would FLATTEN the pydantic model into
-                # ``structured_content`` (a plain dict), so the dispatch's type-based park
-                # recognition fails and the flow proceeds UN-parked while the delivered
-                # question's later answer strands — a silent lost-park. Stow it RAW so the
-                # in-process dispatch returns the object intact, exactly as the direct-run
+            if isinstance(raw_value, (SuspendedInteraction, ResumeBuffered)):
+                # An async ask through a preset parks the caller and returns a
+                # ``SuspendedInteraction`` sentinel; a resume through a preset that leaves sibling
+                # asks of the same super-step still open returns a ``ResumeBuffered``. FastMCP's
+                # serialization would FLATTEN either pydantic model into ``structured_content`` (a
+                # plain dict), so the dispatch's type-based park recognition fails and the run
+                # proceeds as if the value were a terminal result — a silent lost-park. Stow it RAW
+                # so the in-process dispatch returns the object intact, exactly as the direct-run
                 # seam preserves it; the ToolResult built below is never returned.
                 gate.park = raw_value
                 gate.has_park = True
@@ -53,7 +54,7 @@ class _SecretRevealingTool(FunctionTool):
                 return super().convert_result(mask_secrets(raw_value))
             return super().convert_result(raw_value)
         if isinstance(raw_value, SuspendedInteraction):
-            # Unarmed MCP edge: an async ask_user through this tool (or a preset over it)
+            # Unarmed MCP edge: an async ask through this tool (or a preset over it)
             # parked the caller and returned this sentinel. FastMCP's own serialization
             # would FLATTEN the pydantic model into ``structured_content`` (its plain
             # fields), dropping the reserved marker key a dispatch edge recognizes a park
@@ -65,7 +66,13 @@ class _SecretRevealingTool(FunctionTool):
             # tool's output_schema) since the marker is a control signal, not the tool's
             # declared output — it must ride the wire top-level, unwrapped, whatever the
             # base tool's return schema.
-            marker = suspended_interaction_marker(raw_value.interaction_id, raw_value.expiry_at, raw_value.resume_owner)
+            marker = suspended_interaction_marker(
+                raw_value.interaction_id,
+                raw_value.expiry_at,
+                raw_value.resume_owner,
+                interaction_ids=raw_value.interaction_ids,
+                caller_interaction_ids=raw_value.caller_interaction_ids,
+            )
             return ToolResult(structured_content=marker)
         if contains_secrets(raw_value):
             # Unarmed MCP edge: this reveal exposes a secret into ``structured_content``.

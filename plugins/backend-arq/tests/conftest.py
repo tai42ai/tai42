@@ -14,6 +14,7 @@ import fnmatch
 import itertools
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -21,8 +22,10 @@ import pytest
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.state_context import current_state_context
 
 # -- The recording stub app ------------------------------------------------------
 
@@ -54,7 +57,9 @@ class StubTools:
             return register(args[0])
         return register
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+    async def run_tool(
+        self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False, extras: dict[str, Any] | None = None
+    ) -> Any:
         self.detached_seen.append(in_detached_run())
         self.offloads.append(offload_sync)
         self.secret_capability_seen.append(caller_may_read_secrets())
@@ -165,6 +170,70 @@ class StubStorage:
         self.resource_manager = StubResourceManager()
 
 
+class StubInteractions:
+    """Records the schedule-door drive ``backend_fire`` enters for a job carrying door signals.
+
+    ``visit`` runs the start callable (so the tool runs under the deposited ``schedule`` context) and
+    reports a result; with ``park_sentinel`` set it reports a caller-ask park instead, so a follow-up
+    whose tool asks hands back the re-park sentinel rather than a value.
+    """
+
+    def __init__(self) -> None:
+        self.visit_calls: list[SimpleNamespace] = []
+        self.binds: list[tuple[str, str]] = []
+        self.parked_contexts: list[Any] = []
+        self.fire_identity: tuple[str, str] | None = None
+        self.park_sentinel: Any = None
+
+    def current_fire_identity(self) -> tuple[str, str] | None:
+        return self.fire_identity
+
+    async def list_parked_for(self, context: Any) -> list[Any]:
+        self.parked_contexts.append(context)
+        return []
+
+    async def visit(
+        self,
+        *,
+        target_name: str,
+        cancel: list[str],
+        resume: list[Any],
+        start: Any,
+        extras: dict[str, Any],
+        state_binding: Any,
+        receives_outcome: bool,
+    ) -> VisitOutcome:
+        result = await start(extras) if start is not None else None
+        self.visit_calls.append(
+            SimpleNamespace(
+                target_name=target_name,
+                cancel=list(cancel),
+                resume=list(resume),
+                started=start is not None,
+                extras=dict(extras),
+                state_binding=state_binding,
+                receives_outcome=receives_outcome,
+                context=current_state_context(),
+            )
+        )
+        if self.park_sentinel is not None:
+            return VisitOutcome(action="started", kind="asks", suspended=self.park_sentinel)
+        return VisitOutcome(
+            action="started" if start is not None else "none",
+            kind="result" if start is not None else "none",
+            result=result,
+        )
+
+    def bound_execution_identity_for_fire(self, user_id: str, fingerprint: str) -> Any:
+        self.binds.append((user_id, fingerprint))
+
+        @asynccontextmanager
+        async def _cm() -> AsyncIterator[None]:
+            yield
+
+        return _cm()
+
+
 class StubApp:
     def __init__(self) -> None:
         self.tools = StubTools()
@@ -172,6 +241,7 @@ class StubApp:
         self.backends = StubBackends()
         self.lifecycle = StubLifecycle()
         self.admin = StubAdmin()
+        self.interactions = StubInteractions()
         self.storage = StubStorage()
 
 
@@ -207,6 +277,11 @@ def _reset_stub_run_tool() -> None:
     _stub_app.tools.detached_seen.clear()
     _stub_app.tools.offloads.clear()
     _stub_app.tools.secret_capability_seen.clear()
+    _stub_app.interactions.visit_calls.clear()
+    _stub_app.interactions.binds.clear()
+    _stub_app.interactions.parked_contexts.clear()
+    _stub_app.interactions.fire_identity = None
+    _stub_app.interactions.park_sentinel = None
     _stub_app.storage.resource_manager.templates.clear()
     _stub_app.admin.calls.clear()
     # A fresh, pre-set boot-ready latch per test: the stub app is process-global,

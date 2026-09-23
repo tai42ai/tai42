@@ -93,7 +93,7 @@ def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackCo
             }
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="postgres-mcp",
@@ -143,7 +143,7 @@ def build_resilience_mcp_stack(res: StackResources, variants: Variants, *, mcp_u
             }
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="mcp-resilience",

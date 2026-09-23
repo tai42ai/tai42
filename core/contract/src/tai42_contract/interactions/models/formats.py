@@ -1,4 +1,4 @@
-"""Answer-format enums for an ``ask_user`` question.
+"""Answer-format enums for an ``ask`` question.
 
 ``AnswerFormat`` names the shape a question's answer takes; ``AnswerMismatchPolicy``
 names what a channel-delivered ask does with a reply the answer door rejects.
@@ -17,6 +17,10 @@ class AnswerFormat(StrEnum):
     SELECT = "select"
     FORM = "form"
     EXTERNAL = "external"
+    # An arbitrary JSON answer. Unconstrained by default; validated only against an
+    # optional ``schema`` when the question carries one. A caller-addressed ask uses it
+    # to receive a structured value another run hands back.
+    FREE = "free"
 
 
 class AnswerMismatchPolicy(StrEnum):

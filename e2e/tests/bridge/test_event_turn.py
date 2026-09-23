@@ -73,7 +73,7 @@ async def _web_tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag
         execution_key=exec_key,
         channel="web",
         our_identity=identity,
-        payload_expr=_ECHO_EXPR,
+        start_expr=_ECHO_EXPR,
     )
     return route_name, identity
 

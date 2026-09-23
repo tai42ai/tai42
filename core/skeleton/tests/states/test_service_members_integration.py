@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any, LiteralString
 
 import pytest
+from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import RegimeViolationError
 from tai42_contract.states.models import AttachBody, StateDeclaration, StateSubject, StateTemplateDocument, WriteOrigin
 from tai42_kit.clients import client_ctx
@@ -29,9 +30,20 @@ from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.db import STATES_COMPONENT, states_entry
 from tai42_skeleton.states.service import StatesService
 
+from .fake_service_store import _FakeApp
+
 pytestmark = pytest.mark.integration
 
 _OPT_IN_ENV = "TAI42_SKELETON_REAL_PG"
+
+
+@pytest.fixture(autouse=True)
+def _bound_app() -> Iterator[None]:
+    """A program body renders through ``tai42_app.storage.resource_manager`` before it is
+    compiled or evaluated; bind the fake app so this real-Postgres exercise resolves the
+    resource manager (inline ``content`` verbatim) without standing up the full app."""
+    with tai42_app.bound(_FakeApp()):
+        yield
 
 
 async def _exec(sql: LiteralString, params: tuple = ()) -> None:
@@ -60,7 +72,7 @@ def _template_body(name: str) -> dict[str, Any]:
             "add": {
                 "purpose": "update",
                 "writes": [["items"]],
-                "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]'},
+                "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: $input}]'},
             },
             "wipe": {
                 "purpose": "update",
@@ -89,12 +101,12 @@ def _reconciler_body(name: str) -> dict[str, Any]:
         "reconcile": {
             "orphans": {
                 "content": (
-                    ".new.allowed as $a | [(.data.items // [])[] "
+                    "$new.allowed as $a | [(.items // [])[] "
                     "| select(.id as $i | ($a | index($i)) == null) | {id, label: (.id | tostring)}]"
                 )
             },
             "resolutions": {"content": '["closed"]'},
-            "close": {"content": '[{op: "remove_by_key", path: ["items"], key_field: "id", key: .id}]'},
+            "close": {"content": '[{op: "remove_by_key", path: ["items"], key_field: "id", key: $id}]'},
         },
     }
 

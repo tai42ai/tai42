@@ -25,14 +25,15 @@ from typing import Any
 import pytest
 from langchain_core.tools import ToolException
 from tai42_contract.interactions import (
+    ChainedResume,
     SuspendedInteraction,
-    chained_park_context,
     read_suspended_interaction_marker,
-    reset_park_completion,
+    reset_chained_resume,
     reset_resume_continuation_tool,
-    set_park_completion,
+    set_chained_resume,
     set_resume_continuation_tool,
 )
+from tai42_contract.tools import current_call_chain, tool_call_frame
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -67,7 +68,9 @@ async def _run_parking_tool(
         runnable = app._tool_binding._client_runnable(tool_obj)
         token = set_resume_continuation_tool(bound)
         completion = (
-            set_park_completion("deliver_chained_park", chained_park_context(chained, (None, None)))
+            set_chained_resume(
+                ChainedResume(delivery_tool="deliver_chained_park", chain_key=chained, asked_by=("main",))
+            )
             if chained is not None
             else None
         )
@@ -75,8 +78,30 @@ async def _run_parking_tool(
             return await runnable(q="x")
         finally:
             if completion is not None:
-                reset_park_completion(completion)
+                reset_chained_resume(completion)
             reset_resume_continuation_tool(token)
+
+
+def test_the_in_process_runnable_opens_the_push_frame_of_the_tool():
+    # The in-process agent tool-dispatch door reaches the tool body directly, so it opens the call
+    # frame itself: a PUSH of the tool's own name, so an ask this dispatch raises records it.
+    seen: dict[str, tuple[str, ...]] = {}
+
+    async def _run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def records_chain(q: str) -> str:
+                """Records the ambient call chain the in-process runnable dispatches under."""
+                seen["chain"] = current_call_chain()
+                return "ok"
+
+            tool_obj = await app.tools.get_tool("records_chain")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+            await runnable(q="x")
+
+    asyncio.run(_run())
+    assert seen["chain"] == ("records_chain",)
 
 
 def test_a_park_this_run_owns_becomes_the_park_marker():
@@ -136,8 +161,8 @@ def test_an_unbound_caller_is_refused_an_ownerless_park_too():
         asyncio.run(_run_parking_tool(None, bound=None))
 
 
-def test_a_real_ask_user_park_is_adoptable_by_the_binding_that_raised_it():
-    # End to end on the PRODUCER side: the sentinel is minted by the real ``ask_user`` under a
+def test_a_real_ask_park_is_adoptable_by_the_binding_that_raised_it():
+    # End to end on the PRODUCER side: the sentinel is minted by the real ``ask`` under a
     # bound continuation (not hand-built), so this pins that what the helper stamps is exactly
     # what the adoption seam accepts — the two halves cannot drift apart.
     async def run() -> Any:
@@ -145,20 +170,20 @@ def test_a_real_ask_user_park_is_adoptable_by_the_binding_that_raised_it():
 
             @app.tools.tool(force=True)
             async def asks(q: str) -> Any:
-                """A tool that async-parks through the real ask_user helper."""
+                """A tool that async-parks through the real ask helper."""
                 from tai42_skeleton.authz.execution_identity import (
                     reset_execution_identity,
                     set_execution_identity,
                 )
                 from tai42_skeleton.authz.identity import CallerIdentity
-                from tai42_skeleton.interactions import ask_user
+                from tai42_skeleton.interactions import ask
 
                 # The identity an async park records its continuation under, bound around the
                 # ask ONLY: bound any wider it would send the dispatch through the live-fire
                 # entitlement gate, which is not what this test exercises.
                 identity = set_execution_identity(CallerIdentity(user_id="svc", execution_key_fingerprint="fp"))
                 try:
-                    return await ask_user(q, mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+                    return await ask(q, mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
                 finally:
                     reset_execution_identity(identity)
 
@@ -166,7 +191,10 @@ def test_a_real_ask_user_park_is_adoptable_by_the_binding_that_raised_it():
             runnable = app._tool_binding._client_runnable(tool_obj)
             token = set_resume_continuation_tool("agent_resume")
             try:
-                return await runnable(q="proceed?")
+                # The outer door frame that mints the run's delivery identity a parkable run
+                # always carries (a real dispatch always opens one before the tool body runs).
+                with tool_call_frame():
+                    return await runnable(q="proceed?")
             finally:
                 reset_resume_continuation_tool(token)
 
@@ -200,7 +228,7 @@ def test_a_real_agent_tool_face_park_is_refused_by_an_adopting_run():
 
 def _with_interactions_store(run: Any) -> Any:
     """Drive ``run`` with the interactions store pointed at an in-memory fakeredis, so the
-    real ``ask_user`` persists its park without a live server."""
+    real ``ask`` persists its park without a live server."""
     import contextlib
 
     from fakeredis import aioredis

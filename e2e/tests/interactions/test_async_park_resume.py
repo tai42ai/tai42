@@ -1,8 +1,8 @@
-"""The async ``ask_user`` park lifecycle end to end, across a worker
+"""The async ``ask`` park lifecycle end to end, across a worker
 boundary.
 
 A flow driver (the ``e2e_async_park_flow`` probe) binds a resume continuation tool
-plus a synthetic execution identity and calls ``ask_user(mode="async", expiry_at=...)``
+plus a synthetic execution identity and calls ``ask(mode="async", expiry_at=...)``
 on replica A. The ask PARKS — it returns a ``SuspendedInteraction`` at once, never
 blocking — and the stored generic continuation (``e2e_async_resume``) fires exactly
 once when the park resolves, REBOUND to the STORED park identity (never the answerer's
@@ -59,14 +59,16 @@ async def _resume_record(stack: TaiStack, interaction_id: str) -> dict | None:
     return json.loads(records[0])
 
 
-async def _park(stack: TaiStack, question: str, expiry_seconds: float) -> dict:
+async def _park(stack: TaiStack, question: str, expiry_seconds: float, on_expiry: str = "kill") -> dict:
     """Drive the park on replica A and return the driver's frame
-    (``interaction_id`` + the parking process pid). The submit can race the boot-time
-    self-resync gate, so poll past a retriable ``reloading``."""
+    (``interaction_id`` + the parking process pid). ``on_expiry`` selects what the reaper
+    does at the deadline — ``"resume"`` fires the stored continuation, ``"kill"`` tears the
+    chain down. The submit can race the boot-time self-resync gate, so poll past a retriable
+    ``reloading``."""
     async with stack.mcp(port=stack.port_a) as mcp:
         result = await mcp.call_tool(
             "e2e_async_park_flow",
-            {"question": question, "expiry_seconds": expiry_seconds},
+            {"question": question, "expiry_seconds": expiry_seconds, "on_expiry": on_expiry},
             retry_on_reloading=True,
         )
     return result.data
@@ -102,6 +104,7 @@ async def test_async_multipark_super_step_resolves_once(async_park_stack: TaiSta
                 "expiry_seconds": [2.0, 3600.0, 3600.0],
                 "slow_slot": 1,
                 "slow_seconds": 2.5,
+                "on_expiry": "resume",
             },
             retry_on_reloading=True,
         )
@@ -171,9 +174,10 @@ async def test_async_park_answer_resumes_across_workers(async_park_stack: TaiSta
 
 async def test_async_park_expiry_resumes(async_park_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
-    # Park with a short deadline and never answer: the expiry reaper (pinned to 1s on
-    # this stack) claims the park once ``expiry_at`` passes and fires the continuation.
-    frame = await _park(async_park_stack, question, expiry_seconds=2)
+    # Park with a short deadline under ``on_expiry="resume"`` and never answer: the expiry
+    # reaper (pinned to 1s on this stack) claims the park once ``expiry_at`` passes and fires
+    # the stored continuation with the expiry marker.
+    frame = await _park(async_park_stack, question, expiry_seconds=2, on_expiry="resume")
     interaction_id = frame["interaction_id"]
     stored_identity = frame["stored_identity"]
 

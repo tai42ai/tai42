@@ -14,6 +14,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, StructuredFinal, SuspendedFinal
 from tai42_contract.conversations import ConversationRoute, ConversationTargetKind, TargetConversationConfig
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils import render as door_contract_module
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import cache as cache_module
@@ -35,11 +36,13 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.conversations.turn import keys as keys_module
 from tai42_skeleton.conversations.turn import outcome as outcome_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
 from tai42_skeleton.conversations.turn import pairing as pairing_module
+from tai42_skeleton.conversations.turn import record as turn_record_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import rendered_user_message
+from .conftest import _connected, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _CODE_RE = re.compile(r"LINK-[A-Z0-9]{8}")
@@ -174,6 +177,7 @@ def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None,
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
+    monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent or EchoAgent()})
@@ -197,14 +201,14 @@ def _tool_route(
     route_name: str = "tool-line",
     our_identity: str = "+15550001111",
     *,
-    payload_expr: str | None = None,
+    start_expr: str | None = None,
 ):
     return ConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
         target_name="pinger",
-        payload_expr=TemplatedText(content=payload_expr) if payload_expr is not None else None,
+        start_expr=TemplatedText(content=start_expr) if start_expr is not None else None,
         execution_key="svc",
         channel="twilio",
         our_identity=our_identity,
@@ -216,7 +220,7 @@ class _FakeTools:
     def __init__(self, fn) -> None:
         self.fn = fn
 
-    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False):
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None):
         return self.fn(arguments)
 
 
@@ -280,10 +284,10 @@ async def _mint_via_link(monkeypatch, fake, route, *, address="+15550002222", pr
 
 async def test_tool_payload_off_carries_no_person_keys(env, monkeypatch):
     # Multichannel OFF (no config row): the payload the tool sees carries the base keys plus
-    # the generic turn block — no person_id / person_addresses. ``payload_expr="."`` echoes
+    # the generic turn block — no person_id / person_addresses. ``start_expr="."`` echoes
     # the whole payload.
     seen: list[dict] = []
-    _wire(monkeypatch, FakeManager(_tool_route(payload_expr=".")), FakeChannel())
+    _wire(monkeypatch, FakeManager(_tool_route(start_expr=".")), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
     await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
     await _settle()
@@ -296,7 +300,7 @@ async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):
     # and identical on a second message from the same address; sender stays the address.
     _seed_config(env, target_kind="tool", target_name="pinger")
     seen: list[dict] = []
-    _wire(monkeypatch, FakeManager(_tool_route(payload_expr=".")), FakeChannel())
+    _wire(monkeypatch, FakeManager(_tool_route(start_expr=".")), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
     await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
     await _settle()
@@ -313,10 +317,10 @@ async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):
     assert seen[0]["person_addresses"] == [a.model_dump(mode="json") for a in person.addresses]
 
 
-async def test_payload_expr_can_read_person_id_and_addresses(env, monkeypatch):
+async def test_start_expr_can_read_person_id_and_addresses(env, monkeypatch):
     _seed_config(env, target_kind="tool", target_name="pinger")
     seen: list[dict] = []
-    route = _tool_route(payload_expr="{who: .person_id, addrs: .person_addresses}")
+    route = _tool_route(start_expr="{who: .person_id, addrs: .person_addresses}")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
     await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
@@ -377,7 +381,7 @@ async def test_tool_payload_on_the_api_door_carries_the_person_and_composed_addr
         door="api",
         target_kind="tool",
         target_name="pinger",
-        payload_expr=TemplatedText(content="."),
+        start_expr=TemplatedText(content="."),
         execution_key="svc",
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
@@ -389,7 +393,7 @@ async def test_tool_payload_on_the_api_door_carries_the_person_and_composed_addr
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
     client_address = keys_module._api_client_address("alice", "u7")
-    await turn_module.submit_api_message("tool-api", "u7", "hi", "alice", 5)
+    await turn_module.submit_api_message("tool-api", "u7", "hi", "alice", 5, client_connected=_connected)
     await _settle()
 
     person = await _person_store().get_person(
@@ -418,7 +422,7 @@ async def test_api_door_join_discovers_the_person_thread_key(env, monkeypatch):
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
     # The redeem submit's OWN response carries the PRE-merge route key (fixed at accept).
-    redeem = await turn_module.submit_api_message("chat", "u7", code, "alice", 5)
+    redeem = await turn_module.submit_api_message("chat", "u7", code, "alice", 5, client_connected=_connected)
     await _settle()
     assert redeem.thread_id == "bridge:chat:alice/u7"
     assert redeem.answer is not None
@@ -430,7 +434,7 @@ async def test_api_door_join_discovers_the_person_thread_key(env, monkeypatch):
     assert person.addresses[0].door in {"api", "channel"}
 
     # The NEXT submit RETURNS the person thread key — the discovery vehicle at the door.
-    nxt = await turn_module.submit_api_message("chat", "u7", "hi", "alice", 5)
+    nxt = await turn_module.submit_api_message("chat", "u7", "hi", "alice", 5, client_connected=_connected)
     await _settle()
     assert nxt.thread_id == f"bridge:@person:{person.person_id}"
 
@@ -446,8 +450,8 @@ async def test_api_door_concurrent_double_redeem_has_exactly_one_winner(env, mon
     # Two callers redeem the SAME code at once: the atomic GETDEL admits exactly one winner
     # (the api door has no claim_inbound dedupe of its own).
     first, second = await asyncio.gather(
-        turn_module.submit_api_message("chat", "u-a", code, "alice", 5),
-        turn_module.submit_api_message("chat", "u-b", code, "bob", 5),
+        turn_module.submit_api_message("chat", "u-a", code, "alice", 5, client_connected=_connected),
+        turn_module.submit_api_message("chat", "u-b", code, "bob", 5, client_connected=_connected),
     )
     await _settle()
     answers = sorted(
@@ -486,6 +490,24 @@ def _resolved(outcome):
     return outcome.answer_status, outcome.answer, outcome.error
 
 
+def _agent_turn_args(route, thread_id="bridge:x:y"):
+    """The ``record``/``batch`` an agent turn needs, for the drain tests that drive it directly."""
+    from tai42_skeleton.conversations.models import DeliveryStatus
+
+    record = turn_record_module._new_record(
+        route=route,
+        message_id="m-a",
+        thread_id=thread_id,
+        client_address="+client",
+        # The api door requires a caller principal; the channel door carries none.
+        caller_principal="caller-1" if route.door == "api" else None,
+        provider_message_id="PID1",
+        inbound_text="hi",
+        delivery_status=DeliveryStatus.ACCEPTED,
+    )
+    return {"record": record, "batch": overlap_module.Batch(lead=record, members=[record])}
+
+
 async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
     route = _api_route()
     cases = {
@@ -495,7 +517,9 @@ async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
     }
     for expected, event in cases.items():
         monkeypatch.setattr(accessors_module, "_agent_registry", lambda event=event: {"assistant": _StreamAgent(event)})
-        status, answer, error = _resolved(await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
+        status, answer, error = _resolved(
+            await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
+        )
         assert status == "answered"
         assert answer == expected
         assert error is None
@@ -505,7 +529,9 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
     route = _api_route()
     agent = _StreamAgent(InterruptFinal(interrupt_id="i1", payload={"q": "?"}, reason="needs input"))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent})
-    status, answer, error = _resolved(await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
+    status, answer, error = _resolved(
+        await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
+    )
     assert status == "error"
     assert answer == outcome_module._ERROR_ANSWER_TEXT
     assert error is not None
@@ -513,20 +539,22 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
 
 
 async def test_agent_drain_async_park_is_a_silent_outcome(env, monkeypatch):
-    # The conversation door binds a completion tool around the turn, so an async ask_user
+    # The conversation door binds a completion tool around the turn, so an async ask
     # PARKS: the turn produces no reply now (a silent outcome) and the resumed answer is
     # delivered out of band by the completion continuation.
     route = _api_route()
     agent = _StreamAgent(SuspendedFinal(interaction_ids=["i1"], thread_id="t"))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent})
-    outcome = await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
+    outcome = await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
     assert isinstance(outcome, outcome_module._SilentOutcome)
 
 
 async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": _StreamAgent()})  # no events
-    status, _answer, error = _resolved(await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
+    status, _answer, error = _resolved(
+        await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
+    )
     assert status == "error"
     assert error == "agent produced an empty answer"
 
@@ -534,7 +562,9 @@ async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatc
 async def test_agent_turn_for_an_unregistered_agent_is_an_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(accessors_module, "_agent_registry", dict)
-    status, _answer, error = _resolved(await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
+    status, _answer, error = _resolved(
+        await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
+    )
     assert status == "error"
     assert error is not None
     assert "not registered" in error

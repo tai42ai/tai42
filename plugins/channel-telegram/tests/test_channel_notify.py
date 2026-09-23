@@ -67,7 +67,20 @@ async def test_notify_caller_recipient_not_on_allowlist_refuses_without_sending(
 @pytest.mark.parametrize(
     ("responder", "match"),
     [
-        pytest.param(lambda request: httpx.Response(500, text="server error"), "HTTP 500", id="http-500"),
+        pytest.param(
+            lambda request: httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests",
+                    "parameters": {"retry_after": 5},
+                },
+            ),
+            "error_code=429",
+            id="non-200-json-error",
+        ),
+        pytest.param(lambda request: httpx.Response(500, text="server error"), "rejected", id="non-200-non-json"),
         pytest.param(lambda request: httpx.Response(200, text="not json"), "non-JSON body", id="non-json"),
         pytest.param(
             lambda request: httpx.Response(200, json={"ok": False, "error_code": 403, "description": "Forbidden"}),

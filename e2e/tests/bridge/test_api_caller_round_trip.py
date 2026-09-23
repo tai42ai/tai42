@@ -1,10 +1,11 @@
 """API-caller round-trip.
 
 The authed ``POST /api/conversations/{route}/messages`` door: the sync-wait carrying the
-answer inline in a ``200`` (callback suppressed), the async ``202`` whose permanently
-undeliverable callback lands ``failed`` on the admin list door, and the grant-gated read
-door (any grant-holder reads the caller-safe projection, which withholds the route key's
-internal detail; only an admin reads that detail).
+answer inline in a ``200`` (callback suppressed), a caller that hangs up during the sync
+wait whose finished answer is NOT claimed inline but delivered by the route's callback, the
+async ``202`` whose permanently undeliverable callback lands ``failed`` on the admin list
+door, and the grant-gated read door (any grant-holder reads the caller-safe projection,
+which withholds the route key's internal detail; only an admin reads that detail).
 
 The signed-callback SUCCESS delivery is not exercised here: the contract forces an absolute
 HTTPS ``callback_url`` with no insecure opt-out, so a plain-loopback receiver cannot stand in
@@ -14,10 +15,12 @@ without TLS. The sync-inline path and the failure path cover the door's outcomes
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlencode
 
 import pytest
 
 from tai42_e2e.settings import HarnessSettings
+from tai42_e2e.waiting import wait_for_async
 
 from ._bridge_support import BridgeHarness, script_reply, wait_record_status
 
@@ -68,6 +71,45 @@ async def test_sync_wait_returns_answer_inline(bridge: BridgeHarness, uniq: Call
     # The record settled delivered without a callback POST (the unreachable URL was never hit).
     record = await bridge.get_record(route_name, data["message_id"])
     assert record["delivery_status"] == "delivered"
+
+
+async def test_gone_client_sync_wait_falls_to_the_callback(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+    # A caller that hangs up during the sync wait must NOT have its answer claimed inline: the
+    # turn finishes inside the window, but the disconnect probe reads gone, so the answer is
+    # delivered by the route's callback instead of written to the closed socket. The callback URL
+    # is unreachable, so the record exhausts its attempts and lands terminal ``failed`` — proof
+    # the callback FIRED (a wrongly claimed inline answer would land ``delivered`` with no
+    # callback attempt, and never appear on the failed-delivery list).
+    route_name = await _api_route(bridge, uniq, callback_url=_UNREACHABLE_CALLBACK)
+    answer = uniq("l3-gone")
+    script_reply(bridge.llm_stub, f"gone {answer}")
+    # The turn's answer is delayed well past the hang-up: the client holds the connection open long
+    # enough for the server to accept and record the message and start the turn, then closes before
+    # the answer is ready, so the claim-time disconnect probe reads gone and the answer falls to
+    # the callback.
+    bridge.llm_stub.set_response_delay(3.0)
+
+    caller_token = await bridge.mint_key(user_id=uniq("l3-caller"), scopes=["e2e-all"])
+    text = uniq("l3-gone-text")
+    bridge.api(token=caller_token).post_and_disconnect(
+        f"/api/conversations/{route_name}/messages",
+        json={"external_user_id": uniq("l3-user"), "text": text, "wait_seconds": 20},
+        hold_seconds=1.0,
+    )
+
+    # Find the accepted record by its unique inbound text (the hung-up post read no message_id back).
+    async def _find_message_id() -> str | None:
+        hits = await bridge.api().get(f"/api/conversations/{route_name}/messages/search?{urlencode({'q': text})}")
+        return next((item["message_id"] for item in hits["items"] if item["inbound_text"] == text), None)
+
+    message_id = await wait_for_async(
+        _find_message_id, deadline=20.0, message="the gone-client record never appeared on the route"
+    )
+    # The callback to the unreachable URL exhausts the shortened attempt ladder → failed.
+    record = await wait_record_status(bridge, route_name, message_id, {"failed"}, deadline=20.0)
+    assert record["answer_status"] == "answered"
+    failed = await bridge.list_failed()
+    assert any(item["message_id"] == message_id for item in failed["items"])
 
 
 async def test_async_callback_permanent_failure_marks_failed(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

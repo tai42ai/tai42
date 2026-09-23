@@ -263,7 +263,7 @@ async def test_core_stack_template_jq_input_and_update(core_stack: TaiStack, uni
                     "purpose": "update",
                     "description": "add an item",
                     "writes": [["items"]],
-                    "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]'},
+                    "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: $input}]'},
                 },
             },
         },

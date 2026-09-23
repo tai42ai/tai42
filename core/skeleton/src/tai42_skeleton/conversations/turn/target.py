@@ -93,7 +93,19 @@ async def _target_outcome(
                     record=intake,
                     batch=batch,
                 )
-            return await agent_turn._run_agent_turn(route, text, intake.thread_id, intake.client_address)
+            return await agent_turn._run_agent_turn(
+                route,
+                text,
+                intake.thread_id,
+                intake.client_address,
+                record=intake,
+                batch=batch,
+                person=person,
+                params=params,
+                form=form,
+                attachments=attachments,
+                location=location,
+            )
     finally:
         reset_conversation_turn(turn_token)
 

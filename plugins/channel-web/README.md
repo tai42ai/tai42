@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A **public web chat** channel plugin for the TAI ecosystem. It hosts a standalone
-chat page for anonymous visitors, delivers an `ask_user` question into the page the
+chat page for anonymous visitors, delivers an `ask` question into the page the
 visitor is looking at, and bridges their reply back into the interactions store — so
 an agent can talk to whoever opens the page, not only to people who already have an
 account. It implements the `tai42_contract.channels.Channel` protocol and registers
@@ -16,7 +16,7 @@ cookie the page mints for them.
 
 TAI is an open-source runtime for MCP tools, agents, and workflows. A `Channel` is
 "how a question reaches a human" — a pluggable deliverer the runtime resolves by
-name when `ask_user` is called with `channel=...`. This package is one such
+name when `ask` is called with `channel=...`. This package is one such
 deliverer (public web chat); siblings back the same contract with WhatsApp,
 Telegram, or Slack. This repo is this plugin's own full doc home, and the
 documentation site covers the platform-level story:
@@ -112,7 +112,7 @@ https://<your deployment>/api/channels/web/chat/<identity>?topic=onboarding&ref=
 
 - The parameters are captured on the navigation that serves the page and stored on
   the visitor's session registration; every later message's turn carries them, so a
-  route's `payload_expr` can read `.params.topic`.
+  route's `start_expr` can read `.params.topic`.
 - Bounds — a violation is refused as an HTML page, HTTP `400`, carrying
   `link_params_invalid` in its `<meta name="tai42-refusal-code">` and naming the
   first bound it broke: at most **16** parameters; each key matches
@@ -139,7 +139,7 @@ and never logs it, but attaches **no** trust: no signature, no expiry, no
 interpretation. A param is text anyone can put in a URL. A flow that must *trust* a
 value issues its **own** secret token, delivers it in the link, and checks it in its
 **own** store — where expiry, single-use, and revocation live — from the tool the
-route dispatches (gated in `payload_expr` before the tool runs, or inside the tool
+route dispatches (gated in `start_expr` before the tool runs, or inside the tool
 itself). The platform never verifies a param on the flow's behalf.
 
 ## Entry gate
@@ -253,7 +253,7 @@ together when they open the chat page:
 - a **visitor id**, a separate opaque non-secret id the token is registered against
   server-side (`channel:web:session:{token}` in the plugin's Redis). **That** is the
   conversation address (`client_address`), the transcript key, and what an
-  `ask_user` names as its recipient.
+  `ask` names as its recipient.
 
 `SESSION_COOKIE_SECURE` decides the cookie's name, `Path` and `Secure` flag
 together, because a browser honours the `__Host-` prefix only on a cookie that is
@@ -419,7 +419,7 @@ a browser navigation, so it answers those refusals as HTML pages (above).
 
 ## How a delivery is addressed
 
-`ChannelDelivery` carries no sender identity, so a web `ask_user` names its target
+`ChannelDelivery` carries no sender identity, so a web `ask` names its target
 as `recipient = "<identity>:<visitor-id>"` — the channel splits it back into the
 transcript pair (on the LAST colon: a visitor id is urlsafe-minted and therefore
 colon-free) and stores both in the pending-question record so the later
@@ -494,7 +494,7 @@ notification is refused loudly — a template is a vendor construct this channel
   cannot overwrite a live session cookie.
 - The message and answer doors read their bodies bounded (`MAX_BODY_BYTES`, actual
   bytes, never a declared `Content-Length`) and refuse an over-cap one with `413`,
-  never a truncation. An `ask_user` callback ticket never reaches the browser except
+  never a truncation. An `ask` callback ticket never reaches the browser except
   for the `external` widget that must open it.
 - The page's CSP admits scripts, stylesheets, fonts, and connections from its own
   origin only, forbids framing, and the assets door serves only integrity-listed

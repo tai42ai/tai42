@@ -282,6 +282,37 @@ async def test_send_rejection_detail_bounded_for_non_json_body(fake_redis: FakeR
     assert len(str(excinfo.value)) < 600  # detail capped at 500 chars
 
 
+async def test_send_rejection_surfaces_every_documented_field(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The vendor's full error object is kept, in Twilio's documented field order, none
+    # dropped: each present field a name=<render> token (repr for a scalar, compact
+    # sorted JSON for a list/dict), joined by one space — the operator's diagnostic.
+    body = {
+        "code": 21211,
+        "message": "The 'To' number is not a valid phone number.",
+        "status": 400,
+        "more_info": "https://www.twilio.com/docs/errors/21211",
+    }
+    fake_httpx.responses.append(response(400, json=body))
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await TwilioChannel().deliver(make_delivery())
+
+    assert (
+        "code=21211 message=\"The 'To' number is not a valid phone number.\" "
+        "status=400 more_info='https://www.twilio.com/docs/errors/21211'"
+    ) in str(excinfo.value)
+
+
+async def test_send_rejection_simple_body_renders_only_present_fields(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A body carrying only code/message renders those two tokens and nothing else.
+    fake_httpx.responses.append(response(400, json={"code": 30001, "message": "Queue overflow"}))
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await TwilioChannel().deliver(make_delivery())
+
+    assert "code=30001 message='Queue overflow'" in str(excinfo.value)
+
+
 async def test_transport_failure_raises_and_releases_reservation(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(httpx.ConnectError("boom"))
 

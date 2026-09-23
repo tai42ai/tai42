@@ -57,7 +57,9 @@ class _SpyStore:
     ):
         self.starts.append({"run_id": run_id, "preset_name": preset_name})
 
-    async def update_outcome(self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None):
+    async def update_outcome(
+        self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+    ):
         self.terminals.append({"run_id": run_id, "outcome": outcome})
 
 

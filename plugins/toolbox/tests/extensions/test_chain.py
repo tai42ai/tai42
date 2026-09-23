@@ -252,7 +252,7 @@ def test_pathological_jq_expression_surfaces_timeout_through_chain(bind_fake_app
 
     bind_fake_app(FakeTools(run_tool=run_tool))
 
-    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expression, prelude="": _BlockingProgram())
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expression, prelude="", variables=(): _BlockingProgram())
     monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.05")
     reset_all_settings()
     try:
@@ -267,3 +267,68 @@ def test_pathological_jq_expression_surfaces_timeout_through_chain(bind_fake_app
             )
     finally:
         reset_all_settings()
+
+
+class _RecordingTools:
+    """A tools facet whose ``run_tool`` records the ``extras`` each step receives."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False, extras: Any = None):
+        self.calls.append((key, extras))
+        return {"user_id": arguments.get("user_id", 0)} if key == "first" else {"ok": True}
+
+
+def test_a_chain_step_runs_with_empty_extras(bind_fake_app):
+    # The chain is a plain ``run_tool`` caller, not a door: it forwards no ``extras`` to a step, so each
+    # stage starts with the platform's empty default. A step that inherited door extras would be a leak.
+    tools = _RecordingTools()
+    bind_fake_app(tools)
+
+    result = asyncio.run(
+        execute_chain(
+            tool_name="first",
+            tool_arguments={"user_id": 7},
+            jq_expression=TemplatedText(content="{user_id: .user_id}"),
+            next_tool_name="second",
+        )
+    )
+
+    assert result == {"ok": True}
+    # Both stages ran; neither received chain-injected extras.
+    assert tools.calls == [("first", None), ("second", None)]
+
+
+def test_a_caller_ask_in_a_step_surfaces_to_caller_at_the_chains_door(bind_fake_app):
+    # A step tool that async-asks its CALLER returns a sentinel whose ``caller_interaction_ids`` mark the
+    # caller-addressed asks. The chain propagates the sentinel verbatim, so the ``to="caller"`` asks reach
+    # the chain's OWN caller — whose ``visit`` turns them into asks — never swallowed or re-minted here.
+    from tai42_contract.interactions import SuspendedInteraction
+
+    caller_ask = SuspendedInteraction(
+        interaction_id="i-ask",
+        resume_owner="chain_caller_resume",
+        interaction_ids=["i-ask"],
+        caller_interaction_ids=["i-ask"],
+    )
+
+    async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
+        if key == "asker":
+            return caller_ask
+        raise AssertionError(f"the next tool must not run on a parked first stage; got {key}")
+
+    bind_fake_app(FakeTools(run_tool=run_tool))
+
+    result = asyncio.run(
+        execute_chain(
+            tool_name="asker",
+            tool_arguments={},
+            jq_expression=TemplatedText(content=".name"),
+            next_tool_name="sink",
+        )
+    )
+
+    # The SAME sentinel surfaces, its caller-ask marking intact for the chain's caller to visit.
+    assert result is caller_ask
+    assert result.caller_interaction_ids == ["i-ask"]

@@ -21,7 +21,7 @@ Two faces:
 
 This agent wires no HITL approval interrupt (its ``langchain`` ``create_agent``
 runtime has no ``interrupt_on``), so the stream never contains an
-``InterruptFinal``. It CAN park, though: an async ``ask_user`` a tool raises parks
+``InterruptFinal``. It CAN park, though: an async ``ask`` a tool raises parks
 the run through the shared park middleware — the caller gets a suspended RECEIPT and
 the durable index resumes it by id out of band, exactly as ``langchain_deep_agent`` does. A park
 is recorded only when the run is park-capable AND a resume path is bound: the ``run``
@@ -42,8 +42,8 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec, SubAgentSpec
 from tai42_contract.agent.events import StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import get_park_completion
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import get_run_delivery_id
 from tai42_kit.llm.runtime import build_user_output, extract_structured_output
 
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
@@ -58,6 +58,7 @@ from tai42_agents._internal.config_util import build_run_config, init_langgraph_
 from tai42_agents._internal.park import (
     ParkIdentity,
     build_park_identity,
+    chain_routing_slots,
     collect_pending_interrupts,
     finalize_drive,
     park_drive,
@@ -83,7 +84,7 @@ from tai42_agents._internal.stream_events import astream_tools_agent_events
 # output through ``create_agent`` and is honored on both faces. ``recursion_limit``
 # is NOT here either — it is a standard ``RunnableConfig`` key the compiled graph
 # reads, so it is honored (overlaid onto the run config) rather than rejected.
-# ``resume`` is NOT here either — an async ``ask_user`` park makes a run resumable,
+# ``resume`` is NOT here either — an async ``ask`` park makes a run resumable,
 # so a caller-driven ``Command(resume=...)`` is honored (the park itself resumes out
 # of band through the ``agent_resume`` continuation).
 _UNHONORED_REASONS: dict[str, str] = {
@@ -95,7 +96,7 @@ _UNHONORED_REASONS: dict[str, str] = {
     "inline_skills": "skill backends are langchain_deep_agent's domain; this agent loads none",
     "interrupt_on": (
         "HITL approval interrupts are langchain_deep_agent's domain; this agent's create_agent runtime wires none "
-        "(an async ask_user parks instead, resumed by id)"
+        "(an async ask parks instead, resumed by id)"
     ),
     "store_provider": "this agent wires no long-term store",
 }
@@ -185,7 +186,7 @@ class ToolsAgentInput(BaseModel):
 
 
 # A parking agent must bind the hidden ``agent_resume`` continuation from its OWN
-# registration: the park package no longer binds it as a module-import side effect, so a box
+# registration: the park package does not bind it as a module-import side effect, so a box
 # loading this agent (even with no deep engine present) still resumes its async parks. The
 # call is per-epoch idempotent, so a combined box binds it exactly once.
 register_agent_resume_tool()
@@ -291,7 +292,7 @@ class ToolsAgent(Agent):
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
         (answering a prior async-ask park with ``Command(resume=...)``). A run that
-        parks on an async ``ask_user`` returns a suspended RECEIPT
+        parks on an async ``ask`` returns a suspended RECEIPT
         (``{"status": "suspended", ...}``) instead of an answer and resumes out of
         band. This face captures the AMBIENT park completion (in parity with
         :meth:`astream`): when a door bound one around the dispatch (a conversation
@@ -349,7 +350,7 @@ class ToolsAgent(Agent):
         # NONE is bound (``completion_tool`` stays ``None``): the run's async ask is resumable
         # by ``agent_resume`` regardless, and with no completion the resumed answer is delivered
         # nowhere — byte-identical to the pre-capture behavior.
-        completion_tool, completion_context = get_park_completion()
+        completion_tool, completion_context = chain_routing_slots()
 
         def build_park(final_config: dict[str, Any]) -> ParkIdentity | None:
             return build_park_identity(
@@ -460,13 +461,14 @@ class ToolsAgent(Agent):
         ``interrupt_on`` (no HITL approval interrupt is wired), and
         ``store_provider`` (no long-term store is wired).
 
-        This streaming face binds a resume path — and so lets an async ``ask_user``
-        park — ONLY when a completion tool is bound around the run (the conversation
-        turn binds one to deliver a resumed answer back to the originating thread).
-        With none bound (a direct SSE run), an async ask refuses loudly pre-persist:
-        the streaming caller has no out-of-band delivery path for a late answer.
-        ``resume`` drives ``Command(resume=...)`` — answering a prior park — in place
-        of a fresh ``user_message``.
+        This streaming face binds a resume path — and so lets an async ``ask``
+        park — whenever the run is driven under a run-delivery context (the door that
+        started it opened the minting call frame; an SSE agent-run door and a
+        conversation turn both do). The live receiver takes the run's outcome inline,
+        so a receiver-less run (no out-of-band address) still parks. A stream driven
+        under NO run-delivery context has no way to deliver a late answer, so its async
+        ask refuses loudly pre-persist. ``resume`` drives ``Command(resume=...)`` —
+        answering a prior park — in place of a fresh ``user_message``.
         """
         reject_unhonored(
             "tools_agent.astream",
@@ -608,21 +610,23 @@ class ToolsAgent(Agent):
         langgraph_config: dict[str, Any] | None,
         recursion_limit: int | None,
     ) -> ParkBuilder | None:
-        """The park builder for the streaming face, or ``None`` when no resumed-answer path is bound.
+        """The park builder for the streaming face, or ``None`` when the run cannot park.
 
-        The streaming face returns its stream to a caller that cannot receive a late
-        answer, so it binds a resume path — and lets an async ask park — ONLY when a
-        completion tool is bound in context (the conversation turn binds one). That
-        completion tool is stored on the park entry and fired with the final answer on a
-        clean terminal drive. With none bound, this returns ``None`` so an async ask
-        refuses loudly pre-persist.
+        Park-capability follows the RUN-DELIVERY context, not an out-of-band address: a run
+        driven under one (the starting door opened the minting call frame) can park, whether or
+        not that door bound a delivery address — a live receiver (an SSE agent-run door, a
+        conversation turn) takes the outcome inline, and a receiver-less run subject-tracks or
+        fires its stored address on a later resolve. A stream driven under NO run-delivery
+        context has no receiver at all, so this returns ``None`` and an async ask refuses loudly
+        pre-persist.
 
-        The binding's opaque context is stored beside the tool name and merged into the
-        completion fire verbatim, so the delivery tool receives the address it routes by.
+        What the park ENTRY captures is the cross-driver CHAIN routing (``chained_resume``), not
+        the door address: the driver fires only the chain at its terminal, and the platform
+        delivers the run's outcome to the door address it captured at ask time.
         """
-        completion_tool, completion_context = get_park_completion()
-        if completion_tool is None:
+        if get_run_delivery_id() is None:
             return None
+        completion_tool, completion_context = chain_routing_slots()
 
         def build(final_config: dict[str, Any]) -> ParkIdentity | None:
             return build_park_identity(
@@ -712,7 +716,7 @@ class ToolsAgent(Agent):
         # through the agent's own bound entrypoint); the completion tool the driver
         # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
         # park-capable by construction.
-        completion_tool, completion_context = get_park_completion()
+        completion_tool, completion_context = chain_routing_slots()
         park = build_park_identity(
             agent_name=self.tool_name,
             config=config,

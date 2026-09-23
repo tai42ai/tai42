@@ -129,6 +129,7 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
     from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
     from tai42_skeleton.authz.identity import INTERNAL_PRINCIPAL
     from tai42_skeleton.conversations.turn import accessors as accessors_module
+    from tai42_skeleton.runs.chokepoint import delivery_fire
 
     class _AlreadyCommittedStore:
         async def get_record(self, completion_id: str) -> object:
@@ -138,11 +139,14 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
         async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": False}})):
             monkeypatch.setattr(accessors_module, "_store", lambda: _AlreadyCommittedStore())
             token = set_execution_identity(INTERNAL_PRINCIPAL)
+            # The resume driver fires the address tool inside the platform's delivery-fire context;
+            # without it the tool's delivery-authorisation guard refuses the fire.
             try:
-                out = await app.tools.run_tool(
-                    "conversation_deliver",
-                    {"thread_id": "bridge:line:+15550002222", "result": "hi", "completion_id": "cmpl-x"},
-                )
+                with delivery_fire("cmpl-x"):
+                    out = await app.tools.run_tool(
+                        "conversation_deliver",
+                        {"thread_id": "bridge:line:+15550002222", "result": "hi", "completion_id": "cmpl-x"},
+                    )
             finally:
                 reset_execution_identity(token)
             assert out == {"message_id": "cmpl-x"}

@@ -38,9 +38,9 @@ def test_reads_across_groups(cli_stack: TaiStack, tmp_path: Path) -> None:
     mode = run_cli(cli_stack, tmp_path, "config", "mode")
     assert "file" in mode.stdout, mode.stdout
 
-    # manifest show: the manifest's user tools include ask_user.
+    # manifest show: the manifest's user tools include ask.
     manifest = run_cli(cli_stack, tmp_path, "manifest", "show")
-    assert "ask_user" in manifest.stdout, manifest.stdout
+    assert "ask" in manifest.stdout, manifest.stdout
 
     # system kinds: the pluggable-kind table reports the storage kind.
     kinds = run_cli(cli_stack, tmp_path, "system", "kinds")

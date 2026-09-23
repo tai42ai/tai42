@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 from tai42_contract.conversations import ConversationEventSubmission, ConversationRoute
@@ -106,6 +107,8 @@ async def submit_event(
     route_name: str,
     submission: ConversationEventSubmission,
     caller_principal: str | None,
+    *,
+    client_connected: Callable[[], Awaitable[bool]],
 ) -> ApiSubmitResult:
     """Run a structured event as a turn ON an existing thread of ``route_name``.
 
@@ -113,7 +116,9 @@ async def submit_event(
     slot, persist a durable event record, run the tool target AS the route's execution key —
     and its answer is delivered by the TARGET route's door: a channel route texts the
     thread's address, an api route POSTs the route's signed callback (or returns the answer
-    inline within ``wait_seconds``). It never mints a thread and never runs an agent target.
+    inline within ``wait_seconds`` while ``client_connected`` reports the caller still
+    connected — a hung-up caller's answer falls to the callback or its terminal poll record).
+    It never mints a thread and never runs an agent target.
 
     ``caller_principal`` is MANDATORY: it is the accountable party the rate cap buckets on
     and the authorizing principal recorded on the event (``submitted_by``). Admission runs
@@ -202,4 +207,4 @@ async def submit_event(
         # the channel door does; the caller gets the accepted id back.
         return ApiSubmitResult(message_id=message_id, thread_id=thread_id, answer=None)
     wait_seconds = min(submission.wait_seconds, caps.settings.sync_wait_max_seconds)
-    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds)
+    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds, client_connected)

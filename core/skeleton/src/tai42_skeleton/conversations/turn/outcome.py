@@ -26,16 +26,6 @@ def _serialize_structured(data: object) -> str:
     return json.dumps(data, default=str)
 
 
-#: Internal sentinel: the agent turn parked on an async ``ask_user`` instead of answering.
-#: Its resumed answer is delivered out of band by the completion continuation, so the turn
-#: produces no reply now.
-class _AgentParked:
-    __slots__ = ()
-
-
-_AGENT_PARKED = _AgentParked()
-
-
 @dataclass(frozen=True)
 class _SilentOutcome:
     """A tool turn that produced no reply — a designed no-reply, never an error.

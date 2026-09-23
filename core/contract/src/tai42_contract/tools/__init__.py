@@ -7,13 +7,22 @@ Vendor return types (fastmcp ``Tool``, langchain ``StructuredTool``) are ``TYPE_
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_checkable
 
 from pydantic import BaseModel
 
 from tai42_contract.app.facets import RouteAction
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.tools.call_frame import (
+    RunDelivery,
+    current_call_chain,
+    current_extras,
+    get_run_delivery,
+    get_run_delivery_id,
+    run_delivery,
+    tool_call_frame,
+)
 from tai42_contract.tools.invocation import (
     ToolInvocation,
     current_tool_invocation,
@@ -98,7 +107,10 @@ class AppTools(Protocol):
     # :data:`RouteAction`): ``fenced``/``secret`` gates both AUTHORING a preset over the
     # tool AND RUNNING it (admin-only); ``read``/``write`` carry no execution gate. It is
     # the declarative form of :meth:`register_tier` and, like the two above, registers
-    # only when the manifest includes the tool.
+    # only when the manifest includes the tool. ``extras_keys`` declares the door
+    # ``extras`` keys this tool reads through :meth:`extras`; a key a target does not
+    # declare is refused before the run, and a preset inherits its base tool's keys
+    # (likewise registered only when the manifest includes the tool).
     @overload
     def tool(self, func: F, /) -> F: ...
     @overload
@@ -109,6 +121,7 @@ class AppTools(Protocol):
         tool_refs: ToolRefsExtractor | None = None,
         retry: ToolRetryPolicy | None = None,
         tier: RouteAction | None = None,
+        extras_keys: frozenset[str] | None = None,
         **kwargs: Any,
     ) -> Callable[[F], F]: ...
 
@@ -133,10 +146,48 @@ class AppTools(Protocol):
         """Return the client-facing tool objects, restricted to ``names`` when given."""
         ...
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+    async def run_tool(
+        self,
+        key: str,
+        arguments: dict[str, Any],
+        *,
+        offload_sync: bool = False,
+        continues_chain: Sequence[str] | None = None,
+        extras: Mapping[str, Any] | None = None,
+    ) -> Any:
         """Execute the tool registered under ``key`` with ``arguments`` and return its result.
 
         ``offload_sync`` runs a synchronous tool body off the event loop in a worker thread.
+
+        ``continues_chain`` is an in-process seam keyword ONLY (no request model, MCP
+        argument, or tool argument sets it): when given, the dispatch's call frame SETS
+        the ambient call chain to it rather than pushing ``key``, so a continuation
+        runner restores a parked run's chain on the one dispatch that resumes it.
+
+        ``extras`` is likewise an in-process seam keyword ONLY (no request model, MCP
+        argument, or tool argument sets it): the mapping a door carries into the run it
+        starts. It is set on the dispatch's call frame — ambient and read-only for THAT
+        frame, so the started tool reads it through :meth:`extras` and every nested frame
+        starts empty. A visit checks the keys against the target's declaration before the
+        run; ``None`` binds an empty mapping.
+        """
+        ...
+
+    def extras(self) -> Mapping[str, Any]:
+        """The ambient door ``extras`` mapping the current run was started with (empty when none).
+
+        A door carries author-configured ``extras`` into a run; a tool reads the keys it declared
+        (``@app.tools.tool(extras_keys=...)``) here. The mapping is read-only and scoped to the
+        started target's own frame — every nested dispatch reads an empty mapping, so nothing leaks
+        down. No request model, MCP argument, or tool argument can set it.
+        """
+        ...
+
+    async def declared_extras(self, name: str) -> frozenset[str]:
+        """The door ``extras`` keys tool ``name`` is declared to read (empty when it declares none).
+
+        A preset inherits its base tool's declared keys. The visit checks a door's ``extras`` against
+        this set before starting the target and refuses an undeclared key.
         """
         ...
 
@@ -232,6 +283,7 @@ __all__ = [
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
     "AppTools",
+    "RunDelivery",
     "StateTemplateDetachReferee",
     "ToolDeleteReferee",
     "ToolInfo",
@@ -240,7 +292,13 @@ __all__ = [
     "ToolRenameReferee",
     "ToolRetryBackoff",
     "ToolRetryPolicy",
+    "current_call_chain",
+    "current_extras",
     "current_tool_invocation",
+    "get_run_delivery",
+    "get_run_delivery_id",
     "reset_current_tool_invocation",
+    "run_delivery",
     "set_current_tool_invocation",
+    "tool_call_frame",
 ]

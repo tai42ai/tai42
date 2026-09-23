@@ -44,7 +44,7 @@ set) — the medium's honest ceiling, a real text-reply mapping, never a fake bu
 affordance. Authored option ids never round-trip over SMS: an inbound text matches by
 its TEXT, so any author-set id is dropped rather than echoed back.
 
-The recipient allowlist governs ask_user deliveries; a bridge reply carries a
+The recipient allowlist governs ask deliveries; a bridge reply carries a
 ``sender_identity`` and goes solely to the address that initiated the
 conversation, bypassing the allowlist.
 """

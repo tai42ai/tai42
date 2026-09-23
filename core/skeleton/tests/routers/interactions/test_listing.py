@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 from tai42_contract.interactions import InteractionResponse, MediaItem
 
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.operations.interactions import _add_data
 from tai42_skeleton.routers import interactions as router
@@ -166,16 +166,16 @@ def test_add_data_media_is_conditional(wired):
     assert "media" not in _add_data(without_media)
 
 
-async def test_ask_user_invalid_media_raises_before_persist(wired):
+async def test_ask_invalid_media_raises_before_persist(wired):
     # An invalid media item fails at the InteractionRequest build, before any state
     # is written: the request never persists and the open index stays empty.
     with pytest.raises(ValidationError):
-        await ask_user("q", media=[{"kind": "image", "url": "javascript:alert(1)"}], timeout=5)
+        await ask("q", media=[{"kind": "image", "url": "javascript:alert(1)"}], timeout=5)
     assert await wired.store.count_open(wired.fake) == 0
     assert _store_empty(wired.fake)
 
 
-async def test_ask_user_media_persists_and_frame_carries_it(wired):
+async def test_ask_media_persists_and_frame_carries_it(wired):
     # End to end through the real helper with DICT-form media (an agent emits dicts):
     # the ask persists, answers normally (media never touches the answer), and the
     # stored request's add frame carries the coerced media — the display-only round trip.
@@ -196,7 +196,7 @@ async def test_ask_user_media_persists_and_frame_carries_it(wired):
         {"kind": "link", "url": "https://docs.example/p"},
     ]
     answerer = asyncio.create_task(answer_when_asked())
-    result = await ask_user("Pick a product", answer_format="text", media=media, timeout=5)
+    result = await ask("Pick a product", answer_format="text", media=media, timeout=5)
     await answerer
 
     assert result == "chosen"  # answer unchanged by the presence of media

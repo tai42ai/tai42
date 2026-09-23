@@ -243,7 +243,7 @@ class WebChannel:
     vendor construct with no place on a page this plugin renders itself.
     """
 
-    # The page renders a schema-driven form widget, so the ask_user helper may route
+    # The page renders a schema-driven form widget, so the ask helper may route
     # a ``form`` delivery here; absent this flag it never would.
     supports_form_delivery: ClassVar[bool] = True
     # notify carries a media card and a tappable option list (reply chips + link

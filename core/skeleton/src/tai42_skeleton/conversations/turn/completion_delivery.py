@@ -18,16 +18,18 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.turn import accessors
+from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.errors import CompletionDeliveryError
 from tai42_skeleton.conversations.turn.outcome import _error_answer_text, _serialize_structured, _text_part
 from tai42_skeleton.conversations.turn.record import _answer_fields, _new_record
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_reply
+from tai42_skeleton.interactions.authorization import assert_delivery_authorized
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 # The registered name of the hidden completion-delivery tool. The conversation door binds it
 # (``set_park_completion``) around an agent turn, carrying this turn's thread as the opaque
-# delivery address, so an async ``ask_user`` may park with a path back to this thread; a resumed
+# delivery address, so an async ``ask`` may park with a path back to this thread; a resumed
 # run's driver fires it with the generic contract payload (that context merged with
 # ``{result, completion_id, status}``) and it mints the answered record + spawns delivery. Must
 # equal the registered tool name.
@@ -45,6 +47,22 @@ DELIVER_TOOL_COMPLETION_NAME = "deliver_tool_completion"
 # Recorded as the sending principal on a completion-delivered record — a namespaced system
 # sentinel (no operator answered by hand) that cannot collide with a looked-up user id.
 _COMPLETION_PRINCIPAL = "system:agent-resume"
+
+
+async def _rebuilt_turn(message_id: str | None, route: ConversationRoute) -> dict[str, object] | None:
+    """Rebuild the ``$turn`` block a late reply maps against, from the turn's originating intake record.
+
+    The completion binding carries the originating turn's ``message_id``; this loads that record and
+    builds the SAME generic ``turn`` block a live tool turn surfaces, so an out-of-band reply reads
+    ``$turn`` symmetric to a live one. ``None`` when no id was carried or the record has aged out of
+    retention — ``reply_expr`` then reads ``$turn`` as null rather than a guessed value.
+    """
+    if not message_id:
+        return None
+    record = await accessors._store().get_record(message_id)
+    if record is None:
+        return None
+    return _turn_block(record, route, person=None, thread_id=record.thread_id)
 
 
 async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute, str]:
@@ -124,6 +142,7 @@ async def deliver_agent_completion(
     result: Any = None,
     completion_id: str | None = None,
     status: str | None = None,
+    message_id: str | None = None,
 ) -> dict[str, str | None]:
     """Deliver a resumed agent turn's FINAL answer back into its originating thread.
 
@@ -168,7 +187,13 @@ async def deliver_agent_completion(
     bounded retry of a malformed fire. A missing ``thread_id`` DROPS: the payload is permanently
     unroutable, so raising would only buy an unending retry storm against a fire no attempt can
     ever land.
+
+    ``message_id`` is the originating turn's intake record id, carried on the completion binding so
+    a ``reply_expr`` reply rebuilds ``$turn`` from that record (:func:`_rebuilt_turn`).
     """
+    # Only the platform's own delivery-ladder fire may reach here: a call named at the run-tool door
+    # or the MCP edge — or one with no completion id — is refused before any record read or mint.
+    assert_delivery_authorized(completion_id)
     if not completion_id:
         raise ValueError("deliver_agent_completion requires a completion_id — it is the exactly-once delivery key")
     existing = await accessors._store().get_record(completion_id)
@@ -188,13 +213,34 @@ async def deliver_agent_completion(
         )
         return {"message_id": None}
     route, client_address = await _resolve_completion_target(thread_id)
+    answer_parts: list[AnswerPart] | None = None
     if _completion_succeeded(COMPLETION_TOOL_NAME, completion_id, status):
         # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
         # replies for an empty answer, so the client sees a consistent outcome either way — the
         # route's own ``error_reply_text`` when it carries one. It rides the operator record as
         # an ``answered`` reply (an operator record is always answered) — the text is the reply,
         # there is no client turn to mark ``error`` against.
-        if result is None:
+        if route.reply_expr is not None:
+            # The route maps the resumed final through its ``reply_expr`` exactly as a live agent
+            # turn does — over the run's result, with ``$turn`` rebuilt from the originating record.
+            turn = await _rebuilt_turn(message_id, route)
+            try:
+                reply = await _tool_reply(route, result, turn=turn, asks=[], parked=[])
+            except Exception as exc:
+                logger.exception(
+                    "conversations: mapping a resumed agent result for route %r failed",
+                    route.route_name,
+                    exc_info=exc,
+                )
+                answer = _error_answer_text(route)
+            else:
+                parts = _reply_parts(reply)
+                if parts is None:
+                    # A designed silent outcome delivers nothing; it re-maps to the same null on a
+                    # redelivery, so it anchors no record.
+                    return {"message_id": None}
+                answer, answer_parts = _answer_fields(parts)
+        elif result is None:
             # A success fire carrying NO result: serializing it would render the literal "null",
             # which is not blank and would sail past the check below straight into the participant's
             # thread. It is the same malformed-payload class the status guards catch, so it takes
@@ -210,8 +256,8 @@ async def deliver_agent_completion(
             text = _serialize_structured(result)
             answer = text if text.strip() else _error_answer_text(route)
     else:
-        # A non-success terminal: an agent route carries no error mapping, so deliver the uniform
-        # client-safe notice — never the raw terminal detail, never silence.
+        # A non-success terminal: deliver the uniform client-safe notice — never the raw terminal
+        # detail, never silence.
         answer = _error_answer_text(route)
     record = _new_record(
         route=route,
@@ -224,6 +270,7 @@ async def deliver_agent_completion(
         delivery_status=DeliveryStatus.PENDING_DELIVERY,
         answer_status="answered",
         answer=answer,
+        answer_parts=answer_parts,
         origin="operator",
     )
     await accessors._store().create_record(record)
@@ -238,6 +285,7 @@ async def deliver_tool_completion(
     result: Any = None,
     status: str | None = PARK_COMPLETION_FAILED,
     route_name: str | None = None,
+    message_id: str | None = None,
 ) -> dict[str, str | None]:
     """Deliver a resumed TOOL route's deferred outcome back into its originating thread.
 
@@ -295,7 +343,13 @@ async def deliver_tool_completion(
     permanently unroutable and raising the retriable error would only buy an unending retry storm
     against a fire no attempt can ever land. An unresolvable but PRESENT thread still raises —
     that one can come back (a route can be restored), so it is the resumer's to retry.
+
+    ``message_id`` is the originating turn's intake record id, carried on the completion binding so a
+    ``reply_expr`` rebuilds ``$turn`` from that record (:func:`_rebuilt_turn`).
     """
+    # Only the platform's own delivery-ladder fire may reach here: a call named at the run-tool door
+    # or the MCP edge — or one with no completion id — is refused before any record read or mint.
+    assert_delivery_authorized(completion_id)
     if not completion_id:
         raise ValueError("deliver_tool_completion requires a completion_id — it is the exactly-once delivery key")
     existing = await accessors._store().get_record(completion_id)
@@ -328,7 +382,9 @@ async def deliver_tool_completion(
         mapping_route = pinned
     if _completion_succeeded(DELIVER_TOOL_COMPLETION_NAME, completion_id, status):
         try:
-            reply = await _tool_reply(mapping_route, result)
+            reply = await _tool_reply(
+                mapping_route, result, turn=await _rebuilt_turn(message_id, mapping_route), asks=[], parked=[]
+            )
         except Exception as exc:
             # A terminal the route's reply_expr cannot map is delivered as the client-safe
             # notice rather than crashing the resumer or dropping the outcome.

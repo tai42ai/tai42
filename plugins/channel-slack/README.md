@@ -2,7 +2,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A Slack `channel` plugin for the TAI ecosystem. `ask_user(..., channel="slack")`
+A Slack `channel` plugin for the TAI ecosystem. `ask(..., channel="slack")`
 posts the question to a configured Slack channel via `chat.postMessage`; the
 human replies **in the message's thread**; the Slack Events API delivers the
 reply to this plugin's inbound door, which verifies the request signature and
@@ -61,14 +61,14 @@ inbound route `POST /api/channels/slack/inbound`, and the interactivity route
 channel_modules: [tai42_channel_slack]
 ```
 
-`ask_user(..., channel="slack")` then selects it by name.
+`ask(..., channel="slack")` then selects it by name.
 
 ## Configuration
 
 Settings are read from the `CHANNEL_SLACK_` environment group (see
 `SlackSettings` / `SlackRedisSettings`). Credentials are operator-bound
 environment configuration — never LLM-visible tool parameters. The recipient
-is resolved per question: a caller may request one (`ask_user(...,
+is resolved per question: a caller may request one (`ask(...,
 recipient=...)`), and the plugin sends to it only if it is on the operator
 allowlist — an unlisted recipient fails loudly, nothing is sent; a question
 without a requested recipient goes to the operator default.
@@ -112,7 +112,7 @@ All links: https://docs.slack.dev
 
 ## How an answer travels
 
-1. A tool calls `ask_user(question, channel="slack", ...)`. The runtime
+1. A tool calls `ask(question, channel="slack", ...)`. The runtime
    persists the interaction, mints a single-use callback ticket, and hands the
    plugin a `ChannelDelivery`.
 2. `SlackChannel.deliver` resolves the recipient — the caller-requested id if
@@ -148,7 +148,7 @@ All links: https://docs.slack.dev
    reply's `thread_ts` against the correlation store, and forwards
    `{"answer": "<typed text>"}` to the stored callback URL.
 6. The public callback door validates the answer against the question's stored
-   format and records it; the blocked `ask_user` returns it.
+   format and records it; the blocked `ask` returns it.
 
 Operational notes: answers must be typed in-thread; non-answer traffic (edits,
 bot echoes, other channels, top-level messages, threads with no pending

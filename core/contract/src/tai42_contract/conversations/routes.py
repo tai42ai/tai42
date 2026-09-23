@@ -7,10 +7,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.conversations.overlap import OverlapPolicy
+from tai42_contract.interactions.door_contract import PARKED_VARIABLE_ANNOTATION, ParkableDoorMixin
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
@@ -18,13 +19,15 @@ from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, ex
 #: ``channel`` delivers back through the medium adapter's ``notify``.
 ConversationDoor = Literal["api", "channel"]
 
-#: A per-target-kind bind validator a plugin registers on the conversations facet:
-#: given a route's target NAME, returns the BLOCKING message lines that forbid binding
-#: it to a route (empty = allow). Route creation consults every registered validator
-#: for the target's kind before the route exists, so a flow that reads an unbound state
-#: is refused at bind, not discovered at run time. Blocking only — a warning is not a
-#: bind-path concept.
-TargetBindValidator = Callable[[str], Awaitable[Sequence[str]]]
+#: A per-target-kind bind validator registered on the conversations facet: given a route's
+#: FULL create model, returns the BLOCKING message lines that forbid binding its target to
+#: the route (empty = allow). Route creation consults the registered validator for the
+#: target's kind before the route exists, so a defect the target carries against the route's
+#: own door fields — a flow reading a state no binding supplies, an asking agent with no
+#: reply/resume path — is refused at bind, not discovered at run time. Passing the whole
+#: model (not just the name) lets a validator judge the target against those door fields.
+#: Blocking only — a warning is not a bind-path concept.
+TargetBindValidator = Callable[["ConversationRouteCreate"], Awaitable[Sequence[str]]]
 
 #: A thread's conversation control mode: ``agent`` runs the target turn (an agent run or a
 #: tool dispatch); ``manual`` suppresses the target turn so an operator answers by hand,
@@ -49,14 +52,17 @@ def _is_https_url(value: str) -> bool:
     return split.scheme == "https" and bool(split.hostname) and "@" not in split.netloc
 
 
-class ConversationRouteCreate(BaseModel):
+class ConversationRouteCreate(ParkableDoorMixin):
     """The client-facing create/edit body for a conversation route: the fields a caller supplies.
 
     Binds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to
-    an ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``
-    target may carry a ``payload_expr`` (jq mapping the inbound message to the tool's
-    kwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are
-    tool-only. ``api`` rows MAY carry an https ``callback_url`` (the answer sink; when absent
+    an ``execution_key`` the turn runs AS (bound with pass-role at create). Both target kinds
+    may carry the parkable-door jq (:class:`ParkableDoorMixin`: ``cancel_expr`` / ``resume_expr`` /
+    ``start_expr`` / ``extras_expr``) plus a ``reply_expr`` (jq mapping the started run's result to
+    the reply): ``start_expr`` builds the run's kwargs (a tool dispatch's kwargs or an agent run's
+    ``astream`` kwargs), the cancel/resume jqs act on the run's parked interactions, and
+    ``reply_expr`` maps the terminal to the participant reply. ``api`` rows MAY carry an https
+    ``callback_url`` (the answer sink; when absent
     the caller reads its answer back from the poll door); ``channel`` rows carry the
     registry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may
     share a channel, each its own identity). The server-derived ``callback_secret`` and
@@ -72,21 +78,22 @@ class ConversationRouteCreate(BaseModel):
     door: ConversationDoor
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
-    # tool targets only: a templated text carrying (inline or by stored id) a jq program
-    # mapping the inbound payload to the tool kwargs, and one mapping the tool result to the
-    # reply. Rendered then compiled at create; an ``agent`` target carries neither.
-    # ``reply_expr`` maps the SUCCESS shape: a result whose own ``status`` names a
-    # non-success terminal diverts to the turn's error outcome without being mapped.
-    # Both carry the ``x-tai42-expression`` schema annotation (via ``Annotated`` so the
-    # attribute default stays the ``None`` literal — the api-gate flags a ``Field(default=...)``
-    # redeclaration as breaking) so a schema-driven UI auto-renders the jq editor.
-    payload_expr: Annotated[
+    # A templated text carrying (inline or by stored id) a jq program mapping the inbound turn
+    # payload to the started run's kwargs, overriding the mixin's generic ``start_expr`` gloss with
+    # this route's own input keys. Rendered then compiled at create. ``reply_expr`` (below) maps the
+    # SUCCESS shape: a result whose own ``status`` names a non-success terminal diverts to the turn's
+    # error outcome without being mapped. Both carry the ``x-tai42-expression`` schema annotation
+    # (via ``Annotated`` so the attribute default stays the ``None`` literal — the api-gate flags a
+    # ``Field(default=...)`` redeclaration as breaking) so a schema-driven UI auto-renders the jq
+    # editor. The four door jqs read the run's currently parked interactions as ``$parked``.
+    start_expr: Annotated[
         TemplatedText | None,
         Field(
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="payload expression",
-                    blurb="the inbound turn payload the route maps to the tool/flow kwargs",
+                    label="start expression",
+                    blurb="the inbound turn payload the route maps to the started run's kwargs",
+                    variables=[PARKED_VARIABLE_ANNOTATION],
                     keys=[
                         ("message", "the inbound message text"),
                         ("sender", "the sending address"),
@@ -118,7 +125,7 @@ class ConversationRouteCreate(BaseModel):
                         ("turn", "the turn ids: {id, inbound: {id, kind, source}}"),
                         ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
                     ],
-                    returns="the JSON object dispatched as the tool/flow kwargs",
+                    returns="the JSON object dispatched as the started run's kwargs; null starts nothing",
                 )
             }
         ),
@@ -129,7 +136,25 @@ class ConversationRouteCreate(BaseModel):
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
                     label="reply expression",
-                    blurb="the tool/flow result (the SUCCESS shape) the route maps to the participant reply",
+                    blurb=(
+                        "the started run's result (the SUCCESS shape) the route maps to the participant reply; "
+                        "null when the run asked its caller instead of finishing"
+                    ),
+                    variables=[
+                        (
+                            "turn",
+                            "the turn ids and subject this reply answers ({id, inbound, subject}); null when an "
+                            "out-of-band delivery's originating record has aged out",
+                            {"id": "m-1", "inbound": {"id": "i-1", "kind": "message", "source": "api"}},
+                        ),
+                        (
+                            "asks",
+                            "the run's caller-ask entries when it asked instead of finishing (each the full parked "
+                            "entry); an empty list on a plain result",
+                            [{"id": "i-42", "question": "proceed?", "answer_format": "confirm"}],
+                        ),
+                        PARKED_VARIABLE_ANNOTATION,
+                    ],
                     returns="the reply: null (silent), a string, or a list of answer parts",
                 )
             }
@@ -187,12 +212,6 @@ class ConversationRouteCreate(BaseModel):
     @classmethod
     def _canonical_locale(cls, value: str | None) -> str | None:
         return normalize_optional_locale(value)
-
-    @model_validator(mode="after")
-    def _check_target_fields(self) -> ConversationRouteCreate:
-        if self.target_kind == "agent" and (self.payload_expr is not None or self.reply_expr is not None):
-            raise ValueError("target_kind=agent carries no payload_expr/reply_expr")
-        return self
 
     @model_validator(mode="after")
     def _check_door_fields(self) -> ConversationRouteCreate:

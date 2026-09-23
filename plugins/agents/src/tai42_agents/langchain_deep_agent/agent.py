@@ -29,7 +29,6 @@ from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import get_park_completion
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
@@ -45,6 +44,7 @@ from tai42_agents._internal.park import (
     ParkIdentity,
     bind_resume_per_step,
     build_park_identity,
+    chain_routing_slots,
     collect_pending_interrupts,
     detach_dead_chains,
     finalize_drive,
@@ -77,7 +77,7 @@ from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgent
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec, _to_internal, resolve_subagent_specs
 
 # A parking agent binds the hidden ``agent_resume`` continuation from its OWN registration:
-# the park package no longer binds it as a module-import side effect. Per-epoch idempotent, so
+# the park package does not bind it as a module-import side effect. Per-epoch idempotent, so
 # a box loading several parking agents binds it exactly once.
 register_agent_resume_tool()
 # ...and the completion tool that closes a CHAINED park, for the same reason: this loop's
@@ -228,7 +228,7 @@ class DeepAgent(Agent):
                     agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
                 # The run face returns the park RECEIPT to its caller and resumes out of band, so
-                # it binds the resume continuation: an async ask_user this run drives parks through
+                # it binds the resume continuation: an async ask this run drives parks through
                 # it. No completion tool is bound here, so a resumed run's final text is delivered
                 # nowhere — its side effects are the product; a caller needing the answer must
                 # invoke through a completion-bound door. A run carrying live tools, a non-durable
@@ -749,7 +749,7 @@ class DeepAgent(Agent):
                 # through the agent's own bound entrypoint); the completion tool the driver
                 # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
                 # park-capable by construction. The retention bound is min(checkpoint, workspace).
-                completion_tool, completion_context = get_park_completion()
+                completion_tool, completion_context = chain_routing_slots()
                 park = build_park_identity(
                     agent_name=self.tool_name,
                     config=config,

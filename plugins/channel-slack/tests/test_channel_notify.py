@@ -102,14 +102,14 @@ async def test_notify_reply_option_description_folds_into_context_block(http_scr
     # preceding muted context block rather than dropped.
     http_script.results.append(_ok_response(ts="1.1"))
     options: list[Option] = [
-        ReplyOption(text="Refund", description="Money back to your card"),
+        ReplyOption(text="Retry", description="Run the step again"),
         ReplyOption(text="Replace"),
     ]
     await SlackChannel().notify(ChannelNotification(message="Choose:", options=options))
 
     blocks = json.loads(http_script.requests[0].content)["blocks"]
     context = next(b for b in blocks if b["type"] == "context")
-    assert context["elements"] == [{"type": "mrkdwn", "text": "*Refund* — Money back to your card"}]
+    assert context["elements"] == [{"type": "mrkdwn", "text": "*Retry* — Run the step again"}]
     # The context precedes the actions block of buttons.
     assert blocks.index(context) < blocks.index(next(b for b in blocks if b["type"] == "actions"))
 
@@ -290,7 +290,7 @@ async def test_notify_matching_sender_identity_sends_and_returns_ts(http_script,
 
 async def test_notify_matching_sender_identity_bypasses_recipient_allowlist(http_script, fake_redis):
     # A bridge reply goes to the initiating conversation verbatim — an unlisted
-    # recipient is delivered, not refused (the allowlist governs ask_user only).
+    # recipient is delivered, not refused (the allowlist governs ask only).
     http_script.results.append(_ok_response(ts="7.7"))
 
     result = await SlackChannel().notify(

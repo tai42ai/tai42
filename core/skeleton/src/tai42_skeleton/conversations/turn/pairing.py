@@ -201,7 +201,13 @@ async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Rede
             linked_at=datetime.now(UTC),
         ),
     )
-    await accessors._person_store().merge(person.person_id, minting_person.person_id)
+    survivor = await accessors._person_store().merge(person.person_id, minting_person.person_id)
+    # Re-key every park/outcome of the absorbed person onto the survivor, so a resume after the
+    # merge addresses the surviving subject (its person id and its aggregated person-thread key).
+    from tai42_skeleton.interactions.helper import rekey_parks_for_merge
+
+    for absorbed_id in {person.person_id, minting_person.person_id} - {survivor.person_id}:
+        await rekey_parks_for_merge(absorbed_id, survivor.person_id)
     return _pairing_reply(_LINKED_TEXT)
 
 

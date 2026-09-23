@@ -1,6 +1,6 @@
 """The agents-plugin durable index that resolves an async-parked agent run by interaction id.
 
-When an async ``ask_user`` parks a park-capable agent run, the flow-blind platform keeps only
+When an async ``ask`` parks a park-capable agent run, the flow-blind platform keeps only
 the interaction id — never any agent, thread, or graph state. This index is how the
 agents plugin reverses that id back to the parked run: at park it records
 ``interaction_id -> {agent_name, thread_id, superstep_id, interrupt_id, rebuild_kwargs,
@@ -40,7 +40,9 @@ from collections.abc import AsyncIterator, Awaitable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
-from tai42_agents._internal.park.errors import AgentResumeBarrierNotFoundError
+from tai42_contract.app import tai42_app
+
+from tai42_agents._internal.park.errors import AgentResumeBarrierNotFoundError, AgentSuperstepLeaseLostError
 from tai42_agents.settings import agents_park_redis_settings
 
 
@@ -101,6 +103,31 @@ end
 return 0
 """
 
+# Finalize a resolved super-step in ONE round trip, GUARDED by the caller's drive-lease token:
+# the whole write lands only while the claim key (KEYS[1]) still holds ARGV[1]. Both writers of a
+# super-step's resolution — the resume drive and the whole-chain kill — pass the token they hold,
+# so the two can never both land: whoever holds the lease wins, the other is refused (return 0)
+# and raises rather than overwriting the winner's record. Writes every park entry (KEYS[5..]) as a
+# tombstone, the resolution record (KEYS[3]), the run resolution index member + its TTL (KEYS[4]),
+# and drops the barrier (KEYS[2]) and the claim lease (KEYS[1]) — all-or-nothing, so a crash
+# tombstones either none or all. Returns 1 on success, 0 when the token no longer holds the claim.
+_FINALIZE_SUPERSTEP_SCRIPT: Final[str] = """
+-- agent:finalize-superstep
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+local ttl = tonumber(ARGV[2])
+for i = 5, #KEYS do
+    redis.call('set', KEYS[i], ARGV[3], 'EX', ttl)
+end
+redis.call('set', KEYS[3], ARGV[4], 'EX', ttl)
+redis.call('hset', KEYS[4], ARGV[5], ARGV[6])
+redis.call('expire', KEYS[4], ttl)
+redis.call('del', KEYS[2])
+redis.call('del', KEYS[1])
+return 1
+"""
+
 
 # One key per parked interaction, namespaced to the agents plugin so it never collides
 # with another consumer on a shared Redis.
@@ -131,21 +158,49 @@ _BARRIER_TTL_MARGIN_SECONDS: Final[int] = 60 * 60
 _DRIVE_LEASE_SECONDS: Final[int] = 60
 _DRIVE_LEASE_HEARTBEAT_SECONDS: Final[float] = 20.0
 
-# Marker written under a park key IN PLACE of the entry once its super-step drove cleanly. A
-# lapped redelivery of a losing sibling's still-open due-record reads this and clears benignly,
-# instead of finding an absent key (a genuine ordering race that must retry).
+# Marker written under a park key IN PLACE of the entry once its super-step resolved. A lapped
+# redelivery of a losing sibling's still-open due-record reads this and REPLAYS the super-step's
+# stored resolution, instead of finding an absent key (a genuine ordering race that must retry). A
+# real resolution's tombstone carries the ``thread_id``/``superstep_id`` that locate its
+# resolution record; a benign detach tombstone (a chained key claimed but never parked) carries
+# neither, so a fire landing on it reads no record and no-ops.
 _RESOLVED_TOMBSTONE_FIELD: Final[str] = "__park_resolved__"
 
-# TTL on a resolved tombstone. Sized comfortably above the platform's redelivery horizon for an
-# answer's durable due-record — the interaction group ages out at its idle TTL (24h) after which
-# no redelivery fires — so a lapped redelivery always lands on the tombstone rather than an
-# absent key, while staying far below the 30-day park-entry backstop so a resolved slot never
-# lingers.
-_RESOLVED_TOMBSTONE_TTL_SECONDS: Final[int] = 60 * 60 * 48
+# One resolution record per resolved super-step, holding ``{resolution, value}`` — the outcome the
+# driver returned to the platform for that super-step, so a redrive of any still-open due-record
+# replays it (a committed delivery dedupes, an uncommitted one lands). Keyed by (thread,
+# super-step) beside the barrier key.
+_RESOLUTION_KEY_PREFIX = "agent:park:resolution:"
+
+# One per-run (thread) index of the super-steps whose resolution records exist, mapping
+# ``superstep_id -> [interaction_ids]``. A whole-chain kill reads it to reach and drop every
+# resolution record + tombstone of the killed run (erase reach); nothing else reads it.
+# Refreshed to the resolution TTL on every finalize, so it outlives the records it points at and no
+# longer.
+_RUN_RESOLUTION_INDEX_PREFIX = "agent:park:run-resolutions:"
+
+
+def _resolved_tombstone_ttl_seconds() -> int:
+    """TTL for a resolution record and its tombstones: twice the platform's redelivery horizon.
+
+    A resolution record and its tombstones must outlive the LAST redelivery the reaper can fire —
+    one that fires at the horizon and lands on them — plus reaper-cycle and clock-skew margin, and
+    no longer (they hold the run's outcome, which can carry person data). Derived from the platform
+    facet ``redelivery_horizon_seconds()`` at write time, never a compile-time guess of the horizon.
+    """
+    return 2 * tai42_app.interactions.redelivery_horizon_seconds()
 
 
 def _park_key(interaction_id: str) -> str:
     return f"{_PARK_KEY_PREFIX}{interaction_id}"
+
+
+def _resolution_key(thread_id: str, superstep_id: str) -> str:
+    return f"{_RESOLUTION_KEY_PREFIX}{thread_id}:{superstep_id}"
+
+
+def _run_resolution_index_key(thread_id: str) -> str:
+    return f"{_RUN_RESOLUTION_INDEX_PREFIX}{thread_id}"
 
 
 def _barrier_key(thread_id: str, superstep_id: str) -> str:
@@ -210,25 +265,110 @@ async def finalize_resolved_superstep(
     thread_id: str,
     superstep_id: str,
     item_interaction_ids: Iterable[str],
+    *,
+    resolution: str,
+    value: Any,
+    token: str,
 ) -> None:
-    """Finalize a cleanly-driven super-step in ONE Redis MULTI/EXEC.
+    """Finalize a resolved super-step in ONE guarded Redis round trip: tombstones, its resolution record, and cleanup.
 
-    Replaces every one of its M park entries with a short-TTL resolved tombstone AND drops the barrier plus its
-    drive-claim lease, all-or-nothing. Atomicity closes the crash window a per-key loop would leave — a hard
-    crash mid-loop could tombstone only some siblings, and a redelivery of an un-tombstoned
-    sibling would re-claim and storm on a not-pending resume until the interaction group's 24h
-    give-up. Each tombstone keeps its own ``_RESOLVED_TOMBSTONE_TTL_SECONDS`` TTL so a resolved
-    slot never lingers. A lapped redelivery of any sibling's orphaned due-record reads a resolved
-    marker and clears benignly instead of mistaking an absent key for a permanently dropped
-    resume. Called only after a successful drive; a crash mid-drive skips this and leaves every
-    entry LIVE for a normal reclaim.
+    GUARDED by ``token`` — the caller's drive-lease token: the whole write lands only while the
+    claim key still holds ``token``. Both writers of a super-step's resolution — the resume drive
+    and the whole-chain kill — pass the token they hold, so the two can never both land; the one
+    that no longer holds the lease is refused and this raises :class:`AgentSuperstepLeaseLostError`
+    rather than overwriting the winner's resolution record.
+
+    On the guarded write it replaces every one of its M park entries with a resolved tombstone,
+    writes the super-step's ONE resolution record (``{resolution, value}`` — the outcome the driver
+    returned to the platform), AND drops the barrier plus its drive-claim lease, all-or-nothing.
+    Atomicity closes the crash window a per-key loop would leave — a hard crash mid-loop could
+    tombstone only some siblings, and a redelivery of an un-tombstoned sibling would re-claim and
+    storm on a not-pending resume until the interaction group's give-up. Each tombstone carries this
+    super-step's ``thread_id`` / ``superstep_id`` so a lapped redelivery of ANY sibling's orphaned
+    due-record LOCATES the resolution record and REPLAYS it, rather than mistaking an absent key for
+    a permanently dropped resume. Record and tombstones share the horizon-derived resolution TTL so a
+    resolved slot outlives the last redelivery and no longer. Called only after a drive reaches a
+    resolution; a crash mid-drive skips this and leaves every entry LIVE for a normal reclaim.
+
+    ``resolution`` is one of ``terminal`` (``value`` = the outermost run's outcome the driver
+    returns), ``suspended`` (``value`` = the re-park suspended return the face re-normalises), or
+    ``aborted`` (written by the kill teardown; ``value`` = the aborted outcome a redrive re-raises
+    as ``ParkResumeFailed``). ``value`` is stored as-is and must be JSON-serializable.
+
+    The super-step is also recorded in its run's resolution index (``superstep_id ->
+    [interaction_ids]``), refreshed to the same TTL, so a whole-chain kill can reach every record +
+    tombstone of the run.
     """
-    tombstone = json.dumps({_RESOLVED_TOMBSTONE_FIELD: True})
+    ttl = _resolved_tombstone_ttl_seconds()
+    ids = list(item_interaction_ids)
+    tombstone = json.dumps({_RESOLVED_TOMBSTONE_FIELD: True, "thread_id": thread_id, "superstep_id": superstep_id})
+    record = json.dumps({"resolution": resolution, "value": value})
+    async with _park_client() as client:
+        landed = await _eval(
+            client,
+            _FINALIZE_SUPERSTEP_SCRIPT,
+            4 + len(ids),
+            _claim_key(thread_id, superstep_id),
+            _barrier_key(thread_id, superstep_id),
+            _resolution_key(thread_id, superstep_id),
+            _run_resolution_index_key(thread_id),
+            *(_park_key(interaction_id) for interaction_id in ids),
+            token,
+            str(ttl),
+            tombstone,
+            record,
+            superstep_id,
+            json.dumps(ids),
+        )
+    if not landed:
+        raise AgentSuperstepLeaseLostError(thread_id, superstep_id)
+
+
+async def read_run_resolutions(thread_id: str) -> dict[str, list[str]]:
+    """Every resolved super-step of a run as ``{superstep_id: [interaction_ids]}``, or ``{}`` when none.
+
+    The whole-chain kill teardown reads this to reach every resolution record + tombstone of the
+    killed run and drop them (erase reach). ``{}`` when the run has no resolved super-step (or the
+    index aged out).
+    """
+    from tai42_kit.clients.impl.redis import hgetall
+
+    async with _park_client() as client:
+        raw = await hgetall(client, _run_resolution_index_key(thread_id))
+    if not raw:
+        return {}
+    return {superstep_id: json.loads(ids) for superstep_id, ids in raw.items()}
+
+
+async def read_superstep_resolution(thread_id: str, superstep_id: str) -> dict[str, Any] | None:
+    """The ``{resolution, value}`` a resolved super-step stored, or ``None`` when no record exists.
+
+    ``None`` covers a benign detach tombstone (a chained key claimed but never parked, which writes
+    no record) and a record aged out past its TTL. The caller replays a present record and treats
+    ``None`` as a benign no-op landing.
+    """
+    async with _park_client() as client:
+        raw = await client.get(_resolution_key(thread_id, superstep_id))
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+async def drop_run_resolution(thread_id: str, superstep_id: str, item_interaction_ids: Iterable[str]) -> None:
+    """Erase a super-step's stored outcome: its resolution record AND its tombstones, in ONE MULTI/EXEC.
+
+    The whole-chain kill teardown calls this so a person erase reaches the outcome a resolution
+    record holds — a fully-delivered run leaves nothing on the platform subject
+    index, so its driver-held record would otherwise linger to the TTL. Dropping the tombstones too
+    means a still-buffered sibling's redelivery finds an absent key; the kill chokepoint clears
+    those sibling due-records in the same teardown, so no redelivery survives the drop. The
+    super-step is removed from its run's resolution index in the same MULTI.
+    """
     async with _park_client() as client, client.pipeline(transaction=True) as pipe:
         for interaction_id in item_interaction_ids:
-            pipe.set(_park_key(interaction_id), tombstone, ex=_RESOLVED_TOMBSTONE_TTL_SECONDS)
-        pipe.delete(_barrier_key(thread_id, superstep_id))
-        pipe.delete(_claim_key(thread_id, superstep_id))
+            pipe.delete(_park_key(interaction_id))
+        pipe.delete(_resolution_key(thread_id, superstep_id))
+        pipe.hdel(_run_resolution_index_key(thread_id), superstep_id)
         await pipe.execute()
 
 
@@ -279,11 +419,16 @@ async def detach_chained_parks(keys: Iterable[str]) -> None:
     concurrent re-drive that reached the persist first) or an existing tombstone is left exactly
     as it is. Called with the drive's leftover claims, so a drive that parked on everything it
     claimed writes nothing.
+
+    The tombstone carries NO ``thread_id`` / ``superstep_id`` and no resolution record is written:
+    a detached chain never drove a super-step, so a terminal that lands on it reads no resolution
+    and takes the benign no-op landing rather than replaying a stored outcome.
     """
+    ttl = _resolved_tombstone_ttl_seconds()
     tombstone = json.dumps({_RESOLVED_TOMBSTONE_FIELD: True})
     async with _park_client() as client, client.pipeline(transaction=True) as pipe:
         for key in keys:
-            pipe.set(_park_key(key), tombstone, ex=_RESOLVED_TOMBSTONE_TTL_SECONDS, nx=True)
+            pipe.set(_park_key(key), tombstone, ex=ttl, nx=True)
         await pipe.execute()
 
 
@@ -365,15 +510,17 @@ async def buffer_answer(
     superstep_id: str,
     interaction_id: str,
     answer: Any,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[str]]:
     """Buffer one answer into the super-step barrier and report progress.
 
     ``HSETNX`` makes the write idempotent — a redelivered answer for an interaction
     already answered is a no-op, so ``present`` is stable across redeliveries. Returns
-    ``(present, total)``: how many of the M expected interactions now hold an answer, and
-    M. Raises ``AgentResumeBarrierNotFoundError`` when the barrier is gone, and
-    ``KeyError`` (surfaced by the caller as a not-pending rejection) when the interaction
-    is not one this super-step expects.
+    ``(present, total, remaining_ids)``: how many of the M expected interactions now hold an
+    answer, M, and the still-unanswered interaction ids of this super-step (in the barrier's
+    ``expected`` order). ``remaining_ids`` is what a buffered-but-not-complete resume reports as
+    the ``ResumeBuffered`` partition. Raises ``AgentResumeBarrierNotFoundError`` when the barrier
+    is gone, and ``KeyError`` (surfaced by the caller as a not-pending rejection) when the
+    interaction is not one this super-step expects.
     """
     key = _barrier_key(thread_id, superstep_id)
     async with _park_client() as client:
@@ -385,8 +532,9 @@ async def buffer_answer(
             raise KeyError(interaction_id)
         await _hsetnx(client, key, _output_field(interaction_id), json.dumps(answer))
         present_values = await _hmget(client, key, [_output_field(i) for i in expected])
+    remaining_ids = [iid for iid, value in zip(expected, present_values, strict=True) if value is None]
     present = sum(1 for value in present_values if value is not None)
-    return present, len(expected)
+    return present, len(expected), remaining_ids
 
 
 async def try_claim_drive(thread_id: str, superstep_id: str, token: str) -> bool:
@@ -399,6 +547,20 @@ async def try_claim_drive(thread_id: str, superstep_id: str, token: str) -> bool
     async with _park_client() as client:
         won = await client.set(key, token, nx=True, ex=_DRIVE_LEASE_SECONDS)
     return bool(won)
+
+
+async def holds_claim(thread_id: str, superstep_id: str, token: str) -> bool:
+    """Whether the drive lease is still held by ``token`` right now — a pure read, no TTL change.
+
+    The drive re-checks this after the drive returns and BEFORE its terminal chain fire: the lease
+    heartbeat stops when the drive returns, so a whole-chain kill can reclaim a lapsed lease while
+    the terminal cascade runs. A ``False`` means another writer owns the super-step's resolution, so
+    the drive fires no chain routing for a run it no longer owns.
+    """
+    key = _claim_key(thread_id, superstep_id)
+    async with _park_client() as client:
+        held = await client.get(key)
+    return held == token
 
 
 async def renew_claim(thread_id: str, superstep_id: str, token: str) -> bool:

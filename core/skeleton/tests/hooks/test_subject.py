@@ -20,7 +20,7 @@ def _capture_context(app) -> list[StateContext | None]:
     seen: list[StateContext | None] = []
     original = app.tools.run_tool
 
-    async def recording_run_tool(name, tool_input, *, offload_sync=False):
+    async def recording_run_tool(name, tool_input, *, offload_sync=False, extras=None):
         seen.append(current_state_context())
         return await original(name, tool_input, offload_sync=offload_sync)
 
@@ -106,7 +106,7 @@ def _capture_invocation(app) -> list:
     seen: list = []
     original = app.tools.run_tool
 
-    async def recording_run_tool(name, tool_input, *, offload_sync=False):
+    async def recording_run_tool(name, tool_input, *, offload_sync=False, extras=None):
         seen.append(current_tool_invocation())
         return await original(name, tool_input, offload_sync=offload_sync)
 
@@ -115,8 +115,8 @@ def _capture_invocation(app) -> list:
 
 
 async def test_hook_deposits_its_state_binding_on_the_ambient_invocation(make_app) -> None:
-    # The real ``_run_hook`` seam deposits the hook's door binding on ToolInvocation before
-    # reaching run_tool, so the dispatch chokepoint carries it forward and applies it.
+    # ``_run_hook`` hands the hook's door binding to ``visit``, which deposits it on ToolInvocation
+    # around the started tool alone; so the dispatch that runs the tool sees it applied.
     from tai42_contract.states import StateAttach, StateBinding
 
     app = make_app()

@@ -58,7 +58,7 @@ dependencies = [
     # The real webhook verifiers.
     "tai42-webhook-verifier-github>=1.2,<2",
     "tai42-webhook-verifier-stripe>=1.2,<2",
-    # The channel plugins that deliver ask_user questions over a chat transport.
+    # The channel plugins that deliver ask questions over a chat transport.
     "tai42-channel-telegram>=3.4,<4",
     "tai42-channel-slack>=3.3,<4",
     "tai42-channel-twilio>=4.0,<5",

@@ -275,7 +275,7 @@ def test_destructive_hint_present_on_mutations_absent_on_reads():
 def test_interactions_read_tools_are_agent_callable():
     """``list_interactions`` and ``list_pending_interactions`` are agent-callable platform
     tools via the SAME operation-projection surface (and the SAME ``tai42_app.tools``
-    registry + ``run_tool`` dispatch) that carries ``ask_user`` and ``answer_interaction``:
+    registry + ``run_tool`` dispatch) that carries ``ask`` and ``answer_interaction``:
     both are default-projected reads, so an agent dispatches them by name. A same-named
     ``tools/builtin`` shim is impossible — it would trip the duplicate-bind boot guard —
     so the projected surface IS the agent tool. This pins registration +

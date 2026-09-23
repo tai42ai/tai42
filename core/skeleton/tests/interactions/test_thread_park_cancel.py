@@ -1,15 +1,14 @@
 """The thread→interaction reverse index and its cascade cancel — Phase 1 of the
 "parked-ask orphaned by thread deletion" fix.
 
-An async ``ask_user`` park is stored keyed by interaction id alone, so a conversation
+An async ``ask`` park is stored keyed by interaction id alone, so a conversation
 thread delete had no way to reach it and left it orphaned: the expiry reaper later
 fired a continuation into a deleted thread (a delivery retry storm) and the channel
 correlation stayed muted until the ~24h deadline. This suite proves the reverse index
 that closes that gap: a park bound to a thread joins ``thread-parks:{thread_id}``, the
-member is dropped wherever the interaction leaves pending (answer / prune), and
-``cancel_thread_parks`` tears every park on a thread down via the status-gated
-``prune_pending`` (firing NO continuation), leaving a late answer not-found and the
-expiry reaper with nothing to fire.
+member is dropped wherever the interaction leaves pending (answer / prune), and the whole-chain
+kill's thread reach reads the reverse-index snapshot (``thread_park_members``) and reconciles it
+(``reconcile_thread_park_members``) as it routes each member through the kill seam.
 """
 
 from __future__ import annotations
@@ -27,11 +26,12 @@ from tai42_contract.interactions import (
     set_park_completion,
     set_resume_continuation_tool,
 )
+from tai42_contract.tools import tool_call_frame
 
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
@@ -41,7 +41,7 @@ _OTHER_THREAD = "bridge:chat:+15559990000"
 
 @pytest.fixture(autouse=True)
 def _interactions_store_configured(monkeypatch):
-    # Set BEFORE any InteractionsSettings() is built, so the ask_user OFF-gate passes.
+    # Set BEFORE any InteractionsSettings() is built, so the ask OFF-gate passes.
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
 
 
@@ -122,12 +122,11 @@ async def test_reverse_index_cleared_on_prune(fake_redis):
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == set()
 
 
-# -- store: cancel_thread_parks ----------------------------------------------
+# -- store: thread reverse-index snapshot + reconcile ------------------------
 
 
-async def test_cancel_thread_parks_prunes_every_park_and_clears_the_index(fake_redis):
+async def test_thread_park_members_snapshots_the_reverse_index(fake_redis):
     store = InteractionStore("t:")
-    # Two parks on the target thread, one on a DIFFERENT thread that must be untouched.
     for iid, group in (("i1", "g1"), ("i2", "g2")):
         await store.add(
             fake_redis,
@@ -143,97 +142,29 @@ async def test_cancel_thread_parks_prunes_every_park_and_clears_the_index(fake_r
         continuation_fingerprint="fp",
         thread_id=_OTHER_THREAD,
     )
+    assert set(await store.thread_park_members(fake_redis, _THREAD)) == {"i1", "i2"}
+    assert await store.thread_park_members(fake_redis, _OTHER_THREAD) == ["other"]
+    # A thread with no parks is an empty snapshot.
+    assert await store.thread_park_members(fake_redis, "bridge:chat:nobody") == []
 
-    cancelled = await store.cancel_thread_parks(fake_redis, _THREAD)
 
-    assert set(cancelled) == {"i1", "i2"}
-    # Both target-thread parks are gone (state + expiry member + index).
-    for iid in ("i1", "i2"):
-        assert await store.get_state(fake_redis, iid) is None
+async def test_reconcile_thread_park_members_removes_only_the_snapshot(fake_redis):
+    # SREM only the snapshotted members: a park added concurrently (not in the snapshot) keeps its
+    # member, so the kill cascade never blind-wipes a newcomer.
+    store = InteractionStore("t:")
+    await fake_redis.sadd(store.thread_parks_key(_THREAD), "a", "ghost")
+    await store.reconcile_thread_park_members(fake_redis, _THREAD, ["a", "ghost"])
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == set()
-    assert await store.due_expiries(fake_redis, datetime.now(UTC) + timedelta(days=1)) == ["other"]
-    # The park on the OTHER thread is fully intact.
-    assert await store.get_state(fake_redis, "other") is not None
-    assert await fake_redis.smembers(store.thread_parks_key(_OTHER_THREAD)) == {"other"}
-
-
-async def test_cancel_thread_parks_is_idempotent(fake_redis):
-    store = InteractionStore("t:")
-    # No parks at all: a clean no-op.
-    assert await store.cancel_thread_parks(fake_redis, _THREAD) == []
-    # One park, cancelled twice: the second run finds the set drained.
-    await store.add(
-        fake_redis, _park_request(store, "i1", "g1"), idle_ttl=86400, continuation_fingerprint="fp", thread_id=_THREAD
-    )
-    assert await store.cancel_thread_parks(fake_redis, _THREAD) == ["i1"]
-    assert await store.cancel_thread_parks(fake_redis, _THREAD) == []
-
-
-async def test_cancel_leaves_a_late_answer_not_found_and_the_reaper_firing_nothing(fake_redis):
-    store = InteractionStore("t:")
-    await store.add(
-        fake_redis, _park_request(store, "i1", "g1"), idle_ttl=86400, continuation_fingerprint="fp-1", thread_id=_THREAD
-    )
-    await store.cancel_thread_parks(fake_redis, _THREAD)
-
-    # A late answer to the cancelled interaction finds no state → claims nothing.
-    claimed = await store.record_answer(
-        fake_redis,
-        InteractionResponse(interaction_id="i1", answer="too late", answered_by="op", answered_at=datetime.now(UTC)),
-        group_id="g1",
-        reply_ttl=60,
-        continuation_due_ttl=3600,
-        continuation_first_attempt_at_ms=0,
-    )
-    assert claimed is False
-    # The expiry reaper has nothing to fire for it (no continuation into a dead thread).
-    assert await store.due_expiries(fake_redis, datetime.now(UTC) + timedelta(days=1)) == []
-
-
-async def test_cancel_reconciles_an_orphan_index_member(fake_redis):
-    # A member whose state already vanished (answered/expired) is reconciled off the index
-    # without a prune, never left to strand the set.
-    store = InteractionStore("t:")
-    await fake_redis.sadd(store.thread_parks_key(_THREAD), "ghost")
-    assert await store.cancel_thread_parks(fake_redis, _THREAD) == ["ghost"]
-    assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == set()
-
-
-async def test_cancel_leaves_a_park_added_concurrently_with_the_cascade(fake_redis, monkeypatch):
-    # A park that arrives on the SAME thread DURING the cascade — after the members snapshot,
-    # before the index cleanup — must survive with its index member intact so a retry can
-    # still cancel it. The cascade must SREM only the members it snapshotted, never blind-
-    # DELETE the whole set (which would silently orphan the newcomer — the very bug this
-    # feature prevents). Simulated by injecting a new park mid prune-loop.
-    store = InteractionStore("t:")
-    await store.add(
-        fake_redis, _park_request(store, "a", "ga"), idle_ttl=86400, continuation_fingerprint="fp", thread_id=_THREAD
-    )
-
-    real_prune = store.prune_pending
-    injected = {"done": False}
-
-    async def prune_then_inject(r, interaction_id, group_id):
-        result = await real_prune(r, interaction_id, group_id)
-        if not injected["done"]:
-            injected["done"] = True
-            await store.add(
-                r, _park_request(store, "b", "gb"), idle_ttl=86400, continuation_fingerprint="fp", thread_id=_THREAD
-            )
-        return result
-
-    monkeypatch.setattr(store, "prune_pending", prune_then_inject)
-    cancelled = await store.cancel_thread_parks(fake_redis, _THREAD)
-
-    # 'a' (snapshotted) is cancelled; the concurrently-added 'b' survives in BOTH state and
-    # the reverse index — a blind DELETE would have wiped it, orphaning it.
-    assert cancelled == ["a"]
-    assert await store.get_state(fake_redis, "a") is None
-    assert await store.get_state(fake_redis, "b") is not None
+    # A fresh member added after the snapshot survives a reconcile of the old snapshot.
+    await fake_redis.sadd(store.thread_parks_key(_THREAD), "b")
+    await store.reconcile_thread_park_members(fake_redis, _THREAD, ["a"])
+    assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {"b"}
+    # A no-op on an empty snapshot.
+    await store.reconcile_thread_park_members(fake_redis, _THREAD, [])
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {"b"}
 
 
-# -- helper: ask_user captures the bound thread -------------------------------
+# -- helper: ask captures the bound thread -------------------------------
 
 
 def _wire(monkeypatch, fake_client_ctx) -> InteractionsSettings:
@@ -243,7 +174,7 @@ def _wire(monkeypatch, fake_client_ctx) -> InteractionsSettings:
     return settings
 
 
-async def test_ask_user_captures_thread_from_tool_park_completion_context(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_captures_thread_from_tool_park_completion_context(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
@@ -252,7 +183,8 @@ async def test_ask_user_captures_thread_from_tool_park_completion_context(monkey
         "deliver_tool_completion", {"delivery_thread_id": _THREAD, "route_name": "chat"}
     )
     try:
-        result = await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        with tool_call_frame():
+            result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_park_completion(completion_token)
         reset_execution_identity(id_token)
@@ -263,7 +195,7 @@ async def test_ask_user_captures_thread_from_tool_park_completion_context(monkey
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {result.interaction_id}
 
 
-async def test_ask_user_captures_thread_from_agent_bridge_turn_context(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_captures_thread_from_agent_bridge_turn_context(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
@@ -279,8 +211,8 @@ async def test_ask_user_captures_thread_from_agent_bridge_turn_context(monkeypat
         thread_id=_THREAD, route_name="chat", channel="twilio", our_identity="+1", client_address="+15550001111"
     )
     try:
-        with bridge_turn_context(bridge):
-            result = await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        with tool_call_frame(), bridge_turn_context(bridge):
+            result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_park_completion(park_token)
         reset_execution_identity(id_token)
@@ -293,12 +225,13 @@ async def test_ask_user_captures_thread_from_agent_bridge_turn_context(monkeypat
     assert await fake_redis.smembers(store.thread_parks_key(_OTHER_THREAD)) == set()
 
 
-async def test_ask_user_with_no_bound_thread_indexes_nothing(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_with_no_bound_thread_indexes_nothing(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
     try:
-        result = await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        with tool_call_frame():
+            result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
         reset_execution_identity(id_token)
         reset_resume_continuation_tool(tool_token)

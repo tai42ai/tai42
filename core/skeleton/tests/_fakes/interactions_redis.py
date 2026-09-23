@@ -1,5 +1,5 @@
 """In-memory async fake of the redis surface the interactions store, the
-``ask_user`` helper, and the interactions router exercise.
+``ask`` helper, and the interactions router exercise.
 
 Covers hashes, strings (incr/decr/set with EX), streams (xadd/xrange/xrevrange/
 xread), sorted sets (zadd with ``GT``, zrem/zremrangebyscore/zcard/zrange/

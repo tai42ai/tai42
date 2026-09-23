@@ -9,7 +9,11 @@ for those."""
 
 from __future__ import annotations
 
+import json as _json
+import socket as _socket
+import time as _time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -70,6 +74,42 @@ class ApiClient:
         merged = {**self._headers, **(headers or {})}
         async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout or self._timeout) as client:
             return await client.request(method, path, json=json, headers=merged, content=content)
+
+    def post_and_disconnect(self, path: str, *, json: Any = None, hold_seconds: float = 0.0) -> None:
+        """Send one POST over a raw socket, hold it open ``hold_seconds``, then close it without
+        reading the response.
+
+        Models a caller that hangs up DURING THE SYNC WAIT: the connection stays open long enough
+        for the server to accept and record the message and start its turn, then closes before the
+        turn finishes, so the door's disconnect probe reads gone at claim time and the answer falls
+        to the route's callback. ``hold_seconds`` must cover acceptance and land before the answer
+        is ready. Synchronous (a bare socket, no event loop) — the raw-socket leg the async client
+        cannot express.
+        """
+
+        parts = urlsplit(self._base_url)
+        host, port = parts.hostname, parts.port
+        if host is None or port is None:
+            raise ValueError(f"base url has no host:port to open a raw socket to: {self._base_url!r}")
+        body = b"" if json is None else _json.dumps(json).encode()
+        header_lines = [
+            f"POST {path} HTTP/1.1",
+            f"Host: {host}:{port}",
+            "Content-Type: application/json",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            *(f"{name}: {value}" for name, value in self._headers.items()),
+        ]
+        request = ("\r\n".join(header_lines) + "\r\n\r\n").encode() + body
+        sock = _socket.create_connection((host, port), timeout=self._timeout)
+        try:
+            sock.sendall(request)
+            if hold_seconds > 0:
+                # Hold the raw socket open for real wall-clock — the point is a client that stays
+                # connected through acceptance, then hangs up; there is no condition to poll.
+                _time.sleep(hold_seconds)  # noqa: TID251 — a bare synchronous socket, no event loop
+        finally:
+            sock.close()
 
     async def request(
         self,

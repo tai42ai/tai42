@@ -1,8 +1,12 @@
-"""The builtin ``ask_user`` tool: a thin, LLM-facing shim over the interactions ``ask_user`` helper.
+"""The builtin interactions tools: the ``ask`` shim and the generic parked-run tools.
 
-It lets an agent pause mid-run to ask a human a question — in ``mode="sync"`` it blocks
+The parked-run tools are ``list_parked`` / ``resume_parked`` / ``cancel_parked``.
+
+``ask`` lets an agent pause mid-run to ask a human a question — in ``mode="sync"`` it blocks
 until the answer (or a timeout) returns; in ``mode="async"`` it PARKS, returning a
-``SuspendedInteraction`` at once, and a later answer/expiry resumes the agent out of band.
+``SuspendedInteraction`` at once, and a later answer/expiry resumes the agent out of band. The
+three generic tools are thin, LLM-facing shims over the platform's shared-visit facade, so a
+run inspects, resumes/takes, or cancels the parked interactions on its own subject.
 """
 
 from datetime import datetime
@@ -11,7 +15,7 @@ from typing import Any, Literal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import AnswerMismatchPolicy
 
-from tai42_skeleton.interactions import ask_user as _ask_user
+from tai42_skeleton.interactions import ask as _ask
 
 # The answer is returned as ``Any`` — a scalar (text→str, confirm→bool,
 # select→str) or a dict (external/JSON formats) — so FastMCP derives no output
@@ -28,7 +32,7 @@ _ANSWER_SCHEMA: dict[str, Any] = {
 
 
 @tai42_app.tools.tool(output_schema=_ANSWER_SCHEMA, tags={"interactions"})
-async def ask_user(
+async def ask(
     question: str,
     answer_format: str = "text",
     options: list[str] | None = None,
@@ -46,6 +50,9 @@ async def ask_user(
     mismatch_notice: str | None = None,
     data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
+    to: Literal["user", "caller"] = "user",
+    payload: dict[str, Any] | None = None,
+    on_expiry: Literal["kill", "resume"] = "kill",
 ) -> Any:
     """Ask a human a question mid-run.
 
@@ -147,6 +154,15 @@ async def ask_user(
             ``{"title": ..., "fields": [prop, ...]}`` splitting the form into ordered
             steps; every top-level property must appear on exactly one page. Omit for
             a single-page form. The submitted answer is the union of all pages' fields.
+        to: Who the question is addressed to. "user" (the default) is a human answered
+            through the inbox/callback/channel surfaces. "caller" addresses another RUN:
+            the ask carries NO out-of-band delivery — it parks this run and its answer is
+            handed back by the run that resolves it. A "caller" ask is always mode="async".
+        payload: A structured value a "caller" ask hands the resolving run in place of (or
+            beside) ``question``; when given, ``question`` may be empty. Forbidden for "user".
+        on_expiry: What happens when a parked ask's deadline lapses unanswered. "kill" (the
+            default) tears the whole run chain down; "resume" resumes with the expiry marker.
+            Applies only to an async park.
 
     Returns:
         The typed answer (text -> str, confirm -> bool, select -> chosen value,
@@ -164,7 +180,7 @@ async def ask_user(
         RuntimeError: An ``external`` question (or one bound to a ``channel``)
             was asked without ``INTERACTIONS_PUBLIC_BASE_URL`` configured.
     """
-    return await _ask_user(
+    return await _ask(
         question,
         answer_format=answer_format,
         options=options,
@@ -184,4 +200,66 @@ async def ask_user(
         media=media,  # type: ignore[arg-type]
         mode=mode,
         expiry_at=expiry_at,
+        to=to,
+        payload=payload,
+        on_expiry=on_expiry,
     )
+
+
+@tai42_app.tools.tool(tags={"interactions"})
+async def list_parked() -> list[dict[str, Any]]:
+    """List the interactions parked on the current run's subject.
+
+    Returns every parked interaction addressed to this run — pending asks (``asking``), asks being
+    resumed (``running``), and resolved runs' waiting outcomes (``finished``/``failed``) — each a
+    full entry with its id, status, addressing (``to``), question and answer-format fields. Use it
+    to see what is waiting before resuming, taking, or cancelling one with the tools below.
+
+    Returns:
+        A list of parked-interaction entry objects (empty when nothing is parked).
+    """
+    entries = await tai42_app.interactions.list_parked()
+    return [entry.model_dump(mode="json") for entry in entries]
+
+
+@tai42_app.tools.tool(tags={"interactions"})
+async def resume_parked(interaction_id: str, payload: Any = None) -> dict[str, Any]:
+    """Resume a parked caller ask with an answer, or TAKE a resolved run's waiting outcome.
+
+    With ``payload`` given, resume the ``asking`` caller ask ``interaction_id`` with that answer and
+    return the resumed run's next outcome. With ``payload`` omitted (or null), TAKE the waiting
+    outcome of a ``finished`` interaction (its result is returned) — a ``failed`` one raises so the
+    caller fails as the resolved run did.
+
+    Args:
+        interaction_id: The parked interaction to resume or take (from ``list_parked``).
+        payload: The answer to resume the caller ask with; omit (or pass null) to take a waiting
+            outcome instead of resuming.
+
+    Returns:
+        The visit outcome: the action taken, and the resumed run's result, new caller asks, or
+        re-park.
+    """
+    if payload is None:
+        outcome = await tai42_app.interactions.resume_parked(interaction_id)
+    else:
+        outcome = await tai42_app.interactions.resume_parked(interaction_id, payload)
+    return outcome.model_dump(mode="json")
+
+
+@tai42_app.tools.tool(tags={"interactions"})
+async def cancel_parked(ids: list[str]) -> dict[str, Any]:
+    """Cancel (whole-chain kill) the parked interactions named in ``ids`` on the current run's subject.
+
+    Each named interaction and every run it linked above it is torn down for good; a run a door
+    started with a receiver is delivered a single FAILED. Use it to withdraw asks a run no longer
+    needs answered.
+
+    Args:
+        ids: The parked interaction ids to cancel (from ``list_parked``).
+
+    Returns:
+        The visit outcome naming the ids cancelled.
+    """
+    outcome = await tai42_app.interactions.cancel_parked(ids)
+    return outcome.model_dump(mode="json")

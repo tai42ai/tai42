@@ -76,6 +76,13 @@ class PendingQuestion:
     # A form ask carries its question text so a door-rejected answer can be re-asked
     # with a fresh Flow whose body repeats the question; non-form asks None.
     question: str | None = None
+    # A form ask also carries the per-send inputs the original send built its Flow from
+    # — the step layout, the prefilled values, and the per-send option lists (the plain
+    # JSON the send resolved) — so a door-rejection re-send reproduces the SAME Flow and
+    # prefill without re-deriving them; all None for a non-form ask.
+    form_pages: list[dict[str, Any]] | None = None
+    form_values: dict[str, Any] | None = None
+    form_options: dict[str, list[dict[str, Any]]] | None = None
     # Door-400 rejections already recovered by re-sending a fresh Flow. Bounds the
     # re-send loop (see the inbound handler's cap); starts at 0.
     rejections: int = 0
@@ -118,6 +125,9 @@ def _encode_pending(question: PendingQuestion) -> str:
             "interaction_id": question.interaction_id,
             "schema": question.schema,
             "question": question.question,
+            "form_pages": question.form_pages,
+            "form_values": question.form_values,
+            "form_options": question.form_options,
             "rejections": question.rejections,
         }
     )
@@ -148,6 +158,9 @@ async def reserve_pending(
     interaction_id: str | None = None,
     schema: dict[str, Any] | None = None,
     question: str | None = None,
+    form_pages: list[dict[str, Any]] | None = None,
+    form_values: dict[str, Any] | None = None,
+    form_options: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     """Atomically reserve the pair for one question, or raise ``PendingQuestionExistsError``."""
     value = _encode_pending(
@@ -158,6 +171,9 @@ async def reserve_pending(
             interaction_id=interaction_id,
             schema=schema,
             question=question,
+            form_pages=form_pages,
+            form_values=form_values,
+            form_options=form_options,
         )
     )
     ttl = _remaining_seconds(timeout_at)
@@ -185,6 +201,9 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
         interaction_id=data.get("interaction_id"),
         schema=data.get("schema"),
         question=data["question"],
+        form_pages=data.get("form_pages"),
+        form_values=data.get("form_values"),
+        form_options=data.get("form_options"),
         rejections=data["rejections"],
     )
 

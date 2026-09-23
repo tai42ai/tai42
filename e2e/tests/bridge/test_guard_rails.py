@@ -65,7 +65,7 @@ async def test_off_passthrough_uniform_refusal_and_redelivery(
         execution_key=exec_off,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM,
-        payload_expr="{payload: .message}",
+        start_expr="{payload: .message}",
     )
     # ``/link`` reaches the echo tool verbatim — it is NOT intercepted into a mint.
     link_inbound = bridge.twilio_inbound(

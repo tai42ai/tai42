@@ -12,13 +12,19 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import AnswerFormat, InteractionRequest, SuspendedInteraction
 from tai42_contract.secrets import SecretValue
+from tai42_contract.states import StateContext, StateSubject, SubjectCandidates
+from tai42_kit.utils.state_context import state_context
 
+from tai42_skeleton.interactions import visit as visit_module
+from tai42_skeleton.interactions.settings import InteractionsSettings
+from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations import (
     BadRequestError,
     ForbiddenError,
@@ -32,7 +38,72 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
+from .._fakes.interactions_redis import FakeRedis as InteractionsFakeRedis
 from .._fakes.tool_runs_redis import FakeRedis
+
+# The addressed subject a parkable submit/fire names, and the matching candidates a caller ask
+# is seeded and indexed under, so the visit's subject listing reaches the ask.
+_SUBJECT = StateSubject(target_kind="agent", target_name="a", kind="person", key="pA")
+_CANDIDATES = SubjectCandidates(target_kind="agent", target_name="a", by_kind={"person": "pA"})
+
+
+def _interactions_double() -> SimpleNamespace:
+    """The ``app.interactions`` seam the run paths reach: the real visit + its two shaping helpers.
+
+    The background-submit and inline-hook run paths drive the shared visit and shape their terminal
+    record through ``tai42_app.interactions.{visit,normalise_started,park_answer}``; this exposes the
+    real callables, whose interactions-store seams the tests wire when a park must be read back.
+    """
+    return SimpleNamespace(
+        visit=visit_module.visit,
+        park_answer=visit_module.park_answer,
+        normalise_started=visit_module.normalise_started,
+    )
+
+
+def _bind_impl(monkeypatch, tools) -> None:
+    """Bind a fake ``tai42_app`` exposing the tools double AND the interactions seam."""
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools, interactions=_interactions_double()))
+
+
+def _wire_interactions_store(monkeypatch):
+    """Point the visit's interactions-store seams at a fresh fake and mark the store configured.
+
+    Returns the ``(fake, store)`` pair so a caller ask can be seeded and the visit reads it back.
+    """
+    fake = InteractionsFakeRedis()
+    settings = InteractionsSettings()
+
+    @asynccontextmanager
+    async def ctx(client_cls, s=None, *, fresh=False, **kwargs):
+        yield fake
+
+    monkeypatch.setattr(visit_module, "client_ctx", ctx)
+    monkeypatch.setattr(visit_module, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(visit_module, "interactions_store_configured", lambda: True)
+    return fake, InteractionStore(settings.key_prefix)
+
+
+async def _seed_caller_ask(store: InteractionStore, fake, iid: str) -> None:
+    """Seed one live ``to="caller"`` ask on the ``_CANDIDATES`` subject, so the visit lists it."""
+    now = datetime.now(UTC)
+    expiry = now + timedelta(minutes=60)
+    request = InteractionRequest(
+        interaction_id=iid,
+        group_id="g1",
+        question="proceed?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=expiry,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        continuation_state_context=StateContext(door="api", candidates=_CANDIDATES),
+        expiry_at=expiry,
+        asked_by=[],
+    )
+    await store.add(fake, request, idle_ttl=86400, to="caller")
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +123,7 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.calls.append((key, arguments, offload_sync))
         return self.result
 
@@ -73,7 +144,7 @@ def wired(monkeypatch):
 
     def install(registered: set[str] | None = None) -> _FakeTools:
         tools = _FakeTools(registered)
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+        _bind_impl(monkeypatch, tools)
         return tools
 
     yield SimpleNamespace(
@@ -102,12 +173,10 @@ async def test_submit_returns_run_id_and_runs_through_the_offload_seam(wired):
     assert record["status"] == "succeeded"
 
 
-async def test_background_run_of_a_parking_tool_records_parked_not_succeeded(wired):
-    # A detached tool-run whose tool async-parks returns the generic SuspendedInteraction
-    # sentinel; the recorder reflects a PARKED terminal keyed by the parked interaction id —
-    # never a ``succeeded`` record over an unfinished run. GENERIC: any parking tool.
-    from tai42_contract.interactions import SuspendedInteraction
-
+async def test_background_submit_of_a_user_parking_tool_records_the_suspended_sentinel(wired):
+    # A background submit whose tool parks on USER asks alone (no caller ask) records a PARKED
+    # terminal carrying the full suspended sentinel — the SAME shape a poller reads off the sync
+    # door, never a succeeded record over an unfinished run. GENERIC: any parking tool.
     tools = wired.install()
     tools.result = SuspendedInteraction(interaction_id="i-detached")
     out = await ops.submit_run("alpha", {"x": 1})
@@ -115,7 +184,191 @@ async def test_background_run_of_a_parking_tool_records_parked_not_succeeded(wir
 
     record = await wired.store.get_run(wired.fake, out["run_id"])
     assert record["status"] == "parked"
-    assert json.loads(record["result"]) == {"interaction_id": "i-detached", "expiry_at": None}
+    # No caller ask: ``caller_interaction_ids`` is empty, so a poller's submitter knows the park is
+    # answered out of band (a user answer), not through ``resume_parked``.
+    assert json.loads(record["result"]) == {
+        "interaction_id": "i-detached",
+        "expiry_at": None,
+        "resume_owner": None,
+        "interaction_ids": ["i-detached"],
+        "caller_interaction_ids": [],
+    }
+
+
+async def test_background_submit_of_a_caller_asking_tool_records_the_ask_entries(wired):
+    # A background submit whose tool asks its CALLER records a PARKED terminal whose result is the
+    # ask entries — the SAME ``{"asks": [...]}`` shape the sync door returns — so a poller sees the
+    # question and answers it through ``resume_parked`` on the submit's subject.
+    ifake, istore = _wire_interactions_store(wired.monkeypatch)
+    await _seed_caller_ask(istore, ifake, "c1")
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+    out = await ops.submit_run("alpha", {}, subject=_SUBJECT)
+    await _drain()
+
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "parked"
+    answer = json.loads(record["result"])
+    assert list(answer) == ["asks"]
+    assert [entry["id"] for entry in answer["asks"]] == ["c1"]
+    assert answer["asks"][0]["to"] == "caller"
+    assert answer["asks"][0]["question"] == "proceed?"
+
+
+async def test_hook_run_recorded_of_a_caller_asking_tool_records_the_ask_entries(wired):
+    # The inline hook/trigger path (``run_recorded`` → the ``propagate_failure`` supervisor, which
+    # runs INSIDE the hook door's own visit) records the SAME park answer: a caller-ask park carries
+    # the ask entries, read back over the fire's own ambient subject context.
+    ifake, istore = _wire_interactions_store(wired.monkeypatch)
+    await _seed_caller_ask(istore, ifake, "c1")
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+
+    with state_context(StateContext(door="conversation", candidates=_CANDIDATES, actor="u-1")):
+        await ops.run_recorded("alpha", {})
+
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["parked"]
+    record = await wired.store.get_run(wired.fake, entries[0]["run_id"])
+    answer = json.loads(record["result"])
+    assert list(answer) == ["asks"]
+    assert [entry["id"] for entry in answer["asks"]] == ["c1"]
+    assert answer["asks"][0]["to"] == "caller"
+
+
+async def test_hook_run_recorded_of_a_user_parking_tool_records_the_suspended_sentinel(wired):
+    # The inline hook/trigger path of a USER-only park records the same suspended sentinel the
+    # submit door does: ``caller_interaction_ids`` empty, no store lookup needed.
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="u-hook")
+
+    with state_context(StateContext(door="conversation", candidates=_CANDIDATES, actor="u-1")):
+        await ops.run_recorded("alpha", {})
+
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["parked"]
+    record = await wired.store.get_run(wired.fake, entries[0]["run_id"])
+    assert json.loads(record["result"]) == {
+        "interaction_id": "u-hook",
+        "expiry_at": None,
+        "resume_owner": None,
+        "interaction_ids": ["u-hook"],
+        "caller_interaction_ids": [],
+    }
+
+
+async def test_crash_resume_re_drive_records_caller_asks_under_the_fires_own_subject(wired):
+    # The crash-resume re-drive replays the recorded fire under the SAME subject the fire ran under
+    # (its persisted ``state_context``), never the reader door's ambient one: a re-driven caller-
+    # asking tool records a PARKED terminal carrying the ask entries, read back over that subject.
+    from tai42_skeleton.operations.tool_runs import reconcile
+    from tai42_skeleton.states.context import current_state_context
+
+    ifake, istore = _wire_interactions_store(wired.monkeypatch)
+    await _seed_caller_ask(istore, ifake, "c1")
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+    seen: dict = {}
+    original = tools.run_tool
+
+    async def _capturing(key, arguments, *, offload_sync=False, extras=None):
+        ctx = current_state_context()
+        seen["door"] = ctx.door if ctx is not None else None
+        return await original(key, arguments, offload_sync=offload_sync, extras=extras)
+
+    tools.run_tool = _capturing
+    fire_context = StateContext(door="hook", candidates=_CANDIDATES, actor="svc-key")
+    record = {
+        "tool_name": "alpha",
+        "arguments": "{}",
+        "extras": "{}",
+        "state_context": json.dumps(fire_context.model_dump(mode="json")),
+    }
+    await reconcile._crash_resume("r-x", record)
+
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["parked"]
+    answer = json.loads((await wired.store.get_run(wired.fake, entries[0]["run_id"]))["result"])
+    assert list(answer) == ["asks"]
+    assert [entry["id"] for entry in answer["asks"]] == ["c1"]
+    assert answer["asks"][0]["to"] == "caller"
+    # The deposited context is the FIRE's hook door, never the reader door's ambient one.
+    assert seen["door"] == "hook"
+
+
+async def test_crash_resume_re_drive_records_the_suspended_sentinel_for_a_user_park(wired):
+    # A re-driven tool that parks on USER asks alone records the full suspended sentinel — the same
+    # shape the sync door returns — under the re-driven fire's subject.
+    from tai42_skeleton.operations.tool_runs import reconcile
+
+    _wire_interactions_store(wired.monkeypatch)
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="i-detached")
+    fire_context = StateContext(door="hook", candidates=_CANDIDATES)
+    record = {
+        "tool_name": "alpha",
+        "arguments": "{}",
+        "extras": "{}",
+        "state_context": json.dumps(fire_context.model_dump(mode="json")),
+    }
+    await reconcile._crash_resume("r-y", record)
+
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["parked"]
+    result = json.loads((await wired.store.get_run(wired.fake, entries[0]["run_id"]))["result"])
+    assert result == {
+        "interaction_id": "i-detached",
+        "expiry_at": None,
+        "resume_owner": None,
+        "interaction_ids": ["i-detached"],
+        "caller_interaction_ids": [],
+    }
+
+
+async def test_crash_resume_re_drive_deposits_no_context_without_a_stored_one(wired):
+    # A record with no stored context (a fire that ran under no subject) re-drives with NO context
+    # deposited: the run executes and records its result, the ambient context left ``None``.
+    from tai42_skeleton.operations.tool_runs import reconcile
+    from tai42_skeleton.states.context import current_state_context
+
+    _wire_interactions_store(wired.monkeypatch)
+    tools = wired.install()
+    tools.result = {"ok": 1}
+    seen: dict = {}
+    original = tools.run_tool
+
+    async def _capturing(key, arguments, *, offload_sync=False, extras=None):
+        seen["ctx"] = current_state_context()
+        return await original(key, arguments, offload_sync=offload_sync, extras=extras)
+
+    tools.run_tool = _capturing
+    record = {"tool_name": "alpha", "arguments": "{}", "extras": "{}"}
+    await reconcile._crash_resume("r-z", record)
+
+    assert seen["ctx"] is None
+    entries = await ops.list_tool_runs("alpha")
+    assert [entry["status"] for entry in entries] == ["succeeded"]
+
+
+async def test_background_submit_of_an_unencodable_result_records_failed_read_at_the_poll(wired):
+    # A tool whose result cannot be JSON-encoded is refused at the dispatch seam with the named
+    # ``ToolResultEncodingError``; the background supervisor's terminal-write path records the run
+    # ``failed`` with that message, read cleanly at the poll door — never a 500 at the poll read.
+    from tai42_skeleton.tools.binding import ToolResultEncodingError
+
+    tools = wired.install()
+
+    async def _raise(key, arguments, *, offload_sync=False, extras=None):
+        raise ToolResultEncodingError(key, "$.token")
+
+    tools.run_tool = _raise
+    out = await ops.submit_run("alpha", {})
+    await _drain()
+
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "failed"
+    assert "alpha" in record["error"]
+    assert "$.token" in record["error"]
 
 
 async def test_background_run_masks_wrapped_secrets_in_the_stored_record(wired):
@@ -193,14 +446,14 @@ async def test_background_run_of_a_secret_preset_schema_failure_redacts_the_reco
 
 async def test_run_binds_its_run_id_as_interaction_origin(wired):
     # The supervisor binds the run's id as the interaction origin for the tool body,
-    # so a question the tool raises through ask_user is attributed to the run. The
+    # so a question the tool raises through ask is attributed to the run. The
     # binding lives on the run's own context and is released with the run.
     from tai42_skeleton.interactions.origin import get_interaction_origin
 
     tools = wired.install()
     seen: dict[str, str | None] = {}
 
-    async def _run_tool(key, arguments, *, offload_sync=False):
+    async def _run_tool(key, arguments, *, offload_sync=False, extras=None):
         seen["origin"] = get_interaction_origin()
         return {"ok": 1}
 
@@ -279,6 +532,43 @@ async def test_list_tool_runs_returns_present_records(wired):
     assert "error" not in entries[0]
 
 
+async def test_full_view_carries_the_parsed_resumed_interactions(wired):
+    # The terminal record's ``resumed_interactions`` field (a JSON-encoded id list) is
+    # parsed back into the full GET view.
+    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.mark_terminal_if_running(
+        wired.fake,
+        "r1",
+        {
+            "status": "succeeded",
+            "finished_at": "2026-01-01T00:01:00",
+            "result": json.dumps({"ok": 1}),
+            "resumed_interactions": json.dumps(["i-a", "i-b"]),
+        },
+        wired.settings.result_ttl_seconds,
+    )
+    view = await ops.get_run("r1")
+    assert view["resumed_interactions"] == ["i-a", "i-b"]
+
+
+async def test_list_view_omits_resumed_interactions(wired):
+    # The trimmed list view stays id/tool/status/timestamps only — never the resumed list.
+    await wired.store.create_run(wired.fake, "r1", "alpha", "2026-01-01T00:00:00", 1.0, wired.settings)
+    await wired.store.mark_terminal_if_running(
+        wired.fake,
+        "r1",
+        {
+            "status": "succeeded",
+            "finished_at": "2026-01-01T00:01:00",
+            "result": json.dumps({"ok": 1}),
+            "resumed_interactions": json.dumps(["i-a"]),
+        },
+        wired.settings.result_ttl_seconds,
+    )
+    entries = await ops.list_tool_runs("alpha")
+    assert "resumed_interactions" not in entries[0]
+
+
 def test_metadata_declares_the_tier1_destructive_submit_and_read_ops():
     submit = operation_metadata_of(ops.submit_run)
     assert submit.destructive is True
@@ -343,7 +633,7 @@ class _IdentityReadingTools(_FakeTools):
         super().__init__()
         self.seen_identities: list[object] = []
 
-    async def run_tool(self, key, arguments, *, offload_sync=False):
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         from tai42_skeleton.authz.execution_identity import get_execution_identity
 
         self.seen_identities.append(get_execution_identity())
@@ -357,7 +647,7 @@ async def test_submit_binds_the_callers_own_key_into_the_detached_run(wired):
     from tai42_skeleton.authz.identity import CallerIdentity
 
     tools = _IdentityReadingTools()
-    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    _bind_impl(wired.monkeypatch, tools)
     wired.monkeypatch.setattr(ops, "request_identity", lambda: ("usr-caller", False))
 
     rebuilt = CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live")
@@ -390,7 +680,7 @@ async def test_submit_from_a_fire_keeps_the_fires_binding(wired):
     from tai42_skeleton.authz.identity import CallerIdentity
 
     tools = _IdentityReadingTools()
-    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    _bind_impl(wired.monkeypatch, tools)
     wired.monkeypatch.setattr(ops, "request_identity", lambda: ("usr-caller", False))
     fire_identity = CallerIdentity(user_id="svc-fire", execution_key_fingerprint="fp-fire")
 
@@ -418,7 +708,7 @@ async def test_submit_degrades_to_unbound_when_the_rebuild_cannot_answer(wired):
     from tai42_skeleton.authz.execution_identity import get_execution_identity
 
     tools = _IdentityReadingTools()
-    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    _bind_impl(wired.monkeypatch, tools)
     wired.monkeypatch.setattr(ops, "request_identity", lambda: ("usr-caller", False))
 
     async def _rebuild_raises(key: str):
@@ -438,7 +728,7 @@ async def test_submit_unauthenticated_binds_nothing(wired):
     # No caller id (gate off / anonymous): the run stays identity-less, exactly as
     # before — the async-ask seam then fail-closes loudly inside the tool.
     tools = _IdentityReadingTools()
-    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    _bind_impl(wired.monkeypatch, tools)
     wired.monkeypatch.setattr(ops, "request_identity", lambda: (None, False))
 
     await ops.submit_run("alpha", {"x": 1})

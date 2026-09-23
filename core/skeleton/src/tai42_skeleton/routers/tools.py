@@ -34,16 +34,17 @@ from tai42_skeleton.routers._tool_call import ToolCallRequestError, read_tool_ca
 
 
 async def _extract_run_tool(request: Request) -> dict[str, Any]:
-    """Parse the run-tool body ``{tool_name, arguments}`` at the HTTP edge via the shared parser.
+    """Parse the run-tool body ``{tool_name, arguments, subject}`` at the HTTP edge via the shared parser.
 
-    Maps its loud 4xx to a typed error. Yields the operation's flat ``tool_name``
-    / ``arguments`` kwargs.
+    Maps its loud 4xx to a typed error. Yields the operation's flat ``tool_name`` /
+    ``arguments`` / ``subject`` kwargs; ``subject`` is the validated
+    :class:`~tai42_contract.states.StateSubject` (or ``None``) the run indexes an async park under.
     """
     try:
-        tool_name, arguments = await read_tool_call(request)
+        tool_name, arguments, subject = await read_tool_call(request)
     except ToolCallRequestError as exc:
         raise BadRequestError(exc.message) from exc
-    return {"tool_name": tool_name, "arguments": arguments}
+    return {"tool_name": tool_name, "arguments": arguments, "subject": subject}
 
 
 list_tools = register_operation_route(

@@ -1,4 +1,4 @@
-"""The ``ask_user`` external-format flow in the helper: the link/options/schema
+"""The ``ask`` external-format flow in the helper: the link/options/schema
 combo validation, up-front schema rejection (before the builder runs), the
 template/callable link resolution, the exact callback URL, ``public_base_url``
 scheme validation, the ``max_concurrent`` guard, cancel-cleanup, and the
@@ -18,7 +18,7 @@ from tai42_contract.interactions import InteractionResponse
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.helper import InteractionLimitError, InteractionTimeoutError
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -52,23 +52,23 @@ def _empty(fake_redis) -> bool:
 
 async def test_external_requires_link():
     with pytest.raises(ValueError, match="requires a link"):
-        await ask_user("q", answer_format="external")
+        await ask("q", answer_format="external")
 
 
 async def test_link_forbidden_without_external():
     with pytest.raises(ValueError, match="only valid with answer_format 'external'"):
-        await ask_user("q", link="{callback_url}")
+        await ask("q", link="{callback_url}")
 
 
 async def test_verifier_forbidden_without_external():
     with pytest.raises(ValueError, match="verifier is only valid with answer_format 'external'"):
-        await ask_user("q", verifier={"name": "github", "config": {}})
+        await ask("q", verifier={"name": "github", "config": {}})
 
 
 async def test_external_rejects_options(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_redis, fake_client_ctx)
     with pytest.raises(ValueError, match="options are not valid with answer_format 'external'"):
-        await ask_user("q", answer_format="external", link="{callback_url}", options=["a"])
+        await ask("q", answer_format="external", link="{callback_url}", options=["a"])
 
 
 async def test_bad_schema_rejected_before_builder(monkeypatch, fake_redis, fake_client_ctx):
@@ -80,7 +80,7 @@ async def test_bad_schema_rejected_before_builder(monkeypatch, fake_redis, fake_
         return "https://external.example/resource"
 
     with pytest.raises(ValueError, match="pydantic model or a JSON-schema dict"):
-        await ask_user("q", answer_format="external", link=builder, schema=cast("dict", 123), timeout=60)
+        await ask("q", answer_format="external", link=builder, schema=cast("dict", 123), timeout=60)
     assert called == []  # up-front validation ran before external work
     assert _empty(fake_redis)
 
@@ -119,7 +119,7 @@ async def test_template_substitution_preserves_other_braces(monkeypatch, fake_re
     template = "https://sign.example/doc/{callback_url}?keep={other}"
 
     answerer = asyncio.create_task(_answer_with_capture(fake_redis, store, captured, {"ok": True}))
-    result = await ask_user("q", answer_format="external", link=template, timeout=5)
+    result = await ask("q", answer_format="external", link=template, timeout=5)
     await answerer
 
     assert result == {"ok": True}
@@ -131,7 +131,7 @@ async def test_template_substitution_preserves_other_braces(monkeypatch, fake_re
 async def test_missing_placeholder_errors(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_redis, fake_client_ctx)
     with pytest.raises(ValueError, match=r"must contain \{callback_url\}"):
-        await ask_user("q", answer_format="external", link="https://no-placeholder.example", timeout=5)
+        await ask("q", answer_format="external", link="https://no-placeholder.example", timeout=5)
     assert _empty(fake_redis)
 
 
@@ -146,7 +146,7 @@ async def test_builder_receives_exact_callback_url(monkeypatch, fake_redis, fake
         return "https://external.example/go"
 
     answerer = asyncio.create_task(_answer_with_capture(fake_redis, store, {}, "done"))
-    await ask_user("q", answer_format="external", link=builder, timeout=5)
+    await ask("q", answer_format="external", link=builder, timeout=5)
     await answerer
 
     assert seen == ["https://cb.example/api/interactions/callback/TICKET123"]
@@ -159,7 +159,7 @@ async def test_builder_exception_propagates_nothing_persisted(monkeypatch, fake_
         raise RuntimeError("resource creation failed")
 
     with pytest.raises(RuntimeError, match="resource creation failed"):
-        await ask_user("q", answer_format="external", link=builder, timeout=5)
+        await ask("q", answer_format="external", link=builder, timeout=5)
     assert _empty(fake_redis)
 
 
@@ -170,7 +170,7 @@ async def test_builder_non_url_return_errors(monkeypatch, fake_redis, fake_clien
         return "ftp://not-http.example"
 
     with pytest.raises(ValueError, match="must return an http"):
-        await ask_user("q", answer_format="external", link=builder, timeout=5)
+        await ask("q", answer_format="external", link=builder, timeout=5)
     assert _empty(fake_redis)
 
 
@@ -180,12 +180,12 @@ async def test_builder_non_url_return_errors(monkeypatch, fake_redis, fake_clien
 async def test_missing_public_base_url_raises(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_redis, fake_client_ctx, public_base_url=None)
     with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
-        await ask_user("q", answer_format="external", link="{callback_url}", timeout=5)
+        await ask("q", answer_format="external", link="{callback_url}", timeout=5)
 
 
 def test_http_non_localhost_rejected(monkeypatch, fake_redis, fake_client_ctx):
     # The settings validator rejects a non-TLS URL at construction — before any
-    # ask_user call can ever mint a callback URL from it.
+    # ask call can ever mint a callback URL from it.
     with pytest.raises(PydanticValidationError, match="must be https"):
         _wire(monkeypatch, fake_redis, fake_client_ctx, public_base_url="http://evil.example")
 
@@ -195,7 +195,7 @@ async def test_http_localhost_accepted(monkeypatch, fake_redis, fake_client_ctx,
     settings = _wire(monkeypatch, fake_redis, fake_client_ctx, public_base_url=base)
     store = InteractionStore(settings.key_prefix)
     answerer = asyncio.create_task(_answer_plain(fake_redis, store, "ok"))
-    result = await ask_user("q", answer_format="external", link="{callback_url}", timeout=5)
+    result = await ask("q", answer_format="external", link="{callback_url}", timeout=5)
     await answerer
     assert result == "ok"
 
@@ -210,7 +210,7 @@ async def test_max_concurrent_admits_below_limit(monkeypatch, fake_redis, fake_c
     fake_redis._zadd(store.open_key, {"other": 9_999_999_999_999.0})
 
     answerer = asyncio.create_task(_answer_plain(fake_redis, store, "hi"))
-    result = await ask_user("q", timeout=5)
+    result = await ask("q", timeout=5)
     await answerer
     assert result == "hi"
 
@@ -221,7 +221,7 @@ async def test_max_concurrent_trips_at_limit(monkeypatch, fake_redis, fake_clien
     fake_redis._zadd(store.open_key, {"other": 9_999_999_999_999.0})
 
     with pytest.raises(InteractionLimitError) as exc:
-        await ask_user("q", timeout=5)
+        await ask("q", timeout=5)
     # The message carries the open count and the setting name.
     assert "1" in str(exc.value)
     assert "max_concurrent" in str(exc.value)
@@ -234,7 +234,7 @@ async def test_max_concurrent_purges_stale_then_admits(monkeypatch, fake_redis, 
     fake_redis._zadd(store.open_key, {"stale": 1.0})
 
     answerer = asyncio.create_task(_answer_plain(fake_redis, store, "ok"))
-    result = await ask_user("q", timeout=5)
+    result = await ask("q", timeout=5)
     await answerer
     assert result == "ok"
 
@@ -247,7 +247,7 @@ async def test_max_concurrent_atomic_under_burst(monkeypatch, fake_redis, fake_c
     _wire(monkeypatch, fake_redis, fake_client_ctx, max_concurrent=2)
 
     results = await asyncio.gather(
-        *(ask_user("q", timeout=0.1) for _ in range(5)),
+        *(ask("q", timeout=0.1) for _ in range(5)),
         return_exceptions=True,
     )
 
@@ -264,7 +264,7 @@ async def test_cancel_prunes_and_reraises(monkeypatch, fake_redis, fake_client_c
     settings = _wire(monkeypatch, fake_redis, fake_client_ctx)
     store = InteractionStore(settings.key_prefix)
 
-    task = asyncio.create_task(ask_user("q", timeout=60))
+    task = asyncio.create_task(ask("q", timeout=60))
     iid, _gid = await await_add_event(fake_redis, store)
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as excinfo:
@@ -277,10 +277,10 @@ async def test_cancel_prunes_and_reraises(monkeypatch, fake_redis, fake_client_c
     assert await store.count_open(fake_redis) == 0
 
 
-async def test_turn_budget_expiry_names_the_parked_ask_user_question(monkeypatch, fake_redis, fake_client_ctx):
-    # The real seam end to end: a real ``ask_user`` parked on its answer wait, killed by
+async def test_turn_budget_expiry_names_the_parked_ask_question(monkeypatch, fake_redis, fake_client_ctx):
+    # The real seam end to end: a real ``ask`` parked on its answer wait, killed by
     # a real ``turn_budget`` expiry, surfaces the enriched ``TurnTimeoutError`` naming the
-    # question the turn was waiting on. The budget (0.2s) fires before ask_user's own
+    # question the turn was waiting on. The budget (0.2s) fires before ask's own
     # longer timeout, cancelling the wait; the cancel path stamps the pending question,
     # and the budget reads it off the cancelled TimeoutError's cause.
     settings = _wire(monkeypatch, fake_redis, fake_client_ctx)
@@ -290,7 +290,7 @@ async def test_turn_budget_expiry_names_the_parked_ask_user_question(monkeypatch
     try:
         with pytest.raises(TurnTimeoutError) as excinfo:
             async with turn_budget():
-                await ask_user("what is the status?", timeout=5)
+                await ask("what is the status?", timeout=5)
     finally:
         reset_all_settings()
 
@@ -307,7 +307,7 @@ async def test_timeout_prunes(monkeypatch, fake_redis, fake_client_ctx):
     store = InteractionStore(settings.key_prefix)
 
     with pytest.raises(InteractionTimeoutError):
-        await ask_user("q", timeout=0.05)
+        await ask("q", timeout=0.05)
 
     assert await store.count_open(fake_redis) == 0
 
@@ -332,7 +332,7 @@ async def test_external_pydantic_schema_stored(monkeypatch, fake_redis, fake_cli
         await store.record_answer(fake_redis, resp, gid, reply_ttl=60)
 
     answerer = asyncio.create_task(grab())
-    await ask_user("q", answer_format="external", link="{callback_url}", schema=_Form, timeout=5)
+    await ask("q", answer_format="external", link="{callback_url}", schema=_Form, timeout=5)
     await answerer
 
     assert captured["payload"]["schema"] == _Form.model_json_schema()

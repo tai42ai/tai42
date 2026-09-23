@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
 
@@ -39,13 +40,17 @@ async def submit_api_message(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     locale: str | None = None,
+    *,
+    client_connected: Callable[[], Awaitable[bool]],
 ) -> ApiSubmitResult:
     """Accept one authed API-door message and run its turn.
 
     ``wait_seconds`` (clamped to ``sync_wait_max_seconds`` by the door, ``0`` for the
     pure-async path) bounds a sync wait: a turn that finishes inside it answers in the
     ``200`` with the callback suppressed, otherwise the door returns ``202`` and the answer
-    is POSTed to the callback.
+    is POSTed to the callback. The inline ``200`` is claimed only while ``client_connected``
+    reports the caller still connected; a hung-up caller's answer is left to the route's
+    callback (or its terminal poll record) instead of written to a closed socket.
 
     Admission runs in the channel door's order — rate cap, thread reservation, intake
     record — so a refusal writes nothing and a returned ``message_id`` always names a
@@ -136,7 +141,7 @@ async def submit_api_message(
         location=checked_location,
     )
 
-    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds)
+    return await _api_wait_or_callback(task, message_id, thread_id, wait_seconds, client_connected)
 
 
 async def _get_api_route(route_name: str) -> ConversationRoute:

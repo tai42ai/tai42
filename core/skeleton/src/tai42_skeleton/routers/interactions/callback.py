@@ -1,7 +1,7 @@
 """The unauthenticated external-answer callback door (GET page + POST claim) for the interactions surface.
 
 Serves ``/api/interactions/callback/{ticket}``.
-The callback ticket is a bearer capability minted by the ``ask_user`` helper; it is
+The callback ticket is a bearer capability minted by the ``ask`` helper; it is
 never deleted, single-use is enforced by the answered-state guard in ``record_answer``,
 and a duplicate callback resolves idempotently to 200. The door is NOT audience-gated —
 the ticket IS the authorization (an external-answer flow deliberately addresses
@@ -24,8 +24,10 @@ from tai42_contract.app import tai42_app
 from tai42_contract.conversations import validate_entry_params
 from tai42_contract.interactions import (
     AnswerFormat,
+    AnswerMismatchError,
     InteractionResponse,
     InteractionState,
+    QuestionFormat,
 )
 from tai42_contract.webhooks import WebhookVerificationError
 from tai42_kit.clients.impl.redis import RedisClient
@@ -33,19 +35,18 @@ from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_bo
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
+
+# The answer check is the shared ``check_answer`` (the one check every door reaches). The
+# still-handler callback door shares the human answer door's reply-TTL and serializer-guarded
+# claim helpers, imported from the operations module.
+from tai42_skeleton.interactions.answer_check import check_answer
+from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
-
-# The human answer door is an operation in ``tai42_skeleton.operations.interactions``;
-# the still-handler callback door shares its answer-validation, reply-TTL, and
-# serializer-guarded claim helpers, imported from that module.
 from tai42_skeleton.operations.interactions import (
-    _AnswerInvalidError,
     _claim_or_serialization_error,
     _reply_ttl,
-    _schema_mismatch,
-    _validate_answer,
 )
 
 from .form_render import _FormRenderError, _render_form_page
@@ -180,12 +181,14 @@ async def _claim_external(
     state: InteractionState,
     answer: Any,
 ) -> JSONResponse:
-    """Validate (if a schema was declared), then atomically claim the answer."""
-    schema = (state.request.format_payload or {}).get("schema")
-    if schema is not None:
-        mismatch = _schema_mismatch(answer, schema)
-        if mismatch is not None:
-            return _callback_json({"error": mismatch[0]}, 400)
+    """Validate (only against a declared schema), then atomically claim the answer."""
+    try:
+        check_answer(
+            QuestionFormat(answer_format=AnswerFormat.EXTERNAL, format_payload=state.request.format_payload),
+            answer,
+        )
+    except AnswerMismatchError as exc:
+        return _callback_json({"error": str(exc)}, 400)
     return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, answer)
 
 
@@ -296,8 +299,11 @@ async def _claim_channel_typed(
         return parsed
     value, answer_params = parsed
     try:
-        validated = _validate_answer(state.request, value)
-    except _AnswerInvalidError as exc:
+        check_answer(
+            QuestionFormat(answer_format=state.request.answer_format, format_payload=state.request.format_payload),
+            value,
+        )
+    except AnswerMismatchError as exc:
         # The failing field's dotted path rides as an optional ``field`` key so a
         # channel can pin the error on the right control; absent when unlocated.
         # ``retry_in_place`` is the door's policy signal to a correlated channel:
@@ -307,9 +313,7 @@ async def _claim_channel_typed(
         if exc.field is not None:
             body["field"] = exc.field
         return _callback_json(body, 400)
-    return await _record_callback_answer(
-        r, store, settings, ticket, interaction_id, state, validated, params=answer_params
-    )
+    return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, value, params=answer_params)
 
 
 async def _claim_verbatim_external(
@@ -369,6 +373,12 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
         # A cancel/timeout prune deletes the state while the ticket lives out its
         # TTL — the same uniform 404, never a None dereference.
         return _callback_json({"error": "not found"}, 404)
+    if is_caller_ask(state):
+        # A caller ask is addressed to the calling run and resolved only by that run
+        # resuming; the public answer door refuses it loudly (both the typed and the
+        # external claim branch flow through here). A caller ask carries no channel
+        # delivery and no ticket, so this is defence-in-depth on the ticket resolution.
+        return _callback_json({"error": CALLER_ASK_RESOLUTION_REFUSED}, 409)
     # Verify the signed server-to-server answer over the RAW body BEFORE the
     # answered-state check, before parsing, and before recording. A bound door
     # authenticates before it reports anything about the ticket's state, so a
@@ -455,7 +465,7 @@ class InteractionCallbackAck(BaseModel):
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
-        error_statuses=(400, 401, 404, 413, 500),
+        error_statuses=(400, 401, 404, 409, 413, 500),
         success_status=200,
     ),
 )

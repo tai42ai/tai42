@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import Json, PostgresClient
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -33,7 +33,7 @@ from tai42_skeleton.runs.models import RunIndexFilter, RunOutcome, RunRow
 # ``run_id`` tiebreak so paging is deterministic across equal ``started_at``.
 _LIST_SQL = (
     "SELECT run_id, preset_name, preset_version, trace_id, user_id, session_id, "
-    "interaction_id, outcome, started_at, ended_at FROM run_index "
+    "interaction_id, outcome, started_at, ended_at, resumed_interactions FROM run_index "
     "WHERE (%s::text IS NULL OR preset_name = %s) "
     "AND (%s::int IS NULL OR preset_version = %s) "
     "AND (%s::text IS NULL OR user_id = %s) "
@@ -94,8 +94,9 @@ class PostgresRunIndexStore:
         *,
         trace_id: str | None = None,
         interaction_id: str | None = None,
+        resumed_interactions: list[str] | None = None,
     ) -> None:
-        """Terminally update a run: set its ``outcome`` + ``ended_at`` and BACKFILL ``trace_id``.
+        """Terminally update a run: set its ``outcome`` + ``ended_at``, BACKFILL ``trace_id``, write the resumed ids.
 
         ``trace_id`` is backfilled when one is now available. ``COALESCE(%s, trace_id)``
         keeps a trace id captured at START and only fills a NULL — a later NULL sample
@@ -103,13 +104,18 @@ class PostgresRunIndexStore:
         OPPOSITE way — ``COALESCE(interaction_id, %s)``, first-set wins — so a resume row
         keeps the ORIGIN id captured at START even when its own body parks again (a
         single-park lifecycle joins fully; a re-park's new id is deliberately not
-        recorded, so deeper chains are not walkable by this column).
+        recorded, so deeper chains are not walkable by this column). ``resumed_interactions``
+        is the parked ids this run resumed or took across its span; a ``None`` argument
+        leaves the column at its START default (``[]``) via ``COALESCE``, so the terminal
+        write only ever sets it, never nulls the NOT NULL column.
         """
+        resumed = Json(resumed_interactions) if resumed_interactions is not None else None
         async with self._cursor() as cur:
             await cur.execute(
                 "UPDATE run_index SET outcome = %s, ended_at = %s, trace_id = COALESCE(%s, trace_id), "
-                "interaction_id = COALESCE(interaction_id, %s) WHERE run_id = %s",
-                (outcome, ended_at, trace_id, interaction_id, run_id),
+                "interaction_id = COALESCE(interaction_id, %s), "
+                "resumed_interactions = COALESCE(%s::jsonb, resumed_interactions) WHERE run_id = %s",
+                (outcome, ended_at, trace_id, interaction_id, resumed, run_id),
             )
 
     async def list(self, filter_: RunIndexFilter, *, page: int, page_size: int) -> list[RunRow]:
@@ -167,6 +173,7 @@ def _row(row: Any) -> RunRow:
         outcome,
         started_at,
         ended_at,
+        resumed_interactions,
     ) = row
     return RunRow(
         run_id=run_id,
@@ -179,6 +186,7 @@ def _row(row: Any) -> RunRow:
         outcome=outcome,
         started_at=_iso(started_at),
         ended_at=_iso(ended_at) if ended_at is not None else None,
+        resumed_interactions=list(resumed_interactions),
     )
 
 

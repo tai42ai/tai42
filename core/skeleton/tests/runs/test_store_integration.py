@@ -168,6 +168,25 @@ async def test_prune_deletes_strictly_before_cutoff(store: tuple[PostgresRunInde
     assert remaining == [f"{token}-r2", f"{token}-r3"]
 
 
+async def test_resumed_interactions_jsonb_round_trips(store: tuple[PostgresRunIndexStore, str]) -> None:
+    s, token = store
+    run = f"{token}-r1"
+    await _start(s, token, run)
+    # The START row defaults the real JSONB column to `[]`.
+    [row] = await s.list(RunIndexFilter(preset=token), page=1, page_size=10)
+    assert row.resumed_interactions == []
+    # The terminal write persists the collected list into the JSONB column and it reads
+    # back as a parsed Python list.
+    await s.update_outcome(run, "success", _iso(1), resumed_interactions=[f"{token}-i1", f"{token}-i2"])
+    [row] = await s.list(RunIndexFilter(preset=token), page=1, page_size=10)
+    assert row.resumed_interactions == [f"{token}-i1", f"{token}-i2"]
+    # A later terminal write with no list (None arg) keeps the stored list through COALESCE —
+    # the NOT NULL column is never nulled.
+    await s.update_outcome(run, "success", _iso(2))
+    [row] = await s.list(RunIndexFilter(preset=token), page=1, page_size=10)
+    assert row.resumed_interactions == [f"{token}-i1", f"{token}-i2"]
+
+
 async def test_started_at_renders_iso_from_real_timestamptz(store: tuple[PostgresRunIndexStore, str]) -> None:
     s, token = store
     run = f"{token}-r1"

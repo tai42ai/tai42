@@ -37,12 +37,16 @@ from tai42_e2e.manifests import (
     build_auth_stack,
     build_bare_stack,
     build_bridge_stack,
+    build_caller_cap_stack,
+    build_caller_stack,
+    build_caller_sweep_stack,
     build_channel_stack,
     build_claude_agent_stack,
     build_connectors_stack,
     build_core_stack,
     build_deep_agent_durable_stack,
     build_default_router_stack,
+    build_door_schedule_stack,
     build_embed_stack,
     build_extensions_stack,
     build_minimal_stack,
@@ -270,9 +274,29 @@ def recycle_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Ite
 
 @pytest.fixture(scope="module")
 def async_park_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
-    """REPLICAS, no backend — the async ``ask_user`` park lifecycle stack (park on A,
-    resume on B via an answer or the 1s expiry reaper)."""
+    """REPLICAS, no backend — the async ``ask`` park lifecycle stack (park on A,
+    resolve on B via an answer or the 1s expiry reaper)."""
     yield from _boot(infra, tmp_path_factory.mktemp("async-park"), build_async_park_stack)
+
+
+@pytest.fixture(scope="module")
+def caller_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """REPLICAS, no backend — the caller-ask park/kill/waiting-outcome stack (the tool-runs
+    subject door + hooks + interactions, expiry reaper pinned to 1s)."""
+    yield from _boot(infra, tmp_path_factory.mktemp("caller"), build_caller_stack)
+
+
+@pytest.fixture(scope="module")
+def caller_cap_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The caller-ask stack with ``INTERACTIONS_MAX_CONCURRENT_CALLER=1`` — the separate-cap leg."""
+    yield from _boot(infra, tmp_path_factory.mktemp("caller-cap"), build_caller_cap_stack)
+
+
+@pytest.fixture(scope="module")
+def caller_sweep_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The caller-ask stack with a short retention horizon (``INTERACTIONS_IDLE_TTL_SECONDS=5``) —
+    the untaken-outcome retention-sweep leg."""
+    yield from _boot(infra, tmp_path_factory.mktemp("caller-sweep"), build_caller_sweep_stack)
 
 
 @pytest.fixture(scope="module")
@@ -427,6 +451,15 @@ def schedule_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
     yield from _boot(infra, tmp_path_factory.mktemp("schedule"), build_schedule_stack)
 
 
+@pytest.fixture(scope="module")
+def door_schedule_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """REPLICAS backend + scheduler with access control ON and the in-process conversation door
+    tools + the ``schedule_task`` branch — the home of the keyless-fire door refusal. Seeded with a
+    root key (``seed_auth=True``) so the create door authenticates; the keyless recurring FIRE runs
+    in the worker with no bound execution identity, and its door call is refused under the gate."""
+    yield from _boot(infra, tmp_path_factory.mktemp("door-schedule"), build_door_schedule_stack, seed_auth=True)
+
+
 @pytest.fixture(scope="session")
 def seams_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
     """MULTIWORKER(1) + backend stack carrying the seams fixture (preset seed + rename
@@ -470,8 +503,8 @@ def agent_async_park_stack(
     infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
 ) -> Iterator[TaiStack]:
     """REPLICAS agents stack on the redis checkpoint provider plus the durable agent park
-    index — the AGENT async ``ask_user`` park lifecycle (a ``tools_agent`` run parks on A,
-    resumes on B via an answer or the 1s expiry reaper). Gated on the module-capable
+    index — the AGENT async ``ask`` park lifecycle (a ``tools_agent`` run parks on A,
+    resolves on B via an answer or the 1s expiry reaper). Gated on the module-capable
     checkpoint Redis, like ``agents_redis_stack``."""
     if infra.checkpoint_redis is None:
         pytest.skip(

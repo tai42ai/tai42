@@ -14,6 +14,7 @@ from tai42_contract.agent.base import (
     SubAgentSpec,
 )
 from tai42_contract.agent.events import (
+    AsksFinal,
     InterruptFinal,
     MessageDelta,
     MessageFinal,
@@ -24,6 +25,7 @@ from tai42_contract.agent.events import (
     SuspendedFinal,
     ToolCallStep,
     ToolResultStep,
+    final_event_for_value,
 )
 
 # The ambient in-process session-thread door: a logic-free channel both the skeleton
@@ -39,6 +41,7 @@ from tai42_contract.agent.session_thread import (
 __all__ = [
     "Agent",
     "AgentInterruptedError",
+    "AsksFinal",
     "InterruptFinal",
     "MessageDelta",
     "MessageFinal",
@@ -52,6 +55,7 @@ __all__ = [
     "ToolCallStep",
     "ToolResultStep",
     "agent_session_thread",
+    "final_event_for_value",
     "get_agent_session_thread",
     "reset_agent_session_thread",
     "set_agent_session_thread",

@@ -7,7 +7,7 @@
  * remaining seam a web participant's traffic actually takes: the REAL widget bundle, served by
  * the skeleton at the channel's public chat page, rendering a REAL web-channel delivery.
  *
- * A blocking `ask_user(channel="web", answer_format="form", data=..., pages=...)` is fired
+ * A blocking `ask(channel="web", answer_format="form", data=..., pages=...)` is fired
  * at the browser visitor's own conversation (its server-side visitor id read from the SUT
  * Redis — the web channel never discloses it to the client, exactly as the pytest harness's
  * `registered_visitor_id` reads it). The question streams into the widget, which shows the
@@ -99,7 +99,7 @@ test('a per-send form with data + pages renders in the widget, steps, and resolv
     headers: apiHeaders(),
     timeout: 90_000,
     data: {
-      tool_name: 'ask_user',
+      tool_name: 'ask',
       arguments: {
         question,
         channel: 'web',
@@ -161,4 +161,60 @@ test('a per-send form with data + pages renders in the widget, steps, and resolv
   expect(askRes.status(), await askRes.text()).toBe(200);
   const body = (await askRes.json()) as { data: unknown };
   expect(body.data).toEqual(answer);
+});
+
+test('a notify_user form with data + pages opens in the widget already filled in and stepped', async ({
+  page,
+  request,
+  browserName,
+}) => {
+  // The widget's SSE feed is a fetch-stream; CI's Linux WebKit delivers those unreliably, so this
+  // stream-dependent flow flakes only there. Chromium + Firefox cover the stream path.
+  test.skip(browserName === 'webkit', 'Linux CI WebKit delivers fetch-streams unreliably');
+
+  const identity = uniq('notifyformsite').replace(/_/g, '-');
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto(`/api/channels/web/chat/${identity}`);
+
+  const cookies = await page.context().cookies();
+  const token = cookies.find((c) => c.name === WEB_SESSION_COOKIE)?.value;
+  expect(token, 'the chat page minted no web-session cookie').toBeTruthy();
+  const visitorId = await resolveWebVisitorId(token as string);
+
+  // Fire an ask-less notify_user FORM (fire-and-forget) at this visitor: the web channel delivers a
+  // form-data notification the widget renders — prefilled and stepped, exactly as an ask form is.
+  const notifyRes = await request.post('/api/run-tool', {
+    headers: apiHeaders(),
+    timeout: 30_000,
+    data: {
+      tool_name: 'notify_user',
+      arguments: {
+        message: uniq('notify_form_q'),
+        channel: 'web',
+        recipient: `${identity}:${visitorId}`,
+        schema: SCHEMA,
+        data: DATA,
+        pages: PAGES,
+      },
+    },
+  });
+  expect(notifyRes.status(), await notifyRes.text()).toBe(200);
+
+  // The delivered form opens on its first page, prefilled, with the per-send option labels.
+  const card = page.locator('.tcw-question-form');
+  await expect(card.getByText(/Step 1 of 2 . Basics/)).toBeVisible();
+  await expect(card.getByRole('spinbutton')).toHaveValue('3');
+  await expect(card.getByRole('combobox')).toHaveValue('a');
+  await expect(card.getByRole('option', { name: 'Option A' })).toHaveAttribute('value', 'a');
+  await expect(card.getByRole('option', { name: 'Option B' })).toHaveAttribute('value', 'b');
+
+  await settleCardEntry(page, card);
+  await page.screenshot({ path: `${SHOTS_DIR}/notify-form-widget-light.png` });
+
+  // Stepping advances the progress and reveals the second page's field.
+  await card.getByRole('button', { name: 'Next' }).click();
+  await expect(card.getByText(/Step 2 of 2 . Extras/)).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Back' })).toBeVisible();
 });

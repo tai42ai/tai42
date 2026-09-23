@@ -46,7 +46,7 @@ from tai42_contract.interactions import (
 from tai42_agents._internal.park.index import extend_park_horizon, is_resolved_tombstone, read_park_entry
 from tai42_agents._internal.park.middleware import park_error_answer
 from tai42_agents._internal.park.persist import chained_park_horizon
-from tai42_agents._internal.park.resume import agent_resume
+from tai42_agents._internal.park.resume import agent_resume, to_contract_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, 
     A key with no live entry is a no-op, not an error, and that is the COMMON case rather than a
     fault: the first park of a chained call always notifies before the waiting run has finished
     recording its own park (the nested run parks first, by construction); a park the caller
-    ADOPTED as its own — an ``ask_user`` raised directly by a chained dispatch — notifies a chain
+    ADOPTED as its own — an ``ask`` raised directly by a chained dispatch — notifies a chain
     nothing ever parks on; and a resolved or detached chain has nothing left to extend.
     """
     entry = await read_park_entry(chain_token)
@@ -144,16 +144,24 @@ async def deliver_chained_park(
     exactly as the nested run produced it, empty included — the model reads what the call
     returned, not an interpretation of it.
 
-    Delivery is at-least-once, and the resume is idempotent for it: the super-step barrier
-    buffers an answer once (a redelivery is a no-op) and a resolved super-step leaves a
-    tombstone a late fire lands on benignly. ``completion_id`` is the driver's stable id for the
-    resolved terminal, carried for correlation in the logs — the barrier, not this id, is what
-    makes redelivery safe.
+    AUTHORISATION: the tool is hidden but dispatchable by name at the run-tool door and the MCP
+    edge, so it asserts ``assert_resume_authorized(chain_token)`` FIRST (after the presence check),
+    before it re-enters or returns anything — the ancestor shares the leaf's ``run_delivery_id``
+    (one id spans the cross-driver chain), so a legitimate terminal fire from inside the leaf's
+    resume drive, and a whole-chain kill's teardown notify (which ``kill_park`` runs with the
+    run-authorization context bound), pass; an external run-tool / MCP caller is refused loudly.
 
-    Returns the resumed run's own outcome (its terminal value, a ``buffered`` receipt while
-    sibling parks of the same super-step are outstanding, a ``suspended`` receipt if the resumed
-    run parked again, or ``already_resolved``), so the driver that fired sees what its delivery
-    led to.
+    Delivery is at-least-once, and the resume is idempotent for it: the super-step barrier
+    buffers an answer once (a redelivery is a no-op) and a resolved super-step replays its stored
+    resolution to a late fire. ``completion_id`` is accepted for signature completeness (a fire
+    carries none — the ancestor's barrier is the redelivery idempotency, not an id).
+
+    Returns the OUTERMOST run's outcome in CONTRACT types
+    (:func:`~tai42_agents._internal.park.resume.to_contract_outcome`): a ``SuspendedInteraction``
+    if the re-entered ancestor parked again, a ``ResumeBuffered`` while sibling parks of the same
+    super-step are outstanding, the final result on a clean terminal, or ``None`` for a benign
+    detach landing — so a CROSS-DRIVER caller (another driver firing this when its run ran under
+    an agent) can read the outcome without interpreting an agents-private envelope.
 
     A fire with NO ``chain_token`` is unroutable and no retry can ever land it, so it is dropped
     LOUDLY rather than raising into an endless redelivery. A token whose park entry is ABSENT
@@ -162,11 +170,10 @@ async def deliver_chained_park(
     ends without ever parking on a chain it claimed detaches that key itself, which is what
     turns the truly-dead case into the benign tombstone rather than an endless retry.
 
-    ``chained_context`` and ``delivery_thread_id`` are the rest of the chained binding, accepted
-    because the whole context rides every fire: the embedded caller binding (which this tool
-    never needs — the waiting run's own park entry carries its delivery address) and the
-    reserved thread field the platform's park-by-thread index reads off the context. Neither is
-    read here; they are declared so a complete fire is never a signature error.
+    ``chained_context`` and ``delivery_thread_id`` are accepted because the whole fire payload may
+    ride them (the reserved thread field the platform's park-by-thread index reads, and a caller's
+    residual context). Neither is read here; they are declared so a complete fire is never a
+    signature error.
     """
     if not chain_token:
         logger.error(
@@ -175,6 +182,7 @@ async def deliver_chained_park(
             completion_id,
         )
         return {"status": "dropped"}
+    await tai42_app.interactions.assert_resume_authorized(chain_token)
     if status == PARK_COMPLETION_REPARKED:
         return await _extend_horizon(chain_token, expiry_at)
     if _terminal_succeeded(chain_token, completion_id, status):
@@ -184,7 +192,7 @@ async def deliver_chained_park(
             f"the call this run is waiting on ended without a result (terminal status {status!r}); "
             "nothing was delivered, so continue without it"
         )
-    return await agent_resume(chain_token, answer)
+    return to_contract_outcome(await agent_resume(chain_token, answer))
 
 
 def register_chained_park_tool() -> None:
