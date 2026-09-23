@@ -36,14 +36,27 @@ from .records import (
     WaitingOutcome,
 )
 from .serde import as_str
-from .writes import KILL_ACT_ON_ANY, KILL_ACT_ON_PENDING, KillEnqueueResult, PruneResult, _StoreWrites
+from .writes import PruneResult, _StoreWrites
+from .writes_answers import _StoreAnswerWrites
+from .writes_kills import KILL_ACT_ON_ANY, KILL_ACT_ON_PENDING, KillEnqueueResult, _StoreKillWrites
+from .writes_outcomes import _StoreOutcomeWrites
+from .writes_rekey import _StoreRekeyWrites
 
 
-class InteractionStore(_StoreWrites, _StoreReads):
+class InteractionStore(
+    _StoreWrites,
+    _StoreAnswerWrites,
+    _StoreKillWrites,
+    _StoreOutcomeWrites,
+    _StoreRekeyWrites,
+    _StoreReads,
+):
     """The interactions store: the durable question lifecycle (writes) and read/query/audit + reaper claims (reads).
 
     Reassembled over the shared Redis key contract into the one class every ``store.<method>`` call
-    site uses.
+    site uses. The lifecycle mutations are split across cohesive write mixins (add/slot/prune,
+    answers, kills, outcomes, re-keying), all sharing the addressing primitives in
+    ``_StoreWritesBase``.
     """
 
 

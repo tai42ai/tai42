@@ -186,7 +186,7 @@ class _StoreKeys:
         ``completion_id`` (``uuid5`` of the run's delivery identity), so a redelivery of the same
         run — or a buffered sibling re-driving the SAME terminal — writes the SAME key and the
         second write is a no-op: exactly one row per run terminal. Taken atomically
-        (:meth:`~..writes._StoreWrites.claim_outcome`); dropped on kill/erase or by the retention
+        (:meth:`~..writes_outcomes._StoreOutcomeWrites.claim_outcome`); dropped on kill/erase or by the retention
         sweep.
         """
         return f"{self._p}outcome:{completion_id}"
