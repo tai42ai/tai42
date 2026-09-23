@@ -1,6 +1,7 @@
 """The record write SQL — replace, ``apply_ops`` (op-id ledger, guards, ``_trace`` stamping,
-composing-shape refusal, prune), RTBF erase, and subject fold — driven against the in-memory
-fake Postgres (the ``pg``/``store`` fixtures in ``conftest``).
+composing-shape refusal, the version-gated attachments cache, the UPDATE+write CTE), RTBF
+erase, and subject fold — driven against the in-memory fake Postgres (the ``pg``/``store``
+fixtures in ``conftest``).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from tai42_contract.states.errors import (
     RegimeViolationError,
     StateNotFoundError,
     SubjectFoldError,
+    ValueValidationError,
 )
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
@@ -32,6 +34,11 @@ _ORIGIN = CompletedOrigin(
 
 def _ok(schema, doc):
     """A permissive document validator — the SQL tests isolate the store, not the schema."""
+    return None
+
+
+async def _admit(subject_kinds):
+    """A permissive in-txn subject check — these SQL tests isolate the store, not admission."""
     return None
 
 
@@ -66,7 +73,7 @@ async def test_apply_ops_applies_and_records_touched_paths(pg: FakeStatesPg, sto
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_ok,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied is True
     assert data == {"n": 5}
@@ -79,12 +86,12 @@ async def test_apply_ops_op_id_ledger_and_replay(pg: FakeStatesPg, store: Postgr
     pg.seed_declaration("alerts")
     op = [{"op": "set", "path": ["n"], "value": 1}]
     first = await store.apply_ops(
-        "alerts", _subj(), op, op_id="op-1", origin=_ORIGIN, validate_doc=_ok, retention_days=30
+        "alerts", _subj(), op, op_id="op-1", origin=_ORIGIN, validate_doc=_ok, validate_subject_in_txn=_admit
     )
     assert first[0] is True
     assert "op-1" in pg.applied_ops
     replay = await store.apply_ops(
-        "alerts", _subj(), op, op_id="op-1", origin=_ORIGIN, validate_doc=_ok, retention_days=30
+        "alerts", _subj(), op, op_id="op-1", origin=_ORIGIN, validate_doc=_ok, validate_subject_in_txn=_admit
     )
     assert replay == (False, None, None, [])
     # only the first apply wrote a record-changing row
@@ -100,7 +107,7 @@ async def test_apply_ops_guard_skips_and_deletes_fresh_record(pg: FakeStatesPg, 
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_ok,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied is True
     assert data is None  # the freshly-inserted empty record was rolled back out
@@ -119,7 +126,7 @@ async def test_apply_ops_guard_pass_on_existing_record(pg: FakeStatesPg, store: 
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_ok,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied is True
     assert data == {"n": 2}
@@ -136,7 +143,7 @@ async def test_apply_ops_all_guards_skip_on_existing_keeps_record(pg: FakeStates
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_ok,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied is True
     assert data == {"n": 1}  # the existing record is untouched, not deleted
@@ -167,7 +174,7 @@ async def test_apply_ops_stamps_trace_under_traced_attach(pg: FakeStatesPg, stor
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_ok,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied is True
     assert data is not None
@@ -207,7 +214,7 @@ async def test_apply_ops_refuses_composing_shape_before_ledger(pg: FakeStatesPg,
             op_id="op-x",
             origin=_ORIGIN,
             validate_doc=_ok,
-            retention_days=30,
+            validate_subject_in_txn=_admit,
         )
     assert "op-x" not in pg.applied_ops  # the shape refusal precedes the ledger insert
 
@@ -221,11 +228,11 @@ async def test_apply_ops_undeclared_raises(pg: FakeStatesPg, store: PostgresStat
             op_id=None,
             origin=_ORIGIN,
             validate_doc=_ok,
-            retention_days=30,
+            validate_subject_in_txn=_admit,
         )
 
 
-async def test_apply_ops_prunes_expired_ledger_rows(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_apply_ops_does_not_prune_the_op_ledger(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     from datetime import timedelta
 
     pg.seed_declaration("alerts")
@@ -237,10 +244,158 @@ async def test_apply_ops_prunes_expired_ledger_rows(pg: FakeStatesPg, store: Pos
         op_id="fresh",
         origin=_ORIGIN,
         validate_doc=_ok,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
-    assert "stale" not in pg.applied_ops  # opportunistic prune dropped the old row
+    # The write path never prunes: the op ledger's retention is the state-retention sweep's job.
+    assert "stale" in pg.applied_ops
     assert "fresh" in pg.applied_ops
+    assert not any("state_applied_ops" in sql and "DELETE" in sql for sql, _ in pg.executed)
+
+
+async def test_apply_ops_round_trip_count_cold_then_warm(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    pg.seed_declaration("alerts")
+    ops = [{"op": "set", "path": ["n"], "value": 1}]
+
+    before = len(pg.executed)
+    await store.apply_ops(
+        "alerts", _subj(), ops, op_id="a", origin=_ORIGIN, validate_doc=_ok, validate_subject_in_txn=_admit
+    )
+    cold = len(pg.executed) - before
+    # cold path: FOR SHARE decl, attachments JOIN, alias resolve, op-ledger insert,
+    # record upsert-lock, and the UPDATE+write CTE.
+    assert cold == 6
+
+    before = len(pg.executed)
+    await store.apply_ops(
+        "alerts", _subj(), ops, op_id="b", origin=_ORIGIN, validate_doc=_ok, validate_subject_in_txn=_admit
+    )
+    warm = len(pg.executed) - before
+    # warm path skips the attachments JOIN (the declaration's version is unchanged).
+    assert warm == 5
+
+
+async def test_apply_ops_attachment_cache_serves_the_warm_composition(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    pg.seed_declaration("alerts")
+    ops = [{"op": "set", "path": ["n"], "value": 1}]
+
+    def _joins() -> int:
+        return sum(1 for sql, _ in pg.executed if "JOIN state_templates" in sql)
+
+    await store.apply_ops(
+        "alerts", _subj(), ops, op_id="a", origin=_ORIGIN, validate_doc=_ok, validate_subject_in_txn=_admit
+    )
+    assert _joins() == 1  # cold miss reads the composition
+    await store.apply_ops(
+        "alerts", _subj(), ops, op_id="b", origin=_ORIGIN, validate_doc=_ok, validate_subject_in_txn=_admit
+    )
+    assert _joins() == 1  # warm hit — no second JOIN
+
+
+def _joins(pg: FakeStatesPg) -> int:
+    return sum(1 for sql, _ in pg.executed if "JOIN state_templates" in sql)
+
+
+async def _apply_once(store: PostgresStatesStore, op_id: str) -> None:
+    await store.apply_ops(
+        "alerts",
+        _subj(),
+        [{"op": "set", "path": ["n"], "value": 1}],
+        op_id=op_id,
+        origin=_ORIGIN,
+        validate_doc=_ok,
+        validate_subject_in_txn=_admit,
+    )
+
+
+def _seed_template(pg: FakeStatesPg, name: str = "m") -> None:
+    pg.templates[name] = {
+        "name": name,
+        "body": {"kind": "state-template", "name": name, "schema": {"type": "object"}},
+        "shipped_hash": None,
+        "updated_at": pg.tick(),
+    }
+
+
+_EFF = {"type": "object"}
+
+
+async def test_cache_invalidated_by_attach(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    pg.seed_declaration("alerts")
+    _seed_template(pg)
+    await _apply_once(store, "a")
+    assert _joins(pg) == 1
+    await store.upsert_attachment("alerts", "m", ["a"], {}, {}, effective_schema=_EFF)
+    await _apply_once(store, "b")
+    assert _joins(pg) == 2  # attach bumped updated_at → cache miss
+
+
+async def test_cache_invalidated_by_update_attachment_declarations(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    pg.seed_declaration("alerts")
+    _seed_template(pg)
+    await store.upsert_attachment("alerts", "m", ["a"], {}, {}, effective_schema=_EFF)
+    await _apply_once(store, "a")
+    joins = _joins(pg)
+    await store.update_attachment_declarations("alerts", "m", {"x": 1}, effective_schema=_EFF)
+    await _apply_once(store, "b")
+    assert _joins(pg) == joins + 1
+
+
+async def test_cache_invalidated_by_template_body_replace(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    # A template-body replace backfills each attached state through update_attachment_parameters,
+    # which bumps the declaration's updated_at.
+    pg.seed_declaration("alerts")
+    _seed_template(pg)
+    await store.upsert_attachment("alerts", "m", ["a"], {}, {}, effective_schema=_EFF)
+    await _apply_once(store, "a")
+    joins = _joins(pg)
+    await store.update_attachment_parameters("alerts", "m", {"p": 1}, effective_schema=_EFF)
+    await _apply_once(store, "b")
+    assert _joins(pg) == joins + 1
+
+
+async def test_cache_invalidated_by_detach(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    pg.seed_declaration("alerts")
+    _seed_template(pg)
+    await store.upsert_attachment("alerts", "m", ["a"], {}, {}, effective_schema=_EFF)
+    await _apply_once(store, "a")
+    joins = _joins(pg)
+    await store.delete_attachment("alerts", "m", effective_schema=_EFF)
+    await _apply_once(store, "b")
+    assert _joins(pg) == joins + 1
+
+
+async def test_cache_invalidated_by_declaration_upsert(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+    pg.seed_declaration("alerts")
+    await _apply_once(store, "a")
+    joins = _joins(pg)
+    await store.upsert_declaration("alerts", "", {"type": "object"}, ["thread"], "thread", None)
+    await _apply_once(store, "b")
+    assert _joins(pg) == joins + 1
+
+
+async def test_apply_ops_schema_failure_rolls_back_write_and_ledger(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    strict = {"type": "object", "properties": {"n": {"type": "integer"}}, "additionalProperties": False}
+    pg.seed_declaration("alerts", schema=strict, effective_schema=strict)
+    with pytest.raises(ValueValidationError):
+        await store.apply_ops(
+            "alerts",
+            _subj(),
+            [{"op": "set", "path": ["bad"], "value": 1}],
+            op_id="op-z",
+            origin=_ORIGIN,
+            validate_doc=_validate_document,
+            validate_subject_in_txn=_admit,
+        )
+    # The whole transaction rolled back: no op-ledger row, no write row, no record.
+    assert "op-z" not in pg.applied_ops
+    assert pg.writes == []
+    assert await store.read_record("alerts", _subj()) == (None, None)
 
 
 async def test_erase_declared_is_alias_aware_and_audited(pg: FakeStatesPg, store: PostgresStatesStore) -> None:

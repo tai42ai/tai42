@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 from tai42_contract.agent import Agent
-from tai42_contract.agent.events import MessageFinal
+from tai42_contract.agent.events import MessageFinal, StructuredOutputUnresolvedFinal
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import current_call_chain
 
@@ -105,6 +105,37 @@ async def test_agent_structured_array_final_stays_one_serialized_message(env, mo
     assert record.answer == json.dumps(["alpha", "beta", "gamma"])
     assert len(channel.sends) == 1
     assert channel.sends[0].message == json.dumps(["alpha", "beta", "gamma"])
+
+
+async def test_agent_reprompt_cap_outcome_reaches_the_turn_reply(env, monkeypatch):
+    # A capped structured-output run ends on a typed, non-fatal outcome: the conversation route
+    # surfaces it to the turn's reply as the serialized typed outcome, never a generic empty-answer
+    # error and never a dropped turn.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+
+    class _OutcomeAgent(Agent):
+        tool_name = "oc"
+        ToolInput = _EchoInput
+
+        async def run(self, **kwargs):
+            return await self._drain(self.astream(**kwargs))
+
+        async def astream(self, **kwargs):
+            yield StructuredOutputUnresolvedFinal(schema_name="Answer", attempts=4, error="value is not an integer")
+
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _OutcomeAgent()})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer is not None
+    payload = json.loads(record.answer)
+    assert payload["type"] == "structured_output_unresolved_final"
+    assert payload["attempts"] == 4
+    assert len(channel.sends) == 1
 
 
 async def test_agent_target_ignores_params(env, monkeypatch):

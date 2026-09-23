@@ -38,6 +38,14 @@ _KWARGS_FILE_HELP = (
     "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --kwargs."
 )
 
+# The reference convention a fixed-kwargs value may use so the credential is never baked
+# into the stored body: the server resolves the variable at run time.
+_KWARGS_REFERENCE_SENTENCE = (
+    "A string value written '!ENV ${VAR}' is a secret reference the server resolves from that "
+    "environment variable at run time, storing only the reference."
+)
+_KWARGS_HELP = f"Baked fixed kwargs as a JSON object. {_KWARGS_REFERENCE_SENTENCE}"
+
 
 @app.command("list")
 @covers(("GET", "/api/presets"))
@@ -74,7 +82,7 @@ def create_preset(
     description: Annotated[
         str, typer.Option("--description", help="The preset's LLM-facing description (required, non-empty).")
     ],
-    kwargs: Annotated[str | None, typer.Option("--kwargs", help="Baked fixed kwargs as a JSON object.")] = None,
+    kwargs: Annotated[str | None, typer.Option("--kwargs", help=_KWARGS_HELP)] = None,
     kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     extensions: Annotated[str | None, typer.Option("--extensions", help=_EXTENSIONS_HELP)] = None,
 ) -> None:
@@ -146,7 +154,11 @@ def save_version(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Preset name.")],
     kwargs: Annotated[
-        str | None, typer.Option("--kwargs", help="New fixed kwargs (JSON object); omit to carry forward.")
+        str | None,
+        typer.Option(
+            "--kwargs",
+            help="New fixed kwargs (JSON object); omit to carry forward. " + _KWARGS_REFERENCE_SENTENCE,
+        ),
     ] = None,
     kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     description: Annotated[
@@ -232,7 +244,7 @@ def validate_preset(
     base_tool: Annotated[
         str | None, typer.Option("--base-tool", help="The base tool (required for a new preset).")
     ] = None,
-    kwargs: Annotated[str | None, typer.Option("--kwargs", help="Baked fixed kwargs as a JSON object.")] = None,
+    kwargs: Annotated[str | None, typer.Option("--kwargs", help=_KWARGS_HELP)] = None,
     kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     description: Annotated[
         str | None, typer.Option("--description", help="The preset's LLM-facing description.")

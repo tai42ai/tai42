@@ -369,6 +369,23 @@ def _lock_effective_schema(cur, pg, norm, params):
     cur._one = None if row is None else {"effective_schema": row["effective_schema"]}
 
 
+@_on(r"SELECT effective_schema, subject_kinds, updated_at FROM state_declarations WHERE name = %s FOR SHARE$")
+def _lock_apply_declaration(cur, pg, norm, params):
+    # ``apply_ops``'s enriched FOR SHARE read: the effective schema (validation), the declared
+    # subject kinds (in-txn admission) and updated_at (the attachments-cache version).
+    (name,) = params
+    row = pg.declarations.get(name)
+    cur._one = (
+        None
+        if row is None
+        else {
+            "effective_schema": row["effective_schema"],
+            "subject_kinds": list(row["subject_kinds"]),
+            "updated_at": row["updated_at"],
+        }
+    )
+
+
 @_on(
     r"SELECT m\.template, m\.path, mo\.body FROM state_attachments m JOIN state_templates mo ON mo\.name = m\.template "
     r"WHERE m\.state = %s$"
@@ -776,6 +793,70 @@ def _update_record_data(cur, pg, norm, params):
 def _delete_record(cur, pg, norm, params):
     rkey = tuple(params)
     cur.rowcount = 1 if pg.records.pop(rkey, None) is not None else 0
+
+
+@_on(
+    r"WITH upd AS \(UPDATE state_records SET data = %s, updated_at = clock_timestamp\(\) "
+    r"WHERE state = %s AND target_kind = %s AND target_name = %s AND subject_kind = %s AND subject_key = %s "
+    r"RETURNING extract\(epoch FROM updated_at\)::float8 AS seq\), w AS \(INSERT INTO state_writes "
+    r"\(state, target_kind, target_name, subject_kind, subject_key, seq, at, door, actor, consumer, meta, "
+    r"run_id, turn_id, paths, op_id\) "
+    r"SELECT %s, %s, %s, %s, %s, \(SELECT seq FROM upd\), now\(\), %s, %s, %s, %s, %s, %s, %s, %s\) "
+    r"SELECT seq FROM upd$"
+)
+def _apply_ops_write_cte(cur, pg, norm, params):
+    # ``apply_ops``'s data-modifying CTE: the record UPDATE (returning the fresh seq) and the
+    # ``state_writes`` provenance row (seq = the UPDATE's) as one statement. Postgres runs both
+    # data-modifying sub-queries to completion, and the outer ``SELECT seq FROM upd`` returns seq.
+    (
+        data,
+        u_state,
+        u_tk,
+        u_tn,
+        u_kind,
+        u_key,
+        w_state,
+        w_tk,
+        w_tn,
+        w_kind,
+        w_key,
+        door,
+        actor,
+        consumer,
+        meta,
+        run_id,
+        turn_id,
+        paths,
+        op_id,
+    ) = params
+    row = pg.records.get((u_state, u_tk, u_tn, u_kind, u_key))
+    if row is None:
+        return  # no record to update — upd is empty, seq NULL (never reached: the upsert-lock made it)
+    row["data"] = _unwrap(data)
+    row["updated_at"] = pg.now()
+    seq = _seq(row["updated_at"])
+    cur._one = {"seq": seq}
+    cur.rowcount = 1
+    pg.writes.append(
+        {
+            "id": pg.next_write_id(),
+            "state": w_state,
+            "target_kind": w_tk,
+            "target_name": w_tn,
+            "subject_kind": w_kind,
+            "subject_key": w_key,
+            "seq": seq,
+            "at": pg.now(),
+            "door": door,
+            "actor": actor,
+            "consumer": consumer,
+            "meta": _unwrap(meta) if meta is not None else None,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "paths": _unwrap(paths),
+            "op_id": op_id,
+        }
+    )
 
 
 # -- op ledger ---------------------------------------------------------------

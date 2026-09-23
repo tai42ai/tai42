@@ -28,7 +28,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 136 (sub-protocol, member) pairs over 132
+# The frozen facade surface: the 137 (sub-protocol, member) pairs over 133
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -165,7 +165,7 @@ EXPECTED_FACADE = {
     "used_by",
     # tool_meta (2) — `store` shared with versioning and presets above
     "patch",
-    # states (28)
+    # states (29)
     "list_declarations",
     "get_declaration",
     "put_declaration",
@@ -183,6 +183,7 @@ EXPECTED_FACADE = {
     "replace",
     "merge",
     "apply",
+    "apply_batch",
     "eval_template_jq",
     "apply_template_jq",
     "erase",
@@ -273,11 +274,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 136 (sub-protocol, member) pairs over 132 distinct names — ``store`` is exposed
+    # 137 (sub-protocol, member) pairs over 133 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 132, f"union={len(union)}"
-    assert total == 136 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 133, f"union={len(union)}"
+    assert total == 137 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_four_namespaces():

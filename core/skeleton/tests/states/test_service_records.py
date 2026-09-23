@@ -11,6 +11,7 @@ from tai42_contract.states.errors import (
     SubjectFoldError,
     ValueValidationError,
 )
+from tai42_contract.states.models import StateBatchWrite, WriteOrigin
 
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
@@ -135,9 +136,97 @@ async def test_prune_expired_reports_counts(svc: StatesService) -> None:
     assert counts == {"alerts": 2}
 
 
+async def test_prune_expired_also_sweeps_the_op_ledger(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.states.service import records as records_mod
+
+    monkeypatch.setattr(records_mod, "store_settings_retention", lambda: 30)
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    store.op_ledger_stale = 4
+    await svc.prune_expired()
+    # The state-retention sweep is the op ledger's only prune; it runs it with the op window.
+    assert store.prune_ops_days == 30
+
+
 async def test_prune_expired_refuses_a_misconfigured_default(
     svc: StatesService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(service_mod, "store_settings_default_retention", lambda: 0)
     with pytest.raises(ValueValidationError, match="DEFAULT_RETENTION_DAYS"):
         await svc.prune_expired()
+
+
+def _set_op(field: str, value: object) -> dict[str, object]:
+    return {"op": "set", "path": [field], "value": value}
+
+
+async def test_apply_batch_empty_returns_empty_without_opening_a_transaction(svc: StatesService) -> None:
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    begins = 0
+    original = store.begin
+
+    def _counting_begin():
+        nonlocal begins
+        begins += 1
+        return original()
+
+    store.begin = _counting_begin  # type: ignore[method-assign]
+    results = await svc.apply_batch([])
+    assert results == []
+    assert begins == 0
+
+
+async def test_apply_batch_applies_every_item_in_one_transaction(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    begins = 0
+    original = store.begin
+
+    def _counting_begin():
+        nonlocal begins
+        begins += 1
+        return original()
+
+    store.begin = _counting_begin  # type: ignore[method-assign]
+    writes = [
+        StateBatchWrite(state="alerts", subject=_subject(key="t1"), ops=[_set_op("n", 1)], origin=_ORIGIN),
+        StateBatchWrite(state="alerts", subject=_subject(key="t2"), ops=[_set_op("n", 2)], origin=_ORIGIN),
+        StateBatchWrite(state="alerts", subject=_subject(key="t3"), ops=[_set_op("n", 3)], origin=_ORIGIN),
+    ]
+    results = await svc.apply_batch(writes)
+    assert begins == 1  # one store.begin — one transaction for the whole set
+    assert len(results) == 3
+    assert [r.applied for r in results] == [True, True, True]
+    assert store.records[("alerts", "agent", "a", "thread", "t1")] == {"n": 1}
+    assert store.records[("alerts", "agent", "a", "thread", "t3")] == {"n": 3}
+
+
+async def test_apply_batch_returns_results_in_input_order_while_applying_sorted(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    first = WriteOrigin(consumer="zzz")
+    second = WriteOrigin(consumer="aaa")
+    # Input order is (key "zzz", key "aaa"); the (state, subject) sort applies "aaa" FIRST,
+    # yet the returned results stay in input order.
+    writes = [
+        StateBatchWrite(state="alerts", subject=_subject(key="zzz"), ops=[_set_op("n", 9)], origin=first),
+        StateBatchWrite(state="alerts", subject=_subject(key="aaa"), ops=[_set_op("n", 1)], origin=second),
+    ]
+    results = await svc.apply_batch(writes)
+    assert [r.data for r in results] == [{"n": 9}, {"n": 1}]  # input order preserved
+    assert [o.consumer for o in store.applied_origins] == ["aaa", "zzz"]  # applied sorted: "aaa" before "zzz"
+
+
+async def test_apply_batch_rolls_the_whole_batch_back_when_an_item_raises(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    writes = [
+        StateBatchWrite(state="alerts", subject=_subject(key="t1"), ops=[_set_op("n", 1)], origin=_ORIGIN),
+        StateBatchWrite(
+            state="alerts", subject=_subject(key="t2"), ops=[{"op": "bogus", "path": ["n"]}], origin=_ORIGIN
+        ),
+    ]
+    with pytest.raises(InvalidPathError):
+        await svc.apply_batch(writes)
+    # The first item's write rolled back with the transaction — nothing partial survives.
+    assert ("alerts", "agent", "a", "thread", "t1") not in store.records
+    assert ("alerts", "agent", "a", "thread", "t2") not in store.records

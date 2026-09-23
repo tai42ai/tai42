@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from tai42_contract.states import (
     AttachBody,
     StateAttach,
+    StateBatchWrite,
     StateBinding,
     StateSubject,
     StateTemplateJq,
@@ -188,23 +189,30 @@ async def _resolve_op_id(
 async def apply_binding_updates(
     app: TaiMCP, binding: StateBinding, arguments: dict[str, Any], output: Any, door_id: str
 ) -> None:
-    """Apply each attach's ``updates`` through the store AFTER the dispatch.
+    """Build every engaged attach's ``updates`` into ONE write set and apply it as ONE transaction after the dispatch.
 
     A named ``template_jq`` (update purpose) shapes its ``.input`` from the ``adapter`` over the
     tool output (its ``.``) with the run input bound as ``$input`` (or the run input directly
-    when it declares no adapter) and is applied via :meth:`app.states.apply_template_jq`; a
-    custom ``jq`` authors the whole op batch over the tool output (its ``.``) with the run input
-    bound as ``$input`` and the record as ``$record``, applied via :meth:`app.states.apply`.
+    when it declares no adapter) and is queued as a ``template_jq`` write; a custom ``jq`` authors
+    the whole op batch over the tool output (its ``.``) with the run input bound as ``$input`` and
+    the record as ``$record``, queued as an ``ops`` write. The node-entry record is read ONCE per
+    engaged attach, and every custom update of that attach authors ``$record`` against that one
+    snapshot; the ops then land sequentially and atomically inside the single transaction the
+    batch applies. Every queued item across every engaged attach is applied through
+    :meth:`app.states.apply_batch` ONCE, so a node's whole update set commits or rolls back
+    together — a failed update rolls the node's writes back.
 
     Single-writer identity: a TEMPLATE update writes as one door-independent writer keyed on
     its resolved program name (the SAME update from any door on one state is one writer); a
     CUSTOM update writes as the door's own writer (``door_id`` = the dispatched definition).
     An attach whose ``scope_expr`` predicate is ``false`` is skipped.
     """
+    items: list[StateBatchWrite] = []
     for attach in binding.states:
         if not await _scope_engaged(app, attach, arguments):
             continue
         subject = await _resolve_subject(app, attach, arguments)
+        record_data: dict[str, Any] | None = None
         for update in attach.updates:
             op_id = await _resolve_op_id(app, attach.state, update.op_id, arguments, output)
             if update.template_jq is not None:
@@ -213,29 +221,39 @@ async def apply_binding_updates(
                     adapted = await run_jq_first(adapter, output, variables={"input": arguments})
                 else:
                     adapted = arguments
-                await app.states.apply_template_jq(
-                    attach.state,
-                    subject,
-                    update.template_jq,
-                    adapted,
-                    op_id=op_id,
-                    origin=WriteOrigin(consumer="template_jq", meta={"template_jq": update.template_jq}),
+                items.append(
+                    StateBatchWrite(
+                        state=attach.state,
+                        subject=subject,
+                        template_jq=update.template_jq,
+                        input=adapted,
+                        op_id=op_id,
+                        origin=WriteOrigin(consumer="template_jq", meta={"template_jq": update.template_jq}),
+                    )
                 )
             else:
                 if update.jq is None:
                     raise AssertionError
-                record = await app.states.read(attach.state, subject)
-                data = record.data if record is not None else {}
+                if record_data is None:
+                    record = await app.states.read(attach.state, subject)
+                    record_data = record.data if record is not None else {}
                 jq = await _render_slot(app, f"update jq for state {attach.state!r}", update.jq)
-                ops = await run_jq_first(jq, output, variables={"input": arguments, "record": data})
+                ops = await run_jq_first(jq, output, variables={"input": arguments, "record": record_data})
                 if not isinstance(ops, list):
                     raise ValueValidationError(
                         f"state binding custom update jq for state {attach.state!r} must return an op batch "
                         f"(a list), got {type(ops).__name__}"
                     )
-                await app.states.apply(
-                    attach.state, subject, ops, op_id=op_id, origin=WriteOrigin(consumer=f"door:{door_id}")
+                items.append(
+                    StateBatchWrite(
+                        state=attach.state,
+                        subject=subject,
+                        ops=ops,
+                        op_id=op_id,
+                        origin=WriteOrigin(consumer=f"door:{door_id}"),
+                    )
                 )
+    await app.states.apply_batch(items)
 
 
 async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> None:

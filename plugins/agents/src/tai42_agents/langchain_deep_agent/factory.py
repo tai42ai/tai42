@@ -21,6 +21,7 @@ from deepagents.middleware.subagents import (
     SubAgentMiddleware,
 )
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
@@ -352,7 +353,7 @@ async def build_langchain_deep_agent(
     subagents: list[ResolvedSubAgentSpec] | None = None,
     skills: list[str] | None = None,
     inline_skills: list[InlineSkill] | None = None,
-    system_prompt: str | None = None,
+    system_prompt: str | SystemMessage | None = None,
     interrupt_on: dict[str, Any] | None = None,
     response_format: Any | None = None,
     session: SandboxSession | None = None,
@@ -367,6 +368,11 @@ async def build_langchain_deep_agent(
     ``inline_skills`` (each a name + ``SKILL.md`` body) are collected from the main
     agent and every subagent into one mount, and each agent's own inline skills are
     auto-loaded as ``SKILLS_ROOT<name>/`` sources.
+
+    ``system_prompt`` is the main agent's instructions; a ``SystemMessage`` carrying
+    a ``cache_control`` breakpoint marks the system prefix for prompt caching (kept
+    as the graph's per-run system message, which the rolling cache-mark middleware
+    exempts, so the mark stays stable across turns).
 
     ``response_format`` (a pydantic model or langchain response strategy) makes the
     agent return a validated structured object in ``state['structured_response']``;

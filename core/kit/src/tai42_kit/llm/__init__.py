@@ -10,7 +10,7 @@ vendor-free).
 
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.embedding import get_embedding, get_embedding_async
-from tai42_kit.llm.models import get_llm, get_llm_async
+from tai42_kit.llm.models import get_llm, get_llm_async, system_prompt_cache_mark
 from tai42_kit.llm.store.store_registry import store_registry
 
 __all__ = [
@@ -20,4 +20,5 @@ __all__ = [
     "get_llm",
     "get_llm_async",
     "store_registry",
+    "system_prompt_cache_mark",
 ]

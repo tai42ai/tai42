@@ -19,9 +19,17 @@ from typing import Any, LiteralString
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.states.errors import RegimeViolationError
-from tai42_contract.states.models import AttachBody, StateDeclaration, StateSubject, StateTemplateDocument, WriteOrigin
+from tai42_contract.states.errors import RegimeViolationError, ValueValidationError
+from tai42_contract.states.models import (
+    AttachBody,
+    StateBatchWrite,
+    StateDeclaration,
+    StateSubject,
+    StateTemplateDocument,
+    WriteOrigin,
+)
 from tai42_kit.clients import client_ctx
+from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
@@ -44,6 +52,19 @@ def _bound_app() -> Iterator[None]:
     resource manager (inline ``content`` verbatim) without standing up the full app."""
     with tai42_app.bound(_FakeApp()):
         yield
+
+
+@pytest.fixture(autouse=True)
+async def _release_pools() -> AsyncIterator[None]:
+    """Close this test's pooled Postgres clients at teardown.
+
+    Each test runs on its own event loop and the store caches its pool per loop, so without an
+    explicit close the pool's connections linger past the test — the whole real-Postgres suite
+    would then accumulate open connections and exhaust the server's ``max_connections``. Set up
+    first (autouse) so this teardown runs LAST, after the per-fixture cleanup opens and returns
+    its own connections."""
+    yield
+    await shutdown_all_clients()
 
 
 async def _exec(sql: LiteralString, params: tuple = ()) -> None:
@@ -258,3 +279,230 @@ async def test_reconciler_closes_an_orphan_through_a_keyed_op(
     assert [item["id"] for item in view.data["a"]["items"]] == [1, 3]
     attachments = await svc.list_attachments(state, template=template)
     assert attachments[0]["declarations"] == {"allowed": [1, 3]}
+
+
+def _plain_decl(state: str) -> StateDeclaration:
+    return StateDeclaration(
+        name=state,
+        schema={"type": "object", "properties": {"n": {"type": "integer"}, "m": {"type": "integer"}}},
+        subject_kinds=["thread"],
+        default_subject_kind="thread",
+    )
+
+
+async def _cleanup_plain(state: str) -> None:
+    await _exec("DELETE FROM state_writes WHERE state = %s", (state,))
+    await _exec("DELETE FROM state_records WHERE state = %s", (state,))
+    await _exec("DELETE FROM state_applied_ops WHERE op_id LIKE %s", (f"%:{state}",))
+    await _exec("DELETE FROM state_declarations WHERE name = %s", (state,))
+
+
+@pytest.fixture
+async def real_plain(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[StatesService, str, str]]:
+    """Two plain integer-field states (no template) for the ``apply_batch`` transaction exercises."""
+    if os.environ.get(_OPT_IN_ENV) not in ("1", "true", "True"):
+        pytest.skip(
+            f"real-Postgres apply_batch test is opt-in: set {_OPT_IN_ENV}=1 and point the "
+            "TAI_DATABASE_DEFAULT_PG_* env at a live Postgres to run it (needs jsonb + row locking — no fake)"
+        )
+    reset_all_settings()
+    await apply_migrations([states_entry()])
+    monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
+    state_a = f"st_{uuid.uuid4().hex[:12]}"
+    state_b = f"st_{uuid.uuid4().hex[:12]}"
+    svc = StatesService()
+    await svc.put_declaration(_plain_decl(state_a))
+    await svc.put_declaration(_plain_decl(state_b))
+    yield svc, state_a, state_b
+    await _cleanup_plain(state_a)
+    await _cleanup_plain(state_b)
+
+
+def _sub(key: str) -> StateSubject:
+    return StateSubject(target_kind="agent", target_name="a", kind="thread", key=key)
+
+
+async def test_apply_batch_commits_every_item_over_one_transaction(
+    real_plain: tuple[StatesService, str, str],
+) -> None:
+    svc, state, _b = real_plain
+    store = svc._store
+    begins = 0
+    original = store.begin
+
+    def _counting_begin():
+        nonlocal begins
+        begins += 1
+        return original()
+
+    store.begin = _counting_begin  # type: ignore[method-assign]
+    try:
+        results = await svc.apply_batch(
+            [
+                StateBatchWrite(
+                    state=state,
+                    subject=_sub("t1"),
+                    ops=[{"op": "set", "path": ["n"], "value": 1}],
+                    origin=WriteOrigin(),
+                ),
+                StateBatchWrite(
+                    state=state,
+                    subject=_sub("t2"),
+                    ops=[{"op": "set", "path": ["n"], "value": 2}],
+                    origin=WriteOrigin(),
+                ),
+                StateBatchWrite(
+                    state=state,
+                    subject=_sub("t3"),
+                    ops=[{"op": "set", "path": ["n"], "value": 3}],
+                    origin=WriteOrigin(),
+                ),
+            ]
+        )
+    finally:
+        store.begin = original  # type: ignore[method-assign]
+    assert begins == 1  # ONE store.begin — one BEGIN/one COMMIT for the whole batch
+    assert [r.applied for r in results] == [True, True, True]
+    for key, value in (("t1", 1), ("t2", 2), ("t3", 3)):
+        view = await svc.read(state, _sub(key))
+        assert view is not None
+        assert view.data == {"n": value}
+
+
+async def test_apply_batch_rolls_the_whole_batch_back_when_a_later_item_raises(
+    real_plain: tuple[StatesService, str, str],
+) -> None:
+    svc, state, _b = real_plain
+    # The second item violates the effective schema (a string where an integer is declared),
+    # so its document validation raises inside the shared transaction and the first item's
+    # committed-looking write rolls back with it.
+    with pytest.raises(ValueValidationError):
+        await svc.apply_batch(
+            [
+                StateBatchWrite(
+                    state=state,
+                    subject=_sub("t1"),
+                    ops=[{"op": "set", "path": ["n"], "value": 1}],
+                    origin=WriteOrigin(),
+                ),
+                StateBatchWrite(
+                    state=state,
+                    subject=_sub("t2"),
+                    ops=[{"op": "set", "path": ["n"], "value": "not-an-int"}],
+                    origin=WriteOrigin(),
+                ),
+            ]
+        )
+    assert await svc.read(state, _sub("t1")) is None  # no partial write survived
+    assert await svc.read(state, _sub("t2")) is None
+
+
+async def test_apply_batch_is_idempotent_per_item_on_a_replayed_op_id(
+    real_plain: tuple[StatesService, str, str],
+) -> None:
+    svc, state, _b = real_plain
+    op_id = f"batch-op:{state}"
+    await svc.apply(state, _sub("t1"), [{"op": "set", "path": ["n"], "value": 5}], op_id=op_id, origin=WriteOrigin())
+    results = await svc.apply_batch(
+        [
+            StateBatchWrite(
+                state=state,
+                subject=_sub("t1"),
+                ops=[{"op": "set", "path": ["n"], "value": 9}],
+                op_id=op_id,
+                origin=WriteOrigin(),
+            ),
+            StateBatchWrite(
+                state=state, subject=_sub("t2"), ops=[{"op": "set", "path": ["n"], "value": 2}], origin=WriteOrigin()
+            ),
+        ]
+    )
+    assert results[0].applied is False  # the replayed op_id did not re-write
+    assert results[1].applied is True  # its sibling landed
+    first = await svc.read(state, _sub("t1"))
+    assert first is not None
+    assert first.data == {"n": 5}  # still the original value, not 9
+    second = await svc.read(state, _sub("t2"))
+    assert second is not None
+    assert second.data == {"n": 2}
+
+
+async def test_apply_batch_reads_your_writes_across_two_items_on_one_subject(
+    real_plain: tuple[StatesService, str, str],
+) -> None:
+    svc, state, _b = real_plain
+    # Item 2 carries a compare-and-set guard on ``n`` = 5; it applies ONLY if it observes
+    # item 1's uncommitted write on the SAME subject over the shared transaction.
+    results = await svc.apply_batch(
+        [
+            StateBatchWrite(
+                state=state, subject=_sub("t1"), ops=[{"op": "set", "path": ["n"], "value": 5}], origin=WriteOrigin()
+            ),
+            StateBatchWrite(
+                state=state,
+                subject=_sub("t1"),
+                ops=[{"op": "set", "path": ["m"], "value": 6, "guard": {"path": ["n"], "expected": 5}}],
+                origin=WriteOrigin(),
+            ),
+        ]
+    )
+    assert results[1].applied is True
+    assert results[1].skipped == []  # the guard passed — item 2 saw item 1's write
+    view = await svc.read(state, _sub("t1"))
+    assert view is not None
+    assert view.data == {"n": 5, "m": 6}
+
+
+async def test_apply_batch_spans_two_states_in_one_transaction(
+    real_plain: tuple[StatesService, str, str],
+) -> None:
+    svc, state_a, state_b = real_plain
+    results = await svc.apply_batch(
+        [
+            StateBatchWrite(
+                state=state_a, subject=_sub("t1"), ops=[{"op": "set", "path": ["n"], "value": 1}], origin=WriteOrigin()
+            ),
+            StateBatchWrite(
+                state=state_b, subject=_sub("t1"), ops=[{"op": "set", "path": ["n"], "value": 2}], origin=WriteOrigin()
+            ),
+        ]
+    )
+    assert [r.applied for r in results] == [True, True]
+    view_a = await svc.read(state_a, _sub("t1"))
+    view_b = await svc.read(state_b, _sub("t1"))
+    assert view_a is not None
+    assert view_a.data == {"n": 1}
+    assert view_b is not None
+    assert view_b.data == {"n": 2}
+
+
+async def test_apply_batch_mixes_custom_ops_and_template_jq_items(
+    real_service: tuple[StatesService, str, str],
+) -> None:
+    svc, state, _template = real_service
+    # One raw-ops write (top-level ``meta``) and one ``template_jq`` update (``add`` under the
+    # attachment path) land together in the one batch transaction, on two subjects.
+    results = await svc.apply_batch(
+        [
+            StateBatchWrite(
+                state=state,
+                subject=_sub("t1"),
+                ops=[{"op": "set", "path": ["meta"], "value": "hi"}],
+                origin=WriteOrigin(),
+            ),
+            StateBatchWrite(
+                state=state,
+                subject=_sub("t2"),
+                template_jq="add",
+                input={"id": 1},
+                origin=WriteOrigin(meta={"template_jq": "add"}),
+            ),
+        ]
+    )
+    assert [r.applied for r in results] == [True, True]
+    custom = await svc.read(state, _sub("t1"))
+    assert custom is not None
+    assert custom.data["meta"] == "hi"
+    templated = await svc.read(state, _sub("t2"))
+    assert templated is not None
+    assert templated.data["a"]["items"][0]["id"] == 1

@@ -126,3 +126,35 @@ async def test_structured_output_stream_suppresses_synthetic_tool_frames(
     assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
     # Exactly one model round-trip: the single scripted structured tool call.
     assert len(llm_stub.requests) == 1, f"expected 1 LLM round-trip, saw {len(llm_stub.requests)}"
+
+
+async def test_structured_output_reprompt_cap_yields_the_typed_outcome(
+    agents_stack: TaiStack, llm_stub: LlmStub
+) -> None:
+    """A model that never produces schema-conforming structured output is re-prompted up to the
+    per-run cap, then the run ends with the typed, non-fatal ``structured_output_unresolved_final``
+    outcome — over the real stack — instead of looping to the recursion limit or failing generically.
+
+    The default cap is 3 re-prompts, so the run makes exactly cap + 1 = 4 model round-trips (each a
+    non-conforming structured tool call) before it gives up, and the terminal names that attempt
+    count and the schema."""
+    schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}
+    llm_stub.reset()
+    # Every turn calls the structured-output tool with a non-integer value, so the strategy's parse
+    # fails and the rail re-prompts; script cap + 1 turns so the cap is what stops the loop.
+    llm_stub.script([{"tool_call": {"name": "Answer", "arguments": {"value": "not-an-integer"}}} for _ in range(4)])
+
+    frames = await _run_sse(
+        agents_stack,
+        "/api/agents/tools_agent/runs",
+        {"user_message": {"content": "answer with a number"}, "response_format": schema},
+    )
+    types = [frame.get("type") for frame in frames]
+    outcome = [frame for frame in frames if frame.get("type") == "structured_output_unresolved_final"]
+    assert len(outcome) == 1, f"expected the typed re-prompt-cap outcome: {frames}"
+    assert outcome[0]["schema_name"] == "Answer", outcome
+    assert outcome[0]["attempts"] == 4, outcome
+    assert "stream.error" not in types, f"the capped run must not surface a generic failure: {frames}"
+    assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
+    # Exactly cap + 1 round-trips: the first non-conforming answer plus 3 re-prompts.
+    assert len(llm_stub.requests) == 4, f"expected 4 LLM round-trips, saw {len(llm_stub.requests)}"

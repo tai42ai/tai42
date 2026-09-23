@@ -46,6 +46,8 @@ class FakeStatesStore:
         self.upsert_attach_calls = 0
         self.update_decl_calls = 0
         self.upsert_template_calls = 0
+        self.op_ledger_stale = 0
+        self.prune_ops_days: int | None = None
 
     @asynccontextmanager
     async def begin(self):
@@ -182,7 +184,13 @@ class FakeStatesStore:
             return None
         return {"data": row, "seq": 1.0, "canonical_subject": subject, "folded_from": []}
 
-    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
+    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, validate_subject_in_txn, conn=None):
+        decl = self.declarations.get(state)
+        if decl is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        # The real store validates the subject inside the write txn from the locked declaration's
+        # subject_kinds; mirror that so the service's admission refusals still fire end to end.
+        await validate_subject_in_txn(list(decl["subject_kinds"]))
         self.applied_origins.append(origin)
         # Mirror the store's chokepoint so the service-level provenance test is end to
         # end: compose the state's traced paths from its attachments + templates and stamp
@@ -265,6 +273,10 @@ class FakeStatesStore:
     async def prune_expired(self, default):
         self.prune_default = default
         return {"alerts": 2} if self.records else {}
+
+    async def prune_ops(self, retention_days):
+        self.prune_ops_days = retention_days
+        return self.op_ledger_stale
 
 
 _STATE = StateDeclaration(

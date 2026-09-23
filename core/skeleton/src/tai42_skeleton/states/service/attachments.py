@@ -42,10 +42,21 @@ class _AttachmentMixin(_StatesServiceBase):
         ONLY on the ``person`` branch (its constructor raises 501 without the redis
         conversations backend), so no state of another kind is gated on redis.
         """
-        if subject.kind not in decl.subject_kinds:
+        await self._validate_subject_admitted(decl.subject_kinds, decl.name, subject)
+
+    async def _validate_subject_admitted(
+        self, subject_kinds: list[str], state_name: str, subject: StateSubject
+    ) -> None:
+        """The admission check behind :meth:`validate_subject`, over the declared kinds directly.
+
+        The write path calls this inside the record transaction, under the declaration
+        ``FOR SHARE`` lock, from the ``subject_kinds`` the locked declaration row returns — so
+        the subject is refused without a second declaration read.
+        """
+        if subject.kind not in subject_kinds:
             raise SubjectRefusedError(
-                f"subject kind {subject.kind!r} is not declared by state {decl.name!r} "
-                f"(declared kinds: {sorted(decl.subject_kinds)})"
+                f"subject kind {subject.kind!r} is not declared by state {state_name!r} "
+                f"(declared kinds: {sorted(subject_kinds)})"
             )
         if subject.kind != PERSON_KIND:
             return

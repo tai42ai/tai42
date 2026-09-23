@@ -29,8 +29,10 @@ from tai42_contract.agent.events import (
     InterruptFinal,
     MessageFinal,
     ReasoningStep,
+    RecursionLimitFinal,
     StreamEvent,
     StructuredFinal,
+    StructuredOutputUnresolvedFinal,
     SuspendedFinal,
 )
 from tai42_contract.connectors.errors import OperatorMisconfiguredError
@@ -252,6 +254,22 @@ def test_drain_response_format_met_returns_structured():
     agent = _DummyAgent()
     result = asyncio.run(agent._drain(_agen([StructuredFinal(data={"ok": True})]), response_format=dict))  # pyright: ignore[reportPrivateUsage]
     assert result == {"ok": True}
+
+
+def test_drain_returns_structured_output_unresolved_outcome():
+    # A capped structured-output loop is a typed, non-fatal outcome: _drain returns it as itself,
+    # never raising, even though a response_format was requested and no StructuredFinal was seen.
+    agent = _DummyAgent()
+    outcome = StructuredOutputUnresolvedFinal(schema_name="Answer", attempts=4, error="bad")
+    result = asyncio.run(agent._drain(_agen([outcome]), response_format=dict))  # pyright: ignore[reportPrivateUsage]
+    assert result is outcome
+
+
+def test_drain_returns_recursion_limit_outcome():
+    agent = _DummyAgent()
+    outcome = RecursionLimitFinal(limit=50)
+    result = asyncio.run(agent._drain(_agen([outcome])))  # pyright: ignore[reportPrivateUsage]
+    assert result is outcome
 
 
 def test_drain_suspended_returns_receipt_without_raising():

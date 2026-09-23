@@ -25,6 +25,7 @@ from tai42_contract.states.models import (
     MAX_RETENTION_DAYS,
     ApplyResult,
     CompletedOrigin,
+    StateBatchWrite,
     StateRecord,
     StateSubject,
     WriteEntry,
@@ -125,9 +126,12 @@ class _RecordMixin(_StatesServiceBase):
             return ApplyResult(applied=False, data=None, seq=None, skipped=[])
         for i, op in enumerate(ops):
             validate_op(op, where=f"ops[{i}]")
-        decl = await self._require_declaration_decl(state)
-        await self.validate_subject(decl, subject)
         completed = self._complete_origin(origin)
+
+        async def _validate_subject_in_txn(subject_kinds: list[str]) -> None:
+            """Refuse the subject under the declaration lock, from the row read in the write txn."""
+            await self._validate_subject_admitted(subject_kinds, state, subject)
+
         applied, data, seq, skipped = await self._store.apply_ops(
             state,
             subject,
@@ -135,7 +139,7 @@ class _RecordMixin(_StatesServiceBase):
             op_id=op_id,
             origin=completed,
             validate_doc=_validate_document,
-            retention_days=store_settings_retention(),
+            validate_subject_in_txn=_validate_subject_in_txn,
             conn=conn,
         )
         return ApplyResult(
@@ -144,6 +148,61 @@ class _RecordMixin(_StatesServiceBase):
             seq=seq,
             skipped=[{"op": op.get("op"), "path": op.get("path"), "reason": "guard"} for op in skipped],
         )
+
+    async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
+        """Apply an ordered write set as ONE transaction, one :class:`ApplyResult` per item in input order.
+
+        Opens ``store.begin()`` ONCE and dispatches each item on the shared connection — an ``ops``
+        item through :meth:`apply`, a ``template_jq`` item through :meth:`apply_template_jq` (its
+        outcome mapped onto the item's :class:`ApplyResult`) — so items on one subject read each
+        other's uncommitted writes in the order they are applied. Items are applied STABLY sorted by
+        ``(state, subject)`` so two concurrent multi-state batches take the per-declaration locks in
+        one order rather than opposing (defensive: a subject write takes FOR SHARE, which never
+        conflicts with FOR SHARE, but a concurrent fold/attach holds FOR UPDATE); items sharing a
+        ``(state, subject)`` keep their input order, so a subject's writes still land as authored, and
+        the returned list is in the caller's input order regardless. Any item that raises propagates
+        out of the transaction, rolling the WHOLE batch back — no partial write survives, loud.
+        ``op_id`` idempotency holds per item (a replayed key returns ``applied=False`` while its
+        siblings land). An empty list returns ``[]`` without opening a transaction; the transaction's
+        connection stays hidden behind this seam.
+        """
+        self._ensure_available()
+        if not writes:
+            return []
+        order = sorted(
+            range(len(writes)),
+            key=lambda i: (
+                writes[i].state,
+                writes[i].subject.target_kind,
+                writes[i].subject.target_name,
+                writes[i].subject.kind,
+                writes[i].subject.key,
+            ),
+        )
+        results: dict[int, ApplyResult] = {}
+        async with self._store.begin() as conn:
+            for i in order:
+                item = writes[i]
+                if item.ops is not None:
+                    results[i] = await self.apply(
+                        item.state, item.subject, item.ops, op_id=item.op_id, origin=item.origin, conn=conn
+                    )
+                    continue
+                if item.template_jq is None:
+                    raise AssertionError
+                outcome = await self.apply_template_jq(
+                    item.state,
+                    item.subject,
+                    item.template_jq,
+                    item.input,
+                    op_id=item.op_id,
+                    origin=item.origin,
+                    conn=conn,
+                )
+                results[i] = ApplyResult(
+                    applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped
+                )
+        return [results[i] for i in range(len(writes))]
 
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
         """Erase ``subject``'s record, recording the write."""
@@ -260,7 +319,12 @@ class _RecordMixin(_StatesServiceBase):
     async def prune_expired(self) -> dict[str, int]:
         """The explicit retention sweep — delete every record past its state's effective retention.
 
-        A misconfigured global default is refused loudly before any delete.
+        Also prunes the op-idempotency ledger past its own retention window: this externally
+        scheduled sweep is the ledger's only prune, so a deployment that never runs it keeps a
+        growing ``state_applied_ops`` exactly as it keeps un-pruned records. A misconfigured
+        global default is refused loudly before any delete; a failing prune raises.
+
+        Returns the per-state record removal counts.
         """
         self._ensure_available()
         from tai42_skeleton.states import service as _pkg
@@ -272,9 +336,13 @@ class _RecordMixin(_StatesServiceBase):
                 f"got {default!r}"
             )
         counts = await self._store.prune_expired(default)
-        if counts:
+        op_pruned = await self._store.prune_ops(store_settings_retention())
+        if counts or op_pruned:
             logger.info(
-                "states retention prune: deleted %d record(s) across %d state(s)", sum(counts.values()), len(counts)
+                "states retention prune: deleted %d record(s) across %d state(s) and %d op-ledger row(s)",
+                sum(counts.values()),
+                len(counts),
+                op_pruned,
             )
         return counts
 

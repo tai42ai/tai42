@@ -518,7 +518,8 @@ def register_core_sections(registry: Any) -> None:
         "connector_connections", _export_connector_connections, _import_connector_connections, secret=True
     )
     # Body-opaque and kind-agnostic, so ONE section covers every kind. secret=True:
-    # at least one kind is secret-bearing (a preset's ``fixed_kwargs``, an AC-policy body).
+    # the ``settings_profile`` kind stores env values verbatim, secrets included
+    # (``SettingsProfileBody.env``), so the section is secret-bearing.
     registry.register_section(
         "versioned_documents", _export_versioned_documents, _import_versioned_documents, secret=True
     )

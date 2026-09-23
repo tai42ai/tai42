@@ -58,6 +58,7 @@ class _FakeStates:
         facet.eval_template_jq = self.eval_template_jq
         facet.apply_template_jq = self.apply_template_jq
         facet.apply = self.apply
+        facet.apply_batch = self.apply_batch
 
     def context(self):
         return None
@@ -76,6 +77,24 @@ class _FakeStates:
     async def apply(self, state, subject, ops, *, op_id, origin) -> ApplyResult:
         self.applies.append(("__custom__", ops))
         return ApplyResult(applied=True, data={}, seq=1.0, skipped=[])
+
+    async def apply_batch(self, writes) -> list[ApplyResult]:
+        # The ONE seam the door now applies its write set through — dispatch each item to
+        # ``apply`` / ``apply_template_jq`` so the recorded ``applies`` reflect the batch.
+        results: list[ApplyResult] = []
+        for item in writes:
+            if item.ops is not None:
+                results.append(
+                    await self.apply(item.state, item.subject, item.ops, op_id=item.op_id, origin=item.origin)
+                )
+                continue
+            outcome = await self.apply_template_jq(
+                item.state, item.subject, item.template_jq, item.input, op_id=item.op_id, origin=item.origin
+            )
+            results.append(
+                ApplyResult(applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped)
+            )
+        return results
 
 
 _SUBJECT_EXPR = TemplatedText(content='{target_kind: "agent", target_name: "a", kind: "thread", key: (.x | tostring)}')

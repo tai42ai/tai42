@@ -17,7 +17,8 @@ from .connection import _pool, _settings
 class _RetentionStore:
     """The op-ledger and expired-record pruning."""
 
-    async def prune_ops(self, retention_days: int) -> None:
+    async def prune_ops(self, retention_days: int) -> int:
+        """Delete op-ledger rows older than ``retention_days`` and return how many were removed."""
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -27,6 +28,7 @@ class _RetentionStore:
                 "DELETE FROM state_applied_ops WHERE applied_at < now() - make_interval(days => %s)",
                 (retention_days,),
             )
+            return cur.rowcount
 
     async def prune_expired(self, default_retention_days: int | None) -> dict[str, int]:
         """Delete every record past its state's EFFECTIVE retention, in ONE atomic statement.
@@ -56,8 +58,8 @@ class _RetentionStore:
 def store_settings_retention() -> int:
     """The op-ledger retention window in days, read fresh and validated LOUDLY.
 
-    A ``0``/negative value would turn the opportunistic prune inside every write
-    into a full ledger wipe, so a misconfigured value refuses the write instead.
+    A ``0``/negative value would turn the retention sweep's op-ledger prune into a full
+    ledger wipe, so a misconfigured value refuses the sweep instead.
     """
     value = sys.modules["tai42_skeleton.states.store"].states_settings().op_retention_days
     if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > MAX_RETENTION_DAYS:

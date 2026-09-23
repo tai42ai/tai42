@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         AttachValidator,
         ConsumerLister,
         ConsumerRow,
+        StateBatchWrite,
         StateContext,
         StateDeclaration,
         StateRecord,
@@ -169,6 +170,14 @@ class StatesFacet(_Facet):
     ) -> ApplyResult:
         """Apply ``ops`` to ``subject``'s document under ``state``; ``op_id`` makes the write idempotent."""
         return await self._app._states_service.apply(state, subject, ops, op_id=op_id, origin=origin)
+
+    async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
+        """Apply an ordered write set as ONE transaction, returning an :class:`ApplyResult` per item in order.
+
+        A failed item rolls the whole batch back; ``op_id`` idempotency holds per item and the
+        transaction's connection stays hidden behind this seam.
+        """
+        return await self._app._states_service.apply_batch(writes)
 
     async def eval_template_jq(
         self, state: str, subject: StateSubject, name: str, params: dict[str, Any]

@@ -174,8 +174,14 @@ def test_role_prompts_are_per_run_config_with_purge_middleware_and_system_free_i
     )
 
     # The evaluator, critic, and structured final pass each compiled with their
-    # role's per-run system prompt.
-    assert recorder.system_prompts == [EVALUATOR_SYSTEM_MESSAGE, CRITIC_SYSTEM_MESSAGE, EVALUATOR_SYSTEM_MESSAGE]
+    # role's per-run system prompt, built as a SystemMessage handed to create_agent.
+    for system_prompt in recorder.system_prompts:
+        assert isinstance(system_prompt, SystemMessage)
+    assert [system_prompt.content for system_prompt in recorder.system_prompts] == [
+        EVALUATOR_SYSTEM_MESSAGE,
+        CRITIC_SYSTEM_MESSAGE,
+        EVALUATOR_SYSTEM_MESSAGE,
+    ]
     # Each graph's middleware stack leads with the system purge, so a stored
     # system message never reaches the model alongside the per-run prompt.
     assert len(recorder.middlewares_per_call) == 3

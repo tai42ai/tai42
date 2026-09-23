@@ -8,6 +8,7 @@ record-read and record-write mixins.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
@@ -17,6 +18,11 @@ from tai42_contract.states.models import CompletedOrigin, StateSubject
 
 class _StoreBase(ABC):
     """The cross-mixin method contract every concern mixin builds on."""
+
+    # The version-gated attachments-composition cache, keyed ``(state, declaration.updated_at)``
+    # off the ``FOR SHARE``-locked declaration row and holding ``(regime_paths, traced_paths)``.
+    # The composed store owns the one instance; the write mixin reads and populates it.
+    _attachment_paths_cache: OrderedDict[tuple[str, Any], tuple[Any, Any]]
 
     @abstractmethod
     def _write_cursor(self, conn: AsyncConnection[Any] | None) -> AbstractAsyncContextManager[Any]:

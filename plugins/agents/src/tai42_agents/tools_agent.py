@@ -36,11 +36,18 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec, SubAgentSpec
-from tai42_contract.agent.events import StreamEvent, StructuredFinal, SuspendedFinal
+from tai42_contract.agent.events import (
+    RecursionLimitFinal,
+    StreamEvent,
+    StructuredFinal,
+    StructuredOutputUnresolvedFinal,
+    SuspendedFinal,
+)
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import get_run_delivery_id
@@ -55,6 +62,7 @@ from tai42_agents._internal.base_tool_agent import (
     ainvoke_tools_agent,
 )
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import (
     ParkIdentity,
     build_park_identity,
@@ -154,8 +162,11 @@ class ToolsAgentInput(BaseModel):
     system_content_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Content-block keys merged into the system message's text block (e.g. cache_control "
-            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors."
+            "Content-block keys merged into the system message's text block (e.g. a cache_control "
+            "breakpoint for prompt caching). Left unset the system prompt takes the server-wide "
+            "default cache mark for the provider (from the provider capability), on for a provider "
+            "that supports marking; pass {} to opt this node out (no mark), or an explicit mark to "
+            "override. Provider-unknown keys surface as loud provider errors."
         ),
     )
     user_content_kwargs: dict[str, Any] | None = Field(
@@ -174,13 +185,15 @@ class ToolsAgentInput(BaseModel):
     llm_kwargs: dict[str, Any] | None = None
     langgraph_config: dict[str, Any] | None = None
 
-    @field_validator("system_content_kwargs", "user_content_kwargs")
+    @field_validator("user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Normalize an empty dict to ``None`` so it reads as unset.
+        """Normalize an empty ``user_content_kwargs`` to ``None`` so it reads as unset.
 
         An empty dict carries no content-block keys, matching the builders that treat ``{}`` as no
-        mark.
+        mark. ``system_content_kwargs`` is deliberately excluded: an explicit ``{}`` there is the
+        per-node opt-out from the server-wide system-prompt cache default (unset applies the
+        default, ``{}`` marks nothing).
         """
         return value or None
 
@@ -388,6 +401,10 @@ class ToolsAgent(Agent):
             park_builder=build_park,
             resume=resume,
         )
+        if result.outcome is not None:
+            # A capped structured-output loop or a tripped recursion limit ended the run with a
+            # typed, non-fatal outcome instead of an answer — return it as the run's result.
+            return result.outcome
         if result.suspended is not None:
             return result.suspended
         if response_format is not None:
@@ -505,6 +522,7 @@ class ToolsAgent(Agent):
             recursion_limit=recursion_limit,
         )
         saw_structured = False
+        saw_outcome = False
         async for event in astream_tools_agent_events(
             system_message=rendered_system,
             user_message=[rendered_user],
@@ -521,11 +539,14 @@ class ToolsAgent(Agent):
         ):
             if isinstance(event, StructuredFinal):
                 saw_structured = True
+            elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+                saw_outcome = True
             yield event
         # Structured-final parity with the invoke face: a requested response_format
         # that produced no StructuredFinal fails loudly after the stream drains
-        # rather than silently omitting the frame.
-        if response_format is not None and not saw_structured:
+        # rather than silently omitting the frame — unless the run ended on a typed
+        # non-fatal outcome (re-prompt cap or recursion limit), which IS its result.
+        if response_format is not None and not saw_structured and not saw_outcome:
             raise RuntimeError("agent run requested a response_format but produced no structured output")
 
     async def append_thread_messages(
@@ -729,7 +750,16 @@ class ToolsAgent(Agent):
             bind=True,
         )
         async with park_drive(park):
-            state = await agent.ainvoke(Command(resume=resume_map), config)
+            try:
+                state = await agent.ainvoke(Command(resume=resume_map), config)
+            except (RepromptCapError, GraphRecursionError) as exc:
+                # A capped structured-output loop or a tripped recursion limit ends the resumed
+                # run with a typed, non-fatal outcome instead of an answer — never a generic
+                # failure. Any other error propagates unchanged.
+                outcome = outcome_for_drive_error(exc, config)
+                if outcome is None:
+                    raise
+                return outcome
             events = await finalize_drive(agent, config, None, park)
         for event in events:
             if isinstance(event, SuspendedFinal):

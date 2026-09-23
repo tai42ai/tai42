@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
+from tai42_contract.agent import Agent, RecursionLimitFinal, StructuredOutputUnresolvedFinal
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
@@ -33,11 +33,12 @@ from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
-from tai42_kit.llm.runtime import build_agent_input, build_user_output, extract_structured_output
+from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
+from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.park import (
@@ -440,7 +441,7 @@ class DeepAgent(Agent):
         # turns serialize across workers and the lease-loser never opens a leaked session; a
         # tool-face run takes none.
         async with DeepAgentSession.leased(thread_id=thread_id) as drive:
-            saw_structured = False
+            saw_structured = False  # also set by a typed non-fatal outcome (re-prompt cap / recursion limit)
             saw_interrupt = False
             saw_suspended = False
             try:
@@ -512,7 +513,7 @@ class DeepAgent(Agent):
                             park=park,
                         ),
                     ):
-                        if isinstance(event, StructuredFinal):
+                        if isinstance(event, StructuredFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal):
                             saw_structured = True
                         elif isinstance(event, InterruptFinal):
                             saw_interrupt = True
@@ -521,9 +522,9 @@ class DeepAgent(Agent):
                         yield event
                 finally:
                     await detach_dead_chains(claims)
-                # A requested response_format that produced no StructuredFinal fails loudly.
-                # A pending interrupt OR an async park means the run paused rather than finished,
-                # so (as in _drain) the pause takes precedence and the raise is skipped.
+                # A requested response_format that produced no terminal answer fails loudly; a
+                # pending interrupt or an async park paused the run, so (as in _drain) the raise
+                # is skipped.
                 if response_format is not None and not saw_structured and not saw_interrupt and not saw_suspended:
                     raise RuntimeError("agent run requested a response_format but produced no structured output")
             finally:
@@ -600,6 +601,11 @@ class DeepAgent(Agent):
             provider=st_provider, conn_string=llm_provider_settings().store_conn_string
         )
 
+        # Under the server-wide cache default the system prompt is a marked SystemMessage
+        # (deepagents keeps it as the roll-exempt per-run system message); else the string.
+        mark = default_system_cache_mark(provider) if system_message else None
+        system_prompt = build_system_message(system_message, mark) if mark else (system_message or None)
+
         return await build_langchain_deep_agent(
             llm=llm,
             store=store,
@@ -607,7 +613,7 @@ class DeepAgent(Agent):
             tools=tools,
             skills=skills or None,
             inline_skills=inline_skills or None,
-            system_prompt=system_message or None,
+            system_prompt=system_prompt,
             interrupt_on=interrupt_on,
             response_format=response_format,
             subagents=subagents or None,

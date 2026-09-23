@@ -11,6 +11,7 @@ import pytest
 from tai42_contract.states import (
     ApplyResult,
     StateAttach,
+    StateBatchWrite,
     StateBinding,
     StateContext,
     StateDeclaration,
@@ -59,6 +60,8 @@ class FakeStates:
         self.eval_calls: list[tuple[str, StateSubject, str, dict[str, Any]]] = []
         self.apply_tjq_calls: list[tuple[str, StateSubject, str, Any, str | None, WriteOrigin]] = []
         self.apply_calls: list[tuple[str, StateSubject, list[dict[str, Any]], str | None, WriteOrigin]] = []
+        self.apply_batch_calls: list[list[StateBatchWrite]] = []
+        self.read_calls: list[tuple[str, StateSubject]] = []
         self.attached_now: list[tuple[str, str, list[str]]] = []
 
     def context(self) -> StateContext | None:
@@ -68,6 +71,7 @@ class FakeStates:
         return _DECL if state == "status" else None
 
     async def read(self, state: str, subject: StateSubject) -> StateRecord | None:
+        self.read_calls.append((state, subject))
         if self._record is None:
             return None
         return StateRecord(state=state, subject=subject, data=self._record, seq=1.0, canonical_subject=subject)
@@ -85,6 +89,35 @@ class FakeStates:
     async def apply(self, state, subject, ops, *, op_id, origin) -> ApplyResult:
         self.apply_calls.append((state, subject, ops, op_id, origin))
         return ApplyResult(applied=True, data={}, seq=1.0, skipped=[])
+
+    async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
+        # Mirror the real service: record the batch, then dispatch each item (STABLY sorted by
+        # ``(state, subject)``) to ``apply`` / ``apply_template_jq``, returning results in input
+        # order — so the per-call assertions and the batch-shape assertions both hold.
+        self.apply_batch_calls.append(list(writes))
+        order = sorted(
+            range(len(writes)),
+            key=lambda i: (
+                writes[i].state,
+                writes[i].subject.target_kind,
+                writes[i].subject.target_name,
+                writes[i].subject.kind,
+                writes[i].subject.key,
+            ),
+        )
+        results: dict[int, ApplyResult] = {}
+        for i in order:
+            item = writes[i]
+            if item.ops is not None:
+                results[i] = await self.apply(item.state, item.subject, item.ops, op_id=item.op_id, origin=item.origin)
+                continue
+            outcome = await self.apply_template_jq(
+                item.state, item.subject, item.template_jq, item.input, op_id=item.op_id, origin=item.origin
+            )
+            results[i] = ApplyResult(
+                applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped
+            )
+        return [results[i] for i in range(len(writes))]
 
     async def list_attachments(self, state: str, *, template: str | None = None):
         names = self._attached.get(state, [])
@@ -353,6 +386,101 @@ async def test_named_update_adapts_input_and_custom_update_authors_ops() -> None
     _s2, _subj2, ops, _op2, origin2 = states.apply_calls[0]
     assert ops == [{"op": "set", "path": ["last"], "value": {"status": "done"}}]
     assert origin2.consumer == "door:preset-x"
+    # both updates rode ONE batch — a single transaction for the node's whole write set
+    assert len(states.apply_batch_calls) == 1
+    assert len(states.apply_batch_calls[0]) == 2
+
+
+async def test_two_updates_on_one_state_ride_one_batch() -> None:
+    ctx = StateContext(door="schedule", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".tid"),
+                updates=[
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["a"], value: 1}]')),
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["b"], value: 2}]')),
+                ],
+            )
+        ]
+    )
+    await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {}, door_id="d")
+    assert len(states.apply_batch_calls) == 1
+    batch = states.apply_batch_calls[0]
+    assert [item.state for item in batch] == ["status", "status"]
+    assert [item.ops for item in batch] == [
+        [{"op": "set", "path": ["a"], "value": 1}],
+        [{"op": "set", "path": ["b"], "value": 2}],
+    ]
+
+
+async def test_binding_spanning_two_states_lands_one_atomic_batch() -> None:
+    ctx = StateContext(door="schedule", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".tid"),
+                updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["a"], value: 1}]'))],
+            ),
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content='.tid + "-2"'),
+                updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["b"], value: 2}]'))],
+            ),
+        ]
+    )
+    await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {}, door_id="d")
+    # ONE batch carries both attaches' writes — a single transaction across the node's states.
+    assert len(states.apply_batch_calls) == 1
+    assert len(states.apply_batch_calls[0]) == 2
+
+
+async def test_two_custom_updates_read_the_node_entry_record_once() -> None:
+    ctx = StateContext(door="schedule", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={"seen": "original"}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".tid"),
+                updates=[
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .}]')),
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["echo"], value: $record.seen}]')),
+                ],
+            )
+        ]
+    )
+    await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {"status": "done"}, door_id="d")
+    # The node-entry record is read ONCE for the whole attach, and the second custom update's
+    # jq sees THAT snapshot (``$record`` is the node-entry record, not a re-read).
+    assert states.read_calls == [("status", states.apply_batch_calls[0][0].subject)]
+    second_ops = states.apply_batch_calls[0][1].ops
+    assert second_ops == [{"op": "set", "path": ["echo"], "value": "original"}]
+
+
+async def test_a_build_time_update_failure_applies_no_batch() -> None:
+    ctx = StateContext(door="schedule", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".tid"),
+                updates=[
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["a"], value: 1}]')),
+                    StateUpdate(jq=TemplatedText(content='"not a list"')),
+                ],
+            )
+        ]
+    )
+    with pytest.raises(ValueValidationError, match="must return an op batch"):
+        await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {}, door_id="d")
+    # The build raised before the batch was applied — nothing partial reached the store.
+    assert states.apply_batch_calls == []
 
 
 # -- attach-on-use / validate at save -----------------------------------------

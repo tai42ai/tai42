@@ -22,7 +22,14 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from tai42_contract.agent import Agent, MessageDelta, MessageFinal, StreamEvent, StructuredFinal
+from tai42_contract.agent import (
+    Agent,
+    MessageDelta,
+    MessageFinal,
+    RecursionLimitFinal,
+    StreamEvent,
+    StructuredFinal,
+)
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
@@ -304,6 +311,11 @@ class RetrievalToolsAgent(Agent):
             if isinstance(event, MessageFinal):
                 terminal = event
                 continue
+            if isinstance(event, RecursionLimitFinal):
+                # The retrieval graph tripped the recursion limit: surface the named, non-fatal
+                # outcome as the run's terminal instead of running the finalization pass.
+                yield event
+                return
             yield event
         if terminal is None:
             raise ValueError(
@@ -412,9 +424,11 @@ _UNHONORED_REASONS: dict[str, str] = {
     "interrupt_on": "its graph never pauses for external input, so there is no interrupt to configure",
     "resume": "its graph never interrupts, so there is no paused run to resume",
     "system_content_kwargs": (
-        "its system prompt is a composed template string prepended inside the graph, never built as a "
-        "content block through build_system_message, so it cannot carry content-block keys; "
-        "use user_content_kwargs instead"
+        "its raw graph prepends the system prompt as the first entry of the message list it rolls to "
+        "the newest cache breakpoint, so a system mark there is the earliest and is stripped whenever a "
+        "later turn carries one — it cannot hold a stable system breakpoint the way a create_agent "
+        "face's roll-exempt per-run system message does, so this face is excluded from the system-prompt "
+        "cache default; use user_content_kwargs to mark the user turn instead"
     ),
 }
 

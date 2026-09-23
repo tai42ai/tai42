@@ -14,6 +14,7 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from tai42_contract.agent.events import SuspendedFinal
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
@@ -27,12 +28,14 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.append import awrite_thread_messages
+from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.structured import as_tool_strategy
-from tai42_agents._internal.usage import AgentInvokeResult, aggregate_usage
+from tai42_agents._internal.usage import AgentInvokeResult, CallUsage, aggregate_usage
 
 # One shared, stateless park hook leading the tools-agent stack, so an async
 # ``ask`` parked inside a run interrupts its own graph and resumes by id. The
@@ -78,10 +81,13 @@ async def _compile_tools_agent(
     system-purge, context-overflow, leading-user, rolling-cache-mark and
     tool-error middleware are attached.
 
-    ``system_message`` (with optional ``system_content_kwargs``, e.g.
-    ``cache_control`` for prompt caching) becomes the graph's per-run
-    ``system_prompt``, applied at the model-call boundary on every turn and never
-    written into checkpointed thread state; the ``SystemPurgeMiddleware`` removes
+    ``system_message`` becomes the graph's per-run ``system_prompt``, applied at
+    the model-call boundary on every turn and never written into checkpointed
+    thread state. ``system_content_kwargs`` merges content-block keys onto the
+    system message (a ``cache_control`` breakpoint for prompt caching); left unset
+    it takes the server-wide default mark for the provider, while an explicit value
+    — a mark, or ``{}`` for no mark — is honored as given. The
+    ``SystemPurgeMiddleware`` removes
     any system message a thread's stored history carries, so state never contains
     one. A ``response_format`` (JSON-Schema dict or pydantic class) forces the
     structured output onto ``state["structured_response"]`` — always through the
@@ -96,6 +102,13 @@ async def _compile_tools_agent(
         provider=checkpoint_provider,
         conn_string=llm_provider_settings().checkpoint_conn_string,
     )
+
+    # An unset system_content_kwargs takes the server-wide default cache mark for
+    # the provider; an explicit value (a mark, or {} for no mark) is left as the
+    # caller set it. The rolling-cache-mark middleware exempts the per-run system
+    # message, so this breakpoint stays stable across a checkpointed thread's turns.
+    if system_content_kwargs is None:
+        system_content_kwargs = default_system_cache_mark(llm_provider)
 
     # The per-run system prompt is shared with the context-overflow middlewares so
     # the trimming budget covers the full outgoing request, prompt included.
@@ -233,7 +246,16 @@ async def ainvoke_tools_agent(
     # not park on is detached when the drive stops. Safe whole-drive here: a run face awaits the
     # drive to a result in one task, never yielding to an external consumer.
     async with park_drive(park):
-        state = await agent.ainvoke(agent_input, config)
+        try:
+            state = await agent.ainvoke(agent_input, config)
+        except (RepromptCapError, GraphRecursionError) as exc:
+            # A capped structured-output loop or a tripped recursion limit ends the invoke with a
+            # typed, non-fatal outcome (logged once) in place of an answer — never a generic
+            # failure. Any other error propagates unchanged.
+            outcome = outcome_for_drive_error(exc, config)
+            if outcome is None:
+                raise
+            return AgentInvokeResult(output="", usage=CallUsage(0, 0, None), structured=None, outcome=outcome)
         park_events = await finalize_drive(agent, config, None, park)
     for event in park_events:
         if isinstance(event, SuspendedFinal):

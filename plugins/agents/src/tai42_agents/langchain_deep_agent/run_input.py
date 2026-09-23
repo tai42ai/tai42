@@ -27,8 +27,8 @@ _UNHONORED_REASONS: dict[str, str] = {
     ),
     "strategy": "the deepagents runtime applies no composition strategy and will not silently ignore one",
     "system_content_kwargs": (
-        "its system prompt is handed to the deepagents factory, never built as a content block through "
-        "build_system_message, so it cannot carry content-block keys; use user_content_kwargs instead"
+        "its system prompt takes the server-wide cache mark at the build seam, so a per-node system "
+        "content key has no seat; toggle it with the server setting, or use user_content_kwargs instead"
     ),
     "resume_checkpoint_id": (
         "the durable sandbox WORKSPACE volume cannot be forked alongside the LangGraph checkpoint, so "

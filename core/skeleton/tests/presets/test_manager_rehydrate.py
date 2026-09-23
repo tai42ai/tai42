@@ -220,3 +220,30 @@ def test_reconcile_quarantines_on_reregister_failure(pg: FakeVersioningPg, monke
             assert not mgr.is_registered("wv")
 
     asyncio.run(run())
+
+
+def test_rehydrate_quarantines_a_preset_whose_secret_reference_is_unset(pg: FakeVersioningPg, monkeypatch, caplog):
+    async def run():
+        # A stored preset whose ``fixed_kwargs`` references an env var that is not set:
+        # the bind at rehydrate raises loudly, so the preset is quarantined (never a
+        # silent empty bake, never a boot crash) and the reason names the missing var.
+        monkeypatch.delenv("TAI_TEST_ABSENT_SECRET", raising=False)
+        async with app.app_context(_manifest()):
+            mgr = app.preset_manager
+            await app.presets.store.create_preset(
+                PresetSpec(
+                    name="secretive",
+                    description="d",
+                    base_tool="weather",
+                    fixed_kwargs={"units": "!ENV ${TAI_TEST_ABSENT_SECRET}"},
+                ),
+                extensions=[],
+            )
+            with caplog.at_level(logging.ERROR, logger="tai42_skeleton.presets.manager"):
+                await mgr.rehydrate()
+            assert mgr.is_quarantined("secretive")
+            assert not mgr.is_registered("secretive")
+            assert "secretive" not in await app.tools.get_tools()
+            assert "TAI_TEST_ABSENT_SECRET" in caplog.text
+
+    asyncio.run(run())

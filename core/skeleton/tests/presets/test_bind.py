@@ -14,6 +14,7 @@ from typing import Any, cast
 import pytest
 from fastmcp.tools import Tool
 from tai42_contract.app import TaiApp, tai42_app
+from tai42_contract.secrets import SecretValue, mask_secrets
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 from tai42_kit.utils.render import SchemaBodyError
@@ -117,6 +118,46 @@ def _payload_base_tool() -> Tool:
         return {"payload": payload, "image": image}
 
     return Tool.from_function(runner, name="runner")
+
+
+def _secret_sink_base_tool() -> Tool:
+    def sink(token: Any = None) -> dict:
+        """Echo the masked view of the token it received and whether it is a secret."""
+        return {"masked": mask_secrets({"token": token}), "is_secret": isinstance(token, SecretValue)}
+
+    return Tool.from_function(sink, name="sink")
+
+
+def _payload_secret_base_tool() -> Tool:
+    def runner(payload: dict, image: Any = None) -> dict:
+        """Echo a MASKED view of everything it received (payload + image constant)."""
+        return mask_secrets({"payload": payload, "image": image})
+
+    return Tool.from_function(runner, name="runner")
+
+
+def _typed_str_sink() -> Tool:
+    def sink(token: str) -> dict:
+        """Echo the token it received and its runtime type (a ``str`` parameter)."""
+        return {"token": token, "type": type(token).__name__}
+
+    return Tool.from_function(sink, name="sink")
+
+
+def _optional_str_sink() -> Tool:
+    def sink(token: str | None = None) -> dict:
+        """Echo the token it received and its runtime type (a ``str | None`` parameter)."""
+        return {"token": token, "type": type(token).__name__}
+
+    return Tool.from_function(sink, name="sink")
+
+
+def _dict_payload_sink() -> Tool:
+    def sink(payload: dict) -> dict:
+        """Echo the masked payload and whether its nested leaf stayed a secret."""
+        return {"masked": mask_secrets(payload), "is_secret": isinstance(payload.get("token"), SecretValue)}
+
+    return Tool.from_function(sink, name="sink")
 
 
 async def test_bind_hides_baked_key_and_keeps_typed_schema():
@@ -602,3 +643,137 @@ async def test_input_schema_by_id_invalid_json_fails_loudly():
             name="r",
             input_schema=TemplatedText(id="not-json"),
         )
+
+
+# -- !ENV secret references: resolved at bind, baked as a masked SecretValue ----------
+
+
+async def test_secret_reference_bakes_a_masked_secret_value(monkeypatch: pytest.MonkeyPatch):
+    # A ``fixed_kwargs`` leaf written ``!ENV ${VAR}`` is resolved from the environment at
+    # bind and baked as a hidden ``SecretValue`` constant: it is absent from the exposed
+    # schema and the framework masks it wherever the forwarded kwargs are recorded.
+    monkeypatch.setenv("PRESET_BIND_TOKEN", "s3cr3t")
+    tool = await preset_bind(
+        _app(_secret_sink_base_tool()),
+        "sink",
+        {"token": "!ENV ${PRESET_BIND_TOKEN}"},
+        name="p",
+    )
+    assert "token" not in tool.to_mcp_tool().inputSchema.get("properties", {})
+    out = await tool.run({})
+    assert out.structured_content == {"masked": {"token": "[secret]"}, "is_secret": True}
+
+
+async def test_secret_reference_absent_required_var_fails_bind_loudly(monkeypatch: pytest.MonkeyPatch):
+    # An absent REQUIRED var raises loudly at the chokepoint — the dry-run bake maps this
+    # to a 400, and rehydrate quarantines; never a silent empty bake.
+    monkeypatch.delenv("PRESET_BIND_MISSING", raising=False)
+    with pytest.raises(ValueError, match="PRESET_BIND_MISSING"):
+        await preset_bind(
+            _app(_secret_sink_base_tool()),
+            "sink",
+            {"token": "!ENV ${PRESET_BIND_MISSING}"},
+            name="p",
+        )
+
+
+async def test_secret_reference_reveals_for_a_typed_str_param(monkeypatch: pytest.MonkeyPatch):
+    # The common real case (an API key / token typed ``str``): the resolved reference is
+    # revealed to its plain value at bind so it passes the base tool's pydantic argument
+    # validation and REACHES the tool body as the real string, not the wrapper.
+    monkeypatch.setenv("PRESET_TYPED_TOKEN", "s3cr3t")
+    tool = await preset_bind(
+        _app(_typed_str_sink()),
+        "sink",
+        {"token": "!ENV ${PRESET_TYPED_TOKEN}"},
+        name="p",
+    )
+    assert "token" not in tool.to_mcp_tool().inputSchema.get("properties", {})
+    out = await tool.run({})
+    assert out.structured_content == {"token": "s3cr3t", "type": "str"}
+
+
+async def test_secret_reference_reveals_for_an_optional_str_param(monkeypatch: pytest.MonkeyPatch):
+    # A ``str | None`` parameter also rejects the wrapper at validation; the reference is
+    # revealed to its plain value so the optional-typed parameter receives the real string.
+    monkeypatch.setenv("PRESET_OPTIONAL_TOKEN", "s3cr3t")
+    tool = await preset_bind(
+        _app(_optional_str_sink()),
+        "sink",
+        {"token": "!ENV ${PRESET_OPTIONAL_TOKEN}"},
+        name="p",
+    )
+    out = await tool.run({})
+    assert out.structured_content == {"token": "s3cr3t", "type": "str"}
+
+
+async def test_secret_reference_stays_wrapped_nested_in_a_dict_param(monkeypatch: pytest.MonkeyPatch):
+    # A reference NESTED inside a permissive ``dict`` parameter stays wrapped: a container
+    # parameter validates its leaves loosely, so the SecretValue reaches the tool intact
+    # and is masked wherever the run is recorded.
+    monkeypatch.setenv("PRESET_NESTED_TOKEN", "s3cr3t")
+    tool = await preset_bind(
+        _app(_dict_payload_sink()),
+        "sink",
+        {"payload": {"token": "!ENV ${PRESET_NESTED_TOKEN}"}},
+        name="p",
+    )
+    out = await tool.run({})
+    assert out.structured_content == {"masked": {"token": "[secret]"}, "is_secret": True}
+
+
+async def test_input_schema_absolute_constant_kwarg_carries_a_secret(monkeypatch: pytest.MonkeyPatch):
+    # On the input-schema path, an absolute-constant ``fixed_kwargs`` leaf written as a
+    # secret reference is resolved and forwarded to the base as a masked ``SecretValue``
+    # alongside the caller's validated payload.
+    monkeypatch.setenv("PRESET_IMAGE_TOKEN", "img-secret")
+    tool = await preset_bind(
+        _app(_payload_secret_base_tool(), support=_Support("payload")),
+        "runner",
+        {"image": "!ENV ${PRESET_IMAGE_TOKEN}"},
+        name="p",
+        input_schema={"type": "object"},
+    )
+    out = await tool.run({"a": 1})
+    assert out.structured_content == {"payload": {"a": 1}, "image": "[secret]"}
+
+
+async def test_input_schema_baked_payload_default_carries_a_secret_leaf(monkeypatch: pytest.MonkeyPatch):
+    # A secret reference NESTED inside a baked ``payload_arg`` default survives the
+    # deep-merge over the caller's object (the SecretValue leaf is aliased, never
+    # deepcopy-choked) and reaches the base masked.
+    monkeypatch.setenv("PRESET_HDR_TOKEN", "hdr-secret")
+    tool = await preset_bind(
+        _app(_payload_secret_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": {"headers": {"auth": "!ENV ${PRESET_HDR_TOKEN}"}}},
+        name="p",
+        input_schema={"type": "object"},
+    )
+    out = await tool.run({"body": "x"})
+    assert out.structured_content == {
+        "payload": {"headers": {"auth": "[secret]"}, "body": "x"},
+        "image": None,
+    }
+
+
+def test_deep_merge_deep_copies_a_baked_only_list_subtree():
+    # A baked-only LIST subtree is deep-copied like a dict one: a consumer scribbling on
+    # the merged list's elements can never poison the bind's shared defaults.
+    baked = {"xs": [{"k": "pristine"}]}
+    merged = deep_merge(baked, {"e": 1})
+    merged["xs"][0]["k"] = "poisoned"
+    merged["xs"].append("added")
+    assert baked == {"xs": [{"k": "pristine"}]}
+
+
+def test_deep_merge_aliases_secret_value_leaves_in_baked_only_subtrees():
+    # A SecretValue refuses deepcopy by design; a baked-only subtree carrying one is
+    # copied while the immutable SecretValue leaf is aliased in place — deep_merge must
+    # not choke, and the shared defaults stay private (the enclosing container is copied).
+    secret = SecretValue("s3cr3t")
+    baked = {"headers": {"auth": secret}}
+    merged = deep_merge(baked, {"other": 1})
+    assert merged["headers"]["auth"] is secret
+    assert merged["headers"] is not baked["headers"]
+    assert merged["other"] == 1

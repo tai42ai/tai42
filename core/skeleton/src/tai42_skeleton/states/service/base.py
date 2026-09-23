@@ -19,11 +19,13 @@ if TYPE_CHECKING:
         AttachReconciler,
         CompletedOrigin,
         ConsumerRow,
+        StateBatchWrite,
         StateContext,
         StateDeclaration,
         StateRecord,
         StateSubject,
         StateTemplateDocument,
+        TemplateJqApplyResult,
         WriteOrigin,
     )
     from tai42_contract.template import TemplatedText
@@ -59,6 +61,10 @@ class _StatesServiceBase:
     def _complete_origin(self, origin: WriteOrigin) -> CompletedOrigin: ...
 
     async def validate_subject(self, decl: StateDeclaration, subject: StateSubject) -> None: ...
+
+    async def _validate_subject_admitted(
+        self, subject_kinds: list[str], state_name: str, subject: StateSubject
+    ) -> None: ...
 
     async def _require_declaration(self, state: str) -> dict[str, Any]: ...
 
@@ -119,6 +125,20 @@ class _StatesServiceBase:
         origin: WriteOrigin,
         conn: AsyncConnection[Any] | None = None,
     ) -> ApplyResult: ...
+
+    async def apply_template_jq(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input_: Any,
+        *,
+        op_id: str | None,
+        origin: WriteOrigin,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> TemplateJqApplyResult: ...
+
+    async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]: ...
 
     async def list_subjects(
         self,

@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from tai42_contract.agent.events import RunUsage
+from tai42_contract.agent.events import RunUsage, StreamEvent
 
 
 @dataclass(frozen=True)
@@ -42,12 +42,18 @@ class AgentInvokeResult:
     the run parked on an async ``ask`` instead of finishing; ``None`` on a
     normal terminal run. When set, ``output``/``structured`` carry no answer — the
     run resumes out of band.
+
+    ``outcome`` is a typed, non-fatal terminal event (a structured-output re-prompt
+    cap reached, or the recursion limit hit) when the run ended on one instead of
+    producing an answer; ``None`` otherwise. When set, ``output``/``structured``
+    carry no answer — the outcome IS the run's result.
     """
 
     output: str
     usage: CallUsage
     structured: Any = None
     suspended: dict[str, Any] | None = None
+    outcome: StreamEvent | None = None
 
 
 def _int_token_count(usage_metadata: Mapping[str, Any], key: str) -> int:

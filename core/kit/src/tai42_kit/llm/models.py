@@ -2,6 +2,7 @@
 
 import asyncio
 from functools import lru_cache
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
@@ -61,5 +62,24 @@ def _build_llm(provider: str, **kwargs) -> BaseChatModel:
             from langchain_huggingface import ChatHuggingFace  # pyright: ignore[reportMissingImports]
 
             return ChatHuggingFace(**kwargs)
+
+    raise ValueError(f"Unsupported chat model provider: '{provider}'")
+
+
+def system_prompt_cache_mark(provider: str) -> dict[str, Any] | None:
+    """The content-block kwargs that mark ``provider``'s system prompt for caching, or ``None``.
+
+    A provider that takes an explicit system-prompt cache breakpoint returns the
+    ``system_content_kwargs`` that carry it (the block :func:`build_system_message` merges onto
+    the system message); a provider that caches its prefixes with no mark, or does not cache,
+    returns ``None``. The ``match`` mirrors :func:`_build_llm`'s so a provider name never leaves
+    this module and an unknown provider is refused loudly rather than silently un-marked.
+    """
+    match provider:
+        case "anthropic":
+            return {"cache_control": {"type": "ephemeral"}}
+
+        case "mistral" | "openai" | "google" | "xai" | "ollama" | "huggingface":
+            return None
 
     raise ValueError(f"Unsupported chat model provider: '{provider}'")

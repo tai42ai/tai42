@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import Handler, data_response, run_cli
+from .remote_harness import Handler, data_response, run_cli, visible
 
 
 def test_presets_create_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -519,3 +519,40 @@ def test_presets_set_version_tags(monkeypatch: pytest.MonkeyPatch) -> None:
         return data_response({"ok": True})
 
     assert run_cli(monkeypatch, handler, ["presets", "set-version-tags", "p", "2", "stable"]).exit_code == 0
+
+
+_MARKER = "!ENV ${SECRET_TOKEN}"
+
+
+def test_presets_get_renders_the_reference_marker_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A preset whose ``fixed_kwargs`` carries an ``!ENV`` reference renders the marker
+    # as the API returned it — the passthrough never resolves it to a value.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/presets/greet"
+        return data_response({"name": "greet", "base_tool": "echo", "fixed_kwargs": {"token": _MARKER}})
+
+    result = run_cli(monkeypatch, handler, ["presets", "get", "greet"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert _MARKER in result.output
+
+
+def test_presets_versions_render_the_reference_marker_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/presets/greet/versions"
+        return data_response([{"version": 1, "body": {"base_tool": "echo", "fixed_kwargs": {"token": _MARKER}}}])
+
+    result = run_cli(monkeypatch, handler, ["presets", "versions", "greet"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert _MARKER in result.output
+
+
+def test_presets_kwargs_help_names_the_reference_convention(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - help never calls the API
+        return data_response({})
+
+    for command in ("create", "save-version", "validate"):
+        result = run_cli(monkeypatch, handler, ["presets", command, "--help"])
+        assert result.exit_code == 0, result.output
+        text = visible(result.output)
+        assert "!ENV" in text, text
+        assert "secret reference" in text, text

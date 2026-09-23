@@ -21,6 +21,7 @@ from tai42_contract.states import (
     CompletedOrigin,
     ConsumerRow,
     DeclarationInUseError,
+    StateBatchWrite,
     StateContext,
     StateDeclaration,
     StateExistsError,
@@ -310,6 +311,64 @@ def test_record_apply_and_write_entry_shapes():
     assert entry.origin.door == "api"
 
 
+def test_state_batch_write_accepts_an_ops_item_and_is_frozen():
+    subject = StateSubject.model_validate(_subject())
+    item = StateBatchWrite(
+        state="profile",
+        subject=subject,
+        ops=[{"op": "set", "path": ["a"], "value": 1}],
+        op_id="e:planner:k",
+        origin=WriteOrigin(consumer="door:tool"),
+    )
+    assert item.template_jq is None
+    assert item.input is None
+    with pytest.raises(ValidationError):
+        item.op_id = "other"  # type: ignore[misc]
+
+
+def test_state_batch_write_accepts_a_template_jq_item_with_input():
+    subject = StateSubject.model_validate(_subject())
+    item = StateBatchWrite(
+        state="profile",
+        subject=subject,
+        template_jq="outcome",
+        input={"delta": 1},
+        origin=WriteOrigin(consumer="template_jq"),
+    )
+    assert item.ops is None
+    assert (item.template_jq, item.input) == ("outcome", {"delta": 1})
+
+
+def test_state_batch_write_requires_exactly_one_source():
+    subject = StateSubject.model_validate(_subject())
+    # Neither source set is refused.
+    with pytest.raises(ValidationError, match="exactly one of 'ops' or 'template_jq'"):
+        StateBatchWrite(state="profile", subject=subject, origin=WriteOrigin())
+    # Both sources set is refused.
+    with pytest.raises(ValidationError, match="exactly one of 'ops' or 'template_jq'"):
+        StateBatchWrite(state="profile", subject=subject, ops=[], template_jq="outcome", origin=WriteOrigin())
+
+
+def test_state_batch_write_refuses_input_without_template_jq():
+    subject = StateSubject.model_validate(_subject())
+    with pytest.raises(ValidationError, match="'input' only with 'template_jq'"):
+        StateBatchWrite(
+            state="profile",
+            subject=subject,
+            ops=[{"op": "set", "path": ["a"], "value": 1}],
+            input={"x": 1},
+            origin=WriteOrigin(),
+        )
+
+
+def test_state_batch_write_forbids_extra_keys():
+    subject = StateSubject.model_validate(_subject())
+    with pytest.raises(ValidationError):
+        StateBatchWrite.model_validate(
+            {"state": "profile", "subject": subject.model_dump(), "ops": [], "stray": 1, "origin": {}}
+        )
+
+
 def test_writes_page_wraps_items_and_a_keyset_cursor():
     page = WritesPage(
         items=[
@@ -417,7 +476,7 @@ def test_attach_reconcile_context_is_frozen_and_defaults_options():
 # --------------------------------------------------------------------------- #
 # The facet surface
 # --------------------------------------------------------------------------- #
-def test_appstates_enumerates_its_thirty_one_members():
+def test_appstates_enumerates_its_thirty_two_members():
     members = protocol_members(AppStates)
     assert members == {
         "list_declarations",
@@ -437,6 +496,7 @@ def test_appstates_enumerates_its_thirty_one_members():
         "replace",
         "merge",
         "apply",
+        "apply_batch",
         "eval_template_jq",
         "apply_template_jq",
         "erase",

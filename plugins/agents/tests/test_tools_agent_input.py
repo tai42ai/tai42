@@ -115,11 +115,14 @@ def test_tool_input_rejects_unknown_key() -> None:
 
 
 def test_empty_content_kwargs_normalize_to_none() -> None:
-    """An empty content-kwargs dict from the JSON door reads as absent — the builders
-    treat {} as no mark, so the field normalizes to None rather than a set-but-empty
-    value the unhonored-reject face would misread."""
+    """An empty ``user_content_kwargs`` reads as absent — the builders treat {} as no
+    mark, so it normalizes to None rather than a set-but-empty value the
+    unhonored-reject face would misread. An empty ``system_content_kwargs`` is
+    deliberately preserved: {} there is the explicit per-node opt-out from the
+    server-wide system-prompt cache default (unset applies the default, {} marks
+    nothing)."""
     validated = ToolsAgentInput.model_validate({"system_content_kwargs": {}, "user_content_kwargs": {}})
-    assert validated.system_content_kwargs is None
+    assert validated.system_content_kwargs == {}
     assert validated.user_content_kwargs is None
     # A non-empty mark is a real value and rides through unchanged.
     marked = ToolsAgentInput.model_validate({"user_content_kwargs": {"cache_control": {"type": "ephemeral"}}})

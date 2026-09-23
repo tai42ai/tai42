@@ -75,7 +75,8 @@ async def test_prune_ops(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
 
     pg.applied_ops["stale"] = pg.now() - timedelta(days=40)
     pg.applied_ops["fresh"] = pg.now()
-    await store.prune_ops(30)
+    removed = await store.prune_ops(30)
+    assert removed == 1
     assert "stale" not in pg.applied_ops
     assert "fresh" in pg.applied_ops
 

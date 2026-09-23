@@ -18,6 +18,15 @@ Bake through the PROGRAMMATIC ``transform_args`` path (whose ``default`` accepts
 any value, incl. dict/list) rather than a declarative scalar-only path, so a
 non-scalar baked value is preserved.
 
+A ``fixed_kwargs`` scalar leaf written ``!ENV ${VAR[:default]}`` is a secret
+REFERENCE, not a stored credential: :func:`resolve_secret_refs` materialises it
+from the process environment here, baking the resolved value while the store keeps
+only the marker. A present var resolves to a ``SecretValue`` so a value that reaches
+a recording door is masked; :func:`reveal_typed_scalar_refs` then reveals a value
+baked into a TYPED-scalar base parameter (``token: str``) to its plain form so it
+passes the base tool's pydantic argument validation, while a value baked into a
+PERMISSIVE parameter (``Any`` / ``object``) stays wrapped.
+
 An author-set ``output_schema`` (an object JSON Schema) dispatches on the base's
 kind. When the base is an AGENT run tool, the schema is baked into the run tool's
 ``response_format`` (a hidden, fixed constant, with the preset ``name`` injected as
@@ -39,7 +48,7 @@ from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward, forward_raw
 from tai42_contract.interactions import SuspendedInteraction
-from tai42_contract.secrets import SECRET_PLACEHOLDER, unwrap_secrets
+from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue, unwrap_secrets
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
@@ -47,6 +56,7 @@ from tai42_kit.utils.data.json_schema_util import (
 )
 from tai42_kit.utils.render import resolve_schema_body
 
+from tai42_skeleton.presets.secret_refs import resolve_secret_refs, reveal_typed_scalar_refs
 from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_park, stowed_reveal_payload
 
 if TYPE_CHECKING:
@@ -85,6 +95,19 @@ async def preset_bind(
     output_schema = await resolve_schema_body(f"preset {name!r} output_schema", output_schema)
     input_schema = await resolve_schema_body(f"preset {name!r} input_schema", input_schema)
     base = await app.tools.get_tool(base_tool)
+    # Materialise every ``!ENV ${VAR}`` secret reference from the process environment
+    # once, here at the shared chokepoint, so every bind path (plain, agent-forced,
+    # validated, input-schema) bakes the resolved value — a present var wrapped in
+    # ``SecretValue`` — while the STORE body keeps the marker verbatim. An absent
+    # required var raises loudly (a 400 at the save dry-run, a quarantine at rehydrate).
+    fixed_kwargs = resolve_secret_refs(fixed_kwargs)
+    # Reveal a resolved reference baked into a TYPED-scalar base parameter (``token:
+    # str``) so it survives the base tool's pydantic argument validation and reaches
+    # the tool body; a reference baked into a PERMISSIVE parameter (``Any`` / ``object``)
+    # stays wrapped so a value that reaches a recording door is masked. Runs here at the
+    # chokepoint so every bind path (plain, agent-forced, validated, input-schema) bakes
+    # the reveal decision the base tool's own schema dictates.
+    fixed_kwargs = reveal_typed_scalar_refs(fixed_kwargs, base.parameters)
     transform_args = {key: ArgTransform(hide=True, default=value) for key, value in fixed_kwargs.items()}
 
     if input_schema is not None:
@@ -242,15 +265,20 @@ def deep_merge(baked: dict[str, Any], caller: dict[str, Any]) -> dict[str, Any]:
 
     Neither input is mutated; a fresh dict is returned. The result shares NO mutable state
     with ``baked``: a baked-only subtree (one no caller key overrides) is DEEP-COPIED into
-    the result, not aliased. ``baked`` is a bind's shared payload defaults reused across every
-    call, so aliasing it would let a consumer that mutates the forwarded merged payload poison
-    those defaults for all later calls. Caller-supplied values, by contrast, come from a fresh
-    per-call object and are taken by reference (a caller never shares state across calls).
+    the result, not aliased — save an immutable :class:`~tai42_contract.secrets.SecretValue`
+    leaf, which is aliased (it refuses deepcopy by design and cannot be mutated), its
+    enclosing containers still copied. ``baked`` is a bind's shared payload defaults reused
+    across every call, so aliasing a mutable subtree would let a consumer that mutates the
+    forwarded merged payload poison those defaults for all later calls. Caller-supplied
+    values, by contrast, come from a fresh per-call object and are taken by reference (a
+    caller never shares state across calls).
     """
     # Baked-only keys are the sole aliasing seam (keys in ``caller`` are overwritten in the
     # loop below by either a recursion result or the caller's own value): deep-copy their
     # values so the returned object owns them and can never reach back into the shared defaults.
-    merged: dict[str, Any] = {key: (value if key in caller else copy.deepcopy(value)) for key, value in baked.items()}
+    merged: dict[str, Any] = {
+        key: (value if key in caller else _copy_baked_default(value)) for key, value in baked.items()
+    }
     for key, caller_value in caller.items():
         baked_value = baked.get(key)
         if key in baked and isinstance(baked_value, dict) and isinstance(caller_value, dict):
@@ -258,6 +286,24 @@ def deep_merge(baked: dict[str, Any], caller: dict[str, Any]) -> dict[str, Any]:
         else:
             merged[key] = caller_value
     return merged
+
+
+def _copy_baked_default(value: Any) -> Any:
+    """Deep-copy a baked-only value while ALIASING immutable ``SecretValue`` leaves.
+
+    :func:`deep_merge` deep-copies a baked-only subtree so a consumer mutating the merged
+    payload can never poison the bind's shared defaults. A :class:`SecretValue` refuses
+    deepcopy (its ``__reduce__`` raises) and is immutable, so it is aliased in place; its
+    enclosing dict/list containers are still copied, keeping every mutable subtree private
+    to the returned object.
+    """
+    if isinstance(value, SecretValue):
+        return value
+    if isinstance(value, dict):
+        return {key: _copy_baked_default(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_baked_default(item) for item in value]
+    return copy.deepcopy(value)
 
 
 def _bind_with_input_schema(
