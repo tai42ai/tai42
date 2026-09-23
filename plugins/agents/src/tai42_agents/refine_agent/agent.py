@@ -21,9 +21,15 @@ from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from langchain.agents import create_agent
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
-from tai42_contract.agent.events import StreamEvent, StructuredFinal
+from tai42_contract.agent.events import (
+    RecursionLimitFinal,
+    StreamEvent,
+    StructuredFinal,
+    StructuredOutputUnresolvedFinal,
+)
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
@@ -38,6 +44,7 @@ from tai42_kit.logging.settings import logging_settings
 from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import init_langgraph_config
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
+from tai42_agents._internal.outcomes import outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
 from tai42_agents._internal.render import render_message
@@ -402,29 +409,42 @@ class RefineAgent(Agent):
         resolved_tools = scope_nested_dispatch_all(
             await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
         )
-        final_agent, final_input, final_config = await _run_refine_loop(
-            tools=resolved_tools,
-            evaluator_message=evaluator_message,
-            critic_message=critic_message,
-            max_iterations=max_iterations,
-            evaluator_llm_provider=evaluator_llm_provider,
-            critic_llm_provider=critic_llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            evaluator_llm_kwargs=evaluator_llm_kwargs,
-            critic_llm_kwargs=critic_llm_kwargs,
-            evaluator_config=evaluator_langgraph_config,
-            critic_config=critic_langgraph_config,
-            strategy=strategy,
-            user_content_kwargs=user_content_kwargs,
-        )
+        try:
+            final_agent, final_input, final_config = await _run_refine_loop(
+                tools=resolved_tools,
+                evaluator_message=evaluator_message,
+                critic_message=critic_message,
+                max_iterations=max_iterations,
+                evaluator_llm_provider=evaluator_llm_provider,
+                critic_llm_provider=critic_llm_provider,
+                checkpoint_provider=checkpoint_provider,
+                evaluator_llm_kwargs=evaluator_llm_kwargs,
+                critic_llm_kwargs=critic_llm_kwargs,
+                evaluator_config=evaluator_langgraph_config,
+                critic_config=critic_langgraph_config,
+                strategy=strategy,
+                user_content_kwargs=user_content_kwargs,
+            )
+        except GraphRecursionError as exc:
+            # A recursion trip in an evaluator/critic turn ends the loop with the named,
+            # non-fatal outcome instead of a generic failure. Any other error propagates.
+            outcome = outcome_for_drive_error(exc, None)
+            if outcome is None:
+                raise
+            yield outcome
+            return
         saw_structured = False
+        saw_outcome = False
         async for event in aproject_agent_events(
             final_agent, final_input, final_config, response_format=response_format, structured_strategy=strategy
         ):
             if isinstance(event, StructuredFinal):
                 saw_structured = True
+            elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+                saw_outcome = True
             yield event
         # A requested response_format that produced no StructuredFinal fails loudly
-        # after the stream drains.
-        if response_format is not None and not saw_structured:
+        # after the stream drains — unless the run ended on a typed non-fatal outcome
+        # (re-prompt cap or recursion limit), which IS its result.
+        if response_format is not None and not saw_structured and not saw_outcome:
             raise RuntimeError("agent run requested a response_format but produced no structured output")

@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Any, cast
 from tai42_contract.agent.events import (
     InterruptFinal,
     MessageFinal,
+    RecursionLimitFinal,
     StructuredFinal,
+    StructuredOutputUnresolvedFinal,
     SuspendedFinal,
     final_event_for_value,
 )
@@ -114,7 +116,7 @@ async def _drive_agent_terminal(agent: Agent, run_kwargs: dict[str, Any]) -> Any
             return await _agent_suspended(event)
         if isinstance(event, InterruptFinal):
             raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
-        if isinstance(event, StructuredFinal | MessageFinal):
+        if isinstance(event, StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal):
             return event
     return None
 
@@ -124,8 +126,14 @@ def _final_event(result: Any) -> StructuredFinal | MessageFinal:
 
     The start drive yields the final event itself; a resume returns the run's plain terminal value,
     which the platform's value rule maps to the SAME final event (a ``str`` → a message final, any
-    other value → a structured final). Both paths reach :func:`_agent_result_outcome` as one shape.
+    other value → a structured final). A typed non-fatal outcome (structured-output re-prompt cap
+    reached, or the recursion limit hit) — arriving as the event from the start drive or as the same
+    model from a resumed ``run`` — surfaces as a :class:`StructuredFinal` carrying the outcome's own
+    fields as data, so ``reply_expr`` can branch on the typed outcome rather than a generic failure.
+    Both paths reach :func:`_agent_result_outcome` as one shape.
     """
+    if isinstance(result, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+        return StructuredFinal(data=result.model_dump(mode="json"))
     if isinstance(result, StructuredFinal | MessageFinal):
         return result
     return final_event_for_value(result)

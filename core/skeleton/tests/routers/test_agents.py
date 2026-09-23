@@ -18,7 +18,14 @@ import pytest
 from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from tai42_contract.agent.events import AsksFinal, InterruptFinal, StructuredFinal, SuspendedFinal
+from tai42_contract.agent.events import (
+    AsksFinal,
+    InterruptFinal,
+    RecursionLimitFinal,
+    StructuredFinal,
+    StructuredOutputUnresolvedFinal,
+    SuspendedFinal,
+)
 from tai42_contract.interactions import ParkedEntry
 from tai42_contract.tools import current_call_chain, get_run_delivery_id
 
@@ -571,6 +578,26 @@ async def test_run_finish_emits_the_final_frame_result(one_agent):
     frames = _data_frames(await _collect(resp))
     assert [f["type"] for f in frames] == ["structured_final", "stream.end"]
     assert StructuredFinal.model_validate(frames[0]).data == {"answer": 7}
+
+
+async def test_run_reprompt_cap_outcome_emits_a_terminal_event_not_stream_error(one_agent):
+    # A capped structured-output loop is a typed, non-fatal terminal: the drive captures it as the
+    # run's ``result`` and re-emits it as its own event frame, then ``stream.end`` — never a
+    # ``stream.error``.
+    outcome = StructuredOutputUnresolvedFinal(schema_name="Answer", attempts=4, error="bad")
+    one_agent(_FakeAgent([outcome]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["structured_output_unresolved_final", "stream.end"]
+    assert StructuredOutputUnresolvedFinal.model_validate(frames[0]).attempts == 4
+
+
+async def test_run_recursion_limit_outcome_emits_a_terminal_event(one_agent):
+    one_agent(_FakeAgent([RecursionLimitFinal(limit=50)]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames] == ["recursion_limit_final", "stream.end"]
+    assert RecursionLimitFinal.model_validate(frames[0]).limit == 50
 
 
 async def test_run_user_park_emits_the_suspended_frame_parked(one_agent, monkeypatch):

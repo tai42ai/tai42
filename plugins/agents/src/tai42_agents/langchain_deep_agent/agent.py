@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
+from tai42_contract.agent import Agent, RecursionLimitFinal, StructuredOutputUnresolvedFinal
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
@@ -441,7 +441,7 @@ class DeepAgent(Agent):
         # turns serialize across workers and the lease-loser never opens a leaked session; a
         # tool-face run takes none.
         async with DeepAgentSession.leased(thread_id=thread_id) as drive:
-            saw_structured = False
+            saw_structured = False  # also set by a typed non-fatal outcome (re-prompt cap / recursion limit)
             saw_interrupt = False
             saw_suspended = False
             try:
@@ -513,7 +513,7 @@ class DeepAgent(Agent):
                             park=park,
                         ),
                     ):
-                        if isinstance(event, StructuredFinal):
+                        if isinstance(event, StructuredFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal):
                             saw_structured = True
                         elif isinstance(event, InterruptFinal):
                             saw_interrupt = True
@@ -522,9 +522,9 @@ class DeepAgent(Agent):
                         yield event
                 finally:
                     await detach_dead_chains(claims)
-                # A requested response_format that produced no StructuredFinal fails loudly.
-                # A pending interrupt OR an async park means the run paused rather than finished,
-                # so (as in _drain) the pause takes precedence and the raise is skipped.
+                # A requested response_format that produced no terminal answer fails loudly; a
+                # pending interrupt or an async park paused the run, so (as in _drain) the raise
+                # is skipped.
                 if response_format is not None and not saw_structured and not saw_interrupt and not saw_suspended:
                     raise RuntimeError("agent run requested a response_format but produced no structured output")
             finally:

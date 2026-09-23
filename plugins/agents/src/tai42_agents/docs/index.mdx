@@ -19,6 +19,26 @@ Limits shared by every agent in this package:
 | `TAI_AGENTS_EMBEDDING_DIMS_CACHE_SIZE` | `64` | Bound on the retrieval agent's embedding-dims probe cache (an LRU). |
 | `TAI_AGENTS_DEFAULT_RECURSION_LIMIT` | `50` | Default LangGraph `recursion_limit` when a run pins none; a caller-supplied limit wins. |
 | `TAI_AGENTS_SYSTEM_PROMPT_CACHE_DEFAULT` | `true` | Mark the per-run system prompt for prompt caching on providers that support it (see [System-prompt caching](#system-prompt-caching)). |
+| `TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP` | `3` | How many times a run re-prompts a model whose response fails to parse against a requested `response_format` before it ends with a typed outcome (see [Structured-output outcomes](#structured-output-outcomes)). |
+
+### Structured-output outcomes
+
+When a run requests a `response_format`, the model's answer is forced through a
+tool-calling rail that re-prompts the model each time its response fails to parse
+against the schema. Two typed, **non-fatal** terminal outcomes bound that loop, so
+a run that cannot produce a conforming or bounded answer ends readably instead of
+failing generically. Each surfaces exactly like a normal terminal — the streaming
+faces emit it as a terminal event, `run` returns it as the run's value, the agent
+run route emits it as one SSE frame, and a conversation route surfaces it to the
+turn's reply — so a flow or route branches on its `type`:
+
+| Outcome (`type`) | Raised when | Fields |
+| --- | --- | --- |
+| `structured_output_unresolved_final` | The model never produced schema-conforming output within `TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP` re-prompts. | `schema_name`, `attempts` (non-conforming responses, the cap plus the final rejected attempt), `error` (last validation error, masked) |
+| `recursion_limit_final` | The run hit its graph step ceiling (`recursion_limit`) before finishing. | `limit`, `steps` (known step count, else null) |
+
+Both carry `final: true`. Neither raises — a branch that does not handle them
+reads them as the run's terminal value.
 
 ### Async-park index
 

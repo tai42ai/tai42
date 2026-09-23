@@ -37,6 +37,7 @@ from typing import Any
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.errors import GraphRecursionError
 
 # A node may overwrite a reduced channel by returning ``Overwrite(value=...)``;
 # the ``updates`` stream then yields the wrapper, so it must be unwrapped.
@@ -53,6 +54,7 @@ from tai42_contract.agent.events import (
 from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
+from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.text import text_of
@@ -395,20 +397,30 @@ async def aproject_agent_events(
         _structured_tool_names(structured_strategy if structured_strategy is not None else response_format)
     )
 
-    async for item in agent.astream(agent_input, config, stream_mode=["updates", "messages"]):
-        mode, chunk = _split_stream_item(item)
+    try:
+        async for item in agent.astream(agent_input, config, stream_mode=["updates", "messages"]):
+            mode, chunk = _split_stream_item(item)
 
-        if mode == "messages":
-            delta = _message_delta_text(chunk)
-            if delta:
-                projection.answer_parts.append(delta)
-                yield MessageDelta(text=delta)
-            continue
+            if mode == "messages":
+                delta = _message_delta_text(chunk)
+                if delta:
+                    projection.answer_parts.append(delta)
+                    yield MessageDelta(text=delta)
+                continue
 
-        # mode == "updates": chunk == {node_name: {"messages": [...], ...}, ...}
-        for update in _normalize_node_updates(chunk):
-            for event in _project_update_events(update, projection):
-                yield event
+            # mode == "updates": chunk == {node_name: {"messages": [...], ...}, ...}
+            for update in _normalize_node_updates(chunk):
+                for event in _project_update_events(update, projection):
+                    yield event
+    except (RepromptCapError, GraphRecursionError) as exc:
+        # A capped structured-output loop or a tripped recursion limit ends the run with a
+        # typed, non-fatal terminal event (logged once) in place of the normal final — never
+        # a generic failure. Any other error propagates unchanged.
+        outcome = outcome_for_drive_error(exc, config)
+        if outcome is None:
+            raise
+        yield outcome
+        return
 
     for event in _terminal_events(projection, response_format):
         yield event

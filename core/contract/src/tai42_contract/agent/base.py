@@ -34,8 +34,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.agent.events import (
     InterruptFinal,
     MessageFinal,
+    RecursionLimitFinal,
     StreamEvent,
     StructuredFinal,
+    StructuredOutputUnresolvedFinal,
     SuspendedFinal,
     final_event_for_value,
 )
@@ -68,15 +70,18 @@ def _resolve_drain_terminal(
     *,
     suspended: SuspendedFinal | None,
     interrupts: list[InterruptFinal],
+    outcome: StructuredOutputUnresolvedFinal | RecursionLimitFinal | None,
     structured: StructuredFinal | None,
     message: MessageFinal | None,
     response_format: Any,
 ) -> Any:
     """The terminal rule of a drained event stream — the final value from the collected terminals.
 
-    A park wins first (a clean, non-error receipt), then an interrupt raises, then the
-    requested-but-absent ``response_format`` raises, else the last structured/message payload,
-    else ``""`` for an empty run. Never returns a partial.
+    A park wins first (a clean, non-error receipt), then an interrupt raises, then a typed
+    non-fatal ``outcome`` (structured-output re-prompt cap reached, or the recursion limit hit)
+    is returned as itself — it is the run's answer, so it precedes the requested-but-absent
+    ``response_format`` raise. Else the requested-but-absent ``response_format`` raises, else the
+    last structured/message payload, else ``""`` for an empty run. Never returns a partial.
     """
     if suspended is not None:
         return {
@@ -88,6 +93,8 @@ def _resolve_drain_terminal(
         }
     if interrupts:
         raise AgentInterruptedError(interrupts)
+    if outcome is not None:
+        return outcome
     if response_format is not None:
         if structured is None:
             raise RuntimeError("agent run requested a response_format but produced no structured output")
@@ -281,6 +288,9 @@ class Agent(ABC):
           receipt-before-raise order keeps a park a clean, non-error outcome.
         * Any :class:`InterruptFinal` seen → raise :class:`AgentInterruptedError`
           (a non-streaming caller cannot answer an interrupt).
+        * A :class:`StructuredOutputUnresolvedFinal` or :class:`RecursionLimitFinal`
+          seen → return that typed, non-fatal outcome as itself (the run's answer);
+          it precedes the requested-but-absent ``response_format`` raise.
         * ``response_format`` requested but no :class:`StructuredFinal` produced
           → raise (fail loud; never silently fall back to message text).
         * Else return the last terminal's payload — ``StructuredFinal.data`` if
@@ -290,6 +300,7 @@ class Agent(ABC):
         """
         interrupts: list[InterruptFinal] = []
         suspended: SuspendedFinal | None = None
+        outcome: StructuredOutputUnresolvedFinal | RecursionLimitFinal | None = None
         structured: StructuredFinal | None = None
         message: MessageFinal | None = None
         async for event in agen:
@@ -297,6 +308,8 @@ class Agent(ABC):
                 suspended = event
             elif isinstance(event, InterruptFinal):
                 interrupts.append(event)
+            elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+                outcome = event
             elif isinstance(event, StructuredFinal):
                 structured = event
             elif isinstance(event, MessageFinal):
@@ -304,6 +317,7 @@ class Agent(ABC):
         return _resolve_drain_terminal(
             suspended=suspended,
             interrupts=interrupts,
+            outcome=outcome,
             structured=structured,
             message=message,
             response_format=response_format,

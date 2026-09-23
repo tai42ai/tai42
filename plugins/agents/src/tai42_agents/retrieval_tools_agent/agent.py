@@ -22,7 +22,14 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from tai42_contract.agent import Agent, MessageDelta, MessageFinal, StreamEvent, StructuredFinal
+from tai42_contract.agent import (
+    Agent,
+    MessageDelta,
+    MessageFinal,
+    RecursionLimitFinal,
+    StreamEvent,
+    StructuredFinal,
+)
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
@@ -304,6 +311,11 @@ class RetrievalToolsAgent(Agent):
             if isinstance(event, MessageFinal):
                 terminal = event
                 continue
+            if isinstance(event, RecursionLimitFinal):
+                # The retrieval graph tripped the recursion limit: surface the named, non-fatal
+                # outcome as the run's terminal instead of running the finalization pass.
+                yield event
+                return
             yield event
         if terminal is None:
             raise ValueError(

@@ -78,6 +78,14 @@ class AgentsLimitsSettings(TaiBaseSettings):
     # limit wins. Bounds the top-level graph only. Must be positive.
     default_recursion_limit: int = Field(default=50, gt=0)
 
+    # How many times the structured-output tool-calling rail may re-prompt a model
+    # whose response fails to parse against the requested ``response_format`` before
+    # the run gives up. Counted PER RUN at the strategy every face builds. On the
+    # next non-conforming response past this many re-prompts the run ends with a
+    # typed, non-fatal outcome naming the schema and the last validation error
+    # instead of looping until the recursion limit. Must be positive.
+    structured_output_reprompt_cap: int = Field(default=3, gt=0)
+
 
 @settings_cache
 def agents_limits_settings() -> AgentsLimitsSettings:

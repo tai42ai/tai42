@@ -53,7 +53,15 @@ from pydantic import RootModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from tai42_contract.agent import Agent
-from tai42_contract.agent.events import AsksFinal, MessageFinal, StreamEvent, StructuredFinal, SuspendedFinal
+from tai42_contract.agent.events import (
+    AsksFinal,
+    MessageFinal,
+    RecursionLimitFinal,
+    StreamEvent,
+    StructuredFinal,
+    StructuredOutputUnresolvedFinal,
+    SuspendedFinal,
+)
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.presets.errors import PresetNotFoundError
@@ -267,13 +275,18 @@ async def _drive_capturing_terminal(
 
     Interim events and an ``InterruptFinal`` (not a park — the client answers it and the drive ends)
     stream live as ``("event", …)``; the park/final terminal (``SuspendedFinal`` /
-    ``StructuredFinal`` / ``MessageFinal``) is captured WITHOUT streaming and its ``visit`` value
-    returned — a :class:`SuspendedInteraction` for a park, the final event itself for a finish, so
-    ``visit`` classifies the finish as a ``result`` and re-emits today's terminal frame. ``None``
-    when the drive ended on an interrupt (already streamed) — ``visit`` classifies it ``none``.
+    ``StructuredFinal`` / ``MessageFinal`` / a typed non-fatal outcome —
+    ``StructuredOutputUnresolvedFinal`` / ``RecursionLimitFinal``) is captured WITHOUT streaming and
+    its ``visit`` value returned — a :class:`SuspendedInteraction` for a park, the final event itself
+    for a finish, so ``visit`` classifies the finish as a ``result`` and re-emits today's terminal
+    frame. ``None`` when the drive ended on an interrupt (already streamed) — ``visit`` classifies it
+    ``none``.
     """
     async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
-        if isinstance(event, SuspendedFinal | StructuredFinal | MessageFinal):
+        if isinstance(
+            event,
+            SuspendedFinal | StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal,
+        ):
             captured["terminal"] = event
             return await _suspended_sentinel(event) if isinstance(event, SuspendedFinal) else event
         await queue.put(("event", event))

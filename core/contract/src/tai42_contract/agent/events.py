@@ -103,6 +103,41 @@ class StructuredFinal(StreamEvent):
     final: bool = True
 
 
+class StructuredOutputUnresolvedFinal(StreamEvent):
+    """The model never produced output conforming to the requested ``response_format``. Terminal, non-fatal.
+
+    The structured-output tool-calling rail re-prompted the model each time its
+    response failed to parse against the schema, and the per-run re-prompt cap was
+    reached with no conforming response. The run ends with this typed outcome —
+    branchable like a tool error — rather than looping to the recursion limit or
+    surfacing a generic failure. ``schema_name`` names the requested schema;
+    ``attempts`` is how many non-conforming responses the model produced (the
+    re-prompt cap plus the final rejected attempt); ``error`` is the last
+    validation error text (masked as every recorded error is).
+    """
+
+    type: Literal["structured_output_unresolved_final"] = "structured_output_unresolved_final"  # pyright: ignore[reportIncompatibleVariableOverride]
+    schema_name: str
+    attempts: int
+    error: str
+    final: bool = True
+
+
+class RecursionLimitFinal(StreamEvent):
+    """The run hit the graph's step (``recursion_limit``) ceiling before it finished. Terminal, non-fatal.
+
+    A runaway loop that exhausts the super-step budget ends with this typed,
+    readable outcome instead of a generic failure, so a flow or route can branch
+    on it. ``limit`` is the super-step ceiling that was hit; ``steps`` is what is
+    known of the step count when the graph reports it, else ``None``.
+    """
+
+    type: Literal["recursion_limit_final"] = "recursion_limit_final"  # pyright: ignore[reportIncompatibleVariableOverride]
+    limit: int
+    steps: int | None = None
+    final: bool = True
+
+
 class SuspendedFinal(StreamEvent):
     """A generic async park surfaced out of a paused agent graph. Terminal.
 
