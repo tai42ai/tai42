@@ -71,6 +71,17 @@ def test_state_family_documents_round_trip(name: str) -> None:
     assert model.model_validate(parsed.model_dump(by_alias=True, exclude_none=True)) == parsed
 
 
+@pytest.mark.parametrize("document", ["PresetBody", "PresetSeed"])
+def test_fixed_kwargs_publishes_the_secret_reference_convention(document: str) -> None:
+    # The served schema documents the ``!ENV ${VAR}`` secret-reference convention on
+    # ``fixed_kwargs`` so an editor (Studio) and every schema consumer read it: a
+    # reference is resolved server-side at bind and never stored.
+    schema = build_document_schemas()["documents"][document]
+    description = schema["properties"]["fixed_kwargs"]["description"]
+    assert "!ENV ${VAR}" in description
+    assert "SECRET REFERENCE" in description
+
+
 def _templated_text_is_marked(bundle: dict[str, Any]) -> None:
     templated = bundle["$defs"]["TemplatedText"]
     assert TEMPLATED_TEXT_ANNOTATION_KEY in templated

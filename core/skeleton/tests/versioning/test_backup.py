@@ -226,6 +226,37 @@ async def test_backup_reimport_under_skip_leaves_existing(pg: _FakeVersioningBac
     assert len(pg.versions) == 6
 
 
+async def test_backup_round_trip_preserves_a_preset_secret_reference(pg: _FakeVersioningBackupPg):
+    # A preset body whose ``fixed_kwargs`` carries a ``!ENV ${VAR}`` secret reference:
+    # the store keeps the marker verbatim, so the body-opaque backup carries it through
+    # export → import unchanged (the store never held a resolved credential to leak).
+    marker = "!ENV ${BACKUP_PRESET_SECRET}"
+    pg.documents.append(
+        {"id": 1, "kind": "preset", "name": "ref", "active_version": 1, "is_active": True, "created_at": _T0}
+    )
+    pg.versions.append(
+        {
+            "id": 1,
+            "document_id": 1,
+            "version": 1,
+            "body": {"base_tool": "echo", "fixed_kwargs": {"token": marker}},
+            "tags": [],
+            "created_at": _T0,
+        }
+    )
+
+    payload = await export_versioned_documents()
+    assert payload["versions"][0]["body"]["fixed_kwargs"] == {"token": marker}
+
+    pg.documents.clear()
+    pg.versions.clear()
+    report = await import_versioned_documents(payload)
+    assert report["errors"] == []
+
+    restored = next(v for v in pg.versions if v["document_id"] == 1 and v["version"] == 1)
+    assert restored["body"]["fixed_kwargs"] == {"token": marker}
+
+
 def test_versioned_documents_section_registered_secret():
     registry = BackupRegistry()
     register_core_sections(registry)

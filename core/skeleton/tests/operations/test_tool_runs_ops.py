@@ -412,6 +412,40 @@ async def test_background_run_of_a_secret_preset_masks_the_real_secret_in_the_re
             await app.preset_manager.remove("acme_vault")
 
 
+async def test_background_run_of_an_env_reference_preset_masks_the_resolved_secret(wired):
+    # A preset baking a ``!ENV ${VAR}`` reference into its fixed_kwargs resolves the
+    # variable to a wrapped ``SecretValue`` at bind and forwards it to the base tool;
+    # a background run of that preset records the masked placeholder, never the resolved
+    # value, in the durable tool-run record.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    resolved = "resolved-ref-credential"
+    wired.monkeypatch.setenv("PRESET_RECORD_REF_VAR", resolved)
+    manifest = Manifest.model_validate(
+        {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["payload_tool"]}]}
+    )
+    async with app.app_context(manifest):
+        await app.preset_manager.register(
+            "ref_payload",
+            "payload_tool",
+            {"payload": {"token": "!ENV ${PRESET_RECORD_REF_VAR}"}},
+            [],
+            "Ref payload",
+        )
+        try:
+            out = await ops.submit_run("ref_payload", {})
+            await _drain()
+
+            record = await wired.store.get_run(wired.fake, out["run_id"])
+            assert record["status"] == "succeeded"
+            assert json.loads(record["result"]) == {"payload": {"token": "[secret]"}, "tag": "t"}
+            # The resolved value never reaches the persisted record JSON.
+            assert resolved not in record["result"]
+        finally:
+            await app.preset_manager.remove("ref_payload")
+
+
 async def test_background_run_of_a_secret_preset_schema_failure_redacts_the_record_error(wired):
     # A secret preset whose output_schema the REAL value violates: the guard raises,
     # the background recorder persists the failure — but the durable ``error`` text must

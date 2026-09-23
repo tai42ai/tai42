@@ -49,11 +49,25 @@ class PresetBody(BaseModel):
     tool's description, dropping ``output_schema`` would silently un-enforce the
     structured output, and dropping ``input_schema`` would silently un-enforce the
     structured input.
+
+    A ``fixed_kwargs`` scalar-string value written ``!ENV ${VAR}`` is a SECRET
+    REFERENCE, not a credential: the server resolves it from the environment at bind
+    and the store keeps only the reference — never the resolved value.
     """
 
     base_tool: str
     description: str = ""
-    fixed_kwargs: dict[str, Any] = Field(default_factory=dict)
+    fixed_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Baked kwargs, each a hidden fixed constant on the bound tool. A scalar-string "
+            "value written `!ENV ${VAR}` (or `!ENV ${VAR:default}`) is a SECRET REFERENCE: "
+            "the server resolves it from that environment variable server-side at bind and "
+            "bakes the resolved value, while the stored body, its versions and any export "
+            "keep only the reference — never the credential. A `:default` is baked and "
+            "stored in the clear, so a credential must never be written as a default."
+        ),
+    )
     extensions: list[list[ExtensionElement]] = Field(default_factory=list[list[ExtensionElement]])
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
@@ -102,12 +116,26 @@ class PresetSeed(BaseModel):
     ``output_schema`` and optional ``tool_meta`` display seed. The applier creates
     or upgrades the preset from this shape; the contract holds only the SHAPE,
     never the applier logic.
+
+    A ``fixed_kwargs`` scalar-string value written ``!ENV ${VAR}`` is a SECRET
+    REFERENCE, not a credential: the server resolves it from the environment at bind
+    and the store keeps only the reference — never the resolved value.
     """
 
     name: str
     description: str
     base_tool: str
-    fixed_kwargs: dict[str, Any] = Field(default_factory=dict)
+    fixed_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Baked kwargs, each a hidden fixed constant on the bound tool. A scalar-string "
+            "value written `!ENV ${VAR}` (or `!ENV ${VAR:default}`) is a SECRET REFERENCE: "
+            "the server resolves it from that environment variable server-side at bind and "
+            "bakes the resolved value, while the stored body, its versions and any export "
+            "keep only the reference — never the credential. A `:default` is baked and "
+            "stored in the clear, so a credential must never be written as a default."
+        ),
+    )
     input_schema: TemplatedText | dict[str, Any] | None = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     tool_meta: PresetSeedToolMeta | None = None

@@ -11,8 +11,8 @@ row's synthetic ``id`` is carried verbatim so the ``document_id`` foreign key
 survives the round-trip; the opaque ``body`` JSONB is never inspected.
 
 Registered ``secret=True`` (default-OFF in the export UI): the opaque bodies are
-secret-bearing — a preset's ``fixed_kwargs`` can embed credentials, an AC-policy
-condition body is sensitive.
+secret-bearing — the ``settings_profile`` kind stores env values verbatim,
+secrets included (``SettingsProfileBody.env``).
 """
 
 from __future__ import annotations
