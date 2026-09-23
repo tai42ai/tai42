@@ -1,6 +1,6 @@
-"""Agent async ``ask_user`` park/resume: middleware, durable index, and resume driver.
+"""Agent async ``ask`` park/resume: middleware, durable index, and resume driver.
 
-The three pieces behind a park-capable agent run that async-parks on an ``ask_user``:
+The three pieces behind a park-capable agent run that async-parks on an ``ask``:
 
 * :class:`AsyncParkMiddleware` — the ``before_model`` hook that interrupts the loop once
   per super-step of async-ask parks and substitutes their answers back on resume.
@@ -24,6 +24,8 @@ from tai42_agents._internal.park.capability import (
     ParkIdentity,
     assert_park_capable,
     build_park_identity,
+    chain_routing_slots,
+    chained_resume_from_entry,
 )
 from tai42_agents._internal.park.chain import (
     CHAINED_PARK_DELIVERY_TOOL_NAME,
@@ -49,7 +51,6 @@ from tai42_agents._internal.park.persist import persist_park
 from tai42_agents._internal.park.resume import (
     AGENT_RESUME_TOOL_NAME,
     agent_resume,
-    fire_park_failed_completion,
     is_suspended_receipt,
 )
 from tai42_agents._internal.park.resume_tool import register_agent_resume_tool
@@ -66,11 +67,12 @@ __all__ = [
     "assert_park_capable",
     "bind_resume_per_step",
     "build_park_identity",
+    "chain_routing_slots",
+    "chained_resume_from_entry",
     "collect_pending_interrupts",
     "deliver_chained_park",
     "detach_dead_chains",
     "finalize_drive",
-    "fire_park_failed_completion",
     "is_suspended_receipt",
     "park_continuation",
     "park_drive",

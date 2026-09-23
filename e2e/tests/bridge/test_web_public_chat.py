@@ -8,7 +8,7 @@ turn, and the answer is delivered back into the same visitor transcript, where t
 visitor's SSE stream receives it live. Reopening the stream replays the whole exchange in
 order — the reconnect a browser does on every navigation.
 
-The second leg proves the ask and the bridge share ONE conversation: an ``ask_user`` aimed
+The second leg proves the ask and the bridge share ONE conversation: an ``ask`` aimed
 at the same ``(identity, visitor id)`` pair lands in that visitor's transcript alongside
 the bridged messages and is answered from the page's own answer door.
 
@@ -139,7 +139,7 @@ async def test_web_visitor_message_round_trips_and_the_stream_replays_it(
     assert answer2 in exchange[3][1]
 
 
-async def test_ask_user_lands_in_the_live_web_conversation(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+async def test_ask_lands_in_the_live_web_conversation(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     web = await _open_web_route(bridge, uniq, "l12ask")
     # A SECOND registered visitor on the same route — a real session owning another
     # conversation, which is what separates "not yours" from "no session at all".
@@ -153,7 +153,7 @@ async def test_ask_user_lands_in_the_live_web_conversation(bridge: BridgeHarness
         # A web ask names its target as the visitor pair; there is no operator default.
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {"question": question, "channel": "web", "recipient": web.recipient},
             )
         return result.data

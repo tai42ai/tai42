@@ -23,7 +23,12 @@ from tai42_kit.backend.base import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     ManagedBackend,
 )
-from tai42_kit.backend.callback import CallbackSchema, callback_execution, prepare_backend_kwargs
+from tai42_kit.backend.callback import (
+    CallbackSchema,
+    callback_execution,
+    carry_forwarded_fire,
+    prepare_backend_kwargs,
+)
 from tai42_kit.backend.conformance import check_backend_declarations, check_runtime_declarations
 from tai42_kit.backend.schedule_fire import backend_fire, fire_schedule_door
 from tai42_kit.backend.settings import BackendDispatchSettings
@@ -36,6 +41,7 @@ __all__ = [
     "ManagedBackend",
     "backend_fire",
     "callback_execution",
+    "carry_forwarded_fire",
     "check_backend_declarations",
     "check_runtime_declarations",
     "fire_schedule_door",

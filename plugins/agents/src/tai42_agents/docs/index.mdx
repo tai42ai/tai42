@@ -21,7 +21,7 @@ Limits shared by every agent in this package:
 
 ### Async-park index
 
-A park-capable run whose tool async-parks (`ask_user(mode="async")`) writes a durable
+A park-capable run whose tool async-parks (`ask(mode="async")`) writes a durable
 index that reverses a parked interaction id back to its parked run, so a later worker
 can resume it. This needs the `[park]` extra (`pip install tai42-agents[park]`) and a
 Redis URL:
@@ -32,6 +32,37 @@ Redis URL:
 
 The park index is the agents plugin's own Redis, independent of the checkpoint provider
 and the interactions store.
+
+When the ask is answered (or expires), the platform resumes the parked run and drives it
+to its next outcome. The resumed run's final outcome is delivered by the **platform** to the
+run's own address — the agent never delivers it itself; a caller that needs the answer runs
+the agent through a door that receives it out of band (a conversation route). A whole-chain
+kill (a cancel, a thread delete, a person erase) tears the parked run down and delivers a
+single failed outcome to that address.
+
+An async ask may address the run's own **caller** (`ask(to="caller")`) instead of a human
+(`to="user"`): the run parks the same way and resumes when the caller answers, so an agent
+can hand a question back up to whatever invoked it. When an agent's own tool call drives a
+nested run that async-parks, the agent parks on that **call** rather than blocking; once the
+nested run reaches its terminal the agent's turn resumes with that terminal as the tool's
+result, and a non-success terminal comes back as a model-visible tool error.
+
+### Parking tools
+
+An agent that lists the generic parking tools in its `tool_names` — `list_parked`,
+`resume_parked`, `cancel_parked` — can list, answer, or cancel the caller asks parked on the
+run's subject from inside its own turn. They are platform builtins and need no plugin code.
+
+### Conversation-door tools
+
+`send_conversation_message` and `send_conversation_event` let an agent reach a conversation
+route from inside its own turn, in-process under the run's own execution identity — no route
+key is handed to the agent. `send_conversation_message` posts a message into a route's
+conversation; `send_conversation_event` delivers a structured event onto an existing thread
+of one. Each applies the target door's own authorization before it runs and refuses a run
+with no accountable execution identity loudly; the turn's answer is delivered by the route's
+own configured delivery, never inline to the agent. List either in an agent's `tool_names`
+to include it — they are platform builtins and need no plugin code.
 
 ## Tool-error resilience
 
@@ -116,7 +147,7 @@ transcript. The credential scrub removes credential FILES on a terminal exit; wh
 platform `sandbox_scrub_transcript` flag is on, injected credential VALUES are also redacted
 from the kept transcript.
 
-Async `ask_user` parks are supported on threaded (conversation) runs and use the same
+Async `ask` parks are supported on threaded (conversation) runs and use the same
 `[park]` extra + `TAI_AGENTS_REDIS_URL` as the other parking agents (see
 [Async-park index](#async-park-index)); an async ask on a thread-less tool-face run is
 refused loudly (its ephemeral workspace could never be resumed).
@@ -138,7 +169,7 @@ A tools agent that retrieves its tools on demand from a vector store.
 ## tools_agent
 
 Runs a LangGraph tools agent over tools loaded by name (and optional presets). A tool
-that async-parks (`ask_user(mode="async")`) suspends the run instead of blocking; it
+that async-parks (`ask(mode="async")`) suspends the run instead of blocking; it
 resumes on a later worker when the ask is answered or expires. This needs the `[park]`
 extra and `TAI_AGENTS_REDIS_URL` (see [Async-park index](#async-park-index)).
 

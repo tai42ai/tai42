@@ -8,7 +8,9 @@ One pooled ``httpx.AsyncClient`` (the kit's ``HttpxClient`` via
 
 from __future__ import annotations
 
+import json
 from contextlib import AbstractAsyncContextManager
+from typing import Any
 
 import httpx
 from tai42_contract.app import tai42_app
@@ -24,6 +26,67 @@ def telegram_http() -> AbstractAsyncContextManager[httpx.AsyncClient]:
     return tai42_app.clients.client_ctx(HttpxClient, timeout=telegram_settings().http_timeout_seconds)
 
 
+# The Bot API's error object, in the vendor's documented field order.
+_ERROR_FIELDS = ("error_code", "description", "parameters")
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """The Bot API's full documented error object from the body, whatever the status.
+
+    Telegram answers a JSON error object on an HTTP-error status too, so the body is
+    parsed regardless of status. Each present field renders as a ``name=<render>``
+    token in the Bot API's fixed order — ``repr(value)`` for a scalar, compact sorted
+    JSON for ``parameters`` — joined by one space and bounded to 500 chars.
+    ``parameters`` carries ``retry_after`` / ``migrate_to_chat_id``. A body that is
+    not JSON, or not a dict, falls back to the raw response text (also bounded).
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text[:500]
+    if not isinstance(payload, dict):
+        return response.text[:500]
+    tokens: list[str] = []
+    for name in _ERROR_FIELDS:
+        if name not in payload:
+            continue
+        value = payload[name]
+        if isinstance(value, (list, dict)):
+            render = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        else:
+            render = repr(value)
+        tokens.append(f"{name}={render}")
+    return " ".join(tokens)[:500]
+
+
+async def call_method(token: str, method: str, payload: dict[str, Any], *, context: str) -> dict[str, Any]:
+    """POST ``payload`` to one Bot API ``method`` and return its decoded ``ok: true`` body.
+
+    The single transport for every Bot API call. It posts to
+    ``{api_base_url}/bot{token}/{method}``, wraps an ``httpx.HTTPError`` as a
+    :class:`~tai42_contract.channels.ChannelDeliveryError`, then applies one refusal
+    rule: a non-200 status OR a JSON body with ``ok`` false raises, naming ``method``
+    and ``context`` and carrying the vendor's full error detail. A 200 whose body is
+    not JSON also raises. The request URL embeds the bot token and never appears in
+    error text.
+    """
+    settings = telegram_settings()
+    try:
+        async with telegram_http() as client:
+            response = await client.post(f"{settings.api_base_url}/bot{token}/{method}", json=payload)
+    except httpx.HTTPError as exc:
+        raise ChannelDeliveryError(f"telegram {method} failed for {context}: {type(exc).__name__}: {exc}") from exc
+    if response.status_code != 200:
+        raise ChannelDeliveryError(f"telegram {method} rejected {context}: {_error_detail(response)}")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ChannelDeliveryError(f"telegram {method} returned a non-JSON body for {context}") from exc
+    if not data.get("ok"):
+        raise ChannelDeliveryError(f"telegram {method} rejected {context}: {_error_detail(response)}")
+    return data
+
+
 async def send_chat_action(chat_id: int, action: str) -> None:
     """POST one Bot API ``sendChatAction`` so ``chat_id`` shows a status indicator.
 
@@ -37,27 +100,7 @@ async def send_chat_action(chat_id: int, action: str) -> None:
         token = require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
     except ValueError as exc:
         raise ChannelDeliveryError(str(exc)) from exc
-    try:
-        async with telegram_http() as client:
-            response = await client.post(
-                f"{settings.api_base_url}/bot{token}/sendChatAction",
-                json={"chat_id": chat_id, "action": action},
-            )
-    except httpx.HTTPError as exc:
-        raise ChannelDeliveryError(f"telegram sendChatAction failed: {type(exc).__name__}: {exc}") from exc
-    if response.status_code != 200:
-        raise ChannelDeliveryError(
-            f"telegram sendChatAction returned HTTP {response.status_code}: {response.text[:200]}"
-        )
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise ChannelDeliveryError("telegram sendChatAction returned a non-JSON body") from exc
-    if not data.get("ok"):
-        raise ChannelDeliveryError(
-            f"telegram sendChatAction rejected: "
-            f"error_code={data.get('error_code')} description={data.get('description')!r}"
-        )
+    await call_method(token, "sendChatAction", {"chat_id": chat_id, "action": action}, context=f"chat {chat_id}")
 
 
 async def answer_callback_query(callback_query_id: str) -> None:
@@ -75,24 +118,9 @@ async def answer_callback_query(callback_query_id: str) -> None:
         token = require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
     except ValueError as exc:
         raise ChannelDeliveryError(str(exc)) from exc
-    try:
-        async with telegram_http() as client:
-            response = await client.post(
-                f"{settings.api_base_url}/bot{token}/answerCallbackQuery",
-                json={"callback_query_id": callback_query_id},
-            )
-    except httpx.HTTPError as exc:
-        raise ChannelDeliveryError(f"telegram answerCallbackQuery failed: {type(exc).__name__}: {exc}") from exc
-    if response.status_code != 200:
-        raise ChannelDeliveryError(
-            f"telegram answerCallbackQuery returned HTTP {response.status_code}: {response.text[:200]}"
-        )
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise ChannelDeliveryError("telegram answerCallbackQuery returned a non-JSON body") from exc
-    if not data.get("ok"):
-        raise ChannelDeliveryError(
-            f"telegram answerCallbackQuery rejected: "
-            f"error_code={data.get('error_code')} description={data.get('description')!r}"
-        )
+    await call_method(
+        token,
+        "answerCallbackQuery",
+        {"callback_query_id": callback_query_id},
+        context=f"callback {callback_query_id}",
+    )

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StreamEvent(BaseModel):
@@ -112,15 +112,19 @@ class SuspendedFinal(StreamEvent):
     for it rather than raising :class:`~tai42_contract.agent.base.AgentInterruptedError`.
 
     ``interaction_ids`` are the parked questions the resume converges on;
-    ``expiry_at`` is the earliest park deadline (ISO-8601, or ``None`` when no park
-    carried one); ``thread_id`` is the parked run's thread. The vocabulary is
-    generic — it names no driver, engine, or resume state, only the parked
+    ``caller_interaction_ids`` is the subset of them addressed to the CALLER
+    (``to="caller"``), empty for a park of only user asks — the two id lists let the
+    platform's ``visit`` normalise a caller-ask park inside an agent into its
+    caller/user partition; ``expiry_at`` is the earliest park deadline (ISO-8601, or
+    ``None`` when no park carried one); ``thread_id`` is the parked run's thread. The
+    vocabulary is generic — it names no driver, engine, or resume state, only the parked
     interaction ids the flow-blind platform already holds.
     """
 
     type: Literal["suspended_final"] = "suspended_final"  # pyright: ignore[reportIncompatibleVariableOverride]
     interaction_ids: list[str]
     thread_id: str
+    caller_interaction_ids: list[str] = Field(default_factory=list)
     expiry_at: str | None = None
     final: bool = True
 
@@ -156,3 +160,14 @@ class InterruptFinal(StreamEvent):
     payload: Any = None
     reason: str | None = None
     final: bool = True
+
+
+def final_event_for_value(value: Any) -> MessageFinal | StructuredFinal:
+    """The terminal event a plain agent result value represents.
+
+    A ``str`` is a plain-text answer (:class:`MessageFinal`); any other value is structured output
+    (:class:`StructuredFinal`, its ``data``). The single rule both the non-streaming ``astream``
+    default and a resumed run's plain terminal map a raw value through, so every path surfaces the
+    same final shape.
+    """
+    return MessageFinal(text=value) if isinstance(value, str) else StructuredFinal(data=value)

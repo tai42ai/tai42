@@ -124,9 +124,7 @@ def test_door_and_preset_binding_merge_inject_before_and_update_after() -> None:
                     _attach(
                         subject_expr=TemplatedText(content=".missing_key"),  # a DIFFERENT subject the door overrides
                         input_injections=[StateInjection(template_jq="preset_view", into="p")],
-                        updates=[
-                            StateUpdate(template_jq="preset_mark", adapter=TemplatedText(content="{v: .output.ok}"))
-                        ],
+                        updates=[StateUpdate(template_jq="preset_mark", adapter=TemplatedText(content="{v: .ok}"))],
                     )
                 ]
             )
@@ -135,10 +133,8 @@ def test_door_and_preset_binding_merge_inject_before_and_update_after() -> None:
             door_binding = StateBinding(
                 states=[
                     _attach(
-                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")],
-                        updates=[
-                            StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .output.ok}]'))
-                        ],
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .n}"), into="injected")],
+                        updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .ok}]'))],
                     )
                 ]
             )
@@ -185,7 +181,7 @@ def test_no_binding_dispatch_never_touches_the_states_facet() -> None:
 
 
 def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
-    # H1: a door binding whose target is a plain tool (NOT a registered preset) still applies
+    # A door binding whose target is a plain tool (NOT a registered preset) still applies
     # at the outermost dispatch — injection before, update after.
     seen: dict[str, Any] = {}
     fake = _FakeStates(record={"n": 7})
@@ -202,10 +198,8 @@ def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
             binding = StateBinding(
                 states=[
                     _attach(
-                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")],
-                        updates=[
-                            StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .output.ok}]'))
-                        ],
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .n}"), into="injected")],
+                        updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .ok}]'))],
                     )
                 ]
             )
@@ -222,7 +216,7 @@ def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
 
 
 def test_nested_preset_dispatch_does_not_apply_its_own_binding() -> None:
-    # M3: a preset's own binding fires only when it is the OUTERMOST dispatch. Dispatched as a
+    # A preset's own binding fires only when it is the OUTERMOST dispatch. Dispatched as a
     # sub-tool (nested), it applies nothing — no double apply.
     seen: dict[str, Any] = {}
     fake = _FakeStates(record={})
@@ -232,11 +226,7 @@ def test_nested_preset_dispatch_does_not_apply_its_own_binding() -> None:
             fake.patch_onto(app._states_facet)
             inner_binding = StateBinding(
                 states=[
-                    _attach(
-                        updates=[
-                            StateUpdate(template_jq="inner_mark", adapter=TemplatedText(content="{v: .output.ok}"))
-                        ]
-                    )
+                    _attach(updates=[StateUpdate(template_jq="inner_mark", adapter=TemplatedText(content="{v: .ok}"))])
                 ]
             )
             await _register_preset("inner", inner_binding, seen)
@@ -296,7 +286,7 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
             binding = StateBinding(
                 states=[
                     _attach(
-                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")],
+                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .n}"), into="injected")],
                         updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: 1}]'))],
                     )
                 ]
@@ -335,16 +325,14 @@ def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
             fake.patch_onto(app._states_facet)
             binding = StateBinding(
                 states=[
-                    _attach(
-                        input_injections=[StateInjection(jq=TemplatedText(content="{n: .record.n}"), into="injected")]
-                    )
+                    _attach(input_injections=[StateInjection(jq=TemplatedText(content="{n: .n}"), into="injected")])
                 ]
             )
             await _register_preset("pm", binding, seen)
 
             mw = DispatchScopeMiddleware(app)
             message = SimpleNamespace(name="pm", arguments=None)
-            context = SimpleNamespace(message=message)
+            context = SimpleNamespace(message=message, fastmcp_context=None)
             dispatched: dict[str, Any] = {}
 
             async def call_next(_ctx: object) -> object:
@@ -407,7 +395,7 @@ def test_mcp_edge_refuses_an_unencodable_result() -> None:
         async with app.app_context(Manifest.model_validate({})):
             mw = DispatchScopeMiddleware(app)
             message = SimpleNamespace(name="emits", arguments={})
-            context = SimpleNamespace(message=message)
+            context = SimpleNamespace(message=message, fastmcp_context=None)
 
             async def call_next(_ctx: object) -> object:
                 return SimpleNamespace(structured_content={"token": "\ud83d"}, content=[])
@@ -434,7 +422,7 @@ def test_mcp_edge_refuses_a_surrogate_in_a_content_block() -> None:
         async with app.app_context(Manifest.model_validate({})):
             mw = DispatchScopeMiddleware(app)
             message = SimpleNamespace(name="emits", arguments={})
-            context = SimpleNamespace(message=message)
+            context = SimpleNamespace(message=message, fastmcp_context=None)
 
             async def call_next(_ctx: object) -> object:
                 return SimpleNamespace(structured_content=None, content=[TextContent(type="text", text="\ud83d")])
@@ -458,7 +446,7 @@ def test_mcp_edge_passes_an_encodable_result() -> None:
         async with app.app_context(Manifest.model_validate({})):
             mw = DispatchScopeMiddleware(app)
             message = SimpleNamespace(name="emits", arguments={})
-            context = SimpleNamespace(message=message)
+            context = SimpleNamespace(message=message, fastmcp_context=None)
             sentinel = SimpleNamespace(structured_content={"emoji": "😀"}, content=[])
 
             async def call_next(_ctx: object) -> object:

@@ -1,6 +1,6 @@
 """The channel cross-worker loop, per medium (telegram/slack/twilio).
 
-``ask_user(channel=...)`` blocks a tool call on replica A; the channel plugin
+``ask(channel=...)`` blocks a tool call on replica A; the channel plugin
 delivers ONE outbound send through its provider stub; a GENUINELY-signed inbound
 reply arrives on replica B (the plugin's real signature verification runs); the
 inbound handler correlates it through the shared Redis and forwards to the
@@ -60,7 +60,7 @@ async def test_ask_via_channel_on_a_inbound_on_b_resolves_on_a(
 
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
-            result = await mcp.call_tool("ask_user", {"question": question, "channel": case.name})
+            result = await mcp.call_tool("ask", {"question": question, "channel": case.name})
         return result.data
 
     # Baseline the correlation keys BEFORE the ask, so the guard below waits for
@@ -112,7 +112,7 @@ async def test_inbound_rejected_fail_closed(channel_case: ChannelCase, uniq: Cal
 
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
-            result = await mcp.call_tool("ask_user", {"question": question, "channel": case.name})
+            result = await mcp.call_tool("ask", {"question": question, "channel": case.name})
         return result.data
 
     ask_task = asyncio.create_task(ask())
@@ -156,7 +156,7 @@ async def test_tier1_confirm_message_carries_callback_url(
 
     async def ask_probe() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
-            result = await mcp.call_tool("ask_user", {"question": probe_q, "channel": case.name})
+            result = await mcp.call_tool("ask", {"question": probe_q, "channel": case.name})
         return result.data
 
     probe_task = asyncio.create_task(ask_probe())
@@ -184,7 +184,7 @@ async def test_tier1_confirm_message_carries_callback_url(
     async def ask_confirm() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user", {"question": confirm_q, "channel": case.name, "answer_format": "confirm"}
+                "ask", {"question": confirm_q, "channel": case.name, "answer_format": "confirm"}
             )
         return result.data
 

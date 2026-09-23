@@ -16,7 +16,7 @@ from ._overlap_support import (
     entry_texts,
     joined,
     open_visitor,
-    probe_payload_expr,
+    probe_start_expr,
     reply_matching,
     send_web,
 )
@@ -31,7 +31,7 @@ async def test_a_settle_window_rides_a_burst_into_one_turn(bridge: BridgeHarness
         uniq,
         "ov-settle",
         tool="e2e_overlap_probe",
-        payload_expr=probe_payload_expr(marker),
+        start_expr=probe_start_expr(marker),
         overlap={"deliver": "all", "settle_seconds": _SETTLE_SECONDS},
     )
     web = await open_visitor(bridge, identity)

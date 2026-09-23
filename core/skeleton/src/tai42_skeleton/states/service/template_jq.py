@@ -155,8 +155,8 @@ class _TemplateJqMixin(_StatesServiceBase):
     ) -> TemplateJqApplyResult:
         """Apply an ``update``-purpose ``template_jq`` program ``name`` to ``subject``.
 
-        Its jq runs over ``{record, input}`` (the record's attached subtree and the adapter's
-        ``input``) with the attachment's ``$parameters``/``$declarations`` bound and the
+        Its jq runs over the record's attached subtree (its ``.``) with the adapter's ``input``
+        bound as ``$input`` and the attachment's ``$parameters``/``$declarations`` bound and the
         sibling ``tjq_<name>`` input-program prelude, returning a template-relative op batch
         rebased under the attachment path and applied through the SAME ``apply`` chokepoint as
         a delta — so regimes, the composing-shape guard, retention, trace stamping and
@@ -193,12 +193,12 @@ class _TemplateJqMixin(_StatesServiceBase):
                 )
         record = await self._store.read_record_view(state, subject, conn=conn)
         subtree = _record_subtree(record["data"], path) if record is not None else {}
-        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations}
+        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "input": input_}
         body, prelude = await self._render_template_jq(template, program_name)
         try:
             result = await run_jq_first(
                 body,
-                {"record": subtree, "input": input_},
+                subtree,
                 prelude=prelude,
                 variables=variables,
             )

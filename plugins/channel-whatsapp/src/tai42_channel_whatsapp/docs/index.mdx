@@ -4,7 +4,7 @@ description: Configure the Meta Cloud API WhatsApp channel — the CHANNEL_WHATS
 ---
 
 Bridge a WhatsApp number carried by the Meta Cloud API to an agent, or deliver
-`ask_user` questions into it. Unlike Twilio, this channel sends interactive
+`ask` questions into it. Unlike Twilio, this channel sends interactive
 controls, media, and pre-approved templates.
 
 ## Enable it
@@ -24,8 +24,8 @@ inherited connection-tuning fields) point the plugin-owned correlation store.
 | `CHANNEL_WHATSAPP_ACCESS_TOKEN` | unset | Graph API bearer token for the send (one token serves many numbers). Secret. |
 | `CHANNEL_WHATSAPP_APP_SECRET` | unset | Keys the `X-Hub-Signature-256` HMAC the inbound door checks over the raw body. Secret. |
 | `CHANNEL_WHATSAPP_VERIFY_TOKEN` | unset | Shared secret echoed during Meta's GET webhook verification handshake. Secret. |
-| `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | unset | `phone_number_id` used as the sender for `ask_user` when none is routed. |
-| `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | empty | Whitelist of `wa_id`s a caller-requested recipient must be on (`ask_user` only). Comma-separated or JSON list. |
+| `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | unset | `phone_number_id` used as the sender for `ask` when none is routed. |
+| `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | empty | Whitelist of `wa_id`s a caller-requested recipient must be on (`ask` only). Comma-separated or JSON list. |
 | `CHANNEL_WHATSAPP_HTTP_TIMEOUT_SECONDS` | `30` | Timeout for the outbound send and the loopback answer forward. |
 | `CHANNEL_WHATSAPP_DEDUPE_TTL` | `172800` | Seconds a handled `wamid` stays remembered (replay guard). |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | `30` | Rolling "seen within N days" window for template-send recipient policy; `0` disables known-contact tracking (allowlist-only). |
@@ -78,6 +78,19 @@ tai conversations create chat-line \
   and `template` are mutually exclusive on one send; media and location may
   combine with a choice surface. A channel that cannot render a given field never
   receives it (the send gates on the matching `supports_*` capability flag).
+
+## Form asks
+
+A `form` ask (an `ask` whose answer is a small JSON object) renders as an in-chat
+**WhatsApp Flow**: the participant fills the fields and submits, and the completed
+values return as the answer. A multi-page layout renders one screen per page, and
+per-send prefill values and option lists open the form already filled in.
+
+If the platform rejects a submitted answer (a value fails the answer schema at the
+door), the **same form is re-sent** — same steps, same prefill, with the door's
+reason shown above it — so the participant can correct and resubmit. This repeats
+up to a fixed retry cap; past the cap the participant is told once that the form
+could not be processed and the ask times out.
 
 ## Inbound entry parameters
 

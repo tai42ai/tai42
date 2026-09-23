@@ -148,7 +148,7 @@ async def astream_tools_agent_events(
 
     ``park_builder`` (given the FINAL thread-id-resolved run config) decides park
     capability and captures the rebuild identity: the resume continuation is bound
-    around the drive, and a run that parks on an async ``ask_user`` persists its
+    around the drive, and a run that parks on an async ``ask`` persists its
     durable index and ends the stream with a terminal :class:`SuspendedFinal`.
     ``resume`` drives ``Command(resume=...)`` — answering a prior park — in place of
     a fresh user turn.

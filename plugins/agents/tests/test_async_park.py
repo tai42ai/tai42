@@ -1,4 +1,4 @@
-"""Agent async ``ask_user`` park/resume over a REAL deep-agent graph.
+"""Agent async ``ask`` park/resume over a REAL deep-agent graph.
 
 Every test drives a real ``build_langchain_deep_agent`` graph with a scripted fake chat model and
 an in-memory checkpointer/store, so the ``AsyncParkMiddleware`` before-model hook, the
@@ -6,7 +6,7 @@ messages reducer, and the interrupt/resume routing land exactly as a live run â€
 no network. Async is driven with ``asyncio.run`` (the repo does not use pytest-asyncio).
 
 The park marker a tool returns here is the same reserved contract marker the in-process
-client-tool seam stamps onto an async ``ask_user``'s ``SuspendedInteraction`` sentinel;
+client-tool seam stamps onto an async ``ask``'s ``SuspendedInteraction`` sentinel;
 the tool body counts its invocations so a resume that re-ran it (a double-park) is caught.
 
 The substitution half of the hook is exercised directly at the end: an ordinary answer becomes
@@ -493,6 +493,10 @@ def test_marker_round_trips_through_msg_content_output() -> None:
             # The park's resume OWNER rides the wire form: the claim point reads it here,
             # having never seen the sentinel object the seam converted.
             "resume_owner": "agent_resume",
+            # Both id lists ride the wire so a driver reading the marker off a serialized tool
+            # result can MERGE a whole super-step at one face; a single ask defaults to itself.
+            "interaction_ids": ["i1"],
+            "caller_interaction_ids": [],
         }
 
 
@@ -596,7 +600,7 @@ def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
             _park_or_resume(messages)
     finally:
         reset_resume_continuation_tool(token)
-    assert seen == [{AGENT_PARK_PAYLOAD_KEY: {"interactions": {key: None}}}]
+    assert seen == [{AGENT_PARK_PAYLOAD_KEY: {"interactions": {key: None}, "caller_interaction_ids": []}}]
 
 
 def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:

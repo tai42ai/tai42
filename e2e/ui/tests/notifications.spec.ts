@@ -67,3 +67,24 @@ test('the notifications feed door denies an unauthenticated read', async ({ requ
   const res = await request.get('/api/notifications');
   expect([401, 403]).toContain(res.status());
 });
+
+test('a notify_user form to the internal sink is refused — a form needs a channel to render', async ({
+  request,
+}) => {
+  // The notifications inbox is a read-only sink: it renders a message, never a fillable form. So a
+  // channel-less notify_user carrying a form ``schema`` is refused loudly at the door (nothing
+  // recorded), never a half-broken card. A form is rendered by a CHANNEL widget instead
+  // (form-data-widget.spec.ts), where a per-send ``data``/``pages`` opens prefilled and stepped.
+  const res = await request.post('/api/run-tool', {
+    headers: apiHeaders(),
+    data: {
+      tool_name: 'notify_user',
+      arguments: {
+        message: uniq('sink_form'),
+        schema: { type: 'object', properties: { label: { type: 'string' } } },
+      },
+    },
+  });
+  expect(res.status()).toBe(500);
+  expect((await res.text()).toLowerCase()).toContain('schema');
+});

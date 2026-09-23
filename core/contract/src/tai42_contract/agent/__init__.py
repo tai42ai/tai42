@@ -25,6 +25,7 @@ from tai42_contract.agent.events import (
     SuspendedFinal,
     ToolCallStep,
     ToolResultStep,
+    final_event_for_value,
 )
 
 # The ambient in-process session-thread door: a logic-free channel both the skeleton
@@ -54,6 +55,7 @@ __all__ = [
     "ToolCallStep",
     "ToolResultStep",
     "agent_session_thread",
+    "final_event_for_value",
     "get_agent_session_thread",
     "reset_agent_session_thread",
     "set_agent_session_thread",

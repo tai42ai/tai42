@@ -85,3 +85,48 @@ async def test_full_deliver_reaches_the_configured_human(monkeypatch: pytest.Mon
             question="tai42-channel-whatsapp live smoke: full deliver — reply is not expected.",
         )
     )
+
+
+@pytest.mark.skipif(
+    not os.environ.get("CHANNEL_WHATSAPP_WABA_ID"), reason="CHANNEL_WHATSAPP_WABA_ID not set (form leg needs a WABA)"
+)
+async def test_stepped_prefilled_form_creates_publishes_and_sends(monkeypatch: pytest.MonkeyPatch):
+    # The vendor authority for the publishable Flow JSON shape: a two-page prefilled form
+    # carrying a TextInput, a Dropdown with per-send options, AND an OptIn boolean,
+    # delivered through the real Graph API. deliver() runs build_form_flow →
+    # _resolve_flow_id → a real create + publish, then the send. It SUCCEEDS only if the
+    # create returned no validation_errors (else _resolve_flow_id raises and deletes the
+    # draft), the publish returned 200, and Meta accepted the send — proof that a screen
+    # id with a digit and a control-level init-value inside a Form are both gone, across
+    # every control type, the boolean included, and the prefill reaches the recipient.
+    from tai42_contract.interactions.models import FormData, FormOption, FormPage
+
+    monkeypatch.setenv("CHANNEL_WHATSAPP_REDIS_URL", "redis://in-memory-fake/0")
+    reset_all_settings()
+    settings = whatsapp_settings()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "title": "Note"},
+            "tier": {"type": "string", "title": "Tier"},
+            "agree": {"type": "boolean", "title": "Agree"},
+        },
+        "required": ["note"],
+    }
+    data = FormData(
+        values={"note": "prefilled", "tier": "gold", "agree": True},
+        options={"tier": [FormOption(value="gold", label="Gold"), FormOption(value="silver", label="Silver")]},
+    )
+    pages = [FormPage(title="Details", fields=["note", "tier"]), FormPage(title="Confirm", fields=["agree"])]
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            recipient=settings.allowed_recipients[0],
+            answer_format="form",
+            schema=schema,
+            data=data,
+            pages=pages,
+            question="tai42-channel-whatsapp live smoke: stepped prefilled form — reply is not expected.",
+        )
+    )

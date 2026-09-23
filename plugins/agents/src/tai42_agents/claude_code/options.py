@@ -108,7 +108,7 @@ def build_options_payload(
         # its ``.claude`` config subtree; Bash is allowed (the sandbox is the boundary).
         "allow_write_root": f"{ws}/project",
         "deny_write_subpaths": [f"{ws}/project/.claude"],
-        # One in-process SDK MCP server exposes ask_user + one proxy tool per requested name —
+        # One in-process SDK MCP server exposes ask + one proxy tool per requested name —
         # no HTTP entry, no credential.
         "proxy_tool_names": list(tool_names),
         "skills": list(skills),

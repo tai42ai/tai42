@@ -10,14 +10,38 @@ from unittest.mock import AsyncMock
 import pytest
 from arq.jobs import JobStatus
 from tai42_contract.access_control import caller_may_read_secrets
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.template import TemplatedText
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.schedule_subject import (
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+    SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_SUBJECT_ARG,
+)
 
 from tai42_backend_arq import tasks
 from tai42_backend_arq.settings import ArqSettings
+
+_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
+_FORWARDED = {
+    SCHEDULE_SUBJECT_ARG: _SUBJECT,
+    SCHEDULE_EXECUTION_KEY_ARG: "svc",
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+}
+
+
+class _RecordingRedis:
+    """Captures the ``tool_execution`` job the enqueue path submits."""
+
+    def __init__(self) -> None:
+        self.jobs: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def enqueue_job(self, *args: Any, **kwargs: Any) -> Any:
+        self.jobs.append((args, kwargs))
+        return None
 
 
 class _Ctx:
@@ -321,3 +345,41 @@ async def test_rendered_condition_unknown_id_raises(stub_app) -> None:
     cb = CallbackSchema(condition=TemplatedText(id="missing"))
     with pytest.raises(KeyError):
         await cb.rendered_condition()
+
+
+# -- the callback carries the followed run's door context --------------------------------
+
+
+async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(stub_app) -> None:
+    # A task fired from within a door forwards its subject/identity onto the job; the callback runs as a
+    # SEPARATE job, so the same pair is carried on its spec or the follow-up loses the door context.
+    redis: Any = _RecordingRedis()
+    await tasks.enqueue_task(
+        redis, backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), **_FORWARDED
+    )
+    (_, job_kwargs) = redis.jobs[0]
+    assert job_kwargs["callback_kwargs"].carried_kwargs == _FORWARDED
+
+
+async def test_enqueue_carries_nothing_onto_a_plain_callback(stub_app) -> None:
+    # A plain background task forwards no door context, so the callback stays a plain follow-up.
+    redis: Any = _RecordingRedis()
+    await tasks.enqueue_task(redis, backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), text="hi")
+    (_, job_kwargs) = redis.jobs[0]
+    assert job_kwargs["callback_kwargs"].carried_kwargs == {}
+
+
+async def test_callback_job_that_asks_parks_under_the_forwarded_identity(monkeypatch, stub_app) -> None:
+    # A dequeued callback whose tool asks parks under the carried identity + subject and hands back the
+    # re-park sentinel — the ask is never returned as the callback's value.
+    sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
+    stub_app.interactions.park_sentinel = sentinel
+    _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result={"value": 3}))
+    cb = CallbackSchema(tool="follow", carried_kwargs=dict(_FORWARDED))
+
+    out = await tasks.callback_job({"redis": object()}, "job-1", cb)
+
+    assert out is sentinel
+    assert stub_app.interactions.binds == [("svc", "fp-1")]
+    assert stub_app.interactions.visit_calls[0].receives_outcome is False
+    assert stub_app.interactions.visit_calls[0].context.door == "schedule"

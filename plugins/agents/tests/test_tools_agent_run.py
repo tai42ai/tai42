@@ -300,7 +300,7 @@ def test_run_keyless_does_not_pin_thread_id(
 def test_run_honors_a_caller_driven_resume(monkeypatch: pytest.MonkeyPatch, app_tools: Any) -> None:
     """A ``run`` given ``resume`` (no ``user_message``) drives the caller's
     ``Command(resume=...)`` map through to the runtime and returns its output — the
-    resumable path an async ``ask_user`` park opens."""
+    resumable path an async ``ask`` park opens."""
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:

@@ -182,17 +182,13 @@ async def tools_schema() -> dict:
 def _run_tool_return(outcome: VisitOutcome) -> Any:
     """The synchronous door's body for a visit outcome.
 
-    A plain result is the tool's own value (its wrapped secrets revealed for the one live caller);
-    a run whose tool async-parked returns a park receipt instead of raising — the caller ask entries
-    when the tool asked its caller, else the suspended sentinel's interaction ids; nothing ran → null.
+    A plain result is the tool's own value, its wrapped secrets revealed here for the one live
+    caller; every other kind is the shared park answer (the caller ask entries, the suspended
+    sentinel, or null), which reveals no secret — only this door does.
     """
     if outcome.kind == "result":
         return unwrap_secrets(outcome.result)
-    if outcome.kind == "asks":
-        return {"asks": [entry.model_dump(mode="json") for entry in outcome.asks]}
-    if outcome.kind == "parked":
-        return outcome.suspended.model_dump(mode="json") if outcome.suspended is not None else None
-    return None
+    return tai42_app.interactions.park_answer(outcome)
 
 
 @operation(

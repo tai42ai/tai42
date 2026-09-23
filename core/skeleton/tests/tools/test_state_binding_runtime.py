@@ -133,7 +133,7 @@ def test_merge_door_wins_subject_unions_templates_concats_and_appends_preset_onl
                 state="status",
                 subject_expr=TemplatedText(content=".a"),
                 templates=["t1"],
-                input_injections=[StateInjection(jq=TemplatedText(content=".record"), into="d")],
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="d")],
             )
         ]
     )
@@ -143,7 +143,7 @@ def test_merge_door_wins_subject_unions_templates_concats_and_appends_preset_onl
                 state="status",
                 subject_expr=TemplatedText(content=".b"),
                 templates=["t2"],
-                input_injections=[StateInjection(jq=TemplatedText(content=".record"), into="p")],
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="p")],
             ),
             StateAttach(state="events", subject_expr=TemplatedText(content=".c")),
         ]
@@ -160,7 +160,7 @@ def test_merge_door_wins_subject_unions_templates_concats_and_appends_preset_onl
 
 
 def test_merge_scope_expr_door_wins_when_present_else_preset() -> None:
-    # M4: the door's scope_expr wins WHEN PRESENT; when the door names none, the preset's is used.
+    # The door's scope_expr wins WHEN PRESENT; when the door names none, the preset's is used.
     door_with = StateBinding(
         states=[
             StateAttach(
@@ -195,7 +195,7 @@ async def test_subject_from_full_object_expression() -> None:
                 subject_expr=TemplatedText(
                     content='{target_kind: "agent", target_name: "a", kind: "thread", key: .id}'
                 ),
-                input_injections=[StateInjection(jq=TemplatedText(content=".record.seen"), into="out")],
+                input_injections=[StateInjection(jq=TemplatedText(content=".seen"), into="out")],
             )
         ]
     )
@@ -213,7 +213,7 @@ async def test_scope_expr_false_skips_the_state_for_the_run() -> None:
                 state="status",
                 subject_expr=TemplatedText(content=".tid"),
                 scope_expr=TemplatedText(content=".enabled"),  # a boolean predicate over the run input
-                input_injections=[StateInjection(jq=TemplatedText(content=".record.n"), into="n")],
+                input_injections=[StateInjection(jq=TemplatedText(content=".n"), into="n")],
             )
         ]
     )
@@ -232,7 +232,7 @@ async def test_scope_expr_true_engages_the_state() -> None:
                 state="status",
                 subject_expr=TemplatedText(content=".tid"),
                 scope_expr=TemplatedText(content=".enabled"),
-                input_injections=[StateInjection(jq=TemplatedText(content=".record.n"), into="n")],
+                input_injections=[StateInjection(jq=TemplatedText(content=".n"), into="n")],
             )
         ]
     )
@@ -308,7 +308,7 @@ async def test_named_injection_calls_eval_and_custom_runs_jq_over_record_and_inp
                 subject_expr=TemplatedText(content=".tid"),
                 input_injections=[
                     StateInjection(template_jq="view", into="v"),
-                    StateInjection(jq=TemplatedText(content="{c: .record.count, given: .input.tid}"), into="w"),
+                    StateInjection(jq=TemplatedText(content="{c: .count, given: $input.tid}"), into="w"),
                 ],
             )
         ]
@@ -331,10 +331,10 @@ async def test_named_update_adapts_input_and_custom_update_authors_ops() -> None
                 updates=[
                     StateUpdate(
                         template_jq="mark",
-                        adapter=TemplatedText(content="{verdict: .output.status}"),
-                        op_id=TemplatedText(content=".input.tid"),
+                        adapter=TemplatedText(content="{verdict: .status}"),
+                        op_id=TemplatedText(content="$input.tid"),
                     ),
-                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .output}]')),
+                    StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .}]')),
                 ],
             )
         ]
@@ -451,9 +451,9 @@ async def test_validate_binding_compiles_scope_custom_and_qualified_named_exprs(
                 subject_expr=TemplatedText(content=".id"),
                 scope_expr=TemplatedText(content=".ok"),
                 templates=["planner"],
-                input_injections=[StateInjection(jq=TemplatedText(content="{v: .record}"), into="x")],
+                input_injections=[StateInjection(jq=TemplatedText(content="{v: .}"), into="x")],
                 updates=[
-                    StateUpdate(jq=TemplatedText(content="[]"), op_id=TemplatedText(content=".output.id")),
+                    StateUpdate(jq=TemplatedText(content="[]"), op_id=TemplatedText(content=".id")),
                     StateUpdate(template_jq="planner.mark", adapter=TemplatedText(content="{v: 1}")),
                 ],
             )
@@ -571,9 +571,9 @@ async def test_by_id_slots_resolve_and_compile_at_save() -> None:
     resources = {
         "subj": ".id",
         "scope": ".ok",
-        "inj": "{v: .record}",
+        "inj": "{v: .}",
         "upd": "[]",
-        "op": ".output.id",
+        "op": ".id",
     }
     b = StateBinding(
         states=[

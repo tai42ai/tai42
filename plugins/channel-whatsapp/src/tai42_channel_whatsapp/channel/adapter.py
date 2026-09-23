@@ -22,7 +22,7 @@ from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
 from tai42_channel_whatsapp.client import send_message
 from tai42_channel_whatsapp.correlation import release_pending, reserve_pending
-from tai42_channel_whatsapp.flows import build_flow
+from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class WhatsAppChannel:
     supports_template_notifications: ClassVar[bool] = True
     supports_interactive_notifications: ClassVar[bool] = True
     supports_form_notifications: ClassVar[bool] = True
-    # This channel renders a form ask as a WhatsApp Flow; the ask_user helper reads
+    # This channel renders a form ask as a WhatsApp Flow; the ask helper reads
     # this before handing a form delivery over.
     supports_form_delivery: ClassVar[bool] = True
 
@@ -52,7 +52,8 @@ class WhatsAppChannel:
         key) — and every subset rule the Flow mapping enforces — is refused here as
         a ``ValueError``, so a schema the delivery path could never render is
         rejected up front instead of persisting a question that only fails at
-        delivery. ``build_flow`` is the single mapping definition; a delivery-time
+        delivery. ``build_form_flow`` is the single mapping definition — the builder
+        that actually sends is the one that refuses; a delivery-time
         ``ChannelInputError`` becomes the ask-time ``ValueError``. The Flow body is
         ``interactive.body.text``, capped by Meta at ``_INTERACTIVE_BODY_MAX_CHARS``,
         so an over-long ``question`` is refused here too.
@@ -60,7 +61,7 @@ class WhatsAppChannel:
         if len(question) > _INTERACTIVE_BODY_MAX_CHARS:
             raise ValueError(f"form question exceeds {_INTERACTIVE_BODY_MAX_CHARS} characters")
         try:
-            build_flow(schema)
+            build_form_flow(schema)
         except ChannelInputError as exc:
             raise ValueError(str(exc)) from exc
 

@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A Meta **WhatsApp API** channel plugin for the TAI ecosystem. It delivers
-an `ask_user` question to a human on WhatsApp through the Cloud (Graph) API and
+an `ask` question to a human on WhatsApp through the Cloud (Graph) API and
 bridges the human's reply back into the interactions store — so an agent can
 reach a person out-of-band instead of only showing the question in the Studio
 inbox. It implements the `tai42_contract.channels.Channel` protocol and registers
@@ -15,7 +15,7 @@ Cloud API (no BSP/Twilio in front); the Twilio-hosted path is the sibling
 
 TAI is an open-source runtime for MCP tools, agents, and workflows. A `Channel`
 is "how a question reaches a human" — a pluggable deliverer the runtime resolves
-by name when `ask_user` is called with `channel=...`. This package is one such
+by name when `ask` is called with `channel=...`. This package is one such
 deliverer (WhatsApp API); siblings back the same contract with Twilio,
 Telegram, or Slack. The ecosystem is open-ended: any package can back the same
 contract, so this repo is this plugin's own full doc home, and the documentation
@@ -76,7 +76,7 @@ Settings are read from the `CHANNEL_WHATSAPP_` environment group (see
 | `CHANNEL_WHATSAPP_ACCESS_TOKEN` | yes | Graph API access token (`SecretStr`) — the Bearer credential for the send |
 | `CHANNEL_WHATSAPP_APP_SECRET` | yes | Meta app secret (`SecretStr`) — the `X-Hub-Signature-256` HMAC key for inbound webhooks |
 | `CHANNEL_WHATSAPP_VERIFY_TOKEN` | yes | Shared token (`SecretStr`) echoed during Meta's GET webhook verification handshake |
-| `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | for ask_user | The `phone_number_id` messages are sent FROM when no sender identity is routed |
+| `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | for ask | The `phone_number_id` messages are sent FROM when no sender identity is routed |
 | `CHANNEL_WHATSAPP_WABA_ID` | for forms | The WhatsApp Business Account id that owns Flows — a `form` ask and an ask-less form notification are rendered as a WhatsApp Flow created and published under this WABA, and the notify-form schema cache is keyed under it. Required only on the form paths |
 | `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | for cold templates | Whitelist of `wa_id`s a **template** send may reach when the recipient is not a known contact — comma-separated or a JSON list. Freeform sends are not fenced by it |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | no (30) | Rolling "seen within N days" window admitting a template send to a `wa_id` the inbound webhook has messaged from; `0` disables known-contact tracking (allowlist-only templates) |
@@ -88,7 +88,7 @@ Settings are read from the `CHANNEL_WHATSAPP_` environment group (see
 
 One credential (`ACCESS_TOKEN` + `APP_SECRET`) serves many `phone_number_id`s: a
 bridge reply is sent from the exact `phone_number_id` that received the inbound
-message, while an ask_user delivery is sent from
+message, while an ask delivery is sent from
 `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID`. Recipient policy is split by what
 Meta itself fences. **Freeform** sends (questions, replies, media) reach any
 requested `wa_id` — Meta's own 24-hour customer-service window is the fence, so a
@@ -302,7 +302,7 @@ status is acknowledged, never retried.
 
 | Limit | Consequence |
 |---|---|
-| One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask_user` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
+| One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
 | Inbound media carries no typed attachment | Inbound **media** (image/document/audio/video/sticker) bridges as a turn (caption → text, identity → `media_*` params) but **without** a typed `attachments` entry: the Graph media id is not a durable `MediaItem` source and no served-media ingestion seam is reachable from a channel (see the inbound media design note). A consumer re-fetches bytes via `media_id` + operator credentials. Inbound **location** DOES land a typed `LocationElement`; **contacts**/**reactions** ride `params` |

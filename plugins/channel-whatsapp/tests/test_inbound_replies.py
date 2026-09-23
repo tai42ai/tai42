@@ -102,7 +102,7 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
     result = await handler(signed_request(message_payload(text="ship it")))
 
     assert result.status_code == 200
-    assert not fake_httpx.calls  # bridge does not use the ask_user forward
+    assert not fake_httpx.calls  # bridge does not use the ask forward
     assert stub_app.conversations.accept_calls == [
         {
             "channel": "whatsapp",
@@ -130,7 +130,7 @@ async def test_uncorrelated_unrouted_inbound_logged_ack_no_turn(
         result = await handler(signed_request(message_payload()))
 
     assert result.status_code == 200
-    assert not fake_httpx.calls  # no ask_user forward
+    assert not fake_httpx.calls  # no ask forward
     assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted
     assert any("unrouted" in record.message for record in caplog.records)
     assert _SEEN_KEY in fake_redis.store  # replay of the same wamid dedupes
@@ -148,7 +148,7 @@ async def test_uncorrelated_blank_inbound_logged_ack_no_turn(
         result = await handler(signed_request(message_payload(text="   ")))
 
     assert result.status_code == 200
-    assert not fake_httpx.calls  # no ask_user forward
+    assert not fake_httpx.calls  # no ask forward
     assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted, no turn produced
     assert any("blank" in record.message for record in caplog.records)
     assert _SEEN_KEY in fake_redis.store  # replay of the same wamid dedupes

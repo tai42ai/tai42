@@ -9,6 +9,8 @@ retrying an ambiguous failure risks texting the human twice. Any failure raises
 
 from __future__ import annotations
 
+import json
+
 import httpx
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError
@@ -57,13 +59,33 @@ async def send_message(to: str, from_number: str, body: str, media_urls: list[st
     return sid
 
 
-def _error_detail(response: httpx.Response) -> str:
-    """Twilio's ``code``/``message`` when the body is JSON, else raw text.
+# Twilio's REST error object, in the vendor's documented field order.
+_ERROR_FIELDS = ("code", "message", "status", "more_info")
 
-    Bounded to 500 chars so an HTML error page cannot flood the exception.
+
+def _error_detail(response: httpx.Response) -> str:
+    """Twilio's full documented error object from the parsed body, else raw text.
+
+    Each present field renders as a ``name=<render>`` token in Twilio's fixed order
+    — ``repr(value)`` for a scalar, compact sorted JSON for a list/dict — joined by
+    one space; the whole is bounded to 500 chars so an HTML error page cannot flood
+    the exception. A non-JSON body, or a body that is not a dict, falls back to the
+    raw response text (also bounded).
     """
     try:
         payload = response.json()
     except ValueError:
         return response.text[:500]
-    return f"code={payload.get('code')} message={payload.get('message')!r}"[:500]
+    if not isinstance(payload, dict):
+        return response.text[:500]
+    tokens: list[str] = []
+    for name in _ERROR_FIELDS:
+        if name not in payload:
+            continue
+        value = payload[name]
+        if isinstance(value, (list, dict)):
+            render = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        else:
+            render = repr(value)
+        tokens.append(f"{name}={render}")
+    return " ".join(tokens)[:500]

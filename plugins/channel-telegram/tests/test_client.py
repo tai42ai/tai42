@@ -91,3 +91,58 @@ async def test_answer_callback_query_ok_false_echoes_error_code_and_description(
         await answer_callback_query("cb-1")
     assert "query is too old" in str(excinfo.value)
     assert _TOKEN not in str(excinfo.value)
+
+
+async def test_send_chat_action_non_200_json_error_surfaces_full_detail(http_recorder, fake_redis):
+    # Telegram answers its structured error on the HTTP-error status too — the non-200
+    # arm routes _error_detail, so error_code/description/parameters all surface.
+    http_recorder.responder = lambda request: httpx.Response(
+        429,
+        json={
+            "ok": False,
+            "error_code": 429,
+            "description": "Too Many Requests: retry later",
+            "parameters": {"retry_after": 5},
+        },
+    )
+    with pytest.raises(ChannelDeliveryError, match="error_code=429") as excinfo:
+        await send_chat_action(555, "typing")
+    assert "description='Too Many Requests: retry later'" in str(excinfo.value)
+    assert 'parameters={"retry_after":5}' in str(excinfo.value)
+    assert _TOKEN not in str(excinfo.value)
+
+
+async def test_send_chat_action_ok_false_surfaces_parameters(http_recorder, fake_redis):
+    # The 200 ok:false arm routes the same helper: parameters (here migrate_to_chat_id) ride too.
+    http_recorder.responder = lambda request: httpx.Response(
+        200,
+        json={
+            "ok": False,
+            "error_code": 400,
+            "description": "Bad Request: group migrated",
+            "parameters": {"migrate_to_chat_id": -1001234567890},
+        },
+    )
+    with pytest.raises(ChannelDeliveryError, match="error_code=400") as excinfo:
+        await send_chat_action(555, "typing")
+    assert 'parameters={"migrate_to_chat_id":-1001234567890}' in str(excinfo.value)
+
+
+async def test_send_chat_action_non_200_non_json_body_falls_back_to_bounded_text(http_recorder, fake_redis):
+    # A non-JSON error body (a proxy/WAF HTML page) falls back to the bounded raw text.
+    http_recorder.responder = lambda request: httpx.Response(502, text="<html>" + "x" * 2000 + "</html>")
+    with pytest.raises(ChannelDeliveryError, match="sendChatAction rejected") as excinfo:
+        await send_chat_action(555, "typing")
+    assert len(str(excinfo.value)) < 600  # detail bounded to 500 chars
+    assert _TOKEN not in str(excinfo.value)
+
+
+async def test_answer_callback_query_non_200_json_error_surfaces_full_detail(http_recorder, fake_redis):
+    http_recorder.responder = lambda request: httpx.Response(
+        400,
+        json={"ok": False, "error_code": 400, "description": "query is too old", "parameters": {"retry_after": 1}},
+    )
+    with pytest.raises(ChannelDeliveryError, match="error_code=400") as excinfo:
+        await answer_callback_query("cb-1")
+    assert 'parameters={"retry_after":1}' in str(excinfo.value)
+    assert _TOKEN not in str(excinfo.value)

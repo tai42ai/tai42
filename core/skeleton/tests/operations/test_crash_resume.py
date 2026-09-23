@@ -12,12 +12,18 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import pytest
+from tai42_contract.states import StateContext, SubjectCandidates
 
 import tai42_skeleton.operations.tool_runs as ops
 from tai42_skeleton.operations.tool_runs import ToolRunStore, _reconcile_lost_with_liveness
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
 from .._fakes.tool_runs_redis import FakeRedis
+
+# A fire's ambient subject: the ``door="hook"`` context an inline fire runs under, persisted on a
+# crash-resume record so the re-drive replays under the same subject.
+_CANDIDATES = SubjectCandidates(target_kind="agent", target_name="a", by_kind={"person": "pA"})
+_STATE_CONTEXT = StateContext(door="hook", candidates=_CANDIDATES, actor="svc-key")
 
 
 @pytest.fixture
@@ -50,6 +56,7 @@ async def test_create_run_persists_arguments_and_flag_when_crash_resume(wired) -
         user_id="u1",
         arguments={"x": 1},
         extras={"warm": "y"},
+        state_context=_STATE_CONTEXT,
         crash_resume=True,
     )
     record = await store.get_run(fake, "r1")
@@ -57,6 +64,29 @@ async def test_create_run_persists_arguments_and_flag_when_crash_resume(wired) -
     assert record["crash_resume"] == "1"
     assert json.loads(record["arguments"]) == {"x": 1}
     assert json.loads(record["extras"]) == {"warm": "y"}
+    assert json.loads(record["state_context"]) == _STATE_CONTEXT.model_dump(mode="json")
+
+
+async def test_create_run_omits_state_context_when_the_fire_had_no_subject(wired) -> None:
+    # A crash-resume run whose fire ran under no subject stores no ``state_context``; its re-drive
+    # deposits none. This is the no-subject case, not a legacy branch.
+    store, fake, settings = wired
+    await store.create_run(
+        fake,
+        "r1n",
+        "alpha",
+        "2026-01-01T00:00:00",
+        1.0,
+        settings,
+        user_id="u1",
+        arguments={"x": 1},
+        state_context=None,
+        crash_resume=True,
+    )
+    record = await store.get_run(fake, "r1n")
+    assert record is not None
+    assert record["crash_resume"] == "1"
+    assert "state_context" not in record
 
 
 async def test_crash_resume_re_drive_passes_the_recorded_extras(wired, monkeypatch) -> None:
@@ -77,11 +107,16 @@ async def test_crash_resume_re_drive_passes_the_recorded_extras(wired, monkeypat
 
 async def test_create_run_stores_neither_for_an_unflagged_run(wired) -> None:
     store, fake, settings = wired
-    await store.create_run(fake, "r2", "alpha", "2026-01-01T00:00:00", 1.0, settings, user_id="u1")
+    # An un-flagged run stores none of the re-drive inputs even when a subject was passed: the
+    # state context lands only on crash-resume records.
+    await store.create_run(
+        fake, "r2", "alpha", "2026-01-01T00:00:00", 1.0, settings, user_id="u1", state_context=_STATE_CONTEXT
+    )
     record = await store.get_run(fake, "r2")
     assert record is not None
     assert "crash_resume" not in record
     assert "arguments" not in record
+    assert "state_context" not in record
 
 
 async def test_reconcile_redispatches_a_flagged_lost_run(wired, monkeypatch) -> None:

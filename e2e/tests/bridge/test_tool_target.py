@@ -1,7 +1,7 @@
 """Tool-target conversation routes (twilio fake + api door).
 
 A ``target_kind=tool`` route dispatches a registered tool per inbound message instead of
-running an agent: the message maps to the tool kwargs (``payload_expr``), the tool result
+running an agent: the message maps to the tool kwargs (``start_expr``), the tool result
 maps to the reply (``reply_expr`` or a null/string pass-through), and a reply that maps to
 null/blank sends nothing at all. No scripted LLM is involved — the tool runs directly under
 the route's execution key.
@@ -62,7 +62,7 @@ async def test_tool_target_echoes_a_reply_and_maps_null_to_silence(
         execution_key=exec_echo,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM,
-        payload_expr="{payload: .message}",
+        start_expr="{payload: .message}",
     )
     # The silent route runs e2e_record — a tool whose Redis side effect proves it EXECUTED —
     # but maps its reply to null, so nothing is ever sent. The side effect is the completion
@@ -75,7 +75,7 @@ async def test_tool_target_echoes_a_reply_and_maps_null_to_silence(
         execution_key=exec_silent,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM_B,
-        payload_expr=f'{{key: "{silent_probe}", value: .message}}',
+        start_expr=f'{{key: "{silent_probe}", value: .message}}',
         reply_expr="null",
     )
 
@@ -132,7 +132,7 @@ async def test_api_tool_target_null_reply_answers_silent_inline(
         tool="e2e_echo",
         execution_key=exec_key,
         callback_url=_UNREACHABLE_CALLBACK,
-        payload_expr="{payload: .message}",
+        start_expr="{payload: .message}",
         reply_expr="null",
     )
 
@@ -171,7 +171,7 @@ async def test_api_tool_target_null_reply_delivers_silent_marker_async(
         tool="e2e_echo",
         execution_key=exec_key,
         callback_url=_UNREACHABLE_CALLBACK,
-        payload_expr="{payload: .message}",
+        start_expr="{payload: .message}",
         reply_expr="null",
     )
 

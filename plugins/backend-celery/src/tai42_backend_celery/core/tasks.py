@@ -18,9 +18,8 @@ from typing import Any
 from celery import Task
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from tai42_contract.app import tai42_app
-from tai42_kit.backend import CallbackSchema, callback_execution
+from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
-from tai42_kit.utils.schedule_subject import schedule_state_context
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 from tai42_backend_celery.core.app import celery_app
@@ -104,14 +103,14 @@ async def run_tool(**kwargs: Any) -> Any:
     # the secret-read capability — the worker binds the submitter's own capability
     # carried with the job (falling back to the gate state when none rode along).
     secret_capability = kwargs.pop(WORKER_SECRET_CAPABILITY_ARG, None)
-    # A scheduled fire carries its subject under a reserved kwarg (stamped at creation,
-    # where "this is a schedule" is known); popped and re-established as the ``schedule``
-    # state context here so a state write during the fire is keyed and attributed to it.
-    # A plain background run carries none and runs context-free (``api`` door).
+    # ``backend_fire`` pops the reserved ``backend_schedule_*`` job kwargs and either binds the stamped
+    # firing identity and drives the schedule door (a contract-bearing schedule, or a task that
+    # forwarded the ambient subject/identity), or runs the tool plainly when the job carries no door
+    # signal. A park comes back as the re-park sentinel it returns.
     detached_token = mark_detached_run()
     try:
-        with schedule_state_context(kwargs), bind_worker_secret_capability(secret_capability):
-            return await tai42_app.tools.run_tool(tool_name, kwargs, offload_sync=True)
+        with bind_worker_secret_capability(secret_capability):
+            return await backend_fire(tool_name, kwargs)
     finally:
         reset_detached_run(detached_token)
 

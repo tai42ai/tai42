@@ -67,7 +67,7 @@ def _refusal_code(html: str) -> str | None:
     return match.group(1) if match else None
 
 
-async def _tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, payload_expr: str) -> str:
+async def _tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, start_expr: str) -> str:
     """A ``target_kind=tool`` web route recording its delivered payload; returns its identity.
     The reply maps to null so a message runs the tool (the record lands) but appends nothing."""
     identity = uniq(f"{tag}-site").replace("_", "-")
@@ -80,7 +80,7 @@ async def _tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: st
         execution_key=exec_key,
         channel="web",
         our_identity=identity,
-        payload_expr=payload_expr,
+        start_expr=start_expr,
         reply_expr="null",
     )
     return identity
@@ -113,9 +113,9 @@ async def _wait_record(bridge: BridgeHarness, key: str, *, deadline: float = 20.
 
 
 async def test_an_ungated_route_is_unchanged(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
-    """A route with no gate serves and round-trips exactly as before — the feature is additive."""
+    """A route with no gate serves and round-trips normally — the gate is additive."""
     probe = uniq("l23a")
-    identity = await _tool_route(bridge, uniq, "l23a", payload_expr=f'{{key: "{probe}", value: .message}}')
+    identity = await _tool_route(bridge, uniq, "l23a", start_expr=f'{{key: "{probe}", value: .message}}')
     web, page = await WebChatClient.open_page(_base_url(bridge), identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200
     text = uniq("l23a-msg")
@@ -129,7 +129,7 @@ async def test_a_live_code_admits_and_is_multi_use(bridge: BridgeHarness, uniq: 
     round-trips end to end; the code is multi-use — a second fresh visitor scans the SAME code
     and gets their OWN session."""
     probe = uniq("l23b")
-    identity = await _tool_route(bridge, uniq, "l23b", payload_expr=f'{{key: "{probe}", value: .sender}}')
+    identity = await _tool_route(bridge, uniq, "l23b", start_expr=f'{{key: "{probe}", value: .sender}}')
     store_url = bridge.stack.resources.redis_url
     await _open_gate(bridge, identity)
     code, _code_id = await _mint_code(bridge, identity)
@@ -159,7 +159,7 @@ async def test_a_live_code_admits_and_is_multi_use(bridge: BridgeHarness, uniq: 
 async def test_a_bare_navigation_on_a_gated_route_is_refused(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     """A gated route with no ``tai_entry`` answers the 403 ``entry_refused`` page and mints no
     session cookie."""
-    identity = await _tool_route(bridge, uniq, "l23c", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23c", start_expr='{key: "x", value: .message}')
     await _open_gate(bridge, identity)
     await _mint_code(bridge, identity)
 
@@ -174,7 +174,7 @@ async def test_a_wrong_code_is_refused_identically_to_a_bare_navigation(
 ) -> None:
     """No oracle: an unknown code and a missing code answer the BYTE-IDENTICAL refusal page —
     a caller can never tell "wrong code" from "no code"."""
-    identity = await _tool_route(bridge, uniq, "l23d", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23d", start_expr='{key: "x", value: .message}')
     await _open_gate(bridge, identity)
     await _mint_code(bridge, identity)
     base = _base_url(bridge)
@@ -198,7 +198,7 @@ async def test_the_navigation_guard_runs_before_the_gate(bridge: BridgeHarness, 
     """A non-navigation (a cross-site subresource) answers ``not_a_navigation`` regardless of
     the code it carries — the guard runs BEFORE the gate, so no response differs by code
     validity and a valid code leaks nothing to a subresource load."""
-    identity = await _tool_route(bridge, uniq, "l23e", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23e", start_expr='{key: "x", value: .message}')
     await _open_gate(bridge, identity)
     code, _code_id = await _mint_code(bridge, identity)
     base = _base_url(bridge)
@@ -216,7 +216,7 @@ async def test_the_navigation_guard_runs_before_the_gate(bridge: BridgeHarness, 
 async def test_an_expired_code_becomes_refused(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     """A short-expiry code admits while live, then answers the same 403 page once its TTL
     lapses — expiry gates NEW entries."""
-    identity = await _tool_route(bridge, uniq, "l23f", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23f", start_expr='{key: "x", value: .message}')
     store_url = bridge.stack.resources.redis_url
     await _open_gate(bridge, identity)
     code, code_id = await _mint_code(bridge, identity, expires_at=datetime.now(UTC) + timedelta(seconds=2))
@@ -244,7 +244,7 @@ async def test_a_revoked_code_is_refused_and_the_last_revoke_leaves_the_gate_clo
 ) -> None:
     """Revoking a code refuses new entries with it; revoking the LAST code leaves the gate
     enabled but with no live code, so the route is closed (revocation is a hard cut)."""
-    identity = await _tool_route(bridge, uniq, "l23g", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23g", start_expr='{key: "x", value: .message}')
     store_url = bridge.stack.resources.redis_url
     await _open_gate(bridge, identity)
     code, code_id = await _mint_code(bridge, identity)
@@ -270,7 +270,7 @@ async def test_an_existing_session_survives_a_bare_reload(bridge: BridgeHarness,
     """A session is an already-granted capability: a visitor admitted with a valid code is
     served on a later BARE reload of the same route (no code) — the gate gates new entries,
     not established ones."""
-    identity = await _tool_route(bridge, uniq, "l23h", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23h", start_expr='{key: "x", value: .message}')
     store_url = bridge.stack.resources.redis_url
     await _open_gate(bridge, identity)
     code, _code_id = await _mint_code(bridge, identity)
@@ -290,7 +290,7 @@ async def test_rotate_gates_a_new_session_the_same_way(bridge: BridgeHarness, un
     """A rotation mints a session, so a gated identity gates it: with a live code it rotates,
     without a code it answers the 403 JSON ``entry_refused`` — the rotate-door counterpart of
     the page refusal."""
-    identity = await _tool_route(bridge, uniq, "l23i", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23i", start_expr='{key: "x", value: .message}')
     store_url = bridge.stack.resources.redis_url
     await _open_gate(bridge, identity)
     code, _code_id = await _mint_code(bridge, identity)
@@ -318,7 +318,7 @@ async def test_throttle_refuses_uniformly_and_a_clear_bucket_still_admits(
     VALID code (the throttle is checked before the code, so it reveals no oracle). A client
     whose throttle window is clear is then admitted with the same valid code: the throttle is a
     recoverable per-bucket gate, not a global lockout."""
-    identity = await _tool_route(bridge, uniq, "l23j", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23j", start_expr='{key: "x", value: .message}')
     base = _base_url(bridge)
     await _open_gate(bridge, identity)
     code, _code_id = await _mint_code(bridge, identity)
@@ -348,7 +348,7 @@ async def test_management_doors_are_authed_and_never_leak_a_raw_code(
 ) -> None:
     """The management plane: a mint returns the raw code exactly once, a list returns only its
     id and metadata (never the raw code), and every door refuses an unauthed caller."""
-    identity = await _tool_route(bridge, uniq, "l23k", payload_expr='{key: "x", value: .message}')
+    identity = await _tool_route(bridge, uniq, "l23k", start_expr='{key: "x", value: .message}')
     await _open_gate(bridge, identity)
     code, code_id = await _mint_code(bridge, identity)
 
@@ -376,8 +376,8 @@ async def test_one_url_admits_and_delivers_its_link_params(bridge: BridgeHarness
     gate AND its link param reaches the tool — with ``tai_entry`` stripped from the delivered
     params (the door's own coordinate never leaks into ``.params``)."""
     probe = uniq("l23l")
-    payload_expr = f'{{key: "{probe}", value: ({{x: .params.x, keys: (.params | keys)}} | tojson)}}'
-    identity = await _tool_route(bridge, uniq, "l23l", payload_expr=payload_expr)
+    start_expr = f'{{key: "{probe}", value: ({{x: .params.x, keys: (.params | keys)}} | tojson)}}'
+    identity = await _tool_route(bridge, uniq, "l23l", start_expr=start_expr)
     store_url = bridge.stack.resources.redis_url
     await _open_gate(bridge, identity)
     code, _code_id = await _mint_code(bridge, identity)

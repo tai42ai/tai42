@@ -1,8 +1,8 @@
 """The ``ask_external`` builtin tool extension (TRANSFORMER) through the
 stack.
 
-Distinct from the interactions suite's ``ask_user`` external-format spec: that one
-calls the ``ask_user`` tool directly with a literal ``link`` template. THIS one
+Distinct from the interactions suite's ``ask`` external-format spec: that one
+calls the ``ask`` tool directly with a literal ``link`` template. THIS one
 drives the EXTENSION, which composes a tool into the external ask — it presents
 the wrapped tool's params minus ``callback_url`` plus ``question`` /
 ``answer_schema`` / ``timeout``, calls the wrapped tool with the platform-minted

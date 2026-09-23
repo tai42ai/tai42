@@ -76,7 +76,7 @@ async def test_erasing_a_linked_person_forgets_every_person_scoped_store(
         execution_key=exec_tw,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr="null",
     )
     await bridge.create_tool_channel_route(
@@ -85,7 +85,7 @@ async def test_erasing_a_linked_person_forgets_every_person_scoped_store(
         execution_key=exec_wa,
         channel="whatsapp",
         our_identity=BRIDGE_WHATSAPP_PHONE_ID,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr="null",
     )
 

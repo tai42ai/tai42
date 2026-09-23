@@ -55,16 +55,26 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
 
 
-def _mcp_call_subject(message: Any) -> StateSubject | None:
+# The ``_meta`` key an MCP ``tools/call`` caller names its subject under.
+_SUBJECT_META_KEY = "tai42/subject"
+
+
+def _mcp_call_subject(context: MiddlewareContext[Any]) -> StateSubject | None:
     """The caller's named subject read off an MCP ``tools/call`` request's ``_meta["tai42/subject"]``.
 
-    ``None`` when the caller named none; a malformed value raises loudly (never a silent drop).
+    The client's request ``_meta`` arrives on the middleware's request context
+    (``fastmcp_context.request_context.meta``), whose extra fields carry the named subject — the
+    ``CallToolRequestParams`` message itself carries no ``_meta``. ``None`` when the caller named
+    none (or the request context is not yet established); a malformed value raises loudly (never a
+    silent drop).
     """
     from tai42_contract.states import StateSubject
 
-    meta = getattr(message, "meta", None)
-    extra = getattr(meta, "model_extra", None) if meta is not None else None
-    raw = extra.get("tai42/subject") if extra else None
+    fastmcp_context = context.fastmcp_context
+    request_context = fastmcp_context.request_context if fastmcp_context is not None else None
+    meta = request_context.meta if request_context is not None else None
+    extra = meta.model_extra if meta is not None else None
+    raw = extra.get(_SUBJECT_META_KEY) if extra else None
     return StateSubject.model_validate(raw) if raw is not None else None
 
 
@@ -295,7 +305,7 @@ class DispatchScopeMiddleware(Middleware):
             binding_args = {}
             context.message.arguments = binding_args
         user_id, _restricted = request_identity()
-        subject = _mcp_call_subject(context.message)
+        subject = _mcp_call_subject(context)
         attribution = run_attribution(RunAttribution(user_id=user_id)) if user_id is not None else nullcontext()
         # Bind the caller's own execution identity (so a parking tool can rebind its continuation)
         # and deposit the ``door="api"`` subject context (so the park indexes under the caller's

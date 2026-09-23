@@ -306,7 +306,7 @@
     },
     "StateInjection": {
       "additionalProperties": false,
-      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for\nan injection — the run-input field the value lands under. Frozen.",
+      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over the record (its ``.``) with the run input bound as\n``$input``. ``into`` IS the adapter for an injection — the run-input field the value lands\nunder. Frozen.",
       "properties": {
         "into": {
           "minLength": 1,
@@ -324,28 +324,22 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the injection input document",
-            "keys": [
-              {
-                "gloss": "the attached record's subtree, or {} when no record exists yet",
-                "name": "record"
-              },
-              {
-                "gloss": "the run input the dispatch is about to run on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the attached record's subtree, or {} when no record exists yet",
             "label": "injection jq",
             "language": "jq",
             "returns": "the value placed into the run input at 'into'",
             "sample": {
-              "input": {
-                "value": 2
-              },
-              "record": {
-                "count": 3
+              "count": 3
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch is about to run on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               }
-            }
+            ]
           }
         },
         "template_jq": {
@@ -396,7 +390,7 @@
     },
     "StateTemplateJq": {
       "additionalProperties": false,
-      "description": "One named jq program on a state template.\n\n``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program\nover ``{record, input}`` returning a template-relative op batch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
+      "description": "One named jq program on a state template.\n\n``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program\nover the record subtree (its ``.``) with ``$input`` bound, returning a template-relative op\nbatch. ``jq`` is the program body as a\n:class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).\n``params`` names the keys the program takes; ``reads``/``writes`` are the\ntemplate-relative record paths an ``update`` program declares and are absent on an\n``input`` program. Structural checks (jq compilation, path resolution) live at the store;\nthis model pins the served wire shape.",
       "properties": {
         "description": {
           "default": "",
@@ -473,7 +467,7 @@
     },
     "StateUpdate": {
       "additionalProperties": false,
-      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over ``{output, input}``) shapes from the run's\noutput/input; or ``jq`` is a templated text rendering to a custom program over ``{record,\noutput, input}`` authoring the whole op batch itself (a custom update carries no adapter).\n``op_id`` is an optional templated text rendering to an idempotency-key expression.\nFrozen.",
+      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over the tool output, its ``.``, with the run input bound\nas ``$input``) shapes from the run's output/input; or ``jq`` is a templated text rendering\nto a custom program over the tool output (its ``.``) with the run input bound as ``$input``\nand the record as ``$record``, authoring the whole op batch itself (a custom update carries\nno adapter). ``op_id`` is an optional templated text rendering to an idempotency-key\nexpression. Frozen.",
       "properties": {
         "adapter": {
           "anyOf": [
@@ -486,28 +480,22 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the update input document",
-            "keys": [
-              {
-                "gloss": "the run's output the update runs after",
-                "name": "output"
-              },
-              {
-                "gloss": "the run input the dispatch ran on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the run's output the update runs after",
             "label": "update adapter",
             "language": "jq",
             "returns": "the template program's '.input' object",
             "sample": {
-              "input": {
-                "value": 2
-              },
-              "output": {
-                "ok": true
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               }
-            }
+            ]
           }
         },
         "jq": {
@@ -521,35 +509,29 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the custom-update input document",
-            "keys": [
-              {
-                "gloss": "the attached record's subtree, or {} when no record exists yet",
-                "name": "record"
-              },
-              {
-                "gloss": "the run's output the update runs after",
-                "name": "output"
-              },
-              {
-                "gloss": "the run input the dispatch ran on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the run's output the update runs after",
             "label": "custom update jq",
             "language": "jq",
             "returns": "the op batch (a list of ops) applied to the record",
             "sample": {
-              "input": {
-                "value": 2
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               },
-              "output": {
-                "ok": true
-              },
-              "record": {
-                "count": 3
+              {
+                "blurb": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record",
+                "sample": {
+                  "count": 3
+                }
               }
-            }
+            ]
           }
         },
         "op_id": {
@@ -563,28 +545,22 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the update input document",
-            "keys": [
-              {
-                "gloss": "the run's output the update runs after",
-                "name": "output"
-              },
-              {
-                "gloss": "the run input the dispatch ran on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the run's output the update runs after",
             "label": "op_id expression",
             "language": "jq",
             "returns": "a string idempotency key, or null for no key",
             "sample": {
-              "input": {
-                "value": 2
-              },
-              "output": {
-                "ok": true
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               }
-            }
+            ]
           }
         },
         "template_jq": {
@@ -2725,7 +2701,7 @@
     },
     "StateInjection": {
       "additionalProperties": false,
-      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for\nan injection — the run-input field the value lands under. Frozen.",
+      "description": "One input injection placed into the run input under ``into`` before the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``input``-purpose template jq\n(``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated\ntext rendering to a custom program over the record (its ``.``) with the run input bound as\n``$input``. ``into`` IS the adapter for an injection — the run-input field the value lands\nunder. Frozen.",
       "properties": {
         "into": {
           "minLength": 1,
@@ -2743,28 +2719,22 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the injection input document",
-            "keys": [
-              {
-                "gloss": "the attached record's subtree, or {} when no record exists yet",
-                "name": "record"
-              },
-              {
-                "gloss": "the run input the dispatch is about to run on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the attached record's subtree, or {} when no record exists yet",
             "label": "injection jq",
             "language": "jq",
             "returns": "the value placed into the run input at 'into'",
             "sample": {
-              "input": {
-                "value": 2
-              },
-              "record": {
-                "count": 3
+              "count": 3
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch is about to run on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               }
-            }
+            ]
           }
         },
         "template_jq": {
@@ -2881,7 +2851,7 @@
     },
     "StateUpdate": {
       "additionalProperties": false,
-      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over ``{output, input}``) shapes from the run's\noutput/input; or ``jq`` is a templated text rendering to a custom program over ``{record,\noutput, input}`` authoring the whole op batch itself (a custom update carries no adapter).\n``op_id`` is an optional templated text rendering to an idempotency-key expression.\nFrozen.",
+      "description": "One update applied through the store after the dispatch.\n\nExactly one source is set: ``template_jq`` names an ``update``-purpose template jq\n(``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a\ntemplated text rendering to a jq over the tool output, its ``.``, with the run input bound\nas ``$input``) shapes from the run's output/input; or ``jq`` is a templated text rendering\nto a custom program over the tool output (its ``.``) with the run input bound as ``$input``\nand the record as ``$record``, authoring the whole op batch itself (a custom update carries\nno adapter). ``op_id`` is an optional templated text rendering to an idempotency-key\nexpression. Frozen.",
       "properties": {
         "adapter": {
           "anyOf": [
@@ -2894,28 +2864,22 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the update input document",
-            "keys": [
-              {
-                "gloss": "the run's output the update runs after",
-                "name": "output"
-              },
-              {
-                "gloss": "the run input the dispatch ran on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the run's output the update runs after",
             "label": "update adapter",
             "language": "jq",
             "returns": "the template program's '.input' object",
             "sample": {
-              "input": {
-                "value": 2
-              },
-              "output": {
-                "ok": true
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               }
-            }
+            ]
           }
         },
         "jq": {
@@ -2929,35 +2893,29 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the custom-update input document",
-            "keys": [
-              {
-                "gloss": "the attached record's subtree, or {} when no record exists yet",
-                "name": "record"
-              },
-              {
-                "gloss": "the run's output the update runs after",
-                "name": "output"
-              },
-              {
-                "gloss": "the run input the dispatch ran on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the run's output the update runs after",
             "label": "custom update jq",
             "language": "jq",
             "returns": "the op batch (a list of ops) applied to the record",
             "sample": {
-              "input": {
-                "value": 2
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               },
-              "output": {
-                "ok": true
-              },
-              "record": {
-                "count": 3
+              {
+                "blurb": "the attached record's subtree, or {} when no record exists yet",
+                "name": "record",
+                "sample": {
+                  "count": 3
+                }
               }
-            }
+            ]
           }
         },
         "op_id": {
@@ -2971,28 +2929,22 @@
           ],
           "default": null,
           "x-tai42-expression": {
-            "blurb": "the update input document",
-            "keys": [
-              {
-                "gloss": "the run's output the update runs after",
-                "name": "output"
-              },
-              {
-                "gloss": "the run input the dispatch ran on",
-                "name": "input"
-              }
-            ],
+            "blurb": "the run's output the update runs after",
             "label": "op_id expression",
             "language": "jq",
             "returns": "a string idempotency key, or null for no key",
             "sample": {
-              "input": {
-                "value": 2
-              },
-              "output": {
-                "ok": true
+              "ok": true
+            },
+            "variables": [
+              {
+                "blurb": "the run input the dispatch ran on",
+                "name": "input",
+                "sample": {
+                  "value": 2
+                }
               }
-            }
+            ]
           }
         },
         "template_jq": {

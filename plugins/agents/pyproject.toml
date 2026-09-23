@@ -69,7 +69,7 @@ Issues = "https://github.com/tai42ai/tai42/issues"
 Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/agents/CHANGELOG.md"
 
 [project.optional-dependencies]
-# The durable store behind the agent async-``ask_user`` park index (reached through
+# The durable store behind the agent async-``ask`` park index (reached through
 # the kit's ``RedisClient``): a parked run's paused graph is reversed back from an
 # answered interaction id here, independent of the checkpoint provider. Optional and
 # imported lazily — a deployment that never async-parks never installs or touches it, and

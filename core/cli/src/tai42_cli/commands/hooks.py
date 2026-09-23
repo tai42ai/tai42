@@ -85,6 +85,10 @@ def register_hook(
     An existing name is REPLACED, ``execution_key`` included, and ``registered`` is
     ``true`` either way — run ``tai hooks list`` first to see whether the name is taken.
 
+    A hook is a parkable-driving door: an optional ``start_expr`` builds the fired tool's
+    kwargs over the event payload (e.g. ``"start_expr":".body"``), and ``cancel_expr`` /
+    ``resume_expr`` / ``extras_expr`` act on the run's parked interactions and its extras.
+
     Example: ``tai hooks register --params '{"name":"h1","topic":"gh","tool":"notify","execution_key":"svc"}'``
     """
     ctx_obj = app_context(ctx)

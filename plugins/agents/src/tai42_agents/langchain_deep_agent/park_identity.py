@@ -13,9 +13,9 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
-from tai42_contract.interactions import get_park_completion
+from tai42_contract.tools import get_run_delivery_id
 
-from tai42_agents._internal.park import ParkIdentity, build_park_identity
+from tai42_agents._internal.park import ParkIdentity, build_park_identity, chain_routing_slots
 from tai42_agents.langchain_deep_agent.spec import InlineSkill
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
@@ -90,21 +90,20 @@ def build_astream_park(
 ) -> ParkIdentity | None:
     """Assemble the streaming face's park identity, or ``None`` when the turn cannot park.
 
-    The streaming face returns its stream to a caller that cannot receive a late
-    answer, so it binds a resume path — and lets an async ask park — ONLY when a
-    completion tool is bound in context (the conversation turn binds one to deliver
-    the resumed answer). The completion tool is stored on the park entry and fired
-    with the final answer on a clean terminal drive. A run carrying live tools or
-    neutral (live) subagents is not rebuildable, so it never parks; with no completion
-    bound, an async ask refuses loudly pre-persist. The retention bound is
-    min(checkpoint, workspace). The binding's opaque context is stored beside the tool
-    name and merged into the completion fire, so the delivery tool receives the address
-    it routes by.
+    Park-capability follows the RUN-DELIVERY context, not an out-of-band address: a run driven
+    under one (the starting door opened the minting call frame) can park whether or not that
+    door bound a delivery address — a live receiver takes the outcome inline, a receiver-less
+    run subject-tracks or fires its stored address on a later resolve. A run carrying live tools
+    or neutral (live) subagents is not rebuildable, so it never parks; a stream driven under NO
+    run-delivery context has no receiver, so an async ask refuses loudly pre-persist. The
+    retention bound is min(checkpoint, workspace). What the park ENTRY captures is the
+    cross-driver CHAIN routing (``chained_resume``), not the door address: the driver fires only
+    the chain at its terminal.
     """
-    completion_tool, completion_context = get_park_completion()
     park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
-    if completion_tool is None or not park_rebuildable:
+    if get_run_delivery_id() is None or not park_rebuildable:
         return None
+    completion_tool, completion_context = chain_routing_slots()
     return build_park_identity(
         agent_name=agent_name,
         config=config,

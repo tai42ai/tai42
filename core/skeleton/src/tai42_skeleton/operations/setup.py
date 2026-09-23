@@ -31,6 +31,7 @@ from tai42_skeleton.access_control.setup_gate import (
     record_setup_failure,
     setup_lock,
     setup_throttle_locked,
+    setup_unserviceable_reason,
     verify_setup_token,
 )
 from tai42_skeleton.access_control.store import access_control_store
@@ -99,9 +100,10 @@ async def setup_deployment(
 ) -> dict:
     """Initialize the deployment once behind the secure-by-default setup-token gate.
 
-    Only meaningful on an access-controlled install: with the gate OFF there is nothing to
-    protect, so the door refuses loudly with a 501. The per-IP backoff is consulted BEFORE
-    the token, so a wrong-token flood escalates a lockout that turns further attempts away
+    Only meaningful on a serviceable access-controlled install: it refuses loudly with a
+    501 when the door cannot initialize — access control off, no configured key-minting
+    identity provider, or the access-control Redis unset. The per-IP backoff is consulted
+    BEFORE the token, so a wrong-token flood escalates a lockout that turns further attempts away
     without ever comparing; a wrong/absent token is a generic 403 (no oracle for the
     initialized state). Under one mint mutex: 409 "Already initialized" when ANY principal
     exists; else the owner principal (``kind=human``) is created, granted the admin role,
@@ -112,11 +114,9 @@ async def setup_deployment(
     credential is compensated then mapped to the caller (a too-short password → 400, a
     login/email collision → 409) rather than surfaced as a 500.
     """
-    if not access_control_settings().enable:
-        raise NotSupportedError(
-            "the setup door serves access-controlled installs only; it is disabled while "
-            "ACCESS_CONTROL_ENABLE is off (with the gate off there is nothing to initialize)"
-        )
+    unserviceable = setup_unserviceable_reason(access_control_settings())
+    if unserviceable is not None:
+        raise NotSupportedError(unserviceable)
 
     if await setup_throttle_locked(client_ip):
         logger.warning("setup: throttled for ip=%s", client_ip)
@@ -126,11 +126,6 @@ async def setup_deployment(
         await record_setup_failure(client_ip)
         logger.warning("setup: token mismatch/absent from ip=%s", client_ip)
         raise ForbiddenError("Forbidden")
-
-    if not any(mintable for _name, mintable in management.provider_capabilities()):
-        raise NotSupportedError(
-            "no configured identity provider can mint api keys; the setup door requires a key-minting provider"
-        )
 
     owner_id = owner_user_id or f"usr-{token_urlsafe(8)}"
     key_id = key_user_id or f"{owner_id}-key"

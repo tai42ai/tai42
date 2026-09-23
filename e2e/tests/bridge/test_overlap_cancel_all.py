@@ -16,7 +16,7 @@ from ._overlap_support import (
     entry_texts,
     joined,
     open_visitor,
-    probe_payload_expr,
+    probe_start_expr,
     reply_matching,
     send_web,
 )
@@ -33,7 +33,7 @@ async def test_cancel_all_carries_the_cancelled_message_in_superseded(
         uniq,
         "ov-cancel-all",
         tool="e2e_overlap_probe",
-        payload_expr=probe_payload_expr(marker, hold_seconds=_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "all"},
     )
     web = await open_visitor(bridge, identity)

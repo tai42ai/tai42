@@ -1,6 +1,6 @@
 """Display-only question media rides ask -> store-by-reference -> paged list + tail.
 
-An ``ask_user`` question may carry optional ``media`` (images and/or links) shown
+An ``ask`` question may carry optional ``media`` (images and/or links) shown
 WITH the question in the inbox. These specs prove the wire end to end against the
 real booted stack: a ``data:image`` is stored BY REFERENCE (the durable record and
 the frame carry a same-origin ``/api/interactions/media/<id>`` url, never the inline
@@ -57,7 +57,7 @@ def _assert_media_stored_by_reference(media: list[dict[str, Any]]) -> str:
 
 
 async def _ask(stack: TaiStack, question: str, media: list[dict[str, object]] | None) -> object:
-    """Drive the builtin ``ask_user`` tool over MCP on replica A; the call PARKS
+    """Drive the builtin ``ask`` tool over MCP on replica A; the call PARKS
     until the question is answered, so its awaited result is the human's answer."""
     arguments: dict[str, object] = {"question": question}
     if media is not None:
@@ -65,7 +65,7 @@ async def _ask(stack: TaiStack, question: str, media: list[dict[str, object]] | 
     async with stack.mcp(port=stack.port_a) as mcp:
         # A boot-time ask races the ~2s self-resync gate (a retriable ``reloading``);
         # poll past it so the call parks on the real question, not the reload gate.
-        result = await mcp.call_tool("ask_user", arguments, retry_on_reloading=True)
+        result = await mcp.call_tool("ask", arguments, retry_on_reloading=True)
     return result.data
 
 
@@ -200,7 +200,7 @@ async def test_invalid_media_fails_loudly_and_writes_zero_state(
             # Retry past a boot-time ``reloading`` gate; the invalid-media rejection is
             # a non-reload error, so it is returned at once (never retried).
             result = await mcp.call_tool(
-                "ask_user", {"question": question, "media": media}, raise_on_error=False, retry_on_reloading=True
+                "ask", {"question": question, "media": media}, raise_on_error=False, retry_on_reloading=True
             )
         assert result.is_error, f"expected invalid media to reject {question!r}"
         text = "".join(getattr(block, "text", "") for block in (result.content or []))

@@ -1,38 +1,37 @@
 """Answer-schema → WhatsApp Flow JSON mapping.
 
-An ``ask_user`` form ask carries a JSON answer schema; this module renders it as
-a single-screen WhatsApp Flow the human fills in-chat. The supported subset is a
+An ``ask`` form ask carries a JSON answer schema; this module renders it as a
+publishable WhatsApp Flow the human fills in-chat. The supported subset is a
 top-level ``{"type": "object", "properties": {...}, "required": [...]}`` whose
 properties map one-to-one onto Flow field components:
 
 * ``string``                 → ``TextInput``
-* ``string`` with ``enum``   → ``Dropdown`` (static ``data-source`` items)
+* ``string`` with ``enum``   → ``Dropdown`` (dynamic ``data-source`` items)
 * ``boolean``                → ``OptIn``
 * ``integer`` / ``number``   → ``TextInput`` with ``input-type: "number"``
 
 Each property's ``title`` (else the property name) is the field label; the
 ``required`` list flags the components. Anything outside the subset — a nested
-object, an array, a ``oneOf``/``anyOf``, an unknown type, or the reserved
-``flow_token`` property name — is a permanent input refusal (the medium cannot
-render it BY NATURE): it raises ``ChannelInputError`` naming the property and why,
-before any network work, and is never retried.
+object, an array, a ``oneOf``/``anyOf``, an unknown type, a string ``enum`` that is
+not a non-empty list of strings, or the reserved ``flow_token`` property name — is a
+permanent input refusal (the medium cannot render it BY NATURE): it raises
+``ChannelInputError`` naming the property and why, before any network work, and is
+never retried.
 
-The emitted Flow is one terminal screen ``"FORM"`` with a ``SingleColumnLayout``
-holding one ``Form`` named ``"form"``; its ``Footer`` completes the flow with a
-payload binding every field to ``${form.<field>}``. ``build_flow`` is pure and
-also returns the canonical schema hash (sha256 over a sorted-keys, compact JSON
-dump) that keys the published-Flow cache.
-
-``build_form_flow`` is the ASK (deliver) variant that carries the inline feature's
-per-send data and pages. It publishes ONE Flow per ``(schema, pages, option_fields)``
-triple (never per send): each page becomes its own screen (``SCREEN_0`` the entry,
-the last terminal), a choice field's ``Dropdown`` reads a DYNAMIC ``data-source`` and
-every control an ``init-value`` from the screen's ``data`` model, so the send injects
-the prefilled values and the per-send option lists through ``flow_action_payload.data``
-(built by :func:`build_flow_data`) rather than re-publishing. Collected values are
-threaded forward across screens by each step's navigate payload; the terminal
-screen completes with the flat UNION of every field, keyed by field name, so the
-inbound decode reads it exactly as an unpaged form.
+``build_form_flow`` is the one builder. Each page becomes its own screen — screen
+ids are letters-and-underscores only (``SCREEN_A`` the entry the send navigates to,
+``SCREEN_B`` …, the last terminal), so the vendor's publish accepts them — and every
+screen is a ``SingleColumnLayout`` holding its field components and its footer
+DIRECTLY, with no ``Form`` wrapper. Every control carries its own ``init-value``
+(``${data.<field>__init}``) and a choice field a dynamic ``data-source``
+(``${data.<field>__ds}``), so a send injects the prefilled values and the per-send
+option lists through ``flow_action_payload.data`` (built by :func:`build_flow_data`)
+rather than re-publishing. Collected values thread forward across screens by each
+step's navigate payload; the terminal screen completes with the flat UNION of every
+field, keyed by field name, so the inbound decode reads it exactly as an unpaged
+form. A footer reads a control's just-filled value through the unwrapped-component
+reference ``${screen.<field>}``; an earlier screen's value rides forward as
+``${data.<field>__val}``.
 
 A string property renders as a dynamic ``Dropdown`` when it carries a schema ``enum``
 OR when the ask marks it option-bearing (``option_fields`` — the set of
@@ -43,6 +42,10 @@ option-bearing set publishes its own Flow, while an unchanged triple reuses one.
 string property that is neither enum nor option-bearing stays a ``TextInput``. A
 per-send option list on a NON-STRING property cannot be honored (only a string maps
 to a dropdown) and is refused loudly, naming the field.
+
+``build_form_flow`` returns the ``(flow_json, key)`` pair; ``key`` is a sha256 over
+the ``(schema, pages, option_fields, flow_json)`` — the emitted Flow folded in, so a
+change to the emitted shape re-keys the published-Flow cache — and keys that cache.
 """
 
 from __future__ import annotations
@@ -54,18 +57,20 @@ from typing import Any
 from tai42_contract.channels import ChannelInputError
 
 # Flow JSON version pinned to a Cloud-API-valid release. This is a static
-# (endpoint-less) navigate flow whose single terminal screen completes with the
-# form payload — no ``data_api_version`` because there is no data-exchange
-# endpoint. Bump this constant when a newer schema version is adopted.
+# (endpoint-less) navigate flow whose terminal screen completes with the form
+# payload — no ``data_api_version`` because there is no data-exchange endpoint.
+# Bump this constant when a newer schema version is adopted.
 _FLOW_JSON_VERSION = "7.0"
 
-# The single terminal screen id; the send's flow_action_payload navigates to it.
-_SCREEN_ID = "FORM"
-# The per-page screen id prefix for a stepped form (``SCREEN_0`` is the entry screen
-# the send navigates to). One screen per page; the last is terminal.
+# The per-page screen id prefix. A screen id must be letters-and-underscores only
+# (the vendor rejects a digit in an ``id`` at publish), so the page index's decimal
+# digits are mapped onto letters — ``SCREEN_A`` is the entry screen the send
+# navigates to, then ``SCREEN_B`` … one screen per page, the last terminal.
 _SCREEN_PREFIX = "SCREEN_"
-# The Form component name the field bindings (``${form.<field>}``) resolve against.
-_FORM_NAME = "form"
+# The digit→letter table: decimal digit ``d`` maps to the ``d``-th letter, so the
+# index's decimal representation stays injective and the ids stay unique and
+# unbounded (``SCREEN_J`` is 9, ``SCREEN_BA`` is 10).
+_SCREEN_DIGIT_LETTERS = "ABCDEFGHIJ"
 # Generic labels — a form ask carries no domain-specific chrome.
 _SCREEN_TITLE = "Form"
 _FOOTER_LABEL = "Submit"
@@ -78,47 +83,19 @@ _CONTINUE_LABEL = "Continue"
 _RESERVED_PROPERTY = "flow_token"
 
 
-def _field_component(name: str, prop: dict[str, Any], required: bool) -> dict[str, Any]:
-    """One Flow field component for a single top-level schema property.
+def _screen_id(index: int) -> str:
+    """The screen id for a zero-based page index — letters-and-underscores only.
 
-    Raises ``ChannelInputError`` naming the property when it is outside the subset.
+    The index's decimal digits are mapped onto :data:`_SCREEN_DIGIT_LETTERS`, so no
+    id ever carries a digit (which the vendor rejects at publish) yet the ids stay
+    unique and unbounded in page count.
     """
-    label = prop.get("title") if isinstance(prop.get("title"), str) else name
-    prop_type = prop.get("type")
-    enum = prop.get("enum")
-
-    if prop_type == "string" and enum is not None:
-        if not isinstance(enum, list) or not enum or not all(isinstance(item, str) for item in enum):
-            raise ChannelInputError(f"form property {name!r}: a string enum must be a non-empty list of strings")
-        return {
-            "type": "Dropdown",
-            "name": name,
-            "label": label,
-            "required": required,
-            "data-source": [{"id": item, "title": item} for item in enum],
-        }
-    if prop_type == "string":
-        return {"type": "TextInput", "name": name, "label": label, "required": required}
-    if prop_type == "boolean":
-        return {"type": "OptIn", "name": name, "label": label, "required": required}
-    if prop_type in ("integer", "number"):
-        return {
-            "type": "TextInput",
-            "name": name,
-            "label": label,
-            "required": required,
-            "input-type": "number",
-        }
-    raise ChannelInputError(
-        f"form property {name!r}: unsupported schema type {prop_type!r} — a form field must be "
-        "string, string+enum, boolean, integer, or number (no nested objects, arrays, or unions)"
-    )
+    return _SCREEN_PREFIX + "".join(_SCREEN_DIGIT_LETTERS[int(digit)] for digit in str(index))
 
 
-def _canonical_hash(schema: dict[str, Any]) -> str:
-    """sha256 hex over a canonical (sorted-keys, compact-separator) JSON dump."""
-    canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+# The entry screen a form send navigates to (index 0). The single source of truth
+# for that id, imported by the send path so it can never drift from the builder.
+FORM_ENTRY_SCREEN = _screen_id(0)
 
 
 def _validate_object_schema(schema: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
@@ -142,57 +119,19 @@ def _validate_object_schema(schema: dict[str, Any]) -> tuple[dict[str, Any], set
     return properties, set(required_raw)
 
 
-def build_flow(schema: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """The ``(flow_json, schema_hash)`` for a form answer schema.
+def _canonical_hash_pages(
+    schema: dict[str, Any], pages: list[dict[str, Any]], option_fields: set[str], flow_json: dict[str, Any]
+) -> str:
+    """sha256 hex over a canonical dump of ``(schema, pages, option_fields, flow_json)``.
 
-    Validates the schema is the supported ``object`` subset and maps each property
-    to a field component; raises ``ChannelInputError`` (naming the offending
-    property or shape) on anything outside it. Pure — no I/O.
-    """
-    properties, required = _validate_object_schema(schema)
-
-    components: list[dict[str, Any]] = []
-    payload: dict[str, str] = {}
-    for name, prop in properties.items():
-        if name == _RESERVED_PROPERTY:
-            raise ChannelInputError(
-                f"form property {name!r}: reserved on this channel — Meta injects {name!r} into the "
-                "Flow response to correlate the reply, so a field of that name is unanswerable"
-            )
-        if not isinstance(prop, dict):
-            raise ChannelInputError(f"form property {name!r}: schema must be an object")
-        components.append(_field_component(name, prop, name in required))
-        payload[name] = f"${{form.{name}}}"
-
-    components.append(
-        {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
-    )
-    flow_json = {
-        "version": _FLOW_JSON_VERSION,
-        "screens": [
-            {
-                "id": _SCREEN_ID,
-                "title": _SCREEN_TITLE,
-                "terminal": True,
-                "layout": {
-                    "type": "SingleColumnLayout",
-                    "children": [{"type": "Form", "name": _FORM_NAME, "children": components}],
-                },
-            }
-        ],
-    }
-    return flow_json, _canonical_hash(schema)
-
-
-def _canonical_hash_pages(schema: dict[str, Any], pages: list[dict[str, Any]], option_fields: set[str]) -> str:
-    """sha256 hex over a canonical dump of the ``(schema, pages, option_fields)`` TRIPLE.
-
-    The published Flow key for a stepped/per-send form. A different page layout OR a different
-    option-bearing set keys a different published Flow, and the ``pages``/``option_fields`` members keep
-    it from colliding with the ask-less (schema-only) hash.
+    The published-Flow cache key for a per-send form. A different page layout, a
+    different option-bearing set, OR a different emitted Flow shape keys a different
+    published Flow; the ``schema`` member keeps the notify sidecar's exact-schema
+    identity, and folding in the emitted ``flow_json`` means a change to the emitted
+    shape alone re-keys (a corrected shape can never resolve an earlier one).
     """
     canonical = json.dumps(
-        {"schema": schema, "pages": pages, "option_fields": sorted(option_fields)},
+        {"schema": schema, "pages": pages, "option_fields": sorted(option_fields), "flow": flow_json},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -301,7 +240,8 @@ def _forward_field_data(name: str, prop: dict[str, Any], option_fields: set[str]
 def _validate_form_properties(properties: dict[str, Any], required: set[str], option_fields: set[str]) -> None:
     """Validate every property is inside the supported per-send subset, before any screen is built.
 
-    Raises ``ChannelInputError`` naming a reserved name, a non-object property, or an unsupported type.
+    Raises ``ChannelInputError`` naming a reserved name, a non-object property, an unsupported type, or a
+    string ``enum`` that is not a non-empty list of strings.
     """
     for name, prop in properties.items():
         if name == _RESERVED_PROPERTY:
@@ -311,6 +251,15 @@ def _validate_form_properties(properties: dict[str, Any], required: set[str], op
             )
         if not isinstance(prop, dict):
             raise ChannelInputError(f"form property {name!r}: schema must be an object")
+        # A string enum, when present, must be a non-empty list of strings — else the
+        # published dropdown would have nothing (or the wrong shape) to pick from.
+        enum = prop.get("enum")
+        if (
+            prop.get("type") == "string"
+            and enum is not None
+            and (not isinstance(enum, list) or not enum or not all(isinstance(item, str) for item in enum))
+        ):
+            raise ChannelInputError(f"form property {name!r}: a string enum must be a non-empty list of strings")
         # Validate the subset up front (raises naming the property on an unsupported type).
         _dynamic_component(name, prop, name in required, option_fields)
 
@@ -371,17 +320,18 @@ def _screen_footer(
 ) -> dict[str, Any]:
     """The screen's ``Footer`` component.
 
-    The terminal screen completes with the flat union of every field (this screen's from the form, earlier
-    ones from their ``__val`` carriers); a non-terminal screen navigates to the next, forwarding
-    successors' init/ds and every collected value, and records the transition in ``routing_model``.
+    The terminal screen completes with the flat union of every field (this screen's read through the
+    unwrapped-component reference ``${screen.<field>}``, earlier ones from their ``__val`` carriers); a
+    non-terminal screen navigates to the next, forwarding successors' init/ds and every collected value,
+    and records the transition in ``routing_model``.
     """
     if is_terminal:
         payload = {
-            name: (f"${{form.{name}}}" if name in this_fields else f"${{data.{name}__val}}") for name in properties
+            name: (f"${{screen.{name}}}" if name in this_fields else f"${{data.{name}__val}}") for name in properties
         }
         return {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
-    screen_id = f"{_SCREEN_PREFIX}{index}"
-    next_screen = f"{_SCREEN_PREFIX}{index + 1}"
+    screen_id = _screen_id(index)
+    next_screen = _screen_id(index + 1)
     routing_model[screen_id] = [next_screen]
     forward: dict[str, str] = {}
     for name in later_fields:
@@ -389,7 +339,7 @@ def _screen_footer(
     for name in earlier_fields:
         forward[f"{name}__val"] = f"${{data.{name}__val}}"
     for name in this_fields:
-        forward[f"{name}__val"] = f"${{form.{name}}}"
+        forward[f"{name}__val"] = f"${{screen.{name}}}"
     return {
         "type": "Footer",
         "label": _CONTINUE_LABEL,
@@ -427,12 +377,12 @@ def _build_form_screen(
     )
 
     screen: dict[str, Any] = {
-        "id": f"{_SCREEN_PREFIX}{index}",
+        "id": _screen_id(index),
         "title": str(page["title"]),
         "terminal": is_terminal,
         "layout": {
             "type": "SingleColumnLayout",
-            "children": [{"type": "Form", "name": _FORM_NAME, "children": [*components, footer]}],
+            "children": [*components, footer],
         },
     }
     if data_model:
@@ -445,18 +395,20 @@ def build_form_flow(
     pages: list[dict[str, Any]] | None = None,
     option_fields: set[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """The ``(flow_json, key)`` for a per-send/stepped form ask.
+    """The ``(flow_json, key)`` for a per-send/stepped form ask — publishable Flow JSON.
 
     One screen per page (``pages`` absent → one screen carrying every property in
-    schema order); each choice field reads a dynamic ``data-source`` and every control
-    an ``init-value``, so the send supplies the values/options through
-    ``flow_action_payload.data``. A string property renders as a choice ``Dropdown`` when
-    it carries a schema ``enum`` or when ``option_fields`` (the ask's option-bearing set,
-    the ``data.options`` keys) names it; any other string stays a ``TextInput``. Collected
-    values thread forward across screens and the terminal screen completes with the flat
-    union of every field. ``key`` is the hash of the ``(schema, pages, option_fields)``
-    triple. Pure — no I/O. Raises ``ChannelInputError`` naming any property outside the
-    subset or any page field that is not a declared property.
+    schema order); each screen holds its field components and footer directly (no
+    ``Form`` wrapper) and its ``id`` is letters-and-underscores only. Each choice field
+    reads a dynamic ``data-source`` and every control an ``init-value``, so the send
+    supplies the values/options through ``flow_action_payload.data``. A string property
+    renders as a choice ``Dropdown`` when it carries a schema ``enum`` or when
+    ``option_fields`` (the ask's option-bearing set, the ``data.options`` keys) names it;
+    any other string stays a ``TextInput``. Collected values thread forward across
+    screens and the terminal screen completes with the flat union of every field.
+    ``key`` is the hash of the ``(schema, pages, option_fields)`` and the emitted
+    ``flow_json``. Pure — no I/O. Raises ``ChannelInputError`` naming any property
+    outside the subset or any page field that is not a declared property.
     """
     option_fields = option_fields or set()
     properties, required = _validate_object_schema(schema)
@@ -486,9 +438,9 @@ def build_form_flow(
     flow_json: dict[str, Any] = {"version": _FLOW_JSON_VERSION, "screens": screens}
     if screen_count > 1:
         # A multi-screen navigate flow declares its allowed transitions.
-        routing_model[f"{_SCREEN_PREFIX}{screen_count - 1}"] = []
+        routing_model[_screen_id(screen_count - 1)] = []
         flow_json["routing_model"] = routing_model
-    return flow_json, _canonical_hash_pages(schema, resolved_pages, option_fields)
+    return flow_json, _canonical_hash_pages(schema, resolved_pages, option_fields, flow_json)
 
 
 def build_flow_data(

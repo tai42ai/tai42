@@ -17,20 +17,18 @@ from typing import Any
 from tai42_contract.channels import AnswerForwardError
 from tai42_kit.utils.data.form_text import render_form_text
 
-from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX
-from tai42_channel_whatsapp.client import send_flow, send_message
+from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX, send_form_ask_flow
+from tai42_channel_whatsapp.client import send_message
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
     bump_rejections,
-    get_cached_flow_id,
     get_cached_flow_schema,
     mark_seen,
     peek_pending,
     release_pending,
 )
-from tai42_channel_whatsapp.flows import build_flow
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
-from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
+from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
 
@@ -222,11 +220,12 @@ async def _recover_form_rejection(
     load-bearing for Meta's redelivery:
 
     * Under the cap — re-send a fresh Flow (same ``flow_token`` = ``interaction_id``,
-      same cached flow id), then count the rejection on the STILL-HELD record and mark
-      the wamid seen. A re-send that itself fails does NOT mark the wamid seen and
-      leaves the counter unchanged, then raises — so Meta's redelivery re-runs the
-      ladder, re-hits the 400, and re-enters this path (the counter is spent only by a
-      re-send that reached the participant).
+      the SAME published Flow reproduced from the pending record's inputs, re-created if
+      the cache was lost), then count the rejection on the STILL-HELD record and mark the
+      wamid seen. A re-send that itself fails does NOT mark the wamid seen and leaves the
+      counter unchanged, then raises — so Meta's redelivery re-runs the ladder, re-hits
+      the 400, and re-enters this path (the counter is spent only by a re-send that
+      reached the participant).
     * At the cap — tell the participant once the form could not be processed and mark the
       wamid seen; the ask times out on its side.
     """
@@ -253,33 +252,22 @@ async def _recover_form_rejection(
     body_text = _rejection_body(pending.question, _door_error_line(retry_reason))
     # A re-send that fails must NOT mark the wamid seen and must NOT count the rejection:
     # the record is still held (the ladder kept it), so letting the error propagate is
-    # enough — Meta's redelivery re-runs the ladder and re-enters this path.
-    flow_id = await _cached_form_flow_id(pending.schema)
-    await send_flow(
+    # enough — Meta's redelivery re-runs the ladder and re-enters this path. The one
+    # sender reproduces the SAME Flow from the pending record's inputs (re-creating it if
+    # the published-Flow cache was lost) and navigates to the entry screen with the same
+    # prefill and options the first send carried.
+    await send_form_ask_flow(
         phone_number_id=phone_number_id,
         to=wa_id,
         body_text=body_text,
-        flow_id=flow_id,
         flow_token=pending.interaction_id,
+        schema=pending.schema,
+        pages=pending.form_pages,
+        values=pending.form_values or {},
+        options=pending.form_options or {},
     )
     await bump_rejections(phone_number_id, wa_id, pending)
     await mark_seen(wamid)
-
-
-async def _cached_form_flow_id(schema: dict[str, Any]) -> str:
-    """The published flow id for a form ask's schema, from the cache the original send populated.
-
-    The cache has no TTL, so a miss means the store was lost — a loud failure that re-sends nothing,
-    never a silent skip of the recovery.
-    """
-    _, schema_hash = build_flow(schema)
-    waba_id = require_delivery_setting(whatsapp_settings().waba_id, "CHANNEL_WHATSAPP_WABA_ID")
-    flow_id = await get_cached_flow_id(waba_id, schema_hash)
-    if flow_id is None:
-        raise AnswerForwardError(
-            f"cannot re-send a form for the rejected answer: no published flow cached for its schema under {waba_id}"
-        )
-    return flow_id
 
 
 def _rejection_body(question: str, error_line: str) -> str:

@@ -1,5 +1,5 @@
 /**
- * The per-format answer controls for one `ask_user` question: a text field, a
+ * The per-format answer controls for one `ask` question: a text field, a
  * Yes/No pair, one button per option, a schema-driven form, or — for `external` —
  * a link out to the question's own callback page. The dispatch switch has NO default
  * arm: a new answer format has to be given a widget here before it type-checks.

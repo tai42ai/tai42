@@ -5,7 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
-from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
+from tai42_contract.agent.events import (
+    InterruptFinal,
+    MessageFinal,
+    StructuredFinal,
+    SuspendedFinal,
+    final_event_for_value,
+)
 from tai42_contract.conversations import ConversationRoute, Person
 from tai42_contract.interactions import (
     LocationElement,
@@ -113,6 +119,18 @@ async def _drive_agent_terminal(agent: Agent, run_kwargs: dict[str, Any]) -> Any
     return None
 
 
+def _final_event(result: Any) -> StructuredFinal | MessageFinal:
+    """A finished agent run's terminal as a final event, whichever path produced it.
+
+    The start drive yields the final event itself; a resume returns the run's plain terminal value,
+    which the platform's value rule maps to the SAME final event (a ``str`` → a message final, any
+    other value → a structured final). Both paths reach :func:`_agent_result_outcome` as one shape.
+    """
+    if isinstance(result, StructuredFinal | MessageFinal):
+        return result
+    return final_event_for_value(result)
+
+
 async def _agent_result_outcome(
     route: ConversationRoute,
     final: StructuredFinal | MessageFinal,
@@ -162,7 +180,7 @@ async def _agent_outcome_of_visit(
     the SAME client-safe error the fresh-turn path gives for an empty answer, never a silent drop.
     """
     if outcome.kind == "result":
-        return await _agent_result_outcome(route, outcome.result, turn=turn, parked=parked)
+        return await _agent_result_outcome(route, _final_event(outcome.result), turn=turn, parked=parked)
     if outcome.kind == "asks":
         asks = parked_entries_for_jq(outcome.asks)
         return await _agent_asks_outcome(route, asks, turn=turn, parked=parked)

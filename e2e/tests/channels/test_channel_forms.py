@@ -1,6 +1,6 @@
 """Form-over-channel delivery on the backendless channel stack.
 
-``ask_user(answer_format="form", schema=..., channel=...)`` renders a schema-driven
+``ask(answer_format="form", schema=..., channel=...)`` renders a schema-driven
 answer surface on the channels that advertise ``supports_form_delivery`` and refuses
 loudly on one that does not:
 
@@ -26,6 +26,7 @@ from collections.abc import Callable
 
 import httpx
 import pytest
+from fastmcp.client.client import CallToolResult
 
 from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.settings import HarnessSettings
@@ -98,7 +99,7 @@ async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {"question": question, "channel": "telegram", "answer_format": "form", "schema": _FORM_SCHEMA},
             )
         return result.data
@@ -152,7 +153,7 @@ async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {"question": question, "channel": "slack", "answer_format": "form", "schema": _FORM_SCHEMA},
             )
         return result.data
@@ -219,7 +220,7 @@ async def test_form_to_a_non_advertising_channel_is_refused_and_persists_nothing
     # ValueError naming the channel, raised BEFORE any state is written.
     async with stack.mcp(port=stack.port_a) as mcp:
         result = await mcp.call_tool(
-            "ask_user",
+            "ask",
             {"question": question, "channel": "twilio", "answer_format": "form", "schema": _FORM_SCHEMA},
             raise_on_error=False,
         )
@@ -230,3 +231,103 @@ async def test_form_to_a_non_advertising_channel_is_refused_and_persists_nothing
     # The refusal is pre-persist and pre-send: nothing is pending, and no SMS was sent.
     assert not await is_pending(stack, stack.port_b, question)
     assert fake_twilio.sends_matching(question) == []
+
+
+# The ask-less form a ``notify_user`` send carries: a schema, a prefill + per-send options, and a
+# stepped page layout — the same FormData/FormPage vocabulary the ask path uses.
+_NOTIFY_FORM_SCHEMA = {
+    "type": "object",
+    "required": ["label"],
+    "properties": {
+        "label": {"type": "string"},
+        "color": {"type": "string", "enum": ["red", "blue"]},
+        "count": {"type": "integer"},
+    },
+}
+
+
+async def _notify(stack: TaiStack, arguments: dict) -> CallToolResult:
+    async with stack.mcp(port=stack.port_a) as mcp:
+        return await mcp.call_tool("notify_user", arguments, raise_on_error=False, retry_on_reloading=True)
+
+
+async def test_notify_form_over_a_channel_carries_the_prefilled_values_and_pages(
+    channel_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    stack = channel_stack
+    recipient = uniq("nf-rcpt")
+    label = uniq("nf-label")
+    data = {
+        "values": {"label": label, "color": "blue"},
+        "options": {"color": [{"value": "blue", "label": "Blue"}, {"value": "red", "label": "Red"}]},
+    }
+    pages = [{"title": "Who", "fields": ["label", "color"]}, {"title": "How many", "fields": ["count"]}]
+
+    result = await _notify(
+        stack,
+        {
+            "message": uniq("nf-msg"),
+            "channel": "stub_form",
+            "recipient": recipient,
+            "schema": _NOTIFY_FORM_SCHEMA,
+            "data": data,
+            "pages": pages,
+        },
+    )
+    assert not result.is_error, result
+
+    async def _captured() -> dict | None:
+        records = stack.records(f"notify_form:{recipient}")
+        return json.loads(records[0]) if records else None
+
+    form = await wait_for_async(_captured, deadline=15.0, message="the form notification was never delivered")
+    # The delivered form carries the prefilled values and the stepped pages the send named.
+    assert form["data"]["values"] == {"label": label, "color": "blue"}, form
+    assert [p["fields"] for p in form["pages"]] == [["label", "color"], ["count"]], form
+    assert form["schema"] == _NOTIFY_FORM_SCHEMA, form
+
+
+async def test_notify_form_bad_prefill_and_bad_page_are_refused_and_nothing_sent(
+    channel_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    stack = channel_stack
+
+    # A ``values`` key the schema does not declare is refused, naming the field; nothing delivered.
+    bad_rcpt = uniq("nf-bad-rcpt")
+    bad_values = await _notify(
+        stack,
+        {
+            "message": uniq("nf-bad"),
+            "channel": "stub_form",
+            "recipient": bad_rcpt,
+            "schema": _NOTIFY_FORM_SCHEMA,
+            "data": {"values": {"ghost": "x"}},
+        },
+    )
+    assert bad_values.is_error
+    assert "ghost" in json.dumps([b.model_dump(mode="json") for b in (bad_values.content or [])])
+    assert stack.records(f"notify_form:{bad_rcpt}") == []
+
+    # A ``pages`` layout omitting a declared property is refused the same way, naming it.
+    bad_page_rcpt = uniq("nf-badpage-rcpt")
+    bad_page = await _notify(
+        stack,
+        {
+            "message": uniq("nf-badpage"),
+            "channel": "stub_form",
+            "recipient": bad_page_rcpt,
+            "schema": _NOTIFY_FORM_SCHEMA,
+            "pages": [{"title": "Only", "fields": ["label", "color"]}],
+        },
+    )
+    assert bad_page.is_error
+    assert "count" in json.dumps([b.model_dump(mode="json") for b in (bad_page.content or [])])
+    assert stack.records(f"notify_form:{bad_page_rcpt}") == []
+
+
+async def test_notify_form_over_whatsapp_live_leg_skips_without_creds(uniq: Callable[[str], str]) -> None:
+    import os
+
+    if not (os.environ.get("CHANNEL_WHATSAPP_ACCESS_TOKEN") and os.environ.get("CHANNEL_WHATSAPP_PHONE_NUMBER_ID")):
+        pytest.skip("whatsapp form-notification live leg needs CHANNEL_WHATSAPP_ACCESS_TOKEN + _PHONE_NUMBER_ID")
+    raise AssertionError("whatsapp live form-notification leg is unimplemented on the creds host")

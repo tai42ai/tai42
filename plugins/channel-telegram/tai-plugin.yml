@@ -4,7 +4,7 @@ name: channel-telegram
 package: tai42-channel-telegram
 version: 3.4.10
 description: >-
-  Telegram channel plugin for the TAI ecosystem — delivers ask_user questions to
+  Telegram channel plugin for the TAI ecosystem — delivers ask questions to
   a Telegram chat and bridges the typed reply back to the interactions callback
   door.
 license: Apache-2.0
@@ -16,7 +16,7 @@ categories:
 tags:
   - channel
   - telegram
-  - ask-user
+  - ask
   - hitl
 permissions:
   network: true
@@ -27,7 +27,7 @@ provides:
     name: telegram
     module: tai42_channel_telegram.register
     description: >-
-      Deliver ask_user questions to a Telegram chat and bridge the typed reply
+      Deliver ask questions to a Telegram chat and bridge the typed reply
       back.
     routes:
       base: channels/telegram

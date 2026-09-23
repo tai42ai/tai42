@@ -1,8 +1,8 @@
 /**
  * HITL / interactions inbox. The pytest twin proves
- * ask_user blocks on worker A and is answered via worker B over SSE
+ * ask blocks on worker A and is answered via worker B over SSE
  * (`tests/interactions/test_hitl_cross_worker.py`); the browser never drove the
- * inbox. Here the built-in `ask_user` USER TOOL is fired through the same-origin
+ * inbox. Here the built-in `ask` USER TOOL is fired through the same-origin
  * run-tool door (it BLOCKS until answered — the interaction under test), the
  * pending question is answered in the browser at `/interactions`, and both sides
  * are asserted: the UI card flips to Answered and the blocked run returns the
@@ -11,7 +11,7 @@
 import { expect, test } from '@playwright/test';
 import { apiHeaders, armInboxResynced, seedCredential, uniq } from './helpers';
 
-test('ask_user blocks a run, is answered in the browser, and the run unblocks', async ({
+test('ask blocks a run, is answered in the browser, and the run unblocks', async ({
   page,
   request,
   browserName,
@@ -23,12 +23,12 @@ test('ask_user blocks a run, is answered in the browser, and the run unblocks', 
   const question = uniq('question');
   const answer = uniq('answer');
 
-  // Fire the blocking ask_user WITHOUT awaiting: the run-tool call parks until the
+  // Fire the blocking ask WITHOUT awaiting: the run-tool call parks until the
   // interaction is answered, so the promise is resolved only after the browser
   // submits the answer below.
   const askPromise = request.post('/api/run-tool', {
     headers: apiHeaders(),
-    data: { tool_name: 'ask_user', arguments: { question } },
+    data: { tool_name: 'ask', arguments: { question } },
   });
 
   await seedCredential(page);
@@ -81,10 +81,10 @@ test('an answer during an SSE reconnect gap still heals the inbox card', async (
   await page.goto('/interactions');
   await inboxResynced();
 
-  // ask_user parks the run until answered; fire it WITHOUT awaiting.
+  // ask parks the run until answered; fire it WITHOUT awaiting.
   const askPromise = request.post('/api/run-tool', {
     headers: apiHeaders(),
-    data: { tool_name: 'ask_user', arguments: { question } },
+    data: { tool_name: 'ask', arguments: { question } },
   });
 
   const card = page.getByTestId('interaction-card').filter({ hasText: question });
@@ -148,13 +148,13 @@ test('a media-bearing question renders images + links in the inbox and still ans
   const caption = uniq('caption');
   const linkUrl = `https://example.com/${uniq('shop')}`;
 
-  // Fire the blocking ask_user carrying display-only media WITHOUT awaiting: the
+  // Fire the blocking ask carrying display-only media WITHOUT awaiting: the
   // call parks until the browser submits the answer below. Media is a data:image
   // item (captioned) plus an https link item.
   const askPromise = request.post('/api/run-tool', {
     headers: apiHeaders(),
     data: {
-      tool_name: 'ask_user',
+      tool_name: 'ask',
       arguments: {
         question,
         media: [

@@ -98,7 +98,7 @@ _FORM_SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "r
 
 
 def test_web_channel_advertises_form_delivery():
-    # The plain class attribute the ask_user helper reads with ``getattr`` before it
+    # The plain class attribute the ask helper reads with ``getattr`` before it
     # routes a form delivery here; absent it, this channel would never receive one.
     assert WebChannel.supports_form_delivery is True
 

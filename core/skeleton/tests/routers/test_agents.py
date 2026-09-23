@@ -20,7 +20,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from tai42_contract.agent.events import AsksFinal, InterruptFinal, StructuredFinal, SuspendedFinal
 from tai42_contract.interactions import ParkedEntry
-from tai42_contract.tools import current_call_chain
+from tai42_contract.tools import current_call_chain, get_run_delivery_id
 
 from tai42_skeleton.agent import (
     Agent,
@@ -539,8 +539,33 @@ async def test_run_opens_the_push_frame_of_the_target_agent(one_agent):
     assert agent.chain == ("faker",)
 
 
+class _RunDeliveryRecordingAgent(_FakeAgent):
+    """Records the ambient run-delivery id seen inside its drive, so the door's minting frame is observable."""
+
+    def __init__(self, events: list[Any] | None = None) -> None:
+        super().__init__(events)
+        self.run_delivery_id: str | None = "unset"
+
+    async def astream(self, **kwargs: Any):  # type: ignore[override]
+        self.run_delivery_id = get_run_delivery_id()
+        async for event in super().astream(**kwargs):
+            yield event
+
+
+async def test_run_drives_under_a_run_delivery_context(one_agent):
+    # The SSE door's minting frame binds a run-delivery context whose id an async park captures —
+    # the seam that makes a caller ask park-capable even though the live SSE receiver takes the
+    # outcome inline and no out-of-band address is bound.
+    agent = _RunDeliveryRecordingAgent([MessageFinal(text="ok")])
+    one_agent(agent)
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    await _collect(resp)
+    assert agent.run_delivery_id != "unset"
+    assert agent.run_delivery_id is not None
+
+
 async def test_run_finish_emits_the_final_frame_result(one_agent):
-    # ``result``: a structured final is captured by the drive and re-emitted as today's frame.
+    # ``result``: a structured final is captured by the drive and re-emitted as a ``structured_final`` frame.
     one_agent(_FakeAgent([StructuredFinal(data={"answer": 7})]))
     resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
     frames = _data_frames(await _collect(resp))

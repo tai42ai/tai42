@@ -37,6 +37,7 @@ from tai42_contract.agent.events import (
     StreamEvent,
     StructuredFinal,
     SuspendedFinal,
+    final_event_for_value,
 )
 from tai42_contract.errors import ErrorKind
 from tai42_contract.template import TemplatedText
@@ -81,6 +82,7 @@ def _resolve_drain_terminal(
         return {
             "status": "suspended",
             "interaction_ids": suspended.interaction_ids,
+            "caller_interaction_ids": suspended.caller_interaction_ids,
             "thread_id": suspended.thread_id,
             "expiry_at": suspended.expiry_at,
         }
@@ -253,10 +255,7 @@ class Agent(ABC):
         :meth:`_drain`.
         """
         result = await self.run(**kwargs)
-        if isinstance(result, str):
-            yield MessageFinal(text=result)
-        else:
-            yield StructuredFinal(data=result)
+        yield final_event_for_value(result)
 
     async def append_thread_messages(self, *, thread_id: str, messages: list[dict[str, str]], **kwargs: Any) -> None:
         """Append ``messages`` to ``thread_id``'s stored history WITHOUT running the agent.

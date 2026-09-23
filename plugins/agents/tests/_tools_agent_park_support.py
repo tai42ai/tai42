@@ -18,9 +18,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
-    CHAINED_PARK_TOKEN_KEY,
     SuspendedInteraction,
-    get_park_completion,
+    get_chained_resume,
     get_resume_continuation_tool,
     suspended_interaction_marker,
 )
@@ -62,22 +61,30 @@ class ScriptedChatModel(BaseChatModel):
 
 
 class _AskStandIn:
-    """A faithful ``ask_user(mode="async")`` stand-in: it parks (returns the reserved
+    """A faithful ``ask(mode="async")`` stand-in: it parks (returns the reserved
     marker) ONLY when a resume continuation is bound, and otherwise RAISES exactly as the
     platform helper does with no driver bound — so a face that binds no resume path refuses
     loudly. Counts calls so a resume that re-ran the tool (a double-park) is caught."""
 
-    def __init__(self, interaction_id: str, expiry_at: Any = None) -> None:
+    def __init__(self, interaction_id: str, expiry_at: Any = None, *, caller: bool = False) -> None:
         self.calls = 0
         self._interaction_id = interaction_id
         self._expiry_at = expiry_at
+        # A ``to="caller"`` ask stamps its own id into the marker's caller subset (the platform's
+        # ``ask`` does this off ``to``); a user ask leaves it empty.
+        self._caller = caller
 
     def tool(self) -> StructuredTool:
         def ask() -> dict[str, Any]:
             self.calls += 1
             if get_resume_continuation_tool() is None:
                 raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
-            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
+            return suspended_interaction_marker(
+                self._interaction_id,
+                self._expiry_at,
+                get_resume_continuation_tool(),
+                caller_interaction_ids=[self._interaction_id] if self._caller else [],
+            )
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
@@ -106,9 +113,9 @@ class _NestedDriverStandIn:
 
     def run(self, **_kwargs: Any) -> SuspendedInteraction:
         self.calls += 1
-        _tool, context = get_park_completion()
-        if context is not None and CHAINED_PARK_TOKEN_KEY in context:
-            self.chained_keys.append(context[CHAINED_PARK_TOKEN_KEY])
+        routing = get_chained_resume()
+        if routing is not None:
+            self.chained_keys.append(routing.chain_key)
         return SuspendedInteraction(
             interaction_id=self._interaction_id, resume_owner=self._resume_owner, expiry_at=self._expiry_at
         )

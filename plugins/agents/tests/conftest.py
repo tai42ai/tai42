@@ -126,6 +126,9 @@ class RecordingTools:
         self.client_tools: dict[str, StructuredTool] = {}
         self.tool_runners: dict[str, Callable[..., Any]] = {}
         self.registered_tools: dict[str, Callable[..., Any]] = {}
+        # Every ``run_tool`` dispatch, so a test can assert a cross-driver chain fire and the
+        # ancestor chain it continued.
+        self.run_tool_calls: list[dict[str, Any]] = []
 
     def tool(self, *args: Any, **kwargs: Any) -> Any:
         """A no-op tool registrar mirroring ``AppTools.tool``: it records the decorated
@@ -152,9 +155,18 @@ class RecordingTools:
             raise RuntimeError(f"unknown client tools: {missing}")
         return [self.client_tools[name] for name in names]
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
-        # ``offload_sync`` mirrors the real facet's keyword-only argument; the fake
-        # runs its recorded runners synchronously and has nothing to offload.
+    async def run_tool(
+        self,
+        key: str,
+        arguments: dict[str, Any],
+        *,
+        offload_sync: bool = False,
+        continues_chain: Any = None,
+    ) -> Any:
+        # ``offload_sync`` / ``continues_chain`` mirror the real facet's keyword-only arguments; the
+        # fake runs its recorded runners synchronously and records the chain the caller continued
+        # (a cross-driver chain re-entry passes the ancestor's chain as ``continues_chain``).
+        self.run_tool_calls.append({"key": key, "arguments": arguments, "continues_chain": continues_chain})
         if key not in self.tool_runners:
             raise RuntimeError(f"unknown base tool: {key}")
         result = self.tool_runners[key](**arguments)
@@ -246,21 +258,37 @@ class RecordingSandboxes:
 
 
 class RecordingInteractions:
-    """An ``AppInteractions`` facade whose ``ask_user`` records each call and returns a scripted
+    """An ``AppInteractions`` facade whose ``ask`` records each call and returns a scripted
     answer (sync) — the deep agent reaches the human only through parking tools, so this stays a
     minimal stub the facet needs to be present."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.answer: Any = None
+        # The platform redelivery horizon the resolution-record TTL derives from (2x). Default 24h,
+        # matching the platform's ``idle_ttl_seconds`` default; a test may override it.
+        self.redelivery_horizon: int = 24 * 60 * 60
+        # Resume authorisation, permissive by default; a test flips it to exercise the refusal.
+        self.resume_authorized: bool = True
+        self.resume_auth_calls: list[str] = []
 
     @property
-    def ask_user(self) -> Callable[..., Awaitable[Any]]:
-        async def _ask_user(question: Any, **kwargs: Any) -> Any:
+    def ask(self) -> Callable[..., Awaitable[Any]]:
+        async def _ask(question: Any, **kwargs: Any) -> Any:
             self.calls.append({"question": question, **kwargs})
             return self.answer
 
-        return _ask_user
+        return _ask
+
+    def redelivery_horizon_seconds(self) -> int:
+        return self.redelivery_horizon
+
+    async def assert_resume_authorized(self, interaction_id: str) -> None:
+        self.resume_auth_calls.append(interaction_id)
+        if not self.resume_authorized:
+            from tai42_contract.interactions import ParkResumeUnauthorizedError
+
+            raise ParkResumeUnauthorizedError(f"unauthorised resume of {interaction_id!r}")
 
 
 class RecordingConnectors:
@@ -323,6 +351,9 @@ def _reset_sandbox_facets() -> Iterator[None]:
     APP.connectors.calls.clear()
     APP.interactions.calls.clear()
     APP.interactions.answer = None
+    APP.interactions.resume_authorized = True
+    APP.interactions.redelivery_horizon = 24 * 60 * 60
+    APP.interactions.resume_auth_calls.clear()
     yield
     provider = APP.sandboxes.provider
     if provider is not None:
@@ -353,9 +384,20 @@ def app_tools() -> Iterator[RecordingTools]:
     """The bound app's ``tools`` facet, cleared before and after each test."""
     APP.tools.client_tools.clear()
     APP.tools.tool_runners.clear()
+    APP.tools.run_tool_calls.clear()
     yield APP.tools
     APP.tools.client_tools.clear()
     APP.tools.tool_runners.clear()
+    APP.tools.run_tool_calls.clear()
+
+
+@pytest.fixture
+def app_interactions() -> RecordingInteractions:
+    """The bound app's ``interactions`` facet as its concrete recording double, so a test can set
+    and read the driver-facing attributes (``resume_authorized`` / ``redelivery_horizon`` and the
+    ``resume_auth_calls`` record) the contract's typed facet does not declare. The autouse
+    ``_reset_sandbox_facets`` fixture restores these to their defaults around every test."""
+    return APP.interactions
 
 
 @pytest.fixture

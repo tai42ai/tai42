@@ -121,10 +121,15 @@ def provider() -> _SpyProvider:
 
 @pytest.fixture
 def setup_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
-    """The AC Redis the gate's throttle counters and mint mutex live on."""
+    """The AC Redis the gate's throttle counters and mint mutex live on, configured.
+
+    A configured deployment has ``redis_url`` set (the door's serviceability requires it);
+    the transport itself is faked through ``client_ctx``.
+    """
     fake = FakeRedis(strings={})
     monkeypatch.setattr(setup_gate_mod, "client_ctx", make_client_ctx(fake))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(access_control_settings().redis, "redis_url", "redis://ac-redis")
     return fake
 
 
@@ -277,6 +282,19 @@ async def test_setup_refused_without_a_mint_provider(
     finally:
         registry._REGISTRY.pop("validator", None)
         reset_all_settings()
+
+
+async def test_setup_refused_when_the_access_control_redis_is_unset(
+    pg: FakeAccessControlPg, provider: _SpyProvider, operator_token: None, role_spy
+) -> None:
+    # Access control on and a key-minting provider present, but no AC Redis configured
+    # (``redis_url`` unset): the door refuses cleanly with a 501 before reaching for the
+    # absent Redis, never a 500 on a client error. No ``setup_redis`` fixture here — that is
+    # what leaves ``redis_url`` unset.
+    with pytest.raises(NotSupportedError, match="access-control Redis is not configured"):
+        await setup_deployment(setup_token=_TOKEN, owner_display_name="Owner")
+    assert provider.identities == {}
+    assert pg.principal("owner") is None
 
 
 async def test_setup_attaches_a_login_when_a_provider_is_present(

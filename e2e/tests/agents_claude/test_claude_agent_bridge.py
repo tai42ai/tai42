@@ -10,7 +10,7 @@ The reachable, engine-agnostic legs over the identity-less ephemeral doors:
 * NO ASYNC PARK ON AN EPHEMERAL RUN — the async ask requires a durable (threaded) run to rebind
   the continuation onto; a thread-less tool-face/SSE run cannot park, so the run terminates
   WITHOUT a ``suspended_final`` frame (never a stranded question).
-* THE ASK-DESIGN PREMISE — a platform ``ask_user(mode="async")`` invoked over the REAL MCP edge
+* THE ASK-DESIGN PREMISE — a platform ``ask(mode="async")`` invoked over the REAL MCP edge
   (no resuming driver) raises "async ask requires a resuming driver", which is exactly why the
   adapter answers a SYNC ask itself and parks an ASYNC ask through the resume continuation
   rather than leaning on the MCP edge. This keeps the ask design's justification ENFORCED.

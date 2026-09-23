@@ -11,15 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.state_context import current_state_context
 
 
 class _RecordingTools:
@@ -52,7 +56,9 @@ class _RecordingTools:
 
         return decorate
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
+    async def run_tool(
+        self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False, extras: dict[str, Any] | None = None
+    ) -> Any:
         self.run_tool_calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
         self.offloads.append(offload_sync)
@@ -185,6 +191,70 @@ class _RecordingLifecycle:
         await self.ready.wait()
 
 
+class _RecordingInteractions:
+    """Records the schedule-door drive ``backend_fire`` enters for a job carrying door signals.
+
+    ``visit`` runs the start callable (so the tool runs under the deposited ``schedule`` context) and
+    reports a result; with ``park_sentinel`` set it reports a caller-ask park instead, so a follow-up
+    whose tool asks hands back the re-park sentinel rather than a value.
+    """
+
+    def __init__(self) -> None:
+        self.visit_calls: list[SimpleNamespace] = []
+        self.binds: list[tuple[str, str]] = []
+        self.parked_contexts: list[Any] = []
+        self.fire_identity: tuple[str, str] | None = None
+        self.park_sentinel: Any = None
+
+    def current_fire_identity(self) -> tuple[str, str] | None:
+        return self.fire_identity
+
+    async def list_parked_for(self, context: Any) -> list[Any]:
+        self.parked_contexts.append(context)
+        return []
+
+    async def visit(
+        self,
+        *,
+        target_name: str,
+        cancel: list[str],
+        resume: list[Any],
+        start: Any,
+        extras: dict[str, Any],
+        state_binding: Any,
+        receives_outcome: bool,
+    ) -> VisitOutcome:
+        result = await start(extras) if start is not None else None
+        self.visit_calls.append(
+            SimpleNamespace(
+                target_name=target_name,
+                cancel=list(cancel),
+                resume=list(resume),
+                started=start is not None,
+                extras=dict(extras),
+                state_binding=state_binding,
+                receives_outcome=receives_outcome,
+                context=current_state_context(),
+            )
+        )
+        if self.park_sentinel is not None:
+            return VisitOutcome(action="started", kind="asks", suspended=self.park_sentinel)
+        return VisitOutcome(
+            action="started" if start is not None else "none",
+            kind="result" if start is not None else "none",
+            result=result,
+        )
+
+    def bound_execution_identity_for_fire(self, user_id: str, fingerprint: str) -> Any:
+        self.binds.append((user_id, fingerprint))
+
+        @asynccontextmanager
+        async def _cm() -> AsyncIterator[None]:
+            yield
+
+        return _cm()
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.tools = _RecordingTools()
@@ -193,6 +263,7 @@ class _StubApp:
         self.clients = _StubClients()
         self.admin = _StubAdmin()
         self.lifecycle = _RecordingLifecycle()
+        self.interactions = _RecordingInteractions()
         self.storage = MagicMock()
         self.storage.resource_manager = _StubResourceManager()
         self.monitoring = MagicMock()
@@ -236,6 +307,11 @@ def _reset_stub_state() -> Any:
     stub_app_instance.tools.detached_seen.clear()
     stub_app_instance.tools.offloads.clear()
     stub_app_instance.tools.secret_capability_seen.clear()
+    stub_app_instance.interactions.visit_calls.clear()
+    stub_app_instance.interactions.binds.clear()
+    stub_app_instance.interactions.parked_contexts.clear()
+    stub_app_instance.interactions.fire_identity = None
+    stub_app_instance.interactions.park_sentinel = None
     stub_app_instance.storage.resource_manager.templates.clear()
     stub_app_instance.clients.client = None
     stub_app_instance.clients.shutdown_calls = 0

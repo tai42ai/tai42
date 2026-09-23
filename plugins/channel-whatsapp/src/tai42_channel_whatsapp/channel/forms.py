@@ -8,6 +8,7 @@ correlation; the ask-less notify rides a ``tai42-nf:`` token instead.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import uuid4
@@ -23,8 +24,8 @@ from tai42_channel_whatsapp.correlation import (
     release_pending,
     reserve_pending,
 )
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
-from tai42_channel_whatsapp.settings import WhatsAppSettings, require_delivery_setting
+from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, build_flow_data, build_form_flow
+from tai42_channel_whatsapp.settings import WhatsAppSettings, require_delivery_setting, whatsapp_settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,6 @@ _NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"  # noqa: S105 constant identifier, not a
 # orphan-draft cleanup, never from the name.
 _FLOW_NAME_PREFIX = "tai42-form-"
 
-# The entry screen a stepped form's send navigates to (``build_form_flow``'s first
-# screen); the send injects the per-send values/options as its ``data``.
-_FORM_ENTRY_SCREEN = "SCREEN_0"
-
 
 async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, Any]) -> str:
     """The published flow id for this schema under ``waba_id``.
@@ -54,25 +51,37 @@ async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, 
     a create, publish, or store failure raises and never falls back to another
     answer format.
 
-    A publish or cache failure AFTER a successful create strands the draft on Meta,
-    and the central retry re-enters create under the same name — so the draft is
-    best-effort deleted before re-raising the original error; a delete that itself
-    fails is logged without masking it.
+    Meta returns HTTP 200 for a create even when the Flow JSON is invalid: the draft
+    IS created but carries ``validation_errors`` and can never publish. A non-empty
+    list is refused loudly with the full list rendered, BEFORE ``publish_flow``.
+
+    That refusal — and a publish or cache failure AFTER a successful create — strands
+    the draft on Meta, and the central retry re-enters create under the same name, so
+    the draft is best-effort deleted before re-raising the original error; a delete
+    that itself fails is logged without masking it. This is the ONE writer of a
+    draft's lifecycle.
     """
     cached = await get_cached_flow_id(waba_id, schema_hash)
     if cached is not None:
         return cached
-    flow_id = await create_flow(waba_id=waba_id, name=f"{_FLOW_NAME_PREFIX}{schema_hash}", flow_json=flow_json)
+    result = await create_flow(waba_id=waba_id, name=f"{_FLOW_NAME_PREFIX}{schema_hash}", flow_json=flow_json)
     try:
-        await publish_flow(flow_id)
-        await cache_flow_id(waba_id, schema_hash, flow_id)
+        if result.validation_errors:
+            # The refusal rides the SAME except that deletes an orphaned draft, so the
+            # invalid draft is cleaned up by the one lifecycle writer — hence raising here.
+            raise ChannelDeliveryError(  # noqa: TRY301
+                "WhatsApp created the flow draft with validation errors and it can never publish: "
+                + json.dumps(result.validation_errors, sort_keys=True, separators=(",", ":"))[:1000]
+            )
+        await publish_flow(result.flow_id)
+        await cache_flow_id(waba_id, schema_hash, result.flow_id)
     except Exception:
         try:
-            await delete_flow(flow_id)
+            await delete_flow(result.flow_id)
         except Exception:
-            logger.exception("failed to delete orphaned draft flow %s after resolve failure", flow_id)
+            logger.exception("failed to delete orphaned draft flow %s after resolve failure", result.flow_id)
         raise
-    return flow_id
+    return result.flow_id
 
 
 def _form_pages_list(send: ChannelDelivery | ChannelNotification) -> list[dict[str, Any]] | None:
@@ -106,6 +115,39 @@ def _form_values_and_options(
     return dict(send.data.values), options
 
 
+async def send_form_ask_flow(
+    phone_number_id: str,
+    to: str,
+    body_text: str,
+    flow_token: str,
+    schema: dict[str, Any],
+    pages: list[dict[str, Any]] | None,
+    values: dict[str, Any],
+    options: dict[str, list[dict[str, Any]]],
+) -> str:
+    """Build, resolve and send a form ask's Flow; return its ``wamid``.
+
+    The ONE sender for a form ask's Flow: the first send and every door-rejection
+    re-send call it with the same inputs the pending record holds, so the re-send
+    resolves the SAME published Flow through the same cache key — re-creating it if
+    the cache was lost, never raising a stale-lookup miss — and navigates to the entry
+    screen with the same prefill and option lists the first send carried.
+    """
+    flow_json, schema_hash = build_form_flow(schema, pages, set(options))
+    flow_data = build_flow_data(schema, values, options)
+    waba_id = require_delivery_setting(whatsapp_settings().waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
+    return await send_flow(
+        phone_number_id=phone_number_id,
+        to=to,
+        body_text=body_text,
+        flow_id=flow_id,
+        flow_token=flow_token,
+        screen=FORM_ENTRY_SCREEN,
+        data=flow_data,
+    )
+
+
 async def _deliver_form(
     settings: WhatsAppSettings, phone_number_id: str, target: str, delivery: ChannelDelivery
 ) -> None:
@@ -115,23 +157,26 @@ async def _deliver_form(
     BEFORE any network work — an unsupported schema, an unmappable per-send option, or
     an unknown page field raises here, before the ``CHANNEL_WHATSAPP_WABA_ID`` gate, the
     reservation, or a send. The reservation carries the answer schema (so an inbound
-    Flow response is coerced to its types) and the question text (so a door-rejected
-    answer is re-asked), and uses the ``interaction_id`` as the ``flow_token``
-    correlating the completed form. The published Flow is keyed by the
-    ``(schema, pages, option_fields)`` triple (the option-bearing fields decide which
-    string properties render as dropdowns) and REUSED across sends; the prefilled values
-    and per-send option lists ride the send's ``flow_action_payload.data`` (a dynamic
-    data-source), never a new Flow.
-    A failure resolving the Flow or sending releases the reservation and raises — never a
-    fallback format.
+    Flow response is coerced to its types), the question text (so a door-rejected answer
+    is re-asked) and the per-send pages/values/options (so a re-send reproduces the same
+    Flow), and uses the ``interaction_id`` as the ``flow_token`` correlating the
+    completed form. The published Flow is keyed by the ``(schema, pages, option_fields)``
+    triple and the emitted shape (the option-bearing fields decide which string
+    properties render as dropdowns) and REUSED across sends; the prefilled values and
+    per-send option lists ride the send's ``flow_action_payload.data`` (a dynamic
+    data-source), never a new Flow. The send goes through the one sender
+    :func:`send_form_ask_flow`; a failure resolving the Flow or sending releases the
+    reservation and raises — never a fallback format.
     """
     if delivery.schema is None:
         raise ChannelDeliveryError(f"form delivery {delivery.interaction_id} is missing its schema")
     pages = _form_pages_list(delivery)
     values, options = _form_values_and_options(delivery)
-    flow_json, schema_hash = build_form_flow(delivery.schema, pages, set(options))
-    flow_data = build_flow_data(delivery.schema, values, options)
-    waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+    # Build + validate before any reservation (raises on an unsupported schema, an
+    # unmappable per-send option, or an unknown page field).
+    build_form_flow(delivery.schema, pages, set(options))
+    build_flow_data(delivery.schema, values, options)
+    require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
 
     await reserve_pending(
         phone_number_id=phone_number_id,
@@ -141,17 +186,20 @@ async def _deliver_form(
         interaction_id=delivery.interaction_id,
         schema=delivery.schema,
         question=delivery.question,
+        form_pages=pages,
+        form_values=values,
+        form_options=options,
     )
     try:
-        flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
-        await send_flow(
+        await send_form_ask_flow(
             phone_number_id=phone_number_id,
             to=target,
             body_text=delivery.question,
-            flow_id=flow_id,
             flow_token=delivery.interaction_id,
-            screen=_FORM_ENTRY_SCREEN,
-            data=flow_data,
+            schema=delivery.schema,
+            pages=pages,
+            values=values,
+            options=options,
         )
     except Exception:
         # Any create/publish/store/send failure frees the pair instead of holding
@@ -202,7 +250,7 @@ async def _send_form_notification(
             body_text=notification.message,
             flow_id=flow_id,
             flow_token=flow_token,
-            screen=_FORM_ENTRY_SCREEN,
+            screen=FORM_ENTRY_SCREEN,
             data=flow_data,
         )
     )

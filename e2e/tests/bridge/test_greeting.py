@@ -149,7 +149,7 @@ async def test_greeting_leads_once_on_a_tool_target(bridge: BridgeHarness, uniq:
         execution_key=exec_key,
         channel="twilio",
         our_identity=BRIDGE_TWILIO_FROM_B,
-        payload_expr="{payload: .message}",
+        start_expr="{payload: .message}",
     )
 
     # First contact: the greeting leads as its own send, then the tool echo as the next send.

@@ -51,7 +51,7 @@ def build_monitoring_stack(res: StackResources, variants: Variants) -> StackConf
         # alongside the tool run.
         "agents": [_AGENT_ENTRIES[0]],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     # The langfuse monitoring module is real either way — only the host + key pair
     # change. MOCK: the compose-baked self-hosted coordinates on resources. REAL: the

@@ -146,8 +146,8 @@ async def test_reply_from_allowlisted_conversation_forwards(fake_redis, channels
     assert call.answer == "yes, deploy it"
 
 
-async def test_bridge_only_deployment_needs_no_ask_user_recipients(fake_redis, stub_conversations, monkeypatch):
-    # No default recipient and an empty allowlist: ask_user correlation can never
+async def test_bridge_only_deployment_needs_no_ask_recipients(fake_redis, stub_conversations, monkeypatch):
+    # No default recipient and an empty allowlist: ask correlation can never
     # match, but a bridge-only deployment must still forward messages to the bridge.
     monkeypatch.delenv("CHANNEL_SLACK_DEFAULT_RECIPIENT")
     monkeypatch.delenv("CHANNEL_SLACK_ALLOWED_RECIPIENTS")

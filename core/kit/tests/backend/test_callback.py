@@ -18,10 +18,21 @@ from fastmcp import Context
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
-from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
+from tai42_kit.backend import CallbackSchema, callback_execution, carry_forwarded_fire, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.schedule_subject import (
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+    SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_SUBJECT_ARG,
+)
+
+_FORWARDED = {
+    SCHEDULE_SUBJECT_ARG: {"target_kind": "app", "target_name": "svc", "kind": "user", "key": "u1"},
+    SCHEDULE_EXECUTION_KEY_ARG: "svc",
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+}
 
 
 class _FakeResourceManager:
@@ -200,3 +211,28 @@ async def test_callback_jq_eval_is_timeout_bounded(bound_app, monkeypatch) -> No
         assert time.monotonic() - start < 0.5
     finally:
         reset_all_settings()
+
+
+# -- carry_forwarded_fire: move the job's forwarded pair onto its callback spec --------------------
+
+
+def test_carry_forwarded_fire_stamps_the_pair_on_a_schema() -> None:
+    # A task job that forwards a door subject/identity pair carries it onto the callback schema so the
+    # follow-up job re-establishes the same door context.
+    callback = CallbackSchema(tool="next")
+    carry_forwarded_fire(callback, dict(_FORWARDED))
+    assert callback.carried_kwargs == _FORWARDED
+
+
+def test_carry_forwarded_fire_stamps_the_pair_on_a_raw_mapping() -> None:
+    # Before it crosses the queue the spec is a plain mapping; the pair is carried under the same key.
+    callback: dict[str, Any] = {"tool": "next"}
+    carry_forwarded_fire(callback, dict(_FORWARDED))
+    assert callback["carried_kwargs"] == _FORWARDED
+
+
+def test_carry_forwarded_fire_leaves_a_plain_callback_untouched() -> None:
+    # A plain task forwards no door context, so the callback stays a plain follow-up.
+    callback = CallbackSchema(tool="next")
+    carry_forwarded_fire(callback, {"text": "hi"})
+    assert callback.carried_kwargs == {}

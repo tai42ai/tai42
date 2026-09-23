@@ -197,7 +197,7 @@ class StackConfig:
     # Env keys that must carry THIS stack's own single app origin (``http://host:port``),
     # only known after boot — the single-port (MULTIWORKER) analogue of
     # ``replica_b_origin_env_keys``. The studio profile pins ``INTERACTIONS_PUBLIC_BASE_URL``
-    # here so an ask_user callback ticket it mints is reachable back on its own origin (the
+    # here so an ask callback ticket it mints is reachable back on its own origin (the
     # web channel's answer door FORWARDS the answer to that callback URL — a loopback
     # origin resolves, an off-host placeholder does not). Filled from the first app port.
     app_origin_env_keys: list[str] = field(default_factory=list)

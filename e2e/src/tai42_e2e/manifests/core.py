@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from tai42_e2e.manifests.feature_env import _base_env
@@ -64,7 +65,7 @@ def build_bare_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="bare",
@@ -99,7 +100,7 @@ def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="core",
@@ -131,7 +132,7 @@ def build_embed_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     return StackConfig(
         name="embed",
@@ -177,14 +178,14 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     if res.gh_webhook_secret is not None:
         env["E2E_GH_WEBHOOK_SECRET"] = res.gh_webhook_secret
     if res.stripe_webhook_secret is not None:
         env["E2E_STRIPE_WEBHOOK_SECRET"] = res.stripe_webhook_secret
-    # An external-format ``ask_user`` mints a callback ticket only when a public base URL
+    # An external-format ``ask`` mints a callback ticket only when a public base URL
     # is set (it builds the callback URL from it); the host is never dialed, but the
     # setting requires an https value.
     env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
@@ -200,11 +201,11 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
 
 
 def build_async_park_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """REPLICAS, NO backend worker — the async ``ask_user`` park lifecycle home.
+    """REPLICAS, NO backend worker — the async ``ask`` park lifecycle home.
 
     Two replicas give the cross-worker park/resume boundary: a flow parks on replica A
     (the ``e2e_async_park_flow`` driver MCP-dispatched there binds a resume continuation
-    and calls ``ask_user(mode="async")``), and the park is resumed on replica B — either
+    and calls ``ask(mode="async")``), and the park is resumed on replica B — either
     by an answer through B's ``/answer`` door (which fires the stored continuation once it
     claims) or by B's expiry reaper. ``e2e_async_resume`` (the stored continuation) runs on
     both replicas, so whichever process resolves the park fires it. The expiry reaper
@@ -213,7 +214,7 @@ def build_async_park_stack(res: StackResources, variants: Variants) -> StackConf
 
     Carries the probe tools (the single-park driver + resume continuation, and the
     multi-park super-step barrier driver + its shared continuation) plus the interactions
-    router (the ``/answer`` door) and the ``ask_user`` builtin."""
+    router (the ``/answer`` door) and the ``ask`` builtin."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [
@@ -228,10 +229,10 @@ def build_async_park_stack(res: StackResources, variants: Variants) -> StackConf
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
-    # An async ask_user park has no blocking waiter, so its continuation only fires when
+    # An async ask park has no blocking waiter, so its continuation only fires when
     # the expiry reaper trips; pin the reaper cadence low so the expiry leg resumes in
     # seconds rather than on the 30s default.
     env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
@@ -244,6 +245,67 @@ def build_async_park_stack(res: StackResources, variants: Variants) -> StackConf
         run_metrics=False,
         auth=False,
     )
+
+
+def build_caller_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """REPLICAS, no backend — the caller-ask park / kill / waiting-outcome home.
+
+    Two replicas give the cross-worker boundary; the full core router set carries the
+    tool-runs subject door (a detached run parks under a named subject), the hooks and
+    schedules doors, and the interactions router, so a caller ask parked by one door is
+    resumable, killable, and takeable by a later run — or another door — on the same
+    subject. The expiry reaper is pinned to 1s so a kill-on-expiry or a redelivery leg
+    resolves in seconds rather than on the 30s default. ``run_backend=False`` keeps the
+    module honestly ``backendless``. Auth off, so the caller-ask drivers bind their own
+    synthetic execution identity."""
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
+    return StackConfig(
+        name="caller",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=env,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )
+
+
+def build_caller_cap_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The caller-ask stack with the caller concurrency cap pinned to 1 — the separate-cap leg.
+
+    ``max_concurrent_caller`` bounds only the caller asks, so a second concurrent ``to="caller"``
+    ask is refused while a ``to="user"`` ask keeps its own (default-high) ``max_concurrent`` cap.
+    """
+    base = build_caller_stack(res, variants)
+    base.env["INTERACTIONS_MAX_CONCURRENT_CALLER"] = "1"
+    return replace(base, name="caller-cap")
+
+
+def build_caller_sweep_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The caller-ask stack with a short retention horizon — the untaken-outcome sweep leg.
+
+    ``idle_ttl_seconds`` pinned low is the retention horizon: an untaken waiting outcome is dropped
+    one horizon out by the reaper's retention sweep, which fires its loud
+    ``interactions_outcome_dropped_untaken`` event. Kept apart from ``caller_stack`` (whose default
+    horizon lets a waiting outcome linger to be taken) so the redelivery/take legs are unaffected.
+    """
+    base = build_caller_stack(res, variants)
+    base.env["INTERACTIONS_IDLE_TTL_SECONDS"] = "5"
+    return replace(base, name="caller-sweep")
 
 
 def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -271,7 +333,7 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     # A recycled worker's replacement must boot + rejoin the census within the recycle

@@ -29,7 +29,7 @@ async def test_fire_is_multi_use_across_replicas_and_hides_its_topic(
     # The hook maps the scan's ``?x=`` query param into the tool's ``value`` (without
     # an expr the scan payload never reaches the tool); ``key`` is the record channel.
     await register_record_hook(
-        admin, topic, name=uniq("hook"), execution_key=exec_key, tool_kwargs={"key": rkey}, expr="{value: .x}"
+        admin, topic, name=uniq("hook"), execution_key=exec_key, tool_kwargs={"key": rkey}, start_expr="{value: .x}"
     )
     link = await mint_link(admin, topic, ttl_seconds=None, execution_key=exec_key)
     token = link["token"]
@@ -69,7 +69,7 @@ async def test_revoke_is_immediate_and_gone_from_list(
     topic = uniq("topic").replace("_", "-")
     rkey = uniq("rec")
     await register_record_hook(
-        admin, topic, name=uniq("hook"), execution_key=exec_key, tool_kwargs={"key": rkey}, expr="{value: .x}"
+        admin, topic, name=uniq("hook"), execution_key=exec_key, tool_kwargs={"key": rkey}, start_expr="{value: .x}"
     )
     link = await mint_link(admin, topic, ttl_seconds=None, execution_key=exec_key)
     public = no_auth(stack)

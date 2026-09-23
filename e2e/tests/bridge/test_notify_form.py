@@ -122,7 +122,7 @@ async def _form_record_route(bridge: BridgeHarness, uniq: Callable[[str], str], 
         execution_key=exec_key,
         channel=channel,
         our_identity=identity,
-        payload_expr=_FORM_PAYLOAD_EXPR,
+        start_expr=_FORM_PAYLOAD_EXPR,
         reply_expr="null",
     )
 
@@ -280,7 +280,7 @@ async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarnes
         execution_key=exec_key,
         channel="web",
         our_identity=identity,
-        payload_expr=f'{{key: "{uniq("l27-reply-probe")}", value: .message}}',
+        start_expr=f'{{key: "{uniq("l27-reply-probe")}", value: .message}}',
         reply_expr=json.dumps([reply_part]),
     )
     web, page = await WebChatClient.open_page(_base_url(bridge), identity, store_url=bridge.stack.resources.redis_url)
@@ -364,7 +364,7 @@ async def test_whatsapp_notify_form_reply_never_touches_a_pending_ask_on_the_sam
 
     async def ask() -> object:
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
-            result = await mcp.call_tool("ask_user", {"question": question, "channel": "whatsapp", "recipient": wa_id})
+            result = await mcp.call_tool("ask", {"question": question, "channel": "whatsapp", "recipient": wa_id})
         return result.data
 
     ask_task = asyncio.create_task(ask())

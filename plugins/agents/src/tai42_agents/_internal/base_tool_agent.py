@@ -35,7 +35,7 @@ from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.usage import AgentInvokeResult, aggregate_usage
 
 # One shared, stateless park hook leading the tools-agent stack, so an async
-# ``ask_user`` parked inside a run interrupts its own graph and resumes by id. The
+# ``ask`` parked inside a run interrupts its own graph and resumes by id. The
 # SAME hook class langchain_deep_agent mounts (the park driver is shared, not forked per agent
 # type); a fresh stateless instance here keeps the tools-agent import graph a leaf.
 _async_park_middleware = AsyncParkMiddleware()
@@ -54,6 +54,7 @@ def _suspended_receipt(event: SuspendedFinal) -> dict[str, Any]:
     return {
         "status": "suspended",
         "interaction_ids": event.interaction_ids,
+        "caller_interaction_ids": event.caller_interaction_ids,
         "thread_id": event.thread_id,
         "expiry_at": event.expiry_at,
     }
@@ -208,7 +209,7 @@ async def ainvoke_tools_agent(
     ``park_builder`` (given the FINAL thread-id-resolved run config) decides whether
     the run is park-capable and, if so, captures the rebuild identity: the resume
     continuation is bound around the drive, and a run that parks on an async
-    ``ask_user`` persists its durable index and returns a ``.suspended`` receipt
+    ``ask`` persists its durable index and returns a ``.suspended`` receipt
     instead of an answer. ``resume`` drives ``Command(resume=...)`` — answering a
     prior park — in place of a fresh user turn.
     """
@@ -227,7 +228,7 @@ async def ainvoke_tools_agent(
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = Command(resume=resume) if resume is not None else messages
     # The resume continuation and the chained-park claims ledger are bound for the drive's
-    # duration so an async ``ask_user`` a tool raises stamps its resume path onto the parked
+    # duration so an async ``ask`` a tool raises stamps its resume path onto the parked
     # interaction (``None`` bound when the run does not bind), and a chained call this run does
     # not park on is detached when the drive stops. Safe whole-drive here: a run face awaits the
     # drive to a result in one task, never yielding to an external consumer.

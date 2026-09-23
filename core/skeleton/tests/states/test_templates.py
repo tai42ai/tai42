@@ -324,7 +324,7 @@ def test_bad_or_missing_purpose_refused() -> None:
 
 def test_purpose_specific_keys_refused() -> None:
     # An ``input`` program may not declare ``reads``/``writes``; ``params`` is admitted on
-    # BOTH purposes (an update's ``params`` names its ``.input`` keys). A key outside a
+    # BOTH purposes (an update's ``params`` names its ``$input`` keys). A key outside a
     # purpose's set is refused.
     with pytest.raises(TemplateValidationError, match="unknown key"):
         validate_template(
@@ -344,7 +344,7 @@ def test_update_may_declare_params_naming_its_input_keys() -> None:
                     "purpose": "update",
                     "params": ["verdict"],
                     "writes": [["ledger"]],
-                    "jq": {"content": '[{op: "set", path: ["ledger"], value: .input.verdict}]'},
+                    "jq": {"content": '[{op: "set", path: ["ledger"], value: $input.verdict}]'},
                 }
             }
         )
@@ -366,7 +366,7 @@ def test_update_programs_parse_reads_and_writes() -> None:
                     "description": "settle",
                     "reads": [["ledger"]],
                     "writes": [["ledger"]],
-                    "jq": {"content": '[{op: "set", path: ["ledger"], value: .input}]'},
+                    "jq": {"content": '[{op: "set", path: ["ledger"], value: $input}]'},
                 },
             }
         )
@@ -412,7 +412,7 @@ def test_non_compiling_update_jq_is_refused() -> None:
 def test_update_may_call_an_input_program_by_name() -> None:
     # An update program's jq may call an input program by its relative name; the compile
     # prepends the sibling input-program prelude exactly as the evaluator does, so a
-    # reference over ``.record`` resolves.
+    # reference over the record subtree (its ``.``) resolves.
     template = validate_template(
         _planner_doc(
             template_jq={
@@ -422,8 +422,7 @@ def test_update_may_call_an_input_program_by_name() -> None:
                     "writes": [["ledger"]],
                     "jq": {
                         "content": (
-                            "if (.record | tjq_anything_due({})) then "
-                            '[{op: "set", path: ["ledger"], value: []}] else [] end'
+                            'if (. | tjq_anything_due({})) then [{op: "set", path: ["ledger"], value: []}] else [] end'
                         )
                     },
                 },
@@ -441,15 +440,15 @@ def test_reconcile_parses_three_jq_programs() -> None:
     template = validate_template(
         _planner_doc(
             reconcile={
-                "orphans": {"content": "[.data.ledger[]? | {id, label: .id}]"},
-                "resolutions": {"content": "[.new.resolutions[]?]"},
-                "close": {"content": '[{op: "remove", path: ["ledger"], keys: [.id]}]'},
+                "orphans": {"content": "[.ledger[]? | {id, label: .id}]"},
+                "resolutions": {"content": "[.resolutions[]?]"},
+                "close": {"content": '[{op: "remove", path: ["ledger"], keys: [$id]}]'},
             }
         )
     )
     assert template.reconcile is not None
     assert template.reconcile.orphans.content is not None
-    assert template.reconcile.orphans.content.startswith("[.data")
+    assert template.reconcile.orphans.content.startswith("[.ledger")
     assert validate_template(template.to_document()).reconcile == template.reconcile
 
 
@@ -508,7 +507,7 @@ def test_reconcile_by_id_is_accepted_and_round_trips() -> None:
     doc = _planner_doc(
         reconcile={
             "orphans": {"id": "stored-orphans"},
-            "resolutions": {"content": "[.new.resolutions[]?]"},
+            "resolutions": {"content": "[.resolutions[]?]"},
             "close": {"id": "stored-close"},
         }
     )

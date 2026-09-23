@@ -105,7 +105,7 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     A pending-question reply forwards to its callback; any other human message bridges
     to a conversation. A pending-question correlation is attempted first and wins. On a miss — a thread
     reply whose question expired or was never ours, a top-level message, or a message
-    outside the ask_user allowlist — the message bridges. The bot's own echoes stay
+    outside the ask allowlist — the message bridges. The bot's own echoes stay
     ignored throughout.
     """
     settings = slack_settings()

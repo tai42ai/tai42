@@ -93,16 +93,21 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         "studio_plugins": ["reference_plugin", "tai42_accounts_postgres"],
         # The web channel: its PUBLIC chat page, asset, stream and answer doors serve the
         # browser widget alongside the Studio, so the ``ui/`` suite can drive a real
-        # web-channel ``ask_user`` in the rendered widget. The doors are ``public: true``
+        # web-channel ``ask`` in the rendered widget. The doors are ``public: true``
         # and bypass access control by their own declaration (as in build_bridge_stack).
         "channel_modules": ["tai42_channel_web.register"],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "notify_user", "reload_config"],
+        "user_tools": ["ask", "notify_user", "reload_config"],
     }
     env = _base_env(res, variants)
     # The web channel's own transcript store + limiter windows, so the widget's chat page
     # mints a session and its stream/answer doors work under the browser origin.
     env.update(_web_channel_env(res))
+    # The run panel's subject sub-form offers conversation-route targets, and a run keyed
+    # to such a subject parks its caller asks under it: back the conversation bridge's
+    # store so a browser suite creates a real route to key its runs to.
+    env["CONVERSATIONS_REDIS_URL"] = res.redis_url
+    env["CONVERSATIONS_PREFIX"] = f"{res.bus_namespace}:conversations"
     env["ACCESS_CONTROL_ENABLE"] = "true"
     # Ordered resolution: the accounts provider claims tai-sess- tokens, the key provider
     # claims sk- keys; a non-matching provider is a MISS, not an error.
@@ -137,7 +142,7 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # delivery then fails verification with a clean 401 rather than a 500.
     if res.gh_webhook_secret is not None:
         env["E2E_GH_WEBHOOK_SECRET"] = res.gh_webhook_secret
-    # ask_user mints its callback ticket against the stack's OWN app origin, filled at boot
+    # ask mints its callback ticket against the stack's OWN app origin, filled at boot
     # (app_origin_env_keys below): the web channel's answer door forwards the widget's answer
     # to that callback URL, so it must resolve back on this single-port stack, not an
     # off-host placeholder.
@@ -184,7 +189,7 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         # CONNECTORS_REDIRECT_URI_ALLOWLIST fail-closed; the app port is only known at
         # boot, so the stack fills this with its own origin.
         origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
-        # The ask_user callback base the web channel's answer door forwards to must be this
+        # The ask callback base the web channel's answer door forwards to must be this
         # stack's own reachable origin (single app port, known only at boot).
         app_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
     )
@@ -224,7 +229,7 @@ def build_studio_setup_stack(res: StackResources, variants: Variants) -> StackCo
         "tools": [*_builtin_entries()],
         "studio_plugins": ["tai42_accounts_postgres"],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "notify_user", "reload_config"],
+        "user_tools": ["ask", "notify_user", "reload_config"],
     }
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"

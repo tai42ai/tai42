@@ -20,7 +20,9 @@ from tai42_contract.agent.events import MessageDelta, MessageFinal, SuspendedFin
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.interactions import (
+    ChainedResume,
     SuspendedInteraction,
+    get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
     reset_park_completion,
@@ -236,7 +238,7 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
     deadline = datetime.now(UTC) + timedelta(minutes=5)
 
     def parking_tool(**_kwargs: Any) -> SuspendedInteraction:
-        # Faithful to ``ask_user(mode="async")``: the park it mints names the resume
+        # Faithful to ``ask(mode="async")``: the park it mints names the resume
         # continuation bound around this drive as its owner, so the drive may adopt it.
         return SuspendedInteraction(
             interaction_id="i-tool", expiry_at=deadline, resume_owner=get_resume_continuation_tool()
@@ -269,16 +271,19 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.usefixtures("fake_redis")
 def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
-    # THIS agent owns the interaction and its deferred answer: a parking driver reached through
-    # a proxied tool must not read the completion binding addressing that answer off the
-    # contextvar (``_internal.nested_dispatch``). The binding is restored around the dispatch.
+    # A parking driver reached through a proxied tool captures the cross-driver CHAIN routing
+    # (``chained_resume``) so it re-enters this agent at its terminal, while the door's out-of-band
+    # address flows DOWN unchanged (the platform delivers it — no driver fires the door completion,
+    # so there is no hijack to guard). The door binding is restored around the dispatch.
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL))
     bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
-    seen: list[tuple[str | None, Any]] = []
+    chain_seen: list[ChainedResume | None] = []
+    door_seen: list[tuple[str | None, Any]] = []
 
     def peeking_tool(**_kwargs: Any) -> str:
-        seen.append(get_park_completion())
+        chain_seen.append(get_chained_resume())
+        door_seen.append(get_park_completion())
         return "peeked"
 
     app = build_local_app(tool_runners={"peektool": peeking_tool})
@@ -293,7 +298,11 @@ def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatc
         reset_request_user_id(user_token)
         reset_park_completion(completion_token)
 
-    assert seen == [(None, None)]
+    # The proxied dispatch leaked NO chain of an outer dispatch (``chained_resume`` cleared to
+    # None), and the door's out-of-band address flowed down to it unchanged — the platform, not the
+    # nested driver, delivers the agent's own answer there.
+    assert chain_seen == [None]
+    assert door_seen == [bound]
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -341,7 +350,7 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
     _settings(monkeypatch, creds=[_bearer_cred()])
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
 
-    async def ask_user(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
+    async def ask(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
         # Stamp the resume owner the real platform ask does — the continuation bound by the
         # threaded drive — so the sentinel is faithful to what the ask actually mints.
         return SuspendedInteraction(
@@ -350,9 +359,7 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
             resume_owner=get_resume_continuation_tool(),
         )
 
-    app = build_local_app(
-        ask_user=ask_user, resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1"))
-    )
+    app = build_local_app(ask=ask, resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1")))
     token = set_request_user_id("user-1")
     try:
         events = _run(app, user_message=TemplatedText(content="deploy it"), thread_id="t1")
@@ -378,7 +385,7 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
     deadline = datetime.now(UTC) + timedelta(hours=1)
 
-    async def real_ask_user(_question: str, *, expiry_at: datetime | None = None, mode: str = "sync", **_: Any) -> Any:
+    async def real_ask(_question: str, *, expiry_at: datetime | None = None, mode: str = "sync", **_: Any) -> Any:
         # Mirror the platform helper's async guard: an async ask REQUIRES a resuming driver bound
         # in the resume-continuation context, else it refuses loudly and produces no park.
         assert mode == "async"
@@ -391,7 +398,7 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
 
     agent = ClaudeCodeAgent()
     app = build_local_app(
-        ask_user=real_ask_user,
+        ask=real_ask,
         resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1")),
         agents={"claude_code": agent},
     )
@@ -432,7 +439,7 @@ def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, 
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(ASYNC_ASK))
 
-    async def ask_user(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
+    async def ask(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
         deadline = expiry_at or datetime.now(UTC) + timedelta(hours=1)
         # Faithful to the platform ask: stamp the resume owner the threaded drive bound.
         return SuspendedInteraction(
@@ -440,7 +447,7 @@ def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, 
         )
 
     async def _park_then_read() -> Any:
-        await _astream(build_local_app(ask_user=ask_user), user_message=TemplatedText(content="deploy"), thread_id="t9")
+        await _astream(build_local_app(ask=ask), user_message=TemplatedText(content="deploy"), thread_id="t9")
         return await idx.read_park_entry("int-9")
 
     entry = asyncio.run(_park_then_read())

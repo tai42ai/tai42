@@ -12,11 +12,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
 from tai42_contract.app import tai42_app
+from tai42_contract.states import StateContext
 
 import tai42_skeleton.operations.tool_runs as _pkg
+from tai42_skeleton.states.context import state_context
 
 from . import supervisor
 from .models import _CRASH_RESUME_META_KEY, _LOST, _RUNNING
@@ -107,14 +111,19 @@ def _on_crash_resume_done(task: asyncio.Task[None], run_id: str, tool_name: str)
 
 
 async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
-    """Replay ``record``'s run FROM SCRATCH under the principal's reconstructed identity.
+    """Replay ``record``'s run FROM SCRATCH under the principal's reconstructed identity and subject.
 
     Binds the execution identity rebuilt from the record's ``user_id`` (its CURRENT live
-    grants, so a mid-life de-scope/revocation lands on the re-drive), then replays
-    ``run_recorded(tool_name, persisted arguments, extras=persisted extras)``. When the principal's live grants no
+    grants, so a mid-life de-scope/revocation lands on the re-drive) AND deposits the
+    fire's persisted ``state_context`` around the replay, so the re-driven run runs under
+    the SAME subject the original fire did: its park indexes where the original's would
+    have and a caller ask can still be raised. It then replays
+    ``run_recorded(tool_name, persisted arguments, extras=persisted extras)``. A record with no
+    stored context (a fire without a subject) deposits none. When the principal's live grants no
     longer carry authority the reconstruction binds ``None`` (identity-less) — the
     re-drive then fail-closes loudly on any credential seam, never a silent principal
-    substitution under a revoked key.
+    substitution under a revoked key. An unreadable arguments/extras/context blob is logged
+    and the re-drive skipped, the same loud path the persisted input takes.
     """
     from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 
@@ -122,17 +131,23 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     try:
         arguments = json.loads(record.get("arguments") or "{}")
         extras = json.loads(record.get("extras") or "{}")
-    except json.JSONDecodeError:
+        raw_context = record.get("state_context")
+        context = StateContext.model_validate(json.loads(raw_context)) if raw_context is not None else None
+    except (json.JSONDecodeError, ValidationError):
         logger.exception(
-            "crash-resume: run %s (%s) has an unreadable arguments/extras blob; skipping re-drive", run_id, tool_name
+            "crash-resume: run %s (%s) has an unreadable arguments/extras/context blob; skipping re-drive",
+            run_id,
+            tool_name,
         )
         return
     user_id = record.get("user_id")
     identity = await _rebuild_crash_resume_identity(user_id) if user_id is not None else None
     logger.info("crash-resume: re-dispatching lost run %s (%s) from scratch", run_id, tool_name)
+    context_scope = state_context(context) if context is not None else nullcontext()
     token = set_execution_identity(identity)
     try:
-        await supervisor.run_recorded(tool_name, arguments, extras=extras)
+        with context_scope:
+            await supervisor.run_recorded(tool_name, arguments, extras=extras)
     finally:
         reset_execution_identity(token)
 

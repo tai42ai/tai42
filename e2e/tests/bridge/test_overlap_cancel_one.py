@@ -14,7 +14,7 @@ from ._bridge_support import BridgeHarness, wait_probe_record, wait_record_statu
 from ._overlap_support import (
     create_web_tool_route,
     open_visitor,
-    probe_payload_expr,
+    probe_start_expr,
     reply_matching,
     send_web,
 )
@@ -31,7 +31,7 @@ async def test_cancel_one_supersedes_the_running_and_middle_messages(
         uniq,
         "ov-cancel-one",
         tool="e2e_overlap_probe",
-        payload_expr=probe_payload_expr(marker, hold_seconds=_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "one"},
     )
     web = await open_visitor(bridge, identity)

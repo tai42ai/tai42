@@ -39,7 +39,7 @@ class AgentInvokeResult:
     or non-conforming result raises in the invoke path, never surfaces as ``None``).
 
     ``suspended`` is the async-park RECEIPT (``{"status": "suspended", ...}``) when
-    the run parked on an async ``ask_user`` instead of finishing; ``None`` on a
+    the run parked on an async ``ask`` instead of finishing; ``None`` on a
     normal terminal run. When set, ``output``/``structured`` carry no answer — the
     run resumes out of band.
     """

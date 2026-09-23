@@ -6,7 +6,7 @@ visitor's session and delivered to the turn's tool payload under its OWN ``param
 never merged into the root, never interpreted, never trusted. The web page door captures
 them; the authed API door takes the same field on its message body, for one uniform
 tool-payload contract. This leg drives both doors against a ``target_kind=tool`` route whose
-``payload_expr`` reads ``.params.*`` and records what the tool actually received, so the
+``start_expr`` reads ``.params.*`` and records what the tool actually received, so the
 assertion is on the delivered payload and not on any intermediate.
 
 The security invariants pinned here: the payload ``sender`` is the server-side visitor id
@@ -42,7 +42,7 @@ def _base_url(bridge: BridgeHarness) -> str:
     return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
 
 
-async def _web_tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, payload_expr: str) -> str:
+async def _web_tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, start_expr: str) -> str:
     """Create a ``target_kind=tool`` web route whose tool records the delivered payload, and
     return its identity. The reply maps to null so the turn runs (the record side effect
     lands) but nothing is appended to the visitor transcript."""
@@ -56,7 +56,7 @@ async def _web_tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag
         execution_key=exec_key,
         channel="web",
         our_identity=identity,
-        payload_expr=payload_expr,
+        start_expr=start_expr,
         reply_expr="null",
     )
     return identity
@@ -83,7 +83,7 @@ async def test_link_params_reach_the_tool_and_sender_is_the_unspoofable_visitor_
     under ``.params.sender``, never over the address the platform attests)."""
     probe = uniq("l22-sender")
     value_expr = "({x: .params.x, y: .params.y, sender: .sender, spoofed: .params.sender} | tojson)"
-    identity = await _web_tool_route(bridge, uniq, "l22a", payload_expr=_record_expr(json.dumps(probe), value_expr))
+    identity = await _web_tool_route(bridge, uniq, "l22a", start_expr=_record_expr(json.dumps(probe), value_expr))
 
     web, _page = await WebChatClient.open_page(
         _base_url(bridge),
@@ -109,8 +109,8 @@ async def test_params_persist_across_every_message_of_the_session(
     """The params captured at the entry ride EVERY message of that session, not just the
     first — the tool sees them on message two and three exactly as on message one."""
     value = uniq("l22-persist-val")
-    payload_expr = _record_expr(".message", '(.params.x // "none")')
-    identity = await _web_tool_route(bridge, uniq, "l22b", payload_expr=payload_expr)
+    start_expr = _record_expr(".message", '(.params.x // "none")')
+    identity = await _web_tool_route(bridge, uniq, "l22b", start_expr=start_expr)
 
     web, _page = await WebChatClient.open_page(
         _base_url(bridge), identity, store_url=bridge.stack.resources.redis_url, query={"x": value}
@@ -129,8 +129,8 @@ async def test_renavigation_replaces_params_and_a_bare_renavigation_keeps_them(
 ) -> None:
     """Re-opening the chat page on the SAME session with new params rewrites them; re-opening
     with NO params leaves the stored ones untouched (same token, same visitor id throughout)."""
-    payload_expr = _record_expr(".message", '(.params.x // "none")')
-    identity = await _web_tool_route(bridge, uniq, "l22c", payload_expr=payload_expr)
+    start_expr = _record_expr(".message", '(.params.x // "none")')
+    identity = await _web_tool_route(bridge, uniq, "l22c", start_expr=start_expr)
     store_url = bridge.stack.resources.redis_url
 
     first = uniq("l22c-first")
@@ -164,7 +164,7 @@ async def test_rotate_mints_a_clean_registration_with_no_params(
     """A rotation is the visitor's "new conversation": its fresh registration carries NO link
     params, so the tool payload for a rotated session has no ``params`` key at all."""
     identity = await _web_tool_route(
-        bridge, uniq, "l22d", payload_expr=_record_expr(".message", '(has("params") | tostring)')
+        bridge, uniq, "l22d", start_expr=_record_expr(".message", '(has("params") | tostring)')
     )
     store_url = bridge.stack.resources.redis_url
 
@@ -188,8 +188,8 @@ async def test_a_no_params_visitor_delivers_a_byte_identical_payload(
     turn carries the stable base keys and NO ``params`` key. The base set is asserted as a
     subset so unrelated additive keys do not re-break this fence; the invariant under test is
     that a no-params entry adds no ``params`` key."""
-    payload_expr = _record_expr(".message", '(keys | join(","))')
-    identity = await _web_tool_route(bridge, uniq, "l22e", payload_expr=payload_expr)
+    start_expr = _record_expr(".message", '(keys | join(","))')
+    identity = await _web_tool_route(bridge, uniq, "l22e", start_expr=start_expr)
 
     web, _page = await WebChatClient.open_page(_base_url(bridge), identity, store_url=bridge.stack.resources.redis_url)
     text = uniq("l22e-msg")
@@ -208,7 +208,7 @@ async def test_bounds_violations_answer_a_400_page_and_mint_no_session(
     """Each params bound — too many, oversize value, bad key charset, duplicate key — is a
     byte-constant 400 refusal PAGE carrying ``link_params_invalid`` in its meta, and NO
     session cookie is minted (the door refused before establishing one)."""
-    identity = await _web_tool_route(bridge, uniq, "l22f", payload_expr=_record_expr(".message", ".params.x"))
+    identity = await _web_tool_route(bridge, uniq, "l22f", start_expr=_record_expr(".message", ".params.x"))
     base = _base_url(bridge)
 
     too_many = {f"k{i}": "v" for i in range(17)}
@@ -232,7 +232,7 @@ async def test_reserved_query_names_never_reach_the_delivered_params(
     ``tai_pair`` / ``tai_entry`` under ``.params``."""
     probe = uniq("l22-reserved")
     identity = await _web_tool_route(
-        bridge, uniq, "l22g", payload_expr=_record_expr(json.dumps(probe), '(.params | keys | join(","))')
+        bridge, uniq, "l22g", start_expr=_record_expr(json.dumps(probe), '(.params | keys | join(","))')
     )
 
     web, _page = await WebChatClient.open_page(
@@ -264,7 +264,7 @@ async def test_api_door_carries_params_and_refuses_an_invalid_value_without_echo
         tool="e2e_record",
         execution_key=exec_key,
         callback_url=_UNREACHABLE_CALLBACK,
-        payload_expr=_record_expr(json.dumps(probe), '(.params.x // "none")'),
+        start_expr=_record_expr(json.dumps(probe), '(.params.x // "none")'),
         reply_expr="null",
     )
     caller = await bridge.mint_key(user_id=uniq("l22h-caller"), scopes=["e2e-all"])

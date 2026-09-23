@@ -875,6 +875,51 @@ async def test_delete_route_cascade_cancels_every_thread_park(wired, record_redi
     await _assert_park_cancelled(store, fake, interaction_id="ib", thread_id=thread_b)
 
 
+async def test_delete_route_cancels_parks_before_removing_the_routing_row(
+    wired, record_redis, interactions_parks, monkeypatch
+):
+    # A park's whole-chain kill delivers the run's FAILED, which resolves the park's thread back to
+    # its route+address — reachable only while the routing row stands. So the delete cancels every
+    # thread park BEFORE it removes the row; removing the row first would leave that delivery unable
+    # to resolve the now-gone route and fail the delete.
+    manager = wired
+    store, fake = interactions_parks
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    thread = "bridge:chat:alice/user-0"
+    await _seed_thread_on("chat", door="api", thread_id=thread)
+    await _seed_park(store, fake, interaction_id="ia", group_id="ga", thread_id=thread)
+
+    from tai42_skeleton.interactions import helper as interactions_helper
+
+    order: list[str] = []
+    real_cancel = interactions_helper.cancel_parks_for_thread
+    real_delete = manager.delete_route
+
+    async def _cancel(thread_id: str, *, reason: str = "thread_deleted"):
+        order.append("cancel")
+        return await real_cancel(thread_id, reason=reason)
+
+    async def _delete(route_name: str):
+        order.append("delete_route")
+        return await real_delete(route_name)
+
+    monkeypatch.setattr(interactions_helper, "cancel_parks_for_thread", _cancel)
+    monkeypatch.setattr(manager, "delete_route", _delete)
+
+    assert (await ops.delete_conversation_route("chat"))["removed"] is True
+
+    # The park cancel ran before the routing row was removed, and the park is gone.
+    assert order == ["cancel", "delete_route"]
+    await _assert_park_cancelled(store, fake, interaction_id="ia", thread_id=thread)
+
+
 # -- the registered target bind validator (warn-then-error at bind) --------
 
 

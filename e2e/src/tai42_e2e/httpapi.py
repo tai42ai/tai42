@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json as _json
 import socket as _socket
+import time as _time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -74,14 +75,18 @@ class ApiClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout or self._timeout) as client:
             return await client.request(method, path, json=json, headers=merged, content=content)
 
-    def post_and_disconnect(self, path: str, *, json: Any = None) -> None:
-        """Send one POST over a raw socket, then close it AT ONCE without reading the response.
+    def post_and_disconnect(self, path: str, *, json: Any = None, hold_seconds: float = 0.0) -> None:
+        """Send one POST over a raw socket, hold it open ``hold_seconds``, then close it without
+        reading the response.
 
-        Models a caller that hangs up mid-request: the server holds a sync-wait response the
-        closed connection never receives, so the door's disconnect probe reads gone when the
-        turn finishes. Synchronous (a bare socket, no event loop) so the close lands as soon as
-        the request bytes are flushed — the raw-socket leg the async client cannot express.
+        Models a caller that hangs up DURING THE SYNC WAIT: the connection stays open long enough
+        for the server to accept and record the message and start its turn, then closes before the
+        turn finishes, so the door's disconnect probe reads gone at claim time and the answer falls
+        to the route's callback. ``hold_seconds`` must cover acceptance and land before the answer
+        is ready. Synchronous (a bare socket, no event loop) — the raw-socket leg the async client
+        cannot express.
         """
+
         parts = urlsplit(self._base_url)
         host, port = parts.hostname, parts.port
         if host is None or port is None:
@@ -99,6 +104,10 @@ class ApiClient:
         sock = _socket.create_connection((host, port), timeout=self._timeout)
         try:
             sock.sendall(request)
+            if hold_seconds > 0:
+                # Hold the raw socket open for real wall-clock — the point is a client that stays
+                # connected through acceptance, then hangs up; there is no condition to poll.
+                _time.sleep(hold_seconds)  # noqa: TID251 — a bare synchronous socket, no event loop
         finally:
             sock.close()
 

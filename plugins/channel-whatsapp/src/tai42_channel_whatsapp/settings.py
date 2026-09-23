@@ -3,7 +3,7 @@
 A ``TaiBaseSettings`` subclass reading the ``CHANNEL_WHATSAPP_`` env group
 through accessors cached by ``tai42_kit.settings.settings_cache`` (dropped on a
 soft restart). ``CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS`` whitelists
-caller-requested destinations for ask_user. The access token, app secret, and
+caller-requested destinations for ask. The access token, app secret, and
 verify token are ``SecretStr`` (never in a repr/log/traceback); the plaintext is
 read only at the Bearer-auth and signature-HMAC seams.
 """
@@ -33,12 +33,12 @@ class WhatsAppSettings(TaiBaseSettings):
     verify_token: SecretStr | None = None
     # Graph API origin with a pinned version; overridable so a stub can stand in (e2e).
     api_base_url: str = "https://graph.facebook.com/v23.0"
-    # phone_number_id used as the sender when no sender_identity is routed (ask_user).
+    # phone_number_id used as the sender when no sender_identity is routed (ask).
     default_phone_number_id: str | None = None
     # WhatsApp Business Account id that owns Flows; required only on the form-delivery
     # path (a form ask is rendered as a WhatsApp Flow created under this WABA).
     waba_id: str | None = None
-    # Whitelist of wa_ids a caller-requested recipient must be on (ask_user only).
+    # Whitelist of wa_ids a caller-requested recipient must be on (ask only).
     # NoDecode hands the raw env string to the validator (comma-separated or JSON).
     allowed_recipients: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # Timeout for both the outbound Graph send and the loopback answer forward.

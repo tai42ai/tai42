@@ -83,14 +83,18 @@ async def test_gone_client_sync_wait_falls_to_the_callback(bridge: BridgeHarness
     route_name = await _api_route(bridge, uniq, callback_url=_UNREACHABLE_CALLBACK)
     answer = uniq("l3-gone")
     script_reply(bridge.llm_stub, f"gone {answer}")
-    # The turn takes about a second, so the raw-socket client is long gone by the time it finishes.
-    bridge.llm_stub.set_response_delay(1.0)
+    # The turn's answer is delayed well past the hang-up: the client holds the connection open long
+    # enough for the server to accept and record the message and start the turn, then closes before
+    # the answer is ready, so the claim-time disconnect probe reads gone and the answer falls to
+    # the callback.
+    bridge.llm_stub.set_response_delay(3.0)
 
     caller_token = await bridge.mint_key(user_id=uniq("l3-caller"), scopes=["e2e-all"])
     text = uniq("l3-gone-text")
     bridge.api(token=caller_token).post_and_disconnect(
         f"/api/conversations/{route_name}/messages",
         json={"external_user_id": uniq("l3-user"), "text": text, "wait_seconds": 20},
+        hold_seconds=1.0,
     )
 
     # Find the accepted record by its unique inbound text (the hung-up post read no message_id back).

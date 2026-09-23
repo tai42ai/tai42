@@ -8,7 +8,7 @@ but posts a plain message (no correlation, no deadline, no reply) and returns th
 posted ``ts``. A ``notify`` carrying ``sender_identity`` must name this
 deployment's single bot identity (``CHANNEL_SLACK_BOT_USER_ID``) or it is refused.
 
-The recipient allowlist governs ask_user deliveries; a bridge reply goes solely to
+The recipient allowlist governs ask deliveries; a bridge reply goes solely to
 the conversation that initiated it, resolved by the bridge, not the allowlist.
 
 Tier-1 (``confirm``/``external``) skip correlation: their answers travel through
@@ -24,6 +24,7 @@ Redis, before the send) holds the schema and callback URL that door needs.
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
 import httpx
@@ -247,7 +248,7 @@ async def _post_message(
     except ValueError as exc:
         raise ChannelDeliveryError("chat.postMessage returned a non-JSON body") from exc
     if body.get("ok") is not True:
-        raise ChannelDeliveryError(f"chat.postMessage failed: {body.get('error', 'unknown error')}")
+        raise ChannelDeliveryError(f"chat.postMessage failed: {_error_detail(body)}")
     return body
 
 
@@ -278,7 +279,32 @@ async def open_modal_view(trigger_id: str, view: dict[str, Any]) -> None:
     except ValueError as exc:
         raise ChannelDeliveryError("views.open returned a non-JSON body") from exc
     if body.get("ok") is not True:
-        raise ChannelDeliveryError(f"views.open failed: {body.get('error', 'unknown error')}")
+        raise ChannelDeliveryError(f"views.open failed: {_error_detail(body)}")
+
+
+# Slack's Web API error object, in the vendor's documented field order.
+_ERROR_FIELDS = ("error", "warning", "needed", "provided", "response_metadata")
+
+
+def _error_detail(body: dict[str, Any]) -> str:
+    """Slack's full documented error fields from an ``ok: false`` body, in one deterministic format.
+
+    Each present field renders as a ``name=<render>`` token in Slack's fixed order —
+    ``repr(value)`` for a scalar, compact sorted JSON for ``response_metadata`` —
+    joined by one space and bounded to 500 chars. ``response_metadata`` carries the
+    per-field validation ``messages`` a scope or block error reports.
+    """
+    tokens: list[str] = []
+    for name in _ERROR_FIELDS:
+        if name not in body:
+            continue
+        value = body[name]
+        if isinstance(value, (list, dict)):
+            render = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        else:
+            render = repr(value)
+        tokens.append(f"{name}={render}")
+    return " ".join(tokens)[:500]
 
 
 def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:

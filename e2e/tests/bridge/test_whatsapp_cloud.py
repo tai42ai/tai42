@@ -2,7 +2,7 @@
 
 Meta's GET verification handshake; a signed POST inbound routed to a turn whose answer sends
 FROM the correct ``phone_number_id``; a bad signature is 401 with no turn; two
-``phone_number_id``s under one credential fire two routes; and an ask_user round-trip over
+``phone_number_id``s under one credential fire two routes; and an ask round-trip over
 whatsapp (deliver → correlated reply → answer returns) — the coverage every sibling
 channel has.
 
@@ -164,16 +164,16 @@ async def test_two_phone_number_ids_two_agents(bridge: BridgeHarness, uniq: Call
     assert send_b["phone_number_id"] == BRIDGE_WHATSAPP_PHONE_ID_B
 
 
-async def test_ask_user_round_trip_over_whatsapp(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+async def test_ask_round_trip_over_whatsapp(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     question = uniq("l7-ask-q")
     ask_answer = uniq("l7-ask-a")
 
     async def ask() -> object:
-        # ask_user over whatsapp delivers FROM the default phone_number_id to the
+        # ask over whatsapp delivers FROM the default phone_number_id to the
         # allowlisted wa_id and stores a Tier-2 pending correlation on that pair.
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
             result = await mcp.call_tool(
-                "ask_user", {"question": question, "channel": "whatsapp", "recipient": BRIDGE_WHATSAPP_CLIENT}
+                "ask", {"question": question, "channel": "whatsapp", "recipient": BRIDGE_WHATSAPP_CLIENT}
             )
         return result.data
 
@@ -200,7 +200,7 @@ async def _ask_select(bridge: BridgeHarness, *, question: str, recipient: str, o
     async def ask() -> object:
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {
                     "question": question,
                     "channel": "whatsapp",
@@ -367,7 +367,7 @@ async def test_button_tap_carries_reply_id_onto_the_tool_payload_params(
         execution_key=exec_key,
         channel="whatsapp",
         our_identity=identity,
-        payload_expr=f'{{key: "{probe}", value: (.params.reply_id // "none")}}',
+        start_expr=f'{{key: "{probe}", value: (.params.reply_id // "none")}}',
         reply_expr="null",
     )
 
@@ -438,7 +438,7 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     async def ask() -> object:
         async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {
                     "question": question,
                     "channel": "whatsapp",

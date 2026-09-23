@@ -9,12 +9,14 @@ run's terminal to the reply.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, StructuredFinal
 from tai42_contract.conversations import ConversationRoute
-from tai42_contract.interactions import ParkedEntry
+from tai42_contract.interactions import ParkedEntry, VisitOutcome
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app import instance
@@ -159,6 +161,74 @@ async def test_agent_reply_expr_maps_the_structured_final(monkeypatch):
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
     assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == "the mapped reply"
+
+
+def _wire_resumed_result(monkeypatch, result: object) -> None:
+    """Drive the route's visit to a RESUMED run whose terminal is the plain ``result`` value.
+
+    A resume returns the run's own terminal value (a ``str``, or the structured data), NOT the
+    ``StructuredFinal`` / ``MessageFinal`` event the start drive yields — so this exercises the
+    outcome mapping on the resume shape, the path that reaches ``_agent_result_outcome``.
+    """
+
+    async def _visit(**_kwargs):
+        return VisitOutcome(action="resumed", kind="result", result=result)
+
+    monkeypatch.setattr(agent_turn_module, "visit", _visit)
+
+
+async def test_agent_resume_message_terminal_no_reply_expr(monkeypatch):
+    # A resumed run whose terminal is a plain string maps to that text as the answer (a message
+    # final), with no reply_expr — the resume value must not be treated as a final event's ``.text``.
+    agent = _RecordingAgent()
+    route = _agent_route()
+    _wire_agent(monkeypatch, route, agent)
+    _wire_resumed_result(monkeypatch, "the resumed answer")
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "answered"
+    assert outcome.parts[0].message == "the resumed answer"
+
+
+async def test_agent_resume_message_terminal_reply_expr(monkeypatch):
+    # With a reply_expr the resumed message terminal is the ``.`` the jq maps.
+    agent = _RecordingAgent()
+    route = _agent_route(reply_expr=".")
+    _wire_agent(monkeypatch, route, agent)
+    _wire_resumed_result(monkeypatch, "mapped resume text")
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "answered"
+    assert outcome.parts[0].message == "mapped resume text"
+
+
+async def test_agent_resume_structured_terminal_no_reply_expr(monkeypatch):
+    # A resumed run whose terminal is structured data serializes to ONE string (a structured final),
+    # never split — the resume value is DATA, mapped like the start path's structured final.
+    agent = _RecordingAgent()
+    route = _agent_route()
+    _wire_agent(monkeypatch, route, agent)
+    _wire_resumed_result(monkeypatch, {"answer": "structured resume"})
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "answered"
+    assert outcome.parts[0].message == json.dumps({"answer": "structured resume"})
+
+
+async def test_agent_resume_structured_terminal_reply_expr(monkeypatch):
+    # With a reply_expr the resumed structured terminal is the ``.`` (its data) the jq maps.
+    agent = _RecordingAgent()
+    route = _agent_route(reply_expr=".answer")
+    _wire_agent(monkeypatch, route, agent)
+    _wire_resumed_result(monkeypatch, {"answer": "the mapped resume reply"})
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "answered"
+    assert outcome.parts[0].message == "the mapped resume reply"
 
 
 async def test_agent_start_is_refused_while_a_caller_ask_is_pending(monkeypatch):

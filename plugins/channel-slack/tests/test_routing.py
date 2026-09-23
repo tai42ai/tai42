@@ -213,7 +213,7 @@ async def test_bot_user_id_unset_on_bridge_route_is_loud_misconfig(fake_redis, s
     assert _DEDUPE_KEY not in fake_redis.store
 
 
-async def test_bot_user_id_unset_does_not_block_ask_user_path(fake_redis, channels, stub_conversations, monkeypatch):
+async def test_bot_user_id_unset_does_not_block_ask_path(fake_redis, channels, stub_conversations, monkeypatch):
     # The forward path needs no bot user id: a correlated reply still resolves via the
     # ladder when CHANNEL_SLACK_BOT_USER_ID is unset (the id rides only into the bridge
     # context the ladder uses on a terminal 404, not the forward).

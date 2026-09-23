@@ -6,47 +6,57 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Literal
 
 from tai42_contract.app import tai42_app
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
+from tai42_e2e_fixtures.tools.driving import driving_as
 
-# The synthetic execution identity the park driver binds before ``ask_user`` and the
+# The synthetic execution identity the park driver binds before ``ask`` and the
 # async park stores as its ``continuation_identity``. A value nothing else on the stack
 # produces, so a continuation that fires under it proves the stored-identity rebind (the
 # auth-off default execution identity is ``None``, never this).
 _ASYNC_PARK_IDENTITY = "e2e-async-driver"
 
 
+def _on_expiry_policy(value: str) -> Literal["kill", "resume"]:
+    """Narrow a fixture caller's ``on_expiry`` to the ask expiry policy, raising on any other value.
+
+    The tools take the policy as a plain ``str`` (their signatures are resolved by the agent
+    tool binder, which cannot evaluate a ``Literal`` forward reference), so the ask-policy type
+    is recovered here and a bad value fails loudly rather than silently taking a branch.
+    """
+    if value == "kill":
+        return "kill"
+    if value == "resume":
+        return "resume"
+    raise ValueError(f"on_expiry must be 'kill' or 'resume', got {value!r}")
+
+
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_async_park_flow(question: str, expiry_seconds: float) -> dict:
-    """Drive an async ``ask_user`` park exactly as a resuming driver would.
+async def e2e_async_park_flow(question: str, expiry_seconds: float, on_expiry: str = "kill") -> dict:
+    """Drive an async ``ask`` park exactly as a resuming driver would.
 
     Binds ``e2e_async_resume`` as the current driver's resume continuation tool and a
     synthetic execution identity (``_ASYNC_PARK_IDENTITY``) to rebind that continuation as,
-    then calls ``ask_user(mode="async", expiry_at=now+expiry_seconds)`` — which PARKS and
-    returns a ``SuspendedInteraction`` at once, never blocking — and unbinds both. Returns
-    the parked ``interaction_id`` and the STORED identity so a spec can answer (or await the
-    expiry of) THIS park and assert the resume ran under that stored identity; a later answer
-    or the expiry reaper fires ``e2e_async_resume`` as the stored identity, out of band, in
+    then calls ``ask(mode="async", expiry_at=now+expiry_seconds, on_expiry=_on_expiry_policy(on_expiry))`` —
+    which PARKS and returns a ``SuspendedInteraction`` at once, never blocking — and unbinds
+    both. Returns the parked ``interaction_id`` and the STORED identity so a spec can answer
+    (or await the expiry of) THIS park and assert the resume ran under that stored identity.
+    An answer always fires ``e2e_async_resume`` as the stored identity; on expiry
+    ``on_expiry="resume"`` fires the same continuation with the expiry marker, while
+    ``on_expiry="kill"`` tears the chain down and delivers the run's single FAILED — in
     whichever process resolves the park."""
     from datetime import UTC, datetime, timedelta
 
-    from tai42_contract.interactions import reset_resume_continuation_tool, set_resume_continuation_tool
-    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
     from tai42_skeleton.authz.identity import CallerIdentity
-    from tai42_skeleton.interactions import ask_user
+    from tai42_skeleton.interactions import ask
 
-    tool_token = set_resume_continuation_tool("e2e_async_resume")
-    identity_token = set_execution_identity(
-        CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-async-fp")
-    )
-    try:
+    identity = CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-async-fp")
+    with driving_as(continuation="e2e_async_resume", identity=identity):
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
-        suspended = await ask_user(question, mode="async", expiry_at=expiry_at)
-    finally:
-        reset_execution_identity(identity_token)
-        reset_resume_continuation_tool(tool_token)
+        suspended = await ask(question, mode="async", expiry_at=expiry_at, on_expiry=_on_expiry_policy(on_expiry))
     assert suspended.expiry_at is not None  # async park always carries its deadline
     return {
         "interaction_id": suspended.interaction_id,
@@ -107,14 +117,20 @@ def _multipark_minted_key(super_step_id: str) -> str:
 
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_async_multipark_flow(
-    super_step_id: str, expiry_seconds: list[float], slow_slot: int = -1, slow_seconds: float = 0.0
+    super_step_id: str,
+    expiry_seconds: list[float],
+    slow_slot: int = -1,
+    slow_seconds: float = 0.0,
+    on_expiry: str = "kill",
 ) -> dict:
-    """Drive N concurrent async ``ask_user`` parks in ONE super-step (one driver call).
+    """Drive N concurrent async ``ask`` parks in ONE super-step (one driver call).
 
     For each slot it binds ``e2e_async_multipark_resume`` as the resume continuation plus
     the synthetic park identity (``_ASYNC_PARK_IDENTITY``) and calls
-    ``ask_user(mode="async", expiry_at=now+expiry_seconds[slot])`` — each PARKS and returns
-    at once, so all N are suspended concurrently within this single call. It routes each
+    ``ask(mode="async", expiry_at=now+expiry_seconds[slot], on_expiry=_on_expiry_policy(on_expiry))`` — each
+    PARKS and returns at once, so all N are suspended concurrently within this single call.
+    A slot left to expiry fires its continuation with the expiry marker under
+    ``on_expiry="resume"``, or tears the chain down under ``on_expiry="kill"``. It routes each
     park's ``interaction_id`` to its ``{super_step_id, slot, n, slow}`` on the probe channel
     so the flow-blind continuation can recover its barrier slot from the interaction id
     alone. ``slow_slot`` marks one slot whose continuation sleeps ``slow_seconds`` before
@@ -125,27 +141,21 @@ async def e2e_async_multipark_flow(
     from datetime import UTC, datetime, timedelta
     from typing import cast
 
-    from tai42_contract.interactions import reset_resume_continuation_tool, set_resume_continuation_tool
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
-    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
     from tai42_skeleton.authz.identity import CallerIdentity
-    from tai42_skeleton.interactions import ask_user
+    from tai42_skeleton.interactions import ask
 
+    identity = CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-async-fp")
     n = len(expiry_seconds)
     interaction_ids: list[str] = []
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         for slot, expiry in enumerate(expiry_seconds):
-            tool_token = set_resume_continuation_tool("e2e_async_multipark_resume")
-            identity_token = set_execution_identity(
-                CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-async-fp")
-            )
-            try:
+            with driving_as(continuation="e2e_async_multipark_resume", identity=identity):
                 expiry_at = datetime.now(UTC) + timedelta(seconds=expiry)
-                suspended = await ask_user(f"{super_step_id}:{slot}", mode="async", expiry_at=expiry_at)
-            finally:
-                reset_execution_identity(identity_token)
-                reset_resume_continuation_tool(tool_token)
+                suspended = await ask(
+                    f"{super_step_id}:{slot}", mode="async", expiry_at=expiry_at, on_expiry=_on_expiry_policy(on_expiry)
+                )
             route = json.dumps(
                 {
                     "super_step_id": super_step_id,
@@ -221,18 +231,18 @@ async def e2e_async_multipark_resume(interaction_id: str, answer: object) -> dic
 # The AGENT async-park leg. Unlike the flow-driver probes above, the AGENT is the
 # consumer: its own park machinery binds the ``agent_resume`` continuation around the
 # drive, so these tools bind NO continuation. ``e2e_agent_async_ask`` supplies only the
-# execution identity ``ask_user`` needs, and only when the stack has not already bound one
+# execution identity ``ask`` needs, and only when the stack has not already bound one
 # (see its docstring), then returns the ``SuspendedInteraction`` the in-process tool seam
 # stamps into the park marker the agent's park middleware interrupts on.
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_agent_async_ask(question: str, expiry_seconds: float) -> object:
-    """Async ``ask_user`` an agent tool call reaches, parking the agent run.
+async def e2e_agent_async_ask(question: str, expiry_seconds: float, on_expiry: str = "kill") -> object:
+    """Async ``ask`` an agent tool call reaches, parking the agent run.
 
-    INHERIT OR BIND. ``ask_user`` stores the CURRENTLY bound execution identity as the
+    INHERIT OR BIND. ``ask`` stores the CURRENTLY bound execution identity as the
     parked interaction's ``continuation_identity``, and the resolution door rebinds exactly
     that identity to fire the resume. So this probe binds its synthetic stand-in
     (:data:`_ASYNC_PARK_IDENTITY`) ONLY when nothing is bound — the auth-off stacks, which
-    carry no caller identity and where ``ask_user`` would otherwise refuse the ask. Where the
+    carry no caller identity and where ``ask`` would otherwise refuse the ask. Where the
     stack HAS bound one (an access-controlled profile running the turn as a conversation
     route's execution key), that real key is inherited untouched: it is the only identity
     that still carries authority at resume time, and overriding it with a policy-less
@@ -254,7 +264,7 @@ async def e2e_agent_async_ask(question: str, expiry_seconds: float) -> object:
         set_execution_identity,
     )
     from tai42_skeleton.authz.identity import CallerIdentity
-    from tai42_skeleton.interactions import ask_user
+    from tai42_skeleton.interactions import ask
 
     identity_token = (
         None
@@ -265,7 +275,7 @@ async def e2e_agent_async_ask(question: str, expiry_seconds: float) -> object:
     )
     try:
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
-        suspended = await ask_user(question, mode="async", expiry_at=expiry_at)
+        suspended = await ask(question, mode="async", expiry_at=expiry_at, on_expiry=_on_expiry_policy(on_expiry))
     finally:
         if identity_token is not None:
             reset_execution_identity(identity_token)

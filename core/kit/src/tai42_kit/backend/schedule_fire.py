@@ -7,10 +7,10 @@ evaluates the door contract with ``$parked`` bound, and drives the shared
 :func:`tai42_app.interactions.visit` — which applies the binding around the started tool alone, so a
 ``resume_expr`` resume never runs its continuation under the target's binding.
 
-:func:`backend_fire` is the seam each backend worker enters in place of its old
-``schedule_state_context`` + ``run_tool`` block: it pops the reserved ``backend_schedule_*`` job
-kwargs into objects and drives the door (binding the stamped firing identity when one rode the job),
-or, for a plain job carrying no door signal, runs ``run_tool`` with no door context.
+:func:`backend_fire` is the seam each backend worker enters to fire a dequeued job: it pops the
+reserved ``backend_schedule_*`` job kwargs into objects and drives the door (binding the stamped
+firing identity when one rode the job), or, for a plain job carrying no door signal, runs ``run_tool``
+with no door context.
 
 Homed in kit's backend package so a backend plugin reaches it without importing the skeleton; it
 drives the skeleton's ``visit`` only through the bound ``tai42_app`` handle.

@@ -276,6 +276,8 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
         "ask",
         "check_answer",
         "visit",
+        "park_answer",
+        "normalise_started",
         "list_parked",
         "list_parked_for",
         "resume_parked",
@@ -341,6 +343,12 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
 
         @property
         def visit(self) -> object:
+            return None
+
+        def park_answer(self, outcome: object) -> object:
+            return None
+
+        async def normalise_started(self, value: object) -> object:
             return None
 
         async def list_parked(self) -> list[object]:

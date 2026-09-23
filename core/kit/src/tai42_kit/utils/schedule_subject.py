@@ -145,6 +145,20 @@ SCHEDULE_EXECUTION_KEY_ARG = "backend_schedule_execution_key"
 SCHEDULE_EXECUTION_FINGERPRINT_ARG = "backend_schedule_execution_fingerprint"
 SCHEDULE_CONTRACT_ARG = "backend_schedule_contract"
 
+# The reserved schedule-door kwargs the CREATE door stamps onto a recurring fire's arguments before
+# it dispatches ``<tool>_schedule_task`` (the firing identity pair and the door contract). They reach
+# the branch as validated dispatch kwargs, so every backend's schedule branch must widen its
+# signature to accept them (each optional, defaulting absent) or the tool binding refuses them as
+# unexpected — the worker's ``backend_fire`` pop reads them back off the stored job. One kit
+# definition the three backends compose beside their own ``*_SCHEDULE_OPTS`` so the reserved set is
+# never hand-copied per backend. The subject and state binding are stamped INSIDE the branch (after
+# validation) and so are not listed here.
+SCHEDULE_STAMPED_DOOR_OPTS: dict[str, Any] = {
+    SCHEDULE_EXECUTION_KEY_ARG: str | None,
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG: str | None,
+    SCHEDULE_CONTRACT_ARG: dict[str, Any] | None,
+}
+
 
 def pop_schedule_subject(kwargs: dict[str, Any]) -> StateSubject | None:
     """Strip :data:`SCHEDULE_SUBJECT_ARG` from ``kwargs`` and parse it into a :class:`StateSubject`.
@@ -232,21 +246,4 @@ def schedule_subject_context(subject: StateSubject | None) -> Iterator[None]:
             actor=None,
         )
     ):
-        yield
-
-
-@contextmanager
-def schedule_state_context(kwargs: dict[str, Any]) -> Iterator[None]:
-    """Pop a worker job's reserved subject/binding kwargs and enter its ``schedule`` state context.
-
-    The thin worker wrapper over :func:`schedule_subject_context`: it pops
-    :data:`SCHEDULE_SUBJECT_ARG` and :data:`SCHEDULE_STATE_BINDING_ARG` from ``kwargs`` in place (so
-    neither reaches the tool) and enters the ``schedule`` state context for the popped subject. The
-    door-layer binding is applied by :func:`~tai42_kit.backend.schedule_fire.fire_schedule_door`
-    around the started tool alone (never an ambient deposit), so it is stripped here but not
-    deposited.
-    """
-    subject = pop_schedule_subject(kwargs)
-    pop_schedule_state_binding(kwargs)
-    with schedule_subject_context(subject):
         yield

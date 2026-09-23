@@ -217,14 +217,14 @@ async def test_reply_option_tap_bridges_with_reply_id_param(fake_redis, channels
     # A notify reply-option tap carries the submit text plus the author-set id in its value
     # envelope. With no pending ask it bridges: the text is the turn, and the id rides as
     # params.reply_id (the channel-agnostic tap enrichment a consumer reads).
-    response = await slack_interactive(_signed(_reply_tap(text="Refund me", option_id="opt-refund")))
+    response = await slack_interactive(_signed(_reply_tap(text="Retry it", option_id="opt-retry")))
 
     assert response.status_code == 200
     assert body_json(response) == {"status": "accepted"}
     assert channels.inbound_calls == []
     (call,) = stub_conversations.accept_calls
-    assert call.text == "Refund me"
-    assert call.params == {"reply_id": "opt-refund"}
+    assert call.text == "Retry it"
+    assert call.params == {"reply_id": "opt-retry"}
 
 
 async def test_reply_option_tap_without_id_bridges_without_params(fake_redis, channels, stub_conversations):
@@ -383,6 +383,32 @@ async def test_failed_views_open_surfaces_loudly(fake_redis, http_script):
 
     with pytest.raises(ChannelDeliveryError, match="expired_trigger_id"):
         await slack_interactive(_signed(_block_actions()))
+
+
+async def test_failed_views_open_surfaces_every_documented_field(fake_redis, http_script):
+    # views.open routes its ok:false body through the SAME _error_detail helper as
+    # chat.postMessage: every documented field kept in Slack's fixed order.
+    from tai42_contract.channels import ChannelDeliveryError
+
+    await _seed_form(fake_redis)
+    body = {
+        "ok": False,
+        "error": "invalid_arguments",
+        "warning": "missing_charset",
+        "needed": "chat:write",
+        "provided": "chat:read",
+        "response_metadata": {"messages": ["[ERROR] invalid view"]},
+    }
+    http_script.results.append(httpx.Response(200, json=body))
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await slack_interactive(_signed(_block_actions()))
+
+    assert (
+        "views.open failed: error='invalid_arguments' warning='missing_charset' "
+        "needed='chat:write' provided='chat:read' "
+        'response_metadata={"messages":["[ERROR] invalid view"]}'
+    ) in str(excinfo.value)
 
 
 # -- view_submission ----------------------------------------------------------

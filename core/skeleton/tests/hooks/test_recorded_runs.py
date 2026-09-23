@@ -67,7 +67,8 @@ class _ResourceManager:
 
 class _Interactions:
     """The interactions facade the hook door drives through: a ``visit`` that runs ``start`` under the
-    ambient fire context (so the real ``run_recorded`` writes its record), and an empty ``$parked``."""
+    ambient fire context (so the real ``run_recorded`` writes its record), an empty ``$parked``, and
+    the ``normalise_started`` the inline supervisor calls to shape its terminal record."""
 
     async def list_parked_for(self, context: object) -> list:
         return []
@@ -81,6 +82,15 @@ class _Interactions:
             kind="result" if start is not None else "none",
             result=result,
         )
+
+    async def normalise_started(self, value):
+        from tai42_contract.interactions import SuspendedInteraction, VisitOutcome
+
+        if isinstance(value, SuspendedInteraction):
+            return VisitOutcome(action="started", kind="parked", suspended=value)
+        if value is None:
+            return VisitOutcome(action="started", kind="none")
+        return VisitOutcome(action="started", kind="result", result=value)
 
 
 class _App:

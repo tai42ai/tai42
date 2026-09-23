@@ -19,10 +19,10 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.interactions import (
+    CHAINED_PARK_TOKEN_KEY,
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
-    chained_park_context,
     is_chained_park_key,
 )
 from tai42_contract.template import TemplatedText
@@ -183,7 +183,10 @@ def test_two_chained_calls_in_one_super_step_resume_together(
         buffered = await deliver_chained_park(
             chain_token=keys[0], result="a done", completion_id="c-a", status=PARK_COMPLETION_SUCCEEDED
         )
-        assert buffered == {"status": "buffered", "remaining": 1}
+        from tai42_contract.interactions import ResumeBuffered
+
+        assert isinstance(buffered, ResumeBuffered)
+        assert set(buffered.remaining_ids) == {keys[1]}
         assert (
             await deliver_chained_park(
                 chain_token=keys[1], result="b done", completion_id="c-b", status=PARK_COMPLETION_SUCCEEDED
@@ -200,11 +203,10 @@ def test_two_chained_calls_in_one_super_step_resume_together(
 def test_the_delivery_tool_accepts_the_whole_contract_fire_payload(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # What a nested driver actually fires is the BOUND CONTEXT merged with the terminal —
-    # every field of it, not just the ones this tool reads. The context a chained dispatch
-    # composes carries the embedded caller binding and (under a tool route) the reserved thread
-    # field, so a fire carrying them must not be a signature error: that failure mode is a turn
-    # that parks, resumes nowhere, and is retried until it is dropped.
+    # A fire may carry the whole contract completion payload — the terminal plus fields this tool
+    # never reads (a residual caller context, the reserved thread field a driver stamps). A fire
+    # carrying them must not be a signature error: that failure mode is a turn that parks, resumes
+    # nowhere, and is retried until it is dropped.
     saver = InMemorySaver()
     nested = _NestedDriverStandIn("i-nested", "nested_driver_resume")
     model = ScriptedChatModel([_preset_call(), AIMessage(content="the call approved it")])
@@ -226,10 +228,14 @@ def test_the_delivery_tool_accepts_the_whole_contract_fire_payload(
         )
         (chain_token,) = receipt["interaction_ids"]
         fire = {
-            **chained_park_context(chain_token, ("deliver_tool_completion", {"delivery_thread_id": "bridge:r:a"})),
+            CHAINED_PARK_TOKEN_KEY: chain_token,
             "result": "the call said yes",
             "completion_id": "c-1",
             "status": PARK_COMPLETION_SUCCEEDED,
+            # Fields this tool accepts but never reads: a residual caller context and the reserved
+            # thread field a driver may stamp on the fire.
+            "chained_context": {"tool": "deliver_tool_completion", "context": {"delivery_thread_id": "bridge:r:a"}},
+            "delivery_thread_id": "bridge:r:a",
         }
         assert await deliver_chained_park(**fire) == "the call approved it"
 
@@ -476,11 +482,14 @@ def test_a_terminal_for_a_chain_the_drive_never_parked_on_lands_benignly(
         entry = await idx.read_park_entry(chain_token)
         assert entry is not None
         assert idx.is_resolved_tombstone(entry)
-        # A late terminal reads the tombstone and clears, instead of raising into an endless
-        # redelivery against an absent key.
-        assert await deliver_chained_park(
-            chain_token=chain_token, result="too late", completion_id="c-1", status=PARK_COMPLETION_SUCCEEDED
-        ) == {"status": "already_resolved"}
+        # A late terminal reads the record-less detach tombstone and no-ops (None), instead of
+        # raising into an endless redelivery against an absent key.
+        assert (
+            await deliver_chained_park(
+                chain_token=chain_token, result="too late", completion_id="c-1", status=PARK_COMPLETION_SUCCEEDED
+            )
+            is None
+        )
 
     asyncio.run(go())
 

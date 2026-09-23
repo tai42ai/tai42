@@ -25,9 +25,10 @@ from pydantic_core import to_jsonable_python
 from redbeat import RedBeatSchedulerEntry
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
-from tai42_kit.backend import CallbackSchema, prepare_backend_kwargs
+from tai42_kit.backend import CallbackSchema, carry_forwarded_fire, prepare_backend_kwargs
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
+from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
 from tai42_backend_celery.core.app import celery_app
 from tai42_backend_celery.core.settings import celery_settings
@@ -46,6 +47,7 @@ def _apply_task_opts(kwargs: dict[str, Any]) -> dict[str, Any]:
     apply_async_opts = {k: v for k, v in task_kwargs.items() if v is not None}
     callback: CallbackSchema | None = apply_async_opts.pop("callback_kwargs", None)
     if callback:
+        carry_forwarded_fire(callback, kwargs)
         apply_async_opts["link"] = callback_task.s(callback)
     return apply_async_opts
 
@@ -91,7 +93,9 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
     safe_name = makefun_func_name(raw_name)
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
-    sig = add_signature_params(func, CELERY_SCHEDULE_OPTS, exclude_fastmcp_ctx=True)
+    # The branch accepts its own schedule opts PLUS the reserved keys the create door stamps
+    # (identity + contract), or the tool binding refuses the stamped dispatch as unexpected kwargs.
+    sig = add_signature_params(func, {**CELERY_SCHEDULE_OPTS, **SCHEDULE_STAMPED_DOOR_OPTS}, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> None:
         schedule_name = kwargs.pop("backend_schedule_name", None)

@@ -42,10 +42,10 @@ from ._overlap_support import (
     create_web_tool_route,
     joined,
     open_visitor,
-    probe_payload_expr,
+    probe_start_expr,
     reply_matching,
     send_web,
-    yield_payload_expr,
+    yield_start_expr,
 )
 
 _PROBE = "e2e_overlap_probe"
@@ -77,7 +77,7 @@ async def test_greeting_rides_the_successor_when_a_first_contact_turn_is_cancell
         uniq,
         "ov-greet-cancel",
         tool=_PROBE,
-        payload_expr=probe_payload_expr(marker, hold_seconds=_CHANNEL_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_CHANNEL_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "one"},
     )
     web = await open_visitor(bridge, identity)
@@ -128,7 +128,7 @@ async def test_greeting_rides_the_successor_when_a_first_contact_turn_yields_on_
         uniq,
         "ov-greet-yield",
         tool=_YIELD,
-        payload_expr=yield_payload_expr(marker, wait_seconds=_WAIT_SECONDS),
+        start_expr=yield_start_expr(marker, wait_seconds=_WAIT_SECONDS),
         overlap={"running": "continue", "deliver": "all"},
     )
     web = await open_visitor(bridge, identity)
@@ -175,7 +175,7 @@ async def test_greeting_rides_the_successor_on_the_api_door_when_the_first_conta
         tool=_PROBE,
         execution_key=exec_key,
         callback_url=_UNREACHABLE_CALLBACK,
-        payload_expr=probe_payload_expr(marker, hold_seconds=_DOOR_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_DOOR_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "one"},
     )
     caller = await bridge.mint_key(user_id=uniq("ov-greet-api-caller"), scopes=["e2e-all"])
@@ -249,7 +249,7 @@ async def test_greeting_rides_the_successor_on_the_bridge_door_when_the_first_co
         execution_key=exec_key,
         channel="twilio",
         our_identity=identity,
-        payload_expr=probe_payload_expr(marker, hold_seconds=_DOOR_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_DOOR_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "one"},
     )
     port = bridge.stack.port_b

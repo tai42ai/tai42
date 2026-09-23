@@ -12,6 +12,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_NAME_KEY,
+    SCHEDULE_STAMPED_DOOR_OPTS,
     SCHEDULE_STATE_BINDING_ARG,
     SCHEDULE_STATE_BINDING_REQUEST_KEY,
     SCHEDULE_SUBJECT_ARG,
@@ -20,9 +21,7 @@ from tai42_kit.utils.schedule_subject import (
     pop_schedule_state_binding,
     pop_schedule_subject,
     schedule_create_fire,
-    schedule_state_context,
 )
-from tai42_kit.utils.state_context import current_state_context
 
 _BINDING = {"states": [{"state": "status", "subject_expr": {"content": ".subject.key"}, "templates": ["summary"]}]}
 
@@ -85,27 +84,6 @@ def test_pop_schedule_subject_raises_on_a_malformed_value() -> None:
         pop_schedule_subject({SCHEDULE_SUBJECT_ARG: {"kind": "person"}})
 
 
-def test_schedule_state_context_deposits_the_schedule_door() -> None:
-    kwargs = {SCHEDULE_SUBJECT_ARG: _SUBJECT, "message": "hi"}
-    with schedule_state_context(kwargs):
-        ctx = current_state_context()
-        assert ctx is not None
-        assert ctx.door == "schedule"
-        assert ctx.actor is None
-        assert ctx.candidates.target_kind == "tool"
-        assert ctx.candidates.target_name == "assistant"
-        assert ctx.candidates.by_kind == {"person": "p-1"}
-    # The arg is stripped from the fire kwargs; the context is torn down after the block.
-    assert SCHEDULE_SUBJECT_ARG not in kwargs
-    assert current_state_context() is None
-
-
-def test_schedule_state_context_is_a_noop_without_a_subject() -> None:
-    kwargs = {"message": "hi"}
-    with schedule_state_context(kwargs):
-        assert current_state_context() is None
-
-
 # -- the door-layer state binding rides the SAME kit seam --------------------
 async def test_scheduled_prepare_stamps_the_binding_and_pops_the_raw_key() -> None:
     with schedule_create_fire():
@@ -163,6 +141,40 @@ def test_assert_no_reserved_schedule_keys_names_the_offending_key() -> None:
     assert_no_reserved_schedule_keys({"message": "hi", SCHEDULE_NAME_KEY: "nightly"})
 
 
+def test_stamped_door_opts_are_the_create_stamped_reserved_keys() -> None:
+    # The opts a schedule branch widens its signature with are exactly the reserved keys the create
+    # door stamps (the firing identity pair + the door contract) and the worker's ``backend_fire`` pop
+    # reads back — never the subject/binding, which the branch re-stamps after validation.
+    assert set(SCHEDULE_STAMPED_DOOR_OPTS) == {
+        SCHEDULE_EXECUTION_KEY_ARG,
+        SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+        SCHEDULE_CONTRACT_ARG,
+    }
+
+
+async def test_scheduled_prepare_preserves_the_create_stamped_keys() -> None:
+    # The create door stamps these onto the recurring arguments before dispatch; the scheduled preparer
+    # leaves them untouched (unlike the subject/binding it re-stamps) so they ride the stored job to the
+    # worker fire, where ``backend_fire`` pops them into the firing identity and door contract.
+    contract = {"resume_expr": {"content": "."}}
+    with schedule_create_fire():
+        kwargs = await prepare_backend_kwargs(
+            _func,
+            "backend_tool_name",
+            "greet",
+            {
+                SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
+                SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+                SCHEDULE_CONTRACT_ARG: contract,
+                "message": "hi",
+            },
+            scheduled=True,
+        )
+    assert kwargs[SCHEDULE_EXECUTION_KEY_ARG] == "svc-key"
+    assert kwargs[SCHEDULE_EXECUTION_FINGERPRINT_ARG] == "fp-1"
+    assert kwargs[SCHEDULE_CONTRACT_ARG] == contract
+
+
 def test_pop_schedule_state_binding_strips_and_parses() -> None:
     kwargs = {SCHEDULE_STATE_BINDING_ARG: _BINDING, "other": 1}
     binding = pop_schedule_state_binding(kwargs)
@@ -173,17 +185,3 @@ def test_pop_schedule_state_binding_strips_and_parses() -> None:
 def test_pop_schedule_state_binding_raises_on_a_malformed_value() -> None:
     with pytest.raises(ValueError, match=r"[Ss]tate"):
         pop_schedule_state_binding({SCHEDULE_STATE_BINDING_ARG: {"states": [{"no_subject": True}]}})
-
-
-def test_worker_wrapper_strips_both_reserved_keys_and_deposits_the_subject() -> None:
-    # The worker wrapper pops BOTH reserved kwargs (so neither reaches the tool) and deposits the
-    # subject door; the door-layer binding is applied by ``fire_schedule_door`` around the started
-    # tool, so the wrapper strips it here but leaves the ambient dispatch context to that seam.
-    kwargs = {SCHEDULE_SUBJECT_ARG: _SUBJECT, SCHEDULE_STATE_BINDING_ARG: _BINDING, "message": "hi"}
-    with schedule_state_context(kwargs):
-        ctx = current_state_context()
-        assert ctx is not None
-        assert ctx.door == "schedule"
-        assert ctx.candidates.by_kind == {"person": "p-1"}
-    assert kwargs == {"message": "hi"}
-    assert current_state_context() is None

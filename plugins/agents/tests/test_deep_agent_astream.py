@@ -27,12 +27,12 @@ from tai42_contract.agent.events import (
     ToolResultStep,
 )
 from tai42_contract.interactions import (
-    chained_park_context,
+    ChainedResume,
     new_chained_park_key,
-    reset_park_completion,
+    reset_chained_resume,
     reset_resume_continuation_tool,
     resolve_park_adoption,
-    set_park_completion,
+    set_chained_resume,
     set_resume_continuation_tool,
 )
 from tai42_contract.template import TemplatedText
@@ -302,9 +302,9 @@ class _ClaimingGraph:
         self.received_input = agent_input
         # Early step: a dispatched tool drove a nested run that parked, so the caller CHAINS the
         # call — recording the key in whatever claims ledger the streaming face bound for THIS
-        # step. Bind agent_resume + the chained completion the way scope_nested_dispatch would.
-        completion = set_park_completion(
-            CHAINED_PARK_DELIVERY_TOOL_NAME, chained_park_context(self.chain_key, (None, None))
+        # step. Bind agent_resume + the chained routing the way scope_nested_dispatch would.
+        chain = set_chained_resume(
+            ChainedResume(delivery_tool=CHAINED_PARK_DELIVERY_TOOL_NAME, chain_key=self.chain_key, asked_by=())
         )
         resume = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
         try:
@@ -314,7 +314,7 @@ class _ClaimingGraph:
             assert key == self.chain_key
         finally:
             reset_resume_continuation_tool(resume)
-            reset_park_completion(completion)
+            reset_chained_resume(chain)
         yield ("updates", {"agent": {"messages": [AIMessage(content="chained the call")]}})
         # Later step: the agent moves on and finishes with a plain answer — it never parks, so the
         # claim is never turned into a park entry and stays a dead chain.

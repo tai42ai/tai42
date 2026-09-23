@@ -24,7 +24,7 @@ async def test_an_event_turn_on_a_cancel_route_is_never_batched_superseded_or_a_
     marker = uniq("ov-event")
     # The event turn nulls ``message``, so the probe coalesces the event kind in as its reply text
     # (a null reply would end the event turn silently and blur "survived" from "was superseded").
-    payload_expr = (
+    start_expr = (
         f'{{key: "{marker}", message: (.message // .event.kind), messages: .messages, '
         f"superseded: .superseded, hold_seconds: {_HOLD_SECONDS}}}"
     )
@@ -33,7 +33,7 @@ async def test_an_event_turn_on_a_cancel_route_is_never_batched_superseded_or_a_
         uniq,
         "ov-event",
         tool="e2e_overlap_probe",
-        payload_expr=payload_expr,
+        start_expr=start_expr,
         overlap={"running": "cancel", "deliver": "all"},
     )
     web = await open_visitor(bridge, identity)

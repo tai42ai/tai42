@@ -161,6 +161,41 @@ async def test_ok_false_raises_with_slack_error_and_writes_nothing(http_script, 
     assert fake_redis.store == {}
 
 
+async def test_ok_false_surfaces_every_documented_field(http_script, fake_redis):
+    # chat.postMessage routes its ok:false body through the one _error_detail helper:
+    # every documented field is kept in Slack's fixed order, none dropped, each a
+    # name=<render> token (repr for a scalar, compact sorted JSON for
+    # response_metadata, which carries the per-field validation messages).
+    body = {
+        "ok": False,
+        "error": "invalid_blocks",
+        "warning": "missing_charset",
+        "needed": "chat:write",
+        "provided": "chat:read",
+        "response_metadata": {"messages": ["[ERROR] invalid block", "[WARN] deprecated"]},
+    }
+    http_script.results.append(httpx.Response(200, json=body))
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await SlackChannel().deliver(make_delivery())
+
+    assert (
+        "chat.postMessage failed: error='invalid_blocks' warning='missing_charset' "
+        "needed='chat:write' provided='chat:read' "
+        'response_metadata={"messages":["[ERROR] invalid block","[WARN] deprecated"]}'
+    ) in str(excinfo.value)
+
+
+async def test_ok_false_simple_body_renders_only_present_fields(http_script, fake_redis):
+    # A body carrying only error renders that one token and nothing else.
+    http_script.results.append(httpx.Response(200, json={"ok": False, "error": "not_authed"}))
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await SlackChannel().deliver(make_delivery())
+
+    assert "chat.postMessage failed: error='not_authed'" in str(excinfo.value)
+
+
 @pytest.mark.parametrize("status", [429, 500])
 async def test_non_200_status_raises(http_script, fake_redis, status):
     http_script.results.append(httpx.Response(status, json={"ok": False}))

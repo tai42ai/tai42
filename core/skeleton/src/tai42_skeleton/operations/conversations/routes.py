@@ -390,23 +390,25 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
     store = ConversationRecordStore(ConversationsSettings())
-    removed = await manager.delete_route(route_name)
-    if not removed and await store.count_route_threads(route_name) == 0:
-        raise NotFoundError(f"conversation route not found: {route_name!r}")
-    # After the routing row, never before: no further message can open a thread on a name
-    # that no longer routes. A turn already IN FLIGHT still completes behind this, which is
-    # why the create writes the thread indexes only while the row stands and the completion
-    # write re-stamps the route index only while the thread's own index still holds
-    # members — either one unguarded would re-create a pair nothing walks and no TTL expires.
-    #
-    # Cancel every async ``ask`` parked on each of the route's threads BEFORE the
-    # indexes go, so deleting the route does not orphan a park (its expiry reaper would
-    # later fire a continuation into a thread whose route is gone, and its channel
-    # correlation would stay muted until the deadline). Enumerated up front from the route
-    # thread index; idempotent, so this door's own retry re-runs it cleanly.
+    # Cancel every async ``ask`` parked on each of the route's threads FIRST, while the routing row
+    # still stands. Each cancel whole-chain-kills the park and delivers the run's single door FAILED,
+    # and that delivery resolves the park's thread back to its route+address — which only exists while
+    # the row is present. Removing the row first would leave the kill's FAILED delivery unable to
+    # resolve the now-gone route (a ``CompletionDeliveryError``), failing the delete and stranding the
+    # route's thread indexes. Cancelling first also stops the expiry reaper later firing a continuation
+    # into a thread whose route is gone. Enumerated up front from the route thread index; idempotent,
+    # so this door's own retry re-runs it cleanly.
     from tai42_skeleton.interactions.helper import cancel_parks_for_thread
 
     for thread_id in await store.route_thread_ids(route_name):
         await cancel_parks_for_thread(thread_id, reason="route_deleted")
+    removed = await manager.delete_route(route_name)
+    if not removed and await store.count_route_threads(route_name) == 0:
+        raise NotFoundError(f"conversation route not found: {route_name!r}")
+    # Drop the thread indexes only after the routing row, never before: no further message can open a
+    # thread on a name that no longer routes. A turn already IN FLIGHT still completes behind this,
+    # which is why the create writes the thread indexes only while the row stands and the completion
+    # write re-stamps the route index only while the thread's own index still holds members — either
+    # one unguarded would re-create a pair nothing walks and no TTL expires.
     await store.drop_route_threads(route_name)
     return {"removed": removed, "route_name": route_name}

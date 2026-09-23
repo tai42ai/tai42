@@ -17,7 +17,6 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.secrets import mask_secrets
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
@@ -26,6 +25,7 @@ import tai42_skeleton.operations.tool_runs as _pkg
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings, tool_runs_store_configured
 from tai42_skeleton.runs.chokepoint import collect_resumed_interactions
+from tai42_skeleton.states.context import current_state_context
 
 from .models import _DEFAULT_CANCEL_REASON, _FAILED, _PARKED, _SUCCEEDED
 from .store import ToolRunStore
@@ -206,8 +206,6 @@ async def _supervise(
         # capability to — the capability follows the identity the run acts as.
         detached_token = mark_detached_run()
         tool_error: Exception | None = None
-        parked: SuspendedInteraction | None = None
-        result_json = ""
         try:
             # Arm the resumed-interaction collector for the dispatch span: a submit/hook run
             # whose tool resumes or takes a parked entry records those interaction ids in its
@@ -215,24 +213,34 @@ async def _supervise(
             # JSON-encoded ``resumed_interactions`` field (``[]`` when it resumed nothing).
             with collect_resumed_interactions() as resumed:
                 try:
-                    # The ``door="api"`` subject context (submit path only) is ambient across the
-                    # dispatch so an async park of the run indexes under the caller's named subject;
-                    # the inline ``run_recorded`` path passes no subject and runs under the fire door's
-                    # own already-deposited context.
-                    with api_state_context(subject, actor):
+                    if propagate_failure:
+                        # Both inline callers reach this branch, and neither opens a second visit
+                        # here: the hook/trigger fire runs INSIDE the hook door's OWN visit (that
+                        # visit's start IS this run), and the crash-resume re-drive replays a
+                        # recorded fire under the SAME state context that fire ran under, deposited
+                        # around this call by the reconciler. A visit here would nest a visit inside
+                        # a visit — the already-deposited ambient context owns the run. Run the tool
+                        # under that context and normalise the raw return the SAME way the visit
+                        # does, so the record carries the one park-answer shape both direct doors
+                        # return.
                         result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True, extras=extras)
-                    if isinstance(result, SuspendedInteraction):
-                        # The tool async-parked (a generic contract sentinel): the run has NOT
-                        # succeeded — its answer is delivered out of band by the tool's own resumer —
-                        # so it terminates PARKED, keyed by the parked interaction id, never a
-                        # succeeded record over an unfinished run.
-                        parked = result
+                        outcome = await tai42_app.interactions.normalise_started(result)
                     else:
-                        # ``run_tool`` already json-normalizes the body; a residual dumps
-                        # failure surfaces as a ``failed`` record rather than a lost run. A
-                        # background run has no live-caller door, so any wrapped secret is
-                        # masked to the placeholder before it lands in the durable record.
-                        result_json = json.dumps(mask_secrets(result))
+                        # The background-submit path starts through the shared visit under the
+                        # caller's ``door="api"`` subject context, so an async park of the run
+                        # indexes under the named subject and the terminal record carries the same
+                        # park answer the sync door returns.
+                        with api_state_context(subject, actor):
+                            outcome = await tai42_app.interactions.visit(
+                                target_name=tool_name,
+                                cancel=[],
+                                resume=[],
+                                start=lambda started_extras: tai42_app.tools.run_tool(
+                                    tool_name, arguments, offload_sync=True, extras=started_extras
+                                ),
+                                extras=extras or {},
+                                receives_outcome=False,
+                            )
                 except asyncio.CancelledError as cancel:
                     # A drain (process shutdown OR an epoch retire) cancelled this run
                     # mid-flight. Record it as ``failed`` through the same one-way CAS the
@@ -269,23 +277,26 @@ async def _supervise(
                         "resumed_interactions": json.dumps(resumed),
                     }
                 else:
-                    if parked is not None:
+                    # ONE terminal-record shaping over the VisitOutcome. A ``result``/``none``
+                    # terminal SUCCEEDED — its wrapped secrets masked to the placeholder before
+                    # they land in the durable record (a background run has no live-caller door
+                    # to reveal them to). An ``asks``/``parked`` terminal did NOT succeed: its
+                    # answer is delivered out of band by the run's own resumer, so it terminates
+                    # PARKED carrying the shared park answer — the caller ask entries or the
+                    # suspended sentinel, the SAME shape a poller reads off the sync door, so a
+                    # caller-ask park is answerable through ``resume_parked``.
+                    if outcome.kind in ("result", "none"):
                         fields = {
-                            "status": _PARKED,
+                            "status": _SUCCEEDED,
                             "finished_at": _pkg._now().isoformat(),
-                            "result": json.dumps(
-                                {
-                                    "interaction_id": parked.interaction_id,
-                                    "expiry_at": parked.expiry_at.isoformat() if parked.expiry_at is not None else None,
-                                }
-                            ),
+                            "result": json.dumps(mask_secrets(outcome.result)),
                             "resumed_interactions": json.dumps(resumed),
                         }
                     else:
                         fields = {
-                            "status": _SUCCEEDED,
+                            "status": _PARKED,
                             "finished_at": _pkg._now().isoformat(),
-                            "result": result_json,
+                            "result": json.dumps(mask_secrets(tai42_app.interactions.park_answer(outcome))),
                             "resumed_interactions": json.dumps(resumed),
                         }
                 # Gate the terminal write on the record still being ``running`` so it
@@ -319,6 +330,11 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
     crash-resume-declared record so a re-drive replays the run WITH its warm data, and passed on both
     ``run_tool`` call sites (the store-off inline run and the ``_supervise`` task); ``None`` binds an
     empty mapping, exactly as a run with no door extras.
+
+    On a crash-resume-declared record the ambient :class:`StateContext` (``current_state_context()``,
+    the fire's own subject) is stored alongside ``arguments``/``extras`` too, so the re-drive can
+    replay the run under the SAME subject the fire ran under — a park then indexes where the
+    original's would have and a caller ask can still be raised. A fire with no subject stores none.
 
     Writes the SAME running -> succeeded/failed lifecycle a background submit
     writes — so a hook- or trigger-dispatched fire is listable via ``GET /api/tool-runs``
@@ -372,6 +388,7 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
             user_id=user_id,
             arguments=arguments,
             extras=extras,
+            state_context=current_state_context() if crash_resume else None,
             crash_resume=crash_resume,
         )
     # Run under a supervisor task ENROLLED in the drain registry exactly like a submitted

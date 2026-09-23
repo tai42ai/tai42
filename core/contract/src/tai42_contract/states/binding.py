@@ -29,8 +29,9 @@ class StateInjection(BaseModel):
 
     Exactly one source is set: ``template_jq`` names an ``input``-purpose template jq
     (``name`` or ``<template>.<name>``) evaluated over the record, or ``jq`` is a templated
-    text rendering to a custom program over ``{record, input}``. ``into`` IS the adapter for
-    an injection — the run-input field the value lands under. Frozen.
+    text rendering to a custom program over the record (its ``.``) with the run input bound as
+    ``$input``. ``into`` IS the adapter for an injection — the run-input field the value lands
+    under. Frozen.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -42,13 +43,10 @@ class StateInjection(BaseModel):
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
                     label="injection jq",
-                    blurb="the injection input document",
-                    keys=[
-                        ("record", "the attached record's subtree, or {} when no record exists yet"),
-                        ("input", "the run input the dispatch is about to run on"),
-                    ],
+                    blurb="the attached record's subtree, or {} when no record exists yet",
+                    variables=[("input", "the run input the dispatch is about to run on", {"value": 2})],
                     returns="the value placed into the run input at 'into'",
-                    sample={"record": {"count": 3}, "input": {"value": 2}},
+                    sample={"count": 3},
                 )
             }
         ),
@@ -67,11 +65,12 @@ class StateUpdate(BaseModel):
 
     Exactly one source is set: ``template_jq`` names an ``update``-purpose template jq
     (``name`` or ``<template>.<name>``) whose ``.input`` object the optional ``adapter`` (a
-    templated text rendering to a jq over ``{output, input}``) shapes from the run's
-    output/input; or ``jq`` is a templated text rendering to a custom program over ``{record,
-    output, input}`` authoring the whole op batch itself (a custom update carries no adapter).
-    ``op_id`` is an optional templated text rendering to an idempotency-key expression.
-    Frozen.
+    templated text rendering to a jq over the tool output, its ``.``, with the run input bound
+    as ``$input``) shapes from the run's output/input; or ``jq`` is a templated text rendering
+    to a custom program over the tool output (its ``.``) with the run input bound as ``$input``
+    and the record as ``$record``, authoring the whole op batch itself (a custom update carries
+    no adapter). ``op_id`` is an optional templated text rendering to an idempotency-key
+    expression. Frozen.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -83,14 +82,13 @@ class StateUpdate(BaseModel):
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
                     label="custom update jq",
-                    blurb="the custom-update input document",
-                    keys=[
-                        ("record", "the attached record's subtree, or {} when no record exists yet"),
-                        ("output", "the run's output the update runs after"),
-                        ("input", "the run input the dispatch ran on"),
+                    blurb="the run's output the update runs after",
+                    variables=[
+                        ("input", "the run input the dispatch ran on", {"value": 2}),
+                        ("record", "the attached record's subtree, or {} when no record exists yet", {"count": 3}),
                     ],
                     returns="the op batch (a list of ops) applied to the record",
-                    sample={"record": {"count": 3}, "output": {"ok": True}, "input": {"value": 2}},
+                    sample={"ok": True},
                 )
             }
         ),
@@ -101,13 +99,10 @@ class StateUpdate(BaseModel):
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
                     label="update adapter",
-                    blurb="the update input document",
-                    keys=[
-                        ("output", "the run's output the update runs after"),
-                        ("input", "the run input the dispatch ran on"),
-                    ],
+                    blurb="the run's output the update runs after",
+                    variables=[("input", "the run input the dispatch ran on", {"value": 2})],
                     returns="the template program's '.input' object",
-                    sample={"output": {"ok": True}, "input": {"value": 2}},
+                    sample={"ok": True},
                 )
             }
         ),
@@ -118,13 +113,10 @@ class StateUpdate(BaseModel):
             json_schema_extra={
                 EXPRESSION_ANNOTATION_KEY: expression_annotation(
                     label="op_id expression",
-                    blurb="the update input document",
-                    keys=[
-                        ("output", "the run's output the update runs after"),
-                        ("input", "the run input the dispatch ran on"),
-                    ],
+                    blurb="the run's output the update runs after",
+                    variables=[("input", "the run input the dispatch ran on", {"value": 2})],
                     returns="a string idempotency key, or null for no key",
-                    sample={"output": {"ok": True}, "input": {"value": 2}},
+                    sample={"ok": True},
                 )
             }
         ),
@@ -136,7 +128,8 @@ class StateUpdate(BaseModel):
             raise ValueError("an update sets exactly one of 'template_jq' or 'jq'")
         if self.jq is not None and self.adapter is not None:
             raise ValueError(
-                "a custom-jq update carries no 'adapter' — it authors the batch over {record, output, input}"
+                "a custom-jq update carries no 'adapter' — it authors the batch over the tool output "
+                "(its .) with $input and $record bound"
             )
         return self
 

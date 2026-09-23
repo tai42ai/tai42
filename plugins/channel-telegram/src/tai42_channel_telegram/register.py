@@ -15,7 +15,7 @@ from tai42_kit.settings import require, require_secret
 
 import tai42_channel_telegram.inbound  # noqa: F401  (import registers the inbound route)
 from tai42_channel_telegram.channel import TelegramChannel
-from tai42_channel_telegram.client import telegram_http
+from tai42_channel_telegram.client import call_method
 from tai42_channel_telegram.log_hygiene import install_telegram_log_redaction
 from tai42_channel_telegram.settings import telegram_settings
 
@@ -56,12 +56,4 @@ async def _register_telegram_webhook() -> None:
         # suggested-reply asks, notify options) arrive as callback queries.
         "allowed_updates": ["message", "callback_query"],
     }
-    async with telegram_http() as client:
-        response = await client.post(f"{settings.api_base_url}/bot{token}/setWebhook", json=payload)
-    if response.status_code != 200:
-        raise RuntimeError(f"telegram setWebhook returned HTTP {response.status_code}: {response.text[:200]}")
-    data = response.json()
-    if not data.get("ok"):
-        raise RuntimeError(
-            f"telegram setWebhook failed: error_code={data.get('error_code')} description={data.get('description')!r}"
-        )
+    await call_method(token, "setWebhook", payload, context="startup webhook registration")

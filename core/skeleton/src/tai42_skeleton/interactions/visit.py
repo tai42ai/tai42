@@ -510,6 +510,42 @@ async def _entries_for(
     return [ParkedEntry(**index[iid]) for iid in ids if iid in index]
 
 
+# --- the shared park answer + start normalisation --------------------------------------
+
+
+def park_answer(outcome: VisitOutcome) -> Any:
+    """The ONE park-answer shape a direct door hands back for a visit outcome.
+
+    A plain ``result`` is the tool's own value; an ``asks`` outcome is the caller ask entries
+    the run parked; a ``parked`` outcome is the full suspended sentinel dump; ``none`` is null.
+    Wrapped secrets are NOT revealed here — the sync door reveals them on the ``result`` kind
+    itself and every recorder masks its own copy.
+    """
+    if outcome.kind == "result":
+        return outcome.result
+    if outcome.kind == "asks":
+        return {"asks": [entry.model_dump(mode="json") for entry in outcome.asks]}
+    if outcome.kind == "parked":
+        return outcome.suspended.model_dump(mode="json") if outcome.suspended is not None else None
+    return None
+
+
+async def normalise_started(value: Any) -> VisitOutcome:
+    """Classify a raw start return into a ``started`` :class:`VisitOutcome` over the ambient subject.
+
+    The same normalisation :func:`visit` applies to what ``start`` returned, exposed for a door
+    that already ran its start inside its OWN visit and only needs the return classified into
+    caller asks / a re-park / a final result. Resolves the store, settings and ambient subject
+    candidates exactly as :func:`visit` does before it starts.
+    """
+    settings = interactions_settings() if interactions_store_configured() else None
+    store = InteractionStore(settings.key_prefix) if settings is not None else None
+    ctx = current_state_context()
+    candidates = ctx.candidates if ctx is not None else None
+    kind, result, asks, suspended = await _normalise(store, settings, candidates, value)
+    return VisitOutcome(action="started", cancelled=[], kind=kind, result=result, asks=asks, suspended=suspended)
+
+
 # --- the generic facade wrappers -------------------------------------------------
 
 
@@ -569,6 +605,8 @@ def _reply_ttl(request: InteractionRequest) -> int:
 __all__ = [
     "cancel_parked",
     "list_parked",
+    "normalise_started",
+    "park_answer",
     "resume_parked",
     "visit",
 ]

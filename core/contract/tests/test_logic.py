@@ -258,11 +258,19 @@ def test_drain_suspended_returns_receipt_without_raising():
     # A park is a clean, non-error outcome: _drain returns the suspended RECEIPT dict and
     # NEVER raises AgentInterruptedError.
     agent = _DummyAgent()
-    events = [SuspendedFinal(interaction_ids=["i1", "i2"], thread_id="t", expiry_at="2030-01-01T00:00:00+00:00")]
+    events = [
+        SuspendedFinal(
+            interaction_ids=["i1", "i2"],
+            caller_interaction_ids=["i2"],
+            thread_id="t",
+            expiry_at="2030-01-01T00:00:00+00:00",
+        )
+    ]
     result = asyncio.run(agent._drain(_agen(events)))  # pyright: ignore[reportPrivateUsage]
     assert result == {
         "status": "suspended",
         "interaction_ids": ["i1", "i2"],
+        "caller_interaction_ids": ["i2"],
         "thread_id": "t",
         "expiry_at": "2030-01-01T00:00:00+00:00",
     }

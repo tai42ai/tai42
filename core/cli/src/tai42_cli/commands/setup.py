@@ -7,7 +7,8 @@ invite link). It first reads ``GET /api/login/methods`` to learn whether the dep
 needs setup and what login kinds it can attach; both calls run credential-free (the caller has
 no key yet). Failures surface with their server message and a non-zero exit: ``403`` means the
 setup token was wrong or the door is throttled; ``409`` means the deployment is already
-initialized; ``501`` means access control is off or no key-minting provider is configured.
+initialized; ``501`` means the door is unavailable — access control is off, no key-minting
+provider is configured, or the access-control Redis is unset.
 
 ``--recover`` is the host-side path for an initialized deployment whose owner has no key that
 can authenticate (the identity store was flushed with no backup export): run on the deployment
@@ -252,8 +253,10 @@ def setup(
         typer.Option(
             "--token",
             envvar="TAI_SETUP_TOKEN",
-            help="The setup token printed in the server log at startup, or '-' to read it from stdin. Falls back to "
-            "TAI_SETUP_TOKEN, then an interactive prompt.",
+            help="The setup token, or '-' to read it from stdin. The server auto-generates one and prints it in its "
+            "startup log unless you set TAI_SETUP_TOKEN yourself, or the door is unavailable and mints none — access "
+            "control off, no key-minting identity provider, or the access-control Redis unset (those three are also "
+            "the 501 the door answers). Falls back to TAI_SETUP_TOKEN, then an interactive prompt.",
         ),
     ] = None,
     user: Annotated[

@@ -8,6 +8,7 @@ from typing import Any
 
 import orjson
 import pytest
+from tai42_kit.utils.schedule_subject import schedule_create_fire
 
 from tai42_backend_arq import extensions, scheduler
 from tai42_backend_arq.settings import TaskFailedError
@@ -170,7 +171,10 @@ async def test_schedule_task_writes_interval_schedule(fake_redis, monkeypatch, b
     for opt in ARQ_SCHEDULE_OPTS:
         assert opt in params
 
-    await branch(text="hi", backend_schedule_name="every-min", backend_schedule=60)
+    # The create door wraps the branch dispatch in this marker; a ``schedule_task`` branch dispatched
+    # outside it is refused, so a registration test drives it under the marker like the create door does.
+    with schedule_create_fire():
+        await branch(text="hi", backend_schedule_name="every-min", backend_schedule=60)
 
     stored = fake_redis._store["arq:schedule:every-min"]
     assert stored[b"target"] == b"tool_execution"
@@ -187,12 +191,58 @@ async def test_schedule_task_writes_interval_schedule(fake_redis, monkeypatch, b
     }
 
 
+async def test_schedule_task_carries_the_create_stamped_keys(fake_redis, monkeypatch, bind_pool) -> None:
+    # The create door stamps the firing identity + door contract onto the recurring dispatch. The
+    # branch signature must declare them (else the tool binding refuses the dispatch as unexpected
+    # kwargs) and the fire must carry them into the stored job so the worker's ``backend_fire`` pop
+    # reads them back.
+    from tai42_kit.utils.schedule_subject import (
+        SCHEDULE_CONTRACT_ARG,
+        SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+        SCHEDULE_EXECUTION_KEY_ARG,
+        SCHEDULE_STAMPED_DOOR_OPTS,
+    )
+
+    bind_pool(fake_redis)
+
+    class _NoJob:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def abort(self, **kwargs: Any) -> bool:
+            return True
+
+    monkeypatch.setattr(scheduler, "Job", _NoJob)
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    params = inspect.signature(branch).parameters
+    for opt in SCHEDULE_STAMPED_DOOR_OPTS:
+        assert opt in params
+
+    contract = {"resume_expr": {"content": "."}}
+    with schedule_create_fire():
+        await branch(
+            text="hi",
+            backend_schedule_name="every-min",
+            backend_schedule=60,
+            **{
+                SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
+                SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+                SCHEDULE_CONTRACT_ARG: contract,
+            },
+        )
+
+    stored = orjson.loads(fake_redis._store["arq:schedule:every-min"][b"kwargs"])
+    assert stored[SCHEDULE_EXECUTION_KEY_ARG] == "svc-key"
+    assert stored[SCHEDULE_EXECUTION_FINGERPRINT_ARG] == "fp-1"
+    assert stored[SCHEDULE_CONTRACT_ARG] == contract
+
+
 async def test_schedule_task_requires_name_and_schedule(fake_redis, bind_pool) -> None:
     bind_pool(fake_redis)
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    with pytest.raises(ValueError, match="backend_schedule_name is required"):
+    with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule_name is required"):
         await branch(text="hi", backend_schedule=60)
-    with pytest.raises(ValueError, match="backend_schedule is required"):
+    with schedule_create_fire(), pytest.raises(ValueError, match="backend_schedule is required"):
         await branch(text="hi", backend_schedule_name="every-min")
     assert fake_redis._store == {}
 
@@ -210,7 +260,8 @@ async def test_schedule_task_writes_crontab_schedule(fake_redis, monkeypatch, bi
     monkeypatch.setattr(scheduler, "Job", _NoJob)
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
 
-    await branch(text="hi", backend_schedule_name="mornings", backend_schedule="0 9 * * 1")
+    with schedule_create_fire():
+        await branch(text="hi", backend_schedule_name="mornings", backend_schedule="0 9 * * 1")
 
     stored = fake_redis._store["arq:schedule:mornings"]
     assert stored[b"cron_or_interval"] == b"0 9 * * 1"

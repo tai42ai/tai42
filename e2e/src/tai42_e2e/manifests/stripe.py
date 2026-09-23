@@ -77,7 +77,7 @@ def build_stripe_stack(res: StackResources, variants: Variants) -> StackConfig:
         "api_tools": _PROJECTED_API_TOOLS,
         # The four stripe names are kept off the user surface (they are answer capabilities);
         # agents are given the money-pinned preset over the composed tool, never these.
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     switch = _switch()
     stripe_real = switch.is_real("stripe")

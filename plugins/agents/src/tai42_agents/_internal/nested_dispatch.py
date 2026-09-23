@@ -1,41 +1,28 @@
-"""Completion-binding ownership across a NESTED tool dispatch.
+"""Cross-driver chain routing across a NESTED tool dispatch.
 
-The park-completion binding (``set_park_completion``) is the deferred-response DELIVERY ADDRESS
-of one interaction, bound by the party that owns answering it — the conversation door binds it
-around the turn it will answer. It rides a contextvar, so everything the turn dispatches inherits
-it, and any OTHER driver that parks inside the turn captures the SAME address as its own: a flow
-preset invoked as a tool inside an agent turn would post its own raw envelope into the participant's
-thread while the agent's answer is orphaned, both fires racing for one delivery address.
+An agent dispatches a tool as a STEP of its own turn — whatever the tool resolves to belongs to
+the agent, which folds it into the answer it alone delivers. The door's out-of-band delivery
+address rides ``_park_completion`` and flows DOWN unchanged through every dispatch: the platform
+delivers each run's outcome to that run's OWN stored address, so no nested driver can hijack the
+agent's answer by capturing the address (no driver fires the door completion).
 
-THE OWNER OF THE INTERACTION OWNS DELIVERY. An agent that dispatches a tool is that owner: the
-tool call is a STEP of the agent's turn, never a second answerer of it — whatever the tool
-resolves to belongs to the agent, which folds it into the answer it alone delivers. So a tool an
-agent dispatches never runs under the door's binding, while the agent's OWN park still captures
-the binding the door set for it.
+What a nested dispatch DOES bind is the cross-driver CHAIN ROUTING, on ``chained_resume``, and
+there are two answers.
 
-What that achieves is bounded, and the bound is worth stating. It stops the HIJACK: no nested
-driver can address the participant thread this agent's answer is owed to. It does NOT make the nested
-park the agent's. A nested driver that binds its own resume continuation — a flow preset is the
-live example — owns that park end to end: it resumes on its own continuation and hands the
-outcome wherever its own face delivers.
-
-Which leaves the question of what the dispatch binds INSTEAD, and there are two answers.
-
-CHAINED — the dispatch of a run that can park. The binding becomes a chained completion
-(``chained_park_context``) addressing THIS call: a fresh key naming the dispatch, wrapping
-whatever the caller had bound. A nested driver that parks under it captures that address, so
-when it reaches its terminal it fires the chain's delivery tool, which re-enters this loop with
-that terminal as the tool's result. The agent parks on the CALL — a park of its own, owned by
-its own resume continuation — while the nested run keeps its park and its resume. This is what
-lets an agent wait on a flow (or another agent) that has to ask a human.
+CHAINED — the dispatch of a run that can park. ``chained_resume`` is set to a fresh key naming
+this call, the chain-delivery tool that re-enters this loop, and the ancestor's own call chain. A
+nested driver that parks under it captures that routing, so when it reaches its terminal it fires
+the chain's delivery tool, which re-enters this loop with that terminal as the tool's result. The
+agent parks on the CALL — a park of its own, owned by its own resume continuation — while the
+nested run keeps its park and its resume. This is what lets an agent wait on a flow (or another
+agent) that has to ask a human.
 
 CLEARED — the dispatch of a run that cannot park. Nothing here could wait on a nested terminal,
-so nothing addresses one: the binding is cleared, and a nested run's park is refused to the
-model by the ownership guard, loudly, rather than suspending a run with no way back.
+so ``chained_resume`` is set to ``None``: a nested run's park is refused to the model by the
+ownership guard, loudly, rather than suspending a run with no way back.
 
-The two are the same rule under different capabilities, and the capability is read off the ONE
-fact that decides it: whether a resume continuation is bound for this run. Nothing else here
-knows about parking.
+The two are the same rule under different capabilities, read off the ONE fact that decides it:
+whether a resume continuation is bound for this run. Nothing else here knows about parking.
 
 One chained key addresses one CALL, so a single dispatch that reaches two parking runs can only
 be waited on for the first: the second claims the same key and would be delivered to the same
@@ -50,8 +37,8 @@ assembled OUTSIDE an agent (a toolbox chain wired straight onto a conversation r
 same hazard class under a different owner and out of this plugin's reach — the scope has to be
 applied by whoever dispatches the step.
 
-The binding is replaced for the DISPATCH ONLY, so the agent's own park — raised by the graph
-outside any tool body — still captures the completion the door bound for it, unchanged.
+The routing is bound for the DISPATCH ONLY, so the agent's own park — raised by the graph outside
+any tool body — captures no chain and is delivered by the platform to the run's own address.
 """
 
 from __future__ import annotations
@@ -64,13 +51,13 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 from tai42_contract.interactions import (
-    chained_park_context,
-    get_park_completion,
+    ChainedResume,
     get_resume_continuation_tool,
     new_chained_park_key,
-    reset_park_completion,
-    set_park_completion,
+    reset_chained_resume,
+    set_chained_resume,
 )
+from tai42_contract.tools import current_call_chain
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
@@ -83,39 +70,43 @@ logger = logging.getLogger(__name__)
 def nested_tool_dispatch(*, chain: bool = False) -> Iterator[None]:
     """Run a nested tool dispatch, rebinding the parent run's claim points for the tool body.
 
-    Wraps the exact call that hands control to a foreign tool body, and restores the caller's
-    own bindings in a ``finally`` — the agent's park, raised outside this scope, still sees the
-    completion the door bound for it.
+    Wraps the exact call that hands control to a foreign tool body, and restores the caller's own
+    bindings in a ``finally``. The door's out-of-band delivery address (``_park_completion``) is NOT
+    touched — it flows DOWN unchanged, because no driver fires the door completion (the
+    platform delivers to the run's own address), so no driver can hijack another run's delivery by
+    overwriting that address.
 
-    Two claim points the parent run set are rebound here, not only the completion ADDRESS. The
-    resuming-park interaction ids name what the PARENT run is resuming; a nested run dispatched
-    inside the tool body must not inherit them, or its claim point would adopt an ownerless
-    marker that merely carries one of the parent's resuming ids — so they are cleared to
-    ``frozenset()`` for the whole dispatch, unconditionally. Every claim-point binding the parent
-    set is cleared at this seam unless this dispatch deliberately passes it down.
+    Two claim points the parent run set are rebound here. The resuming-park interaction ids name
+    what the PARENT run is resuming; a nested run dispatched inside the tool body must not inherit
+    them, or its claim point would adopt an ownerless marker that merely carries one of the parent's
+    resuming ids — so they are cleared to ``frozenset()`` for the whole dispatch, unconditionally.
 
-    ``chain`` asks for the CHAINED completion binding: a fresh chained key addressing this one
-    call, wrapping the caller's binding, so a nested run that parks re-enters this loop with its
-    terminal instead of stranding it. It is honored only when a resume continuation is bound
-    for this run (``agent_resume``) — that is exactly the condition under which this run can
-    park at all, and a chain nothing can park on would leave the nested run firing at a key
-    that never existed. That chained key is the ONE claim-point binding this seam passes into the
-    nested scope on purpose; when the chain declines itself the key is never set, so the
-    clear-when-unchained rule still holds for it. Otherwise, and by default, the completion
-    binding is CLEARED: no nested driver can address this agent's answer, and its park is refused
-    to the model.
+    ``chain`` asks for the CHAINED resume routing: a fresh chained key addressing this one call,
+    carried on ``chained_resume`` with the ancestor's own call chain, so a nested run that parks
+    captures it and re-enters THIS loop with its terminal (through ``deliver_chained_park``) instead
+    of stranding it. It is honored only when a resume continuation is bound for this run
+    (``agent_resume``) — exactly the condition under which this run can park at all, and a chain
+    nothing can park on would leave the nested run firing at a key that never existed. Otherwise,
+    and by default, ``chained_resume`` is CLEARED to ``None`` so a nested run that cannot be waited
+    on captures no stale chain of an outer dispatch.
     """
     if chain and get_resume_continuation_tool() == AGENT_RESUME_TOOL_NAME:
-        token = set_park_completion(
-            CHAINED_PARK_DELIVERY_TOOL_NAME, chained_park_context(new_chained_park_key(), get_park_completion())
+        # ``asked_by`` is the ancestor's OWN call chain at this dispatch, passed as
+        # ``continues_chain`` on the chain re-entry so the ancestor's re-park records its own chain
+        # rather than the descendant's plus the chain tool's name.
+        routing: ChainedResume | None = ChainedResume(
+            delivery_tool=CHAINED_PARK_DELIVERY_TOOL_NAME,
+            chain_key=new_chained_park_key(),
+            asked_by=current_call_chain(),
         )
     else:
-        token = set_park_completion()
+        routing = None
+    token = set_chained_resume(routing)
     with resuming_park_interaction_ids(frozenset()):
         try:
             yield
         finally:
-            reset_park_completion(token)
+            reset_chained_resume(token)
 
 
 def scope_nested_dispatch[ToolT: BaseTool](tool: ToolT) -> ToolT:

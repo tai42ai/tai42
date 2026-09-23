@@ -61,6 +61,9 @@ from tai42_e2e.manifests.connectors import (
 from tai42_e2e.manifests.core import (
     build_async_park_stack,
     build_bare_stack,
+    build_caller_cap_stack,
+    build_caller_stack,
+    build_caller_sweep_stack,
     build_core_stack,
     build_embed_stack,
     build_minimal_stack,
@@ -100,7 +103,7 @@ from tai42_e2e.manifests.sandbox import (
     build_sandbox_local_stack,
     build_sandbox_stack,
 )
-from tai42_e2e.manifests.scheduling import build_schedule_stack
+from tai42_e2e.manifests.scheduling import build_door_schedule_stack, build_schedule_stack
 from tai42_e2e.manifests.seams import build_seams_seed_off_stack, build_seams_seed_stack, build_seams_stack
 from tai42_e2e.manifests.stripe import _STRIPE_TEST_SECRET_KEY, build_stripe_stack
 from tai42_e2e.manifests.studio import build_studio_setup_stack, build_studio_stack
@@ -177,12 +180,16 @@ __all__ = [
     "build_auth_stack",
     "build_bare_stack",
     "build_bridge_stack",
+    "build_caller_cap_stack",
+    "build_caller_stack",
+    "build_caller_sweep_stack",
     "build_channel_stack",
     "build_claude_agent_stack",
     "build_connectors_stack",
     "build_core_stack",
     "build_deep_agent_durable_stack",
     "build_default_router_stack",
+    "build_door_schedule_stack",
     "build_embed_stack",
     "build_extensions_stack",
     "build_marketplace_authz_stack",

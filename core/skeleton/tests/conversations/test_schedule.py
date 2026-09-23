@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import types
 
 import pytest
 from tai42_contract.conversations import (
@@ -140,14 +141,19 @@ async def test_redrive_confirms_a_provisional_record_whose_grace_elapsed(env, mo
 
 async def test_redrive_reschedules_only_the_remaining_grace_of_a_provisional_record(env, monkeypatch):
     # Still inside its window: the fallback is rebuilt for what is LEFT of the grace,
-    # not a fresh full window.
+    # not a fresh full window. Redrive reads a frozen clock so the deadline is
+    # deterministically in the future when boot inspects the record, and the rescheduled
+    # confirm sleeps only the ~50ms that is left — a full-window reschedule would not
+    # confirm within ``_settle``.
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_GRACE_SECONDS", "3600")
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     store = _store()
+    now = time.time()
+    monkeypatch.setattr(delivery_module, "time", types.SimpleNamespace(time=lambda: now))
     await store.create_record(_answered_channel_record("prov-young"))
-    await store.mark_provisional("prov-young", ["out-1"], 1, time.time(), "tok")
-    _set_grace_deadline(env, "prov-young", time.time() + 0.05)
+    await store.mark_provisional("prov-young", ["out-1"], 1, now, "tok")
+    _set_grace_deadline(env, "prov-young", now + 0.05)
 
     await delivery_module.redrive_pending()
     still_provisional = await store.get_record("prov-young")

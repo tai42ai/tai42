@@ -27,7 +27,7 @@ async def test_timed_link_expires_and_frees_its_name(
     ttl_seconds = 5
 
     await register_record_hook(
-        admin, topic, name=uniq("hook"), execution_key=exec_key, tool_kwargs={"key": rkey}, expr="{value: .x}"
+        admin, topic, name=uniq("hook"), execution_key=exec_key, tool_kwargs={"key": rkey}, start_expr="{value: .x}"
     )
     link = await mint_link(admin, topic, name=name, ttl_seconds=ttl_seconds, execution_key=exec_key)
     created = time.monotonic()

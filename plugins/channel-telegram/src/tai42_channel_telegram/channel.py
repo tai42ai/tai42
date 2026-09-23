@@ -59,7 +59,7 @@ button to the same callback door: it opens the schema-rendered callback page as 
 in-chat webview and the page POSTs the answer straight to the door, so like Tier-1
 there is no correlation and nothing arrives on the inbound route.
 
-``notify`` is fire-and-forget. The recipient allowlist governs default/ask_user
+``notify`` is fire-and-forget. The recipient allowlist governs default/ask
 sends; a bridge reply carries ``sender_identity`` (this bot's numeric id) and goes
 to the initiating chat verbatim — a mismatched ``sender_identity`` is refused.
 
@@ -74,7 +74,6 @@ import math
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
-import httpx
 from pydantic import SecretStr
 from tai42_contract.channels import (
     ChannelDelivery,
@@ -89,7 +88,7 @@ from tai42_contract.channels import (
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 from tai42_kit.settings import require, require_secret
 
-from tai42_channel_telegram.client import telegram_http
+from tai42_channel_telegram.client import call_method
 from tai42_channel_telegram.correlation import (
     StoredOption,
     scoped_correlation_key,
@@ -364,37 +363,6 @@ def _resolve_target(recipient: str | None) -> str:
     return recipient
 
 
-async def _call_bot_api(token: str, method: str, payload: dict[str, Any], context: str) -> dict[str, Any]:
-    """POST ``payload`` to one Bot API ``method`` and validate the response.
-
-    Returns the decoded ``ok: true`` body. A transport error, non-200 status,
-    non-JSON body, or ``ok: false`` each raises
-    :class:`~tai42_contract.channels.ChannelDeliveryError` naming ``method`` and
-    ``context``. The request URL embeds the bot token and never appears in error
-    text.
-    """
-    try:
-        async with telegram_http() as client:
-            response = await client.post(f"{telegram_settings().api_base_url}/bot{token}/{method}", json=payload)
-    except httpx.HTTPError as exc:
-        raise ChannelDeliveryError(f"telegram {method} failed for {context}: {type(exc).__name__}: {exc}") from exc
-
-    if response.status_code != 200:
-        raise ChannelDeliveryError(
-            f"telegram {method} returned HTTP {response.status_code} for {context}: {response.text[:200]}"
-        )
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise ChannelDeliveryError(f"telegram {method} returned a non-JSON body for {context}") from exc
-    if not data.get("ok"):
-        raise ChannelDeliveryError(
-            f"telegram {method} rejected {context}: "
-            f"error_code={data.get('error_code')} description={data.get('description')!r}"
-        )
-    return data
-
-
 def _result_message_id(data: dict[str, Any], context: str) -> int:
     """The integer ``result.message_id`` from an ``ok: true`` send, or raise.
 
@@ -470,7 +438,7 @@ class TelegramChannel:
         # video/audio by kind); link media is appended to the question text (_question_text).
         for item in _file_media(delivery.media):
             method, payload = _media_send(target, item)
-            await _call_bot_api(token, method, payload, f"interaction {delivery.interaction_id} media")
+            await call_method(token, method, payload, context=f"interaction {delivery.interaction_id} media")
 
         payload: dict[str, Any] = {"chat_id": target, "text": _question_text(delivery)}
         records: list[StoredOption] = []
@@ -498,7 +466,7 @@ class TelegramChannel:
         else:
             payload["reply_markup"] = {"force_reply": True, "input_field_placeholder": "Reply to answer"}
 
-        data = await _call_bot_api(token, "sendMessage", payload, f"interaction {delivery.interaction_id}")
+        data = await call_method(token, "sendMessage", payload, context=f"interaction {delivery.interaction_id}")
 
         if delivery.answer_format == "form" or delivery.answer_format in _TIER1_FORMATS:
             return
@@ -584,13 +552,15 @@ class TelegramChannel:
         else:
             body = self._plain_body(notification)
             if body.strip():
-                data = await _call_bot_api(token, "sendMessage", {"chat_id": target, "text": body}, "notification")
+                data = await call_method(
+                    token, "sendMessage", {"chat_id": target, "text": body}, context="notification"
+                )
                 sent.append(str(_result_message_id(data, "notification")))
 
         for item in _file_media(notification.media):
             method, payload = _media_send(target, item)
             try:
-                media_data = await _call_bot_api(token, method, payload, "notification media")
+                media_data = await call_method(token, method, payload, context="notification media")
             except ChannelDeliveryError as exc:
                 raise ChannelDeliveryError(f"telegram multi-part send failed after delivering {sent}: {exc}") from exc
             sent.append(str(_result_message_id(media_data, "notification media")))
@@ -598,7 +568,7 @@ class TelegramChannel:
         if notification.location is not None:
             method, payload = _location_send(target, notification.location)
             try:
-                location_data = await _call_bot_api(token, method, payload, "notification location")
+                location_data = await call_method(token, method, payload, context="notification location")
             except ChannelDeliveryError as exc:
                 raise ChannelDeliveryError(f"telegram multi-part send failed after delivering {sent}: {exc}") from exc
             sent.append(str(_result_message_id(location_data, "notification location")))
@@ -686,7 +656,7 @@ class TelegramChannel:
             payload: dict[str, Any] = {"chat_id": target, "text": body_text, "reply_markup": keyboard}
             if parse_mode is not None:
                 payload["parse_mode"] = parse_mode
-            data = await _call_bot_api(token, "sendMessage", payload, "notification")
+            data = await call_method(token, "sendMessage", payload, context="notification")
             sent.append(str(_result_message_id(data, "notification")))
             return data
 
@@ -695,19 +665,19 @@ class TelegramChannel:
             payload = {"chat_id": target, source_key: header.url, "caption": body_text, "reply_markup": keyboard}
             if parse_mode is not None:
                 payload["parse_mode"] = parse_mode
-            data = await _call_bot_api(token, method, payload, "notification header")
+            data = await call_method(token, method, payload, context="notification header")
             sent.append(str(_result_message_id(data, "notification header")))
             return data
 
         # Body too long for a caption: send the header media alone, then the text-plus-keyboard
         # message (which carries the keyboard and anchors the option side record).
-        header_data = await _call_bot_api(
-            token, method, {"chat_id": target, source_key: header.url}, "notification header"
+        header_data = await call_method(
+            token, method, {"chat_id": target, source_key: header.url}, context="notification header"
         )
         sent.append(str(_result_message_id(header_data, "notification header")))
         payload = {"chat_id": target, "text": body_text, "reply_markup": keyboard}
         if parse_mode is not None:
             payload["parse_mode"] = parse_mode
-        data = await _call_bot_api(token, "sendMessage", payload, "notification")
+        data = await call_method(token, "sendMessage", payload, context="notification")
         sent.append(str(_result_message_id(data, "notification")))
         return data

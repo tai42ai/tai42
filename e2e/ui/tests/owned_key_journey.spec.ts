@@ -3,7 +3,7 @@
  * projection ⊆ gate, claim-link lifecycle, and per-identity isolation over the API
  * (`tests/owned_keys/`); the browser never drove the owner→QR→scoped-Studio path.
  * Here the API ARRANGES (the admin root mints a
- * scoped OWNED key, mints a one-time claim link, and fires an `ask_user` addressed to
+ * scoped OWNED key, mints a one-time claim link, and fires an `ask` addressed to
  * that owned identity), and the browser exercises exactly what only a browser can:
  * the `#claim=` login leg, the capability-scoped shell (a scoped nav + the
  * RouteCapabilityBoundary "not available" panel on an uncovered route), the scoped
@@ -100,7 +100,7 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   await shellContext.close();
 
   // -- The claim login leg (in-memory session; remember=false) ----------------------
-  // Submit ask_user AS THE OWNED IDENTITY through the background run door (the grantable
+  // Submit ask AS THE OWNED IDENTITY through the background run door (the grantable
   // path a non-admin uses): the door answers 202 at once with a run id, and the run
   // parks in the background until the browser answers, so the addressed interaction is
   // pending when the scoped inbox opens. The background run carries the SUBMITTER's
@@ -110,7 +110,7 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   // session sees it.
   const question = uniq('question');
   const answer = uniq('answer');
-  const askRunId = await submitToolRun(request, 'ask_user', { question }, ownedKey);
+  const askRunId = await submitToolRun(request, 'ask', { question }, ownedKey);
 
   // The QR/onboarding link lands here; the one-time token is exchanged automatically,
   // then the lander redirects to its first covered feature entry.

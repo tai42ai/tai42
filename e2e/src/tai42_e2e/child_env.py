@@ -73,7 +73,7 @@ def app_origin_env(config: StackConfig, host: str, app_ports: list[int]) -> dict
     """Fill each ``app_origin_env_keys`` entry with this stack's own single app
     origin (``http://host:port``), only known after boot allocates the port. Used by a
     single-port (MULTIWORKER) stack for an env key that must name its OWN origin — e.g.
-    the ask_user callback base the web channel's answer door forwards an answer back to."""
+    the ask callback base the web channel's answer door forwards an answer back to."""
     if not config.app_origin_env_keys:
         return {}
     if not app_ports:

@@ -29,6 +29,6 @@ rendering, the tappable-choice primitives, and recipient resolution.
 """
 
 from tai42_channel_whatsapp.channel.adapter import WhatsAppChannel
-from tai42_channel_whatsapp.channel.forms import _NOTIFY_FORM_TOKEN_PREFIX
+from tai42_channel_whatsapp.channel.forms import _NOTIFY_FORM_TOKEN_PREFIX, send_form_ask_flow
 
-__all__ = ["_NOTIFY_FORM_TOKEN_PREFIX", "WhatsAppChannel"]
+__all__ = ["_NOTIFY_FORM_TOKEN_PREFIX", "WhatsAppChannel", "send_form_ask_flow"]

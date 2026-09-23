@@ -277,7 +277,8 @@ class StateTemplateJq(BaseModel):
     """One named jq program on a state template.
 
     ``purpose`` is ``input`` — a read over the record returning a value — or ``update`` — a program
-    over ``{record, input}`` returning a template-relative op batch. ``jq`` is the program body as a
+    over the record subtree (its ``.``) with ``$input`` bound, returning a template-relative op
+    batch. ``jq`` is the program body as a
     :class:`~tai42_contract.template.TemplatedText` (inline ``content`` or a stored ``id``).
     ``params`` names the keys the program takes; ``reads``/``writes`` are the
     template-relative record paths an ``update`` program declares and are absent on an

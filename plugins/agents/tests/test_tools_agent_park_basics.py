@@ -18,7 +18,10 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
+    ChainedResume,
+    reset_chained_resume,
     reset_park_completion,
+    set_chained_resume,
     set_park_completion,
 )
 from tai42_contract.template import TemplatedText
@@ -53,6 +56,38 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     return redis
 
 
+def test_tools_agent_caller_ask_park_carries_both_id_lists(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A caller ask parked inside the agent surfaces on the receipt in BOTH id lists — every parked
+    # id, and the caller subset — so the platform's visit partitions caller from user asks. A user
+    # ask (the sibling assertion in the test above) carries the caller subset empty.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1", caller=True)
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        receipt = await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-caller",
+        )
+        assert receipt == {
+            "status": "suspended",
+            "interaction_ids": ["i1"],
+            "caller_interaction_ids": ["i1"],
+            "thread_id": "t-caller",
+            "expiry_at": None,
+        }
+
+    asyncio.run(go())
+
+
 def test_tools_agent_park_then_answer_exactly_once(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
@@ -74,6 +109,7 @@ def test_tools_agent_park_then_answer_exactly_once(
         assert receipt == {
             "status": "suspended",
             "interaction_ids": ["i1"],
+            "caller_interaction_ids": [],
             "thread_id": "t-tools",
             "expiry_at": None,
         }
@@ -95,15 +131,13 @@ def test_tools_agent_park_then_answer_exactly_once(
     asyncio.run(go())
 
 
-def test_tools_agent_run_park_captures_the_ambient_completion(
+def test_tools_agent_run_park_is_outermost_and_captures_no_chain(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # The run face is a JSON tool-face a flow node / conversation agent turn dispatches. When
-    # that door bound a park completion around the dispatch (the deferred-answer DELIVERY leg),
-    # a park raised inside the run must CAPTURE it — in parity with the astream face — so the
-    # resumed run's final answer has a path back to the door. On origin/main the run face binds
-    # the park with completion_tool=None (no delivery leg), so agent_resume drives the answer to
-    # NOWHERE and the participant is orphaned; this pins the capture that makes the park deliverable.
+    # An outermost run-face park (no ancestor driver waiting on it across a chain) captures NO
+    # chain routing: its terminal fires nothing, and the platform delivers the run's outcome to
+    # the run's own stored address (captured at ask time, not on this driver's park entry). The
+    # door's out-of-band address flows DOWN unchanged and is the platform's to fire.
     saver = InMemorySaver()
     ask = _AskStandIn("i1")
     model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
@@ -111,12 +145,11 @@ def test_tools_agent_run_park_captures_the_ambient_completion(
     app_tools.client_tools["ask"] = ask.tool()
 
     agent = _agent()
-    completion_tool = "conversation_deliver"
-    completion_context = {"thread_id": "bridge:acme:alice"}
 
     async def go() -> None:
-        # Stand in for the door that owns delivery binding its completion around the dispatch.
-        token = set_park_completion(completion_tool, completion_context)
+        # The door's out-of-band delivery address is bound and flows down unchanged; the driver
+        # does not capture it as the park's chain routing.
+        token = set_park_completion("conversation_deliver", {"thread_id": "bridge:acme:alice"})
         try:
             receipt = await agent.run(
                 tool_names=["ask"],
@@ -128,12 +161,48 @@ def test_tools_agent_run_park_captures_the_ambient_completion(
             reset_park_completion(token)
         assert receipt["status"] == "suspended"
 
-        # The park entry carries the door's delivery leg verbatim, so a resumed clean terminal
-        # fires the completion back to the address the door bound (never delivered nowhere).
         entry = await idx.read_park_entry("i1")
         assert entry is not None
-        assert entry["completion_tool"] == completion_tool
-        assert entry["completion_context"] == completion_context
+        assert entry["completion_tool"] is None
+        assert entry["completion_context"] is None
+
+    asyncio.run(go())
+
+
+def test_tools_agent_run_park_captures_the_ambient_chain_routing(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A run dispatched as a nested tool of ANOTHER driver's chained call captures that ancestor's
+    # chain routing onto its park entry, so its own terminal fires the ancestor's chain-delivery
+    # tool and returns the outermost outcome up.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+    routing = ChainedResume(
+        delivery_tool="deliver_chained_park", chain_key="tai42:chained-park:abc", asked_by=("caller",)
+    )
+
+    async def go() -> None:
+        token = set_chained_resume(routing)
+        try:
+            receipt = await agent.run(
+                tool_names=["ask"],
+                checkpoint_provider="redis",
+                user_message=TemplatedText(content="go"),
+                thread_id="t-run-chained",
+            )
+        finally:
+            reset_chained_resume(token)
+        assert receipt["status"] == "suspended"
+
+        entry = await idx.read_park_entry("i1")
+        assert entry is not None
+        assert entry["completion_tool"] == "deliver_chained_park"
+        assert entry["completion_context"] == {"chain_key": "tai42:chained-park:abc", "asked_by": ["caller"]}
 
     asyncio.run(go())
 

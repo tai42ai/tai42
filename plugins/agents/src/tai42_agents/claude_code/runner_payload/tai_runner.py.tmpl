@@ -102,10 +102,10 @@ async def _stdin_pump(reader: asyncio.StreamReader, wire: _Wire) -> None:
 
 
 def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tool_names: list[str]) -> Any:
-    """One in-process SDK MCP server exposing ask_user + one proxy tool per requested name."""
+    """One in-process SDK MCP server exposing ask + one proxy tool per requested name."""
 
-    @tool("ask_user", "Ask a human a question and block for the answer.", {"question": str, "mode": str})
-    async def ask_user(args: dict[str, Any]) -> dict[str, Any]:
+    @tool("ask", "Ask a human a question and block for the answer.", {"question": str, "mode": str})
+    async def ask(args: dict[str, Any]) -> dict[str, Any]:
         ask_id_seq[0] += 1
         ask_id = f"ask-{ask_id_seq[0]}"
         await wire.emit(
@@ -116,7 +116,7 @@ def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tool_names: list
             return {"content": [{"type": "text", "text": str(reply.get("answer"))}], "is_error": True}
         return {"content": [{"type": "text", "text": json.dumps(reply.get("answer"))}]}
 
-    proxy_tools = [ask_user]
+    proxy_tools = [ask]
     for name in proxy_tool_names:
 
         async def _proxy(args: dict[str, Any], _name: str = name) -> dict[str, Any]:

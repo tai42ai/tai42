@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A Twilio SMS/WhatsApp **channel** plugin for the TAI ecosystem. It delivers an
-`ask_user` question to a human's phone through the Twilio Messages API and
+`ask` question to a human's phone through the Twilio Messages API and
 bridges the human's reply back into the interactions store — so an agent can
 reach a person out-of-band instead of only showing the question in the Studio
 inbox. It implements the `tai42_contract.channels.Channel` protocol and registers
@@ -13,7 +13,7 @@ under the name `"twilio"`.
 
 TAI is an open-source runtime for MCP tools, agents, and workflows. A `Channel`
 is "how a question reaches a human" — a pluggable deliverer the runtime resolves
-by name when `ask_user` is called with `channel=...`. This package is one such
+by name when `ask` is called with `channel=...`. This package is one such
 deliverer (Twilio SMS/WhatsApp); siblings back the same contract with Telegram
 or Slack. The ecosystem is open-ended: any package can back the same contract,
 so this repo is this plugin's own full doc home, and the documentation site
@@ -150,7 +150,7 @@ fake an affordance or silently drop the content:
 | `location` | no | needs `supports_location_notifications` — refused upstream |
 | `template` (`ChannelTemplate`) | no | needs `supports_template_notifications` — refused upstream (see below) |
 | `schema` (ask-less form) | no | needs `supports_form_notifications` — refused upstream |
-| `form` delivery (an `ask_user` form) | no | needs `supports_form_delivery` — refused upstream |
+| `form` delivery (an `ask` form) | no | needs `supports_form_delivery` — refused upstream |
 
 **Templates.** This channel does not use Twilio's Content API / `ContentSid` template
 sends today — every outbound is a freeform `Body` (plus any `MediaUrl`). It therefore does
@@ -187,7 +187,7 @@ echoed back on the reply.
 | Limit | Consequence | Future |
 |---|---|---|
 | Recipients fixed by operator env (`_ALLOWED_RECIPIENTS`/`_DEFAULT_RECIPIENT`) | A question can only reach a whitelisted or default number — no dynamic/unlisted destinations | Directory-backed recipient resolution |
-| One pending question per number pair | A second concurrent `ask_user` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired | Number pool via Messaging Service sticky sender |
+| One pending question per number pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired | Number pool via Messaging Service sticky sender |
 | SMS-first; WhatsApp freeform only | With `whatsapp:` numbers, a question outside the human's 24h session window is rejected by Twilio (error 63016) as a loud delivery failure | Approved-template (`ContentSid`) sends |
 | Single send attempt | A transient Twilio outage fails the ask instead of retrying (no idempotency key exists → a blind retry risks double-texting) | App-side dedupe + retry |
 | Send delivery receipts are observability only | The Twilio StatusCallback closes the loop on both legs: a **bridge** outbound's `delivered`/`failed`/`undelivered` flips the answer record (a late failure ends it `failed`, not just the ask's timeout), and a **`notify_user` send** (which runs no bridge record) has its receipt resolved through the send-outcome index and posted as a `delivery_receipt` event on the originating trace (`ERROR` on failure). The send receipt is a monitoring signal only — it never re-sends or fails the run — and correlates only when a trace was ambient at the send and the interactions store is configured; a status neither leg owns is acked and logged | — |

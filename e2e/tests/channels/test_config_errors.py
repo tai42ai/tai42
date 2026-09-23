@@ -63,7 +63,7 @@ async def test_missing_default_recipient_is_a_delivery_error(
     # ValueError surface); nothing sent, the ask pruned.
     question = uniq(f"{channel}_q")
     async with stack.mcp(port=stack.port_a) as mcp:
-        ask_result = await mcp.call_tool("ask_user", {"question": question, "channel": channel}, raise_on_error=False)
+        ask_result = await mcp.call_tool("ask", {"question": question, "channel": channel}, raise_on_error=False)
     assert ask_result.is_error
     assert default_env in tool_content_text(ask_result)
     assert case.sends_matching(question) == []

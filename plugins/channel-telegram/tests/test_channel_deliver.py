@@ -250,11 +250,32 @@ async def test_transport_error_single_attempt_token_free(http_recorder, fake_red
     assert _TOKEN not in str(excinfo.value)
 
 
-async def test_http_error_status_raises(http_recorder, fake_redis):
-    http_recorder.responder = lambda request: httpx.Response(500, text="server error")
-    with pytest.raises(ChannelDeliveryError, match="HTTP 500") as excinfo:
+async def test_non_200_json_error_surfaces_full_detail(http_recorder, fake_redis):
+    # Telegram answers its structured error on the HTTP-error status too — the non-200
+    # arm routes _error_detail, so error_code/description/parameters all surface.
+    http_recorder.responder = lambda request: httpx.Response(
+        403,
+        json={
+            "ok": False,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+            "parameters": {"retry_after": 2},
+        },
+    )
+    with pytest.raises(ChannelDeliveryError, match="sendMessage rejected") as excinfo:
+        await TelegramChannel().deliver(_delivery())
+    assert "error_code=403" in str(excinfo.value)
+    assert 'parameters={"retry_after":2}' in str(excinfo.value)
+    assert "int-1" in str(excinfo.value)
+    assert _TOKEN not in str(excinfo.value)
+
+
+async def test_non_200_non_json_body_falls_back_to_bounded_text(http_recorder, fake_redis):
+    http_recorder.responder = lambda request: httpx.Response(500, text="<html>" + "x" * 2000 + "</html>")
+    with pytest.raises(ChannelDeliveryError, match="sendMessage rejected") as excinfo:
         await TelegramChannel().deliver(_delivery())
     assert "int-1" in str(excinfo.value)
+    assert len(str(excinfo.value)) < 600  # detail bounded to 500 chars
     assert _TOKEN not in str(excinfo.value)
 
 

@@ -82,6 +82,29 @@ class AppInteractions(Protocol):
         """
         ...
 
+    def park_answer(self, outcome: VisitOutcome) -> Any:
+        """The ONE park-answer shape a direct door hands back for a :class:`VisitOutcome`.
+
+        A plain ``result`` is the tool's own value; an ``asks`` outcome is the caller ask entries
+        the run parked (``{"asks": [entry, ...]}``); a ``parked`` outcome is the suspended
+        sentinel; ``none`` is ``None``. Both the synchronous run-tool door and the background
+        submit's terminal record shape a park through this ONE callable, so a poller of either
+        door reads identical bytes and can tell a caller-ask park (answerable through
+        ``resume_parked``) from a user-ask park. It never reveals a wrapped secret — the sync door
+        reveals those on the ``result`` kind itself and every recorder masks its own copy.
+        """
+        ...
+
+    async def normalise_started(self, value: Any) -> VisitOutcome:
+        """Classify a raw start return into a ``started`` :class:`VisitOutcome` over the ambient subject.
+
+        The same normalisation :meth:`visit` applies to what its ``start`` returned — caller asks,
+        a re-park, or a final result — exposed for a door that already ran its start INSIDE its own
+        :meth:`visit` (a hook fire whose visit owns the run) and only needs the return classified,
+        so its record carries the same park answer both direct doors return.
+        """
+        ...
+
     async def list_parked(self) -> list[ParkedEntry]:
         """Every parked interaction on the current run's subject — the full parked entries.
 

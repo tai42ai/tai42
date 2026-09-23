@@ -72,7 +72,7 @@ def _template_body(name: str) -> dict[str, Any]:
             "add": {
                 "purpose": "update",
                 "writes": [["items"]],
-                "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: .input}]'},
+                "jq": {"content": '[{op: "set_by_key", path: ["items"], key_field: "id", value: $input}]'},
             },
             "wipe": {
                 "purpose": "update",
@@ -101,12 +101,12 @@ def _reconciler_body(name: str) -> dict[str, Any]:
         "reconcile": {
             "orphans": {
                 "content": (
-                    ".new.allowed as $a | [(.data.items // [])[] "
+                    "$new.allowed as $a | [(.items // [])[] "
                     "| select(.id as $i | ($a | index($i)) == null) | {id, label: (.id | tostring)}]"
                 )
             },
             "resolutions": {"content": '["closed"]'},
-            "close": {"content": '[{op: "remove_by_key", path: ["items"], key_field: "id", key: .id}]'},
+            "close": {"content": '[{op: "remove_by_key", path: ["items"], key_field: "id", key: $id}]'},
         },
     }
 

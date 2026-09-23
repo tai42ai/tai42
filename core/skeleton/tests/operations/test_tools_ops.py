@@ -85,6 +85,13 @@ class _Interactions:
             return VisitOutcome(action="started", cancelled=list(cancel), kind="parked", suspended=result)
         return VisitOutcome(action="started", cancelled=list(cancel), kind="result", result=result)
 
+    def park_answer(self, outcome: Any) -> Any:
+        # The sync door shapes a park through the real pure shaper — the same callable the
+        # background submit records with, so the door's receipt matches the recorded one.
+        from tai42_skeleton.interactions.visit import park_answer
+
+        return park_answer(outcome)
+
 
 class _Admin:
     def __init__(self, reload_result: object = None) -> None:

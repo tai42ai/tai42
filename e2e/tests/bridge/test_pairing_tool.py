@@ -2,9 +2,9 @@
 
 A deployment opts the ``get_pairing_code`` builtin in through a manifest ``tools[].module``
 row (done on the bridge profile), then wires it as a tool-target route: the inbound payload
-maps to the tool's ``(channel, our_identity, sender)`` via ``payload_expr``, and the tool
+maps to the tool's ``(channel, our_identity, sender)`` via ``start_expr``, and the tool
 result — ``{code, expires_at}`` and nothing else — maps to the reply via ``reply_expr``.
-No agent, no ``ask_user``: the tool runs directly under the route's execution key and its
+No agent, no ``ask``: the tool runs directly under the route's execution key and its
 return is delivered over the channel.
 
 The leg pins the whole contract: a route extracting ``.code`` delivers a well-formed pair
@@ -64,7 +64,7 @@ async def _tool_route(
         execution_key=exec_key,
         channel=channel,
         our_identity=our_identity,
-        payload_expr=_PAYLOAD_EXPR,
+        start_expr=_PAYLOAD_EXPR,
         reply_expr=reply_expr,
     )
     return tag

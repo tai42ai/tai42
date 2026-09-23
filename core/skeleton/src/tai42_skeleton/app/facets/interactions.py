@@ -67,6 +67,27 @@ class InteractionsFacet(_Facet):
 
         return visit
 
+    def park_answer(self, outcome: VisitOutcome) -> Any:
+        """The ONE park-answer shape a direct door hands back for a visit outcome.
+
+        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.park_answer`: the caller ask
+        entries, the suspended sentinel, the tool's own result, or ``None`` — never revealing a
+        wrapped secret (the sync door reveals those on the ``result`` kind itself).
+        """
+        from tai42_skeleton.interactions.visit import park_answer
+
+        return park_answer(outcome)
+
+    async def normalise_started(self, value: Any) -> VisitOutcome:
+        """Classify a raw start return into a ``started`` :class:`VisitOutcome` over the ambient subject.
+
+        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.normalise_started`, for a door
+        that ran its start inside its OWN visit and only needs the return classified.
+        """
+        from tai42_skeleton.interactions.visit import normalise_started
+
+        return await normalise_started(value)
+
     async def list_parked(self) -> list[ParkedEntry]:
         """Every parked interaction on the current run's subject — the full parked entries."""
         from tai42_skeleton.interactions.visit import list_parked

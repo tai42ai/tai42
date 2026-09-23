@@ -167,10 +167,14 @@ class McpClient:
         raise_on_error: bool = True,
         retry_on_reloading: bool = False,
         ready_deadline: float = 10.0,
+        meta: dict[str, Any] | None = None,
     ) -> CallToolResult:
         """Call ``name`` with ``arguments``. With ``raise_on_error=False`` an MCP
         error result is returned (``result.is_error``) rather than raised — for
         tests that assert the error path (``e2e_fail``).
+
+        ``meta`` is sent as the ``tools/call`` request ``_meta`` — how a caller names its
+        ``tai42/subject`` on the MCP edge, so a parking tool indexes its async park under it.
 
         With ``retry_on_reloading=True`` a call that hits the boot-time reload gate
         (the ~2s self-resync) is polled past on the sanctioned :func:`wait_for_async`
@@ -186,7 +190,7 @@ class McpClient:
 
         def _invoke(raise_err: bool) -> Awaitable[CallToolResult]:
             return self._with_session_reinit(
-                lambda: self._client.call_tool(name, arguments or {}, raise_on_error=raise_err)
+                lambda: self._client.call_tool(name, arguments or {}, raise_on_error=raise_err, meta=meta)
             )
 
         if not retry_on_reloading:

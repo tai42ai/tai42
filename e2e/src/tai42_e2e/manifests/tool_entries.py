@@ -98,7 +98,7 @@ _SEAMS_TOOLS_ENTRY = {
 }
 
 
-# The ask_user HITL builtin tool module. Other management ops (reload_config,
+# The ask HITL builtin tool module. Other management ops (reload_config,
 # reload_mcp, register_hook, templates, notify_user) project onto the MCP tool surface
 # from the operations registry via ``api_tools`` (see ``_PROJECTED_API_TOOLS``).
 _INTERACTIONS_ENTRY = {"title": "builtin-interactions", "module": "tai42_skeleton.tools.builtin.interactions"}
@@ -120,7 +120,7 @@ _PROJECTED_API_TOOLS = {"enabled": True}
 
 def _builtin_entries() -> list[dict]:
     """The builtin ``tools[]`` entries a profile carries: ``builtin-interactions``
-    (ask_user) and ``builtin-states`` (the four subject-state tools). Management ops
+    (ask) and ``builtin-states`` (the four subject-state tools). Management ops
     project via ``api_tools`` instead."""
     return [_INTERACTIONS_ENTRY, _STATES_TOOLS_ENTRY]
 

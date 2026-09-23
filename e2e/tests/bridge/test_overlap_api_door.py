@@ -25,14 +25,14 @@ from collections.abc import Callable
 from tai42_e2e.waiting import wait_for_async
 
 from ._bridge_support import BridgeHarness, wait_probe_record, wait_record_status
-from ._overlap_support import probe_payload_expr
+from ._overlap_support import probe_start_expr
 
 _UNREACHABLE_CALLBACK = "https://127.0.0.1:9/callback"
 _HOLD_SECONDS = 4.0
 
 
 async def _api_tool_route(
-    bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, payload_expr: str, overlap: dict[str, object]
+    bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, start_expr: str, overlap: dict[str, object]
 ) -> str:
     route_name = uniq(f"{tag}-route").replace("_", "-")
     exec_key = uniq(f"{tag}-exec")
@@ -42,7 +42,7 @@ async def _api_tool_route(
         tool="e2e_overlap_probe",
         execution_key=exec_key,
         callback_url=_UNREACHABLE_CALLBACK,
-        payload_expr=payload_expr,
+        start_expr=start_expr,
         overlap=overlap,
     )
     return route_name
@@ -56,7 +56,7 @@ async def test_the_api_door_sync_wait_and_poll_see_a_superseded_marker(
         bridge,
         uniq,
         "ov-api-sup",
-        payload_expr=probe_payload_expr(marker, hold_seconds=_HOLD_SECONDS),
+        start_expr=probe_start_expr(marker, hold_seconds=_HOLD_SECONDS),
         overlap={"running": "cancel", "deliver": "one"},
     )
     caller = await bridge.mint_key(user_id=uniq("ov-api-caller"), scopes=["e2e-all"])
@@ -106,7 +106,7 @@ async def test_the_api_door_poll_sees_a_merged_marker(bridge: BridgeHarness, uni
         bridge,
         uniq,
         "ov-api-mrg",
-        payload_expr=probe_payload_expr(marker),
+        start_expr=probe_start_expr(marker),
         overlap={"deliver": "all", "settle_seconds": 2},
     )
     caller = await bridge.mint_key(user_id=uniq("ov-api-caller2"), scopes=["e2e-all"])

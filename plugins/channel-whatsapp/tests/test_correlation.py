@@ -173,6 +173,50 @@ async def test_form_pending_round_trips_schema(fake_redis: FakeRedis):
     )
 
 
+async def test_form_pending_round_trips_the_per_send_inputs(fake_redis: FakeRedis):
+    # The per-send form inputs (the step layout, prefilled values, per-send option lists)
+    # are carried on the pending record so a door-rejection re-send reproduces the same
+    # Flow — the codec round-trips them, and a counted rejection preserves them.
+    schema = {"type": "object", "properties": {"note": {"type": "string"}, "tier": {"type": "string"}}}
+    pages = [{"title": "One", "fields": ["note", "tier"]}]
+    values = {"note": "hi"}
+    options = {"tier": [{"value": "g", "label": "Gold"}]}
+    await reserve_pending(
+        _PNID,
+        _WA,
+        _CALLBACK,
+        _deadline(600),
+        interaction_id="int-9",
+        schema=schema,
+        question="Q?",
+        form_pages=pages,
+        form_values=values,
+        form_options=options,
+    )
+
+    peeked = await peek_pending(_PNID, _WA)
+    assert peeked is not None
+    assert peeked.form_pages == pages
+    assert peeked.form_values == values
+    assert peeked.form_options == options
+
+    # A counted rejection re-encodes the whole record, so the inputs survive it.
+    await bump_rejections(_PNID, _WA, peeked)
+    after = await peek_pending(_PNID, _WA)
+    assert after is not None
+    assert after.rejections == 1
+    assert (after.form_pages, after.form_values, after.form_options) == (pages, values, options)
+
+
+async def test_non_form_pending_has_no_form_inputs(fake_redis: FakeRedis):
+    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(), interaction_id="int-1")
+
+    peeked = await peek_pending(_PNID, _WA)
+
+    assert peeked is not None
+    assert (peeked.form_pages, peeked.form_values, peeked.form_options) == (None, None, None)
+
+
 # -- bump_rejections: the in-place counter on the still-held record --------------
 
 

@@ -10,6 +10,7 @@ from makefun import create_function
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.binding import _UNSET
+from tai42_skeleton.tools.binding.schema import _resolved_signature
 
 
 def _named_call_arguments(
@@ -53,7 +54,10 @@ def _validation_wrapper(resolved_fn: Callable[..., Any], offload: bool) -> Calla
         return result
 
     return create_function(
-        inspect.signature(resolved_fn),
+        # Resolve string forward-refs (``from __future__ import annotations``) to concrete
+        # types here: the created wrapper's namespace lacks the tool module's imports, so
+        # pydantic's TypeAdapter below could not evaluate a stringized annotation.
+        _resolved_signature(resolved_fn),
         # makefun's ``func_impl`` is annotated ``Callable[[Any], Any]`` but it
         # accepts any callable (it drives the separate signature above); our
         # **kwargs impl is valid at runtime.

@@ -9,8 +9,23 @@ import pytest
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.schedules import crontab, schedule
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.schedule_subject import (
+    SCHEDULE_CONTRACT_ARG,
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG,
+    SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_STAMPED_DOOR_OPTS,
+    SCHEDULE_SUBJECT_ARG,
+    schedule_create_fire,
+)
 
 import tai42_backend_celery.extensions.extensions as extensions
+
+_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
+_FORWARDED = {
+    SCHEDULE_SUBJECT_ARG: _SUBJECT,
+    SCHEDULE_EXECUTION_KEY_ARG: "svc",
+    SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+}
 
 
 def sample_tool(a: int, b: str = "x") -> str:
@@ -120,6 +135,23 @@ async def test_callback_kwargs_becomes_link_signature(fake_task, monkeypatch) ->
     assert linked == [callback]
 
 
+def test_apply_task_opts_carries_the_forwarded_pair_onto_the_callback(monkeypatch) -> None:
+    # A task fired from within a door forwards its subject/identity onto the job kwargs; the callback
+    # runs as a SEPARATE task, so the same pair is carried on its spec or the follow-up loses the door.
+    monkeypatch.setattr(extensions, "callback_task", type("_S", (), {"s": staticmethod(lambda cb: "sig")})())
+    callback = extensions.CallbackSchema(tool="follow_up")
+    extensions._apply_task_opts({"callback_kwargs": callback, "a": 1, **_FORWARDED})
+    assert callback.carried_kwargs == _FORWARDED
+
+
+def test_apply_task_opts_carries_nothing_onto_a_plain_callback(monkeypatch) -> None:
+    # A plain background task forwards no door context, so the callback stays a plain follow-up.
+    monkeypatch.setattr(extensions, "callback_task", type("_S", (), {"s": staticmethod(lambda cb: "sig")})())
+    callback = extensions.CallbackSchema(tool="follow_up")
+    extensions._apply_task_opts({"callback_kwargs": callback, "a": 1})
+    assert callback.carried_kwargs == {}
+
+
 class _FakeEntry:
     instances: ClassVar[list[_FakeEntry]] = []
 
@@ -144,7 +176,10 @@ async def test_schedule_task_saves_interval_entry(fake_entry) -> None:
     params = inspect.signature(branch).parameters
     assert {"backend_schedule_name", "backend_schedule"} <= set(params)
 
-    await branch(a=1, backend_schedule_name="nightly", backend_schedule=30)
+    # The create door wraps the branch dispatch in this marker; a ``schedule_task`` branch dispatched
+    # outside it is refused, so a registration test drives it under the marker like the create door does.
+    with schedule_create_fire():
+        await branch(a=1, backend_schedule_name="nightly", backend_schedule=30)
     (entry,) = fake_entry.instances
     assert entry.saved
     assert entry.kwargs["name"] == "nightly"
@@ -159,9 +194,37 @@ async def test_schedule_task_saves_interval_entry(fake_entry) -> None:
     }
 
 
+async def test_schedule_task_carries_the_create_stamped_keys(fake_entry) -> None:
+    # The create door stamps the firing identity + door contract onto the recurring dispatch. The
+    # branch signature must declare them (else the tool binding refuses the dispatch as unexpected
+    # kwargs) and the fire must carry them into the stored entry so the worker's ``backend_fire`` pop
+    # reads them back.
+    branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
+    params = inspect.signature(branch).parameters
+    assert set(SCHEDULE_STAMPED_DOOR_OPTS) <= set(params)
+
+    contract = {"resume_expr": {"content": "."}}
+    with schedule_create_fire():
+        await branch(
+            a=1,
+            backend_schedule_name="nightly",
+            backend_schedule=30,
+            **{
+                SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
+                SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+                SCHEDULE_CONTRACT_ARG: contract,
+            },
+        )
+    (entry,) = fake_entry.instances
+    assert entry.kwargs["kwargs"][SCHEDULE_EXECUTION_KEY_ARG] == "svc-key"
+    assert entry.kwargs["kwargs"][SCHEDULE_EXECUTION_FINGERPRINT_ARG] == "fp-1"
+    assert entry.kwargs["kwargs"][SCHEDULE_CONTRACT_ARG] == contract
+
+
 async def test_schedule_task_saves_crontab_entry(fake_entry) -> None:
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    await branch(a=1, backend_schedule_name="weekday", backend_schedule="0 9 * * 1")
+    with schedule_create_fire():
+        await branch(a=1, backend_schedule_name="weekday", backend_schedule="0 9 * * 1")
     (entry,) = fake_entry.instances
     assert isinstance(entry.kwargs["schedule"], crontab)
 
@@ -179,6 +242,6 @@ async def test_schedule_task_rejects_an_unknown_normalized_kind(fake_entry, monk
     """Defensive guard behind normalize_schedule: an unexpected kind raises."""
     monkeypatch.setattr(extensions, "normalize_schedule", lambda s: {"__type__": "hourly"})
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
-    with pytest.raises(ValueError, match="Unsupported schedule type"):
+    with schedule_create_fire(), pytest.raises(ValueError, match="Unsupported schedule type"):
         await branch(a=1, backend_schedule_name="nightly", backend_schedule=30)
     assert fake_entry.instances == []

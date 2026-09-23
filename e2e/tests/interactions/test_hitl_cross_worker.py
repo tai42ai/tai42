@@ -1,4 +1,4 @@
-"""A human-in-the-loop ``ask_user`` blocks its caller on replica A, the
+"""A human-in-the-loop ``ask`` blocks its caller on replica A, the
 pending interaction is observed and answered via replica B, and the waiter wakes
 across workers (Redis blpop/rpush). The first flow raises the ask INSIDE a background
 tool run, so its add frame carries the submitting run id as ``origin`` (no
@@ -43,7 +43,7 @@ async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: 
     return found
 
 
-async def test_ask_user_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
+async def test_ask_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
     api_a = replicas_stack.api(port=replicas_stack.port_a)
     api_b = replicas_stack.api(port=replicas_stack.port_b)
@@ -53,7 +53,7 @@ async def test_ask_user_blocked_on_a_answered_via_b(replicas_stack: TaiStack, un
     # can race the ~2s boot-time self-resync gate, so poll past a retriable ``reloading``.
     submitted = await api_a.post(
         "/api/tool-runs",
-        json={"tool_name": "ask_user", "arguments": {"question": question}},
+        json={"tool_name": "ask", "arguments": {"question": question}},
         expect=202,
         retry_on_reloading=True,
     )
@@ -88,7 +88,7 @@ async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, 
         # blocks on POST /answer.
         async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {
                     "question": question,
                     "answer_format": "external",

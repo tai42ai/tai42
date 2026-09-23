@@ -2,7 +2,7 @@
 
 A side-effect-free middleware placed at the head of the agent loop (both the tools-agent
 and deep-agent loops mount it). Its whole job is to turn the reserved async-park marker
-(stamped onto a ToolMessage by the in-process client-tool seam when an async ``ask_user``
+(stamped onto a ToolMessage by the in-process client-tool seam when an async ``ask``
 returned its sentinel) into a single graph ``interrupt`` for the super-step, and — on
 resume — to substitute each parked ToolMessage's answer back in place.
 
@@ -163,6 +163,10 @@ def _scan_parks(messages: list[AnyMessage]) -> list[dict[str, Any]]:
                 "interaction_id": marker["interaction_id"],
                 "expiry_at": marker.get("expiry_at"),
                 "resume_owner": marker.get("resume_owner"),
+                # The caller subset the ask's marker carries (``[id]`` for a ``to="caller"`` ask,
+                # empty for a user ask) — surfaced so the super-step's park receipt partitions
+                # caller from user asks for the platform's ``visit`` normalisation.
+                "caller_interaction_ids": marker.get("caller_interaction_ids") or [],
             }
         )
     return parks
@@ -261,7 +265,16 @@ def _park_or_resume(messages: list[AnyMessage]) -> dict[str, Any] | None:
         # no pending park interrupt for the finalizer to have to classify.
         return {"messages": refusals}
 
-    payload = {AGENT_PARK_PAYLOAD_KEY: {"interactions": {p["interaction_id"]: p["expiry_at"] for p in claimable}}}
+    # The caller subset of the claimable super-step: an ask whose own id is in its marker's
+    # caller subset is a ``to="caller"`` ask. Carried on the interrupt payload so the drive
+    # finalizer can partition the park receipt.
+    caller_ids = [p["interaction_id"] for p in claimable if p["interaction_id"] in p["caller_interaction_ids"]]
+    payload = {
+        AGENT_PARK_PAYLOAD_KEY: {
+            "interactions": {p["interaction_id"]: p["expiry_at"] for p in claimable},
+            "caller_interaction_ids": caller_ids,
+        }
+    }
     answers = interrupt(payload)
 
     if not isinstance(answers, dict):

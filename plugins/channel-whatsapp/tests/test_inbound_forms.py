@@ -12,7 +12,8 @@ from tai42_contract.channels import AnswerForwardError, ChannelDeliveryError, In
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
-from tai42_channel_whatsapp.flows import build_flow
+from tai42_channel_whatsapp.channel import WhatsAppChannel
+from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.inbound.forms import (
     _CALLBACK_REJECTION_OPAQUE,
     _FLOW_BODY_MAX_CHARS,
@@ -35,6 +36,7 @@ from .conftest import (
     _seed_pending_form,
     form_reply_payload,
     interactive_payload,
+    make_delivery,
     message_payload,
     response,
     signed_request,
@@ -49,8 +51,18 @@ _WABA_ID = "WABA-100"
 
 
 def _flow_cache_key() -> str:
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     return f"channel:whatsapp:flow:{_WABA_ID}:{schema_hash}"
+
+
+def _flow_created(flow_id: str = "flow-remade") -> httpx.Response:
+    """A Cloud-API create for a re-published Flow (a re-send after the cache was lost)."""
+    return response(200, json={"id": flow_id})
+
+
+def _published() -> httpx.Response:
+    """A Cloud-API publish ack."""
+    return response(200, json={"success": True})
 
 
 @pytest.fixture
@@ -331,21 +343,73 @@ async def test_form_rejection_re_send_failure_raises_and_keeps_pending(
     assert _SEEN_KEY not in fake_redis.store  # not marked seen — redelivery re-enters
 
 
-async def test_form_rejection_cache_miss_raises_loudly(
+async def test_form_rejection_cache_miss_recreates_flow_and_re_sends(
     waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # The published-flow cache has no TTL, so a miss at re-send time means the store
-    # was lost — a loud failure that re-sends nothing, keeping the pending unchanged for
-    # Meta's redelivery, never a silent skip.
+    # The published-flow cache is empty at re-send time (the store was lost): the one
+    # sender re-creates + re-publishes the Flow from the pending record's inputs and
+    # re-sends it — never a stale-lookup raise — and re-caches it under the same key.
     await _seed_pending_form()  # no flow-cache entry seeded
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    fake_httpx.responses.append(_flow_created("flow-remade"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_flow_accepted())
 
-    with pytest.raises(AnswerForwardError, match="no published flow cached"):
-        await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
+    assert result.status_code == 200
+    assert [call["url"] for call in fake_httpx.calls] == [
+        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
+        "https://graph.facebook.com/v23.0/flow-remade/publish",
+        f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages",
+    ]
+    send = fake_httpx.calls[-1]["json"]
+    assert send["interactive"]["type"] == "flow"
+    params = send["interactive"]["action"]["parameters"]
+    assert params["flow_id"] == "flow-remade"
+    assert params["flow_token"] == "int-1"
+    assert params["flow_action_payload"]["screen"] == "SCREEN_A"
     assert await _pending_intact(fake_redis)
-    assert _stored_rejections(fake_redis) == 0
-    assert _SEEN_KEY not in fake_redis.store
+    assert _stored_rejections(fake_redis) == 1
+    assert _SEEN_KEY in fake_redis.store
+    # The re-created Flow is now cached under the same key a later hit would reuse.
+    assert fake_redis.store[_flow_cache_key()] == "flow-remade"
+
+
+async def test_form_deliver_then_rejection_reuses_the_same_flow_through_the_real_key(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The real key path end to end (no hand-seeded cache): a form ask is delivered
+    # (create + publish + cache + send), then a door rejection re-sends the SAME Flow —
+    # same flow id, entry screen, and per-send data — resolved through the same cache key.
+    from tai42_contract.interactions.models import FormData, FormOption, FormPage
+
+    schema = {
+        "type": "object",
+        "properties": {"tier": {"type": "string", "enum": ["g", "s"]}, "note": {"type": "string"}},
+    }
+    data = FormData(values={"note": "hi"}, options={"tier": [FormOption(value="g", label="Gold")]})
+    pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
+
+    # Deliver: cache miss → create + publish + send.
+    fake_httpx.responses.append(_flow_created("flow-e2e"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_flow_accepted("wamid.SENT"))
+    await WhatsAppChannel().deliver(
+        make_delivery(answer_format="form", schema=schema, data=data, pages=pages, question=_FORM_QUESTION)
+    )
+    first = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+
+    # Rejection: cache hit → send only, the SAME Flow reproduced from the pending inputs.
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    fake_httpx.responses.append(_flow_accepted("wamid.RESENT"))
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    resend = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+    assert resend["flow_id"] == first["flow_id"] == "flow-e2e"  # same published Flow, no re-create
+    assert resend["flow_action_payload"]["screen"] == "SCREEN_A"
+    assert resend["flow_action_payload"]["data"] == first["flow_action_payload"]["data"]  # same prefill/options
 
 
 async def test_form_reply_flow_token_mismatch_bridges_and_keeps_pending(
@@ -428,12 +492,12 @@ _NF_PREFIX = "tai42-nf:"
 
 
 def _nf_token(suffix: str = "cafef00d") -> str:
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     return f"{_NF_PREFIX}{schema_hash}:{suffix}"
 
 
 def _schema_cache_key() -> str:
-    _, schema_hash = build_flow(_FORM_SCHEMA)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
     return f"channel:whatsapp:flow-schema:{_WABA_ID}:{schema_hash}"
 
 

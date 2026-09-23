@@ -35,7 +35,7 @@ def build_marketplace_stack(res: StackResources, variants: Variants) -> StackCon
         "storage_module": variants.storage.module,
         "tools": [_probe_tools_entry(with_backend_branches=False), *_builtin_entries()],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["MARKETPLACE_URL"] = res.marketplace_url
@@ -153,7 +153,7 @@ def build_marketplace_connectors_stack(res: StackResources, variants: Variants) 
         "storage_module": variants.storage.module,
         "tools": [_probe_tools_entry(with_backend_branches=False), *_builtin_entries()],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["MARKETPLACE_URL"] = res.marketplace_url

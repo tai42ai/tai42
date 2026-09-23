@@ -31,6 +31,7 @@ from tai42_skeleton.access_control.request_scopes import (
     set_request_identity_claims,
 )
 from tai42_skeleton.app import server as server_module
+from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.operations import tool_runs as ops
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers import tool_runs as router
@@ -41,6 +42,19 @@ from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.tools.retry import ToolRetryRegistry
 
 from .._fakes.tool_runs_redis import FakeRedis
+
+
+def _interactions_double() -> SimpleNamespace:
+    """The ``app.interactions`` seam the submit path reaches: the real visit + its shaping helpers.
+
+    The interactions store is unconfigured in these router tests, so a non-parking run normalises
+    to its plain result.
+    """
+    return SimpleNamespace(
+        visit=visit_module.visit,
+        park_answer=visit_module.park_answer,
+        normalise_started=visit_module.normalise_started,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +159,9 @@ def wired(monkeypatch):
 
     def install_tools(registered: set[str] | None = None) -> _FakeTools:
         tools = _FakeTools(registered)
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+        # The submit path drives the shared visit through ``tai42_app.interactions``, so the
+        # fake impl carries that seam.
+        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools, interactions=_interactions_double()))
         return tools
 
     yield SimpleNamespace(
@@ -769,7 +785,9 @@ async def test_slow_sync_tool_over_liveness_ttl_is_not_marked_lost(monkeypatch):
         time.sleep(2.0)
         return {"echo": x}
 
-    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_real_binding_for(slow_sync)))
+    monkeypatch.setattr(
+        tai42_app, "_impl", SimpleNamespace(tools=_real_binding_for(slow_sync), interactions=_interactions_double())
+    )
 
     try:
         run_id = _json(await router.submit_run(_post(b'{"tool_name": "slow", "arguments": {"x": 9}}')))["data"][

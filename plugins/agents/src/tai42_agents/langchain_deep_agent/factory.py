@@ -41,7 +41,7 @@ from tai42_agents.langchain_deep_agent.sandbox_backend import build_sandbox_back
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 # One shared, stateless park hook on every agent + subagent stack, so an async
-# ``ask_user`` parked inside any of them (main, subagent, nested subagent, the
+# ``ask`` parked inside any of them (main, subagent, nested subagent, the
 # auto-added general-purpose subagent) interrupts its own graph and resumes by id.
 _async_park_middleware = AsyncParkMiddleware()
 

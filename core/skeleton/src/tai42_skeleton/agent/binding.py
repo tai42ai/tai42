@@ -67,34 +67,37 @@ _AGENT_RESULT_SCHEMA: dict[str, Any] = {
 
 
 def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInteraction:
-    """Convert an agent's suspended-RECEIPT dict into the tool-face park sentinel.
+    """Convert an agent's suspended-RECEIPT dict into the tool-face park sentinel with BOTH id lists.
 
-    An agent's ``run`` returns ``{"status": "suspended", "interaction_ids": [...], ...}`` when
-    the run parks on an async ask — the shape the agent's OWN internal driver consumes. That
-    dict is INTERNAL: a park crossing a tool-face must be a :class:`SuspendedInteraction`
-    sentinel, recognized by type, so a caller (a tool-running tool, another agent, the
-    conversation turn) sees the park uniformly. This converts the receipt at the agent
-    tool-face only — the driver keeps its dict.
+    An agent's ``run`` returns ``{"status": "suspended", "interaction_ids": [...],
+    "caller_interaction_ids": [...], ...}`` when the run parks on one or more async asks — the shape
+    the agent's OWN internal driver consumes. That dict is INTERNAL: a park crossing a tool-face must
+    be a :class:`SuspendedInteraction` sentinel, recognized by type, so a caller (a tool-running
+    tool, another agent, the conversation turn) sees the park uniformly. This converts the receipt at
+    the agent tool-face only — the driver keeps its dict.
 
-    The sentinel is single-id; a run parking on one interaction (the common case) maps
-    cleanly. A run parking on several at once (parallel sub-agent asks) cannot be represented
-    at the single-id tool-face and raises loudly rather than silently surfacing only one park
-    while the siblings strand.
+    The sentinel carries the WHOLE super-step: ``interaction_ids`` are every ask this park
+    represents and ``caller_interaction_ids`` the subset addressed to the caller (``to="caller"``),
+    so the platform's ``visit`` normalises a run that parked on several asks at once (parallel
+    sub-agent asks) at one tool-face — the per-ask ids are merged onto the sentinel rather than
+    only one park surfacing while the siblings strand. ``interaction_id`` is the first of them, its
+    single-id key.
 
-    It carries NO ``resume_owner``: the parked run recorded its OWN resume state against that
-    interaction and is the only thing the platform ever resumes for it. A caller must not adopt
-    the park as its own suspended state (it would wait on a resume fired at the nested run),
-    and ``assert_park_adoptable`` refuses it on the caller's behalf.
+    It carries NO ``resume_owner``: the parked run recorded its OWN resume state against those
+    interactions and is the only thing the platform ever resumes for them. A caller must not adopt
+    the park as its own suspended state (it would wait on a resume fired at the nested run), and
+    ``assert_park_adoptable`` refuses it on the caller's behalf.
     """
     ids = receipt["interaction_ids"]
-    if len(ids) != 1:
-        raise RuntimeError(
-            "an agent parked on multiple interactions at once cannot cross a single-id tool-face; "
-            f"got interaction_ids={ids!r}"
-        )
+    caller_ids = receipt.get("caller_interaction_ids") or []
     expiry_raw = receipt.get("expiry_at")
     expiry = datetime.fromisoformat(expiry_raw) if expiry_raw else None
-    return SuspendedInteraction(interaction_id=ids[0], expiry_at=expiry)
+    return SuspendedInteraction(
+        interaction_id=ids[0],
+        expiry_at=expiry,
+        interaction_ids=list(ids),
+        caller_interaction_ids=list(caller_ids),
+    )
 
 
 def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:

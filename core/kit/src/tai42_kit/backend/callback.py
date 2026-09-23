@@ -25,6 +25,7 @@ from tai42_kit.utils.render import render_templated_text
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
+    SCHEDULE_STAMPED_DOOR_OPTS,
     SCHEDULE_STATE_BINDING_ARG,
     SCHEDULE_SUBJECT_ARG,
     assert_no_reserved_schedule_keys,
@@ -97,6 +98,13 @@ async def prepare_backend_kwargs(
         state_binding = kwargs.pop("state_binding", None)
         if state_binding is not None:
             kwargs[SCHEDULE_STATE_BINDING_ARG] = state_binding
+        # The branch signature declares the create-door-stamped reserved keys so the dispatch
+        # validates; makefun materialises any the create door did NOT stamp as ``None``. Drop those
+        # absent Nones so a plain schedule's stored job carries no reserved door signal — only a real
+        # firing identity / door contract rides to the worker's ``backend_fire`` pop.
+        for key in SCHEDULE_STAMPED_DOOR_OPTS:
+            if kwargs.get(key) is None:
+                kwargs.pop(key, None)
     else:
         assert_no_reserved_schedule_keys(kwargs)
         _forward_ambient_fire(kwargs)
@@ -160,6 +168,30 @@ def _parse_schedule_subject(raw: Any) -> StateSubject | None:
         return StateSubject.model_validate(raw)
     except ValueError:
         return None
+
+
+def carry_forwarded_fire(callback: CallbackSchema | dict[str, Any], kwargs: dict[str, Any]) -> None:
+    """Carry a task job's forwarded door subject + firing identity from ``kwargs`` onto its callback spec.
+
+    A background task dispatched from within a door fire forwards its subject/identity pair onto its
+    worker job (:func:`_forward_ambient_fire`); the callback runs as a SEPARATE job that receives only
+    the predecessor's result and this spec, so the same pair is carried onto the spec's
+    ``carried_kwargs`` here or the follow-up loses the door context (:func:`_run_callback_tool` reads it
+    back). A plain task forwards no pair, so the callback is left untouched and runs plainly. Each
+    enqueue path calls this once with its popped ``callback_kwargs`` option — a :class:`CallbackSchema`
+    or the raw mapping the spec is before it crosses the queue as JSON.
+    """
+    carried = {
+        key: kwargs[key]
+        for key in (SCHEDULE_SUBJECT_ARG, SCHEDULE_EXECUTION_KEY_ARG, SCHEDULE_EXECUTION_FINGERPRINT_ARG)
+        if key in kwargs
+    }
+    if not carried:
+        return
+    if isinstance(callback, CallbackSchema):
+        callback.carried_kwargs = carried
+    else:
+        callback["carried_kwargs"] = carried
 
 
 async def callback_execution(result: Any, callback: CallbackSchema) -> Any:

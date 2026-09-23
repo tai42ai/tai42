@@ -227,6 +227,48 @@ async def test_create_schedule_kwargs_not_object_400(install):
     assert "schedule_kwargs" in _json(resp)["error"]
 
 
+async def test_extract_create_forwards_execution_key_and_contract():
+    # The HTTP edge must carry the execution key and every door-contract jq to the operation;
+    # the extractor's returned dict is exactly what ``create_schedule`` is called with.
+    body = (
+        b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
+        b' "schedule_kwargs": {"cron": "0 9 * * *"}, "execution_key": "k-42",'
+        b' "start_expr": {"content": "start"}, "cancel_expr": {"content": "cancel"},'
+        b' "resume_expr": {"content": "resume"}, "extras_expr": {"content": "extras"}}'
+    )
+    kwargs = await router._extract_create(_body_req(body))
+    assert kwargs["execution_key"] == "k-42"
+    assert kwargs["start_expr"].content == "start"
+    assert kwargs["cancel_expr"].content == "cancel"
+    assert kwargs["resume_expr"].content == "resume"
+    assert kwargs["extras_expr"].content == "extras"
+    assert kwargs["tool_name"] == "send_report"
+    assert kwargs["tool_kwargs"] == {"to": "a"}
+    assert kwargs["schedule_kwargs"] == {"cron": "0 9 * * *"}
+
+
+async def test_extract_create_absent_contract_fields_are_none():
+    kwargs = await router._extract_create(_body_req(b'{"tool_name": "send_report"}'))
+    assert kwargs["execution_key"] is None
+    assert kwargs["state_binding"] is None
+    for field in ("start_expr", "cancel_expr", "resume_expr", "extras_expr"):
+        assert kwargs[field] is None
+    assert kwargs["tool_kwargs"] == {}
+    assert kwargs["schedule_kwargs"] == {}
+
+
+async def test_extract_create_contract_jq_without_execution_key_400():
+    # ``ScheduleCreate`` refuses a contract jq with no execution key; the edge surfaces it as a 400.
+    with pytest.raises(router.BadRequestError):
+        await router._extract_create(_body_req(b'{"tool_name": "t", "start_expr": {"content": "x"}}'))
+
+
+async def test_extract_create_bad_state_binding_400():
+    with pytest.raises(router.BadRequestError) as excinfo:
+        await router._extract_create(_body_req(b'{"tool_name": "t", "state_binding": 5}'))
+    assert "state_binding" in str(excinfo.value)
+
+
 # -- GET /api/schedules/server-datetime --------------------------------------
 
 

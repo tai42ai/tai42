@@ -37,7 +37,7 @@ def build_agents_stack(res: StackResources, variants: Variants) -> StackConfig:
         ],
         "agents": _AGENT_ENTRIES,
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env.update(_memory_agent_state_env())
@@ -83,7 +83,7 @@ def build_agents_redis_stack(res: StackResources, variants: Variants) -> StackCo
             },
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env.update(_redis_agent_state_env(res))
@@ -151,9 +151,18 @@ def build_agent_route_park_stack(res: StackResources, variants: Variants) -> Sta
             # The baked park-capable target the conversation route points at. It resolves its
             # ``tools_agent`` delegate per call, so both entries are needed but their order is not.
             {"title": "e2e-park-agent", "module": "tai42_e2e_fixtures.park_agent", "include": ["e2e_park_agent"]},
+            # The caller-ask target the door-contract route drives: its run parks a ``to="caller"``
+            # ask surfaced through ``reply_expr`` and resumed through ``resume_expr``. The
+            # extras-declaring target rides the same module so a route's ``extras_expr`` can reach an
+            # agent run that declares the keys.
+            {
+                "title": "e2e-door-agent",
+                "module": "tai42_e2e_fixtures.door_agent",
+                "include": ["e2e_door_agent", "e2e_extras_agent"],
+            },
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
@@ -166,6 +175,9 @@ def build_agent_route_park_stack(res: StackResources, variants: Variants) -> Sta
     # The agents plugin's durable park index (reverses a parked interaction id to its parked
     # run) rides the plain feature Redis; the async ask refuses loudly without it.
     env["TAI_AGENTS_REDIS_URL"] = res.redis_url
+    # Pin the expiry reaper cadence low so a park killed on expiry resolves in seconds rather than
+    # on the 30s default; a live park with a far deadline is unaffected.
+    env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
     # Small delivery ceiling + backoff so an undeliverable answer reaches terminal fast.
     env["CONVERSATIONS_DELIVERY_MAX_ATTEMPTS"] = "2"
     env["CONVERSATIONS_DELIVERY_BACKOFF_BASE_SECONDS"] = "1"
@@ -183,10 +195,10 @@ def build_agent_route_park_stack(res: StackResources, variants: Variants) -> Sta
 
 
 def build_agent_async_park_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """REPLICAS + redis checkpoint, no backend — the AGENT async ``ask_user`` park lifecycle.
+    """REPLICAS + redis checkpoint, no backend — the AGENT async ``ask`` park lifecycle.
 
     The agents-plugin counterpart to ``build_async_park_stack``: a real ``tools_agent`` run
-    parks on an async ``ask_user`` (raised by the ``e2e_agent_async_ask`` probe tool the model
+    parks on an async ``ask`` (raised by the ``e2e_agent_async_ask`` probe tool the model
     calls) and is resumed on the OTHER replica — by an answer through B's ``/answer`` door or by
     the 1s expiry reaper — through the agents plugin's own durable park index. The langgraph
     checkpoint is the production-default ``redis`` provider on the module-capable checkpoint
@@ -194,7 +206,7 @@ def build_agent_async_park_stack(res: StackResources, variants: Variants) -> Sta
     feature Redis (``TAI_AGENTS_REDIS_URL``). Loading ``tools_agent`` alone registers the hidden
     ``agent_resume`` continuation the park fires (any park-capable agent module does through the
     shared park machinery), and its simpler loop drives the run. Auth off, so the probe tool
-    binds the synthetic identity ``ask_user`` needs."""
+    binds the synthetic identity ``ask`` needs."""
     if res.checkpoint_redis_url is None:
         raise RuntimeError(
             "build_agent_async_park_stack requires resources.checkpoint_redis_url; allocate_resources must run "
@@ -210,9 +222,12 @@ def build_agent_async_park_stack(res: StackResources, variants: Variants) -> Sta
         ],
         "agents": [
             {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},
+            # The caller-ask target: an SSE agent run that async-asks its caller parks and ends with
+            # the ASKS terminal frame.
+            {"title": "e2e-door-agent", "module": "tai42_e2e_fixtures.door_agent", "include": ["e2e_door_agent"]},
         ],
         "api_tools": _PROJECTED_API_TOOLS,
-        "user_tools": ["ask_user", "reload_config"],
+        "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
     env.update(_redis_agent_state_env(res))
@@ -220,7 +235,7 @@ def build_agent_async_park_stack(res: StackResources, variants: Variants) -> Sta
     # The agents plugin's own durable park index (reverses a parked interaction id to its
     # parked run) rides the plain feature Redis; the async ask refuses loudly without it.
     env["TAI_AGENTS_REDIS_URL"] = res.redis_url
-    # An async ask_user park has no blocking waiter, so the expiry leg only resumes when the
+    # An async ask park has no blocking waiter, so the expiry leg only resumes when the
     # reaper trips; pin its cadence low so it resumes in seconds rather than on the 30s default.
     env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
     return StackConfig(

@@ -1,7 +1,7 @@
 """``langchain_deep_agent`` async park + cross-worker resume over the durable backend.
 
 The deep agent's run face binds the hidden ``agent_resume`` continuation, so an async
-``ask_user`` a run drives PARKS and returns a suspended receipt; a resolution on the OTHER
+``ask`` a run drives PARKS and returns a suspended receipt; a resolution on the OTHER
 replica — an answer through B's ``/answer`` door — fires ``agent_resume`` -> ``aresume_park``,
 which rebuilds the same graph from the shared redis checkpoint and drives it to completion,
 REBOUND to the park's STORED identity. This mirrors the ``tools_agent`` park lifecycle, exercised

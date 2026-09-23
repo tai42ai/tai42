@@ -1,5 +1,5 @@
 """Per-identity isolation A/B negatives on the interactions seam. For an addressed
-``ask_user``: identity A sees it (pending list + stream), identity B does not (list
+``ask``: identity A sees it (pending list + stream), identity B does not (list
 absence + a 403 at the answer door), and the unrestricted operator can always answer.
 Two structural pins go beyond simple exclusion: no interactions read surface (the paged
 list or the stream) carries a callback ticket (so a filtered caller can never obtain
@@ -131,7 +131,7 @@ async def _ask(
     if audience is not None:
         kwargs["audience"] = audience
     async with stack.mcp(port=stack.port_a, auth=token) as mcp:
-        result = await mcp.call_tool("ask_user", kwargs)
+        result = await mcp.call_tool("ask", kwargs)
     return result.data
 
 
@@ -199,7 +199,7 @@ async def test_key_own_not_owner_interactions_two_siblings_under_one_owner(
     for foreign_audience in (owner_id, owned_2_id):
         async with owned_keys_stack.mcp(port=port, auth=owned_1_raw) as mcp:
             refused = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {"question": uniq("foreign"), "audience": foreign_audience},
                 raise_on_error=False,
             )
@@ -287,7 +287,7 @@ async def test_stream_add_frame_omits_ticket_though_one_exists(
         # add-frame must never carry the ticket — its silence is a real containment claim.
         async with owned_keys_stack.mcp(port=port, auth=owned_raw) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {"question": question, "channel": _STUB_CHANNEL},
             )
         return result.data

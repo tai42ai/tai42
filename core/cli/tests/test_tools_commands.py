@@ -63,6 +63,32 @@ def test_tools_run_posts_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     assert json.loads(result.output) == {"sum": 3}
 
 
+@pytest.mark.parametrize(
+    ("door_tool", "arguments"),
+    [
+        ("send_conversation_message", {"route_name": "chat-line", "external_user_id": "u-1", "text": "hi"}),
+        ("send_conversation_event", {"route_name": "chat-line", "thread_id": "t-1", "event": {"event_id": "e-1"}}),
+    ],
+)
+def test_tools_run_dispatches_builtin_door_tool(
+    monkeypatch: pytest.MonkeyPatch, door_tool: str, arguments: dict[str, object]
+) -> None:
+    """The in-process conversation-door builtins run through the plain ``tools run`` command — no
+    door-specific subcommand. The tool name rides ``tool_name`` and its args ride ``arguments``,
+    the same ``{tool_name, arguments}`` body every tool uses; the server resolves the builtin."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/run-tool"
+        assert _parse_tool_call(request) == (door_tool, arguments)
+        return data_response({"message_id": "m-1", "thread_id": "t-1"})
+
+    result = run_cli(
+        monkeypatch, handler, ["tools", "run", door_tool, "--kwargs", json.dumps(arguments)], json_output=True
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"message_id": "m-1", "thread_id": "t-1"}
+
+
 def test_tools_run_posts_subject(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ``--subject-*`` flags ride the run-tool body as the ``subject`` object the edge
     validates into a ``StateSubject`` (``target_kind`` is ``tool``)."""

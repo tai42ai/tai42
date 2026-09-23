@@ -2,7 +2,7 @@
 
 Deliberately NOT the conftest ``RecordingApp`` (which carries no sandbox / interactions /
 connectors facets): ``claude_code`` reaches ``tai42_app.sandboxes.require_sandbox()`` +
-``sandbox_policy()``, ``tai42_app.interactions.ask_user``,
+``sandbox_policy()``, ``tai42_app.interactions.ask``,
 ``tai42_app.connectors.resolve_connection_auth``, ``tai42_app.tools.run_tool``, the storage
 ``resource_manager``, and the monitoring writer — so the drive tests bind THIS app for the
 block via ``tai42_app.bound(...)``.
@@ -96,12 +96,20 @@ class _SandboxesFacet:
 
 
 class _InteractionsFacet:
-    def __init__(self, ask_user: Callable[..., Awaitable[Any]]) -> None:
-        self._ask_user = ask_user
+    def __init__(self, ask: Callable[..., Awaitable[Any]]) -> None:
+        self._ask = ask
 
     @property
-    def ask_user(self) -> Callable[..., Awaitable[Any]]:
-        return self._ask_user
+    def ask(self) -> Callable[..., Awaitable[Any]]:
+        return self._ask
+
+    def redelivery_horizon_seconds(self) -> int:
+        # The platform redelivery horizon the resolution-record TTL derives from (2x); 24h default.
+        return 24 * 60 * 60
+
+    async def assert_resume_authorized(self, interaction_id: str) -> None:
+        # Permissive in the local test app: the driver faces call it, and the real platform gates.
+        return None
 
 
 class _ConnectorsFacet:
@@ -190,7 +198,7 @@ class LocalApp:
         *,
         sandbox: FakeSandbox,
         policy: SandboxPolicy,
-        ask_user: Callable[..., Awaitable[Any]],
+        ask: Callable[..., Awaitable[Any]],
         resolver: Callable[[str, str, str], ResolvedConnectionAuth | None] | None,
         tool_runners: dict[str, Callable[..., Any]],
         templates: dict[str, str],
@@ -198,7 +206,7 @@ class LocalApp:
         agents: dict[str, Any] | None = None,
     ) -> None:
         self.sandboxes = _SandboxesFacet(sandbox, policy)
-        self.interactions = _InteractionsFacet(ask_user)
+        self.interactions = _InteractionsFacet(ask)
         self.connectors = _ConnectorsFacet(resolver)
         self.tools = _ToolsFacet(tool_runners)
         self.storage = _StorageFacet(templates)
@@ -207,14 +215,14 @@ class LocalApp:
 
 
 async def _default_ask(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover - overridden per test
-    raise AssertionError("ask_user was not expected in this test")
+    raise AssertionError("ask was not expected in this test")
 
 
 def build_local_app(
     *,
     sandbox: FakeSandbox | None = None,
     policy: SandboxPolicy | None = None,
-    ask_user: Callable[..., Awaitable[Any]] | None = None,
+    ask: Callable[..., Awaitable[Any]] | None = None,
     resolver: Callable[[str, str, str], ResolvedConnectionAuth | None] | None = None,
     tool_runners: dict[str, Callable[..., Any]] | None = None,
     templates: dict[str, str] | None = None,
@@ -224,7 +232,7 @@ def build_local_app(
     return LocalApp(
         sandbox=sandbox or make_fake_sandbox(),
         policy=policy or permissive_sandbox_policy(),
-        ask_user=ask_user or _default_ask,
+        ask=ask or _default_ask,
         resolver=resolver,
         tool_runners=tool_runners or {},
         templates=templates or {},

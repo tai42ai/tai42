@@ -1,6 +1,6 @@
 """The web channel's ask/answer half, driven through the plugin's own PUBLIC doors.
 
-``ask_user(channel="web", recipient="<identity>:<visitor id>")`` blocks a tool call on
+``ask(channel="web", recipient="<identity>:<visitor id>")`` blocks a tool call on
 replica A; the web channel appends the question to that pair's transcript; the visitor's
 SSE door on replica B replays it; the visitor POSTs the answer to the public answer door on
 B, which forwards it to the interactions callback (also B-served); the blocked run resumes
@@ -70,14 +70,14 @@ async def web_case(channel_stack: TaiStack) -> WebChannelCase:
 
 
 def _ask_over_web(case: WebChannelCase, question: str, **extra: object) -> asyncio.Task:
-    """Start a blocking ``ask_user`` over the web channel on replica A, addressed at this
+    """Start a blocking ``ask`` over the web channel on replica A, addressed at this
     case's visitor pair — web has no operator default recipient, so the address is always
     the visitor's own registered session."""
 
     async def ask() -> object:
         async with case.stack.mcp(port=case.stack.port_a) as mcp:
             result = await mcp.call_tool(
-                "ask_user",
+                "ask",
                 {"question": question, "channel": case.name, "recipient": case.default_recipient, **extra},
             )
         return result.data
