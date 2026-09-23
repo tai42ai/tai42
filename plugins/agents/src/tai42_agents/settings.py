@@ -55,6 +55,15 @@ class AgentsLimitsSettings(TaiBaseSettings):
     # oldest entry is evicted past this. Must be positive.
     embedding_dims_cache_size: int = Field(default=64, gt=0)
 
+    # Default ON: the tools-agent chokepoint and every own-graph face whose stack
+    # keeps only the newest cache breakpoint mark their per-run system prompt with
+    # the provider's system-prompt cache breakpoint (sourced from the kit provider
+    # capability), so a marking provider caches the stable system prefix across
+    # turns and a non-marking provider is left unmarked. A per-node explicit
+    # ``system_content_kwargs`` (a mark, or ``{}`` for no mark) overrides this
+    # default at the tools-agent door.
+    system_prompt_cache_default: bool = Field(default=True)
+
     # Ceiling on how far ahead a CHAINED park's inherited horizon may reach. A chained park
     # waits on a nested CALL, so it has no ask of its own and nothing expires it: its deadline
     # is inherited from the ask the nested run is parked on, and this caps that inheritance so

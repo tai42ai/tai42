@@ -11,6 +11,7 @@ from tai42_contract.states.models import (
     AttachValidator,
     ConsumerLister,
     ConsumerRow,
+    StateBatchWrite,
     StateContext,
     StateDeclaration,
     StateRecord,
@@ -204,6 +205,21 @@ class AppStates(Protocol):
         :class:`~tai42_contract.states.StateNotFoundError`; an ambiguous unqualified name, an
         ``input``-purpose name, an evaluation failure or a wrong-shaped return is a
         :class:`~tai42_contract.states.ValueValidationError`.
+        """
+        ...
+
+    async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
+        """Apply an ordered write set as ONE transaction, returning an :class:`ApplyResult` per item in order.
+
+        Each :class:`~tai42_contract.states.StateBatchWrite` is dispatched by its shape — an
+        ``ops`` batch through :meth:`apply`, a ``template_jq`` program through
+        :meth:`apply_template_jq` (its outcome mapped onto the item's ``ApplyResult``) — over the
+        SAME store transaction, so items on one subject read each other's uncommitted writes in
+        order. Any item that raises rolls the WHOLE batch back and propagates loudly: no partial
+        write survives. ``op_id`` idempotency holds per item (a replayed key returns
+        ``applied=False`` without re-writing while its siblings land). The transaction's connection
+        stays hidden behind this seam — a door passes only the write set, never threads a
+        connection. An empty list is a no-op returning ``[]``.
         """
         ...
 

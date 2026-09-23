@@ -74,6 +74,30 @@ def test_build_llm_unsupported_provider_raises():
         models._build_llm("nope")
 
 
+def test_system_prompt_cache_mark_marks_only_a_marking_provider():
+    # A provider that takes an explicit system-prompt breakpoint returns the mark kwargs.
+    assert models.system_prompt_cache_mark("anthropic") == {"cache_control": {"type": "ephemeral"}}
+    # Every provider that caches without a mark (or does not) returns None.
+    for provider in ("mistral", "openai", "google", "xai", "ollama", "huggingface"):
+        assert models.system_prompt_cache_mark(provider) is None
+
+
+def test_system_prompt_cache_mark_unsupported_provider_raises():
+    with pytest.raises(ValueError, match="Unsupported chat model provider"):
+        models.system_prompt_cache_mark("nope")
+
+
+def test_system_prompt_cache_mark_is_the_exact_block_build_system_message_accepts():
+    from langchain_core.messages import SystemMessage
+
+    from tai42_kit.llm.runtime import build_system_message
+
+    mark = models.system_prompt_cache_mark("anthropic")
+    message = build_system_message("you are a helper", mark)
+    assert isinstance(message, SystemMessage)
+    assert message.content == [{"type": "text", "text": "you are a helper", "cache_control": {"type": "ephemeral"}}]
+
+
 def test_get_llm_async_offloads_to_thread(monkeypatch):
     models._cached_llm.cache_clear()
     sentinel = object()

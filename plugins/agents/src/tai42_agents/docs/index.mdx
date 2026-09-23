@@ -18,6 +18,7 @@ Limits shared by every agent in this package:
 | `TAI_AGENTS_VOTER_CONCURRENCY` | `8` | Voters run concurrently within one voting call; the rest queue behind a semaphore. |
 | `TAI_AGENTS_EMBEDDING_DIMS_CACHE_SIZE` | `64` | Bound on the retrieval agent's embedding-dims probe cache (an LRU). |
 | `TAI_AGENTS_DEFAULT_RECURSION_LIMIT` | `50` | Default LangGraph `recursion_limit` when a run pins none; a caller-supplied limit wins. |
+| `TAI_AGENTS_SYSTEM_PROMPT_CACHE_DEFAULT` | `true` | Mark the per-run system prompt for prompt caching on providers that support it (see [System-prompt caching](#system-prompt-caching)). |
 
 ### Async-park index
 
@@ -63,6 +64,31 @@ of one. Each applies the target door's own authorization before it runs and refu
 with no accountable execution identity loudly; the turn's answer is delivered by the route's
 own configured delivery, never inline to the agent. List either in an agent's `tool_names`
 to include it — they are platform builtins and need no plugin code.
+
+## System-prompt caching
+
+Every agent turn re-sends its whole system prompt. On a provider that takes a
+system-prompt cache breakpoint, marking the prompt lets the provider cache that
+stable prefix and read it back on later turns instead of re-billing it. This is
+**on by default** (`TAI_AGENTS_SYSTEM_PROMPT_CACHE_DEFAULT=true`), server-wide; a
+provider that caches without a mark, or does not support one, is left unmarked —
+the mark form is the provider's own, so it is never named here.
+
+Per node, the `tools_agent`'s `system_content_kwargs` overrides the default:
+leave it unset to take the default, pass `{}` to opt this node out (no mark), or
+pass an explicit mark to set your own. The other faces follow the server-wide
+setting only.
+
+Which faces carry it:
+
+| Face | Marking |
+| --- | --- |
+| `tools_agent` (invoke + stream) | default at the shared build seam; per-node override via `system_content_kwargs` |
+| `voting_agent` | inherits the default — its voters and judge run through the `tools_agent` build seam |
+| `refine_agent` | default at each role's model build |
+| `langchain_deep_agent` | default at the model build (the mark rides the deep agent's per-run system message) |
+| `retrieval_tools_agent` | excluded — its graph prepends the system prompt into the message list it rolls to the newest breakpoint, so a system mark there is stripped by any later turn mark; use `user_content_kwargs` to mark the user turn |
+| `claude_code` | not applicable — the system prompt is handed to the Agent SDK verbatim, never as a content block |
 
 ## Tool-error resilience
 

@@ -31,10 +31,11 @@ from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewar
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
-from tai42_kit.llm.runtime import build_agent_input, build_user_output
+from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
+from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import init_langgraph_config
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
@@ -86,8 +87,9 @@ _UNHONORED_REASONS: dict[str, str] = {
     "store_provider": "it wires no long-term store",
     "llm_kwargs": "the loop uses role-named evaluator_llm_kwargs/critic_llm_kwargs",
     "system_content_kwargs": (
-        "its evaluator/critic system messages are internal fixed prompts, never built as content blocks "
-        "through build_system_message; use user_content_kwargs to mark the evaluator's first user turn"
+        "its evaluator/critic system prompts take the server-wide cache mark at the build seam, so a "
+        "per-node system content key has no seat; toggle it with the server setting, or use "
+        "user_content_kwargs to mark the evaluator's first user turn"
     ),
 }
 # The unhonored parameters whose unset default is an empty sequence — a truthy
@@ -111,6 +113,7 @@ async def _build_role_agent(
     system_prompt: str,
     checkpointer: BaseCheckpointSaver,
     *,
+    provider: str,
     is_enabled_for_debug: bool,
     response_format: Any = None,
 ) -> Any:
@@ -121,14 +124,17 @@ async def _build_role_agent(
     own system prompt (so the trimming budget covers the full outgoing request),
     rolling cache-mark, and tool-error visibility. Each role's system message is its
     graph's per-run ``system_prompt``, applied at the model-call boundary and never
-    written into the checkpointed thread. ``response_format`` forces the structured
-    final answer on the final pass; ``None`` keeps the role text-shaped.
+    written into the checkpointed thread. Under the server-wide cache default it is
+    marked with ``provider``'s system-prompt cache breakpoint, which the rolling
+    cache-mark middleware exempts, so the stable prefix stays cacheable across turns.
+    ``response_format`` forces the structured final answer on the final pass; ``None``
+    keeps the role text-shaped.
     """
     extra = {} if response_format is None else {"response_format": response_format}
     return create_agent(
         llm,
         tools=list(tools),
-        system_prompt=system_prompt,
+        system_prompt=build_system_message(system_prompt, default_system_cache_mark(provider)),
         checkpointer=checkpointer,
         middleware=[
             SystemPurgeMiddleware(),
@@ -197,10 +203,20 @@ async def _run_refine_loop(
     )
     is_enabled_for_debug = logging_settings().is_enabled_for("DEBUG")
     evaluator: Any = await _build_role_agent(
-        evaluator_llm, tools, EVALUATOR_SYSTEM_MESSAGE, checkpointer, is_enabled_for_debug=is_enabled_for_debug
+        evaluator_llm,
+        tools,
+        EVALUATOR_SYSTEM_MESSAGE,
+        checkpointer,
+        provider=evaluator_llm_provider,
+        is_enabled_for_debug=is_enabled_for_debug,
     )
     critic: Any = await _build_role_agent(
-        critic_llm, tools, CRITIC_SYSTEM_MESSAGE, checkpointer, is_enabled_for_debug=is_enabled_for_debug
+        critic_llm,
+        tools,
+        CRITIC_SYSTEM_MESSAGE,
+        checkpointer,
+        provider=critic_llm_provider,
+        is_enabled_for_debug=is_enabled_for_debug,
     )
 
     evaluator_config = init_langgraph_config(evaluator_config)
@@ -251,6 +267,7 @@ async def _run_refine_loop(
         tools,
         EVALUATOR_SYSTEM_MESSAGE,
         checkpointer,
+        provider=evaluator_llm_provider,
         is_enabled_for_debug=is_enabled_for_debug,
         response_format=strategy,
     )

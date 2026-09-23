@@ -426,6 +426,37 @@ class ApplyResult(BaseModel):
     skipped: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
 
 
+class StateBatchWrite(BaseModel):
+    """One item of an :meth:`~tai42_contract.app.facets.AppStates.apply_batch` write set.
+
+    A single subject write, named exactly as ``apply`` / ``apply_template_jq`` name theirs:
+    the ``state`` and ``subject`` it targets, its ``op_id`` idempotency key, and its consumer
+    ``origin``. Exactly ONE authoring source is set — a raw ``ops`` batch (applied as ``apply``
+    would) OR a ``template_jq`` program name with its ``input`` (applied as ``apply_template_jq``
+    would); setting both, or neither, is refused loudly, and ``input`` is meaningful only with
+    ``template_jq``. Frozen so a queued item cannot be mutated between build and the one
+    transaction that applies the batch.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    state: str
+    subject: StateSubject
+    ops: list[dict[str, Any]] | None = None
+    template_jq: str | None = None
+    input: Any = None
+    op_id: str | None = None
+    origin: WriteOrigin
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> StateBatchWrite:
+        if (self.ops is None) == (self.template_jq is None):
+            raise ValueError("a batch write sets exactly one of 'ops' or 'template_jq'")
+        if self.input is not None and self.template_jq is None:
+            raise ValueError("a batch write sets 'input' only with 'template_jq'")
+        return self
+
+
 class TemplateJqResult(BaseModel):
     """The result of evaluating an ``input``-purpose ``template_jq`` program for a subject.
 

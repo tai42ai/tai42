@@ -73,7 +73,12 @@ class _FakeStore:
         self.records[self._key(state, subject)] = {"data": dict(data), "seq": self._seq}
         self._append_write(state, subject, origin, [[]])
 
-    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, retention_days, conn=None):
+    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, validate_subject_in_txn, conn=None):
+        decl = self.declarations.get(state)
+        if decl is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        # The real store validates the subject in-txn from the locked declaration's kinds.
+        await validate_subject_in_txn(list(decl["subject_kinds"]))
         self._seq += 1
         key = self._key(state, subject)
         doc = dict(self.records.get(key, {"data": {}})["data"])

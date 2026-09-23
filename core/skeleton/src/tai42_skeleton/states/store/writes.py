@@ -22,6 +22,10 @@ from .connection import _pool, _settings
 from .cursors import _subject_cols
 from .trace import _abs_regime_paths, _iso_now, _refuse_composing_shape, _traced_paths, stamp_trace
 
+# The attachments-composition cache ceiling, mirroring the service template cache's bound.
+# Evicting the oldest past this keeps a busy process's memory bounded across many states.
+_ATTACHMENT_PATHS_CACHE_MAX = 256
+
 
 class _RecordWriteStore(_StoreBase):
     """The record write path plus the ``state_writes`` provenance row and ``state_applied_ops`` idempotency ledger."""
@@ -101,6 +105,32 @@ class _RecordWriteStore(_StoreBase):
             )
             return data, float(seq or 0.0)
 
+    async def _composed_attachment_paths(self, cur: Any, state: str, version: Any) -> tuple[Any, Any]:
+        """The state's ``(regime_paths, traced_paths)``, version-gated by the declaration's ``updated_at``.
+
+        Served from a bounded per-process cache keyed ``(state, version)``: a hit skips the
+        attachments JOIN, a miss runs it and populates. Every attachment/declaration writer bumps
+        ``updated_at`` under the ``FOR UPDATE`` lock, so a changed composition carries a new
+        version and the key misses cross-process — a stale composition is never served.
+        """
+        cache_key = (state, version)
+        cached = self._attachment_paths_cache.get(cache_key)
+        if cached is not None:
+            self._attachment_paths_cache.move_to_end(cache_key)
+            return cached
+        await cur.execute(
+            "SELECT m.template, m.path, mo.body FROM state_attachments m "
+            "JOIN state_templates mo ON mo.name = m.template WHERE m.state = %s",
+            (state,),
+        )
+        attachment_rows = list(await cur.fetchall())
+        composed = (_abs_regime_paths(attachment_rows), _traced_paths(attachment_rows))
+        self._attachment_paths_cache[cache_key] = composed
+        self._attachment_paths_cache.move_to_end(cache_key)
+        if len(self._attachment_paths_cache) > _ATTACHMENT_PATHS_CACHE_MAX:
+            self._attachment_paths_cache.popitem(last=False)
+        return composed
+
     async def apply_ops(
         self,
         state: str,
@@ -110,7 +140,7 @@ class _RecordWriteStore(_StoreBase):
         op_id: str | None,
         origin: CompletedOrigin,
         validate_doc: Any,
-        retention_days: int,
+        validate_subject_in_txn: Any,
         conn: AsyncConnection[Any] | None = None,
     ) -> tuple[bool, dict[str, Any] | None, float | None, list[dict[str, Any]]]:
         """Apply a batch of path-addressed ops to one record, in ONE txn.
@@ -118,33 +148,34 @@ class _RecordWriteStore(_StoreBase):
         Returns ``(applied, merged_document, seq, guarded_skipped)`` —
         ``(False, None, None, [])`` on an op-id replay.
 
-        Order (pinned): declaration row ``FOR SHARE`` (the schema-change serialization pin
-        AND the effective-schema read); compose the state's regime + traced paths from its
-        attachments under the lock; refuse a ``composing`` shape violation BEFORE the op-ledger
-        insert; the op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is
-        set (replay ⇒ return without touching the record); the ATOMIC UPSERT-LOCK on the
-        record row; the COMPARE-AND-SET GUARD filter; the ``_trace`` stamp under a traced
-        attach; the SHARED pure ops apply; the whole-document validation; the UPDATE;
-        the ``state_writes`` row; opportunistic ledger prune. With ``conn`` the write joins
-        the caller's transaction (a reconciler's record write commits or rolls back with
-        the attach).
+        Order (pinned): the declaration row ``FOR SHARE`` — the schema-change serialization pin,
+        the effective-schema read, the declared ``subject_kinds`` and the ``updated_at`` version;
+        ``validate_subject_in_txn`` refuses the subject under that lock; compose the state's regime
+        + traced paths from its attachments, served from the version-gated cache (a hit on
+        ``(state, updated_at)`` skips the attachments JOIN, a miss reads and populates); refuse a
+        ``composing`` shape violation BEFORE the op-ledger insert; the op-ledger
+        ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is set (replay ⇒ return without
+        touching the record); the ATOMIC UPSERT-LOCK on the record row; the COMPARE-AND-SET GUARD
+        filter; the ``_trace`` stamp under a traced attach; the SHARED pure ops apply; the
+        whole-document validation; the UPDATE + ``state_writes`` row as ONE writable CTE. With
+        ``conn`` the write joins the caller's transaction (a reconciler's record write commits or
+        rolls back with the attach).
         """
         async with self._write_cursor(conn) as cur:
-            await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR SHARE", (state,))
+            await cur.execute(
+                "SELECT effective_schema, subject_kinds, updated_at FROM state_declarations WHERE name = %s FOR SHARE",
+                (state,),
+            )
             decl = await cur.fetchone()
             if decl is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
 
-            # Compose the regime + traced paths from the state's attachments under the lock, so
-            # the shape refusal and the trace stamp read the attachments committed at write time.
-            await cur.execute(
-                "SELECT m.template, m.path, mo.body FROM state_attachments m "
-                "JOIN state_templates mo ON mo.name = m.template WHERE m.state = %s",
-                (state,),
-            )
-            attachment_rows = list(await cur.fetchall())
-            regime_paths = _abs_regime_paths(attachment_rows)
-            traced_paths = _traced_paths(attachment_rows)
+            # Refuse the subject inside this transaction, under the declaration lock: the one
+            # locked read of the declaration serves the subject admission check AND the
+            # effective-schema validation; the door does not separately pre-read the declaration.
+            await validate_subject_in_txn(decl["subject_kinds"])
+
+            regime_paths, traced_paths = await self._composed_attachment_paths(cur, state, decl["updated_at"])
 
             # (i) refuse a composing shape violation BEFORE the ledger insert.
             _refuse_composing_shape(ops, regime_paths)
@@ -193,10 +224,6 @@ class _RecordWriteStore(_StoreBase):
                 else:
                     merged = current
                     seq = record["seq"]
-                await cur.execute(
-                    "DELETE FROM state_applied_ops WHERE applied_at < now() - make_interval(days => %s)",
-                    (retention_days,),
-                )
                 return (True, merged, seq, guarded_skipped)
 
             # (ii) stamp ``_trace`` under a traced attach, before the apply + validation.
@@ -213,23 +240,47 @@ class _RecordWriteStore(_StoreBase):
             merged = apply_path_ops(current, applied_ops)
             validate_doc(decl["effective_schema"], merged)
 
+            # (iii) the record UPDATE and its ``state_writes`` provenance row (touched paths =
+            # each applied op's absolute path) land in ONE writable CTE: the UPDATE's returned
+            # ``seq`` feeds the write row and comes back to the caller, so the two statements are
+            # one round-trip.
+            paths = [list(op.get("path") or []) for op in applied_ops]
             await cur.execute(
+                "WITH upd AS ("
                 "UPDATE state_records SET data = %s, updated_at = clock_timestamp() "
-                "WHERE state = %s AND target_kind = %s AND target_name = %s AND subject_kind = %s AND subject_key = %s "
-                "RETURNING extract(epoch FROM updated_at)::float8 AS seq",
-                (Jsonb(merged), state, subject.target_kind, subject.target_name, kind, key),
+                "WHERE state = %s AND target_kind = %s AND target_name = %s "
+                "AND subject_kind = %s AND subject_key = %s "
+                "RETURNING extract(epoch FROM updated_at)::float8 AS seq"
+                "), w AS ("
+                "INSERT INTO state_writes "
+                "(state, target_kind, target_name, subject_kind, subject_key, seq, at, door, actor, consumer, "
+                "meta, run_id, turn_id, paths, op_id) "
+                "SELECT %s, %s, %s, %s, %s, (SELECT seq FROM upd), now(), %s, %s, %s, %s, %s, %s, %s, %s"
+                ") SELECT seq FROM upd",
+                (
+                    Jsonb(merged),
+                    state,
+                    subject.target_kind,
+                    subject.target_name,
+                    kind,
+                    key,
+                    state,
+                    subject.target_kind,
+                    subject.target_name,
+                    kind,
+                    key,
+                    origin.door,
+                    origin.actor,
+                    origin.consumer,
+                    Jsonb(origin.meta) if origin.meta is not None else None,
+                    origin.run_id,
+                    origin.turn_id,
+                    Jsonb(paths),
+                    op_id,
+                ),
             )
             seq_row = await cur.fetchone()
             seq = None if seq_row is None else seq_row["seq"]
-            # (iii) one write row with the touched paths (each applied op's absolute path).
-            paths = [list(op.get("path") or []) for op in applied_ops]
-            await self._insert_write(
-                cur, state, subject.target_kind, subject.target_name, kind, key, seq, origin, paths, op_id
-            )
-            await cur.execute(
-                "DELETE FROM state_applied_ops WHERE applied_at < now() - make_interval(days => %s)",
-                (retention_days,),
-            )
             return (True, merged, seq, guarded_skipped)
 
     async def erase_subject(self, state: str, subject: StateSubject, *, origin: CompletedOrigin) -> None:

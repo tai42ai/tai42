@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from typing import Any
+
 from .attachments import _AttachmentStore
 from .connection import _StoreConnection
 from .declarations import _DeclarationStore
@@ -26,10 +29,14 @@ class PostgresStatesStore(
 ):
     """One class over the record substrate's tables, composed from the per-table concern mixins.
 
-    It holds no instance state: each method opens its own pooled connection, and
-    a multi-statement operation runs in one explicit transaction. A caller that
-    must span several writes atomically opens :meth:`begin` and threads the
-    yielded connection into the write methods' ``conn`` parameter — they join that
-    transaction instead of opening their own. A mixin method reaches a sibling
-    table's method through the composed instance.
+    Its only instance state is the version-gated attachments-composition cache the write
+    path consults; each method otherwise opens its own pooled connection, and a
+    multi-statement operation runs in one explicit transaction. A caller that must span
+    several writes atomically opens :meth:`begin` and threads the yielded connection into
+    the write methods' ``conn`` parameter — they join that transaction instead of opening
+    their own. A mixin method reaches a sibling table's method through the composed instance.
     """
+
+    def __init__(self) -> None:
+        """Bind the per-process attachments-composition cache (bounded, version-gated)."""
+        self._attachment_paths_cache: OrderedDict[tuple[str, Any], tuple[Any, Any]] = OrderedDict()

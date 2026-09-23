@@ -33,11 +33,12 @@ from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
-from tai42_kit.llm.runtime import build_agent_input, build_user_output, extract_structured_output
+from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
+from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.park import (
@@ -600,6 +601,11 @@ class DeepAgent(Agent):
             provider=st_provider, conn_string=llm_provider_settings().store_conn_string
         )
 
+        # Under the server-wide cache default the system prompt is a marked SystemMessage
+        # (deepagents keeps it as the roll-exempt per-run system message); else the string.
+        mark = default_system_cache_mark(provider) if system_message else None
+        system_prompt = build_system_message(system_message, mark) if mark else (system_message or None)
+
         return await build_langchain_deep_agent(
             llm=llm,
             store=store,
@@ -607,7 +613,7 @@ class DeepAgent(Agent):
             tools=tools,
             skills=skills or None,
             inline_skills=inline_skills or None,
-            system_prompt=system_message or None,
+            system_prompt=system_prompt,
             interrupt_on=interrupt_on,
             response_format=response_format,
             subagents=subagents or None,

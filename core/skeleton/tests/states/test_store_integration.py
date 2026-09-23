@@ -41,6 +41,11 @@ _ORIGIN = CompletedOrigin(
 )
 
 
+async def _admit(subject_kinds):
+    """A permissive in-txn subject check — these store tests isolate the store, not admission."""
+    return None
+
+
 async def _exec(sql: LiteralString, params: tuple = ()) -> None:
     async with (
         client_ctx(PostgresClient, component_store_settings(STATES_COMPONENT)) as pool,
@@ -109,7 +114,7 @@ async def test_apply_read_writes_and_trace(real_store: tuple[PostgresStatesStore
         op_id=op_id,
         origin=_ORIGIN,
         validate_doc=_validate_document,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied
     assert seq is not None
@@ -129,7 +134,7 @@ async def test_apply_read_writes_and_trace(real_store: tuple[PostgresStatesStore
 
     # a replayed op-id does not re-apply
     replay = await store.apply_ops(
-        state, subject, [], op_id=op_id, origin=_ORIGIN, validate_doc=_validate_document, retention_days=30
+        state, subject, [], op_id=op_id, origin=_ORIGIN, validate_doc=_validate_document, validate_subject_in_txn=_admit
     )
     assert replay[0] is False
 
@@ -179,7 +184,7 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
         op_id=f"op-1:{state}",
         origin=origin,
         validate_doc=_validate_document,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
     assert applied
     assert seq is not None
@@ -220,7 +225,7 @@ async def test_composing_shape_refused(real_store: tuple[PostgresStatesStore, st
             op_id=None,
             origin=_ORIGIN,
             validate_doc=_validate_document,
-            retention_days=30,
+            validate_subject_in_txn=_admit,
         )
 
 
@@ -343,7 +348,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_validate_document,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
 
     class _RollbackError(Exception):
@@ -358,7 +363,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
                 op_id=None,
                 origin=_ORIGIN,
                 validate_doc=_validate_document,
-                retention_days=30,
+                validate_subject_in_txn=_admit,
                 conn=conn,
             )
             await store.upsert_attachment(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
@@ -380,7 +385,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
             op_id=None,
             origin=_ORIGIN,
             validate_doc=_validate_document,
-            retention_days=30,
+            validate_subject_in_txn=_admit,
             conn=conn,
         )
         await store.upsert_attachment(state, state + "_m", ["x"], {}, {}, effective_schema=schema, conn=conn)
@@ -406,7 +411,7 @@ async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_validate_document,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
 
     async with store.begin() as conn:
@@ -417,7 +422,7 @@ async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
             op_id=None,
             origin=_ORIGIN,
             validate_doc=_validate_document,
-            retention_days=30,
+            validate_subject_in_txn=_admit,
             conn=conn,
         )
         on_txn = await store.read_record_view(state, subject, conn=conn)
@@ -469,7 +474,7 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
         op_id=None,
         origin=_ORIGIN,
         validate_doc=_validate_document,
-        retention_days=30,
+        validate_subject_in_txn=_admit,
     )
 
     async with store.begin() as conn:
@@ -481,7 +486,7 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
                 op_id=None,
                 origin=_ORIGIN,
                 validate_doc=_validate_document,
-                retention_days=30,
+                validate_subject_in_txn=_admit,
                 conn=conn,
             )
     async with store.begin() as conn:
@@ -492,7 +497,7 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
             op_id=None,
             origin=_ORIGIN,
             validate_doc=_validate_document,
-            retention_days=30,
+            validate_subject_in_txn=_admit,
             conn=conn,
         )
     read, _seq = await store.read_record(state, subject)

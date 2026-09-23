@@ -154,8 +154,11 @@ class ToolsAgentInput(BaseModel):
     system_content_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Content-block keys merged into the system message's text block (e.g. cache_control "
-            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors."
+            "Content-block keys merged into the system message's text block (e.g. a cache_control "
+            "breakpoint for prompt caching). Left unset the system prompt takes the server-wide "
+            "default cache mark for the provider (from the provider capability), on for a provider "
+            "that supports marking; pass {} to opt this node out (no mark), or an explicit mark to "
+            "override. Provider-unknown keys surface as loud provider errors."
         ),
     )
     user_content_kwargs: dict[str, Any] | None = Field(
@@ -174,13 +177,15 @@ class ToolsAgentInput(BaseModel):
     llm_kwargs: dict[str, Any] | None = None
     langgraph_config: dict[str, Any] | None = None
 
-    @field_validator("system_content_kwargs", "user_content_kwargs")
+    @field_validator("user_content_kwargs")
     @classmethod
     def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Normalize an empty dict to ``None`` so it reads as unset.
+        """Normalize an empty ``user_content_kwargs`` to ``None`` so it reads as unset.
 
         An empty dict carries no content-block keys, matching the builders that treat ``{}`` as no
-        mark.
+        mark. ``system_content_kwargs`` is deliberately excluded: an explicit ``{}`` there is the
+        per-node opt-out from the server-wide system-prompt cache default (unset applies the
+        default, ``{}`` marks nothing).
         """
         return value or None
 

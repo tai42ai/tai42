@@ -341,6 +341,25 @@ tai42_app.bind(APP)
 
 
 @pytest.fixture(autouse=True)
+def _system_prompt_cache_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the suite with the system-prompt cache default off, an orthogonal concern.
+
+    Most doubles name opaque placeholder providers to exercise routing; the cache
+    default, when on, consults the kit provider capability for the mark and rejects
+    a provider it does not know. Marking is exercised on its own with real providers
+    in ``test_system_prompt_cache_default.py``, so every other test runs with it off
+    (a supported server configuration) and keeps its placeholder providers.
+    """
+    from types import SimpleNamespace
+
+    from tai42_agents._internal import cache_mark
+
+    monkeypatch.setattr(
+        cache_mark, "agents_limits_settings", lambda: SimpleNamespace(system_prompt_cache_default=False)
+    )
+
+
+@pytest.fixture(autouse=True)
 def _reset_sandbox_facets() -> Iterator[None]:
     """Restore the bound sandbox/connector facets to their defaults around each test, so a test
     that clears the provider or scripts a connection auth never leaks into the next."""
