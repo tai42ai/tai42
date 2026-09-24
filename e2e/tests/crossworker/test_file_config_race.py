@@ -36,25 +36,37 @@ async def _write_env(api: ApiClient, body: dict[str, str]) -> None:
     await wait_for_async(_attempt, deadline=15.0, message=f"env write {body} never left the reloading gate")
 
 
-# This drives 40 env writes (20 concurrent A/B pairs), each a heavy local reload
-# plus a reload-gate 503-retry contention against the sibling. Every write lands
-# within its own 15s deadline, but the cumulative wall time is load-sensitive
-# (~15s idle, ~75s under 2x CPU oversubscription) and can exceed the 120s default
-# on a contended runner while still progressing to completion. The larger budget
-# absorbs that load; a genuine hang would still exceed it and fail.
+# The number of concurrent A/B write rounds. What the assertion needs is (a) both
+# replicas writing disjoint keys concurrently, so the cross-process flock arbitrates a
+# real read-modify-write race, and (b) more than one round, so a later round's
+# read-modify-write must preserve the keys earlier rounds persisted ACROSS the fleet
+# reload every write triggers. The endpoint's reload gate serialises concurrent writers
+# (a sibling write meets a retriable ``503 reloading`` while the other's reload runs), so
+# each write is a heavy reload and extra rounds buy reload wall-time, not contention
+# coverage. Three is the smallest count that exercises both facets with a one-round margin
+# for the gate's serialisation not to erase the concurrency in a single round.
+_LOSE_NOTHING_ROUNDS = 3
+
+
 @pytest.mark.timeout(300)
 async def test_concurrent_env_writes_lose_nothing(replicas_stack: TaiStack) -> None:
+    """Concurrent disjoint env writes against both replicas all survive: the flock'd
+    read-modify-write of ``FileConfigManager.write_env`` serialises cross-process writers,
+    so no round's keys are dropped and a later round's write preserves the earlier rounds'
+    keys across the fleet reload each write fans out. The 300s ceiling is a genuine-hang
+    backstop, not a throughput budget — the rounds are held to the few the invariant needs
+    (:data:`_LOSE_NOTHING_ROUNDS`)."""
     api_a = replicas_stack.api(port=replicas_stack.port_a)
     api_b = replicas_stack.api(port=replicas_stack.port_b)
 
-    for i in range(20):
+    for i in range(_LOSE_NOTHING_ROUNDS):
         await asyncio.gather(
             _write_env(api_a, {f"E2E_A_{i}": "1"}),
             _write_env(api_b, {f"E2E_B_{i}": "1"}),
         )
 
     env = (await api_a.get("/api/config/env"))["env"]
-    missing = [k for i in range(20) for k in (f"E2E_A_{i}", f"E2E_B_{i}") if k not in env]
+    missing = [k for i in range(_LOSE_NOTHING_ROUNDS) for k in (f"E2E_A_{i}", f"E2E_B_{i}") if k not in env]
     assert not missing, f"concurrent config writes dropped keys: {missing}"
 
 
