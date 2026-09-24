@@ -331,7 +331,14 @@ class WorkerBusSubscribeMixin:
         await self._set_presence(r, presence_key, presence)
 
     async def _set_presence(self, r: Any, presence_key: str, presence: _PresenceValue) -> None:
-        await r.set(presence_key, presence.model_dump_json(), px=int(self._settings.heartbeat_ttl * 1000))
+        # The presence write and the index membership land in ONE transaction, so a
+        # presence key never exists without its index member: the census reads the index
+        # (SMEMBERS) and then GET/PTTLs each member's key, so a member missing while its
+        # key was live would drop a live worker from the fleet.
+        pipe = r.pipeline(transaction=True)
+        pipe.set(presence_key, presence.model_dump_json(), px=int(self._settings.heartbeat_ttl * 1000))
+        pipe.sadd(self._settings.presence_index, self.identity.name)
+        await pipe.execute()
 
     def _heartbeat_failure(self, heartbeat: asyncio.Task[None], name: str) -> BaseException:
         """Turn a self-terminated heartbeat task into the failure that ends this subscription.
@@ -523,7 +530,13 @@ class WorkerBusSubscribeMixin:
             else:
                 if released and presence_key is not None:
                     try:
-                        await r.delete(presence_key)
+                        # Delete the presence key and drop its index member in one
+                        # transaction, mirroring the atomic write: neither is left for
+                        # the census to self-heal on a clean stop.
+                        pipe = r.pipeline(transaction=True)
+                        pipe.delete(presence_key)
+                        pipe.srem(self._settings.presence_index, self._identity.name)
+                        await pipe.execute()
                     except Exception:
                         logger.warning(
                             "worker bus: presence delete for %s failed (TTL will expire it)",

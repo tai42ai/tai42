@@ -109,8 +109,10 @@ services:
   # here. Credentials + port are env-overridable and match the s3 variant's
   # defaults (`TAI_E2E_S3_*`).
   storage-minio:
-    # Served from quay; the Docker Hub repository is not publicly pullable.
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # MinIO publishes no public `minio/minio` image; `pgsty/minio` is the
+    # community-maintained AGPLv3 build, drop-in with the same `minio server`
+    # entrypoint and the bundled `mc` client the healthcheck below uses.
+    image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     profiles: ["storage"]
     command: server /data
     ports:
@@ -251,8 +253,10 @@ services:
       retries: 30
 
   langfuse-minio:
-    # Served from quay; the Docker Hub repository is not publicly pullable.
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # MinIO publishes no public `minio/minio` image; `pgsty/minio` is the
+    # community-maintained AGPLv3 build, drop-in with the same `minio server`
+    # entrypoint and the bundled `mc` client the healthcheck below uses.
+    image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     profiles: ["monitoring"]
     # Pre-create the event-upload bucket as a filesystem dir before minio starts,
     # exactly as langfuse's official self-hosting compose does. Without it the

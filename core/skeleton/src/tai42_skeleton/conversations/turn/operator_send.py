@@ -142,6 +142,7 @@ async def operator_send(
             answer=answer,
             answer_parts=answer_parts,
             origin="operator",
+            operator_send=True,
         )
         await accessors._store().create_record(record)
         await accessors._refresh_thread_mode_ttl(thread_id)

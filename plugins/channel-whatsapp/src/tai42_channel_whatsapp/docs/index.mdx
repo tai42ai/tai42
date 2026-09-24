@@ -86,6 +86,12 @@ A `form` ask (an `ask` whose answer is a small JSON object) renders as an in-cha
 values return as the answer. A multi-page layout renders one screen per page, and
 per-send prefill values and option lists open the form already filled in.
 
+Each schema property name may use any character, while a Flow component name must be
+an identifier (`[A-Za-z_][A-Za-z0-9_]*`). The channel maps each property to a unique
+identifier-safe component name for the Flow it publishes, and maps the submitted values
+back to the original property names before returning the answer — so the answer keys are
+always the schema's own property names, whatever characters they use.
+
 If the platform rejects a submitted answer (a value fails the answer schema at the
 door), the **same form is re-sent** — same steps, same prefill, with the door's
 reason shown above it — so the participant can correct and resubmit. This repeats

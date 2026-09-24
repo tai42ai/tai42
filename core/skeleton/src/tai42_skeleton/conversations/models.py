@@ -120,10 +120,19 @@ class ConversationRecord(BaseModel):
     # read; an ``operator`` record always names its sender, whichever door it rides.
     caller_principal: str | None = None
 
-    # Who produced this record: ``client`` is an inbound message's turn; ``operator`` is a
-    # message an operator sent into the thread by hand, which runs no turn. Required — every
-    # construction states it, and a stored blob missing it is corruption that fails loudly.
+    # Who produced this record: ``client`` is an inbound message's turn; ``operator`` names a
+    # record an operator's key committed — both a hand-injected operator send and a park
+    # completion's resumed reply ride ``operator``. Required — every construction states it, and
+    # a stored blob missing it is corruption that fails loudly.
     origin: Literal["client", "operator"]
+
+    # ``True`` only for an operator's hand-injected message — the one ``operator`` record that is
+    # NOT a reply to a participant's own turn (it runs no turn and answers nothing the
+    # participant asked). A client turn and a park-completion resumed reply are both replies the
+    # participant awaits, so both carry ``False``. The delivery machine reads this to decide
+    # whether a reachable-channel refusal notifies the participant: a refused turn reply does, a
+    # refused operator hand-send does not.
+    operator_send: bool = False
 
     # The inbound message this record answers, verbatim — nothing truncates or caps it
     # here, so its size is whatever the door that read it admitted on its own body. A

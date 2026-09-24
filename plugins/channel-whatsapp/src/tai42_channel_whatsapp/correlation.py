@@ -22,8 +22,10 @@ A published-Flow cache maps ``(waba_id, schema_hash)`` to a Meta flow id with NO
 TTL — a published Flow persists on Meta, so the id is reused for every form ask
 sharing that answer schema; a cache miss triggers a create + publish + store.
 Beside it, a schema sidecar maps the same ``(waba_id, schema_hash)`` to the answer
-schema itself, for ask-less form notifications whose reply carries only the hash
-(inside its flow token) and no reservation.
+schema itself PLUS the component-name reverse map (each identifier-safe Flow
+component name back to its schema key), for ask-less form notifications whose reply
+carries only the hash (inside its flow token) and no reservation — the map decodes
+the reply's component-named keys back to schema keys before coercion.
 
 A handled-``wamid`` set is the replay guard (a redelivered webhook repeats the id).
 
@@ -83,6 +85,11 @@ class PendingQuestion:
     form_pages: list[dict[str, Any]] | None = None
     form_values: dict[str, Any] | None = None
     form_options: dict[str, list[dict[str, Any]]] | None = None
+    # A form ask also carries the reverse of its schema-key → component-name map — each
+    # identifier-safe Flow component name back to its original schema key — so the inbound
+    # nfm_reply decode (keyed by component names, as Meta relays them) maps every answer
+    # key back to the schema key before coercion; all None for a non-form ask.
+    form_names: dict[str, str] | None = None
     # Door-400 rejections already recovered by re-sending a fresh Flow. Bounds the
     # re-send loop (see the inbound handler's cap); starts at 0.
     rejections: int = 0
@@ -128,6 +135,7 @@ def _encode_pending(question: PendingQuestion) -> str:
             "form_pages": question.form_pages,
             "form_values": question.form_values,
             "form_options": question.form_options,
+            "form_names": question.form_names,
             "rejections": question.rejections,
         }
     )
@@ -161,6 +169,7 @@ async def reserve_pending(
     form_pages: list[dict[str, Any]] | None = None,
     form_values: dict[str, Any] | None = None,
     form_options: dict[str, list[dict[str, Any]]] | None = None,
+    form_names: dict[str, str] | None = None,
 ) -> None:
     """Atomically reserve the pair for one question, or raise ``PendingQuestionExistsError``."""
     value = _encode_pending(
@@ -174,6 +183,7 @@ async def reserve_pending(
             form_pages=form_pages,
             form_values=form_values,
             form_options=form_options,
+            form_names=form_names,
         )
     )
     ttl = _remaining_seconds(timeout_at)
@@ -204,6 +214,7 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
         form_pages=data.get("form_pages"),
         form_values=data.get("form_values"),
         form_options=data.get("form_options"),
+        form_names=data.get("form_names"),
         rejections=data["rejections"],
     )
 
@@ -315,27 +326,32 @@ async def cache_flow_id(waba_id: str, schema_hash: str, flow_id: str) -> None:
         await redis.set(_flow_key(waba_id, schema_hash), flow_id)
 
 
-async def cache_flow_schema(waba_id: str, schema_hash: str, schema: dict[str, Any]) -> None:
-    """Store an ask-less form's answer schema under ``(waba_id, schema_hash)`` with NO TTL.
+async def cache_flow_form(waba_id: str, schema_hash: str, schema: dict[str, Any], names: dict[str, str]) -> None:
+    """Store an ask-less form's schema and its component-name reverse map under ``(waba_id, schema_hash)``, no TTL.
 
-    Beside the published-flow id it renders as.
+    Beside the published-flow id it renders as. ``names`` maps each identifier-safe Flow
+    component name back to its original schema key, so the notify reply (keyed by
+    component names, as Meta relays them) decodes to the schema keys and coerces by type.
     Durability is load-bearing here, not an optimization: an inbound reply carries
     only the schema HASH (inside its flow token), never the schema, so this entry can
     NOT be repopulated from the reply — a miss is permanent for every form already
     sitting in a chat, and degrades each of their replies to raw (uncoerced) values.
-    The entry is content-addressed — one schema per hash — so the unconditional
-    overwrite on every send is idempotent.
+    The entry is content-addressed — one schema+map per hash — so the unconditional
+    overwrite on every send is idempotent. Schema and map are stored as one value, so a
+    hit yields both or the read is a clean miss (no half-populated entry to reason about).
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        await redis.set(_flow_schema_key(waba_id, schema_hash), json.dumps(schema))
+        await redis.set(_flow_schema_key(waba_id, schema_hash), json.dumps({"schema": schema, "names": names}))
 
 
-async def get_cached_flow_schema(waba_id: str, schema_hash: str) -> dict[str, Any] | None:
-    """Return the answer schema cached under ``(waba_id, schema_hash)``, or ``None``.
+async def get_cached_flow_form(waba_id: str, schema_hash: str) -> tuple[dict[str, Any], dict[str, str]] | None:
+    """Return the ``(schema, names)`` cached under ``(waba_id, schema_hash)``, or ``None``.
 
-    A miss means a reply for that schema cannot be coerced and lands with its raw values (see
-    :func:`cache_flow_schema`). A stored value that is not a JSON object is treated as a miss
-    (never a crash on the webhook path).
+    ``names`` is the component-name → schema-key reverse map. A miss means a reply for
+    that schema cannot be decoded/coerced and lands with its raw values (see
+    :func:`cache_flow_form`). A stored value that is not a JSON object carrying both an
+    object ``schema`` and an object ``names`` is treated as a miss (never a crash on the
+    webhook path).
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = await redis.get(_flow_schema_key(waba_id, schema_hash))
@@ -344,9 +360,16 @@ async def get_cached_flow_schema(waba_id: str, schema_hash: str) -> dict[str, An
     try:
         parsed = json.loads(raw)
     except ValueError:
-        logger.warning("cached flow schema under %s is not valid JSON; treating as a miss", schema_hash)
+        logger.warning("cached flow form under %s is not valid JSON; treating as a miss", schema_hash)
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    schema = parsed.get("schema")
+    names = parsed.get("names")
+    if not isinstance(schema, dict) or not isinstance(names, dict):
+        logger.warning("cached flow form under %s lacks its schema or name map; treating as a miss", schema_hash)
+        return None
+    return schema, names
 
 
 async def already_seen(wamid: str) -> bool:

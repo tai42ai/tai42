@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import time
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
-from tai42_contract.conversations import AnswerPart, DeliveryReceipt
+from tai42_contract.conversations import AnswerPart, ConversationRoute, DeliveryReceipt
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
+from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import delivery_channel as delivery_channel_module
 from tai42_skeleton.conversations import ledger as ledger_module
@@ -25,6 +27,7 @@ from tai42_skeleton.conversations.ledger import ChannelSendLedger
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.turn import outcome as outcome_module
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
@@ -40,9 +43,11 @@ class WorkerDiedError(RuntimeError):
 
 class FakeChannel:
     """Records every chunk it is asked to send. ``crash_on`` abandons the send on the nth
-    chunk (a dead worker), ``fail_on`` refuses it the way a provider does, ``input_fail_on``
-    permanently refuses its shape (a ``ChannelInputError``), and ``hang_on`` never returns
-    from it (a send still in flight)."""
+    chunk (a dead worker), ``fail_on`` refuses it the way a provider does with a NON-retryable
+    ``ChannelDeliveryError`` (a vendor validation rejection / hard 4xx), ``retryable_fail_on``
+    raises a RETRYABLE ``ChannelDeliveryError`` (a transport fault), ``input_fail_on`` permanently
+    refuses its shape (a ``ChannelInputError``), and ``hang_on`` never returns from it (a send
+    still in flight)."""
 
     def __init__(
         self,
@@ -50,6 +55,7 @@ class FakeChannel:
         *,
         crash_on: int | None = None,
         fail_on: int | None = None,
+        retryable_fail_on: int | None = None,
         input_fail_on: int | None = None,
         hang_on: int | None = None,
         watch=None,
@@ -58,6 +64,7 @@ class FakeChannel:
         self._prefix = prefix
         self._crash_on = crash_on
         self._fail_on = fail_on
+        self._retryable_fail_on = retryable_fail_on
         self._input_fail_on = input_fail_on
         self._hang_on = hang_on
         self._watch = watch
@@ -72,6 +79,8 @@ class FakeChannel:
             raise WorkerDiedError("the worker died mid-send")
         if self._fail_on is not None and len(self.sends) == self._fail_on:
             raise ChannelDeliveryError("the provider refused the chunk")
+        if self._retryable_fail_on is not None and len(self.sends) == self._retryable_fail_on:
+            raise ChannelDeliveryError("the medium had a transient fault", retryable=True)
         if self._input_fail_on is not None and len(self.sends) == self._input_fail_on:
             raise ChannelInputError("the provider cannot render the chunk")
         if self._hang_on is not None and len(self.sends) == self._hang_on:
@@ -199,6 +208,40 @@ def _wire_channel(monkeypatch, channel) -> None:
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeDeliveryApp(channel))
 
 
+def _channel_route(error_reply_text: str | None = None) -> ConversationRoute:
+    return ConversationRoute(
+        route_name="line",
+        door="channel",
+        target_kind="agent",
+        target_name="echo",
+        execution_key="svc",
+        channel="twilio",
+        our_identity="+15550001111",
+        execution_key_fingerprint="fp-1",
+        error_reply_text=error_reply_text,
+    )
+
+
+class _FakeRouteManager:
+    """Resolves the one route the refusal notice looks up; ``route`` is swapped by a test that
+    exercises a route-carried ``error_reply_text``."""
+
+    def __init__(self, route: ConversationRoute | None) -> None:
+        self.route = route
+
+    async def get_route(self, name: str) -> ConversationRoute | None:
+        return self.route
+
+
+@pytest.fixture(autouse=True)
+def route_manager(monkeypatch) -> _FakeRouteManager:
+    """Wire the could-not-deliver notice's route lookup to a hermetic in-memory route (no
+    ``error_reply_text``, so the notice is the built-in uniform text by default)."""
+    manager = _FakeRouteManager(_channel_route())
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
+    return manager
+
+
 def _claim(fake: FakeRecordRedis, message_id: str) -> tuple[str, float]:
     """The record's live lease as ``(token, expiry)``; an empty token when it is free."""
     raw = fake._hashes[ConversationsSettings().record_key(message_id)]["claim"]
@@ -301,29 +344,178 @@ async def test_a_completed_send_leaves_no_ledger_behind(monkeypatch, fake, store
     assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-clean") == []
 
 
-async def test_a_provider_refusal_is_terminal_and_clears_the_ledger(monkeypatch, fake, store):
+async def test_a_non_retryable_provider_refusal_is_terminal_and_notifies(monkeypatch, fake, store):
     """A refusal is not a crash: the send has no idempotency key to retry under, so the
-    record fails loudly and keeps the ids of the chunks the provider did take."""
+    record fails loudly and keeps the ids of the chunks the provider did take. A NON-retryable
+    mid-sequence ``ChannelDeliveryError`` (a vendor validation rejection / hard 4xx) is the channel
+    refusing a reachable participant's reply, so the participant IS told the could-not-deliver
+    notice after the record is failed."""
+    channel = FakeChannel("w1", fail_on=2)
     await store.create_record(_record("m-refused", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
-    _wire_channel(monkeypatch, FakeChannel("w1", fail_on=2))
+    _wire_channel(monkeypatch, channel)
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-refused"), "worker-1")
 
     assert (await _get(store, "m-refused")).delivery_status is DeliveryStatus.FAILED
     assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-refused") == []
     assert await store.resolve_outbound("twilio", "w1-1") == "m-refused"
+    # Two answer chunks were attempted (the second raised before its ledger write), then the notice.
+    assert channel.sends == ["aaaaaaaaaa", "bbbbbbbbbb", outcome_module._ERROR_ANSWER_TEXT]
 
 
-async def test_a_permanent_input_refusal_is_terminal_and_not_re_driven(monkeypatch, fake, store):
+async def test_a_retryable_provider_refusal_is_terminal_with_no_notice(monkeypatch, fake, store):
+    """A RETRYABLE mid-sequence ``ChannelDeliveryError`` (a transport fault, a medium 5xx) means the
+    participant could not be reached, so it fails the record with NO could-not-deliver notice — the
+    boundary the retryable flag draws, matching the transport-exhaustion path. The record is failed
+    at once, so the transient fault never spends the whole attempt budget on a re-send."""
+    channel = FakeChannel("w1", retryable_fail_on=2)
+    await store.create_record(_record("m-transient", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    _wire_channel(monkeypatch, channel)
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-transient"), "worker-1")
+
+    assert (await _get(store, "m-transient")).delivery_status is DeliveryStatus.FAILED
+    assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-transient") == []
+    # Only the two answer chunks were attempted; no notice went out.
+    assert channel.sends == ["aaaaaaaaaa", "bbbbbbbbbb"]
+    assert outcome_module._ERROR_ANSWER_TEXT not in channel.sends
+
+
+async def test_a_permanent_input_refusal_is_terminal_and_notifies_the_participant(monkeypatch, fake, store):
     """A ``ChannelInputError`` is a permanent refusal of the input's shape — retrying cannot
     succeed, so the record fails terminally (never re-driven), exactly as a delivery refusal
-    is, and keeps the ids of the chunks the provider did take."""
+    is, and keeps the ids of the chunks the provider did take. The channel is reachable but
+    refused the reply, so the participant is told the uniform could-not-deliver notice AFTER the
+    record is failed, and the ledger is cleared."""
+    channel = FakeChannel("w1", input_fail_on=2)
     await store.create_record(_record("m-input", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
-    _wire_channel(monkeypatch, FakeChannel("w1", input_fail_on=2))
+    _wire_channel(monkeypatch, channel)
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-input"), "worker-1")
 
     assert (await _get(store, "m-input")).delivery_status is DeliveryStatus.FAILED
     assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-input") == []
     assert await store.resolve_outbound("twilio", "w1-1") == "m-input"
+    # The last send is the uniform notice — the two answer chunks attempted, then the notice.
+    assert channel.sends == ["aaaaaaaaaa", "bbbbbbbbbb", outcome_module._ERROR_ANSWER_TEXT]
+
+
+async def test_a_refusal_notice_uses_the_route_error_reply_text_when_set(monkeypatch, fake, store, route_manager):
+    """The could-not-deliver notice resolves the route's own ``error_reply_text`` when it carries
+    one — the SAME uniform text the failed park-completion path delivers — not the built-in
+    default."""
+    spanish = "Lo sentimos, no pudimos entregar la respuesta."
+    route_manager.route = _channel_route(error_reply_text=spanish)
+    monkeypatch.setenv("CONVERSATIONS_MAX_OUTBOUND_CHUNKS", "3")
+    store = ConversationRecordStore(ConversationsSettings())
+    channel = FakeChannel()
+    _wire_channel(monkeypatch, channel)
+    await store.create_record(_record("m-huge-es", "x" * (10 * _CHUNK_CHARS)))
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-huge-es"), "worker-1")
+
+    assert (await _get(store, "m-huge-es")).delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == [spanish]
+
+
+async def test_a_refusal_notice_that_fails_is_logged_and_leaves_the_record_failed(monkeypatch, fake, caplog):
+    """The notice send is best-effort and loud: when the channel refuses it too, the failure is
+    logged at ERROR, the record stays terminally ``failed``, and the notice is NEVER retried
+    (the channel's ``notify`` is called exactly once — for the notice)."""
+    monkeypatch.setenv("CONVERSATIONS_MAX_OUTBOUND_CHUNKS", "3")
+    store = ConversationRecordStore(ConversationsSettings())
+    # The very first (and only) send — the notice — is refused by the channel.
+    channel = FakeChannel(fail_on=1)
+    _wire_channel(monkeypatch, channel)
+    await store.create_record(_record("m-huge-noticefail", "x" * (10 * _CHUNK_CHARS)))
+
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-huge-noticefail"), "worker-1")
+
+    assert (await _get(store, "m-huge-noticefail")).delivery_status is DeliveryStatus.FAILED
+    assert len(channel.sends) == 1  # only the notice was attempted, never retried
+    assert any(
+        "could not deliver the client-safe could-not-deliver notice" in record.message
+        and record.levelno == logging.ERROR
+        for record in caplog.records
+    )
+
+
+def _unrenderable_record(message_id: str, *, operator_send: bool, caller_principal: str | None) -> ConversationRecord:
+    """A channel record carrying a media part a text-only channel cannot render — the refusal
+    fixture for the notice-vs-no-notice boundary between an operator hand-send and a turn reply."""
+    now = time.time()
+    part = AnswerPart(message="pic", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
+    return ConversationRecord(
+        message_id=message_id,
+        route_name="line",
+        door="channel",
+        thread_id=f"bridge:line:{message_id}",
+        client_address="+15550002222",
+        channel="twilio",
+        our_identity="+15550001111",
+        origin="operator",
+        operator_send=operator_send,
+        caller_principal=caller_principal,
+        inbound_text="",
+        answer_status="answered",
+        answer="pic",
+        answer_parts=[part],
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_an_operator_hand_send_refusal_sends_no_participant_notice(monkeypatch, fake, store):
+    """An operator's HAND-injected message (``operator_send``) is not a reply to a participant's
+    turn, so a refusal fails the record loudly with NO could-not-deliver notice — the admin
+    failed-delivery listing is the signal, exactly as for a transport exhaustion. The uniform
+    notice speaks of "your message", which no operator hand-send answers."""
+    await store.create_record(_unrenderable_record("m-oper", operator_send=True, caller_principal="op-1"))
+    channel = FakeChannel("w1")  # text-only: no supports_media_notifications
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-oper"), "worker-1")
+
+    assert (await _get(store, "m-oper")).delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
+
+
+async def test_a_completion_delivered_reply_refusal_notifies_the_participant(monkeypatch, fake, store):
+    """A park-completion resumed reply rides ``origin="operator"`` but IS the participant's own
+    turn's deferred answer (``operator_send`` is False, the completion principal authorised it), so
+    a reachable-channel refusal notifies the participant just as a live turn reply's does."""
+    await store.create_record(
+        _unrenderable_record("m-cmpl", operator_send=False, caller_principal="system:agent-resume")
+    )
+    channel = FakeChannel("w1")  # text-only: no supports_media_notifications
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-cmpl"), "worker-1")
+
+    assert (await _get(store, "m-cmpl")).delivery_status is DeliveryStatus.FAILED
+    # The media answer never went out; the ONE send is the uniform could-not-deliver notice.
+    assert channel.sends == [outcome_module._ERROR_ANSWER_TEXT]
+
+
+async def test_a_refusal_notice_falls_back_and_logs_when_the_route_lookup_faults(monkeypatch, fake, store, caplog):
+    """A route-lookup fault must not block the participant notice: it falls back to the built-in
+    uniform text AND is logged at ERROR (never silent)."""
+
+    class _BrokenManager:
+        async def get_route(self, name: str):
+            raise RuntimeError("route store unavailable")
+
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: _BrokenManager())
+    monkeypatch.setenv("CONVERSATIONS_MAX_OUTBOUND_CHUNKS", "3")
+    store = ConversationRecordStore(ConversationsSettings())
+    channel = FakeChannel("w1")
+    _wire_channel(monkeypatch, channel)
+    await store.create_record(_record("m-routefault", "x" * (10 * _CHUNK_CHARS)))
+
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-routefault"), "worker-1")
+
+    assert (await _get(store, "m-routefault")).delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == [outcome_module._ERROR_ANSWER_TEXT]
+    assert any("could not resolve route" in r.message and r.levelno == logging.ERROR for r in caplog.records)
 
 
 async def test_a_ledger_claiming_more_than_the_answer_refuses_loudly(monkeypatch, fake, store):
@@ -373,9 +565,10 @@ async def test_a_multi_part_send_refreshes_the_lease_before_every_part(monkeypat
 
 
 async def test_a_multi_part_send_stops_and_fails_mid_sequence_on_a_refusal(monkeypatch, fake, store):
-    """A provider refusal on part two is terminal STOP-AND-FAIL: part three is never sent (order
-    is meaning — message three without two corrupts the answer), the record fails loudly, and the
-    id of the part that DID land is kept."""
+    """A non-retryable provider refusal on part two is terminal STOP-AND-FAIL: part three is never
+    sent (order is meaning — message three without two corrupts the answer), the record fails
+    loudly, the id of the part that DID land is kept, and the participant is told the uniform
+    could-not-deliver notice after the record is failed."""
     parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
     await store.create_record(_parts_record("m-stopfail", parts))
     channel = FakeChannel("w1", fail_on=2)
@@ -383,7 +576,8 @@ async def test_a_multi_part_send_stops_and_fails_mid_sequence_on_a_refusal(monke
 
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-stopfail"), "worker-1")
 
-    assert channel.sends == ["first", "second"]  # third never went out
+    # Part three never went out; the notice follows the two attempted parts.
+    assert channel.sends == ["first", "second", outcome_module._ERROR_ANSWER_TEXT]
     assert (await _get(store, "m-stopfail")).delivery_status is DeliveryStatus.FAILED
     assert await store.resolve_outbound("twilio", "w1-1") == "m-stopfail"
 
@@ -462,7 +656,8 @@ async def test_a_media_part_is_delivered_with_its_media(monkeypatch, fake, store
 
 async def test_a_media_part_to_a_text_only_channel_is_refused_terminally(monkeypatch, fake, store):
     """A media part routed to a channel that does not advertise media support can never render,
-    so the record fails loudly and terminally with NOTHING sent — never re-driven forever."""
+    so the record fails loudly and terminally with the answer NEVER sent — never re-driven forever.
+    The channel is reachable, so the participant is told the uniform could-not-deliver notice."""
     part = AnswerPart(message="pic", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
     await store.create_record(_parts_record("m-nocap", [part]))
     channel = FakeChannel("w1")  # a text-only channel: no supports_media_notifications
@@ -470,7 +665,8 @@ async def test_a_media_part_to_a_text_only_channel_is_refused_terminally(monkeyp
 
     await delivery_channel_module._deliver_channel(store, await _get(store, "m-nocap"), "worker-1")
 
-    assert channel.sends == []
+    # The media answer never went out; the ONE send is the uniform could-not-deliver notice.
+    assert channel.sends == [outcome_module._ERROR_ANSWER_TEXT]
     assert (await _get(store, "m-nocap")).delivery_status is DeliveryStatus.FAILED
 
 
@@ -939,8 +1135,8 @@ async def test_an_answer_over_the_fan_out_cap_is_refused_as_an_error_outcome(mon
 
     record = await _get(store, "m-huge")
     assert record.delivery_status is DeliveryStatus.FAILED
-    # Exactly one client-safe reply went out; the answer itself was never fanned out.
-    assert channel.sends == [delivery_channel_module._OVERSIZED_ANSWER_TEXT]
+    # Exactly one client-safe notice went out; the answer itself was never fanned out.
+    assert channel.sends == [outcome_module._ERROR_ANSWER_TEXT]
     assert record.attempts == 1
 
 

@@ -12,7 +12,7 @@ from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, Cha
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, component_names
 
 from .conftest import (
     _MESSAGES_URL,
@@ -448,8 +448,13 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
     assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
     assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
     # The answer schema is cached durably beside the flow id (no TTL): the inbound
-    # reply carries only the hash and cannot repopulate this entry.
-    assert json.loads(fake_redis.store[_schema_cache_key(schema_hash)]) == _FORM_SCHEMA
+    # reply carries only the hash and cannot repopulate this entry. The component-name
+    # reverse map rides with it so the reply decodes to schema keys.
+    expected_names = {c: k for k, c in component_names(_FORM_SCHEMA["properties"]).items()}
+    assert json.loads(fake_redis.store[_schema_cache_key(schema_hash)]) == {
+        "schema": _FORM_SCHEMA,
+        "names": expected_names,
+    }
     assert _schema_cache_key(schema_hash) not in fake_redis.ttls
 
 
