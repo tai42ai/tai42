@@ -33,6 +33,17 @@ form. A footer reads a control's just-filled value through the unwrapped-compone
 reference ``${screen.<field>}``; an earlier screen's value rides forward as
 ``${data.<field>__val}``.
 
+Meta accepts a component ``name``, a screen-``data`` key and a ``${data.…}`` /
+``${screen.…}`` reference only in the identifier grammar
+``[A-Za-z_][A-Za-z0-9_]*``, while an answer schema may use ANY JSON property name.
+So each schema property is first mapped to a unique identifier-safe COMPONENT NAME
+(:func:`component_names`), and that component name — never the raw property name — is
+the ``<field>`` every component ``name``, data key, reference, navigate-payload key
+and completion-payload key above is spelled with; the completion payload's keys are
+the component names, so the inbound ``nfm_reply`` decode maps them back to the schema
+keys before coercion. Only the human-facing field label keeps the property ``title``
+(else the raw property name), which may carry any character.
+
 A string property renders as a dynamic ``Dropdown`` when it carries a schema ``enum``
 OR when the ask marks it option-bearing (``option_fields`` — the set of
 ``flow_action_payload.data.options`` keys); this matches the web and Slack channels,
@@ -52,6 +63,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
@@ -81,6 +93,49 @@ _CONTINUE_LABEL = "Continue"
 # form property of that name is unanswerable on this channel: the reply handler
 # strips the key before the answer reaches the door. The mapper refuses it up front.
 _RESERVED_PROPERTY = "flow_token"
+
+# Meta's grammar for a Flow component ``name`` / screen-``data`` key / ``${data.…}``
+# reference: a letter or underscore, then letters, digits, underscores.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _sanitize_name(key: str) -> str:
+    """A property name reduced to Meta's identifier grammar.
+
+    Every character outside ``[A-Za-z0-9_]`` becomes ``_``; a result that is empty or
+    starts with a digit is prefixed ``f_`` so it opens with a letter or underscore.
+    """
+    reduced = re.sub(r"[^A-Za-z0-9_]", "_", key)
+    if not reduced or reduced[0].isdigit():
+        reduced = f"f_{reduced}"
+    return reduced
+
+
+def component_names(properties: dict[str, Any]) -> dict[str, str]:
+    """Map each schema property name to a unique identifier-safe Flow component name.
+
+    Meta accepts a component ``name``, a data key and a ``${data.…}`` reference only in
+    the grammar ``[A-Za-z_][A-Za-z0-9_]*``, while a form's answer schema may name a
+    property with any character. A key already in the grammar is kept verbatim; any
+    other is sanitised by :func:`_sanitize_name`. A collision — two keys reducing to the
+    same name, a sanitised name equal to a later verbatim key, or a name equal to the
+    reserved ``flow_token`` — is disambiguated deterministically in schema order by
+    appending ``_2``, ``_3`` … so the first key to claim a name keeps it. Pure and
+    order-preserving: the same property list always yields the same map, so a re-send
+    and the inbound decode recompute an identical map from the same schema.
+    """
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    for key in properties:
+        base = key if _IDENTIFIER_RE.match(key) else _sanitize_name(key)
+        candidate = base
+        suffix = 2
+        while candidate in used or candidate == _RESERVED_PROPERTY:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        mapping[key] = candidate
+    return mapping
 
 
 def _screen_id(index: int) -> str:
@@ -150,33 +205,38 @@ def _renders_as_dropdown(name: str, prop: dict[str, Any], option_fields: set[str
     return prop.get("enum") is not None or name in option_fields
 
 
-def _dynamic_component(name: str, prop: dict[str, Any], required: bool, option_fields: set[str]) -> dict[str, Any]:
+def _dynamic_component(
+    name: str, prop: dict[str, Any], required: bool, option_fields: set[str], names: dict[str, str]
+) -> dict[str, Any]:
     """One Flow field component for the dynamic (per-send) form.
 
-    Every control reads its ``init-value`` from the screen ``data`` model and a choice field reads a
-    dynamic ``data-source``, so the send injects the values/options. Raises ``ChannelInputError`` naming a
-    property outside the supported subset.
+    The component ``name`` and its data references are the identifier-safe name ``names``
+    maps the schema key to; the label keeps the property ``title`` (else the raw property
+    name). Every control reads its ``init-value`` from the screen ``data`` model and a
+    choice field reads a dynamic ``data-source``, so the send injects the values/options.
+    Raises ``ChannelInputError`` naming a property outside the supported subset.
     """
     label = prop.get("title") if isinstance(prop.get("title"), str) else name
+    cname = names[name]
     prop_type = prop.get("type")
-    init = f"${{data.{name}__init}}"
+    init = f"${{data.{cname}__init}}"
     if _renders_as_dropdown(name, prop, option_fields):
         return {
             "type": "Dropdown",
-            "name": name,
+            "name": cname,
             "label": label,
             "required": required,
-            "data-source": f"${{data.{name}__ds}}",
+            "data-source": f"${{data.{cname}__ds}}",
             "init-value": init,
         }
     if prop_type == "string":
-        return {"type": "TextInput", "name": name, "label": label, "required": required, "init-value": init}
+        return {"type": "TextInput", "name": cname, "label": label, "required": required, "init-value": init}
     if prop_type == "boolean":
-        return {"type": "OptIn", "name": name, "label": label, "required": required, "init-value": init}
+        return {"type": "OptIn", "name": cname, "label": label, "required": required, "init-value": init}
     if prop_type in ("integer", "number"):
         return {
             "type": "TextInput",
-            "name": name,
+            "name": cname,
             "label": label,
             "required": required,
             "input-type": "number",
@@ -198,14 +258,18 @@ def _init_decl(prop: dict[str, Any]) -> dict[str, Any]:
     return {"type": "string", "__example__": ""}
 
 
-def _field_data_decls(name: str, prop: dict[str, Any], option_fields: set[str]) -> dict[str, Any]:
+def _field_data_decls(
+    name: str, prop: dict[str, Any], option_fields: set[str], names: dict[str, str]
+) -> dict[str, Any]:
     """The screen-``data`` declarations a field needs where it is RENDERED.
 
-    Its ``init-value`` source and, for a choice field, its dynamic ``data-source``.
+    Its ``init-value`` source and, for a choice field, its dynamic ``data-source`` —
+    keyed by the field's identifier-safe component name.
     """
-    decls: dict[str, Any] = {f"{name}__init": _init_decl(prop)}
+    cname = names[name]
+    decls: dict[str, Any] = {f"{cname}__init": _init_decl(prop)}
     if _renders_as_dropdown(name, prop, option_fields):
-        decls[f"{name}__ds"] = {
+        decls[f"{cname}__ds"] = {
             "type": "array",
             "items": {
                 "type": "object",
@@ -226,18 +290,24 @@ def _val_decl(prop: dict[str, Any]) -> dict[str, Any]:
     return {"type": "string", "__example__": ""}
 
 
-def _forward_field_data(name: str, prop: dict[str, Any], option_fields: set[str]) -> dict[str, str]:
+def _forward_field_data(
+    name: str, prop: dict[str, Any], option_fields: set[str], names: dict[str, str]
+) -> dict[str, str]:
     """The navigate-payload entries that carry a downstream field's ``init``/``ds`` on to the next screen.
 
-    They enter only at the entry screen, so each step re-forwards the ones its successors still need.
+    They enter only at the entry screen, so each step re-forwards the ones its successors
+    still need — keyed by the field's identifier-safe component name.
     """
-    forwarded = {f"{name}__init": f"${{data.{name}__init}}"}
+    cname = names[name]
+    forwarded = {f"{cname}__init": f"${{data.{cname}__init}}"}
     if _renders_as_dropdown(name, prop, option_fields):
-        forwarded[f"{name}__ds"] = f"${{data.{name}__ds}}"
+        forwarded[f"{cname}__ds"] = f"${{data.{cname}__ds}}"
     return forwarded
 
 
-def _validate_form_properties(properties: dict[str, Any], required: set[str], option_fields: set[str]) -> None:
+def _validate_form_properties(
+    properties: dict[str, Any], required: set[str], option_fields: set[str], names: dict[str, str]
+) -> None:
     """Validate every property is inside the supported per-send subset, before any screen is built.
 
     Raises ``ChannelInputError`` naming a reserved name, a non-object property, an unsupported type, or a
@@ -261,7 +331,7 @@ def _validate_form_properties(properties: dict[str, Any], required: set[str], op
         ):
             raise ChannelInputError(f"form property {name!r}: a string enum must be a non-empty list of strings")
         # Validate the subset up front (raises naming the property on an unsupported type).
-        _dynamic_component(name, prop, name in required, option_fields)
+        _dynamic_component(name, prop, name in required, option_fields, names)
 
 
 def _resolve_pages(
@@ -290,6 +360,7 @@ def _screen_data_model(
     earlier_fields: list[str],
     properties: dict[str, Any],
     option_fields: set[str],
+    names: dict[str, str],
 ) -> dict[str, Any]:
     """The screen's ``data`` declarations.
 
@@ -299,12 +370,12 @@ def _screen_data_model(
     data_model: dict[str, Any] = {}
     if index == 0:
         for name, prop in properties.items():
-            data_model.update(_field_data_decls(name, prop, option_fields))
+            data_model.update(_field_data_decls(name, prop, option_fields, names))
     else:
         for name in [*this_fields, *later_fields]:
-            data_model.update(_field_data_decls(name, properties[name], option_fields))
+            data_model.update(_field_data_decls(name, properties[name], option_fields, names))
         for name in earlier_fields:
-            data_model[f"{name}__val"] = _val_decl(properties[name])
+            data_model[f"{names[name]}__val"] = _val_decl(properties[name])
     return data_model
 
 
@@ -317,17 +388,20 @@ def _screen_footer(
     properties: dict[str, Any],
     option_fields: set[str],
     routing_model: dict[str, list[str]],
+    names: dict[str, str],
 ) -> dict[str, Any]:
     """The screen's ``Footer`` component.
 
     The terminal screen completes with the flat union of every field (this screen's read through the
     unwrapped-component reference ``${screen.<field>}``, earlier ones from their ``__val`` carriers); a
     non-terminal screen navigates to the next, forwarding successors' init/ds and every collected value,
-    and records the transition in ``routing_model``.
+    and records the transition in ``routing_model``. Every payload key and reference is the field's
+    identifier-safe component name — the completion payload keys are what the inbound reply carries back.
     """
     if is_terminal:
         payload = {
-            name: (f"${{screen.{name}}}" if name in this_fields else f"${{data.{name}__val}}") for name in properties
+            names[name]: (f"${{screen.{names[name]}}}" if name in this_fields else f"${{data.{names[name]}__val}}")
+            for name in properties
         }
         return {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
     screen_id = _screen_id(index)
@@ -335,11 +409,11 @@ def _screen_footer(
     routing_model[screen_id] = [next_screen]
     forward: dict[str, str] = {}
     for name in later_fields:
-        forward.update(_forward_field_data(name, properties[name], option_fields))
+        forward.update(_forward_field_data(name, properties[name], option_fields, names))
     for name in earlier_fields:
-        forward[f"{name}__val"] = f"${{data.{name}__val}}"
+        forward[f"{names[name]}__val"] = f"${{data.{names[name]}__val}}"
     for name in this_fields:
-        forward[f"{name}__val"] = f"${{screen.{name}}}"
+        forward[f"{names[name]}__val"] = f"${{screen.{names[name]}}}"
     return {
         "type": "Footer",
         "label": _CONTINUE_LABEL,
@@ -361,6 +435,7 @@ def _build_form_screen(
     earlier_fields: list[str],
     screen_count: int,
     routing_model: dict[str, list[str]],
+    names: dict[str, str],
 ) -> dict[str, Any]:
     """One Flow screen for a page: its field components, its ``data`` model, and its footer.
 
@@ -370,10 +445,12 @@ def _build_form_screen(
     later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
     is_terminal = index == screen_count - 1
 
-    data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, properties, option_fields)
-    components = [_dynamic_component(name, properties[name], name in required, option_fields) for name in this_fields]
+    data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, properties, option_fields, names)
+    components = [
+        _dynamic_component(name, properties[name], name in required, option_fields, names) for name in this_fields
+    ]
     footer = _screen_footer(
-        index, is_terminal, this_fields, later_fields, earlier_fields, properties, option_fields, routing_model
+        index, is_terminal, this_fields, later_fields, earlier_fields, properties, option_fields, routing_model, names
     )
 
     screen: dict[str, Any] = {
@@ -399,7 +476,10 @@ def build_form_flow(
 
     One screen per page (``pages`` absent → one screen carrying every property in
     schema order); each screen holds its field components and footer directly (no
-    ``Form`` wrapper) and its ``id`` is letters-and-underscores only. Each choice field
+    ``Form`` wrapper) and its ``id`` is letters-and-underscores only. Each schema property
+    is mapped to a unique identifier-safe component name (:func:`component_names`), which
+    is what every component ``name``, data key, reference and completion-payload key uses,
+    so a property named with any character still yields a publishable Flow. Each choice field
     reads a dynamic ``data-source`` and every control an ``init-value``, so the send
     supplies the values/options through ``flow_action_payload.data``. A string property
     renders as a choice ``Dropdown`` when it carries a schema ``enum`` or when
@@ -412,7 +492,8 @@ def build_form_flow(
     """
     option_fields = option_fields or set()
     properties, required = _validate_object_schema(schema)
-    _validate_form_properties(properties, required, option_fields)
+    names = component_names(properties)
+    _validate_form_properties(properties, required, option_fields, names)
     resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
 
     screen_count = len(resolved_pages)
@@ -431,6 +512,7 @@ def build_form_flow(
                 earlier_fields,
                 screen_count,
                 routing_model,
+                names,
             )
         )
         earlier_fields = [*earlier_fields, *fields_by_screen[index]]
@@ -451,7 +533,8 @@ def build_flow_data(
     """The ``flow_action_payload.data`` a per-send form carries.
 
     Every field's ``init`` (its prefilled value, or the empty default) and every choice field's ``ds`` (its
-    per-send option list ``{id, title}``, or the schema ``enum`` as the default).
+    per-send option list ``{id, title}``, or the schema ``enum`` as the default) — keyed by the field's
+    identifier-safe component name (:func:`component_names`), matching the published Flow's data keys.
 
     A choice field is a string property that carries a schema ``enum`` OR one the send
     marks option-bearing (a key in ``options``) — matching the published Flow's dynamic
@@ -464,6 +547,7 @@ def build_flow_data(
     properties = schema.get("properties")
     if not isinstance(properties, dict):
         raise ChannelInputError("form schema must carry a non-empty 'properties' object")
+    names = component_names(properties)
 
     for name in options:
         prop = properties.get(name)
@@ -476,17 +560,18 @@ def build_flow_data(
     option_fields = set(options)
     data: dict[str, Any] = {}
     for name, prop in properties.items():
+        cname = names[name]
         prop_type = prop.get("type") if isinstance(prop, dict) else None
         if name in values:
             raw = values[name]
-            data[f"{name}__init"] = bool(raw) if prop_type == "boolean" else raw if isinstance(raw, str) else str(raw)
+            data[f"{cname}__init"] = bool(raw) if prop_type == "boolean" else raw if isinstance(raw, str) else str(raw)
         else:
-            data[f"{name}__init"] = False if prop_type == "boolean" else ""
+            data[f"{cname}__init"] = False if prop_type == "boolean" else ""
         if isinstance(prop, dict) and _renders_as_dropdown(name, prop, option_fields):
             if name in options:
-                data[f"{name}__ds"] = [
+                data[f"{cname}__ds"] = [
                     {"id": choice["value"], "title": choice.get("label") or choice["value"]} for choice in options[name]
                 ]
             else:
-                data[f"{name}__ds"] = [{"id": str(item), "title": str(item)} for item in prop["enum"]]
+                data[f"{cname}__ds"] = [{"id": str(item), "title": str(item)} for item in prop["enum"]]
     return data

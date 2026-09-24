@@ -4,6 +4,7 @@ screen ids, the no-``Form`` control-level prefill, and the publish key."""
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -14,7 +15,41 @@ from tai42_channel_whatsapp.flows import (
     _canonical_hash_pages,
     build_flow_data,
     build_form_flow,
+    component_names,
 )
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_REFERENCE_RE = re.compile(r"\$\{(?:data|screen)\.([^}]+)\}")
+
+
+def _assert_only_identifier_safe_wire_names(flow_json: dict) -> None:
+    """Every component ``name``, screen-``data`` key, ``on-click-action`` payload key and
+    ``${data.…}`` / ``${screen.…}`` reference in the Flow is in Meta's identifier grammar.
+
+    The field LABEL is deliberately excluded — it keeps the property title (else the raw
+    property name) and may carry any character.
+    """
+    for reference in _REFERENCE_RE.findall(json.dumps(flow_json)):
+        assert _IDENTIFIER_RE.match(reference), reference
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("type") in {"TextInput", "Dropdown", "OptIn"} and isinstance(node.get("name"), str):
+                assert _IDENTIFIER_RE.match(node["name"]), node["name"]
+            if isinstance(node.get("data"), dict):
+                for key in node["data"]:
+                    assert _IDENTIFIER_RE.match(key), key
+            action = node.get("on-click-action")
+            if isinstance(action, dict) and isinstance(action.get("payload"), dict):
+                for key in action["payload"]:
+                    assert _IDENTIFIER_RE.match(key), key
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(flow_json)
 
 
 def _screen_children(flow_json: dict, index: int = 0) -> list[dict]:
@@ -397,3 +432,115 @@ def test_flow_data_per_send_options_on_a_non_string_field_raise_naming_it():
     schema = {"type": "object", "properties": {"agree": {"type": "boolean"}}}
     with pytest.raises(ChannelInputError, match="agree"):
         build_flow_data(schema, {}, {"agree": [{"value": "x"}]})
+
+
+# -- component_names: the identifier-safe naming rule --------------------------
+
+
+def test_component_names_keeps_an_already_safe_key_verbatim():
+    assert component_names({"note": {}, "qty_2": {}, "_x": {}}) == {"note": "note", "qty_2": "qty_2", "_x": "_x"}
+
+
+def test_component_names_replaces_every_forbidden_character_with_underscore():
+    # Every character outside [A-Za-z0-9_] becomes '_'; letters/digits are kept.
+    assert component_names({"wamid.HBg=/status/4:language": {}}) == {
+        "wamid.HBg=/status/4:language": "wamid_HBg__status_4_language"
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        pytest.param("4score", "f_4score", id="leading-digit"),
+        pytest.param("2.0", "f_2_0", id="leading-digit-after-sanitise"),
+        pytest.param("=", "_", id="single-forbidden-becomes-underscore"),
+        pytest.param("", "f_", id="empty"),
+    ],
+)
+def test_component_names_prefixes_a_leading_digit_or_empty_result(key: str, expected: str):
+    assert component_names({key: {}}) == {key: expected}
+
+
+def test_component_names_disambiguates_collisions_in_schema_order():
+    # Three distinct keys reduce to the same base 'a_b'; the first keeps it, the rest
+    # take deterministic _2, _3 suffixes in schema order.
+    mapping = component_names({"a.b": {}, "a_b": {}, "a/b": {}})
+    assert mapping == {"a.b": "a_b", "a_b": "a_b_2", "a/b": "a_b_3"}
+
+
+def test_component_names_never_emits_the_reserved_flow_token():
+    # A key sanitising to 'flow_token' is disambiguated away from Meta's reserved key.
+    assert component_names({"flow.token": {}}) == {"flow.token": "flow_token_2"}
+
+
+# -- odd property names ride only identifier-safe wire names -------------------
+
+_ODD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "wamid.HBg=/status/4:language": {"type": "string", "title": "Language"},
+        "a.b=/c/4:d": {"type": "integer", "title": "Count"},
+        "a.b": {"type": "string", "title": "First"},
+        "a_b": {"type": "boolean", "title": "Second"},
+    },
+    "required": ["wamid.HBg=/status/4:language"],
+}
+
+
+def test_odd_named_schema_round_trips_to_identifier_safe_component_names():
+    mapping = component_names(_ODD_SCHEMA["properties"])
+    assert mapping == {
+        "wamid.HBg=/status/4:language": "wamid_HBg__status_4_language",
+        "a.b=/c/4:d": "a_b__c_4_d",
+        "a.b": "a_b",
+        "a_b": "a_b_2",
+    }
+    # The component name a colliding pair shares is disambiguated, never duplicated.
+    assert len(set(mapping.values())) == len(mapping)
+
+
+def test_odd_named_flow_carries_only_identifier_safe_names_everywhere():
+    # Every name, data key, reference and payload key in the emitted Flow is identifier-safe,
+    # and no raw odd property key leaks into a wire name (labels aside, checked below).
+    flow_json, _ = build_form_flow(_ODD_SCHEMA)
+    _assert_only_identifier_safe_wire_names(flow_json)
+
+    blob = json.dumps(flow_json)
+    for raw_key in _ODD_SCHEMA["properties"]:
+        if _IDENTIFIER_RE.match(raw_key):
+            continue  # an already-safe key legitimately appears verbatim as its component name
+        # A key carrying forbidden characters appears ONLY as a label value (its title
+        # here), never as a component name, data key or reference.
+        assert f'"name": "{raw_key}"' not in blob
+        assert f"${{data.{raw_key}" not in blob
+        assert f"${{screen.{raw_key}" not in blob
+
+    # The labels still carry the human-facing titles verbatim.
+    controls = _controls(flow_json)
+    assert [c["label"] for c in controls] == ["Language", "Count", "First", "Second"]
+
+
+def test_odd_named_multi_page_flow_carries_only_identifier_safe_names():
+    pages = [
+        {"title": "One", "fields": ["wamid.HBg=/status/4:language", "a.b=/c/4:d"]},
+        {"title": "Two", "fields": ["a.b", "a_b"]},
+    ]
+    flow_json, _ = build_form_flow(_ODD_SCHEMA, pages)
+    _assert_only_identifier_safe_wire_names(flow_json)
+
+
+def test_odd_named_flow_data_keys_match_the_flow_component_names():
+    # build_flow_data emits the SAME identifier-safe data keys the published Flow declares.
+    flow_json, _ = build_form_flow(_ODD_SCHEMA)
+    data = build_flow_data(_ODD_SCHEMA, {"a.b=/c/4:d": 3, "a.b": "hi", "a_b": True}, {})
+
+    declared_keys: set[str] = set()
+    for screen in flow_json["screens"]:
+        declared_keys.update(screen.get("data", {}).keys())
+
+    assert set(data) <= declared_keys
+    mapping = component_names(_ODD_SCHEMA["properties"])
+    # The prefilled value rides under the odd field's component-named __init key.
+    assert data[f"{mapping['a.b=/c/4:d']}__init"] == "3"
+    assert data[f"{mapping['a.b']}__init"] == "hi"
+    assert data[f"{mapping['a_b']}__init"] is True

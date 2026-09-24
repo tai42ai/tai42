@@ -215,6 +215,32 @@ async def test_non_form_pending_has_no_form_inputs(fake_redis: FakeRedis):
 
     assert peeked is not None
     assert (peeked.form_pages, peeked.form_values, peeked.form_options) == (None, None, None)
+    assert peeked.form_names is None
+
+
+async def test_form_pending_round_trips_the_component_name_map(fake_redis: FakeRedis):
+    # The component-name reverse map (component name → schema key) rides the record so the
+    # inbound decode reads it; the codec round-trips it, and a counted rejection preserves it.
+    names = {"wamid_HBg__status_4_language": "wamid.HBg=/status/4:language", "a_b__c_4_d": "a.b=/c/4:d"}
+    await reserve_pending(
+        _PNID,
+        _WA,
+        _CALLBACK,
+        _deadline(600),
+        interaction_id="int-9",
+        schema={"type": "object"},
+        question="Q?",
+        form_names=names,
+    )
+
+    peeked = await peek_pending(_PNID, _WA)
+    assert peeked is not None
+    assert peeked.form_names == names
+
+    await bump_rejections(_PNID, _WA, peeked)
+    after = await peek_pending(_PNID, _WA)
+    assert after is not None
+    assert after.form_names == names
 
 
 # -- bump_rejections: the in-place counter on the still-held record --------------
