@@ -596,8 +596,10 @@ async def test_pg_create_proves_connection_then_opens_pool_and_close(monkeypatch
             self.opened = False
             self.closed = False
 
-        async def open(self):
+        async def open(self, *, wait=False, timeout=None):
             self.opened = True
+            self.open_wait = wait
+            self.open_timeout = timeout
 
         async def close(self):
             self.closed = True
@@ -614,6 +616,10 @@ async def test_pg_create_proves_connection_then_opens_pool_and_close(monkeypatch
     assert captured["open"] is False  # opened explicitly after construction
     assert captured["check"] is _FakePool.check_connection  # liveness check on checkout
     assert pool.opened is True
+    # The initial fill is awaited here (wait=True) so a one-shot command can exit,
+    # bounded by the DSN-derived budget (this DSN sets no connect_timeout → 30.0).
+    assert pool.open_wait is True
+    assert pool.open_timeout == pg_mod._open_timeout("postgresql://u@h/db", 3)
     await pg_mod.PostgresClient()._close(pool)
     assert pool.closed is True
 

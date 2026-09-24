@@ -1,6 +1,7 @@
 """Pooled Postgres client built on ``psycopg_pool.AsyncConnectionPool``."""
 
 from psycopg import AsyncConnection
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import TupleRow
 from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
@@ -20,6 +21,30 @@ _Pool = AsyncConnectionPool[AsyncConnection[TupleRow]]
 # ``PostgresConnectionSettings.client_kwargs``. Anything else is rejected so it
 # can't silently split the pool key.
 _ALLOWED_KWARGS = frozenset({"dsn", "min_size", "max_size"})
+
+# Fallback budget for filling ``min_size`` connections when the DSN sets no
+# ``connect_timeout`` of its own.
+_DEFAULT_OPEN_TIMEOUT = 30.0
+
+
+def _open_timeout(dsn: str, min_size: int) -> float:
+    """Seconds allowed for the initial ``min_size`` fill.
+
+    Derived from the DSN's own ``connect_timeout`` so a deployment tunes ONE
+    knob rather than two, budgeting that per connection in the fill. A DSN that
+    sets none, or sets something unparseable, falls back to the fixed default.
+    """
+    try:
+        raw = conninfo_to_dict(dsn).get("connect_timeout")
+    except Exception:  # a malformed DSN fails loudly at connect, not here
+        raw = None
+    if raw in (None, ""):
+        return _DEFAULT_OPEN_TIMEOUT
+    try:
+        per_connection = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DEFAULT_OPEN_TIMEOUT
+    return per_connection * max(min_size, 1)
 
 
 class PostgresClient(PooledClient[_Pool]):
@@ -50,9 +75,10 @@ class PostgresClient(PooledClient[_Pool]):
         async with await AsyncConnection.connect(dsn):
             pass
 
+        min_size = kwargs.get("min_size", 2)
         pool = AsyncConnectionPool(
             conninfo=dsn,
-            min_size=kwargs.get("min_size", 2),
+            min_size=min_size,
             max_size=kwargs.get("max_size", 10),
             open=False,
             connection_class=AsyncConnection,
@@ -64,7 +90,21 @@ class PostgresClient(PooledClient[_Pool]):
             # restart.
             check=AsyncConnectionPool.check_connection,
         )
-        await pool.open()
+        # ``wait=True`` so the initial fill finishes HERE. Opened non-blocking, the
+        # fill runs in background workers that outlive the caller: at loop shutdown
+        # they are cancelled mid-connect, psycopg_pool logs the cancellation as
+        # ``error connecting in 'pool-N': `` (an empty cause, since
+        # ``CancelledError`` has no message), and process exit wedges — a one-shot
+        # command such as ``tai db migrate`` applies its migrations and then never
+        # returns. The probe above still owns first-connection diagnostics: this
+        # wait raises ``PoolTimeout``, never the underlying driver error.
+        try:
+            await pool.open(wait=True, timeout=_open_timeout(dsn, min_size))
+        except BaseException:
+            # BaseException, not Exception: a cancelled ``open`` would otherwise
+            # leak the very pool whose lifetime this guard exists to bound.
+            await pool.close()
+            raise
         return pool
 
     async def _close(self, client: _Pool):
