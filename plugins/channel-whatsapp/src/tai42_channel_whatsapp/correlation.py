@@ -85,14 +85,14 @@ class PendingQuestion:
     form_pages: list[dict[str, Any]] | None = None
     form_values: dict[str, Any] | None = None
     form_options: dict[str, list[dict[str, Any]]] | None = None
+    # Door-400 rejections already recovered by re-sending a fresh Flow. Bounds the
+    # re-send loop (see the inbound handler's cap); starts at 0.
+    rejections: int = 0
     # A form ask also carries the reverse of its schema-key → component-name map — each
     # identifier-safe Flow component name back to its original schema key — so the inbound
     # nfm_reply decode (keyed by component names, as Meta relays them) maps every answer
     # key back to the schema key before coercion; all None for a non-form ask.
     form_names: dict[str, str] | None = None
-    # Door-400 rejections already recovered by re-sending a fresh Flow. Bounds the
-    # re-send loop (see the inbound handler's cap); starts at 0.
-    rejections: int = 0
 
 
 def correlation_key(phone_number_id: str, wa_id: str) -> str:
