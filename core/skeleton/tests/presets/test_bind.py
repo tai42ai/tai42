@@ -152,10 +152,26 @@ def _optional_str_sink() -> Tool:
     return Tool.from_function(sink, name="sink")
 
 
+def _str_or_any_sink() -> Tool:
+    def sink(token: str | Any = None) -> dict:
+        """Echo the masked token and whether it stayed a secret (a ``str | Any`` parameter)."""
+        return {"masked": mask_secrets({"token": token}), "is_secret": isinstance(token, SecretValue)}
+
+    return Tool.from_function(sink, name="sink")
+
+
 def _dict_payload_sink() -> Tool:
     def sink(payload: dict) -> dict:
         """Echo the masked payload and whether its nested leaf stayed a secret."""
         return {"masked": mask_secrets(payload), "is_secret": isinstance(payload.get("token"), SecretValue)}
+
+    return Tool.from_function(sink, name="sink")
+
+
+def _typed_dict_payload_sink() -> Tool:
+    def sink(payload: dict[str, str]) -> dict:
+        """Echo the nested leaf it received and its runtime type (a ``dict[str, str]``)."""
+        return {"token": payload.get("token"), "type": type(payload.get("token")).__name__}
 
     return Tool.from_function(sink, name="sink")
 
@@ -707,10 +723,25 @@ async def test_secret_reference_reveals_for_an_optional_str_param(monkeypatch: p
     assert out.structured_content == {"token": "s3cr3t", "type": "str"}
 
 
-async def test_secret_reference_stays_wrapped_nested_in_a_dict_param(monkeypatch: pytest.MonkeyPatch):
-    # A reference NESTED inside a permissive ``dict`` parameter stays wrapped: a container
-    # parameter validates its leaves loosely, so the SecretValue reaches the tool intact
-    # and is masked wherever the run is recorded.
+async def test_secret_reference_stays_wrapped_for_a_typed_or_permissive_union_param(monkeypatch: pytest.MonkeyPatch):
+    # A ``str | Any`` parameter carries a permissive branch that ACCEPTS the wrapper at
+    # validation, so revealing it is unnecessary and would strip the mask: the reference
+    # stays wrapped and is masked wherever the run is recorded.
+    monkeypatch.setenv("PRESET_UNION_TOKEN", "s3cr3t")
+    tool = await preset_bind(
+        _app(_str_or_any_sink()),
+        "sink",
+        {"token": "!ENV ${PRESET_UNION_TOKEN}"},
+        name="p",
+    )
+    out = await tool.run({})
+    assert out.structured_content == {"masked": {"token": "[secret]"}, "is_secret": True}
+
+
+async def test_secret_reference_stays_wrapped_nested_in_a_permissive_dict_param(monkeypatch: pytest.MonkeyPatch):
+    # A reference NESTED inside a permissive ``dict`` parameter stays wrapped: the container
+    # types its values permissively, so the SecretValue reaches the tool intact and is
+    # masked wherever the run is recorded.
     monkeypatch.setenv("PRESET_NESTED_TOKEN", "s3cr3t")
     tool = await preset_bind(
         _app(_dict_payload_sink()),
@@ -720,6 +751,21 @@ async def test_secret_reference_stays_wrapped_nested_in_a_dict_param(monkeypatch
     )
     out = await tool.run({})
     assert out.structured_content == {"masked": {"token": "[secret]"}, "is_secret": True}
+
+
+async def test_secret_reference_reveals_nested_in_a_typed_dict_param(monkeypatch: pytest.MonkeyPatch):
+    # A reference NESTED inside a TYPED ``dict[str, str]`` parameter: pydantic validates
+    # each value as a ``str`` and rejects the wrapper, so the schema-guided walk reveals the
+    # nested leaf to its plain string before it reaches the tool body.
+    monkeypatch.setenv("PRESET_TYPED_NESTED_TOKEN", "s3cr3t")
+    tool = await preset_bind(
+        _app(_typed_dict_payload_sink()),
+        "sink",
+        {"payload": {"token": "!ENV ${PRESET_TYPED_NESTED_TOKEN}"}},
+        name="p",
+    )
+    out = await tool.run({})
+    assert out.structured_content == {"token": "s3cr3t", "type": "str"}
 
 
 async def test_input_schema_absolute_constant_kwarg_carries_a_secret(monkeypatch: pytest.MonkeyPatch):
