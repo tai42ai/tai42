@@ -5,7 +5,8 @@ one-shot command finishes the ``min_size`` fill before it returns, and wraps the
 ``except BaseException: close``. A fill that misses ``min_size`` in time (``PoolTimeout``) and a
 cancelled open (``CancelledError``, a ``BaseException``) both close the pool and re-raise, so no
 half-open pool is ever handed out. ``_open_timeout`` budgets the DSN's own ``connect_timeout``
-across the fill, falling back to a fixed default when the DSN sets none or something unparseable.
+across the fill, falling back to a fixed default when the DSN sets none, something unparseable,
+or a non-positive value.
 Hermetic: the probe connect and the pool are fakes, no real Postgres.
 """
 
@@ -116,6 +117,15 @@ def test_open_timeout_treats_min_size_zero_as_one():
 
 def test_open_timeout_reads_keyword_value_dsn_form():
     assert pg_mod._open_timeout("host=h connect_timeout=5", 4) == 20.0
+
+
+def test_open_timeout_falls_back_when_connect_timeout_is_zero():
+    # libpq reads 0 as "no timeout"; the fill budget stays finite via the default.
+    assert pg_mod._open_timeout("postgresql://u@h/db?connect_timeout=0", 3) == pg_mod._DEFAULT_OPEN_TIMEOUT
+
+
+def test_open_timeout_falls_back_on_negative_connect_timeout():
+    assert pg_mod._open_timeout("postgresql://u@h/db?connect_timeout=-5", 3) == pg_mod._DEFAULT_OPEN_TIMEOUT
 
 
 def test_open_timeout_falls_back_on_unparseable_connect_timeout():
