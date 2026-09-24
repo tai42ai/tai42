@@ -64,6 +64,13 @@ def is_free(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
+def listening_pids(port: int) -> list[int]:
+    """Best-effort pids holding a LISTEN socket on the loopback ``port`` — used by the
+    boot engine to confirm a stack's own process owns the port it was allocated. Empty
+    when no tool can attribute it (never a false claim of ownership)."""
+    return _pids_listening(port)
+
+
 def _pids_listening(port: int) -> list[int]:
     """Best-effort pids listening on ``port``, so a loud refusal can name the
     orphan holding it. Tries ``lsof`` then ``ss``; an absent tool or a parse miss

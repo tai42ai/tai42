@@ -21,6 +21,8 @@ config/resource/infra descriptions live in :mod:`~tai42_e2e.topology`."""
 from __future__ import annotations
 
 import contextlib
+import logging
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
     from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.tcprelay import TcpRelay
     from tai42_e2e.variants import BusWorker
+
+logger = logging.getLogger(__name__)
 
 
 class TaiStack:
@@ -134,12 +138,181 @@ class TaiStack:
         self.metrics_dir = str(Path(family_dirs[0]) / "tai42_prometheus")
 
         spawning.spawn_all(self, manifest_path, family_dirs)
+        self._ensure_own_ports()
         readiness.wait_ready(self)
         # Only after the fleet is ready: a supervised stack now respawns any serve/backend
         # process that self-exits (a recycle). Before readiness, an early exit is a boot
         # failure surfaced by ``_early_exit_detail``, never a recycle — so the supervisor
         # must not start until boot has converged.
         self._start_supervisor()
+
+    # ---- port-ownership heal ---------------------------------------------
+
+    # How many fresh ports one process may be handed before its bind is declared a
+    # genuine failure rather than an ephemeral-port collision.
+    _PORT_OWNERSHIP_ATTEMPTS = 6
+
+    def _ensure_own_ports(self) -> None:
+        """Confirm every port-binding process listens on the port THIS stack allocated it, healing a collision.
+
+        The allocator probes a free ephemeral port then closes the socket before the
+        child binds it, so a foreign process on the shared host can seize that port in the
+        gap; the child then fails to bind (``EADDRINUSE``) and exits. A busless stack's
+        HTTP-only readiness would pass against the foreign listener and the test would talk
+        to the wrong server. For each spawned process that binds a port — the serve fleet,
+        the embed host, the metrics server alike — wait until the port is held by this
+        process's own session; on the child's bind-failure exit, or a foreign pid holding
+        the port, re-allocate a fresh port and respawn, and after the attempts are spent
+        raise loudly naming the port and the foreign holder. Runs at the one boot seam, so
+        every stack shape is covered without a per-stack copy.
+        """
+        for name in [n for n in list(self._procs) if self._ports_for(n)]:
+            self._heal_process_port(name)
+
+    def _heal_process_port(self, name: str) -> None:
+        for _ in range(self._PORT_OWNERSHIP_ATTEMPTS):
+            port = self._ports_for(name)[0]
+            if self._await_port_binding(name, port) != "collision":
+                # "owned": the process holds its own port. "released": the child exited for
+                # its OWN reason (not a bind collision) — leave it untouched so readiness
+                # surfaces the child's failure unchanged; NEVER respawn a child that died on
+                # its own, and log no heal warning.
+                return
+            logger.warning(
+                "stack %r: process %r did not own its port %d (foreign pid(s) %s) — re-allocating and respawning",
+                self.config.name,
+                name,
+                port,
+                self._foreign_holder_text(port),
+            )
+            self._reallocate_and_respawn(name, port)
+        port = self._ports_for(name)[0]
+        raise RuntimeError(
+            f"stack {self.config.name!r}: process {name!r} could not bind an owned port after "
+            f"{self._PORT_OWNERSHIP_ATTEMPTS} re-allocations — port {port} held by foreign pid(s) "
+            f"{self._foreign_holder_text(port)}"
+        )
+
+    @staticmethod
+    def _foreign_holder_text(port: int) -> str:
+        """The pid(s) holding ``port`` as a plain, comma-joined string for a loud error, or
+        ``unknown`` when no diagnostic tool could attribute the listener."""
+        pids = ports.listening_pids(port)
+        return ", ".join(str(pid) for pid in pids) if pids else "unknown"
+
+    def _await_port_binding(self, name: str, port: int) -> str:
+        """Decide the port's fate, distinguishing a bind COLLISION (the heal's to fix) from
+        the child's own early exit (readiness's to surface):
+
+        - ``"owned"`` — a listener in this process's session holds the port.
+        - ``"collision"`` — a FOREIGN pid holds the port, or the child exited having logged
+          the bind error (``EADDRINUSE``); re-allocate and respawn.
+        - ``"released"`` — the child exited for its OWN reason with no foreign listener on
+          the port (a bad manifest, a missing secret); leave it so readiness raises the
+          child's failure unchanged.
+
+        A process that never begins listening within the boot timeout is a genuine bind
+        hang and raises through :func:`wait_for`."""
+        handle = self._procs[name]
+
+        def decide() -> str | None:
+            # Cheap gate first: only reach for the (subprocess-priced) pid attribution once
+            # something is actually listening on the port.
+            if ports.is_free(port):
+                if handle.is_running():
+                    return None  # nothing bound yet; keep waiting
+                # Exited without ever binding: only a recorded bind failure (a foreign
+                # holder since gone) is the heal's; any other exit is the child's own.
+                return "collision" if self._exited_on_bind_error(handle) else "released"
+            pids = ports.listening_pids(port)
+            if pids:
+                return "owned" if self._pids_in_session(pids, handle.pid) else "collision"
+            # Bound but the diagnostic tools cannot attribute it: ours while our child is
+            # alive (a foreign holder would have failed our bind and exited it); a foreign
+            # holder once our child has exited.
+            return "owned" if handle.is_running() else "collision"
+
+        return wait_for(
+            decide,
+            deadline=self.infra.settings.boot_timeout,
+            message=f"process {name!r} never began listening on port {port}",
+        )
+
+    @staticmethod
+    def _exited_on_bind_error(handle: ProcessHandle) -> bool:
+        """Whether an exited child's output shows it failed to BIND its port (``EADDRINUSE``)
+        — the only early exit the port heal owns; every other exit is the child's own boot
+        failure, which readiness surfaces unchanged."""
+        tail = handle.log_tail().lower()
+        return "address already in use" in tail or "[errno 98]" in tail
+
+    @staticmethod
+    def _pids_in_session(pids: list[int], leader_pid: int) -> bool:
+        """Whether every listener pid belongs to ``leader_pid``'s session — the spawned
+        master is a session leader (``start_new_session=True``), so its sid equals its pid
+        and its uvicorn worker children inherit that session. A pid that vanished mid-check
+        is skipped; confirming none is not ownership."""
+        confirmed = False
+        for pid in pids:
+            try:
+                if os.getsid(pid) != leader_pid:
+                    return False
+            except (ProcessLookupError, PermissionError):
+                continue
+            confirmed = True
+        return confirmed
+
+    def _reallocate_and_respawn(self, name: str, old_port: int) -> None:
+        """Reap the child, drop the lost port, allocate a fresh one, rewrite the spec's
+        ``--port``, refresh every port-derived env value, and respawn under the same name."""
+        self._procs[name].terminate()
+        if old_port in self._allocated_ports:
+            self._allocated_ports.remove(old_port)
+        # The lost port is held by a foreign process, so do NOT assert it frees.
+        ports.release_port(old_port)
+        new_port = ports.allocate_port()
+        self._allocated_ports.append(new_port)
+        self._set_port(name, new_port)
+        argv = self._specs[name].argv
+        for i in range(len(argv) - 1):
+            if argv[i] == "--port":
+                argv[i + 1] = str(new_port)
+                break
+        # The port-derived env (origin allowlist, own-origin, replica-B origin — see
+        # ``child_env.dynamic_env``) was baked from the OLD port into every spec and the
+        # rendered ``.env`` the reload path reads. Re-derive it now so neither this process
+        # nor any already-running sibling that inherited a port-derived value advertises or
+        # allows the seized port; the freshly-terminated target then respawns with it.
+        self._refresh_port_derived_env(target=name)
+        spawning.spawn(self, self._specs[name])
+
+    def _refresh_port_derived_env(self, *, target: str) -> None:
+        """Re-derive the port-keyed env into every spec and the ``.env``, respawning each
+        RUNNING process whose port-derived values changed.
+
+        One seam over ``child_env.dynamic_env`` (no per-profile branch): bus keys do not
+        depend on a port so they never trigger a respawn; only a profile that carries a
+        port-derived origin (all-ports allowlist, own-origin, replica-B origin) has a
+        process to refresh. The ``target`` was reaped by the caller and is respawned by it
+        with the updated spec, so it is not respawned here even if still winding down.
+        """
+        fresh = child_env.dynamic_env(self)
+        child_env.render_env_file(self)
+        for pname, spec in list(self._specs.items()):
+            if all(spec.env.get(key) == value for key, value in fresh.items()):
+                continue
+            spec.env.update(fresh)
+            if pname != target and self._procs[pname].is_running():
+                self._procs[pname].terminate()
+                spawning.spawn(self, spec)
+
+    def _set_port(self, name: str, new_port: int) -> None:
+        """Point the stack's port record for ``name`` at ``new_port`` (mirrors :meth:`_ports_for`)."""
+        if name == "metrics":
+            self.metrics_port = new_port
+            return
+        idx = 0 if name in ("serve", "serve-a", "embed") else 1
+        self.app_ports[idx] = new_port
 
     def teardown(self) -> None:
         if getattr(self, "_torn_down", False):

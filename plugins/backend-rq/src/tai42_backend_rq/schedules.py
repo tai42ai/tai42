@@ -9,7 +9,7 @@ string into the job ``meta`` for read-back.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
@@ -88,6 +88,15 @@ async def apply_normalized_schedule(
     or cron string is mirrored into the job ``meta`` for read-back. Any other
     ``__type__`` raises. The scheduler calls are blocking, so they run off the
     event loop.
+
+    An interval schedule's FIRST run is one interval out, not at creation: an
+    interval fires on its cadence, never the instant it is registered. Firing at
+    creation would enqueue-and-reschedule the job immediately, and that reschedule
+    (its zset re-add) races a delete issued right after creation, resurrecting a
+    schedule the caller just removed. Deferring the first run by one interval
+    means a freshly registered schedule holds a stable, unfired zset entry that a
+    delete removes cleanly. A crontab schedule is already anchored to its next
+    matching wall-clock time, so it never fires at creation.
     """
     meta_data: dict[str, Any] = {}
 
@@ -97,7 +106,7 @@ async def apply_normalized_schedule(
 
         await asyncio.to_thread(
             lambda: scheduler.schedule(
-                scheduled_time=datetime.now(UTC),
+                scheduled_time=datetime.now(UTC) + timedelta(seconds=interval_val),
                 func=func,
                 args=args,
                 kwargs=kwargs,
