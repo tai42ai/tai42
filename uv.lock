@@ -5416,7 +5416,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "5.0.3"
+version = "6.0.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -6028,7 +6028,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "19.0.2"
+version = "20.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
