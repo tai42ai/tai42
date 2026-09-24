@@ -8,7 +8,6 @@ fan-out.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 
@@ -22,9 +21,62 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 
 logger = logging.getLogger(__name__)
 
-# Client-safe reply when an answer splits into more provider messages than the fan-out cap
-# allows; the whole answer is refused rather than fanned out or silently truncated.
-_OVERSIZED_ANSWER_TEXT = "Sorry, the answer was too long to send here. Please ask for a shorter response."
+
+async def _notify_refusal(store: ConversationRecordStore, record: ConversationRecord, channel: Channel) -> None:
+    """Tell the participant the uniform could-not-deliver notice after a reachable channel refused a reply.
+
+    A terminal, non-transport refusal on a reachable channel (an oversized answer, an unrenderable
+    part, or a permanent input refusal) has already failed the record; the participant is then sent
+    the SAME uniform client-safe notice the failed park-completion path delivers, through the same
+    channel, resolved via the route's ``error_reply_text`` when it carries one (any route-lookup
+    fault falls back to the built-in text). The send is best-effort and loud: it is bounded by
+    ``delivery_send_timeout_seconds`` like every channel send, is never retried, and never touches
+    the record's state; ANY failure of it is logged at ERROR here, because the record is already
+    terminally ``failed`` and there is no second delivery machine for the notice.
+
+    A reply to a participant's turn earns the notice — a client turn and a park-completion resumed
+    reply alike (both are answers the participant awaits). Only an operator's hand-injected send
+    (``operator_send``) is skipped: it answers nothing the participant asked and the uniform text
+    speaks of "your message", so its refusal fails loudly with the admin failed-delivery listing as
+    the signal, exactly as a transport exhaustion's is.
+    """
+    if record.operator_send:
+        return
+
+    from tai42_skeleton.conversations import cache
+    from tai42_skeleton.conversations.turn.outcome import _error_answer_text
+
+    try:
+        route = await cache.get_conversations_manager().get_route(record.route_name)
+    except Exception:
+        # The route only enriches the notice text (its ``error_reply_text``); a manager/store
+        # fault must not block the participant-facing notice, so it falls back to the built-in
+        # uniform text — logged loudly, never silent.
+        logger.error(
+            "conversations: could not resolve route %r to enrich the could-not-deliver notice for record %s; "
+            "falling back to the built-in uniform text",
+            record.route_name,
+            record.message_id,
+            exc_info=True,
+        )
+        route = None
+    try:
+        async with asyncio.timeout(store.settings.delivery_send_timeout_seconds):
+            await channel.notify(
+                ChannelNotification(
+                    message=_error_answer_text(route),
+                    recipient=record.client_address,
+                    sender_identity=record.our_identity,
+                )
+            )
+    except Exception:
+        logger.error(
+            "conversations: could not deliver the client-safe could-not-deliver notice for record %s on channel "
+            "%r; the record stays failed and the notice is not retried",
+            record.message_id,
+            record.channel,
+            exc_info=True,
+        )
 
 
 def _validate_ledger_parts(parts: list[AnswerPart], sent_by_part: dict[int, int], seen_parts: set[int]) -> None:
@@ -213,7 +265,7 @@ async def _admit_channel_send(
     """
     missing = _unsupported_rich_capability(channel, parts)
     if missing is not None:
-        await _refuse_unrenderable_parts(store, record, missing, attempts, token)
+        await _refuse_unrenderable_parts(store, record, channel, missing, attempts, token)
         return True
     # The cap counts the chunks of EVERY part (each part is chunked independently — its
     # boundaries are message boundaries), so the whole ordered answer is bounded by one knob.
@@ -287,6 +339,7 @@ async def _fail_partial_send(
     store: ConversationRecordStore,
     ledger: ChannelSendLedger,
     record: ConversationRecord,
+    channel: Channel,
     channel_name: str,
     accepted_chunks: int,
     total_chunks: int,
@@ -294,12 +347,20 @@ async def _fail_partial_send(
     token: str,
     *,
     input_refusal: bool,
+    notify: bool,
 ) -> None:
-    """Mark a mid-sequence send terminal ``failed`` and clear the ledger under this worker's write.
+    """Mark a mid-sequence send terminal ``failed`` at once and clear the ledger under this worker's write.
 
-    The medium offers no idempotency key, so a retry would re-send accepted chunks. The ledger is
-    cleared ONLY under this worker's own terminal write (a foreign takeover owns the ledger it
-    resumes from). Logs a delivery refusal or a permanent input-shape refusal.
+    The medium offers no idempotency key, so a retry would re-send accepted chunks. The record is
+    failed on the FIRST refusal (a non-retryable fault never spends the ``delivery_max_attempts``
+    budget), and the ledger is cleared ONLY under this worker's own terminal write (a foreign
+    takeover owns the ledger it resumes from). ``input_refusal`` selects the log wording (a
+    permanent input-shape refusal vs a delivery failure); ``notify`` — set for a permanent input
+    refusal and a NON-retryable delivery refusal, both the channel rejecting a reachable
+    participant's reply — sends them the uniform could-not-deliver notice, but only when THIS
+    worker's write terminalised the record (a foreign takeover owns it and delivers it itself).
+    A retryable (transport) delivery failure fails the record without a notice: the participant
+    could not be reached, so the admin failed-delivery listing is the signal.
     """
     failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
     if failed == 1:
@@ -325,6 +386,8 @@ async def _fail_partial_send(
             failed,
             exc_info=True,
         )
+    if notify and failed == 1:
+        await _notify_refusal(store, record, channel)
 
 
 async def _run_channel_send_loop(
@@ -397,14 +460,37 @@ async def _run_channel_send_loop(
             await store.index_outbound(channel_name, accepted, record.message_id)
             outbound_ids.extend(accepted)
             accepted_chunks += 1
-    except ChannelDeliveryError:
+    except ChannelDeliveryError as exc:
+        # A NON-retryable delivery refusal (a vendor validation rejection, a hard 4xx, a bad
+        # recipient) is the channel refusing a reachable participant's reply, so it earns the
+        # notice; a retryable one is transport and does not.
         await _fail_partial_send(
-            store, ledger, record, channel_name, accepted_chunks, total_chunks, attempts, token, input_refusal=False
+            store,
+            ledger,
+            record,
+            channel,
+            channel_name,
+            accepted_chunks,
+            total_chunks,
+            attempts,
+            token,
+            input_refusal=False,
+            notify=not exc.retryable,
         )
         return False
     except ChannelInputError:
         await _fail_partial_send(
-            store, ledger, record, channel_name, accepted_chunks, total_chunks, attempts, token, input_refusal=True
+            store,
+            ledger,
+            record,
+            channel,
+            channel_name,
+            accepted_chunks,
+            total_chunks,
+            attempts,
+            token,
+            input_refusal=True,
+            notify=True,
         )
         return False
     return True
@@ -476,40 +562,41 @@ async def _refuse_oversized_answer(
     attempts: int,
     token: str,
 ) -> None:
-    """Refuse an answer past the fan-out cap: send ONE client-safe reply and fail the record loudly.
+    """Refuse an answer past the fan-out cap: fail the record loudly, then notify the participant.
 
-    A best-effort provider refusal is suppressed — the record still fails.
+    The whole answer is refused rather than fanned out or truncated. When THIS worker's write
+    terminalises the record, the reachable participant is told the uniform could-not-deliver notice
+    through the same channel; a foreign takeover owns the record, so this worker sends no notice.
     """
     settings = store.settings
     logger.error(
         "conversations: record %s answer splits into %d chunk(s), over the max_outbound_chunks cap of %d on "
-        "channel %r; refusing with a client-safe reply and failing the record",
+        "channel %r; failing the record and notifying the participant",
         record.message_id,
         chunk_count,
         settings.max_outbound_chunks,
         record.channel,
     )
-    with contextlib.suppress(ChannelDeliveryError, TimeoutError):
-        async with asyncio.timeout(settings.delivery_send_timeout_seconds):
-            await channel.notify(
-                ChannelNotification(
-                    message=_OVERSIZED_ANSWER_TEXT,
-                    recipient=record.client_address,
-                    sender_identity=record.our_identity,
-                )
-            )
-    await store.mark_failed(record.message_id, attempts, time.time(), token)
+    failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+    if failed == 1:
+        await _notify_refusal(store, record, channel)
 
 
 async def _refuse_unrenderable_parts(
-    store: ConversationRecordStore, record: ConversationRecord, missing: str, attempts: int, token: str
+    store: ConversationRecordStore,
+    record: ConversationRecord,
+    channel: Channel,
+    missing: str,
+    attempts: int,
+    token: str,
 ) -> None:
-    """Fail a record whose parts need a richer-send capability the channel does not advertise.
+    """Fail a record whose parts need a richer-send capability the channel does not advertise, then notify.
 
     Covers a media/template/options/schema part routed to a text-only channel: the record fails
-    loudly and terminally so it is never re-driven, and no half-rendered send goes out. No
-    client-safe reply is sent — the missing capability is an operator's business, not a
-    participant-facing size hint.
+    loudly and terminally so it is never re-driven, and no half-rendered send goes out. The channel
+    is reachable but refused this reply's shape, so — when THIS worker's write terminalises the
+    record — the participant is told the uniform could-not-deliver notice through the same channel;
+    the missing capability itself stays an operator signal in the log.
     """
     logger.error(
         "conversations: record %s carries a part needing %s, which channel %r does not advertise support for; "
@@ -518,4 +605,6 @@ async def _refuse_unrenderable_parts(
         missing,
         record.channel,
     )
-    await store.mark_failed(record.message_id, attempts, time.time(), token)
+    failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+    if failed == 1:
+        await _notify_refusal(store, record, channel)
