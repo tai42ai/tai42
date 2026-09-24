@@ -18,6 +18,7 @@ import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import fakeredis
 import pytest
@@ -152,7 +153,7 @@ async def _register_bare_presence(
 ) -> None:
     """Write a presence key with no live subscriber behind it (models a worker that
     is counted by the census but will not reply)."""
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
     now = "2026-01-01T00:00:00+00:00"
     value = json.dumps(
         {"kind": kind.value, "pid": 4, "generation": 1, "joined_at": now, "beat_at": now, "state": state.value}
@@ -161,6 +162,9 @@ async def _register_bare_presence(
         await client.set(settings.presence_key(name), value)
     else:
         await client.set(settings.presence_key(name), value, px=ttl_ms)
+    # The census reads names from the presence index, so a bare presence key is only
+    # counted once its name is a member — exactly as a live subscriber's atomic write registers it.
+    await client.sadd(settings.presence_index, name)
     await client.aclose()
 
 
@@ -205,3 +209,66 @@ class _RaisingPubsub:
 
     async def get_message(self, ignore_subscribe_messages: bool = True, timeout: float = 0.0) -> dict | None:
         raise RedisConnectionError("reply collection blip")
+
+
+class _RecordingPipeline:
+    """Wraps a real fakeredis pipeline and records every queued command name, so a test
+    can assert the presence write and its index SADD ride ONE pipeline."""
+
+    def __init__(self, inner: object) -> None:
+        self.inner = inner
+        self.commands: list[str] = []
+
+    def __getattr__(self, name: str) -> object:
+        real = getattr(self.inner, name)
+        if name == "execute":
+            return real
+        if callable(real):
+
+            def _record(*args: object, **kwargs: object) -> object:
+                self.commands.append(name)
+                return real(*args, **kwargs)
+
+            return _record
+        return real
+
+
+class _RecordingRedis:
+    """Wraps a fakeredis handle, recording every top-level attribute reached and every
+    pipeline opened — so a test can prove the census never touches ``scan_iter`` /
+    ``scan`` / ``keys`` and that the presence write queues one pipeline."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.touched: set[str] = set()
+        self.pipelines: list[_RecordingPipeline] = []
+
+    def pipeline(self, *args: object, **kwargs: object) -> _RecordingPipeline:
+        self.touched.add("pipeline")
+        rec = _RecordingPipeline(self.inner.pipeline(*args, **kwargs))
+        self.pipelines.append(rec)
+        return rec
+
+    def __getattr__(self, name: str) -> object:
+        self.touched.add(name)
+        return getattr(self.inner, name)
+
+
+@pytest.fixture
+def recording_bus_client(monkeypatch: pytest.MonkeyPatch, server: fakeredis.FakeServer) -> list[_RecordingRedis]:
+    """Route the bus's ``client_ctx`` to recording handles and hand the test the list of
+    handles opened, so it can assert which commands the census did and did not issue."""
+    clients: list[_RecordingRedis] = []
+
+    @asynccontextmanager
+    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs) -> AsyncIterator[_RecordingRedis]:
+        inner = aioredis.FakeRedis(server=server, decode_responses=True)
+        rec = _RecordingRedis(inner)
+        clients.append(rec)
+        try:
+            yield rec
+        finally:
+            await inner.aclose()
+
+    monkeypatch.setattr(bus_module, "client_ctx", fake_ctx)
+    return clients

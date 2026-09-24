@@ -28,6 +28,7 @@ from tai42_skeleton.app.bus.models import (
     _merge_terminal,
     presence_fresh,
 )
+from tai42_skeleton.utils.redis_typing import eval_script
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.bus.models import WorkerIdentity
@@ -39,6 +40,18 @@ logger = logging.getLogger(__name__)
 # ``monkeypatch.setattr`` on the ``tai42_skeleton.app.bus`` alias bites the pooled
 # connection opened here. Captured as this package instance's own object.
 _pkg = sys.modules["tai42_skeleton.app.bus"]
+
+# Self-heal a stale index member in ONE server-atomic step: SREM the name ONLY while its
+# presence key is absent. Slot names are reused by every re-mint, so between the census's
+# GET (which saw the key gone) and this prune a new worker can claim the same name and
+# write its key+member; re-checking EXISTS under the SREM keeps that live member in the
+# index. KEYS[1] the presence key, KEYS[2] the index, ARGV[1] the member name.
+_PRUNE_STALE_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return redis.call('SREM', KEYS[2], ARGV[1])
+end
+return 0
+"""
 
 
 class WorkerBusPublishMixin:
@@ -171,7 +184,7 @@ class WorkerBusPublishMixin:
         This census runs at publish time; ``expected_at_start`` re-admits what the
         caller's earlier op-start census saw — see :meth:`_carry_expected`.
         """
-        rows = await self._scan_workers(r)
+        rows = await self._indexed_workers(r)
         by_name = {row.name: row for row in rows}
         self_name = self.identity.name
         expected: dict[str, int | None] = {}
@@ -514,7 +527,7 @@ class WorkerBusPublishMixin:
         if self._local:
             return [self._local_row()]
         async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
-            return await self._scan_workers(conn)
+            return await self._indexed_workers(conn)
 
     async def expected_at_start(self) -> dict[str, int]:
         """The siblings owed a confirmation right now, as ``{name: generation}``.
@@ -561,32 +574,38 @@ class WorkerBusPublishMixin:
         if unknown:
             raise UnknownFleetTargetsError(f"worker bus: unknown fleet targets (not on the census): {unknown}")
 
-    async def _scan_workers(self, r: Any) -> list[WorkerRow]:
-        prefix = self._settings.presence_prefix
-        names: list[str] = []
-        keys: list[str] = []
-        async for key in r.scan_iter(match=self._settings.presence_pattern):
-            key_str = key.decode() if isinstance(key, bytes) else key
-            names.append(key_str[len(prefix) :])
-            keys.append(key_str)
-        if not keys:
+    async def _indexed_workers(self, r: Any) -> list[WorkerRow]:
+        index = self._settings.presence_index
+        members = await r.smembers(index)
+        names = sorted(m.decode() if isinstance(m, bytes) else m for m in members)
+        if not names:
             return []
-        # One round-trip for every scanned key: each key's GET and PTTL are queued
-        # ADJACENT in a single pipeline, so the remaining PTTL is captured ALONGSIDE the
-        # value (the freshness gate stays clock-independent, never a worker-stamped
-        # beat_at against our clock) without a sequential read per worker.
+        # One round-trip for every index member: each member's presence-key GET and PTTL
+        # are queued ADJACENT in a single pipeline, so the remaining PTTL is captured
+        # ALONGSIDE the value (the freshness gate stays clock-independent, never a
+        # worker-stamped beat_at against our clock) without a sequential read per worker.
+        keys = [self._settings.presence_key(name) for name in names]
         pipe = r.pipeline(transaction=False)
-        for key_str in keys:
-            pipe.get(key_str)
-            pipe.pttl(key_str)
+        for key in keys:
+            pipe.get(key)
+            pipe.pttl(key)
         outcomes = await pipe.execute()
         rows: list[WorkerRow] = []
+        stale: list[str] = []
         for i, name in enumerate(names):
             raw = outcomes[2 * i]
             if raw is None:
-                # Expired between the scan and the read — no longer live, skipped.
+                # In the index but its presence key is gone (TTL expired) — not live: drop
+                # it from this census and prune the index member so the set self-heals on
+                # read. The prune re-checks the key server-side, so a name re-minted live
+                # between the GET and here is not removed.
+                stale.append(name)
                 continue
             rows.append(self._row_from_presence(name, raw, outcomes[2 * i + 1]))
+        if stale:
+            logger.debug("worker bus: pruning stale presence-index members %s", stale)
+            for name in stale:
+                await eval_script(r, _PRUNE_STALE_LUA, 2, self._settings.presence_key(name), index, name)
         return rows
 
     @staticmethod

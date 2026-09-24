@@ -6,12 +6,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Any
 
 import fakeredis
 import pytest
 from fakeredis import aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from tai42_kit.clients.impl.redis import RedisClient
 
+import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import (
     FleetResult,
     LocalApplyResult,
@@ -61,6 +64,86 @@ async def test_census_lists_registered_workers(wire_bus_client: None) -> None:
         assert by_name[backend_id.name].generation == 1
     finally:
         await _stop(t1, t2)
+
+
+async def test_census_drops_and_prunes_a_member_whose_key_expired(wire_bus_client: None, server) -> None:
+    bus = make_bus()
+    settings = bus._settings
+    await _register_bare_presence(server, settings, "serve-1", WorkerKind.serve, ttl_ms=None)
+    await _register_bare_presence(server, settings, "serve-2", WorkerKind.serve, ttl_ms=None)
+    # serve-2's presence key fades (its TTL lapses) while its index member remains — the
+    # census must drop it from the rows AND self-heal the index by removing the member.
+    await _drop_presence(server, settings, "serve-2")
+
+    rows = await bus.census()
+    assert {row.name for row in rows} == {"serve-1"}
+
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    members = await client.smembers(settings.presence_index)
+    await client.aclose()
+    assert members == {"serve-1"}
+
+
+async def test_census_empties_an_index_of_only_stale_members(wire_bus_client: None, server) -> None:
+    bus = make_bus()
+    settings = bus._settings
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    # Index members whose presence keys never existed (all faded) — the census returns
+    # nothing and prunes the whole index.
+    await client.sadd(settings.presence_index, "serve-1", "serve-2")
+
+    rows = await bus.census()
+    assert rows == []
+    assert await client.smembers(settings.presence_index) == set()
+    await client.aclose()
+
+
+async def test_stale_prune_spares_a_name_re_minted_live_before_the_prune(
+    wire_bus_client: None, server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tai42_skeleton.app.bus.publish as publish_mod
+
+    bus = make_bus()
+    settings = bus._settings
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    # "serve-1" is in the index but has no live presence key at read time, so the census
+    # GET returns None and marks it stale.
+    await client.sadd(settings.presence_index, "serve-1")
+
+    real_eval = publish_mod.eval_script
+
+    async def racing_eval(r, script, numkeys, *args):
+        # A re-mint claims the same slot name and writes its key + index member (the
+        # atomic SET+SADD) AFTER the census GET saw None but BEFORE the prune runs.
+        await _register_bare_presence(server, settings, "serve-1", WorkerKind.serve, ttl_ms=5000)
+        return await real_eval(r, script, numkeys, *args)
+
+    monkeypatch.setattr(publish_mod, "eval_script", racing_eval)
+
+    rows = await bus.census()
+    # The census snapshot saw None, so the re-minted worker is not in these rows...
+    assert rows == []
+    # ...but the conditional prune re-checks the key server-side and must NOT remove the
+    # now-live member: the next census will see it.
+    assert "serve-1" in await client.smembers(settings.presence_index)
+    assert await client.get(settings.presence_key("serve-1")) is not None
+    await client.aclose()
+
+
+async def test_census_reads_the_index_never_a_keyspace_scan(recording_bus_client, server) -> None:
+    bus = make_bus()
+    settings = bus._settings
+    await _register_bare_presence(server, settings, "serve-1", WorkerKind.serve, ttl_ms=5000)
+
+    await bus.census()
+    await bus.expected_at_start()
+    await bus.validate_targets(["serve-1"])
+    async with bus_module.client_ctx(RedisClient, settings.redis) as r:
+        await bus._classify_workers(r, None)
+
+    touched: set[str] = set().union(*(client.touched for client in recording_bus_client))
+    assert not (touched & {"scan_iter", "scan", "keys"})
+    assert "smembers" in touched
 
 
 async def test_publish_requires_a_non_empty_op_name() -> None:

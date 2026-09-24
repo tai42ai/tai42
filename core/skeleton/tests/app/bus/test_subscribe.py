@@ -10,6 +10,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import fakeredis
 import pytest
@@ -27,7 +28,7 @@ from tai42_skeleton.app.bus import (
     _PresenceValue,
 )
 
-from .conftest import _noop_op, _spawn_subscriber, _stop, _until, make_bus
+from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
 
 # -- slot claim / generation / ownership (compare-token) ----------------------
 
@@ -771,3 +772,47 @@ async def test_subscription_uses_a_fresh_epoch_immune_connection(
         assert fresh_flags == [True], f"the subscription connection was not fresh=True: {fresh_flags}"
     finally:
         await _stop(task)
+
+
+# -- presence index: atomic write, self-stop removal ---------------------------
+
+
+async def test_set_presence_writes_key_and_index_member_in_one_pipeline(server) -> None:
+    bus = make_bus(kind=WorkerKind.serve)
+    inner: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    recording = _RecordingRedis(inner)
+    presence = _PresenceValue(
+        kind=WorkerKind.serve,
+        pid=1,
+        generation=1,
+        joined_at="2026-01-01T00:00:00+00:00",
+        beat_at="2026-01-01T00:00:00+00:00",
+        state=WorkerState.ready,
+    )
+    key = bus._settings.presence_key(bus.identity.name)
+
+    await bus._set_presence(recording, key, presence)
+
+    # The SET and the index SADD ride ONE pipeline, in that order — a presence key never
+    # exists without its index member.
+    assert len(recording.pipelines) == 1
+    assert recording.pipelines[0].commands == ["set", "sadd"]
+    assert bus.identity.name in await inner.smembers(bus._settings.presence_index)
+    assert await inner.get(key) is not None
+    await inner.aclose()
+
+
+async def test_deliberate_stop_removes_the_index_member_and_presence_key(wire_bus_client: None, server) -> None:
+    bus = make_bus(kind=WorkerKind.serve)
+    task, ident = await _spawn_subscriber(bus, _noop_op)
+
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    assert ident.name in await client.smembers(bus._settings.presence_index)
+
+    await _stop(task)
+
+    # A deliberate stop releases the claim then removes BOTH the presence key and its
+    # index member (the teardown mirror of the atomic write).
+    assert ident.name not in await client.smembers(bus._settings.presence_index)
+    assert await client.get(bus._settings.presence_key(ident.name)) is None
+    await client.aclose()

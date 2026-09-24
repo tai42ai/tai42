@@ -97,13 +97,19 @@ class BusSettings(TaiBaseSettings):
 
     @property
     def presence_prefix(self) -> str:
-        """Prefix for the per-name presence keys the census scans."""
+        """Prefix for the per-name presence keys the census reads."""
         return f"{self.namespace}:bus:presence:"
 
     @property
-    def presence_pattern(self) -> str:
-        """Glob the census scans to enumerate live presence keys."""
-        return f"{self.presence_prefix}*"
+    def presence_index(self) -> str:
+        """The set of live worker names the census reads to find the presence keys.
+
+        A subscriber SADDs its own name here alongside every presence write and SREMs
+        it on a deliberate stop; the census SMEMBERS this set, then GET/PTTLs each
+        member's presence key. The set has no TTL and is self-healing: a member whose
+        presence key has expired is SREMed by the census on read.
+        """
+        return f"{self.namespace}:bus:presence-index"
 
     def presence_key(self, name: str) -> str:
         """The presence key for one worker slot name."""
