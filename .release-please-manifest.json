@@ -4,7 +4,7 @@
   "core/cli": "11.0.2",
   "core/skeleton": "20.0.0",
   "plugins/accounts-postgres": "3.0.5",
-  "plugins/agents": "8.0.1",
+  "plugins/agents": "8.0.2",
   "plugins/backend-arq": "4.0.2",
   "plugins/backend-celery": "4.0.2",
   "plugins/backend-rq": "4.0.3",
@@ -31,5 +31,5 @@
   "plugins/tools-whatsapp": "1.1.14",
   "plugins/webhook-verifier-github": "1.2.12",
   "plugins/webhook-verifier-stripe": "1.2.12",
-  "e2e": "15.0.3"
+  "e2e": "15.0.4"
 }
