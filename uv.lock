@@ -5692,7 +5692,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "7.0.1"
+version = "7.0.2"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
