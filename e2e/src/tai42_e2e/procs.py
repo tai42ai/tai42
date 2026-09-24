@@ -16,6 +16,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tai42_e2e.waiting import WaitTimeoutError, wait_for
+
 
 @dataclass
 class ProcessHandle:
@@ -128,27 +130,54 @@ class ProcessHandle:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pgid, sig)
 
-    def _reap_session_survivors(self) -> None:
-        """SIGKILL any process still in this master's SESSION after the group kill.
+    def _reap_session_survivors(self, *, deadline: float = 10.0) -> None:
+        """SIGKILL every process still in this master's SESSION after the group kill,
+        then BLOCK until they are actually gone.
 
         ``start_new_session=True`` makes the master a session leader (sid == pid ==
         pgid). A child that re-groups itself (``setpgrp``) escapes the group SIGKILL
-        but stays in the session, so it is found here by session id.
+        but stays in the session, so it is found here by session id. SIGKILL is
+        asynchronous and the harness does not parent these survivors (uvicorn worker
+        children, an rq work-horse) — init reaps them a beat after the kill — so this
+        must WAIT for the session to drain before returning: otherwise teardown releases
+        the stack's Redis DB while a worker still heartbeats its ``bus:presence`` key on
+        it, and the next stack to lease that index trips the live-orphan guard. A
+        survivor still alive at ``deadline`` raises loudly naming its pid rather than
+        leaving a silent leak.
         """
         sid = getattr(self, "_pgid", None)
         if sid is None:
             return
         master_pid = self._proc.pid if self._proc is not None else None
-        for pid in _all_pids():
-            if pid == master_pid:
-                continue  # the master itself is reaped by wait(); leave its pid reserved
-            try:
-                if os.getsid(pid) != sid:
+
+        def survivors() -> list[int]:
+            found: list[int] = []
+            for pid in _all_pids():
+                if pid == master_pid:
+                    continue  # the master itself is reaped by wait(); leave its pid reserved
+                try:
+                    if os.getsid(pid) != sid:
+                        continue
+                except (ProcessLookupError, PermissionError):
                     continue
-            except (ProcessLookupError, PermissionError):
-                continue
+                found.append(pid)
+            return found
+
+        for pid in survivors():
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
+        try:
+            wait_for(
+                lambda: not survivors(),
+                deadline=deadline,
+                interval=0.05,
+                message=f"process {self.name!r}: session worker(s) still alive after SIGKILL",
+            )
+        except WaitTimeoutError as exc:
+            raise RuntimeError(
+                f"process {self.name!r}: session worker(s) still alive {deadline:.0f}s after SIGKILL "
+                f"(pid(s) {survivors()}) — teardown cannot release the stack's infra under a live worker"
+            ) from exc
 
 
 def _all_pids() -> list[int]:
