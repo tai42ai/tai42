@@ -119,9 +119,11 @@ def replica_b_origin_env(config: StackConfig, host: str, app_ports: list[int]) -
     return env
 
 
-def _dynamic_env(stack: TaiStack) -> dict[str, str]:
+def dynamic_env(stack: TaiStack) -> dict[str, str]:
     """The after-boot origin/bus fills a profile names but only the booted stack
-    can resolve. The bus env lands LAST so its mandatory URL + namespace win."""
+    can resolve, derived from the CURRENT ``app_ports``. The bus env lands LAST so its
+    mandatory URL + namespace win. Re-derivable: the boot engine re-runs this after a port
+    re-allocation so a healed stack advertises/allows its new port, never the seized one."""
     return {
         **origin_allowlist_env(stack.config, stack.host, stack.app_ports),
         **replica_b_origin_env(stack.config, stack.host, stack.app_ports),
@@ -144,7 +146,7 @@ def child_env(stack: TaiStack, tmpdir: str, cwd_override: str | None) -> dict[st
         "TAI_MANIFEST_PATH": str(stack._config_dir / "manifest.yml"),
     }
     env.update(stack.config.env)
-    env.update(_dynamic_env(stack))
+    env.update(dynamic_env(stack))
     # The supervision marker is a PROCESS-env-only shape signal (never written to
     # ``.env``): it is X-band, so a profile may not carry it, and keeping it out of the
     # store means a profile built from the stored env never trips the X-band refusal —
@@ -167,6 +169,6 @@ def render_env_file(stack: TaiStack) -> None:
     path (which re-reads ``.env``) sees the same values the process env
     does. TMPDIR is deliberately NOT written here — it is per-process, which
     is how REPLICAS get per-replica metrics dirs from one shared .env."""
-    merged = {**stack.config.env, **_dynamic_env(stack)}
+    merged = {**stack.config.env, **dynamic_env(stack)}
     lines = [f"{key}={value}" for key, value in sorted(merged.items())]
     (stack._config_dir / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
