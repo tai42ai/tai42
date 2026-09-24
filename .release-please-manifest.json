@@ -7,7 +7,7 @@
   "plugins/agents": "8.0.1",
   "plugins/backend-arq": "4.0.2",
   "plugins/backend-celery": "4.0.2",
-  "plugins/backend-rq": "4.0.2",
+  "plugins/backend-rq": "4.0.3",
   "plugins/channel-slack": "4.0.2",
   "plugins/channel-telegram": "4.0.2",
   "plugins/channel-twilio": "5.0.2",
@@ -31,5 +31,5 @@
   "plugins/tools-whatsapp": "1.1.14",
   "plugins/webhook-verifier-github": "1.2.12",
   "plugins/webhook-verifier-stripe": "1.2.12",
-  "e2e": "15.0.1"
+  "e2e": "15.0.2"
 }
