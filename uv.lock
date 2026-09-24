@@ -5189,7 +5189,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "4.0.2"
+version = "4.0.3"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5535,7 +5535,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "15.0.1"
+version = "15.0.2"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
