@@ -4,6 +4,11 @@ A held turn on message 1 is cancelled; then ONE turn carries messages 2 (its lea
 and the cancelled message 1 rides that turn's payload under ``superseded`` — its text is not lost.
 The surviving turn's whole text is the superseded text then the batch texts, in acceptance order.
 This proves CANCEL and CARRY together: a cancelled turn's message still reaches the next turn.
+
+The route carries a settle window: under ``running=cancel`` the running turn is torn down the moment
+a newer message arrives, before the rest of a burst is durably accepted, so the settle window on the
+superseding lead is what defines the burst boundary — it holds the superseding turn until the window
+elapses, so its gather sees messages 2 and 3 whole and they ride one turn.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from ._overlap_support import (
 )
 
 _HOLD_SECONDS = 3.0
+_SETTLE_SECONDS = 2
 
 
 async def test_cancel_all_carries_the_cancelled_message_in_superseded(
@@ -34,7 +40,7 @@ async def test_cancel_all_carries_the_cancelled_message_in_superseded(
         "ov-cancel-all",
         tool="e2e_overlap_probe",
         start_expr=probe_start_expr(marker, hold_seconds=_HOLD_SECONDS),
-        overlap={"running": "cancel", "deliver": "all"},
+        overlap={"running": "cancel", "deliver": "all", "settle_seconds": _SETTLE_SECONDS},
     )
     web = await open_visitor(bridge, identity)
 
@@ -44,9 +50,10 @@ async def test_cancel_all_carries_the_cancelled_message_in_superseded(
     id1 = await send_web(web, t1)
     await wait_probe_record(bridge, marker)
 
-    # 2. Messages 2 and 3 are accepted while turn 1 holds. The newer marker cancels turn 1; then
-    #    message 2's turn carries 2 and 3 and, because message 1's successor rides this batch, it
-    #    carries message 1 under ``superseded``.
+    # 2. Messages 2 and 3 are accepted while turn 1 holds. The newer marker cancels turn 1; message
+    #    2's turn then settles out its window before it gathers, so 2 and 3 land whole and ride one
+    #    turn, and because message 1's successor rides this batch it carries message 1 under
+    #    ``superseded``.
     id2 = await send_web(web, t2)
     id3 = await send_web(web, t3)
 
