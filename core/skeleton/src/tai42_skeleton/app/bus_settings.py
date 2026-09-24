@@ -15,10 +15,11 @@ process runs on :meth:`WorkerBus.local`, and the boot rules name this var when t
 refuse a deployment that requires a bus (multi-worker, a registered backend, or a
 non-file ``TAI_CONFIG_MODE``).
 
-Namespacing (``TAI_BUS_NAMESPACE``, default ``tai``) prefixes the control channel,
-every ephemeral reply channel, and every presence key. Redis pub/sub is
-server-global (it is NOT scoped by the numeric db), so two stacks sharing one Redis
-MUST diverge by namespace or they cross-deliver each other's fleet ops.
+Namespacing (``TAI_BUS_NAMESPACE``, default ``tai``) prefixes every bus key: the
+control channel, every ephemeral reply channel, the per-worker presence keys and
+their presence index, the slot-claim keys, and the generation counters. Redis
+pub/sub is server-global (it is NOT scoped by the numeric db), so two stacks sharing
+one Redis MUST diverge by namespace or they cross-deliver each other's fleet ops.
 """
 
 from __future__ import annotations
@@ -59,8 +60,10 @@ class BusSettings(TaiBaseSettings):
     # so the group declares no connection fields of its own.
     redis: BusRedisSettings = Field(default_factory=BusRedisSettings)
 
-    # Prefixes the control channel, every reply channel, and every presence key so
-    # co-tenant stacks on one server-global pub/sub Redis do not cross-deliver.
+    # Prefixes every bus key — the control channel, every reply channel, the
+    # per-worker presence keys and their index, the slot-claim keys, and the
+    # generation counters — so co-tenant stacks on one server-global pub/sub Redis
+    # do not cross-deliver.
     namespace: str = "tai"
 
     # Short liveness deadline: reaching it only ends the brief ack wait — the
