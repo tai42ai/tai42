@@ -81,6 +81,42 @@ async def test_authored_agent_preset_created_on_one_worker_runs_via_http(
     assert any(final in frame for frame in frames), f"authored agent SSE never delivered the scripted final: {frames}"
 
 
+async def test_agent_preset_baking_a_system_message_runs_on_both_doors(
+    agents_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
+) -> None:
+    # A preset over ``tools_agent`` that bakes a per-call ``system_message`` is a fastmcp
+    # transformed tool: it fills every omitted optional argument with its schema default
+    # before forwarding, so ``system_prompt`` arrives as an explicit ``None``. The run tool
+    # treats that null-default ``None`` as unset, so the guard refusing ``system_prompt``
+    # beside ``system_message`` never fires — the preset runs over BOTH doors it can enter.
+    name = uniq("sysmsg")
+    final = f"sysmsg {uniq('run')}"
+    llm_stub.reset()
+    llm_stub.script([{"content": final}, {"content": final}])
+
+    await agents_stack.api().post(
+        "/api/presets",
+        json={
+            "name": name,
+            "base_tool": "tools_agent",
+            "description": "agent preset baking a per-call system message",
+            "fixed_kwargs": {"system_message": {"content": "answer tersely"}},
+        },
+    )
+
+    # Run-tool HTTP door.
+    http_result = await agents_stack.api().post(
+        "/api/run-tool",
+        json={"tool_name": name, "arguments": {"user_message": {"content": "hi"}}},
+    )
+    assert final in json.dumps(http_result), f"run-tool HTTP door did not return the scripted final: {http_result}"
+
+    # MCP tools/call edge.
+    async with agents_stack.mcp() as mcp:
+        mcp_result = await mcp.call_tool(name, {"user_message": {"content": "hi"}})
+    assert final in json.dumps(mcp_result.data), f"MCP edge did not return the scripted final: {mcp_result.data}"
+
+
 async def _run_sse(stack: TaiStack, path: str, body: dict) -> list[str]:
     url = f"http://{stack.host}:{stack.port_a}{path}"
     frames: list[str] = []

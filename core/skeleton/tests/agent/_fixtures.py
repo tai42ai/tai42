@@ -38,6 +38,29 @@ class EchoFieldsAgent(Agent):
         return ",".join(sorted(kwargs))
 
 
+class NullDefaultInput(BaseModel):
+    """A ``ToolInput`` mixing a required field, a ``null``-default optional field, and a
+    NON-``null``-default nullable field, so a test can observe how the run tool treats an
+    explicit ``None`` per default kind: dropped for a ``null`` default (a transformed-tool
+    caller fills an omitted argument with the schema default, so ``None`` is indistinguishable
+    from omission), kept for a non-``null`` default (there ``None`` is a real caller-chosen
+    value distinct from the default)."""
+
+    text: str
+    optional_null: str | None = None
+    optional_valued: str | None = "seed"
+
+
+@tai42_app.agents.agent("null_default_fields")
+class NullDefaultFieldsAgent(Agent):
+    tool_name = "null_default_fields"
+    tool_description = "Echo which fields survived as set fields."
+    ToolInput = NullDefaultInput
+
+    async def run(self, **kwargs) -> str:
+        return ",".join(sorted(kwargs))
+
+
 # The contract ``AppAgents.agent`` carries the generic ``meta`` passthrough, so a
 # meta-carrying registration goes through the plain ``tai42_app.agents`` protocol surface.
 @tai42_app.agents.agent("meta_carrier", meta={"tai42/crash_resume": True})
