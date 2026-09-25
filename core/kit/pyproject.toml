@@ -86,7 +86,7 @@ uvicorn = ["uvicorn>=0.52.4"]
 # inside the per-provider match branches. Each pulls the llm base stack.
 anthropic = ["tai42-kit[llm]", "langchain-anthropic>=1.5.4"]
 mistral = ["tai42-kit[llm]", "langchain-mistralai>=1.1"]
-google = ["tai42-kit[llm]", "langchain-google-genai>=4.3.7"]
+google = ["tai42-kit[llm]", "langchain-google-genai>=4.4.0"]
 xai = ["tai42-kit[llm]", "langchain-xai>=1.2"]
 ollama = ["tai42-kit[llm]", "langchain-ollama>=1.0"]
 huggingface = [
@@ -111,7 +111,7 @@ langgraph-checkpoint-sqlite = [
 # Pooled-client backends — each client submodule (tai42_kit.clients.*) imports its
 # driver at module top, so install the matching extra to use that client.
 redis = ["redis>=5"]
-curl = ["curl-cffi>=0.7"]
+curl = ["curl-cffi>=0.16.3"]
 postgres = ["psycopg[binary,pool]>=3.3.2"]
 
 # OIDC discovery + JWKS + JWT verification (net/jwt.py imports joserfc at module top).
