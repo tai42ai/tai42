@@ -5,7 +5,7 @@
  * stack (running it returns the baked payload) — not just a stored row.
  */
 import { expect, test } from '@playwright/test';
-import { apiHeaders, runTool, seedCredential, uniq } from './helpers';
+import { apiHeaders, fillFixedKwargs, runTool, seedCredential, uniq } from './helpers';
 
 test('create a preset over e2e_echo; UI row + API list + live tool', async ({ page, request }) => {
   const name = uniq('preset');
@@ -35,7 +35,7 @@ test('create a preset over e2e_echo; UI row + API list + live tool', async ({ pa
   // e2e_echo_prometheus_metrics variant — the negative lookahead rejects a
   // trailing underscore.
   await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
-  await dialog.getByRole('textbox', { name: 'Fixed kwargs JSON' }).fill(JSON.stringify({ payload }));
+  await fillFixedKwargs(dialog, { payload });
   await dialog.getByRole('button', { name: 'Create preset' }).click();
 
   // UI: the new preset appears as a row (its name cell links to the detail view).

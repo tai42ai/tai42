@@ -6,7 +6,7 @@
  * real skeleton doors it calls.
  */
 import { expect, test, type Page } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, fillFixedKwargs, seedCredential, uniq } from './helpers';
 
 /** Create a preset over `e2e_echo` baking `payload`, landing on its detail view. */
 async function createEchoPreset(page: Page, name: string, payload: string): Promise<void> {
@@ -24,7 +24,7 @@ async function createEchoPreset(page: Page, name: string, payload: string): Prom
   await baseTool.focus();
   await baseTool.pressSequentially('e2e_echo');
   await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
-  await dialog.getByRole('textbox', { name: 'Fixed kwargs JSON' }).fill(JSON.stringify({ payload }));
+  await fillFixedKwargs(dialog, { payload });
   await dialog.getByRole('button', { name: 'Create preset' }).click();
   await expect(page.getByRole('link', { name: `Open preset ${name}` })).toBeVisible();
 }
@@ -72,9 +72,7 @@ test('version history compare shows the changed path row and per-version tags', 
   for (const payload of [uniq('p2'), uniq('p3')]) {
     await page.getByRole('button', { name: 'New version' }).click();
     const saveDialog = page.getByRole('dialog', { name: `Save version — ${name}` });
-    await saveDialog
-      .getByRole('textbox', { name: 'Fixed kwargs JSON' })
-      .fill(JSON.stringify({ payload }));
+    await fillFixedKwargs(saveDialog, { payload });
     await saveDialog.getByRole('button', { name: 'Save as new version' }).click();
     await expect(saveDialog).toBeHidden();
   }
@@ -153,7 +151,7 @@ test('validate reports a clean bind, and no conflicted section when none is quar
   await baseTool.focus();
   await baseTool.pressSequentially('e2e_echo');
   await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
-  await dialog.getByRole('textbox', { name: 'Fixed kwargs JSON' }).fill(JSON.stringify({ payload: 'x' }));
+  await fillFixedKwargs(dialog, { payload: 'x' });
   await dialog.getByRole('button', { name: 'Validate' }).click();
   await expect(dialog.getByText('Draft binds cleanly')).toBeVisible();
 });
