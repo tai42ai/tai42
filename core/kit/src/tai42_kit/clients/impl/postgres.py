@@ -32,7 +32,9 @@ def _open_timeout(dsn: str, min_size: int) -> float:
 
     Derived from the DSN's own ``connect_timeout`` so a deployment tunes ONE
     knob rather than two, budgeting that per connection in the fill. A DSN that
-    sets none, or sets something unparseable, falls back to the fixed default.
+    sets none, sets something unparseable, or sets a non-positive value (libpq
+    reads 0 as "no timeout", but the fill budget must stay finite) falls back
+    to the fixed default.
     """
     try:
         raw = conninfo_to_dict(dsn).get("connect_timeout")
@@ -43,6 +45,8 @@ def _open_timeout(dsn: str, min_size: int) -> float:
     try:
         per_connection = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
+        return _DEFAULT_OPEN_TIMEOUT
+    if per_connection <= 0:
         return _DEFAULT_OPEN_TIMEOUT
     return per_connection * max(min_size, 1)
 

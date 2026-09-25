@@ -3,8 +3,9 @@ name: fleet-e2e
 # Fleet e2e gate receiver for the external front-end repos: tai-studio and
 # tai-marketplace (a monorepo whose web/ workspace is the browse site). Each
 # survives standalone; its `trigger-e2e` job dispatches a `fleet-e2e` event for a
-# tested source sha. This checks that sha out (pinning the source repo, the other
-# at main), runs the browser suite against this repo's harness — with the
+# tested source sha. This checks that sha out (pinning the source repo) and runs
+# this repo's harness at the tai42 ref the payload declares (default main), so a
+# paired change is tested tree-against-tree. It runs the browser suite — with the
 # marketplace-gated legs (`TAI_E2E_MARKETPLACE=1`) for the marketplace repo — and
 # posts a `fleet-e2e` commit status back to the source sha. Branch protection on
 # the source repo requires that status, so this is the gate.
@@ -90,7 +91,14 @@ jobs:
       TAI_E2E_PG_PASSWORD: postgres
       TAI_E2E_KEEP_STACKS: "1"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the tai42 ref the dispatch declares (default main)
+        # A paired change names the tai42 ref to test the source sha against with
+        # the payload's `tai42_ref`; absent, this repo's harness runs at `main`.
+        # checkout fails the job loudly on a ref the repo no longer serves, so a
+        # stale ref is never quietly replaced by a different tree.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.client_payload.tai42_ref || 'main' }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.11.26"

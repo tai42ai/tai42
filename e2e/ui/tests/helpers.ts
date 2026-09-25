@@ -14,6 +14,7 @@ import {
   expect,
   type APIRequestContext,
   type APIResponse,
+  type Locator,
   type Page,
   type Request,
   type Response,
@@ -169,6 +170,17 @@ export async function seedCredential(page: Page, key: string = API_KEY): Promise
     },
     [SESSION_KEY, key] as const,
   );
+}
+
+/**
+ * Author a preset's fixed kwargs through the editor's JSON view. The Fixed kwargs
+ * editor opens on its Fields view, so its JSON textarea is mounted only once the
+ * "JSON" segment is selected; switch to it, then replace the textarea with the
+ * serialised object. `scope` is the dialog the kwargs editor lives in.
+ */
+export async function fillFixedKwargs(scope: Locator, kwargs: unknown): Promise<void> {
+  await scope.getByRole('button', { name: 'JSON', exact: true }).click();
+  await scope.getByRole('textbox', { name: 'Fixed kwargs JSON' }).fill(JSON.stringify(kwargs));
 }
 
 /**

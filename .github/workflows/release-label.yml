@@ -1,0 +1,44 @@
+name: release-label
+
+# A pull request's conventional title and body decide the version release-please
+# will publish per touched package. This gate projects that version and runs the
+# release API-diff gate against it before the merge — the same gate release.yml
+# runs on the tag — so a breaking public-API change under a bump its label could
+# not honestly carry is refused here, never after the tag.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  release-label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Full history + tags: the gate diffs each projected version against its
+        # previous released tag, the way the API-diff gate on the tag does.
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Refuse a mislabelled release
+        # The title and body reach the script through the environment, never
+        # interpolated into the shell, so a backtick or ``$(...)`` in a pull
+        # request body cannot run on the runner. The api-gate extra carries the
+        # gate's griffe/pyyaml the same way release.yml installs them; the
+        # tai42-api-gate console script the extra registers is on PATH for the
+        # script's per-package gate calls. No secret or org value is read — the
+        # package list and versions come from the repo's own release-please
+        # config and manifest — so this runs unchanged on a fork.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: >-
+          uv run --locked --package tai42-cli --extra api-gate
+          python scripts/release_label_check.py
+          --base-ref ${{ github.event.pull_request.base.sha }}

@@ -65,7 +65,24 @@ Conventional Commits, scoped by package directory. release-please runs in
 manifest mode: one merged commit train, one release PR per changed package, tags
 `tai42-<name>-v<version>`. `fix:` → patch, `feat:` → minor, `feat!:` or a
 `BREAKING CHANGE:` footer → major; other types do not release. Non-conforming
-commits and PR titles fail the `commitlint` check.
+commits and PR titles fail the `commitlint` check. The `release-label` check
+projects the version each touched package would publish from the pull request's
+title and body and runs the release API-diff gate against it, so a breaking
+public-API change under a bump its label could not honestly carry is refused
+before the merge, not after the tag.
+
+## Cross-repo e2e
+
+The browser lanes test this repo against tai-studio (and tai-marketplace). To
+pair a change here with one in tai-studio, add a `tai-studio-ref: <branch-or-sha>`
+line to the pull request body and the `ui-e2e` lane checks that studio ref out
+instead of `main`. In the other direction, a tai-studio or tai-marketplace pull
+request adds a `tai42-ref: <branch-or-sha>` line and the `fleet-e2e` receiver
+runs this repo's harness at that ref. Either line is a plain body field, not a
+Conventional-Commits header, so it never affects the release the pull request
+projects; omit it and the paired repo stays at `main`. The value must be a branch
+name or a 40-character commit sha — never a fully-qualified `refs/…` ref, which
+is refused.
 
 ## License
 

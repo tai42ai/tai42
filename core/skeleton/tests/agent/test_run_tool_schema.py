@@ -105,6 +105,48 @@ def test_run_tool_advertises_typed_schema_and_forwards_only_set_fields():
     asyncio.run(run())
 
 
+def test_explicit_none_is_unset_for_a_null_default_field_and_kept_otherwise():
+    async def run() -> None:
+        manifest = Manifest.model_validate(
+            {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["null_default_fields"]}]}
+        )
+        async with app.app_context(manifest):
+            # ``optional_null`` advertises a ``null`` default: an explicit ``None`` is
+            # indistinguishable from omission and dropped, so it is absent from the
+            # forwarded set fields (``model_fields_set``).
+            assert await app.tools.run_tool("null_default_fields", {"text": "hi", "optional_null": None}) == "text"
+            # ``optional_valued`` advertises a non-``null`` default: an explicit ``None`` is a
+            # real value and stays in the set fields.
+            assert (
+                await app.tools.run_tool("null_default_fields", {"text": "hi", "optional_valued": None})
+                == "optional_valued,text"
+            )
+            # An omitted optional field arrives as the ``_UNSET`` sentinel and is dropped.
+            assert await app.tools.run_tool("null_default_fields", {"text": "hi"}) == "text"
+
+    asyncio.run(run())
+
+
+def test_transformed_tool_shape_drops_every_null_default_none_at_once():
+    async def run() -> None:
+        manifest = Manifest.model_validate(
+            {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["null_default_fields"]}]}
+        )
+        async with app.app_context(manifest):
+            # A transformed tool (a preset) fills every omitted optional argument with its
+            # schema default before forwarding, so the run tool receives an explicit ``None``
+            # for each null-default field. All such ``None``s are dropped together; a
+            # non-null-default field given an explicit ``None`` stays as a real value.
+            assert (
+                await app.tools.run_tool(
+                    "null_default_fields", {"text": "hi", "optional_null": None, "optional_valued": None}
+                )
+                == "optional_valued,text"
+            )
+
+    asyncio.run(run())
+
+
 def test_client_tool_advertises_agent_tool_input_schema_and_runs():
     async def run() -> None:
         async with app.app_context(_manifest()):

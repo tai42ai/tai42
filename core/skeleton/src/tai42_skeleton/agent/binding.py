@@ -221,8 +221,13 @@ class AgentBinding:
         deliberately absent — API-only via ``astream``). The body sees EXACTLY the
         caller-supplied argument keys — the optional parameters the caller omitted
         arrive as the :data:`_UNSET` sentinel and are stripped, so
-        ``model_fields_set`` after ``model_validate`` reflects only what was passed
-        — then maps to ``run`` kwargs through the shared reservation seam (the
+        ``model_fields_set`` after ``model_validate`` reflects only what was passed.
+        An explicit ``None`` on a field whose advertised schema default is ``null`` is
+        stripped the same way (treated as unset): a transformed-tool caller fills every
+        omitted optional argument with the schema default before forwarding, so a ``null``
+        default arrives as an explicit ``None`` indistinguishable from omission. A field
+        whose default is NOT ``null`` keeps an explicit ``None`` as a real value. The set
+        fields then map to ``run`` kwargs through the shared reservation seam (the
         agent's ``from_tool_input``, which forwards set fields only, plus the
         ``bridge:`` thread refusal) and returns ``run``'s final value (drained per
         the terminal rule inside the agent's own ``run``). A non-JSON ``ToolInput``
@@ -242,8 +247,25 @@ class AgentBinding:
 
         signature = _run_tool_signature(tool_input)
 
+        # Fields whose advertised JSON-schema default is ``null``. A transformed-tool
+        # caller (a preset is a fastmcp transformed tool) fills every omitted optional
+        # argument with the schema default before forwarding, so these arrive as an
+        # explicit ``None`` even when the caller passed nothing — indistinguishable from
+        # omission and stripped alongside :data:`_UNSET` below. A field whose default is
+        # NOT ``null`` keeps an explicit ``None`` (there it is a real, caller-chosen value).
+        # Computed once per binding; the closure only reads it.
+        null_default_fields = frozenset(
+            field_name
+            for field_name, prop in tool_input.model_json_schema().get("properties", {}).items()
+            if isinstance(prop, dict) and "default" in prop and prop["default"] is None
+        )
+
         async def run_impl(**arguments: Any) -> Any:
-            supplied = {key: value for key, value in arguments.items() if value is not _UNSET}
+            supplied = {
+                key: value
+                for key, value in arguments.items()
+                if value is not _UNSET and not (value is None and key in null_default_fields)
+            }
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
             # Thread the ambient in-process session thread onto the run when one is deposited
