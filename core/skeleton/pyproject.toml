@@ -114,7 +114,7 @@ toolbox = ["tai42-toolbox>=4.0,<5"]
 # silent skip. Magika sniffs content; the rest are per-type text extractors.
 files = [
     "magika>=0.6",
-    "pandas>=2.2",
+    "pandas>=3.0.6",
     "langchain-community>=0.3",
     "pypdf>=5",
     "docx2txt>=0.9",
