@@ -29,6 +29,30 @@ pytestmark = [
 ]
 
 
+# The kwarg set the flows engine's agent holder passes on the call each turn. When a flow node
+# holds ``tools_agent`` (or a preset over it), the engine builds the call arguments from the
+# holder's baked ``tool_kwargs`` merged with the turn's message and hands that dict to the held
+# tool — the system/user messages, the client tool list, the LLM provider and its model kwargs,
+# and any forced structured-output schema all ride as CALL arguments, not as the preset's own
+# baked kwargs. A saved preset over ``tools_agent`` receiving this set is the shape a real
+# deployment runs: the preset transform fills every omitted optional (``system_prompt`` among
+# them) with its schema default, so the run must accept a per-call ``system_message`` beside that
+# null default.
+_ENGINE_AGENT_HOLDER_PER_CALL_KWARGS: dict[str, object] = {
+    "user_message": {"content": "engine holder user marker"},
+    "system_message": {"content": "engine holder system marker"},
+    "tool_names": ["e2e_echo"],
+    "llm_provider": "openai",
+    "llm_kwargs": {"temperature": 0.0},
+    "response_format": {
+        "title": "Answer",
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    },
+}
+
+
 async def test_tools_agent_llm_tool_llm_loop_over_http(
     agents_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -115,6 +139,63 @@ async def test_agent_preset_baking_a_system_message_runs_on_both_doors(
     async with agents_stack.mcp() as mcp:
         mcp_result = await mcp.call_tool(name, {"user_message": {"content": "hi"}})
     assert final in json.dumps(mcp_result.data), f"MCP edge did not return the scripted final: {mcp_result.data}"
+
+
+async def test_agent_preset_over_agent_receives_the_engine_holder_per_call_kwargs_on_both_doors(
+    agents_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
+) -> None:
+    # A saved authored preset over ``tools_agent`` is CALLED with the engine agent holder's full
+    # per-call kwarg set (``_ENGINE_AGENT_HOLDER_PER_CALL_KWARGS``) on BOTH doors it can enter — the
+    # run-tool HTTP door and the MCP edge. The engine hands these as call arguments each turn, not
+    # as the preset's baked kwargs, so the preset carries only its own minimal baked config and the
+    # system/user messages and run config arrive per call. The preset transform fills every omitted
+    # optional (``system_prompt`` among them) with its schema default, so the run must accept the
+    # per-call ``system_message`` beside that null default. ``response_format`` forces structured
+    # output: the strategy binds a tool named for the schema ``title`` (``Answer``), the model
+    # answers by calling it, and the run returns the parsed payload.
+    name = uniq("holderkw")
+    http_value = f"http-{uniq('answer')}"
+    mcp_value = f"mcp-{uniq('answer')}"
+    llm_stub.reset()
+    llm_stub.script(
+        [
+            {"tool_call": {"name": "Answer", "arguments": {"value": http_value}}},
+            {"tool_call": {"name": "Answer", "arguments": {"value": mcp_value}}},
+        ]
+    )
+
+    # The harness's authored agent preset over ``tools_agent`` — a saved named alias with no baked
+    # message/run config of its own, so the engine's per-call set is what shapes each turn.
+    await agents_stack.api().post(
+        "/api/presets",
+        json={
+            "name": name,
+            "base_tool": "tools_agent",
+            "description": "authored agent preset over tools_agent",
+        },
+    )
+
+    # Run-tool HTTP door: the engine holder's per-call set as the call arguments.
+    http_result = await agents_stack.api().post(
+        "/api/run-tool",
+        json={"tool_name": name, "arguments": dict(_ENGINE_AGENT_HOLDER_PER_CALL_KWARGS)},
+    )
+    assert http_value in json.dumps(http_result), (
+        f"run-tool HTTP door did not return the structured answer: {http_result}"
+    )
+
+    # MCP tools/call edge: the same per-call set.
+    async with agents_stack.mcp() as mcp:
+        mcp_result = await mcp.call_tool(name, dict(_ENGINE_AGENT_HOLDER_PER_CALL_KWARGS))
+    assert mcp_value in json.dumps(mcp_result.data), f"MCP edge did not return the structured answer: {mcp_result.data}"
+
+    # The per-call ``system_message`` and ``user_message`` reached the model, so the engine holder's
+    # kwarg set travelled through the preset transform intact on both doors.
+    recorded = json.dumps(llm_stub.requests)
+    system_marker = _ENGINE_AGENT_HOLDER_PER_CALL_KWARGS["system_message"]["content"]  # type: ignore[index]
+    user_marker = _ENGINE_AGENT_HOLDER_PER_CALL_KWARGS["user_message"]["content"]  # type: ignore[index]
+    assert system_marker in recorded, f"the per-call system_message never reached the model: {llm_stub.requests}"
+    assert user_marker in recorded, f"the per-call user_message never reached the model: {llm_stub.requests}"
 
 
 async def _run_sse(stack: TaiStack, path: str, body: dict) -> list[str]:
