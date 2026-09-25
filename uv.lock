@@ -5475,7 +5475,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "11.0.2"
+version = "12.0.0"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5551,7 +5551,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "15.0.5"
+version = "16.0.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6044,7 +6044,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "20.0.1"
+version = "21.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
