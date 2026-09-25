@@ -74,7 +74,7 @@ dependencies = [
     # rendering layer formats a sequence per the subject's locale, never in-template.
     "babel>=2.18",
     "jinja2schema>=0.1.4",
-    "cryptography>=44",
+    "cryptography>=50.0.1",
     "xmltodict>=0.14",
     # Callback-answer validation in the interactions router (imported directly).
     "jsonschema>=4",
@@ -114,9 +114,9 @@ toolbox = ["tai42-toolbox>=4.0,<5"]
 # silent skip. Magika sniffs content; the rest are per-type text extractors.
 files = [
     "magika>=0.6",
-    "pandas>=2.2",
+    "pandas>=3.0.6",
     "langchain-community>=0.3",
-    "pypdf>=5",
+    "pypdf>=6.19.0",
     "docx2txt>=0.9",
     "openpyxl>=3.1",
     "tabulate>=0.9",
