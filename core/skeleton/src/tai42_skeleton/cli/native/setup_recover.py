@@ -41,7 +41,7 @@ def _load_deployment(manifest_path: str | None) -> None:
     validates the manifest under the bridged stored env, activates the configured plugin
     prefix so a prefix-installed lifecycle module imports, then imports every lifecycle
     module — the side effect that registers the identity/accounts providers this command
-    re-mints through. A failing import raises loudly: a one-shot command has no quarantine.
+    re-mints through. A failing import raises loudly, aborting the command.
     """
     resolved = manifest_path or default_manifest_path()
     if resolved is None:

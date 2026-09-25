@@ -8,7 +8,6 @@ from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.mount_map import bind_module
-from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools import mcp_health
 
@@ -29,15 +28,10 @@ class ComponentImportMixin(LifecycleState):
         # app import chain free of the marketplace package.
         from tai42_skeleton.marketplace.compat import distribution_map
         from tai42_skeleton.marketplace.prefix import activate_prefix
-        from tai42_skeleton.plugins.quarantine import reset_quarantine
 
         activate_prefix()
 
-        # This pass owns the plugin-quarantine generation: reset here, then every
-        # additive-module import below (and the Studio-plugin registry rebuild
-        # handler that runs after start()) repopulates it. One package→dist
-        # snapshot serves every compat verdict of the pass.
-        reset_quarantine()
+        # One package→dist snapshot serves every compat verdict of the pass.
         dist_map = distribution_map()
 
         # Repopulate the operation registry that start() cleared at its top. A leaf
@@ -64,7 +58,7 @@ class ComponentImportMixin(LifecycleState):
         # Build the module → mount-binding map BEFORE any manifest module imports, so
         # each declared plugin route resolves its absolute path + public flag from the
         # declaration while its module imports below (bound through
-        # ``_import_additive_plugin``). Reserved-prefix violations fail the build here.
+        # ``_import_manifest_module``). Reserved-prefix violations fail the build here.
         self._mount_map = self._build_mount_map()
 
         # Register the manifest's declarative connector providers before importing
@@ -74,7 +68,7 @@ class ComponentImportMixin(LifecycleState):
         # any holder of the handle uses. ``start()`` cleared the write-target
         # generation above, so every (re)load re-registers from the current manifest.
         # A duplicate id across entries is a boot/epoch-build failure: the registry's
-        # duplicate guard raises here rather than quarantining and continuing.
+        # duplicate guard raises here rather than continuing.
         for descriptor in manifest.connectors:
             tai42_app.connectors.register_connector(descriptor)
 
@@ -87,11 +81,6 @@ class ComponentImportMixin(LifecycleState):
         executed_modules: set[str] = set()
 
         self._import_additive_role(manifest.lifecycle_modules, "lifecycle", dist_map, executed_modules)
-
-        # Identity/accounts providers register only on lifecycle-module import, so
-        # their registries are settled here — abort now if a configured provider
-        # quarantined instead of quarantine-and-continuing into an unauthable boot.
-        self._abort_if_auth_provider_quarantined()
 
         # Import-only verifier plugins: each import runs the module's
         # ``tai42_app.webhook_verifiers.register(...)`` side-effect — the registry
@@ -114,14 +103,11 @@ class ComponentImportMixin(LifecycleState):
 
         self._import_additive_role(manifest.middlewares_modules, "middleware", dist_map, executed_modules)
 
-        # The scalar slots ABORT boot on incompat/import failure instead of
-        # quarantining: the server cannot run without its backend/sandbox/storage/
-        # monitoring, so a skipped slot would be a silently crippled server.
         self._import_core_slots(dist_map, executed_modules)
 
         self._import_extension_modules(dist_map, executed_modules)
 
-        quarantined_tool_modules = self._import_tool_modules(dist_map, executed_modules)
+        self._import_tool_modules(dist_map, executed_modules)
 
         # Importing an agents-module fires its @tai42_app.agents.agent decorator, which
         # registers the agent + auto-generates its run tool. Done after tools so
@@ -138,75 +124,49 @@ class ComponentImportMixin(LifecycleState):
         # wraps -> preset rebakes.
         project_operations(self, manifest.api_tools)
 
-        self._validate_tool_registry(quarantined_tool_modules)
+        self._validate_tool_registry()
 
     def _import_additive_role(
         self, modules: list[str] | None, kind: str, dist_map: dict[str, list[str]], executed: set[str]
-    ) -> set[str]:
-        """Import one additive role group, returning the set of modules that quarantined.
+    ) -> None:
+        """Import one additive role group, aborting boot on the first module that cannot load.
 
         The group is one of lifecycle/webhook_verifier/channel/router/middleware/agents. Each import runs
         the module's registration side-effect; the registries were reset at the top of start(), so every
         (re)load re-registers cleanly.
         """
-        quarantined: set[str] = set()
         for module in modules or []:
-            if not self._import_additive_plugin(module, kind, dist_map, executed):
-                quarantined.add(module)
-        return quarantined
+            self._import_manifest_module(module, kind, dist_map, executed)
 
     def _import_core_slots(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
         """Import the four scalar-slot modules (backend/sandbox/storage/monitoring).
 
-        Each aborts boot on incompat or import failure rather than quarantining — the server cannot run
-        without its scalar slots.
+        Each aborts boot on incompat or import failure through the shared abort seam — the server cannot
+        run without its scalar slots.
         """
         manifest = self._require_live_manifest()
-        self._import_core_plugin(manifest.backend_module, "backend_module", dist_map, executed)
-        self._import_core_plugin(manifest.sandbox_module, "sandbox_module", dist_map, executed)
-        self._import_core_plugin(manifest.storage_module, "storage_module", dist_map, executed)
-        self._import_core_plugin(manifest.monitoring_module, "monitoring_module", dist_map, executed)
+        self._import_manifest_module(manifest.backend_module, "backend", dist_map, executed)
+        self._import_manifest_module(manifest.sandbox_module, "sandbox", dist_map, executed)
+        self._import_manifest_module(manifest.storage_module, "storage", dist_map, executed)
+        self._import_manifest_module(manifest.monitoring_module, "monitoring", dist_map, executed)
 
-    def _import_extension_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> set[str]:
-        """Import the extensions modules, returning the set of quarantined extensions modules.
+    def _import_extension_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
+        """Import the extensions modules, then validate the extension registry.
 
-        Runs the quarantine-aware extension validation after the imports.
+        A module that cannot load aborts boot through the shared abort seam; with every
+        declared extensions module imported, a validation failure is genuine manifest
+        misconfiguration and stays a loud abort.
         """
         manifest = self._require_live_manifest()
-        quarantined_extension_modules: set[str] = set()
         for extension in manifest.extensions_modules or []:
-            if not self._import_additive_plugin(extension, "extensions", dist_map, executed):
-                quarantined_extension_modules.add(extension)
-        try:
-            self._extension_registry.validation()
-        except TaiValidationError:
-            # A quarantined extensions module cannot say WHICH extension names it
-            # would have registered, so its missing extensions are indistinguishable
-            # from the quarantine's own footprint — attributed to it loudly here
-            # instead of aborting the boot the quarantine just saved. With no
-            # quarantined extensions module the failure is genuine manifest
-            # misconfiguration and stays a loud abort.
-            if not quarantined_extension_modules:
-                raise
-            logger.error(
-                "extension validation failed with quarantined extensions module(s) %s; "
-                "continuing — tools using their extensions fail at bind/call time",
-                sorted(quarantined_extension_modules),
-                exc_info=True,
-            )
-        return quarantined_extension_modules
+            self._import_manifest_module(extension, "extensions", dist_map, executed)
+        self._extension_registry.validation()
 
-    def _import_tool_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> set[str]:
-        """Import the tools modules, returning the set of quarantined tool modules.
-
-        Their included tool names join the validation ignore set.
-        """
+    def _import_tool_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
+        """Import the tools modules, aborting boot on the first module that cannot load."""
         manifest = self._require_live_manifest()
-        quarantined_tool_modules: set[str] = set()
         for cfg in manifest.tools:
-            if not self._import_additive_plugin(cfg.module, "tools", dist_map, executed):
-                quarantined_tool_modules.add(cfg.module)
-        return quarantined_tool_modules
+            self._import_manifest_module(cfg.module, "tools", dist_map, executed)
 
     def _load_manifest_mcps(self) -> None:
         """Probe and bind the manifest's MCP servers, recording the failed ones.
@@ -230,34 +190,37 @@ class ComponentImportMixin(LifecycleState):
 
         mcp_health.retain({cfg.title for cfg in manifest.mcp or []})
 
-    def _validate_tool_registry(self, quarantined_tool_modules: set[str]) -> None:
+    def _validate_tool_registry(self) -> None:
         """Assemble the tool-validation ignore set and run ``_tool_registry.validation``.
 
-        A quarantined tools module's included tool names are legitimately absent
-        (the module never imported), so they join the failed-MCP ignore set —
-        otherwise the validation would abort the very boot the quarantine saved.
+        The ignore set is the failed-MCP tools whose absence is legitimate (their server
+        was unreachable at probe time); every manifest tool module has imported, so a tool
+        still missing here is a genuine validation failure.
         """
-        manifest = self._require_live_manifest()
-        ignore = set(self._missing_tools_ignore())
-        for module in quarantined_tool_modules:
-            ignore |= manifest.include_module_tools_map.get(module, frozenset())
-        self._tool_registry.validation(ignore=frozenset(ignore))
+        self._tool_registry.validation(ignore=frozenset(self._missing_tools_ignore()))
 
-    def _import_additive_plugin(
-        self, module: str, kind: str, dist_map: dict[str, list[str]], executed_modules: set[str]
-    ) -> bool:
-        """Import one ADDITIVE manifest module under the plugin-compat gate.
+    def _import_manifest_module(
+        self, module: str | None, kind: str, dist_map: dict[str, list[str]], executed_modules: set[str]
+    ) -> None:
+        """Import one manifest-named module under the plugin-compat gate — the shared boot-abort seam.
 
-        An incompatible module is never imported (importing it is exactly what
-        crash-loops or misbehaves), and ANY exception its import raises — not
-        only ImportError; contract drift surfaces as AttributeError/TypeError
-        just as readily — quarantines the module instead of aborting boot. Both
-        paths record a quarantine entry (one loud log line each) and return
-        ``False`` so the caller can account for the module's absent
-        contributions; ``True`` means the module imported. An unknown verdict
-        (no dist mapping / no declared range) proceeds with a logged note,
-        never a silent pass. Imports are function-local to keep the app import
-        chain free of the marketplace package.
+        Every manifest-declared module — an additive role (lifecycle/webhook_verifier/
+        channel/router/middleware/agents/extensions/tools) or a scalar slot
+        (backend/sandbox/storage/monitoring) — flows through here. A module judged
+        INCOMPATIBLE is never imported (importing it is exactly what crash-loops or
+        misbehaves), and an exception its import raises — not only ImportError;
+        contract drift surfaces as AttributeError/TypeError just as readily — aborts
+        boot with a typed :class:`CorePluginBootError` naming the module, its kind and
+        the reason. A manifest names a module the operator chose to load, so a module
+        that cannot load is corrupt configuration, not a degradation to serve around.
+        The ONE exception left with its own type is
+        :class:`CrossOwnerRouteCollisionError`: the module imports fine and the mount
+        collision is resolved by remapping the item's base, so the marketplace install
+        door and the post-record remount reload act on it — at boot, with no remount to
+        follow, it still propagates and aborts boot. An unknown verdict (no dist mapping
+        / no declared range) proceeds with a logged note, never a silent pass. Imports
+        are function-local to keep the app import chain free of the marketplace package.
+        ``None`` (an unset scalar slot) is a no-op.
 
         ``executed_modules`` is the pass's ledger of already-run module bodies: a
         module a prior role loop's package walk already executed under its own
@@ -266,26 +229,24 @@ class ComponentImportMixin(LifecycleState):
         here, so each module body runs EXACTLY once per pass. On success the modules
         this import ran are added to the ledger.
         """
+        if not module:
+            return
         from tai42_skeleton.app.http import plugin_owner
-        from tai42_skeleton.marketplace.compat import module_compat
-        from tai42_skeleton.plugins.quarantine import quarantine_plugin
+        from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
+        from tai42_skeleton.marketplace.compat import CorePluginBootError, module_compat
 
         if module in executed_modules:
-            return True
+            return
         verdict = module_compat(module, dist_map)
         if verdict.status == "incompatible":
-            quarantine_plugin(module, f"{kind} module not loaded: {verdict.reason}")
-            return False
+            raise CorePluginBootError(
+                f"{kind} plugin {module!r} is incompatible and cannot load: {verdict.reason}; "
+                "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
+                "remove it from the manifest, or point the manifest at a working one"
+            )
         if verdict.status == "unknown":
             logger.info("plugin compat unknown for %s module %s: %s", kind, module, verdict.reason)
         binding = self._mount_map.get(module)
-        # Savepoint the FastMCP route table before a BOUND module imports, so a failure
-        # can roll back exactly the routes it committed. A bindingless (core/operator)
-        # module records no owner-isolable rows, so it takes no savepoint/rollback — but a
-        # route submodule this walk sweeps in under ITS OWN binding is guarded per-module
-        # by the importer through the savepoint/rollback handles passed below.
-        savepoint = self._http_surface.route_table_savepoint() if binding is not None else None
-        reloaded: list[str] = []
         try:
             # A mount-bound module resolves its declared routes through the binding
             # carried on the contextvar for the span of its import; the bind also
@@ -300,7 +261,8 @@ class ComponentImportMixin(LifecycleState):
             # itself, so its extra set is empty and no other module is disturbed. Only a
             # route-registering module is re-fired here, so a non-route import side-effect
             # must live in a manifest-listed module to run on reload, never in a
-            # route-sibling that only the extras pop.
+            # route-sibling that only the extras pop. A bindingless (core/scalar-slot)
+            # module records no owner-isolable rows, so it needs no extra set.
             extra = (
                 _lifecycle.route_registry.owner_route_modules(plugin_owner(binding)) - {module}
                 if binding is not None
@@ -314,111 +276,18 @@ class ComponentImportMixin(LifecycleState):
                     route_savepoint=self._http_surface.route_table_savepoint,
                     route_rollback=self._http_surface.rollback_module_routes,
                 )
-        except Exception as exc:
-            if binding is not None and savepoint is not None:
-                # Roll back so a quarantined declared-route module serves NOTHING: the
-                # rows it committed before a mid-import custom_route raise, or before a
-                # post-import _verify_all_registered raise, must leave no trace in the
-                # shape index, _routes, or the FastMCP route table.
-                self._http_surface.rollback_module_routes(binding, savepoint)
-            logger.exception("%s module %s failed to import; quarantining it", kind, module)
-            quarantine_plugin(module, f"{kind} module failed to import: {exc}")
-            return False
-        executed_modules.update(reloaded)
-        return True
-
-    def _import_core_plugin(
-        self, module: str | None, slot: str, dist_map: dict[str, list[str]], executed_modules: set[str]
-    ) -> None:
-        """Import one SCALAR-slot module (backend/storage/monitoring), aborting boot on incompat or import failure.
-
-        Aborts with the typed :class:`CorePluginBootError` — the server cannot run without its scalar slots,
-        so a quarantine-and-continue would be a silently crippled server. ``None`` (slot unset) is a no-op.
-        The error names the plugin, the versions in play (via the compat reason), and the remedy.
-
-        ``executed_modules`` is the pass's run-once ledger: a slot module a prior
-        role loop's walk already executed is not re-imported, and the modules this
-        import runs join the ledger.
-        """
-        if not module:
-            return
-        if module in executed_modules:
-            return
-        from tai42_skeleton.marketplace.compat import CorePluginBootError, module_compat
-
-        verdict = module_compat(module, dist_map)
-        if verdict.status == "incompatible":
-            raise CorePluginBootError(
-                f"{slot} plugin {module!r} cannot boot: {verdict.reason}; the server cannot run without its {slot}"
-            )
-        if verdict.status == "unknown":
-            logger.info("plugin compat unknown for %s %s: %s", slot, module, verdict.reason)
-        try:
-            reloaded = _lifecycle.import_or_reload_package(
-                module,
-                mount_map=self._mount_map,
-                route_savepoint=self._http_surface.route_table_savepoint,
-                route_rollback=self._http_surface.rollback_module_routes,
-            )
+        except CrossOwnerRouteCollisionError:
+            # A cross-owner route mount collision is a resolvable DOMAIN condition, not an
+            # import/compat failure: the module imports fine, and the remedy is remapping
+            # the item's mount base (the marketplace install door surfaces it as a 409 and
+            # the post-record remount reload applies the remap). It keeps its own type
+            # through this seam so those callers can act on it. At boot — with no remount to
+            # follow — it propagates and aborts boot loudly.
+            raise
         except Exception as exc:
             raise CorePluginBootError(
-                f"{slot} plugin {module!r} failed to import: {exc}; the server cannot run without its {slot} — "
-                "fix or update the plugin, or point the manifest at a working one"
+                f"{kind} plugin {module!r} failed to import: {exc}; "
+                "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
+                "remove it from the manifest, or point the manifest at a working one"
             ) from exc
         executed_modules.update(reloaded)
-
-    def _abort_if_auth_provider_quarantined(self) -> None:
-        """Abort boot when a configured auth provider quarantined — the auth-slot twin of the scalar-slot abort.
-
-        Identity/accounts providers are ADDITIVE, so a broken one quarantines rather
-        than aborting; but a quarantined auth provider leaves the server BOOTED yet
-        unauthable, and the quarantine's own report (marketplace listing / Studio)
-        sits behind the very auth that is gone — so the additive loud-failure premise
-        collapses for the one kind whose failure hides its own report. An accounts
-        provider registers into the identity registry too, so every configured
-        provider resolves through ``auth_providers``.
-
-        The gate fires when BOTH hold this boot: a configured provider did not
-        register AND some lifecycle module quarantined. It CANNOT prove the
-        quarantine caused the missing provider — an operator typo in a provider
-        name plus an unrelated quarantine trips the same predicate — so the error
-        enumerates the two facts SEPARATELY (the unresolved provider names; the
-        quarantined lifecycle modules with reasons) with no causal claim, and a
-        remedy covering both. With the gate off, no unresolved provider, or no
-        lifecycle quarantine, boot is untouched; a misconfigured provider name
-        with nothing quarantined is left to the identity-provider startup probe.
-        """
-        manifest = self._require_live_manifest()
-        from tai42_contract.access_control.registry import get_identity_provider_factory_staged
-
-        from tai42_skeleton.access_control.settings import access_control_settings
-        from tai42_skeleton.marketplace.compat import CorePluginBootError
-        from tai42_skeleton.plugins.quarantine import quarantined_plugins_staged
-
-        settings = access_control_settings()
-        if not settings.enable:
-            return
-
-        def _registered(name: str) -> bool:
-            # Read the STAGED generation: this build's own decision keys on what THIS
-            # build imported, not the live epoch's registry.
-            try:
-                get_identity_provider_factory_staged(name)
-            except KeyError:
-                return False
-            else:
-                return True
-
-        unresolved = [name for name in settings.auth_providers if not _registered(name)]
-        lifecycle_modules = set(manifest.lifecycle_modules or [])
-        quarantined = {
-            module: reason for module, reason in quarantined_plugins_staged().items() if module in lifecycle_modules
-        }
-        if unresolved and quarantined:
-            detail = "; ".join(f"{module} ({reason})" for module, reason in sorted(quarantined.items()))
-            raise CorePluginBootError(
-                f"access control is enabled but configured auth provider(s) {sorted(unresolved)} did not register, "
-                f"and lifecycle module(s) quarantined this boot: {detail}; the server would boot unauthable with any "
-                "quarantine surfaced only behind the missing auth — fix the provider name(s) if misspelled, and/or "
-                "resolve the quarantined plugin(s), or point the manifest at a working provider"
-            )

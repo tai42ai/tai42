@@ -3,7 +3,7 @@
 Eleven operations back the ``/api/marketplace/*`` surface: seven reads (search the
 registry, one listing's detail with its versions, the category vocabulary, the
 item-kind vocabulary, the installed inventory with per-row compat/update
-availability plus the boot's plugin-quarantine entries, the advisory snapshot, and
+availability, the advisory snapshot, and
 a no-side-effect install/update route preview) and four environment-mutating flows
 (install, uninstall, update, upgrade-all) driven by
 :class:`~tai42_skeleton.marketplace.installer.Installer`.
@@ -106,7 +106,6 @@ from tai42_skeleton.operations.response_models_group_a import (
     UninstallResult,
     UpgradeAllResult,
 )
-from tai42_skeleton.plugins.quarantine import quarantined_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -467,9 +466,9 @@ async def marketplace_kinds() -> list[str]:
     response_model=InstalledInventory,
 )
 async def marketplace_installed() -> dict[str, Any]:
-    """The installed inventory + the boot-quarantined plugins, in one body.
+    """The installed inventory.
 
-    Shaped ``{"installed": [...], "quarantined": [{"name", "reason"}, ...]}``.
+    Shaped ``{"installed": [...]}``.
 
     Each installed row carries the update picture computed from the registry's
     version rows against the RUNNING contract: ``latest`` (newest published
@@ -498,17 +497,11 @@ async def marketplace_installed() -> dict[str, Any]:
 
     Each row also carries ``delivery`` — ``package`` for a pip-installed plugin,
     ``descriptor`` for a descriptor-only plugin whose stored spec names no package.
-
-    ``quarantined`` mirrors the boot pass's plugin-quarantine registry — the
-    plugins this worker SKIPPED (incompatible or import-broken) with the
-    human-readable reason each.
     """
     # OFF gate: with no install-attribution store there is no installed inventory —
-    # the honest answer is an empty ``installed`` list. The in-process quarantine
-    # list is independent of the store and MUST still be served truthfully.
+    # the honest answer is an empty ``installed`` list.
     if not component_store_configured(SKELETON_COMPONENT):
-        quarantined = [{"name": name, "reason": reason} for name, reason in sorted(quarantined_plugins().items())]
-        return {"installed": [], "quarantined": quarantined}
+        return {"installed": []}
     registry = RegistryClient()
     contract = running_contract_version()
     rows: list[dict[str, Any]] = []
@@ -546,8 +539,7 @@ async def marketplace_installed() -> dict[str, Any]:
                 "route_mounts": record.route_mounts,
             }
         )
-    quarantined = [{"name": name, "reason": reason} for name, reason in sorted(quarantined_plugins().items())]
-    return {"installed": rows, "quarantined": quarantined}
+    return {"installed": rows}
 
 
 @operation(

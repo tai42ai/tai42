@@ -31,12 +31,12 @@ from tai42_skeleton.app import server as server_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
 from tai42_skeleton.monitoring import registry as monitoring_registry
 from tai42_skeleton.operations import OperationError
-from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.tools.binding import ToolBinding, UnknownToolError
 
 if TYPE_CHECKING:
@@ -241,27 +241,35 @@ def test_http_app_builds_and_finalizes():
     assert result.app is sentinel
 
 
+def _assert_error_handlers_installed(sentinel: MagicMock) -> None:
+    from tai42_skeleton.marketplace.compat import CorePluginBootError
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
+    sentinel.add_exception_handler.assert_any_call(FleetBroadcastError, server_module._fleet_broadcast_error_handler)
+    sentinel.add_exception_handler.assert_any_call(CorePluginBootError, server_module._core_plugin_boot_error_handler)
+    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
+
+
 def test_sse_app_registers_error_handlers():
-    # The uniform-500 handler and the JSON-404 handler are installed on the base app's own
-    # exception table, so every adapter route on the SSE serving path answers the generic
-    # {"error", "error_id"} 500 envelope and the {"error": "not found"} 404 envelope.
+    # The shared error-envelope handlers are installed on the base app's own exception table,
+    # so every adapter route on the SSE serving path answers the generic {"error", "error_id"}
+    # 500, the {"error": "not found"} 404, and a reload plugin boot-abort reaches the caller.
     a = _fresh()
     sentinel = MagicMock()
     with patch.object(server_module, "create_sse_app", return_value=sentinel):
         a.sse_app()
-    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
-    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
+    _assert_error_handlers_installed(sentinel)
 
 
 def test_http_app_registers_error_handlers():
-    # The same two handlers are installed on the http serving path's base app.
+    # The same handlers are installed on the http serving path's base app.
     a = _fresh()
     sentinel = MagicMock()
     mcp = a._serving_core._fast_mcp = MagicMock()
     mcp.http_app.return_value = sentinel
     a.http_app(path="/mcp", transport="http")
-    sentinel.add_exception_handler.assert_any_call(Exception, server_module._internal_error_handler)
-    sentinel.add_exception_handler.assert_any_call(404, server_module._not_found_handler)
+    _assert_error_handlers_installed(sentinel)
 
 
 def test_internal_error_handler_mints_id_and_hides_detail():
@@ -280,6 +288,96 @@ def test_internal_error_handler_mints_id_and_hides_detail():
     assert body["error_id"]  # a non-empty correlation id
     assert "boom" not in bytes(resp.body).decode()  # internal text never reaches the client
     assert getattr(exc, "error_id", None) == body["error_id"]  # stamped for the dispatch net to correlate
+
+
+def test_core_plugin_boot_error_handler_surfaces_the_reason():
+    # A reload door drives an epoch rebuild; a manifest plugin that cannot load aborts THAT
+    # rebuild, and the operator-facing message (module, kind, reason) reaches the caller as a
+    # non-2xx envelope — never the generic masked 500 — so the CLI prints it and exits non-zero.
+    import json as _json
+
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
+    exc = CorePluginBootError("tools plugin 'acme_tools' failed to import: No module named 'acme_tools'")
+    resp = asyncio.run(server_module._core_plugin_boot_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert body["error"] == "tools plugin 'acme_tools' failed to import: No module named 'acme_tools'"
+
+
+def test_fleet_broadcast_error_surfaces_a_plugin_boot_cause():
+    # A reload that broadcasts to the fleet wraps a failed local rebuild as FleetBroadcastError;
+    # when the cause is a plugin boot-abort, the reason plus the fleet report reach the caller.
+    import json as _json
+
+    from starlette.requests import Request
+
+    from tai42_skeleton.app.bus.models import FleetResult
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    cause = CorePluginBootError("tools plugin 'acme_tools' failed to import: boom")
+    report = FleetResult(op="reload_config", reachable=True)
+    exc = FleetBroadcastError("reload_config", report, cause)
+    exc.__cause__ = cause  # the production raise sets this via ``from local_failure``
+
+    scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
+    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert body["error"] == "tools plugin 'acme_tools' failed to import: boom"
+    assert body["report"]["op"] == "reload_config"
+
+
+def test_fleet_broadcast_error_surfaces_a_route_collision_cause():
+    # A direct reload door whose rebuild hit a cross-owner route collision wraps it as
+    # FleetBroadcastError; the collision message (naming the remap remedy) plus the report
+    # reach the caller, not the generic masked 500.
+    import json as _json
+
+    from starlette.requests import Request
+
+    from tai42_skeleton.app.bus.models import FleetResult
+    from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    cause = CrossOwnerRouteCollisionError(
+        "route GET /api/x (owner a) collides with GET /api/x (owner b) — "
+        "one owner per route shape; remap the mount base to resolve"
+    )
+    report = FleetResult(op="reload_config", reachable=True)
+    exc = FleetBroadcastError("reload_config", report, cause)
+    exc.__cause__ = cause
+
+    scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
+    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert "remap the mount base to resolve" in body["error"]
+    assert body["report"]["op"] == "reload_config"
+
+
+def test_fleet_broadcast_error_masks_a_transport_cause():
+    # A fleet-broadcast failure whose cause is NOT a plugin boot-abort — a bus transport error
+    # naming internal hosts — keeps the generic masked 500 so internal detail never leaks.
+    import json as _json
+
+    from starlette.requests import Request
+
+    from tai42_skeleton.app.bus.models import FleetResult
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    cause = ConnectionError("cannot reach redis at internal-host:6379")
+    report = FleetResult(op="reload_config", reachable=False, error="ConnectionError")
+    exc = FleetBroadcastError("reload_config", report, cause)
+    exc.__cause__ = cause
+
+    scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
+    resp = asyncio.run(server_module._fleet_broadcast_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert body["error"] == "Internal Server Error"
+    assert "internal-host" not in bytes(resp.body).decode()
 
 
 def test_internal_error_handler_survives_unstampable_exception():
@@ -687,7 +785,8 @@ def test_toolkit_binds_adapted_tools():
 def test_extension_returning_same_name_is_rejected():
     # An extension must rename the tool to create a branch; returning the same
     # name raises during binding (which happens at module-import time in start()),
-    # quarantining the tools module — an additive plugin never aborts boot.
+    # aborting boot through the shared abort seam — a manifest-declared module that
+    # cannot load.
     manifest = Manifest.model_validate(
         {
             "extensions_modules": ["tests.app._fixtures.ext_samename"],
@@ -704,11 +803,10 @@ def test_extension_returning_same_name_is_rejected():
 
     async def run():
         async with app.app_context(manifest):
-            reason = quarantined_plugins()["tests.app._fixtures.tools_b"]
-            assert "same name" in reason
-            assert "shout" not in await app.tools.get_tools()
+            pass  # pragma: no cover — start() aborts before the body runs
 
-    asyncio.run(run())
+    with pytest.raises(CorePluginBootError, match="same name"):
+        asyncio.run(run())
 
 
 def test_agent_not_in_include_is_not_registered():

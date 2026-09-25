@@ -180,8 +180,8 @@ def _import_rows(surface: HttpSurface, binding: MountBinding, *paths: str) -> No
 
 def test_rollback_clears_a_module_that_raised_mid_import(surface: HttpSurface) -> None:
     # A bound module registers declared row A, then a later custom_route for an
-    # UNDECLARED row raises — mirroring a module quarantined mid-import. The
-    # quarantined module must serve nothing.
+    # UNDECLARED row raises — mirroring a module that failed mid-import. The
+    # failed module must serve nothing.
     binding = _binding()  # declares only /ping
     savepoint = surface.route_table_savepoint()
     with pytest.raises(MountRegistrationError, match="not declared"):
@@ -193,7 +193,7 @@ def test_rollback_clears_a_module_that_raised_mid_import(surface: HttpSurface) -
     assert registry.match("/api/acme/one/ping", "GET") is not None
     assert "/api/acme/one/ping" in _fastmcp_paths(surface)
 
-    # Rollback deregisters the quarantined module from all three surfaces.
+    # Rollback deregisters the failed module from all three surfaces.
     surface.rollback_module_routes(binding, savepoint)
     assert registry.match("/api/acme/one/ping", "GET") is None
     assert "/api/acme/one/ping" not in _fastmcp_paths(surface)

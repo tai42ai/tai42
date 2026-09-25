@@ -291,7 +291,7 @@ class HttpSurface:
         return len(self._app._fast_mcp._additional_http_routes)
 
     def rollback_module_routes(self, binding: MountBinding, savepoint: int) -> None:
-        """Undo every route a failed/quarantined bound module registered, across all three surfaces.
+        """Undo every route a failed bound module registered, across all three surfaces.
 
         So ``RouteRegistry.match()``, the cross-owner collision math, and the OpenAPI enumeration all
         see nothing from it: truncate the FastMCP route table back to ``savepoint`` and deregister every

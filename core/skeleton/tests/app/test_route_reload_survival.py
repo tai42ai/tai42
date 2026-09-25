@@ -108,7 +108,7 @@ def plugin_dist(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteRegistry]:
 
 def _reload_extra(registry: RouteRegistry, owner: RouteOwner, leaf: str) -> frozenset[str]:
     """The sibling module(s) the reload pops for ``owner`` — computed exactly as
-    ``_import_additive_plugin`` does (the owner's recorded route modules, minus the
+    ``_import_manifest_module`` does (the owner's recorded route modules, minus the
     leaf itself)."""
     return registry.owner_route_modules(owner) - {leaf}
 
@@ -126,7 +126,7 @@ def test_sibling_route_survives_a_leaf_reimport(plugin_dist: RouteRegistry) -> N
     # A leaf-only re-import leaves the sibling cached in sys.modules, so its registration
     # never re-fires: the declared route goes unregistered and the bind-time completeness
     # check must raise — the failure a rebuild that reimported the leaf alone would hit,
-    # quarantining the plugin and dropping every one of its routes from the epoch.
+    # aborting boot rather than serving a route-dropping epoch.
     registry.reset_shape_index()
     with pytest.raises(MountRegistrationError, match="never registered"), bind_module(_SIBLING_BINDING):
         import_or_reload_package(_SIBLING_LEAF)
@@ -233,8 +233,8 @@ def test_update_that_deletes_the_sibling_reloads_cleanly(monkeypatch: pytest.Mon
     # file. The reload's extra set — the owner's route modules recorded on the OLD epoch —
     # still names the vanished sibling, whose module is still cached in ``sys.modules``.
     # The reload must drop that extra against the filesystem (not its stale cached spec),
-    # so the leaf reimport re-fires v2's own registration: the route stays live, the
-    # plugin is not quarantined by a ModuleNotFoundError, and the audit sees no drop.
+    # so the leaf reimport re-fires v2's own registration: the route stays live, boot
+    # is not aborted by a ModuleNotFoundError, and the audit sees no drop.
     registry = RouteRegistry()
     monkeypatch.setattr("tai42_skeleton.app.route_registry.route_registry", registry)
     monkeypatch.syspath_prepend(str(_PLUGIN_DIST_ROOT))  # for ``_regprobe``
@@ -269,7 +269,7 @@ def test_update_that_deletes_the_sibling_reloads_cleanly(monkeypatch: pytest.Mon
 
         # Reload under the binding with the stale extra: the sibling is dropped (its file is
         # gone), the leaf re-fires v2's own registration, and the route is back — no
-        # ModuleNotFoundError, no ``MountRegistrationError`` quarantine.
+        # ModuleNotFoundError, no ``MountRegistrationError`` boot-abort.
         registry.reset_shape_index()
         with bind_module(_EPS_BINDING):
             reloaded = import_or_reload_package(leaf, extra)
@@ -313,7 +313,7 @@ def test_dual_route_leaf_and_sibling_both_survive_a_rebuild(plugin_dist: RouteRe
 
 
 def test_channel_walk_under_a_bound_leaf_is_unchanged_by_the_mount_map(plugin_dist: RouteRegistry) -> None:
-    # The channel shape driven exactly as ``_import_additive_plugin`` does — an OUTER
+    # The channel shape driven exactly as ``_import_manifest_module`` does — an OUTER
     # ``bind_module`` for the manifest leaf PLUS the mount map — must be unchanged by the
     # per-submodule resolution: the leaf's own binding equals the active one, so it is not
     # re-bound, and the route-carrying sibling (absent from the map) keeps the leaf's
@@ -402,7 +402,7 @@ def test_package_walk_under_foreign_role_binds_a_mapped_route_submodule(foreign_
 def test_unmapped_route_submodule_in_a_foreign_walk_still_raises(foreign_role_dist: RouteRegistry) -> None:
     # The loud-failure floor: a route submodule the walk reaches with NEITHER its own
     # binding in the map NOR any active binding calls ``mount_base()`` at import and must
-    # still raise exactly as today, quarantining the walked package rather than booting a
+    # still raise exactly as today, aborting boot rather than serving a
     # silently mis-mounted route.
     app = TaiMCP(name="foreign-role-unmapped")
     with tai42_app.bound(app), pytest.raises(MountRegistrationError, match="no mount binding present"):
@@ -418,7 +418,7 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
 ) -> None:
     # The accounts-postgres shape: the ROOT package is a lifecycle entry AND its two route
     # submodules are their own router entries. Driven through the REAL role-loop dedup
-    # (``_import_additive_plugin`` with the pass's run-once ledger), the lifecycle walk runs
+    # (``_import_manifest_module`` with the pass's run-once ledger), the lifecycle walk runs
     # each route module body once under its own binding, and the router-role import — reaching
     # already-executed modules — does NOT re-run them. Exactly one execution per module per
     # pass, all routes registered, completeness green (no MountRegistrationError). A second
@@ -435,10 +435,10 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
         registry.reset_shape_index()
         executed: set[str] = set()
         # Lifecycle loop: the root package sweeps in both route submodules under their bindings.
-        assert app._import_additive_plugin("multi_router_plugin", "lifecycle", {}, executed) is True
+        app._import_manifest_module("multi_router_plugin", "lifecycle", {}, executed)
         # Router role: each route submodule is its own entry — already executed by the walk.
-        assert app._import_additive_plugin(_LOGIN_LEAF, "router", {}, executed) is True
-        assert app._import_additive_plugin(_USERS_LEAF, "router", {}, executed) is True
+        app._import_manifest_module(_LOGIN_LEAF, "router", {}, executed)
+        app._import_manifest_module(_USERS_LEAF, "router", {}, executed)
         # The walk executed the submodules and the ledger recorded them, so the router-role import skipped.
         assert {_LOGIN_LEAF, _USERS_LEAF} <= executed
         assert _regprobe.exec_count[_LOGIN_LEAF] == 1

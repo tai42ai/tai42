@@ -48,7 +48,6 @@ from tai42_skeleton.marketplace.errors import (
 )
 from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations import NotSupportedError
-from tai42_skeleton.plugins.quarantine import quarantine_plugin, reset_quarantine
 
 
 @pytest.fixture(autouse=True)
@@ -231,13 +230,8 @@ def _published(version: str, contract_range: str | None = ">=0.3,<0.4") -> dict[
 @pytest.fixture(autouse=True)
 def _pin_contract(monkeypatch: pytest.MonkeyPatch):
     # The installed listing computes against the RUNNING contract; pin it so the
-    # tests are independent of the environment's tai42-contract version. The
-    # process-global quarantine registry is reset around each test too — boot
-    # passes other tests run would otherwise leak entries into ``quarantined``.
+    # tests are independent of the environment's tai42-contract version.
     monkeypatch.setattr(mkt_ops, "running_contract_version", lambda: "0.3.0")
-    reset_quarantine()
-    yield
-    reset_quarantine()
 
 
 async def test_installed_happy_computes_update_availability(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,7 +247,6 @@ async def test_installed_happy_computes_update_availability(monkeypatch: pytest.
     # A row whose stored spec names no package cannot be verdicted — surfaced
     # as unknown, never a silent "compatible".
     assert row["compat"]["status"] == "unknown"
-    assert body["quarantined"] == []
 
 
 async def test_installed_exposes_provided_item_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,20 +399,6 @@ async def test_installed_serves_per_row_compat_verdict(monkeypatch: pytest.Monke
     assert seen == ["acme-toolbox"]  # verdicted by the stored spec's package dist
     assert row["compat"]["status"] == "incompatible"
     assert "requires tai42-contract" in row["compat"]["reason"]
-
-
-async def test_installed_surfaces_the_boot_quarantine(monkeypatch: pytest.MonkeyPatch) -> None:
-    _use_store(monkeypatch, [])
-    _use_registry(monkeypatch, _FakeRegistry())
-    reset_quarantine()
-    try:
-        quarantine_plugin("acme_plugin", "tools module failed to import: boom")
-        resp = await router.marketplace_installed(_get())
-    finally:
-        reset_quarantine()
-    body = _data(resp)["data"]
-    assert body["installed"] == []
-    assert body["quarantined"] == [{"name": "acme_plugin", "reason": "tools module failed to import: boom"}]
 
 
 # -- advisories --------------------------------------------------------------
@@ -649,12 +628,10 @@ def _off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_installed_off_answers_empty_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
-    # With no store the inventory is empty, but the in-process quarantine list is
-    # independent of the store and MUST still be served truthfully (a list).
+    # With no store the inventory is an empty installed list.
     _off(monkeypatch)
     body = await mkt_ops.marketplace_installed()
     assert body["installed"] == []
-    assert isinstance(body["quarantined"], list)
 
 
 async def test_advisories_off_answers_empty_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:

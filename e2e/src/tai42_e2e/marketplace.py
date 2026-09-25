@@ -113,7 +113,7 @@ def _registry_venv_dir() -> Path:
     caps (tai42-contract / tai42-kit) are point-in-time: in a release-PR window
     where the workspace has moved a first-party package past a registry cap, a
     shared-venv install would DOWNGRADE that workspace package from PyPI and the
-    skeleton would then quarantine its own routers at boot. A separate venv keeps
+    skeleton would then abort boot on its own routers. A separate venv keeps
     the registry's dependency resolution wholly apart from the SUT's."""
     return Path(__file__).resolve().parents[2] / f".tai42-e2e-marketplace-{_marketplace_ref()[:12]}"
 

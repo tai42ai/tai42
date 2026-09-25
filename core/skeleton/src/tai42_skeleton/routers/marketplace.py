@@ -8,7 +8,7 @@ Eleven thin adapters over the operations in
 * ``GET  /api/marketplace/categories``             — the controlled category vocabulary.
 * ``GET  /api/marketplace/kinds``                  — the controlled item-kind vocabulary.
 * ``GET  /api/marketplace/installed``              — the installed inventory (per-row compat + update
-  availability) and the boot's plugin-quarantine entries.
+  availability).
 * ``POST /api/marketplace/install/preview``        — resolve a candidate install/update's routes, no side effects.
 * ``POST /api/marketplace/install``                — install a plugin by ref.
 * ``POST /api/marketplace/uninstall``              — uninstall a plugin by ref.

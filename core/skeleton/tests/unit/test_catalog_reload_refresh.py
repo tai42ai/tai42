@@ -113,16 +113,16 @@ def test_reload_registries_audits_dropped_plugin_routes(monkeypatch: pytest.Monk
         mixin._mount_map = {leaf: binding}
 
         # Inject the sibling-cache bug at the reimport seam: re-import the leaf ALONE, so
-        # the cached sibling never re-fires. The bind-time completeness check then raises,
-        # which _import_additive_plugin catches and quarantines — rolling the plugin's
-        # rows out of the STAGED generation, exactly the drop the audit must catch.
+        # the cached sibling never re-fires. The bind-time completeness check then raises;
+        # this buggy_start simulates the rollback that drops the plugin's rows out of the
+        # STAGED generation, exactly the drop the audit must catch.
         def buggy_start(manifest: Manifest) -> None:
             registry.reset_shape_index()  # clears the STAGED target, as the real start() does
             try:
                 with bind_module(binding):
                     import_or_reload_package(leaf)  # no sibling extra → route never re-registers
             except MountRegistrationError:
-                registry.rollback_owner(plugin_owner(binding))  # quarantine drops the partial rows
+                registry.rollback_owner(plugin_owner(binding))  # the rollback drops the partial rows
 
         monkeypatch.setattr(mixin, "start", buggy_start)
 

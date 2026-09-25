@@ -14,6 +14,7 @@ from typing import Any
 
 from tai42_contract.plugins import PluginSpec
 
+from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
 from tai42_skeleton.config.service import ApplyResult
 from tai42_skeleton.marketplace import (
     env_apply,
@@ -237,8 +238,18 @@ class _InstallFlow(_InstallerBase):
 
         Apply provides+env, write the attribution row, post-record remount reload; unwind on any
         failure.
+
+        The forward provides reload runs BEFORE the attribution row exists, so its mount map
+        (which reads the store) mounts every route-carrying item at its DECLARED base. A
+        REMAPPED item therefore transiently registers at its declared base and, when that base
+        already belongs to another owner, the reload raises a route collision. The pre-flight
+        has already proved the RESOLVED base is clear (a same-base collision is refused there,
+        never here), so that one failure is recovered by recording the row and remounting at
+        the resolved base — the exact job the post-record remount already does. Every other
+        reload failure, and a collision no remap resolves, propagates and unwinds.
         """
         manifest_persisted = False
+        row_persisted = False
         # ``env_restore`` captures the PRIOR store value of every key written, so the
         # unwind restores each rather than blind-deleting it.
         env_written = env_apply.env_to_write(env)
@@ -248,31 +259,30 @@ class _InstallFlow(_InstallerBase):
             def mutator(document: dict[str, Any]) -> None:
                 apply_provides(document, spec)
 
-            apply_result = await env_apply.apply_provides_change(
-                self._svc(),
-                spec,
-                mutator,
-                env=env,
-                secret_keys=secret_keys,
-                env_to_write=env_written,
-                env_restore=env_restore,
-            )
+            try:
+                apply_result = await env_apply.apply_provides_change(
+                    self._svc(),
+                    spec,
+                    mutator,
+                    env=env,
+                    secret_keys=secret_keys,
+                    env_to_write=env_written,
+                    env_restore=env_restore,
+                )
+            except FleetBroadcastError as reload_error:
+                if not (resolved_route_list and isinstance(reload_error.__cause__, CrossOwnerRouteCollisionError)):
+                    raise
+                # The provides patch persisted; the forward reload collided only because the
+                # remapped item was still mounted at its declared base. Record the row and
+                # remount at the resolved base — authoritative here (a failure is a real
+                # install failure, not the best-effort degrade the non-collision path allows).
+                manifest_persisted = True
+                await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
+                row_persisted = True
+                return await self._svc().apply_replace(self._cm().read_manifest_preserved())
             manifest_persisted = True
-            repo_url, tag, artifact_ref, sha256 = resolve.pin_provenance(resolved, source)
-            contract_version, skeleton_version = resolve.core_version_stamps()
-            await self._store.record(
-                ref,
-                pinned_version,
-                source,
-                repo_url,
-                tag,
-                artifact_ref,
-                sha256,
-                spec.model_dump(mode="json"),
-                contract_version=contract_version,
-                skeleton_version=skeleton_version,
-                route_mounts=resolved_mounts,
-            )
+            await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
+            row_persisted = True
             # With the row persisted, re-reload so the mount map remounts each route at
             # its remapped base. Route-declaring specs only; best-effort (never unwinds).
             if resolved_route_list:
@@ -290,8 +300,38 @@ class _InstallFlow(_InstallerBase):
                 env_restore=env_restore,
                 **self._install_unwind_seams(),
             )
+            # The row is written only after the manifest reload, so it needs dropping only on
+            # the collision-recovery path, where it precedes the authoritative remount.
+            if row_persisted:
+                await self._store.delete(ref)
             raise
         return apply_result
+
+    async def _record_install_row(
+        self,
+        ref: str,
+        pinned_version: str,
+        spec: PluginSpec,
+        source: str,
+        resolved: dict[str, Any],
+        resolved_mounts: dict[str, str],
+    ) -> None:
+        """Write the attribution row for a committed install, with its resolved route mounts."""
+        repo_url, tag, artifact_ref, sha256 = resolve.pin_provenance(resolved, source)
+        contract_version, skeleton_version = resolve.core_version_stamps()
+        await self._store.record(
+            ref,
+            pinned_version,
+            source,
+            repo_url,
+            tag,
+            artifact_ref,
+            sha256,
+            spec.model_dump(mode="json"),
+            contract_version=contract_version,
+            skeleton_version=skeleton_version,
+            route_mounts=resolved_mounts,
+        )
 
     # -- uninstall ----------------------------------------------------------
 

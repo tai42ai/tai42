@@ -139,8 +139,8 @@ def test_extra_whose_backing_file_was_deleted_is_dropped_not_raised(tmp_path, mo
     # A plugin UPDATE can delete a route-sibling whose module is STILL cached in
     # ``sys.modules`` (imported under the old epoch). ``find_spec`` short-circuits to the
     # cached module's stale ``__spec__``, so the staleness check would keep the vanished
-    # module, pop it, and fail to reimport it — a ModuleNotFoundError that quarantines the
-    # plugin. The extra must instead be dropped: popped first, so ``find_spec`` resolves
+    # module, pop it, and fail to reimport it — a ModuleNotFoundError that aborts the reload.
+    # The extra must instead be dropped: popped first, so ``find_spec`` resolves
     # against the filesystem, sees the deleted file, and drops it with the log.
     pkg = tmp_path / "deleted_sibling_pkg"
     pkg.mkdir()

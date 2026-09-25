@@ -83,7 +83,7 @@ def build_marketplace_prefix_stack(res: StackResources, variants: Variants) -> S
 
 def build_marketplace_quarantine_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The marketplace-prefix stack with the zeta compat fixture's tool module
-    already wired into the manifest — the home of the boot-quarantine spec.
+    already wired into the manifest — the home of the boot-abort spec.
 
     The manifest carries the installer-shaped config row
     (``{"title": <module>, "module": <module>}``) for zeta's tool module, exactly

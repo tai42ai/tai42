@@ -146,36 +146,14 @@ def kinds(ctx: typer.Context) -> None:
 @app.command("installed")
 @covers(("GET", "/api/marketplace/installed"))
 def installed(ctx: typer.Context) -> None:
-    """List installed marketplace plugins with compat verdicts, update availability, and boot-quarantines.
+    """List installed marketplace plugins with compat verdicts and update availability.
 
     Example: ``tai plugins installed``
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/marketplace/installed")
-    # /api/marketplace/installed returns two lists (installed + quarantined) and each
-    # row is reshaped locally (compat flattened to its status), so the columns are not
-    # model-derivable.
-    if not ctx_obj.json_output and isinstance(data, dict):
-        # The table shows the compat STATUS in its own column (the reason is in
-        # the JSON form), and quarantined plugins are printed after the table so
-        # a skipped plugin is never invisible in the default view.
-        rows = [{**row, "compat": row.get("compat", {}).get("status")} for row in data.get("installed", [])]
-        emit_records(
-            ctx_obj,
-            {"installed": rows},
-            ["ref", "version", "latest", "update_available", "incompatible_newer", "compat", "installed_at"],
-            items_key="installed",
-        )
-        for entry in data.get("quarantined", []):
-            typer.echo(f"quarantined: {entry.get('name')} — {entry.get('reason')}")
-        return
-    emit_records(
-        ctx_obj,
-        data,
-        ["ref", "version", "latest", "update_available", "incompatible_newer", "compat", "installed_at"],
-        items_key="installed",
-    )
+    emit_records(ctx_obj, data, route=("GET", "/api/marketplace/installed"))
 
 
 def _mount_overrides(mount: list[str] | None) -> dict[str, str]:

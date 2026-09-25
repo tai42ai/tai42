@@ -1,5 +1,5 @@
 """Studio-plugin registry: manifest validation, integrity hashing, traversal
-defense, vendor hashing, per-plugin quarantine on load faults, and the
+defense, vendor hashing, boot-abort on load faults, and the
 startup/reload rebuild pass."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import pytest
 
 import tai42_skeleton.plugins.registry as reg
 from tai42_skeleton.marketplace import compat
-from tai42_skeleton.plugins.quarantine import quarantined_plugins, reset_quarantine
+from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.plugins.registry import (
     Contributions,
     StudioPluginError,
@@ -20,13 +20,6 @@ from tai42_skeleton.plugins.registry import (
     build_registry,
     resolve_under,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clean_quarantine():
-    reset_quarantine()
-    yield
-    reset_quarantine()
 
 
 def _write_plugin(
@@ -226,44 +219,40 @@ def test_build_registry_happy(tmp_path, monkeypatch):
     assert any(url.startswith("/api/plugins/acme_plugin/studio/") for url in plugin.integrity_by_url)
 
 
-def test_build_registry_missing_manifest_quarantines(tmp_path, monkeypatch):
+def test_build_registry_missing_manifest_aborts_boot(tmp_path, monkeypatch):
     studio = tmp_path / "studio"
     studio.mkdir()
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}  # an empty registry is valid
-    assert "missing studio-manifest.json" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match=r"missing studio-manifest\.json"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_integrity_mismatch_quarantines(tmp_path, monkeypatch):
+def test_build_registry_integrity_mismatch_aborts_boot(tmp_path, monkeypatch):
     studio = _write_plugin(tmp_path)
     # Corrupt the entry file AFTER the manifest recorded its hash.
     entry = next(p for p in studio.iterdir() if p.suffix == ".js")
     entry.write_text("export const x = 2; // mutated\n", encoding="utf-8")
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "sha384 mismatch" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="sha384 mismatch"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_name_package_mismatch_quarantines(tmp_path, monkeypatch):
+def test_build_registry_name_package_mismatch_aborts_boot(tmp_path, monkeypatch):
     # manifest.name != package: the shell builds the bundle URL from the name, so
-    # a mismatch 404s on every browser load — quarantined at load time.
+    # a mismatch 404s on every browser load — a load fault that aborts boot.
     studio = _write_plugin(tmp_path, name="other_name")
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "manifest name" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="manifest name"):
+        build_registry(["acme_plugin"], None)
 
 
 def test_build_registry_duplicate_package_loads_once(tmp_path, monkeypatch, caplog):
     # A duplicate listing is manifest hygiene, not a plugin fault: the plugin
-    # loads ONCE and the duplication is logged loudly, never quarantined away.
+    # loads ONCE and the duplication is logged loudly, never a load fault.
     studio = _write_plugin(tmp_path)
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
     registry = build_registry(["acme_plugin", "acme_plugin"], None)
     assert list(registry.plugins) == ["acme_plugin"]
-    assert quarantined_plugins() == {}
     assert any("listed more than once" in rec.message for rec in caplog.records)
 
 
@@ -299,30 +288,28 @@ def test_studio_root_resolves_a_real_package_dist(tmp_path, monkeypatch):
         sys.modules.pop("studio_fixture_pkg", None)
 
 
-# -- manifest-file faults quarantine at load ---------------------------------
+# -- manifest-file faults abort boot at load ---------------------------------
 
 
-def test_build_registry_unreadable_manifest_json_quarantines(tmp_path, monkeypatch):
+def test_build_registry_unreadable_manifest_json_aborts_boot(tmp_path, monkeypatch):
     studio = tmp_path / "studio"
     studio.mkdir()
     (studio / "studio-manifest.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "not readable JSON" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="not readable JSON"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_schema_invalid_manifest_quarantines(tmp_path, monkeypatch):
+def test_build_registry_schema_invalid_manifest_aborts_boot(tmp_path, monkeypatch):
     studio = tmp_path / "studio"
     studio.mkdir()
     (studio / "studio-manifest.json").write_text(json.dumps({"name": "acme_plugin"}), encoding="utf-8")
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "manifest is invalid" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="manifest is invalid"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_entry_without_integrity_hash_quarantines(tmp_path, monkeypatch):
+def test_build_registry_entry_without_integrity_hash_aborts_boot(tmp_path, monkeypatch):
     studio = _write_plugin(tmp_path)
     manifest_path = studio / "studio-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -331,35 +318,32 @@ def test_build_registry_entry_without_integrity_hash_quarantines(tmp_path, monke
     manifest["integrity"] = {"other-chunk.js": manifest["integrity"][manifest["entry"]]}
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "has no integrity hash" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="has no integrity hash"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_integrity_listing_a_missing_file_quarantines(tmp_path, monkeypatch):
+def test_build_registry_integrity_listing_a_missing_file_aborts_boot(tmp_path, monkeypatch):
     studio = _write_plugin(tmp_path)
     manifest_path = studio / "studio-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["integrity"]["ghost-chunk.js"] = manifest["integrity"][manifest["entry"]]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "no such file exists" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="no such file exists"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_missing_studio_dist_quarantines(monkeypatch):
+def test_build_registry_missing_studio_dist_aborts_boot(monkeypatch):
     def _raise(package):
         raise StudioPluginError(f"studio plugin package {package!r} has no ``studio/`` dist directory")
 
     monkeypatch.setattr(reg, "_studio_root", _raise)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "no ``studio/`` dist" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="no ``studio/`` dist"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_incompatible_plugin_never_loads(tmp_path, monkeypatch):
-    # A contract-incompatible studio plugin is quarantined on the VERDICT alone —
+def test_build_registry_incompatible_plugin_aborts_boot_without_loading(tmp_path, monkeypatch):
+    # A contract-incompatible studio plugin aborts boot on the VERDICT alone —
     # its dist is never even opened (loading it is what misbehaves).
     def _boom(package):  # pragma: no cover - the compat gate must reject first
         raise AssertionError("an incompatible plugin's dist must not be read")
@@ -370,13 +354,12 @@ def test_build_registry_incompatible_plugin_never_loads(tmp_path, monkeypatch):
         "module_compat",
         lambda module, dist_map=None: compat.CompatVerdict("incompatible", "needs tai42-contract <0.2, 0.3.0 running"),
     )
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "needs tai42-contract <0.2" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match=r"needs tai42-contract <0\.2"):
+        build_registry(["acme_plugin"], None)
 
 
-def test_build_registry_one_broken_plugin_keeps_siblings(tmp_path, monkeypatch):
-    # Partial failure: the broken plugin quarantines, the healthy sibling serves.
+def test_build_registry_aborts_on_a_broken_plugin(tmp_path, monkeypatch):
+    # A manifest-declared studio plugin that cannot load aborts the build, naming it.
     good = _write_plugin(tmp_path, name="good_plugin")
 
     def _root(package):
@@ -385,9 +368,8 @@ def test_build_registry_one_broken_plugin_keeps_siblings(tmp_path, monkeypatch):
         raise StudioPluginError(f"studio plugin package {package!r} is not importable")
 
     monkeypatch.setattr(reg, "_studio_root", _root)
-    registry = build_registry(["good_plugin", "bad_plugin"], None)
-    assert list(registry.plugins) == ["good_plugin"]
-    assert "not importable" in quarantined_plugins()["bad_plugin"]
+    with pytest.raises(CorePluginBootError, match="not importable"):
+        build_registry(["good_plugin", "bad_plugin"], None)
 
 
 # -- Host-only specifier gate ------------------------------------------------
@@ -404,26 +386,22 @@ def test_build_registry_normal_sdk_import_loads(tmp_path, monkeypatch):
 def test_build_registry_rejects_host_only_specifier(tmp_path, monkeypatch, specifier):
     studio = _write_plugin(tmp_path, content=f'import {{registry}} from "{specifier}";\n')
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    # The offending bundle never serves: quarantined and excluded, so the asset
-    # route (integrity-listed files only) can never hand it to a browser.
-    assert registry.plugins == {}
-    assert "host-only Studio SDK" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="host-only Studio SDK"):
+        build_registry(["acme_plugin"], None)
 
 
 def test_build_registry_scans_non_entry_chunk(tmp_path, monkeypatch):
     # The entry is clean, but a SECOND integrity-listed chunk carries the host-only
     # specifier. The byte-scan covers every listed file, not just the entry, so the
-    # load must still reject the plugin (into quarantine).
+    # load must still reject the plugin, aborting the build.
     studio = _write_plugin(
         tmp_path,
         content='import {run} from "@tai42/studio-sdk";\n',
         extra_chunks={"chunk-d4e5f6.js": 'import {registry} from "@tai42/studio-sdk/host";\n'},
     )
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
-    registry = build_registry(["acme_plugin"], None)
-    assert registry.plugins == {}
-    assert "host-only Studio SDK" in quarantined_plugins()["acme_plugin"]
+    with pytest.raises(CorePluginBootError, match="host-only Studio SDK"):
+        build_registry(["acme_plugin"], None)
 
 
 # -- Vendor hashing ----------------------------------------------------------
