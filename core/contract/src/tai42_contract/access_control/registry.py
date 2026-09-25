@@ -102,7 +102,7 @@ def get_identity_provider_factory(name: str) -> Callable[..., IdentityProvider]:
 def get_identity_provider_factory_staged(name: str) -> Callable[..., IdentityProvider]:
     """Resolve a factory from the STAGED generation if a build is staging, else the committed one.
 
-    The build's own accessor (quarantine abort, startup probe, kind status), so a build decides
+    The build's own accessor (startup probe, kind status), so a build decides
     against the generation it is assembling.
     """
     factory = _write_target().get(name)
