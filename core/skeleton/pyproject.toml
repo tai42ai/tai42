@@ -74,7 +74,7 @@ dependencies = [
     # rendering layer formats a sequence per the subject's locale, never in-template.
     "babel>=2.18",
     "jinja2schema>=0.1.4",
-    "cryptography>=44",
+    "cryptography>=50.0.1",
     "xmltodict>=0.14",
     # Callback-answer validation in the interactions router (imported directly).
     "jsonschema>=4",
