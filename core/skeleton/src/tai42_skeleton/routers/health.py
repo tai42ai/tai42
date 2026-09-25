@@ -32,7 +32,6 @@ from tai42_skeleton.connectors.settings import connector_store_settings
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.interactions.settings import interactions_settings
-from tai42_skeleton.plugins.quarantine import quarantine_count
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
 from tai42_skeleton.settings.rate_limit import rate_limit_settings
 from tai42_skeleton.sub_mcp.settings import sub_mcp_settings
@@ -49,12 +48,11 @@ class ReadinessStatus(BaseModel):
 
     ``checks`` maps each wired subsystem to ``"ok"`` or, on failure, the raised
     exception's TYPE name only — never its message, which would leak internal
-    hosts/ports. ``plugin_quarantine`` is diagnostic and never flips ``status`` red.
+    hosts/ports.
     """
 
     status: str
     checks: dict[str, str]
-    plugin_quarantine: int
 
 
 @tai42_app.http.custom_route(
@@ -229,11 +227,6 @@ async def readiness_check(request: Request) -> JSONResponse:
     access-control Redis itself is down the middleware fails closed with 403 before
     this handler runs, so a probe still sees a non-200 and rotates the worker
     either way.
-
-    The payload also carries ``plugin_quarantine`` — the count of plugins this
-    worker's boot pass quarantined. Diagnostic ONLY: a quarantined plugin never
-    flips readiness red, because the worker IS serving (that is the quarantine's
-    whole point) — rotating it would turn one broken plugin into a fleet outage.
     """
     conns = _wired_connections()
 
@@ -262,7 +255,5 @@ async def readiness_check(request: Request) -> JSONResponse:
             ready = False
 
     if ready:
-        return JSONResponse({"status": "ready", "checks": checks, "plugin_quarantine": quarantine_count()})
-    return JSONResponse(
-        {"status": "not_ready", "checks": checks, "plugin_quarantine": quarantine_count()}, status_code=503
-    )
+        return JSONResponse({"status": "ready", "checks": checks})
+    return JSONResponse({"status": "not_ready", "checks": checks}, status_code=503)

@@ -31,6 +31,7 @@ from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.monitoring import (
     NoOpMonitoring,
     NoOpReader,
@@ -39,7 +40,6 @@ from tai42_skeleton.monitoring import (
     init_monitoring,
     reset_monitoring,
 )
-from tai42_skeleton.plugins.quarantine import quarantined_plugins
 
 _BUILTIN_MODULE = "tai42_skeleton.extensions.builtin.monitor"
 
@@ -269,11 +269,10 @@ def test_monitor_is_config_agnostic_and_rejects_config():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            reason = quarantined_plugins()["tests.extensions._fixtures.tools_external"]
-            assert "does not accept config" in reason
-            assert "make_signature" not in await app.tools.get_tools()
+            pass  # pragma: no cover — start() aborts before the body runs
 
-    asyncio.run(run())
+    with pytest.raises(CorePluginBootError, match="does not accept config"):
+        asyncio.run(run())
 
 
 def test_monitor_binds_as_wrapper_branch_at_apply_site():

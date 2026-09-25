@@ -19,7 +19,7 @@ from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.plugins.quarantine import quarantined_plugins
+from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.tools.registry import ToolRegistry
 
 _TOOLS_B = "tests.app._fixtures.tools_b"
@@ -220,11 +220,10 @@ def test_two_backends_in_one_combo_rejected():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            reason = quarantined_plugins()[_TOOLS_B]
-            assert "Only one 'backend' extension is allowed" in reason
-            assert "shout" not in await app.tools.get_tools()
+            pass  # pragma: no cover — start() aborts before the body runs
 
-    asyncio.run(run())
+    with pytest.raises(CorePluginBootError, match="Only one 'backend' extension is allowed"):
+        asyncio.run(run())
 
 
 # -- bind order: body locality vs execution relocation ------------------------
@@ -252,14 +251,15 @@ def test_locality_wrapper_outside_relocating_backend_rejected():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            message = quarantined_plugins()[_TOOLS_B]
-            assert "tool 'shout'" in message
-            assert "'localwrap'" in message
-            assert "'backendx'" in message
-            assert "INSIDE" in message
-            assert "shout" not in await app.tools.get_tools()
+            pass  # pragma: no cover — start() aborts before the body runs
 
-    asyncio.run(run())
+    with pytest.raises(CorePluginBootError) as excinfo:
+        asyncio.run(run())
+    message = str(excinfo.value)
+    assert "tool 'shout'" in message
+    assert "'localwrap'" in message
+    assert "'backendx'" in message
+    assert "INSIDE" in message
 
 
 def test_locality_wrapper_inside_relocating_backend_binds():

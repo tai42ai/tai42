@@ -15,7 +15,7 @@ Verdict semantics (:class:`CompatVerdict`):
   semantics as the installer's install-time contract check, so a dev-versioned
   editable contract checkout is never spuriously refused.
 * ``incompatible`` — declared and NOT satisfied. The reason names both versions
-  and the remedy, because it becomes the quarantine entry / abort message the
+  and the remedy, because it becomes the boot-abort message the
   operator acts on.
 * ``unknown`` — no verdict is derivable: the module maps to no installed dist,
   the dist has no metadata, or it declares no ``tai42-contract`` requirement.
@@ -51,11 +51,16 @@ _CONTRACT_DIST = "tai42-contract"
 
 
 class CorePluginBootError(RuntimeError):
-    """A SCALAR-slot plugin (backend/storage/monitoring) is contract-incompatible or failed to import.
+    """A manifest-declared plugin is contract-incompatible or failed to import/load.
 
-    Raised to ABORT boot: the server cannot run without its scalar slots, so they
-    get a typed loud failure instead of a quarantine entry. The message names the
-    plugin, the versions in play, and the remedy.
+    Raised to ABORT boot — and, on a live reload, to abort THAT rebuild so the
+    previous generation keeps serving. Every manifest-named module the operator
+    chose to load flows through this one seam: the scalar slots
+    (backend/sandbox/storage/monitoring), the additive roles
+    (lifecycle/webhook_verifier/channel/router/middleware/agents/extensions/tools),
+    and the studio plugins. A module that cannot load is corrupt configuration, not
+    a degradation to serve around. The message names the module, its kind, the
+    versions in play, and the remedy.
     """
 
 
@@ -64,7 +69,7 @@ class CompatVerdict:
     """One dist's (or module's) verdict against the running contract.
 
     ``reason`` is ``None`` only for ``compatible``; for ``incompatible`` it is the
-    operator-facing quarantine/abort text, for ``unknown`` the note to log.
+    operator-facing boot-abort text, for ``unknown`` the note to log.
     """
 
     status: Literal["compatible", "incompatible", "unknown"]

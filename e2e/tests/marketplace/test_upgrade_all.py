@@ -9,7 +9,7 @@ untouched, reporting a per-ref outcome for both — ``upgraded`` for the move,
 newer version needs a newer core. The HTTP door and the ``tai plugins upgrade
 --all`` CLI drive the same path, each proven on the live process (the SAME
 probe tools answer the expected dist versions after the sweep) and ending
-clean. The ``no-compatible-version`` outcome is exercised by the quarantine
+clean. The ``no-compatible-version`` outcome is exercised by the compat
 spec, whose registry publishes no compatible version at all.
 """
 

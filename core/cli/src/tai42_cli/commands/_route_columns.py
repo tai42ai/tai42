@@ -299,6 +299,23 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("GET", "/api/manifest/mcp-env-refs"): RouteShape(items_key=None, columns=("var", "pointer", "has_default", "set")),
     ("GET", "/api/marketplace/categories"): RouteShape(items_key=None, columns=("value",)),
+    ("GET", "/api/marketplace/installed"): RouteShape(
+        items_key="installed",
+        columns=(
+            "ref",
+            "version",
+            "source",
+            "delivery",
+            "installed_at",
+            "latest",
+            "update_available",
+            "incompatible_newer",
+            "missing_upstream",
+            "compat",
+            "items",
+            "route_mounts",
+        ),
+    ),
     ("GET", "/api/marketplace/kinds"): RouteShape(items_key=None, columns=("value",)),
     ("GET", "/api/mcp-status"): RouteShape(items_key="failed", columns=("title", "status")),
     ("GET", "/api/mcp-status/failed"): RouteShape(

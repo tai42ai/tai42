@@ -18,7 +18,7 @@ from tai42_skeleton.agent.session_thread import agent_session_thread
 from tai42_skeleton.agent.thread_reservation import ReservedThreadNamespaceError
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.plugins.quarantine import quarantined_plugins
+from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.tools.binding.schema import _derive_input_schema
 
 from .conftest import _fixture_flag
@@ -268,9 +268,9 @@ def test_nested_models_survive_as_defs_on_a_branch():
 def test_agent_registration_rejects_stray_preset_bakeable_field():
     # A ``preset_bakeable_fields`` entry that is not a real ``ToolInput`` field could
     # never pass the preset route's unknown-field check, so registration rejects it
-    # loudly (naming the stray field). The rejection quarantines the agents module
-    # (an additive plugin never aborts boot): the agent stays unregistered and the
-    # stray field is named in the quarantine reason.
+    # loudly (naming the stray field). The rejection aborts boot through the shared
+    # abort seam — a manifest-declared agents module that cannot load — and the stray
+    # field is named in the abort reason.
     manifest = Manifest.model_validate(
         {
             "agents": [
@@ -285,10 +285,10 @@ def test_agent_registration_rejects_stray_preset_bakeable_field():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            assert "ghost_field" in quarantined_plugins()["tests.agent._bad_bakeable_fixtures"]
-            assert "bad_bakeable_agent" not in await app.tools.get_tools()
+            pass  # pragma: no cover — start() aborts before the body runs
 
-    asyncio.run(run())
+    with pytest.raises(CorePluginBootError, match="ghost_field"):
+        asyncio.run(run())
 
 
 def test_agent_run_tool_accepts_extension_combo():

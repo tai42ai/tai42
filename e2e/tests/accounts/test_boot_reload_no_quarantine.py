@@ -3,14 +3,12 @@
 ``accounts-postgres`` is wired under TWO manifest roles at once: its ROOT package sits
 under ``lifecycle_modules`` while its ``routes_login`` / ``routes_users`` submodules sit
 under ``routers_modules``. The boot package walk binds each mapped route submodule to its
-OWN mount and runs each module body once per pass, so the distribution never quarantines
-when its route submodules are swept into the lifecycle role's walk. A bare-mount import
-would raise ``MountRegistrationError`` and — because accounts-postgres is the configured
-auth provider — abort the whole boot, so the load-bearing regression signal here is the
-stack COMING UP at all; the zero-quarantine reads then pin the survivable-plugin variant
-of the same class. This drives that shape
-over the real stack: a boot and a fleet reload each leave ZERO plugins quarantined while
-both route families keep serving — login under ``/api/login``, users under ``/api/auth``.
+OWN mount and runs each module body once per pass, so the distribution loads cleanly when
+its route submodules are swept into the lifecycle role's walk. A bare-mount import would
+raise ``MountRegistrationError`` and abort the whole boot, so the load-bearing regression
+signal here is the stack COMING UP at all. This drives that shape over the real stack: a
+boot and a fleet reload each bring the worker to ready while both route families keep
+serving — login under ``/api/login``, users under ``/api/auth``.
 """
 
 from __future__ import annotations
@@ -24,33 +22,31 @@ from tai42_e2e.stack import TaiStack
 _PASSWORD = "correct-horse-battery-staple"
 
 
-async def _assert_no_quarantine(stack: TaiStack, port: int) -> None:
-    """Readiness on one replica: 200 and ZERO plugins parked by this worker's boot pass.
-    ``/ready`` carries ``plugin_quarantine`` — the count the boot walk quarantined; the
-    dual-role accounts wiring must never land there. Read with the seeded root key: under
-    access control this stack fences ``/ready`` (only ``/health`` is pinned public)."""
+async def _assert_ready(stack: TaiStack, port: int) -> None:
+    """Readiness on one replica: 200 ready. A dual-role distribution that could not load
+    would abort boot, so the worker reaching ready is the load-bearing signal. Read with
+    the seeded root key: under access control this stack fences ``/ready`` (only
+    ``/health`` is pinned public)."""
     resp = await stack.api(port=port).request_raw("GET", "/ready")
     assert resp.status_code == 200, f"readiness on :{port} -> {resp.status_code}: {resp.text}"
     body = resp.json()
-    assert body["plugin_quarantine"] == 0, f"boot quarantined a plugin on :{port}: {body}"
+    assert body["status"] == "ready", f"worker on :{port} is not ready: {body}"
 
 
-async def test_dual_role_accounts_boots_and_reloads_without_quarantine(
-    accounts_stack: TaiStack, uniq: Callable[[str], str]
-) -> None:
+async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     stack = accounts_stack
     admin = stack.api(port=stack.port_a)  # seeded root sk- key
     public_a = ApiClient(f"http://{stack.host}:{stack.port_a}")
 
-    # Boot health: neither replica quarantined the accounts distribution despite its root
-    # riding lifecycle_modules while its route submodules ride routers_modules.
-    await _assert_no_quarantine(stack, stack.port_a)
-    await _assert_no_quarantine(stack, stack.port_b)
+    # Boot health: both replicas brought the dual-role accounts distribution to ready despite
+    # its root riding lifecycle_modules while its route submodules ride routers_modules.
+    await _assert_ready(stack, stack.port_a)
+    await _assert_ready(stack, stack.port_b)
 
     # routes_users + routes_login serve: the seeded owner holds the setup door shut, so a new
     # admin comes in through invite/accept/login — the accept mints the first session and the
     # password round-trip another, proving both route families are mounted (/api/auth,
-    # /api/login) and not stranded by quarantine.
+    # /api/login) and both serving.
     user_email = f"{uniq('user')}@e2e.test"
     _user_id, session = await invite_accept_login(
         admin, public_a, email=user_email, role="admin", password=_PASSWORD, retry_on_reloading=True
@@ -64,7 +60,7 @@ async def test_dual_role_accounts_boots_and_reloads_without_quarantine(
     assert any(u["email"] == user_email for u in listed["users"]), listed
 
     # A fleet reload re-imports every manifest module under its binding on every worker: the
-    # dual-role distribution must re-fire each route submodule once and stay off quarantine.
+    # dual-role distribution must re-fire each route submodule once and stay live.
     report = await admin.post("/api/config/reload", json={}, retry_on_reloading=True, timeout=60.0)
     assert report["reachable"] is True, f"the reload broadcast was unreachable: {report}"
     outcomes = {r["name"]: r["outcome"] for r in report["results"]}
@@ -72,9 +68,9 @@ async def test_dual_role_accounts_boots_and_reloads_without_quarantine(
     assert census <= outcomes.keys(), f"a census worker missed the reload report: census={census} report={report}"
     assert all(outcomes[name] == "applied" for name in census), f"a worker did not apply the reload: {report}"
 
-    # Post-reload boot health: still zero quarantines on both replicas.
-    await _assert_no_quarantine(stack, stack.port_a)
-    await _assert_no_quarantine(stack, stack.port_b)
+    # Post-reload boot health: both replicas still ready.
+    await _assert_ready(stack, stack.port_a)
+    await _assert_ready(stack, stack.port_b)
 
     # Both route families still serve after the reload: a fresh password login and an authed
     # users read both succeed against the re-imported route table.

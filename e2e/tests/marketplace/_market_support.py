@@ -9,8 +9,8 @@ never a sleep.
 
 The ``tai plugins`` CLI drivers (the real venv ``tai`` binary against a stack)
 and the plugin-compat response readers (the resolve path with a ``contract``
-pin, the per-ref upgrade-all outcomes, an installed row's compat/quarantined
-blocks) live here too, shared by the CLI-parity and compat specs.
+pin, the per-ref upgrade-all outcomes, an installed row's compat block) live
+here too, shared by the CLI-parity and compat specs.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ def distribution_absent(package: str) -> bool:
 
 async def installed_payload(stack: TaiStack) -> dict[str, Any]:
     """The full installed-inventory body (``GET /api/marketplace/installed``):
-    ``{"installed": [...], "quarantined": [{"name", "reason"}, ...]}``."""
+    ``{"installed": [...]}``."""
     payload = await stack.api().get("/api/marketplace/installed")
     if not isinstance(payload, dict):
         raise AssertionError(f"/api/marketplace/installed did not return an object: {payload!r}")
@@ -215,17 +215,6 @@ def manifest_mcp_titles(stack: TaiStack) -> set[str]:
     mcp-server install appends and an uninstall removes."""
     entries = persisted_manifest(stack).get("mcp") or []
     return {entry["title"] for entry in entries}
-
-
-def quarantined_by_name(payload: dict[str, Any]) -> dict[str, str]:
-    """The installed body's boot-quarantine entries, name → reason."""
-    entries = payload.get("quarantined")
-    assert isinstance(entries, list), f"installed body carries no quarantined list: {payload!r}"
-    keyed: dict[str, str] = {}
-    for entry in entries:
-        assert isinstance(entry, dict), f"quarantined entry is not an object: {entry!r}"
-        keyed[entry["name"]] = entry["reason"]
-    return keyed
 
 
 async def uninstall_and_assert_clean(

@@ -482,18 +482,10 @@ class InstalledRow(BaseModel):
     route_mounts: dict[str, str]
 
 
-class QuarantinedPlugin(BaseModel):
-    """A plugin the boot pass SKIPPED (incompatible or import-broken) with its reason."""
-
-    name: str
-    reason: str
-
-
 class InstalledInventory(BaseModel):
-    """The installed inventory plus the boot-quarantined plugins."""
+    """The installed inventory."""
 
     installed: list[InstalledRow]
-    quarantined: list[QuarantinedPlugin]
 
 
 class AdvisorySnapshot(BaseModel):

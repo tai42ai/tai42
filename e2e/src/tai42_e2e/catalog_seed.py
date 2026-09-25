@@ -179,7 +179,7 @@ async def seed_zeta_listing(mp: MarketplaceService, index: FixturePackageIndex, 
     """Stage the given zeta wheels and publish each version through the real
     admin-seed + ingest pipeline, in the given order.
 
-    Zeta is the plugin-compat fixture the core-aware resolve / boot-quarantine /
+    Zeta is the plugin-compat fixture the core-aware resolve / boot-abort /
     upgrade-all specs select against: which versions publish is the spec's whole
     scenario (both compat wheels for a listing whose newest published version is
     contract-incompatible while an older compatible one exists; the narrow wheel

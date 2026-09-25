@@ -14,7 +14,7 @@ import pytest
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.plugins.quarantine import quarantined_plugins
+from tai42_skeleton.marketplace.compat import CorePluginBootError
 
 
 @pytest.fixture(autouse=True)
@@ -51,8 +51,7 @@ def test_duplicate_tool_name_bind_raises():
 def test_duplicate_agent_name_bind_raises():
     # Two agents-config entries import the same agent module, so the decorator
     # fires twice for one name within a single boot — a genuine collision. The
-    # SECOND module quarantines (an additive plugin never aborts boot); the
-    # first registration keeps serving.
+    # SECOND module cannot load, so boot aborts through the shared abort seam.
     manifest = Manifest.model_validate(
         {
             "agents": [
@@ -64,7 +63,7 @@ def test_duplicate_agent_name_bind_raises():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            assert "already registered" in quarantined_plugins()["tests.agent._fixtures2"]
-            assert "echo_fields" in await app.tools.get_tools()
+            pass  # pragma: no cover — start() aborts before the body runs
 
-    asyncio.run(run())
+    with pytest.raises(CorePluginBootError, match="already registered"):
+        asyncio.run(run())

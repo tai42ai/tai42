@@ -9,19 +9,15 @@ catalog refresh), so a reload that changes ``manifest.studio_plugins`` reflects
 without a process restart. Data is read at call time from the live manifest and
 the ``plugins_settings`` dist path — never captured at import time.
 
-Failure surface, split by blast radius:
-
-* A PER-PLUGIN fault — the package is contract-incompatible with the running
-  ``tai42-contract``, missing its ``studio/`` dist or ``studio-manifest.json``,
-  violates the charset allow-lists, escapes its ``studio/`` root, or fails an
-  integrity hash — QUARANTINES that plugin: one loud log line, a quarantine
-  entry the marketplace listing and readiness count surface, and exclusion from
-  the built registry. One broken plugin never takes the whole boot down (an
-  empty registry is valid), and never a silent skip either.
-* A DEPLOYMENT fault — a REQUIRED shared-vendor asset missing from the SPA
-  dist — still raises :class:`StudioPluginError` and fails the boot: without
-  the vendor assets NO plugin (nor the shell) can load, so continuing would
-  ship an unresolvable import map. An OPTIONAL vendor asset (see
+A manifest-declared studio plugin the operator chose to load that cannot load —
+the package is contract-incompatible with the running ``tai42-contract``, missing
+its ``studio/`` dist or ``studio-manifest.json``, violates the charset
+allow-lists, escapes its ``studio/`` root, or fails an integrity hash — aborts
+the boot/rebuild through the shared :class:`CorePluginBootError` seam naming the
+package and the reason. A REQUIRED shared-vendor asset missing from the SPA dist
+raises :class:`StudioPluginError` for the same reason: without the vendor assets
+NO plugin (nor the shell) can load, so continuing would ship an unresolvable
+import map. An OPTIONAL vendor asset (see
   ``OPTIONAL_VENDOR_MODULES``) is not a fault when absent: the skeleton and the
   packaged SPA dist version independently, so an optional specifier is a
   capability of the dist at hand — present, it is served and hashed; absent, the
@@ -390,20 +386,20 @@ def _vendor_integrity(dist_path: str | None, optional_modules: dict[str, str]) -
 
 
 def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPluginRegistry:
-    """Build the registry from the listed plugins, quarantining per-plugin faults and hashing vendor assets.
+    """Build the registry from the listed plugins, aborting boot on a plugin that cannot load; hash vendor assets.
 
-    A plugin that is contract-incompatible is never loaded (quarantined on the
-    verdict alone); a plugin whose load raises — missing dist, bad manifest,
-    hash mismatch, traversal — is quarantined with the failure as its reason.
-    Both are excluded from the registry and logged loudly; the surviving
-    plugins (possibly none) form the registry. A duplicate listing is a
-    manifest hygiene fault, not a plugin fault: the package loads once and the
-    duplication is logged. Only the vendor-asset check may raise — a missing
-    REQUIRED vendor asset breaks every plugin and the shell, so it stays a boot
-    failure; an optional specifier the dist does not ship is simply not offered.
+    A plugin that is contract-incompatible is never loaded; a plugin whose load
+    raises — missing dist, bad manifest, hash mismatch, traversal — cannot load
+    either. Both abort the boot/rebuild through the shared
+    :class:`CorePluginBootError` seam naming the package and the reason: the
+    package is manifest-declared, so a package that cannot load is corrupt
+    configuration, not a degradation to serve around. A duplicate listing is a
+    manifest hygiene fault, not a load fault: the package loads once and the
+    duplication is logged. A missing REQUIRED vendor asset breaks every plugin and
+    the shell, so it stays a boot failure; an optional specifier the dist does not
+    ship is simply not offered.
     """
-    from tai42_skeleton.marketplace.compat import module_compat
-    from tai42_skeleton.plugins.quarantine import quarantine_plugin
+    from tai42_skeleton.marketplace.compat import CorePluginBootError, module_compat
 
     plugins: dict[str, InstalledStudioPlugin] = {}
     for package in dict.fromkeys(studio_plugins):
@@ -411,15 +407,21 @@ def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPl
             logger.error("studio plugin %r is listed more than once in ``studio_plugins``; loading it once", package)
         verdict = module_compat(package)
         if verdict.status == "incompatible":
-            quarantine_plugin(package, f"studio plugin not loaded: {verdict.reason}")
-            continue
+            raise CorePluginBootError(
+                f"studio plugin {package!r} is incompatible and cannot load: {verdict.reason}; "
+                "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
+                "remove it from the manifest, or point the manifest at a working one"
+            )
         if verdict.status == "unknown":
             logger.info("plugin compat unknown for studio plugin %s: %s", package, verdict.reason)
         try:
             plugins[package] = _load_plugin(package)
         except Exception as exc:
-            logger.exception("studio plugin %r failed to load; quarantining it", package)
-            quarantine_plugin(package, f"studio plugin failed to load: {exc}")
+            raise CorePluginBootError(
+                f"studio plugin {package!r} failed to load: {exc}; "
+                "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
+                "remove it from the manifest, or point the manifest at a working one"
+            ) from exc
     optional_modules = _shipped_optional_vendor_modules(dist_path)
     return StudioPluginRegistry(
         plugins=plugins,

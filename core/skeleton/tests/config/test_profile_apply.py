@@ -112,14 +112,12 @@ def _epoch_state() -> Iterator[None]:
 
     from tai42_skeleton.connectors.providers import registry as connector_registry
     from tai42_skeleton.operations.registry import operation_registry
-    from tai42_skeleton.plugins import quarantine as quarantine_registry
 
     saved = {
         "connector": dict(connector_registry._REGISTRY),
         "identity": dict(identity_registry._REGISTRY),
         "accounts": dict(accounts_registry._REGISTRY),
         "operation": dict(operation_registry._operations),
-        "quarantine": dict(quarantine_registry._quarantined),
     }
     loaded_before = set(epoch_mod._loaded_env_keys)
     try:
@@ -136,8 +134,6 @@ def _epoch_state() -> Iterator[None]:
         accounts_registry._pending = None
         operation_registry._operations = saved["operation"]
         operation_registry._pending = None
-        quarantine_registry._quarantined = saved["quarantine"]
-        quarantine_registry._pending = None
 
 
 class _BuildBoomError(RuntimeError):

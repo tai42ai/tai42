@@ -84,7 +84,7 @@ async def test_collection_reads_answer_200_empty(off_stack: TaiStack) -> None:
     }
 
     # marketplace installed inventory + advisories.
-    assert await api.get("/api/marketplace/installed") == {"installed": [], "quarantined": []}
+    assert await api.get("/api/marketplace/installed") == {"installed": []}
     advisories = await api.get("/api/marketplace/advisories")
     assert advisories["advisories"] == []
 

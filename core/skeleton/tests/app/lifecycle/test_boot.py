@@ -147,8 +147,8 @@ def test_update_drops_old_tools_and_reruns_reload_handlers():
 
 
 def test_failed_update_leaves_previous_tool_set_live():
-    # A reload to a manifest whose SCALAR slot is broken must fail loudly (a
-    # scalar slot never quarantines — the server cannot run without it), but the
+    # A reload to a manifest whose SCALAR slot is broken must fail loudly (the
+    # server cannot run without it), but the
     # worker's previous tool surface is restored (re-added) rather than left
     # empty — a bad module bricks nothing.
     base = Manifest.model_validate(
@@ -276,8 +276,7 @@ def test_reload_dropping_connector_unregisters_it():
 def test_duplicate_connector_ids_fail_boot():
     # The manifest validator rejects duplicate ids for a hand-written manifest;
     # bypass it (model_construct) to prove the boot-time registration loop is itself
-    # a loud guard — a duplicate id across entries aborts boot, never a
-    # quarantine-and-continue.
+    # a loud guard — a duplicate id across entries aborts boot loudly.
     from tai42_skeleton.connectors.providers import registry as conn_registry
 
     manifest = Manifest.model_construct(connectors=[_oauth_descriptor("iota"), _oauth_descriptor("iota")])

@@ -110,7 +110,6 @@ def test_installed_json_passthrough(monkeypatch) -> None:
                 "compat": {"status": "compatible", "reason": None},
             }
         ],
-        "quarantined": [{"name": "acme_plugin", "reason": "tools module failed to import: boom"}],
     }
     captured["_payload"] = payload
     result = run_cli(monkeypatch, handler, ["plugins", "installed"], json_output=True)
@@ -119,7 +118,7 @@ def test_installed_json_passthrough(monkeypatch) -> None:
     assert json.loads(result.output) == payload
 
 
-def test_installed_table_shows_compat_status_and_quarantine(monkeypatch) -> None:
+def test_installed_table_shows_compat_status(monkeypatch) -> None:
     handler, captured = _capture()
     captured["_payload"] = {
         "installed": [
@@ -132,14 +131,11 @@ def test_installed_table_shows_compat_status_and_quarantine(monkeypatch) -> None
                 "compat": {"status": "incompatible", "reason": "needs a newer core"},
             }
         ],
-        "quarantined": [{"name": "acme_plugin", "reason": "tools module failed to import: boom"}],
     }
     result = run_cli(monkeypatch, handler, ["plugins", "installed"])
     assert result.exit_code == 0, result.output
-    # The compat STATUS lands in its own table column, and a quarantined plugin
-    # is printed after the table — never invisible in the default view.
+    # The compat STATUS lands in its own table column.
     assert "incompatible" in result.output
-    assert "quarantined: acme_plugin — tools module failed to import: boom" in result.output
 
 
 # -- install / uninstall / update bodies -------------------------------------
