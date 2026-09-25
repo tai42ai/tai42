@@ -948,15 +948,39 @@ jobs:
         # out-of-band at boot from its pinned ref (the git auth above lets that
         # install reach the private source).
         run: uv sync --locked --package tai42-e2e
-      - name: Clone tai-studio (public, no token)
-        run: git clone --depth 1 https://github.com/tai42ai/tai-studio
-      - name: Record the resolved tai-studio commit (provenance, no pinning)
-        # tai-studio is cloned at unpinned `main`, so which commit the browser suite
-        # actually ran against is only knowable at run time. Resolve it and record it
-        # into (a) the job summary and (b) the environment as TAI_STUDIO_SHA — the
-        # Playwright run below inherits it (job env), so playwright.config.ts can
-        # surface it as report metadata via `metadata: { 'tai-studio-sha':
-        # process.env.TAI_STUDIO_SHA }`. Provenance only; the clone stays unpinned.
+      - name: Resolve the tai-studio ref this pull request declares (default main)
+        # A pull request that pairs a change in this repo with one in tai-studio
+        # names the studio ref to test against with a `tai-studio-ref: <branch-or-sha>`
+        # line in its body; absent (and on a push, which has no pull-request body)
+        # the browser suite runs against studio `main`.
+        id: studio_ref
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          echo "ref=$(python3 scripts/pr_declared_ref.py --field tai-studio-ref)" >> "$GITHUB_OUTPUT"
+      - name: Clone tai-studio at the declared ref (public, no token)
+        env:
+          STUDIO_REF: ${{ steps.studio_ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/tai42ai/tai-studio
+          if [ "$STUDIO_REF" != "main" ]; then
+            # Fetch the declared ref explicitly — a branch that has since moved on,
+            # or a bare sha, is not reachable from the default clone — and fail
+            # loudly if the source repo cannot serve it, never falling back to main.
+            git -C tai-studio fetch --depth 1 origin "$STUDIO_REF"
+            git -C tai-studio checkout --detach FETCH_HEAD
+          fi
+      - name: Record the resolved tai-studio commit (provenance)
+        # The clone is at the declared ref (default `main`), so which commit the
+        # browser suite actually ran against is only knowable at run time. Resolve it
+        # and record it into (a) the job summary and (b) the environment as
+        # TAI_STUDIO_SHA — the Playwright run below inherits it (job env), so
+        # playwright.config.ts can surface it as report metadata via
+        # `metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA }`.
+        env:
+          STUDIO_REF: ${{ steps.studio_ref.outputs.ref }}
         run: |
           set -euo pipefail
           studio_sha=$(git -C tai-studio rev-parse HEAD)
@@ -964,7 +988,7 @@ jobs:
           {
             echo "### tai-studio provenance"
             echo ""
-            echo "Browser suite ran against tai-studio \`main\` @ \`$studio_sha\` (unpinned)."
+            echo "Browser suite ran against tai-studio \`$STUDIO_REF\` @ \`$studio_sha\`."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Clone tai-marketplace (private, marketplace browser leg)
         if: steps.mp.outputs.enabled == 'true'
