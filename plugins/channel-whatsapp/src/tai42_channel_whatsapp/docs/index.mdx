@@ -92,6 +92,11 @@ identifier-safe component name for the Flow it publishes, and maps the submitted
 back to the original property names before returning the answer — so the answer keys are
 always the schema's own property names, whatever characters they use.
 
+The confirmation summary WhatsApp shows the participant after they submit lists each
+field by its human-readable label (its schema `title`, else the property name), so the
+summary reads in words rather than in the identifier-safe names; the channel maps those
+labels back to the schema keys when it decodes the reply.
+
 If the platform rejects a submitted answer (a value fails the answer schema at the
 door), the **same form is re-sent** — same steps, same prefill, with the door's
 reason shown above it — so the participant can correct and resubmit. This repeats

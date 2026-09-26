@@ -28,22 +28,24 @@ DIRECTLY, with no ``Form`` wrapper. Every control carries its own ``init-value``
 option lists through ``flow_action_payload.data`` (built by :func:`build_flow_data`)
 rather than re-publishing. Collected values thread forward across screens by each
 step's navigate payload; the terminal screen completes with the flat UNION of every
-field, keyed by field name, so the inbound decode reads it exactly as an unpaged
-form. A footer reads a control's just-filled value through the form-input reference
-``${form.<field>}`` (Meta's reference for data the user entered on the screen, valid
-with or without a ``Form`` wrapper); an earlier screen's value rides forward as
-``${data.<field>__val}``.
+field, so the inbound decode reads it exactly as an unpaged form. A footer reads a
+control's just-filled value through the form-input reference ``${form.<field>}``
+(Meta's reference for data the user entered on the screen, valid with or without a
+``Form`` wrapper); an earlier screen's value rides forward as ``${data.<field>__val}``.
 
 Meta accepts a component ``name``, a screen-``data`` key and a ``${data.…}`` /
 ``${form.…}`` reference only in the identifier grammar
 ``[A-Za-z_][A-Za-z0-9_]*``, while an answer schema may use ANY JSON property name.
 So each schema property is first mapped to a unique identifier-safe COMPONENT NAME
 (:func:`component_names`), and that component name — never the raw property name — is
-the ``<field>`` every component ``name``, data key, reference, navigate-payload key
-and completion-payload key above is spelled with; the completion payload's keys are
-the component names, so the inbound ``nfm_reply`` decode maps them back to the schema
-keys before coercion. Only the human-facing field label keeps the property ``title``
-(else the raw property name), which may carry any character.
+the ``<field>`` every component ``name``, data key, reference and navigate-payload key
+above is spelled with. The terminal completion payload is keyed differently: by each
+property's human-readable LABEL (:func:`payload_labels` — the property ``title`` when a non-empty
+string, else the property key), because WhatsApp shows those keys to the participant in the
+submitted-form summary. Its VALUES stay the identifier-safe component references, and the
+inbound ``nfm_reply`` decode maps each label back to the schema key before coercion. The
+field label a control shows uses the same :func:`_field_label` rule, so the summary key
+matches the label the participant filled, and either may carry any character.
 
 A string property renders as a dynamic ``Dropdown`` when it carries a schema ``enum``
 OR when the ask marks it option-bearing (``option_fields`` — the set of
@@ -139,6 +141,48 @@ def component_names(properties: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
+def _field_label(name: str, prop: Any) -> str:
+    """The human-facing label for a field: its schema ``title`` when a non-empty string, else the property name.
+
+    The one definition both the rendered control label and the completion-payload key
+    (:func:`payload_labels`) use, so the key the participant sees in the submitted-form
+    summary is always exactly the label shown on the field. A ``title`` that is not a string,
+    or is empty or whitespace-only, counts as absent — WhatsApp cannot show a blank field
+    label or key — so the property name is used instead.
+    """
+    title = prop.get("title") if isinstance(prop, dict) else None
+    return title if isinstance(title, str) and title.strip() else name
+
+
+def payload_labels(properties: dict[str, Any]) -> dict[str, str]:
+    """Map each schema property name to a unique human-readable completion-payload label.
+
+    The terminal ``complete`` action is keyed by these labels — the label WhatsApp shows on
+    each field (its ``title`` when a non-empty string, else the property key; :func:`_field_label`),
+    so the submitted-form summary bubble reads in human words. A collision — two properties
+    sharing a label, or a label equal to the reserved ``flow_token`` (the correlation token Meta
+    injects into every ``nfm_reply``, which the inbound decode strips before the answer reaches
+    the door) — is disambiguated deterministically in schema order by appending ``_2``, ``_3`` …
+    (the same convention :func:`component_names` uses for names), so the first property to claim a
+    label keeps it and no completion key ever clashes with the correlation token. Pure,
+    order-preserving and injective: the same property list always yields the same map, so a
+    re-send and the inbound decode recompute an identical map from the schema alone and the
+    reverse (label → key) is lossless.
+    """
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    for name, prop in properties.items():
+        base = _field_label(name, prop)
+        candidate = base
+        suffix = 2
+        while candidate in used or candidate == _RESERVED_PROPERTY:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        mapping[name] = candidate
+    return mapping
+
+
 def _screen_id(index: int) -> str:
     """The screen id for a zero-based page index — letters-and-underscores only.
 
@@ -217,7 +261,7 @@ def _dynamic_component(
     choice field reads a dynamic ``data-source``, so the send injects the values/options.
     Raises ``ChannelInputError`` naming a property outside the supported subset.
     """
-    label = prop.get("title") if isinstance(prop.get("title"), str) else name
+    label = _field_label(name, prop)
     cname = names[name]
     prop_type = prop.get("type")
     init = f"${{data.{cname}__init}}"
@@ -390,18 +434,21 @@ def _screen_footer(
     option_fields: set[str],
     routing_model: dict[str, list[str]],
     names: dict[str, str],
+    labels: dict[str, str],
 ) -> dict[str, Any]:
     """The screen's ``Footer`` component.
 
     The terminal screen completes with the flat union of every field (this screen's read through the
     form-input reference ``${form.<field>}``, earlier ones from their ``__val`` carriers); a
     non-terminal screen navigates to the next, forwarding successors' init/ds and every collected value,
-    and records the transition in ``routing_model``. Every payload key and reference is the field's
-    identifier-safe component name — the completion payload keys are what the inbound reply carries back.
+    and records the transition in ``routing_model``. A navigate payload key and every reference is the
+    field's identifier-safe component name; the terminal completion payload is keyed by each field's
+    human-readable label (:func:`payload_labels`) — the label the inbound reply carries back and maps
+    to the schema key — while its VALUES stay the identifier-safe component references.
     """
     if is_terminal:
         payload = {
-            names[name]: (f"${{form.{names[name]}}}" if name in this_fields else f"${{data.{names[name]}__val}}")
+            labels[name]: (f"${{form.{names[name]}}}" if name in this_fields else f"${{data.{names[name]}__val}}")
             for name in properties
         }
         return {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
@@ -437,6 +484,7 @@ def _build_form_screen(
     screen_count: int,
     routing_model: dict[str, list[str]],
     names: dict[str, str],
+    labels: dict[str, str],
 ) -> dict[str, Any]:
     """One Flow screen for a page: its field components, its ``data`` model, and its footer.
 
@@ -451,7 +499,16 @@ def _build_form_screen(
         _dynamic_component(name, properties[name], name in required, option_fields, names) for name in this_fields
     ]
     footer = _screen_footer(
-        index, is_terminal, this_fields, later_fields, earlier_fields, properties, option_fields, routing_model, names
+        index,
+        is_terminal,
+        this_fields,
+        later_fields,
+        earlier_fields,
+        properties,
+        option_fields,
+        routing_model,
+        names,
+        labels,
     )
 
     screen: dict[str, Any] = {
@@ -479,8 +536,10 @@ def build_form_flow(
     schema order); each screen holds its field components and footer directly (no
     ``Form`` wrapper) and its ``id`` is letters-and-underscores only. Each schema property
     is mapped to a unique identifier-safe component name (:func:`component_names`), which
-    is what every component ``name``, data key, reference and completion-payload key uses,
-    so a property named with any character still yields a publishable Flow. Each choice field
+    is what every component ``name``, data key, reference and navigate-payload key uses, so
+    a property named with any character still yields a publishable Flow; the terminal
+    completion payload is keyed instead by each property's human-readable label
+    (:func:`payload_labels`), its values still the component references. Each choice field
     reads a dynamic ``data-source`` and every control an ``init-value``, so the send
     supplies the values/options through ``flow_action_payload.data``. A string property
     renders as a choice ``Dropdown`` when it carries a schema ``enum`` or when
@@ -494,6 +553,7 @@ def build_form_flow(
     option_fields = option_fields or set()
     properties, required = _validate_object_schema(schema)
     names = component_names(properties)
+    labels = payload_labels(properties)
     _validate_form_properties(properties, required, option_fields, names)
     resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
 
@@ -514,6 +574,7 @@ def build_form_flow(
                 screen_count,
                 routing_model,
                 names,
+                labels,
             )
         )
         earlier_fields = [*earlier_fields, *fields_by_screen[index]]
