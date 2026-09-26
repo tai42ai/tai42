@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -150,6 +151,69 @@ def build_resilience_mcp_stack(res: StackResources, variants: Variants, *, mcp_u
         topology=Topology.MULTIWORKER,
         manifest=manifest,
         env=_base_env(res, variants),
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )
+
+
+# The manifest title the misbehaving server's tools are prefixed with on this server's MCP
+# surface (``misbehaving_<tool>``).
+MISBEHAVING_MCP_TITLE = "misbehaving"
+
+# A per-call dispatch timeout small enough that the ``hang`` tool's sleep trips it within a
+# test's patience (and below the MCP client's own read patience), overriding the 300s default.
+MISBEHAVING_MCP_CALL_TIMEOUT_SECONDS = "2"
+
+
+def misbehaving_mcp_tool_name(name: str) -> str:
+    """The name a misbehaving-server tool binds under on THIS server's MCP surface: the mount
+    prefixes each tool with the manifest title (``misbehaving_<tool>``)."""
+    return f"{MISBEHAVING_MCP_TITLE}_{name}"
+
+
+def build_misbehaving_mcp_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """MULTIWORKER(1), no backend/metrics, auth off — the low-level ``misbehaving_mcp_server``
+    mounted over stdio as a product-level external MCP for the dispatch-failure scenario.
+
+    The single ``mcp`` entry launches the fixture with the SUT's own interpreter over stdio, so
+    the app's boot-time MCP loader discovers its tools (``ok`` / ``bad_schema`` / ``hang`` /
+    ``plain_text``) and binds them under the ``misbehaving`` title prefix. The server misbehaves
+    in the exact shapes a downstream MCP inflicts on the dispatch seam (an output-schema
+    mismatch, a call that never returns, a non-JSON text body), so a test drives each through the
+    product's own run-tool door. One worker keeps the passive dispatch health in the process that
+    serves the calls. ``TAI_MCP_CALL_TIMEOUT_SECONDS`` is lowered so the ``hang`` call times out
+    within the test's patience."""
+    env = _base_env(res, variants)
+    env["TAI_MCP_CALL_TIMEOUT_SECONDS"] = MISBEHAVING_MCP_CALL_TIMEOUT_SECONDS
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [*_builtin_entries()],
+        # Exactly one transport (``command``): a plain non-managed stdio MCP entry launched with
+        # the SUT interpreter, so no connector auth glue is injected. The child needs no PATH —
+        # the absolute interpreter path resolves the ``-m`` launch regardless of the launch env.
+        "mcp": [
+            {
+                "title": MISBEHAVING_MCP_TITLE,
+                "config": {
+                    "type": "stdio",
+                    "command": sys.executable,
+                    "args": ["-m", "tai42_e2e_fixtures.misbehaving_mcp_server"],
+                },
+            }
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+    return StackConfig(
+        name="mcp-misbehaving",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
         workers=1,
         run_backend=False,
         run_metrics=False,
