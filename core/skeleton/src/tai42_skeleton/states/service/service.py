@@ -25,6 +25,7 @@ from tai42_skeleton.states.service.registries import (
 )
 from tai42_skeleton.states.service.template_jq import _TemplateJqMixin
 from tai42_skeleton.states.service.templates import _TemplateMixin
+from tai42_skeleton.states.service.unit import _UnitMixin
 from tai42_skeleton.states.store import PostgresStatesStore
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ class StatesService(
     _AttachmentMixin,
     _RegistrationMixin,
     _ReconcileMixin,
+    _UnitMixin,
 ):
     """The one validate + apply layer.
 

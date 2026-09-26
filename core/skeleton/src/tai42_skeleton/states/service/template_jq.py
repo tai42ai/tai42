@@ -130,7 +130,7 @@ class _TemplateJqMixin(_StatesServiceBase):
                 + (f", missing {missing}" if missing else "")
                 + (f", got unknown {unknown}" if unknown else "")
             )
-        record = await self._store.read_record_view(state, subject, conn=conn)
+        record = await self._projected_record_view(state, subject, conn=conn)
         subtree = _record_subtree(record["data"], path) if record is not None else {}
         variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "params": dict(args)}
         body, prelude = await self._render_template_jq(template, program_name)
@@ -141,6 +141,73 @@ class _TemplateJqMixin(_StatesServiceBase):
                 f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
             ) from exc
         return TemplateJqResult(name=name, value=value)
+
+    async def _resolve_template_jq_ops(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input_: Any,
+        *,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Resolve an ``update``-purpose ``template_jq`` program ``name`` to the op batch it authors for ``subject``.
+
+        Runs the program's jq over the record's attached subtree (its ``.``) — served from a bound
+        unit's projection when one is bound, else the committed store — with ``$input`` and the
+        attachment's ``$parameters``/``$declarations`` bound and the sibling ``tjq_<name>``
+        input-program prelude, and returns the template-relative op batch rebased under the
+        attachment path. The apply-vs-stage caller applies or projects those ops. When the program
+        DECLARES ``params`` they are the contract for its ``.input`` object: ``input`` must be an
+        object carrying exactly those keys (a value may be null) — a missing or undeclared key is a
+        loud :class:`ValueValidationError`; a program that declares none accepts any ``input``. An
+        ``input``-purpose name, or a jq that does not return an op batch, is a
+        :class:`ValueValidationError`.
+        """
+        decl = await self._require_declaration_decl(state)
+        await self.validate_subject(decl, subject)
+        template, path, parameters, declarations, program_name = await self._resolve_template_jq(state, name)
+        program = template.template_jq[program_name]
+        if program.purpose != "update":
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} has purpose {program.purpose!r}; "
+                f"apply needs an 'update'-purpose program (eval an 'input' one instead)"
+            )
+        if program.params:
+            if not isinstance(input_, dict):
+                raise ValueValidationError(
+                    f"template_jq {program_name!r} on template {template.name!r} declares params "
+                    f"{program.params}, so its input must be an object, got {type(input_).__name__}"
+                )
+            missing = sorted(set(program.params) - set(input_))
+            unknown = sorted(set(input_) - set(program.params))
+            if missing or unknown:
+                raise ValueValidationError(
+                    f"template_jq {program_name!r} on template {template.name!r} declares params {program.params}"
+                    + (f", input missing {missing}" if missing else "")
+                    + (f", input has undeclared {unknown}" if unknown else "")
+                )
+        record = await self._projected_record_view(state, subject, conn=conn)
+        subtree = _record_subtree(record["data"], path) if record is not None else {}
+        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "input": input_}
+        body, prelude = await self._render_template_jq(template, program_name)
+        try:
+            result = await run_jq_first(
+                body,
+                subtree,
+                prelude=prelude,
+                variables=variables,
+            )
+        except Exception as exc:
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
+            ) from exc
+        if not isinstance(result, list):
+            raise ValueValidationError(
+                f"template_jq {program_name!r} on template {template.name!r} is an update program, so its jq must "
+                f"return an op batch (a list of ops), got {type(result).__name__}"
+            )
+        return [_rebase_op(op, path) for op in result]
 
     async def apply_template_jq(
         self,
@@ -168,50 +235,7 @@ class _TemplateJqMixin(_StatesServiceBase):
         :class:`ValueValidationError`.
         """
         self._ensure_available()
-        decl = await self._require_declaration_decl(state)
-        await self.validate_subject(decl, subject)
-        template, path, parameters, declarations, program_name = await self._resolve_template_jq(state, name)
-        program = template.template_jq[program_name]
-        if program.purpose != "update":
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} has purpose {program.purpose!r}; "
-                f"apply needs an 'update'-purpose program (eval an 'input' one instead)"
-            )
-        if program.params:
-            if not isinstance(input_, dict):
-                raise ValueValidationError(
-                    f"template_jq {program_name!r} on template {template.name!r} declares params "
-                    f"{program.params}, so its input must be an object, got {type(input_).__name__}"
-                )
-            missing = sorted(set(program.params) - set(input_))
-            unknown = sorted(set(input_) - set(program.params))
-            if missing or unknown:
-                raise ValueValidationError(
-                    f"template_jq {program_name!r} on template {template.name!r} declares params {program.params}"
-                    + (f", input missing {missing}" if missing else "")
-                    + (f", input has undeclared {unknown}" if unknown else "")
-                )
-        record = await self._store.read_record_view(state, subject, conn=conn)
-        subtree = _record_subtree(record["data"], path) if record is not None else {}
-        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "input": input_}
-        body, prelude = await self._render_template_jq(template, program_name)
-        try:
-            result = await run_jq_first(
-                body,
-                subtree,
-                prelude=prelude,
-                variables=variables,
-            )
-        except Exception as exc:
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
-            ) from exc
-        if not isinstance(result, list):
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} is an update program, so its jq must "
-                f"return an op batch (a list of ops), got {type(result).__name__}"
-            )
-        ops = [_rebase_op(op, path) for op in result]
+        ops = await self._resolve_template_jq_ops(state, subject, name, input_, conn=conn)
         applied = await self.apply(state, subject, ops, op_id=op_id, origin=origin, conn=conn)
         return TemplateJqApplyResult(
             name=name, applied=applied.applied, data=applied.data, seq=applied.seq, skipped=applied.skipped

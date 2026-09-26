@@ -860,6 +860,12 @@ def _apply_ops_write_cte(cur, pg, norm, params):
 
 
 # -- op ledger ---------------------------------------------------------------
+@_on(r"SELECT 1 AS present FROM state_applied_ops WHERE op_id = %s$")
+def _select_applied_op(cur, pg, norm, params):
+    (op_id,) = params
+    cur._one = {"present": 1} if op_id in pg.applied_ops else None
+
+
 @_on(r"INSERT INTO state_applied_ops \(op_id, applied_at\) VALUES \(%s, now\(\)\) ON CONFLICT DO NOTHING$")
 def _insert_applied_op(cur, pg, norm, params):
     (op_id,) = params

@@ -55,7 +55,7 @@ class _RecordMixin(_StatesServiceBase):
         self._ensure_available()
         decl = await self._require_declaration_decl(state)
         await self.validate_subject(decl, subject)
-        view = await self._store.read_record_view(state, subject, conn=conn)
+        view = await self._projected_record_view(state, subject, conn=conn)
         if view is None:
             return None
         return StateRecord(

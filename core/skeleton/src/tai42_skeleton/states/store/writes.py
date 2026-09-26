@@ -15,7 +15,7 @@ from tai42_contract.states.errors import StateNotFoundError, SubjectFoldError
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
-from tai42_skeleton.states.paths import guard_passes
+from tai42_skeleton.states.paths import partition_guarded
 
 from .base import _StoreBase
 from .connection import _pool, _settings
@@ -131,6 +131,38 @@ class _RecordWriteStore(_StoreBase):
             self._attachment_paths_cache.popitem(last=False)
         return composed
 
+    async def read_apply_context(
+        self, state: str, *, conn: AsyncConnection[Any] | None = None
+    ) -> tuple[dict[str, Any], list[str], list[tuple[list[Any], str, str]], tuple[tuple[str | int, ...], ...]]:
+        """The inputs :meth:`apply_ops` validates and projects with, read WITHOUT holding a lock across a scope.
+
+        Returns ``(effective_schema, subject_kinds, regime_paths, traced_paths)`` — the same
+        effective schema, declared subject kinds, absolute composing-regime paths and traced
+        attach prefixes ``apply_ops`` reads under its ``FOR SHARE`` lock — so an in-scope
+        unit-of-work projects a staged write against the identical inputs the commit will apply
+        it under. A one-shot read; an undeclared state raises loudly.
+        """
+        async with self._read_cursor(conn) as cur:
+            await cur.execute(
+                "SELECT effective_schema, subject_kinds, updated_at FROM state_declarations WHERE name = %s FOR SHARE",
+                (state,),
+            )
+            decl = await cur.fetchone()
+            if decl is None:
+                raise StateNotFoundError(f"no state declared as {state!r}")
+            regime_paths, traced_paths = await self._composed_attachment_paths(cur, state, decl["updated_at"])
+            return decl["effective_schema"], list(decl["subject_kinds"]), regime_paths, traced_paths
+
+    async def op_applied(self, op_id: str, *, conn: AsyncConnection[Any] | None = None) -> bool:
+        """Whether ``op_id`` is already in the idempotency ledger — the read a staged replay checks.
+
+        A staged write carrying an ``op_id`` a prior commit already recorded projects as
+        ``applied=False`` (no re-write), matching what :meth:`apply_ops` answers at commit.
+        """
+        async with self._read_cursor(conn) as cur:
+            await cur.execute("SELECT 1 AS present FROM state_applied_ops WHERE op_id = %s", (op_id,))
+            return await cur.fetchone() is not None
+
     async def apply_ops(
         self,
         state: str,
@@ -203,14 +235,7 @@ class _RecordWriteStore(_StoreBase):
                 raise AssertionError
             current = record["data"]
 
-            applied_ops: list[dict[str, Any]] = []
-            guarded_skipped: list[dict[str, Any]] = []
-            for op in ops:
-                guard = op.get("guard")
-                if guard is not None and not guard_passes(current, guard):
-                    guarded_skipped.append(op)
-                    continue
-                applied_ops.append({k: v for k, v in op.items() if k != "guard"})
+            applied_ops, guarded_skipped = partition_guarded(current, ops)
 
             if not applied_ops:
                 if record["inserted"]:
