@@ -19,12 +19,12 @@ from tai42_channel_whatsapp.flows import (
 )
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_REFERENCE_RE = re.compile(r"\$\{(?:data|screen)\.([^}]+)\}")
+_REFERENCE_RE = re.compile(r"\$\{(?:data|form|screen)\.([^}]+)\}")
 
 
 def _assert_only_identifier_safe_wire_names(flow_json: dict) -> None:
     """Every component ``name``, screen-``data`` key, ``on-click-action`` payload key and
-    ``${data.…}`` / ``${screen.…}`` reference in the Flow is in Meta's identifier grammar.
+    ``${data.…}`` / ``${form.…}`` reference in the Flow is in Meta's identifier grammar.
 
     The field LABEL is deliberately excluded — it keeps the property title (else the raw
     property name) and may carry any character.
@@ -106,15 +106,15 @@ def test_form_flow_one_screen_per_page():
     assert flow_json["screens"][1]["terminal"] is True
     assert flow_json["routing_model"] == {"SCREEN_A": ["SCREEN_B"], "SCREEN_B": []}
     # The terminal screen completes with the flat union of every field: this screen's
-    # value through the unwrapped-component reference, an earlier one from its __val carrier.
+    # value through the form-input reference, an earlier one from its __val carrier.
     footer = _screen_children(flow_json, 1)[-1]
     assert footer["on-click-action"]["name"] == "complete"
-    assert footer["on-click-action"]["payload"] == {"a": "${data.a__val}", "b": "${screen.b}"}
-    # The first step navigates forward, carrying its collected value on as ${screen.<field>}.
+    assert footer["on-click-action"]["payload"] == {"a": "${data.a__val}", "b": "${form.b}"}
+    # The first step navigates forward, carrying its collected value on as ${form.<field>}.
     step_footer = _screen_children(flow_json, 0)[-1]
     assert step_footer["on-click-action"]["name"] == "navigate"
     assert step_footer["on-click-action"]["next"] == {"type": "screen", "name": "SCREEN_B"}
-    assert step_footer["on-click-action"]["payload"]["a__val"] == "${screen.a}"
+    assert step_footer["on-click-action"]["payload"]["a__val"] == "${form.a}"
 
 
 # -- the field-component mapping (each keeps its init-value) --------------------
@@ -244,19 +244,35 @@ def test_every_screen_id_is_letters_and_underscores_past_nine():
         assert re.fullmatch(r"[A-Za-z_]+", screen_id)
 
 
-def test_local_field_references_use_the_unwrapped_component_spelling():
-    # A value on THIS screen is read as ${screen.<field>} (no Form namespace); an
-    # earlier screen's value rides forward as ${data.<field>__val}.
+def test_local_field_references_use_the_form_input_spelling():
+    # A value on THIS screen is read as ${form.<field>} (Meta's reference for data the
+    # user entered); an earlier screen's value rides forward as ${data.<field>__val}.
     schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
     pages = [{"title": "1", "fields": ["a"]}, {"title": "2", "fields": ["b"]}]
 
     flow_json, _ = build_form_flow(schema, pages)
 
     step_payload = _screen_children(flow_json, 0)[-1]["on-click-action"]["payload"]
-    assert step_payload["a__val"] == "${screen.a}"  # this-screen value, unwrapped-component spelling
+    assert step_payload["a__val"] == "${form.a}"  # this-screen value, form-input spelling
     terminal_payload = _screen_children(flow_json, 1)[-1]["on-click-action"]["payload"]
-    assert terminal_payload["b"] == "${screen.b}"  # this-screen value on the terminal
+    assert terminal_payload["b"] == "${form.b}"  # this-screen value on the terminal
     assert terminal_payload["a"] == "${data.a__val}"  # earlier value from its carrier
+
+
+def test_every_reference_in_the_emitted_flow_is_a_form_or_data_reference():
+    # Meta resolves a control's just-filled value through the form-input reference
+    # ${form.<name>} and a value passed down (the navigate carrier) through ${data.<name>};
+    # every reference the emitted Flow carries is one of those two grammars, so nothing
+    # comes back to the sender as a literal, unresolved reference string.
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+    pages = [{"title": "1", "fields": ["a"]}, {"title": "2", "fields": ["b"]}]
+
+    flow_json, _ = build_form_flow(schema, pages)
+
+    references = re.findall(r"\$\{[^}]+\}", json.dumps(flow_json))
+    assert references  # the flow does carry references
+    for reference in references:
+        assert reference.startswith(("${form.", "${data.")), reference
 
 
 def test_a_boolean_a_string_and_a_dropdown_are_each_prefilled():
@@ -513,7 +529,7 @@ def test_odd_named_flow_carries_only_identifier_safe_names_everywhere():
         # here), never as a component name, data key or reference.
         assert f'"name": "{raw_key}"' not in blob
         assert f"${{data.{raw_key}" not in blob
-        assert f"${{screen.{raw_key}" not in blob
+        assert f"${{form.{raw_key}" not in blob
 
     # The labels still carry the human-facing titles verbatim.
     controls = _controls(flow_json)
