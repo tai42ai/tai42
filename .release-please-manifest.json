@@ -1,8 +1,8 @@
 {
-  "core/contract": "15.0.1",
+  "core/contract": "15.1.0",
   "core/kit": "7.0.3",
-  "core/cli": "12.0.0",
-  "core/skeleton": "21.0.1",
+  "core/cli": "12.1.0",
+  "core/skeleton": "21.1.0",
   "plugins/accounts-postgres": "3.0.5",
   "plugins/agents": "8.0.3",
   "plugins/backend-arq": "4.0.2",
