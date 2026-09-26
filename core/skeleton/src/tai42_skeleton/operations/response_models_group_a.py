@@ -410,10 +410,19 @@ class McpEnvRefList(RootModel[list[McpEnvRef]]):
 
 
 class FailedMcp(BaseModel):
-    """An MCP server skipped by the viability check — its title and a coarse status."""
+    """An MCP server skipped by the viability check — title, coarse status, and credential-free failure detail.
+
+    ``category`` is the coarse, credential-free cause (``auth`` for a 401/403,
+    ``unreachable`` for a transport error or timeout, ``error`` otherwise); ``message``
+    is the redacted exception message (URL-embedded credentials stripped); ``http_status``
+    is the HTTP status the failure carried, or ``null`` for a pure transport failure.
+    """
 
     title: str
     status: str
+    category: str
+    message: str
+    http_status: int | None
 
 
 class McpHealth(BaseModel):

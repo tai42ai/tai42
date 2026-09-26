@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import SecretStr
 from tai42_contract.app import tai42_app
 from tai42_contract.secrets import SecretValue
 
@@ -19,6 +20,16 @@ from tai42_contract.secrets import SecretValue
 def weather(city: str, units: str = "metric") -> dict:
     """Report the weather for a city."""
     return {"city": city, "units": units}
+
+
+@tai42_app.tools.tool
+def secret_sink(token: SecretStr, label: str = "l", tokens: list[SecretStr] | None = None) -> str:
+    """A base tool with secret-typed parameters (``SecretStr`` scalar and list).
+
+    Exercises the preset read-view redaction: a literal baked into ``token`` /
+    ``tokens`` is masked on a read, while the non-secret ``label`` is returned as
+    authored."""
+    return label
 
 
 @tai42_app.tools.tool

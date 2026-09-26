@@ -19,7 +19,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
 
-from ._doubles import _cfg, _FakeMcpTool, _Mixin
+from ._doubles import _cfg, _failed_row, _FakeMcpTool, _Mixin
 
 
 def test_reload_mcp_unknown_title_is_structured_error():
@@ -34,7 +34,7 @@ def test_reload_mcp_unknown_title_is_structured_error():
 def test_reload_mcp_success_binds_and_clears_failed():
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
-    m._failed_mcps = {"svc": "unavailable"}
+    m._failed_mcps = {"svc": _failed_row()}
     m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
     out = m._reload_mcp("svc")
     assert out["status"] == "ok"
@@ -48,13 +48,19 @@ def test_reload_mcp_probe_failure_records_unavailable():
     m._probe_mcp = AsyncMock(side_effect=TimeoutError("slow"))
     out = m._reload_mcp("svc")
     assert out == {"title": "svc", "status": "unavailable"}
-    assert m._failed_mcps["svc"] == "unavailable"
+    # A timeout with no HTTP status reads as an unreachable server, redacted message.
+    assert m._failed_mcps["svc"] == {
+        "status": "unavailable",
+        "category": "unreachable",
+        "message": "slow",
+        "http_status": None,
+    }
 
 
 def test_reload_failed_mcps_keeps_siblings_on_one_failure():
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("a").model_dump(), _cfg("b").model_dump()]})
-    m._failed_mcps = {"a": "unavailable", "b": "unavailable"}
+    m._failed_mcps = {"a": _failed_row(), "b": _failed_row()}
     m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
 
     # The batch probes concurrently but applies binds one server at a time; a

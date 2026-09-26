@@ -28,7 +28,7 @@ _MANIFEST = {
         {
             "title": "fx",
             "module": "tests.presets._fixtures",
-            "include": ["weather", "echo", "plan_tool", "boom_tool"],
+            "include": ["weather", "echo", "plan_tool", "boom_tool", "secret_sink"],
         }
     ],
     "agents": [

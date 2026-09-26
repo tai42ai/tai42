@@ -94,7 +94,7 @@ class McpReprobeMixin(LifecycleState):
                     continue
                 config = snapshot[title]
                 if isinstance(probe, BaseException):
-                    self._record_failed_mcp(config, type(probe).__name__)
+                    self._record_failed_mcp(config, probe)
                     out.append({"title": title, "status": "unavailable"})
                     continue
                 try:

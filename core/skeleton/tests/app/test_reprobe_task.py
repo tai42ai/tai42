@@ -35,6 +35,11 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.cache import mcp_reload_probe_timeout
 
 
+def _row(category: str = "error", message: str = "", http_status: int | None = None) -> dict:
+    """A failed-MCP record as ``_record_failed_mcp`` writes it, for seeding ``_failed_mcps``."""
+    return {"status": "unavailable", "category": category, "message": message, "http_status": http_status}
+
+
 class _FakeMcpTool:
     name = "ping"
     description = "ping"
@@ -106,7 +111,7 @@ def _settings(initial: float, maximum: float):
 async def test_recovering_title_binds_tools_and_leaves_failed_set(monkeypatch):
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
-    m._failed_mcps = {"svc": "unavailable"}
+    m._failed_mcps = {"svc": _row()}
     m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
@@ -134,7 +139,7 @@ async def test_recovering_title_binds_tools_and_leaves_failed_set(monkeypatch):
 async def test_backoff_doubles_caps_and_resets_on_recovery(monkeypatch):
     m = _Mixin()
     m._manifest = Manifest.model_validate({})
-    m._failed_mcps = {"a": "unavailable"}
+    m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
     pass_index = {"n": 0}
@@ -173,7 +178,7 @@ async def test_backoff_doubles_caps_and_resets_on_recovery(monkeypatch):
 async def test_new_failed_title_resets_backoff(monkeypatch):
     m = _Mixin()
     m._manifest = Manifest.model_validate({})
-    m._failed_mcps = {"a": "unavailable"}
+    m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
     async def fake_probe_apply(_snapshot):
@@ -188,7 +193,7 @@ async def test_new_failed_title_resets_backoff(monkeypatch):
         # "b" fails between passes (e.g. a serving-loop reload_mcp recorded it)
         # right before the fourth pass snapshots the failed set.
         if len(intervals) == 4:
-            m._failed_mcps["b"] = "unavailable"
+            m._failed_mcps["b"] = _row()
         if len(intervals) >= 5:
             raise _Stop
         return
@@ -216,7 +221,7 @@ async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, cap
     lock would capture only the pre-mutation set and fail this test."""
     m = _Mixin()
     m._manifest = Manifest.model_validate({})
-    m._failed_mcps = {"a": "unavailable"}
+    m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
     reload_ran = asyncio.Event()
@@ -242,7 +247,7 @@ async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, cap
         task = asyncio.create_task(m._reprobe_failed_mcps_loop())
         await asyncio.sleep(0)  # let the pass reach the gate and block on it
         assert not reload_ran.is_set()  # blocked before snapshotting — no read yet
-        m._failed_mcps["b"] = "unavailable"  # a reload mutates under the same lock
+        m._failed_mcps["b"] = _row()  # a reload mutates under the same lock
 
     # Lock released: the pass now acquires it, snapshots the settled set, and logs
     # what it snapshotted.
@@ -304,7 +309,7 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
     until the probe finished, so ``wait_for`` would fire."""
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
-    m._failed_mcps = {"svc": "unavailable"}
+    m._failed_mcps = {"svc": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
     probing = asyncio.Event()
@@ -362,7 +367,7 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
 async def test_pass_error_is_logged_and_loop_survives(monkeypatch, caplog):
     m = _Mixin()
     m._manifest = Manifest.model_validate({})
-    m._failed_mcps = {"a": "unavailable"}
+    m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
     calls = {"n": 0}

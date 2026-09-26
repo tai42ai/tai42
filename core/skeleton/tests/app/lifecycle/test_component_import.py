@@ -121,7 +121,15 @@ def test_initialize_components_loads_and_records_failed_mcp(monkeypatch):
 
     async def run():
         async with app.app_context(manifest):
-            assert app.admin.list_failed_mcps() == [{"title": "downsvc", "status": "unavailable"}]
+            assert app.admin.list_failed_mcps() == [
+                {
+                    "title": "downsvc",
+                    "status": "unavailable",
+                    "category": "unreachable",
+                    "message": "slow",
+                    "http_status": None,
+                }
+            ]
 
     asyncio.run(run())
 

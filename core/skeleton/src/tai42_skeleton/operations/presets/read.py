@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from tai42_contract.presets.errors import PresetNotFoundError, PresetVersionNotFoundError
@@ -19,6 +20,50 @@ from tai42_skeleton.operations.response_models_group_a import (
     PresetRecordList,
     PresetRefereesResult,
 )
+from tai42_skeleton.presets.secret_refs import mask_all_baked_secrets, redact_baked_secrets
+from tai42_skeleton.tools.binding.errors import UnknownToolError
+
+logger = logging.getLogger(__name__)
+
+
+async def _redacted_fixed_kwargs(preset_name: str, base_tool: str, fixed_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Mask every baked value under a secret-typed leaf of ``base_tool``'s input schema.
+
+    The one read-view redaction seam every preset read door funnels through, so no two
+    doors drift: :func:`get_preset`, :func:`get_version` and :func:`list_versions` all
+    call it. A baked ``SecretStr`` / ``format: password`` / ``writeOnly`` leaf is masked
+    while an ``!ENV`` marker is kept (see :func:`redact_baked_secrets`); the stored body
+    and the bind / execute paths keep the real value. When ``base_tool`` is not
+    registered — an unbindable preset whose plugin is absent — no schema tells a secret
+    leaf from a config one, so the read fails CLOSED and masks every baked leaf, logging
+    a warning naming the preset and the unresolved base tool so the degraded read view is
+    visible rather than a silent blanket mask (names only, never a baked value).
+    """
+    try:
+        base = await instance.app.tools.get_tool(base_tool)
+    except UnknownToolError:
+        logger.warning(
+            "preset %r read masks every baked value: its base tool %r is not registered, "
+            "so secret-typed kwargs cannot be told from plain config",
+            preset_name,
+            base_tool,
+        )
+        return mask_all_baked_secrets(fixed_kwargs)
+    return redact_baked_secrets(fixed_kwargs, base.parameters)
+
+
+async def _redact_version_body(preset_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Return a version ``body`` with its baked ``fixed_kwargs`` masked through the read seam.
+
+    A version body is an opaque store dict; only a preset-kind body carries both a
+    ``base_tool`` and a ``fixed_kwargs`` mapping — redact it in place then, else pass the
+    body through unchanged.
+    """
+    base_tool = body.get("base_tool")
+    fixed_kwargs = body.get("fixed_kwargs")
+    if isinstance(base_tool, str) and isinstance(fixed_kwargs, dict):
+        body["fixed_kwargs"] = await _redacted_fixed_kwargs(preset_name, base_tool, fixed_kwargs)
+    return body
 
 
 @operation(summary="List presets", tags=["presets"], response_model=PresetRecordList)
@@ -72,7 +117,7 @@ async def get_preset(name: str) -> dict[str, Any]:
     body = bodies[name]
     uses_map, used_by_map = _reference_maps(bodies)
     view = _store_record_view(name, record.active_version, body, uses=uses_map[name], used_by=used_by_map[name])
-    view["fixed_kwargs"] = body.fixed_kwargs
+    view["fixed_kwargs"] = await _redacted_fixed_kwargs(name, body.base_tool, body.fixed_kwargs)
     return view
 
 
@@ -88,7 +133,12 @@ async def list_versions(name: str) -> list[dict[str, Any]]:
         versions = await instance.app.presets.store.list_versions(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
-    return [v.model_dump() for v in versions]
+    dumped: list[dict[str, Any]] = []
+    for version in versions:
+        row = version.model_dump()
+        row["body"] = await _redact_version_body(name, row["body"])
+        dumped.append(row)
+    return dumped
 
 
 @operation(
@@ -110,7 +160,9 @@ async def get_version(name: str, version: str) -> dict[str, Any]:
         row = await instance.app.presets.store.get_version(name, version_num)
     except PresetVersionNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} has no version {version_num}") from exc
-    return row.model_dump()
+    result = row.model_dump()
+    result["body"] = await _redact_version_body(name, result["body"])
+    return result
 
 
 @operation(

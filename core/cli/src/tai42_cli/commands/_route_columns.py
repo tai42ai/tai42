@@ -317,7 +317,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         ),
     ),
     ("GET", "/api/marketplace/kinds"): RouteShape(items_key=None, columns=("value",)),
-    ("GET", "/api/mcp-status"): RouteShape(items_key="failed", columns=("title", "status")),
+    ("GET", "/api/mcp-status"): RouteShape(
+        items_key="failed", columns=("title", "status", "category", "message", "http_status")
+    ),
     ("GET", "/api/mcp-status/failed"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
