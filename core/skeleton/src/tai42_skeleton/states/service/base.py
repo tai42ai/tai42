@@ -8,6 +8,7 @@ declaration here), so every mixin resolves its ``self`` access against one place
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
         StatesAttachValidatorRegistry,
         StatesConsumerListerRegistry,
     )
+    from .unit import _StateUnit
 
 
 class _StatesServiceBase:
@@ -139,6 +141,22 @@ class _StatesServiceBase:
     ) -> TemplateJqApplyResult: ...
 
     async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]: ...
+
+    async def _resolve_template_jq_ops(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input_: Any,
+        *,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def open_unit(self) -> AbstractAsyncContextManager[_StateUnit]: ...
+
+    async def _projected_record_view(
+        self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
+    ) -> dict[str, Any] | None: ...
 
     async def list_subjects(
         self,

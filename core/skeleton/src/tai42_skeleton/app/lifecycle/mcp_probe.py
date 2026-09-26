@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+import httpx
+from tai42_contract.errors import ClientConnectError
 from tai42_contract.manifest import TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as _lifecycle
@@ -15,6 +17,71 @@ if TYPE_CHECKING:
     import mcp
 
 logger = logging.getLogger(__name__)
+
+# The HTTP statuses that mark a probe failure as a CREDENTIAL problem, not an outage.
+_AUTH_STATUSES = frozenset({401, 403})
+
+# Exception types (matched anywhere in the cause chain) that mark a probe failure as
+# the server being UNREACHABLE — a transport/connect error or a timeout — rather than a
+# reachable server answering with an error. ``httpx.TransportError`` covers connect,
+# read, write and pool timeouts; ``asyncio.TimeoutError`` is the probe's own
+# ``wait_for`` budget expiring.
+_UNREACHABLE_EXC: tuple[type[BaseException], ...] = (
+    asyncio.TimeoutError,
+    ConnectionError,
+    httpx.TransportError,
+    ClientConnectError,
+)
+
+
+def _exc_chain(exc: BaseException) -> list[BaseException]:
+    """The exception and every ``__cause__`` / ``__context__`` behind it, cycle-guarded.
+
+    A probe failure is often a wrapped error (a client error around an ``httpx``
+    response error), so the HTTP status and the transport class are read across the
+    whole chain, not just the outermost exception.
+    """
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _mcp_http_status(exc: BaseException) -> int | None:
+    """The HTTP status a probe failure carries, if any — from an ``httpx`` response error or a ``status_code``.
+
+    Walks the cause chain so a wrapped response error still yields its status; ``None``
+    when no exception in the chain carries an integer status (a pure transport failure).
+    """
+    for err in _exc_chain(exc):
+        response = getattr(err, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            return status
+        status = getattr(err, "status_code", None)
+        if isinstance(status, int):
+            return status
+    return None
+
+
+def _mcp_failure_category(exc: BaseException, http_status: int | None) -> str:
+    """A coarse, credential-free category for a failed probe: ``auth`` / ``unreachable`` / ``error``.
+
+    ``auth`` for a 401/403 (a credential problem, not an outage); ``unreachable`` for a
+    transport/connect error or a timeout with no HTTP status; ``error`` for any other
+    HTTP status the server answered with, or an otherwise-unclassified failure.
+    """
+    if http_status in _AUTH_STATUSES:
+        return "auth"
+    if http_status is not None:
+        return "error"
+    if any(isinstance(err, _UNREACHABLE_EXC) for err in _exc_chain(exc)):
+        return "unreachable"
+    return "error"
 
 
 class McpProbeMixin(LifecycleState):
@@ -39,7 +106,7 @@ class McpProbeMixin(LifecycleState):
 
     async def _load_mcps(
         self,
-    ) -> tuple[list[tuple[TaiMCPConfig, Any]], list[tuple[TaiMCPConfig, str]]]:
+    ) -> tuple[list[tuple[TaiMCPConfig, Any]], list[tuple[TaiMCPConfig, BaseException]]]:
         """Probe every manifest MCP server concurrently, each isolated.
 
         Returns ``(successes, failures)`` and never raises for one server, so a
@@ -62,31 +129,49 @@ class McpProbeMixin(LifecycleState):
             try:
                 tools = await self._probe_mcp(config, timeout=timeout)
             except Exception as e:
-                return config, None, type(e).__name__
+                return config, None, e
             else:
                 return config, tools, None
 
         results = await asyncio.gather(*(run_one(cfg) for cfg in manifest.mcp))
         successes, failures = [], []
-        for config, tools, kind in results:
-            if kind is None:
+        for config, tools, error in results:
+            if error is None:
                 successes.append((config, tools))
             else:
-                failures.append((config, kind))
+                failures.append((config, error))
         return successes, failures
 
-    def _record_failed_mcp(self, config: TaiMCPConfig, kind: str) -> None:
-        """Record a failed MCP as ``unavailable`` and log it.
+    def _record_failed_mcp(self, config: TaiMCPConfig, exc: BaseException) -> None:
+        """Record a failed MCP as ``unavailable`` with a credential-free failure detail, and log it.
 
-        Stores only the title + coarse status, never the exception text or
-        config — ``list_failed_mcps`` is LLM-callable and the config carries
-        credentials. Only ``kind`` (exception class name) reaches the log.
+        The shared seam of every failed-probe door (boot ``_load_mcps``, the reprobe
+        loop, and the ``reload_mcp`` / ``reload_failed_mcps`` doors), so what a failure
+        records is decided in one place. Stores the coarse ``unavailable`` status, a
+        credential-free ``category`` (``auth`` / ``unreachable`` / ``error``), the
+        redacted exception ``message`` (``mcp_health._redact`` strips URL-embedded
+        credentials, the same way the dispatch-health record does) and the
+        ``http_status`` the exception carries when it has one. The config itself is
+        never stored — ``list_failed_mcps`` is LLM-callable and the config carries
+        credentials — and the exception CLASS goes only to the operator log, not the
+        LLM-callable record. So a 401 reads as ``auth``, never as an outage.
         """
-        self._failed_mcps[config.title] = "unavailable"
+        http_status = _mcp_http_status(exc)
+        category = _mcp_failure_category(exc, http_status)
+        message = mcp_health._redact(str(exc))
+        self._failed_mcps[config.title] = {
+            "status": "unavailable",
+            "category": category,
+            "message": message,
+            "http_status": http_status,
+        }
         logger.error(
-            "MCP server '%s' unavailable — skipped, recorded for reload (%s)",
+            "MCP server '%s' unavailable — skipped, recorded for reload (category=%s class=%s http_status=%s): %s",
             config.title,
-            kind,
+            category,
+            type(exc).__name__,
+            http_status,
+            message,
         )
 
     def _missing_tools_ignore(self) -> frozenset[str]:
@@ -103,11 +188,13 @@ class McpProbeMixin(LifecycleState):
             ignore |= set(title_map.get(title, set()))
         return frozenset(ignore)
 
-    def _list_failed_mcps(self) -> list[dict[str, str]]:
-        """List MCP servers skipped due to a failed viability check: ``title`` + coarse ``status`` only.
+    def _list_failed_mcps(self) -> list[dict[str, Any]]:
+        """List MCP servers skipped due to a failed viability check, each with its failure detail.
 
-        No config, no exception text — this is LLM-callable, logged and
-        broadcast, and the config carries credentials. Per-process: in a
+        Every row carries ``title`` + the recorded record (``status``, credential-free
+        ``category``, redacted ``message``, ``http_status``) — see
+        :meth:`_record_failed_mcp`. No config, no unredacted text — this is LLM-callable,
+        logged and broadcast, and the config carries credentials. Per-process: in a
         multi-worker backend this reflects only the current process.
 
         Reads race a reload worker thread mutating ``_failed_mcps`` (this read is
@@ -115,7 +202,7 @@ class McpProbeMixin(LifecycleState):
         the dict is snapshot-copied — a single C-level op, atomic under the GIL —
         before iterating.
         """
-        return [{"title": title, "status": status} for title, status in dict(self._failed_mcps).items()]
+        return [{"title": title, **record} for title, record in dict(self._failed_mcps).items()]
 
     def _live_mcp_status(self) -> dict[str, Any]:
         """Snapshot the in-process MCP-binding state.

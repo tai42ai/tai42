@@ -476,7 +476,7 @@ def test_attach_reconcile_context_is_frozen_and_defaults_options():
 # --------------------------------------------------------------------------- #
 # The facet surface
 # --------------------------------------------------------------------------- #
-def test_appstates_enumerates_its_thirty_two_members():
+def test_appstates_enumerates_its_thirty_three_members():
     members = protocol_members(AppStates)
     assert members == {
         "list_declarations",
@@ -497,6 +497,7 @@ def test_appstates_enumerates_its_thirty_two_members():
         "merge",
         "apply",
         "apply_batch",
+        "open_unit",
         "eval_template_jq",
         "apply_template_jq",
         "erase",

@@ -8,6 +8,7 @@ from .base import _Facet
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractAsyncContextManager
     from typing import Any
 
     from tai42_contract.states import (
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
         StateRecord,
         StateSubject,
         StateTemplateDocument,
+        StateUnit,
         TemplateJqApplyResult,
         TemplateJqResult,
         WriteOrigin,
@@ -199,6 +201,15 @@ class StatesFacet(_Facet):
         return await self._app._states_service.apply_template_jq(
             state, subject, name, input_, op_id=op_id, origin=origin
         )
+
+    def open_unit(self) -> AbstractAsyncContextManager[StateUnit]:
+        """Open a unit of work over the states facet, bound to the caller's scope for the ``async with`` block.
+
+        The caller stages writes against the yielded unit and reads its own staged writes back;
+        ``commit`` lands them in one transaction, ``discard`` drops them, and a unit left
+        unresolved when the block exits is discarded at teardown.
+        """
+        return self._app._states_service.open_unit()
 
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
         """Erase ``subject``'s document under ``state``."""

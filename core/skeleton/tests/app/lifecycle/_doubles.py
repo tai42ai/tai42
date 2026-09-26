@@ -60,3 +60,8 @@ class _Mixin(TaiMCPLifecycleMixin):
 
 def _cfg(title="svc"):
     return TaiMCPConfig(title=title, include=[], config=MCPConfig(type="http", url="http://x/mcp"))
+
+
+def _failed_row(category: str = "error", message: str = "", http_status: int | None = None) -> dict[str, Any]:
+    """A failed-MCP record as ``_record_failed_mcp`` writes it, for seeding ``_failed_mcps``."""
+    return {"status": "unavailable", "category": category, "message": message, "http_status": http_status}

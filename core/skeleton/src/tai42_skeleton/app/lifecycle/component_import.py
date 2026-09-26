@@ -185,8 +185,8 @@ class ComponentImportMixin(LifecycleState):
             for cfg, tools in successes:
                 self._mcp_tools(cfg, tools)
 
-            for cfg, kind in failures:
-                self._record_failed_mcp(cfg, kind)
+            for cfg, exc in failures:
+                self._record_failed_mcp(cfg, exc)
 
         mcp_health.retain({cfg.title for cfg in manifest.mcp or []})
 

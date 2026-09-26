@@ -260,6 +260,76 @@ async def test_input_program_reads_without_writing(real_service: tuple[StatesSer
     assert len(writes.items) == 2
 
 
+async def test_unit_of_work_stages_projects_and_commits_once(real_service: tuple[StatesService, str, str]) -> None:
+    svc, state, _template = real_service
+    subject = _subject(state)
+    async with svc.open_unit() as unit:
+        staged = await unit.stage(
+            [StateBatchWrite(state=state, subject=subject, template_jq="add", input={"id": 1}, origin=WriteOrigin())]
+        )
+        assert staged[0].applied is True
+        # Read-your-writes: an input program over the projected record sees the staged keyed item,
+        # which was projected under the composing regime and ``_trace``-stamped like a real write.
+        assert (await svc.eval_template_jq(state, subject, "count", {})).value == 1
+        assert staged[0].data is not None
+        assert staged[0].data["a"]["items"][0]["_trace"]["meta"] is None
+        # Nothing has landed in the store yet — no committed write ledger row.
+        assert len((await svc.writes(state, subject, limit=10, cursor=None)).items) == 0
+        commit = await unit.commit()
+    assert commit.diverged is False
+    assert commit.results[0].applied is True
+    # After commit the item is in the store, trace and all, in one write.
+    view = await svc.read(state, subject)
+    assert view is not None
+    assert view.data["a"]["items"][0]["id"] == 1
+    assert isinstance(view.data["a"]["items"][0]["_trace"]["at"], str)
+    assert len((await svc.writes(state, subject, limit=10, cursor=None)).items) == 1
+
+
+async def test_unit_of_work_discard_writes_nothing(real_service: tuple[StatesService, str, str]) -> None:
+    svc, state, _template = real_service
+    subject = _subject(state)
+    async with svc.open_unit() as unit:
+        await unit.stage(
+            [StateBatchWrite(state=state, subject=subject, template_jq="add", input={"id": 1}, origin=WriteOrigin())]
+        )
+        await unit.discard()
+    assert await svc.read(state, subject) is None
+    assert len((await svc.writes(state, subject, limit=10, cursor=None)).items) == 0
+
+
+async def test_unit_of_work_restage_same_op_id_in_a_later_unit_is_not_applied(
+    real_service: tuple[StatesService, str, str],
+) -> None:
+    svc, state, _template = real_service
+    subject = _subject(state)
+    op_id = f"op:{state}"
+    async with svc.open_unit() as first:
+        await first.stage(
+            [
+                StateBatchWrite(
+                    state=state, subject=subject, template_jq="add", input={"id": 1}, op_id=op_id, origin=WriteOrigin()
+                )
+            ]
+        )
+        await first.commit()  # the first unit commits once
+    async with svc.open_unit() as second:
+        staged = await second.stage(
+            [
+                StateBatchWrite(
+                    state=state, subject=subject, template_jq="add", input={"id": 2}, op_id=op_id, origin=WriteOrigin()
+                )
+            ]
+        )
+        assert staged[0].applied is False  # the ledger already holds the op_id
+        commit = await second.commit()
+    assert commit.diverged is False
+    assert commit.results[0].applied is False
+    view = await svc.read(state, subject)
+    assert view is not None
+    assert [item["id"] for item in view.data["a"]["items"]] == [1]  # id=2 never wrote
+
+
 async def test_reconciler_closes_an_orphan_through_a_keyed_op(
     real_reconciler: tuple[StatesService, str, str],
 ) -> None:

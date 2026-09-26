@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -490,6 +491,39 @@ class TemplateJqApplyResult(BaseModel):
     skipped: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
 
 
+class UnitDivergence(BaseModel):
+    """One staged-vs-committed mismatch surfaced on a unit-of-work commit.
+
+    ``index`` is the staged write's position (in staged order), ``field`` names the answer
+    that differed (``"applied"`` or ``"skipped"``), and ``staged``/``committed`` carry the two
+    values. Reported on :class:`UnitCommitResult` and logged at warning — never swallowed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int
+    field: str
+    staged: Any = None
+    committed: Any = None
+
+
+class UnitCommitResult(BaseModel):
+    """The outcome of committing a unit of work.
+
+    ``results`` is the per-staged-write :class:`ApplyResult` the one commit transaction
+    produced, in staged order; ``diverged`` is true when a staged projection answer differed
+    from the committed answer (guards and ``op_id`` idempotency are authoritative at commit),
+    and ``divergences`` names each. A caller reads ``diverged`` to learn the projection its
+    scope was served differed from what landed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[ApplyResult] = Field(default_factory=list[ApplyResult])
+    diverged: bool = False
+    divergences: list[UnitDivergence] = Field(default_factory=list[UnitDivergence])
+
+
 class WriteEntry(BaseModel):
     """One row of a subject's audit trail.
 
@@ -588,6 +622,65 @@ class AttachReconcileRecords(Protocol):
 
     async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
         """Apply ``ops`` to ``subject``'s record and return the :class:`ApplyResult`."""
+        ...
+
+
+@runtime_checkable
+class StateUnit(Protocol):
+    """A unit of work over the states facet: a scope's writes staged and projected, committed once, or discarded.
+
+    A caller opens a unit for a scope it owns and stages write sets against it. Each staged
+    batch is validated and projected exactly the way a committed apply would be — guards, the
+    path ops, the composing-shape rule and the whole-document schema, the SAME applier — but
+    lands in the unit's staging, not the store. While the unit is bound to the caller's scope,
+    every facet read of a subject the unit has staged is served from the projection (the
+    committed document overlaid with the unit's staged deltas in order, on a monotonic
+    provisional sequence), so the scope reads its own staged writes while every other scope
+    still sees the store's committed document. ``commit`` applies every staged batch onto the
+    latest committed documents in ONE store transaction — the whole-batch rollback holds, so
+    nothing lands on any failure and the failure is loud — and returns the per-write ledger
+    answers. ``discard`` drops the staging. A unit neither committed nor discarded by the end
+    of its scope is discarded by the scope teardown, an error the caller logs.
+    """
+
+    async def stage(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
+        """Validate and project ``writes`` into the unit's staging, returning the provisional per-write result.
+
+        Each write is validated and projected exactly as
+        :meth:`~tai42_contract.app.facets.AppStates.apply` /
+        :meth:`~tai42_contract.app.facets.AppStates.apply_template_jq` would apply it, over the
+        unit's current projection, and returns its provisional :class:`ApplyResult` (a re-staged
+        ``op_id`` — already staged here or already committed — answers ``applied=False`` without
+        touching the projection, mirroring the ledger at commit). No store write happens; a
+        validation, composing-shape or schema error raises loudly.
+        """
+        ...
+
+    async def commit(self) -> UnitCommitResult:
+        """Apply every staged batch onto the latest committed documents in ONE store transaction.
+
+        The whole-batch rollback holds: any write that fails rolls the whole commit back and
+        raises loudly, nothing lands. Returns the committed per-write :class:`ApplyResult` in
+        staged order plus any divergence between the staged projection and the committed answer
+        (a visible field, also logged at warning). A committed or discarded unit refuses a
+        second commit loudly.
+        """
+        ...
+
+    async def discard(self) -> None:
+        """Drop the unit's staging without writing.
+
+        A committed or discarded unit refuses a second discard loudly.
+        """
+        ...
+
+    def savepoint(self) -> AbstractAsyncContextManager[None]:
+        """A nested staging scope inside the unit.
+
+        Writes staged inside the ``async with`` block are KEPT on a clean exit and DROPPED on an
+        exception — only the child's staged deltas roll back, and the exception propagates
+        loudly. Savepoints nest to any depth.
+        """
         ...
 
 

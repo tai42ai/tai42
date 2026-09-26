@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
 from tai42_contract.states.models import (
@@ -17,6 +18,7 @@ from tai42_contract.states.models import (
     StateRecord,
     StateSubject,
     StateTemplateDocument,
+    StateUnit,
     TemplateJqApplyResult,
     TemplateJqResult,
     WriteOrigin,
@@ -220,6 +222,18 @@ class AppStates(Protocol):
         ``applied=False`` without re-writing while its siblings land). The transaction's connection
         stays hidden behind this seam — a door passes only the write set, never threads a
         connection. An empty list is a no-op returning ``[]``.
+        """
+        ...
+
+    def open_unit(self) -> AbstractAsyncContextManager[StateUnit]:
+        """Open a unit of work over the states facet, bound to the caller's scope for the ``async with`` block.
+
+        Yields a :class:`~tai42_contract.states.StateUnit` the caller stages writes against; while
+        the block is open the unit is the ambient unit every facet read of a staged subject is
+        served from (read-your-writes within the scope, the store's committed document to every
+        other scope). The caller ``commit``s or ``discard``s the unit; a unit left unresolved when
+        the block exits (a clean exit or a raised exception) is discarded at teardown and the
+        discard is logged. Nested runs join the outermost unit through :meth:`StateUnit.savepoint`.
         """
         ...
 

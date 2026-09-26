@@ -1,6 +1,6 @@
 """Read/write the live epoch's serving core through the per-epoch forwarding accessors."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 
@@ -118,11 +118,11 @@ class ServingCoreAccessMixin(LifecycleState):
         self._serving_core._extension_registry = value
 
     @property
-    def _failed_mcps(self) -> dict[str, str]:
+    def _failed_mcps(self) -> dict[str, dict[str, Any]]:
         return self._serving_core._failed_mcps
 
     @_failed_mcps.setter
-    def _failed_mcps(self, value: dict[str, str]) -> None:
+    def _failed_mcps(self, value: dict[str, dict[str, Any]]) -> None:
         self._serving_core._failed_mcps = value
 
     @property

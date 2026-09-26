@@ -63,6 +63,11 @@ def _cfg(title="x", **config):
     return TaiMCPConfig.model_validate({"title": title, "include": [], "config": config})
 
 
+def _row(category: str = "error", message: str = "", http_status: int | None = None) -> dict:
+    """A failed-MCP record as ``_record_failed_mcp`` writes it, for seeding ``_failed_mcps``."""
+    return {"status": "unavailable", "category": category, "message": message, "http_status": http_status}
+
+
 class TestSoftValidation:
     def test_raises_for_missing(self):
         with pytest.raises(TaiValidationError):
@@ -77,26 +82,30 @@ class TestSoftValidation:
 
 
 class TestFailedMcpStrip:
-    def test_record_stores_only_title_to_status(self):
+    def test_record_stores_credential_free_detail_never_config(self):
         m = _Mixin()
         cfg = _cfg("redis")
-        m._record_failed_mcp(cfg, "TimeoutError")
-        # Only the title is stored, mapped to a coarse status — the config
-        # (and thus its credentials) never enters process state.
-        assert m._failed_mcps == {"redis": "unavailable"}
+        m._record_failed_mcp(cfg, TimeoutError("slow"))
+        # The record carries the coarse status plus a credential-free failure detail —
+        # the config (and thus its credentials) never enters process state.
+        assert m._failed_mcps == {
+            "redis": {"status": "unavailable", "category": "unreachable", "message": "slow", "http_status": None}
+        }
+        assert "LEAKTOKEN" not in repr(m._failed_mcps)
+        assert "SECRET" not in repr(m._failed_mcps)
 
     def test_list_failed_mcps_shape_has_no_config_or_reason(self):
         m = _Mixin()
-        m._failed_mcps = {"a": "unavailable", "b": "unavailable"}
+        m._failed_mcps = {"a": _row(), "b": _row()}
         out = m._list_failed_mcps()
         assert out == [
-            {"title": "a", "status": "unavailable"},
-            {"title": "b", "status": "unavailable"},
+            {"title": "a", "status": "unavailable", "category": "error", "message": "", "http_status": None},
+            {"title": "b", "status": "unavailable", "category": "error", "message": "", "http_status": None},
         ]
-        # Hard guard: no entry may carry any key beyond title/status, and no
-        # secret substring may appear anywhere in the serialized result.
+        # Hard guard: an entry carries only the title + the credential-free record
+        # fields, and no secret substring appears anywhere in the serialized result.
         for entry in out:
-            assert set(entry) == {"title", "status"}
+            assert set(entry) == {"title", "status", "category", "message", "http_status"}
         assert "SECRET" not in repr(out)
         assert "LEAKTOKEN" not in repr(out)
 
@@ -114,7 +123,7 @@ class TestReloadShapes:
     def test_reload_failed_keeps_siblings_and_strips_text(self):
         m = _Mixin()
         m._manifest = Manifest.model_validate({"mcp": [_cfg("a").model_dump(), _cfg("b").model_dump()]})
-        m._failed_mcps = {"a": "unavailable", "b": "unavailable"}
+        m._failed_mcps = {"a": _row(), "b": _row()}
         # Probe result is irrelevant here — the apply half is patched below.
         m._probe_mcp = AsyncMock(return_value=[])
 

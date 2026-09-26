@@ -53,6 +53,7 @@ __all__ = [
     "guard_passes",
     "json_equal",
     "keyed_op_match_counts",
+    "partition_guarded",
     "path_str",
     "validate_guard",
     "validate_op",
@@ -68,6 +69,28 @@ def guard_passes(doc: dict[str, Any], guard: dict[str, Any]) -> bool:
     ``guard['expected']``.
     """
     return json_equal(value_at_path(doc, guard["path"]), guard["expected"])
+
+
+def partition_guarded(
+    current: dict[str, Any], ops: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split ``ops`` into ``(applied, guard_skipped)`` against ``current``.
+
+    An op whose ``guard`` fails against ``current`` (:func:`guard_passes`) lands in
+    ``guard_skipped``; every other op is copied WITHOUT its ``guard`` key into ``applied``
+    (the guard is a compare-and-set gate, not an operation). The persisted write path and
+    the in-scope unit-of-work projection both partition here, so a guard decides the same way
+    whichever computes the result.
+    """
+    applied: list[dict[str, Any]] = []
+    guard_skipped: list[dict[str, Any]] = []
+    for op in ops:
+        guard = op.get("guard")
+        if guard is not None and not guard_passes(current, guard):
+            guard_skipped.append(op)
+        else:
+            applied.append({k: v for k, v in op.items() if k != "guard"})
+    return applied, guard_skipped
 
 
 class _Absent:

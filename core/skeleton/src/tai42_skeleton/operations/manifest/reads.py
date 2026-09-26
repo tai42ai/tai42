@@ -126,8 +126,10 @@ async def list_failed_mcps(targets: list[str] | None = None) -> Any:
 
     Skipped at boot or last reload. Use ``reload_mcp`` to re-attach one once healthy.
 
-    Each entry is ``{"title": <name>, "status": "unavailable"}`` — title plus a
-    coarse status only. A query op rides the same fan-out primitive as a mutation:
+    Each entry is ``{"title", "status", "category", "message", "http_status"}`` — the
+    title plus the coarse status and a credential-free failure detail (``category`` one
+    of ``auth`` / ``unreachable`` / ``error``, the redacted ``message``, and the
+    ``http_status`` when the failure carried one). A query op rides the same fan-out primitive as a mutation:
     every worker's list arrives as its per-worker ``payload`` in the fleet report
     (this worker's list on its own self entry); ``targets`` optionally restricts the
     query to specific workers.

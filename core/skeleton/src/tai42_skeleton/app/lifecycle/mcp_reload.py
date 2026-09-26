@@ -34,7 +34,7 @@ class McpReloadMixin(LifecycleState):
         try:
             tools = await self._probe_mcp(config)
         except Exception as e:
-            self._record_failed_mcp(config, type(e).__name__)
+            self._record_failed_mcp(config, e)
             return {"title": title, "status": "unavailable"}
 
         return await self._apply_reloaded_mcp(title, config, tools)
@@ -173,7 +173,7 @@ class McpReloadMixin(LifecycleState):
         for title, probe in zip(known, probes, strict=True):
             config = mcp_map[title]
             if isinstance(probe, BaseException):
-                self._record_failed_mcp(config, type(probe).__name__)
+                self._record_failed_mcp(config, probe)
                 out.append({"title": title, "status": "unavailable"})
                 continue
             try:
