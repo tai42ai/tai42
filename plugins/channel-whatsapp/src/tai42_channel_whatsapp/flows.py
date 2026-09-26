@@ -29,12 +29,13 @@ option lists through ``flow_action_payload.data`` (built by :func:`build_flow_da
 rather than re-publishing. Collected values thread forward across screens by each
 step's navigate payload; the terminal screen completes with the flat UNION of every
 field, keyed by field name, so the inbound decode reads it exactly as an unpaged
-form. A footer reads a control's just-filled value through the unwrapped-component
-reference ``${screen.<field>}``; an earlier screen's value rides forward as
+form. A footer reads a control's just-filled value through the form-input reference
+``${form.<field>}`` (Meta's reference for data the user entered on the screen, valid
+with or without a ``Form`` wrapper); an earlier screen's value rides forward as
 ``${data.<field>__val}``.
 
 Meta accepts a component ``name``, a screen-``data`` key and a ``${data.…}`` /
-``${screen.…}`` reference only in the identifier grammar
+``${form.…}`` reference only in the identifier grammar
 ``[A-Za-z_][A-Za-z0-9_]*``, while an answer schema may use ANY JSON property name.
 So each schema property is first mapped to a unique identifier-safe COMPONENT NAME
 (:func:`component_names`), and that component name — never the raw property name — is
@@ -393,14 +394,14 @@ def _screen_footer(
     """The screen's ``Footer`` component.
 
     The terminal screen completes with the flat union of every field (this screen's read through the
-    unwrapped-component reference ``${screen.<field>}``, earlier ones from their ``__val`` carriers); a
+    form-input reference ``${form.<field>}``, earlier ones from their ``__val`` carriers); a
     non-terminal screen navigates to the next, forwarding successors' init/ds and every collected value,
     and records the transition in ``routing_model``. Every payload key and reference is the field's
     identifier-safe component name — the completion payload keys are what the inbound reply carries back.
     """
     if is_terminal:
         payload = {
-            names[name]: (f"${{screen.{names[name]}}}" if name in this_fields else f"${{data.{names[name]}__val}}")
+            names[name]: (f"${{form.{names[name]}}}" if name in this_fields else f"${{data.{names[name]}__val}}")
             for name in properties
         }
         return {"type": "Footer", "label": _FOOTER_LABEL, "on-click-action": {"name": "complete", "payload": payload}}
@@ -413,7 +414,7 @@ def _screen_footer(
     for name in earlier_fields:
         forward[f"{names[name]}__val"] = f"${{data.{names[name]}__val}}"
     for name in this_fields:
-        forward[f"{names[name]}__val"] = f"${{screen.{names[name]}}}"
+        forward[f"{names[name]}__val"] = f"${{form.{names[name]}}}"
     return {
         "type": "Footer",
         "label": _CONTINUE_LABEL,

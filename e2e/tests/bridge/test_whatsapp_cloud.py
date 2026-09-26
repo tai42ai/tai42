@@ -69,7 +69,7 @@ _FORM_SCHEMA = {
 
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_REFERENCE_RE = re.compile(r"\$\{(?:data|screen)\.([^}]+)\}")
+_REFERENCE_RE = re.compile(r"\$\{(?:data|form|screen)\.([^}]+)\}")
 
 
 def _flow_control_names(flow_json: dict) -> list[str]:
@@ -85,7 +85,7 @@ def _flow_control_names(flow_json: dict) -> list[str]:
 
 def _assert_flow_wire_names_identifier_safe(flow_json: dict) -> None:
     """Every component ``name``, screen-``data`` key, ``on-click-action`` payload key and
-    ``${data.…}`` / ``${screen.…}`` reference the created Flow carries is in Meta's
+    ``${data.…}`` / ``${form.…}`` reference the created Flow carries is in Meta's
     identifier grammar. Labels (which keep the property title) are not wire names."""
     for reference in _REFERENCE_RE.findall(json.dumps(flow_json)):
         assert _IDENTIFIER_RE.fullmatch(reference), reference
