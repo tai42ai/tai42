@@ -12,7 +12,7 @@
   "plugins/channel-telegram": "4.0.3",
   "plugins/channel-twilio": "5.0.3",
   "plugins/channel-web": "6.0.3",
-  "plugins/channel-whatsapp": "6.0.1",
+  "plugins/channel-whatsapp": "6.0.2",
   "plugins/connector-atlassian": "2.0.13",
   "plugins/connector-github": "1.0.13",
   "plugins/connector-google": "2.0.13",
@@ -31,5 +31,5 @@
   "plugins/tools-whatsapp": "1.1.15",
   "plugins/webhook-verifier-github": "1.2.13",
   "plugins/webhook-verifier-stripe": "1.2.13",
-  "e2e": "16.0.2"
+  "e2e": "16.0.3"
 }
