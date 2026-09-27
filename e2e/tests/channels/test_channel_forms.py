@@ -210,6 +210,84 @@ async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
     assert not await is_pending(stack, stack.port_b, question)
 
 
+# A schema whose two fields exercise slack's native date/time controls end to end.
+_SLACK_DATE_TIME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "on": {"type": "string", "format": "date"},
+        "at": {"type": "string", "format": "time"},
+    },
+    "required": ["on", "at"],
+}
+
+
+async def test_form_over_slack_renders_native_date_and_time_pickers(
+    channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
+) -> None:
+    stack = channel_stack
+    question = uniq("slack_dt_form_q")
+    good_answer = {"on": "2026-01-31", "at": "09:05"}
+    signing_secret = stack.config.env["CHANNEL_SLACK_SIGNING_SECRET"]
+
+    async def ask() -> object:
+        async with stack.mcp(port=stack.port_a) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {"question": question, "channel": "slack", "answer_format": "form", "schema": _SLACK_DATE_TIME_SCHEMA},
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        post = await _wait_one_send(fake_slack, question)
+        interaction_id = _form_open_value(post["blocks"])
+
+        open_payload = {
+            "type": "block_actions",
+            "trigger_id": uniq("slack_dt_trigger"),
+            "actions": [{"action_id": _SLACK_FORM_OPEN_ACTION, "value": interaction_id}],
+        }
+        opened = await post_inbound(
+            stack,
+            "/api/channels/slack/interactive",
+            fake_slack.build_interactive(signing_secret=signing_secret, payload=open_payload),
+        )
+        assert opened.status_code == 200, opened.text
+        view = fake_slack.views[-1]
+        # The date field renders a native datepicker, the time field a native timepicker.
+        by_id = {b["block_id"]: b for b in view["blocks"] if b.get("type") == "input"}
+        assert by_id["on"]["element"]["type"] == "datepicker"
+        assert by_id["at"]["element"]["type"] == "timepicker"
+
+        # A view_submission carrying the picked values resolves the ask with the ISO strings
+        # unchanged (no coercion).
+        submit_payload = {
+            "type": "view_submission",
+            "view": {
+                "callback_id": _SLACK_FORM_SUBMIT_CALLBACK,
+                "private_metadata": interaction_id,
+                "state": {
+                    "values": {
+                        "on": {_SLACK_FIELD_ACTION: {"type": "datepicker", "selected_date": good_answer["on"]}},
+                        "at": {_SLACK_FIELD_ACTION: {"type": "timepicker", "selected_time": good_answer["at"]}},
+                    }
+                },
+            },
+        }
+        submitted = await post_inbound(
+            stack,
+            "/api/channels/slack/interactive",
+            fake_slack.build_interactive(signing_secret=signing_secret, payload=submit_payload),
+        )
+        assert submitted.status_code == 200, submitted.text
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == good_answer
+    assert not await is_pending(stack, stack.port_b, question)
+
+
 async def test_form_to_a_non_advertising_channel_is_refused_and_persists_nothing(
     channel_stack: TaiStack, fake_twilio: FakeTwilio, uniq: Callable[[str], str]
 ) -> None:
