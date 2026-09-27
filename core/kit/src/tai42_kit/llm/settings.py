@@ -123,6 +123,24 @@ class EmbeddingSettings(TaiBaseSettings):
     model_kwargs: dict[str, Any] | None = None  # HuggingFace, Ollama: optional params
 
 
+class ClassifierSettings(TaiBaseSettings):
+    """Provider-agnostic classifier-model configuration read from the ``CLASSIFIER_`` env namespace.
+
+    The four fields are the classifier provider constructor's arguments; they are
+    consumed as one ``model_dump -> **kwargs -> get_classifier`` bundle. A ``None``
+    is dropped before it reaches the provider (``with_fallbacks`` dumps
+    ``exclude_none``), so an unset ``api_key`` falls through to the provider's own
+    credential resolution and its loud error when none is available.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CLASSIFIER_")
+
+    model: str = "jev-latest"
+    base_url: str | None = None
+    api_key: SecretStr | None = None
+    timeout: int | None = None
+
+
 class LLMSettings(TaiBaseSettings):
     """Provider-agnostic chat-model configuration read from the ``LLM_`` env namespace."""
 
@@ -146,6 +164,7 @@ class LLMProviderSettings(TaiBaseSettings):
 
     llm: str = "openai"
     embedding: str = "openai"
+    classifier: str = "typesafe"
     checkpoint: str = "redis"
     # None: no explicit conn string. The resource factory falls back per provider
     # to the shared connection namespace (redis -> the base Redis URL, postgres ->
@@ -210,3 +229,9 @@ def llm_settings() -> LLMSettings:
 def embedding_settings() -> EmbeddingSettings:
     """Return the process-wide :class:`EmbeddingSettings`, cached after first load."""
     return EmbeddingSettings()
+
+
+@settings_cache
+def classifier_settings() -> ClassifierSettings:
+    """Return the process-wide :class:`ClassifierSettings`, cached after first load."""
+    return ClassifierSettings()
