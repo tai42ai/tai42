@@ -17,6 +17,7 @@ tags:
   - uuid
   - time
   - embeddings
+  - classifier
   - http
   - cache
   - batch
@@ -26,6 +27,12 @@ permissions:
   subprocess: false
   filesystem: false
 provides:
+  - kind: tool
+    name: classify
+    module: tai42_toolbox.tools.classify
+    description: Judge JSON state against typed questions and return typed answers.
+    tags:
+      - classifier
   - kind: tool
     name: current_time_info
     module: tai42_toolbox.tools.current_time_info

@@ -135,9 +135,10 @@ def _toolbox_tools_entry() -> dict:
 
 # Each toolbox tool lives in its own module (one tool per module), so a profile
 # names the module and ``include``s the one tool it registers. ``request`` needs the
-# ``http`` extra (already in the e2e env) and ``generate_embeddings`` the ``embeddings``
-# extra — both fail LOUDLY at import when their extra is absent,
-# so a stack carrying them refuses to boot rather than silently dropping the tool.
+# ``http`` extra (already in the e2e env), ``generate_embeddings`` the ``embeddings``
+# extra, and ``classify`` the ``classifier`` extra — each fails LOUDLY at import when
+# its extra is absent, so a stack carrying them refuses to boot rather than silently
+# dropping the tool.
 _TOOLBOX_EXTRA_TOOL_ENTRIES: list[dict] = [
     {"title": "toolbox-request", "module": "tai42_toolbox.tools.request", "include": ["request"]},
     {
@@ -151,6 +152,7 @@ _TOOLBOX_EXTRA_TOOL_ENTRIES: list[dict] = [
         "module": "tai42_toolbox.tools.current_time_info",
         "include": ["current_time_info"],
     },
+    {"title": "toolbox-classify", "module": "tai42_toolbox.tools.classify", "include": ["classify"]},
 ]
 
 

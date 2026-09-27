@@ -111,6 +111,53 @@ def test_llm_real_unknown_provider_raises(monkeypatch: pytest.MonkeyPatch) -> No
         _llm_env(_res(llm_base_url="http://127.0.0.1:9/v1"))
 
 
+# ---- classifier seam (independent toggle) -------------------------------
+
+
+def test_classifier_env_mock_points_at_the_stub_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stack that wires classifier_base_url points the classify tool at the stub's
+    # root origin (the vendor appends /v1/systemone); the fixed test key rides along.
+    monkeypatch.delenv("TAI_E2E_REAL", raising=False)
+    env = _llm_env(_res(llm_base_url="http://127.0.0.1:9/v1", classifier_base_url="http://127.0.0.1:9"))
+    assert env["CLASSIFIER_BASE_URL"] == "http://127.0.0.1:9"
+    assert env["CLASSIFIER_API_KEY"] == "e2e-test"
+    assert env["CLASSIFIER_MODEL"] == "e2e-classifier"
+    assert "LLM_PROVIDER_CLASSIFIER" not in env
+
+
+def test_classifier_env_mock_is_inert_without_the_resource(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With classifier_base_url unset the mock arm emits no CLASSIFIER_* keys (a no-op,
+    # never an error) — the kit's own default provider/base applies.
+    monkeypatch.delenv("TAI_E2E_REAL", raising=False)
+    env = _llm_env(_res(llm_base_url="http://127.0.0.1:9/v1"))
+    assert not any(key.startswith("CLASSIFIER_") for key in env)
+
+
+def test_classifier_real_selects_configured_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    # classifier real: CLASSIFIER_* points at the live provider (its own key mapped to
+    # CLASSIFIER_API_KEY, LLM_PROVIDER_CLASSIFIER carries the provider id, model falls back
+    # to the provider default). The llm/embeddings groups stay on the stub (independent).
+    monkeypatch.setenv("TAI_E2E_REAL", "classifier")
+    monkeypatch.delenv("REAL_E2E_CLASSIFIER_PROVIDER", raising=False)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-live-xyz")
+    monkeypatch.delenv("REAL_E2E_CLASSIFIER_MODEL", raising=False)
+    env = _llm_env(_res(llm_base_url="http://127.0.0.1:9/v1", classifier_base_url="http://127.0.0.1:9"))
+    assert env["LLM_PROVIDER_CLASSIFIER"] == "typesafe"
+    assert env["CLASSIFIER_API_KEY"] == "ts-live-xyz"
+    assert env["CLASSIFIER_MODEL"] == "jev-latest"
+    assert "CLASSIFIER_BASE_URL" not in env  # no stub base on the real group
+    # llm/embeddings groups untouched (still the stub)
+    assert env["LLM_BASE_URL"] == "http://127.0.0.1:9/v1"
+    assert env["EMBEDDING_BASE_URL"] == "http://127.0.0.1:9/v1"
+
+
+def test_classifier_real_unknown_provider_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_E2E_REAL", "classifier")
+    monkeypatch.setenv("REAL_E2E_CLASSIFIER_PROVIDER", "not-a-provider")
+    with pytest.raises(ValueError, match="not a known classifier provider"):
+        _llm_env(_res(classifier_base_url="http://127.0.0.1:9"))
+
+
 # ---- stripe seam (env-swap manifest builder) ----------------------------
 
 

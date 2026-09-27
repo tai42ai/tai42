@@ -94,6 +94,11 @@ huggingface = [
     "langchain-huggingface>=1.2",
     "sentence-transformers>=5.3",
 ]
+# The classifier backend, imported lazily by llm/classifier.py. It publishes
+# pre-releases only, so uv's if-necessary strategy admits it and the
+# stable-resolution guard stays green; it carries the langchain-core>=1.6.2
+# transitive floor without moving the llm extra's own floor.
+typesafe = ["tai42-kit[llm]", "langchain-typesafe>=0.0.1a3,<0.1"]
 
 # Checkpoint/store backends — imported lazily by llm/checkpoint/checkpoint.py and
 # llm/store/store.py inside the per-backend match branches.

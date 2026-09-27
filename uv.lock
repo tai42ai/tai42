@@ -1720,6 +1720,19 @@ wheels = [
 ]
 
 [[package]]
+name = "httpcore2"
+version = "2.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "h11" },
+    { name = "truststore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/f3/1db7aa2bc2524062192bb0e0323969492d1883152a232fe36eea65f4e35c/httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103", size = 68071, upload-time = "2026-09-23T07:47:22.372Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/ba/a4568248771ce81957bfb7cc600264a40fbcda092391ee1c415c50be4bea/httpcore2-2.13.1-py3-none-any.whl", hash = "sha256:e1e05d4f25f7d7d496bfb96748f6f4b67657b03da069b3a68c36069f3db73d0a", size = 83423, upload-time = "2026-09-23T07:47:19.365Z" },
+]
+
+[[package]]
 name = "httptools"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1770,6 +1783,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0f/4c/751061ffa58615a32c31b2d82e8482be8dd4a89154f003147acee90f2be9/httpx_sse-0.4.3.tar.gz", hash = "sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d", size = 15943, upload-time = "2025-10-10T21:48:22.271Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl", hash = "sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc", size = 8960, upload-time = "2025-10-10T21:48:21.158Z" },
+]
+
+[[package]]
+name = "httpx2"
+version = "2.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio", marker = "sys_platform != 'emscripten'" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
+    { name = "httpx2-jsfetch", marker = "sys_platform == 'emscripten'" },
+    { name = "idna" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d5/44/474bef2a0e9d90f1715d32cb98b0738695ca17ba324095fb2497ed7fbd59/httpx2-2.13.1.tar.gz", hash = "sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa", size = 100405, upload-time = "2026-09-23T07:47:23.052Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/9c/6fe8931fd9f381042a9e4c7d5a7b4cbf7016b252bec0c99a49fce42c3326/httpx2-2.13.1-py3-none-any.whl", hash = "sha256:6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4", size = 95597, upload-time = "2026-09-23T07:47:20.995Z" },
+]
+
+[[package]]
+name = "httpx2-jsfetch"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/c4/0e5636363151a2a1795e0a77617168b9ca438e1748ec05fc9b5687f93d64/httpx2_jsfetch-1.0.tar.gz", hash = "sha256:70a0e3eabfef7cce5ad9c629f7d01ca05e418f586646f4ddf14782e4c1454c60", size = 6872, upload-time = "2026-08-07T00:13:07.492Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/43/832f631d32e4f1211caa2ba368317739fe71f0b8530e4c9d15dc454bac2a/httpx2_jsfetch-1.0-py3-none-any.whl", hash = "sha256:cb916b707601e69a07721aabc8f3f6659be3a6893bc1ff5c6f9e02241df2da32", size = 6382, upload-time = "2026-08-07T00:13:06.567Z" },
 ]
 
 [[package]]
@@ -2183,7 +2221,7 @@ wheels = [
 
 [[package]]
 name = "langchain-core"
-version = "1.6.1"
+version = "1.6.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -2197,9 +2235,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/90/12/aff76ca89c219ebe6f9dd3c5dbc4e3b1cf5450e9fc7037dccad23d45cd7a/langchain_core-1.6.1.tar.gz", hash = "sha256:1b156cb395aac4f009a8a1b38a574c7d948fe2d5f74c96e0d8a5017b4149e04f", size = 1003359, upload-time = "2026-08-27T19:31:14.956Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/ed/ceecd3bfcfc77a94cf30a9f1506e907fdea447458825e01914a72d2d1a6f/langchain_core-1.6.5.tar.gz", hash = "sha256:bdb059fef65473fd444558dbb18f50901657402c43ceed9dc0fdc7b76a393c6b", size = 1007041, upload-time = "2026-09-24T18:11:06.487Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8e/25/f50dd65673c819aa33d3c34df58c115dbb6ec627d19f93e6e401dd0fc8d7/langchain_core-1.6.1-py3-none-any.whl", hash = "sha256:954a84132a5cb0435d27b910e336347b6744ecc18fbeef1e2de7029a0959841a", size = 571478, upload-time = "2026-08-27T19:31:13.34Z" },
+    { url = "https://files.pythonhosted.org/packages/59/68/447ac7e734990b7ed9dcfc3b6dee9a4cd4d4169e296429fa71a9a47c1c7b/langchain_core-1.6.5-py3-none-any.whl", hash = "sha256:54c7b0e9314b9084fb04405bb33dc5d32986d512d92b7b8863899cd5f6267556", size = 572136, upload-time = "2026-09-24T18:11:04.837Z" },
 ]
 
 [[package]]
@@ -2296,6 +2334,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/26/9f/6c545900fefb7b00ddfa3f16b80d61338a0ec68c31c5451eeeab99082760/langchain_text_splitters-1.1.2.tar.gz", hash = "sha256:782a723db0a4746ac91e251c7c1d57fd23636e4f38ed733074e28d7a86f41627", size = 293580, upload-time = "2026-04-16T14:20:39.162Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d3/26/1ef06f56198d631296d646a6223de35bcc6cf9795ceb2442816bc963b84c/langchain_text_splitters-1.1.2-py3-none-any.whl", hash = "sha256:a2de0d799ff31886429fd6e2e0032df275b60ec817c19059a7b46181cc1c2f10", size = 35903, upload-time = "2026-04-16T14:20:38.243Z" },
+]
+
+[[package]]
+name = "langchain-typesafe"
+version = "0.0.1a3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx2" },
+    { name = "langchain-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c9/54/460d126cb5db7b031e5b3b94c63fe36d58bce020f2692fd7661f8f84c7d3/langchain_typesafe-0.0.1a3.tar.gz", hash = "sha256:d77647a7a5bafaa82db8212a682b223a9bbcd52fb015e49464f211552f1f3272", size = 200970, upload-time = "2026-09-20T18:54:40.777Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/5b/a14f30242eb36363ee757024a01727fef5efffbb542d2382468f457a7e2b/langchain_typesafe-0.0.1a3-py3-none-any.whl", hash = "sha256:f06f74ebdcb10cbc836dd89a275bbf4e2e13646cb919dcc02d4219e602cfe36e", size = 24962, upload-time = "2026-09-20T18:54:39.797Z" },
 ]
 
 [[package]]
@@ -5594,7 +5645,7 @@ dependencies = [
     { name = "tai42-storage-github" },
     { name = "tai42-storage-local" },
     { name = "tai42-storage-s3" },
-    { name = "tai42-toolbox", extra = ["chain", "embeddings", "http", "prometheus", "proxy"] },
+    { name = "tai42-toolbox", extra = ["chain", "classifier", "embeddings", "http", "prometheus", "proxy"] },
     { name = "tai42-tools-stripe" },
     { name = "tai42-webhook-verifier-github" },
     { name = "tai42-webhook-verifier-stripe" },
@@ -5655,7 +5706,7 @@ requires-dist = [
     { name = "tai42-storage-github", editable = "plugins/storage-github" },
     { name = "tai42-storage-local", editable = "plugins/storage-local" },
     { name = "tai42-storage-s3", editable = "plugins/storage-s3" },
-    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy"], editable = "plugins/toolbox" },
+    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy", "classifier"], editable = "plugins/toolbox" },
     { name = "tai42-tools-stripe", editable = "plugins/tools-stripe" },
     { name = "tai42-webhook-verifier-github", editable = "plugins/webhook-verifier-github" },
     { name = "tai42-webhook-verifier-stripe", editable = "plugins/webhook-verifier-stripe" },
@@ -5831,6 +5882,16 @@ postgres = [
 redis = [
     { name = "redis" },
 ]
+typesafe = [
+    { name = "langchain" },
+    { name = "langchain-core" },
+    { name = "langchain-openai" },
+    { name = "langchain-typesafe" },
+    { name = "langgraph" },
+    { name = "langgraph-checkpoint" },
+    { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
+]
 uvicorn = [
     { name = "uvicorn" },
 ]
@@ -5865,6 +5926,7 @@ requires-dist = [
     { name = "langchain-mistralai", marker = "extra == 'mistral'", specifier = ">=1.1" },
     { name = "langchain-ollama", marker = "extra == 'ollama'", specifier = ">=1.0" },
     { name = "langchain-openai", marker = "extra == 'llm'", specifier = ">=1.3" },
+    { name = "langchain-typesafe", marker = "extra == 'typesafe'", specifier = ">=0.0.1a3,<0.1" },
     { name = "langchain-xai", marker = "extra == 'xai'", specifier = ">=1.2" },
     { name = "langgraph", marker = "extra == 'llm'", specifier = ">=1.1,<2" },
     { name = "langgraph-checkpoint", marker = "extra == 'llm'", specifier = ">=4.2.0" },
@@ -5895,10 +5957,11 @@ requires-dist = [
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'langgraph-checkpoint-sqlite'" },
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'mistral'" },
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'ollama'" },
+    { name = "tai42-kit", extras = ["llm"], marker = "extra == 'typesafe'" },
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'xai'" },
     { name = "uvicorn", marker = "extra == 'uvicorn'", specifier = ">=0.52.4" },
 ]
-provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xai", "ollama", "huggingface", "langgraph-checkpoint-postgres", "langgraph-checkpoint-sqlite", "redis", "curl", "postgres", "jwt", "dev"]
+provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xai", "ollama", "huggingface", "typesafe", "langgraph-checkpoint-postgres", "langgraph-checkpoint-sqlite", "redis", "curl", "postgres", "jwt", "dev"]
 
 [[package]]
 name = "tai42-mcp-dynamic-postgres"
@@ -6329,6 +6392,9 @@ dependencies = [
 chain = [
     { name = "tai42-kit", extra = ["jq"] },
 ]
+classifier = [
+    { name = "tai42-kit", extra = ["typesafe"] },
+]
 dev = [
     { name = "prometheus-client" },
     { name = "pyright" },
@@ -6337,7 +6403,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
-    { name = "tai42-kit", extra = ["curl", "jq", "llm"] },
+    { name = "tai42-kit", extra = ["curl", "jq", "llm", "typesafe"] },
     { name = "trustme" },
 ]
 embeddings = [
@@ -6376,10 +6442,11 @@ requires-dist = [
     { name = "tai42-kit", extras = ["curl"], marker = "extra == 'http'", editable = "core/kit" },
     { name = "tai42-kit", extras = ["jq"], marker = "extra == 'chain'", editable = "core/kit" },
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'embeddings'", editable = "core/kit" },
-    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy"], marker = "extra == 'dev'" },
+    { name = "tai42-kit", extras = ["typesafe"], marker = "extra == 'classifier'", editable = "core/kit" },
+    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "classifier", "proxy"], marker = "extra == 'dev'" },
     { name = "trustme", marker = "extra == 'dev'", specifier = ">=1.1" },
 ]
-provides-extras = ["http", "prometheus", "chain", "embeddings", "proxy", "dev"]
+provides-extras = ["http", "prometheus", "chain", "embeddings", "classifier", "proxy", "dev"]
 
 [package.metadata.requires-dev]
 docs = [
@@ -6773,6 +6840,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4b/c5/931476f4cf1cd9e736f32651005078061a50dc164a2569fb874e00eb2786/trustme-1.2.1.tar.gz", hash = "sha256:6528ba2bbc7f2db41f33825c8dd13e3e3eb9d334ba0f909713c8c3139f4ae47f", size = 26844, upload-time = "2025-01-02T01:55:32.632Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/f3/c34dbabf6da5eda56fe923226769d40e11806952cd7f46655dd06e10f018/trustme-1.2.1-py3-none-any.whl", hash = "sha256:d768e5fc57c86dfc5ec9365102e9b092541cd6954b35d8c1eea01a84f35a762a", size = 16530, upload-time = "2025-01-02T01:55:30.181Z" },
+]
+
+[[package]]
+name = "truststore"
+version = "0.10.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
 ]
 
 [[package]]

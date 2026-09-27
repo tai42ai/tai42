@@ -12,7 +12,7 @@ pytest.importorskip("langgraph")
 
 from pydantic import SecretStr
 
-from tai42_kit.llm import embedding, models
+from tai42_kit.llm import classifier, embedding, models
 
 
 def test_get_llm_same_kwargs_builds_once(monkeypatch):
@@ -84,3 +84,41 @@ def test_get_embedding_same_kwargs_builds_once(monkeypatch):
 
     assert a is b
     assert len(calls) == 1
+
+
+def test_get_classifier_same_kwargs_builds_once(monkeypatch):
+    classifier._cached_classifier.cache_clear()
+    calls = []
+    monkeypatch.setattr(
+        classifier, "_build_classifier", lambda provider, **kw: calls.append((provider, kw)) or object()
+    )
+
+    a = classifier.get_classifier("typesafe", model="jev-latest", timeout=5)
+    b = classifier.get_classifier("typesafe", timeout=5, model="jev-latest")  # kwargs reordered
+
+    assert a is b
+    assert len(calls) == 1  # cache hit on the reordered call
+
+
+def test_get_classifier_distinct_kwargs_build_distinct(monkeypatch):
+    classifier._cached_classifier.cache_clear()
+    monkeypatch.setattr(classifier, "_build_classifier", lambda provider, **kw: object())
+
+    a = classifier.get_classifier("typesafe", model="jev-latest")
+    b = classifier.get_classifier("typesafe", model="jev-2")
+
+    assert a is not b
+
+
+def test_get_classifier_same_secret_hits_cache(monkeypatch):
+    classifier._cached_classifier.cache_clear()
+    calls = []
+    monkeypatch.setattr(classifier, "_build_classifier", lambda provider, **kw: calls.append(1) or object())
+
+    a = classifier.get_classifier("typesafe", model="jev-latest", api_key=SecretStr("sk-x"))
+    b = classifier.get_classifier("typesafe", model="jev-latest", api_key=SecretStr("sk-x"))
+    c = classifier.get_classifier("typesafe", model="jev-latest", api_key=SecretStr("sk-other"))
+
+    assert a is b  # equal secrets key the same cache entry
+    assert c is not a  # a different secret splits the key
+    assert len(calls) == 2
