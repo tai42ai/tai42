@@ -1,7 +1,7 @@
 spec_version: 1
 namespace: tai42
 name: connector-atlassian
-version: 2.0.13
+version: 2.1.0
 display_name: Atlassian
 description: >-
   Atlassian (Jira, Confluence, Compass) OAuth connector provider on Atlassian's
@@ -11,7 +11,7 @@ icon: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-atlassian
-contract: '>=15.1,<16'
+contract: '>=15.2,<16'
 categories:
   - connectors
 tags:

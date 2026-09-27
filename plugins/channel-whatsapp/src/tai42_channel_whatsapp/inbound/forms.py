@@ -117,15 +117,15 @@ def _coerce_bool(value: str) -> bool:
 
 
 def _coerce_form_answer(
-    response: dict[str, Any], schema: dict[str, Any] | None, names: dict[str, str]
+    response: dict[str, Any], schema: dict[str, Any] | None, labels: dict[str, str]
 ) -> dict[str, Any]:
     """The form answer forwarded to the door.
 
-    ``response`` minus ``flow_token``, each key mapped from its Flow component name back
-    to the schema key through ``names`` (the component-name → schema-key reverse map),
+    ``response`` minus ``flow_token``, each key mapped from its completion-payload label
+    back to the schema key through ``labels`` (the payload-label → schema-key reverse map),
     then each value coerced by that schema key's type. A response key absent from
-    ``names`` is a component name the map does not know: it is forwarded under its OWN
-    name with a WARNING (never dropped), uncoerced.
+    ``labels`` is a payload label the map does not know: it is forwarded under its OWN
+    key with a WARNING (never dropped), uncoerced.
     """
     properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     props = properties if isinstance(properties, dict) else {}
@@ -133,9 +133,9 @@ def _coerce_form_answer(
     for key, value in response.items():
         if key == "flow_token":
             continue
-        schema_key = names.get(key)
+        schema_key = labels.get(key)
         if schema_key is None:
-            logger.warning("whatsapp nfm_reply carried unknown component name %r; forwarding under its own name", key)
+            logger.warning("whatsapp nfm_reply carried unknown payload label %r; forwarding under its own key", key)
             schema_key = key
         coerced[schema_key] = _coerce_value(value, props.get(schema_key))
     return coerced
@@ -175,15 +175,15 @@ async def _handle_form_reply(
         await _bridge_inbound(phone_number_id, wa_id, "", wamid, params=params or None)
         return
 
-    # A matched completed form: map the component-named response keys back to the schema
-    # keys, coerce to the schema's types, and resolve via the shared ladder. The wamid
-    # dedupe upstream guards a redelivery, so no destructive claim is needed before the
-    # ladder's own peek. A form ask always reserves its component-name map; a record that
-    # lost it is corruption, raised loudly (never a silent identity map).
+    # A matched completed form: map the label-keyed response back to the schema keys,
+    # coerce to the schema's types, and resolve via the shared ladder. The wamid dedupe
+    # upstream guards a redelivery, so no destructive claim is needed before the ladder's
+    # own peek. A form ask always reserves its payload-label map; a record that lost it is
+    # corruption, raised loudly (never a silent identity map).
     if pending.form_names is None:
         raise AnswerForwardError(
             f"cannot decode the form reply for {wamid}: the pending record for "
-            f"({phone_number_id}, {wa_id}) is missing its component-name map"
+            f"({phone_number_id}, {wa_id}) is missing its payload-label map"
         )
     answer = _coerce_form_answer(response, pending.schema, pending.form_names)
     await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending, params=params or None)
@@ -196,11 +196,11 @@ async def _handle_notify_form_reply(
 
     The token sits in the ``tai42-nf:`` namespace.
     No reservation exists for it — the token itself carries the schema hash, which
-    resolves the answer schema AND its component-name reverse map from the durable
-    sidecar. On a hit the response's component-named keys are mapped back to the schema
+    resolves the answer schema AND its payload-label reverse map from the durable
+    sidecar. On a hit the response's label-keyed answers are mapped back to the schema
     keys and coerced to its types; on a miss (or an unset WABA id, without which the
     sidecar cannot even be addressed) the values are forwarded RAW under their
-    component-named keys — the reply DEGRADES, never drops, and never 5xx's into a
+    label keys — the reply DEGRADES, never drops, and never 5xx's into a
     permanent Meta redelivery loop. The rendered ``label: value`` text (compact JSON for
     an empty form — never blank) is the turn every consumer sees; the structured copy
     rides beside it through the bridge's ``form`` seam, and ``params`` carry any
@@ -218,8 +218,8 @@ async def _handle_notify_form_reply(
         schema = None
         form = {key: value for key, value in response.items() if key != "flow_token"}
     else:
-        schema, names = cached
-        form = _coerce_form_answer(response, schema, names)
+        schema, labels = cached
+        form = _coerce_form_answer(response, schema, labels)
     await _bridge_inbound(
         phone_number_id, wa_id, render_form_text(form, schema), wamid, form=form, params=params or None
     )

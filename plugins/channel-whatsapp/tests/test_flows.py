@@ -16,6 +16,7 @@ from tai42_channel_whatsapp.flows import (
     build_flow_data,
     build_form_flow,
     component_names,
+    payload_labels,
 )
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -23,25 +24,28 @@ _REFERENCE_RE = re.compile(r"\$\{(?:data|form|screen)\.([^}]+)\}")
 
 
 def _assert_only_identifier_safe_wire_names(flow_json: dict) -> None:
-    """Every component ``name``, screen-``data`` key, ``on-click-action`` payload key and
+    """Every component ``name``, screen-``data`` key, navigate-``payload`` key and
     ``${data.…}`` / ``${form.…}`` reference in the Flow is in Meta's identifier grammar.
 
-    The field LABEL is deliberately excluded — it keeps the property title (else the raw
-    property name) and may carry any character.
+    Two things are deliberately excluded — both may carry any character: the field LABEL
+    (it keeps the property title, else the raw property name) and the terminal ``complete``
+    action's payload KEYS (they are the human-readable completion labels).
     """
     for reference in _REFERENCE_RE.findall(json.dumps(flow_json)):
         assert _IDENTIFIER_RE.match(reference), reference
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
-            if node.get("type") in {"TextInput", "Dropdown", "OptIn"} and isinstance(node.get("name"), str):
+            if node.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"} and isinstance(
+                node.get("name"), str
+            ):
                 assert _IDENTIFIER_RE.match(node["name"]), node["name"]
             if isinstance(node.get("data"), dict):
                 for key in node["data"]:
                     assert _IDENTIFIER_RE.match(key), key
             action = node.get("on-click-action")
-            if isinstance(action, dict) and isinstance(action.get("payload"), dict):
-                for key in action["payload"]:
+            if isinstance(action, dict) and action.get("name") == "navigate":
+                for key in action.get("payload", {}):
                     assert _IDENTIFIER_RE.match(key), key
             for value in node.values():
                 walk(value)
@@ -146,6 +150,18 @@ def test_label_falls_back_to_property_name():
     }
 
 
+@pytest.mark.parametrize("title", ["", "   ", "\t\n", 123, None, ["x"]])
+def test_blank_or_non_string_title_falls_back_to_property_name(title: object):
+    # A title that is not a string, or is empty / whitespace-only, counts as absent — WhatsApp
+    # cannot show a blank field label or completion-payload key — so BOTH the rendered control
+    # label and the completion-payload key fall back to the property name.
+    schema = {"type": "object", "properties": {"note": {"type": "string", "title": title}}, "required": []}
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["label"] == "note"
+    assert payload_labels(schema["properties"]) == {"note": "note"}
+
+
 def test_string_enum_maps_to_dynamic_dropdown():
     schema = {
         "type": "object",
@@ -191,6 +207,88 @@ def test_integer_and_number_map_to_number_text_input(json_type: str):
         "input-type": "number",
         "init-value": "${data.qty__init}",
     }
+
+
+# -- the format: date → DatePicker mapping ------------------------------------
+
+
+def test_string_with_format_date_maps_to_date_picker_without_required():
+    # A DatePicker carries no ``required`` field: the vendor's component reference defines
+    # one for every other input control but not for the DatePicker, and Meta rejects an
+    # unknown component property at publish.
+    schema = {
+        "type": "object",
+        "properties": {"when": {"type": "string", "format": "date", "title": "Pick a date"}},
+        "required": ["when"],
+    }
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "DatePicker",
+        "name": "when",
+        "label": "Pick a date",
+        "init-value": "${data.when__init}",
+    }
+    assert "required" not in field
+
+
+@pytest.mark.parametrize("fmt", ["time", "date-time"])
+def test_string_with_format_time_or_date_time_stays_text_input(fmt: str):
+    # The vendor has no time-of-day picker, so these render as a plain text input; the ask
+    # door validates the submitted shape.
+    schema = {"type": "object", "properties": {"at": {"type": "string", "format": fmt}}, "required": ["at"]}
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "TextInput",
+        "name": "at",
+        "label": "at",
+        "required": True,
+        "init-value": "${data.at__init}",
+    }
+
+
+def test_enum_outranks_format_date_and_still_renders_a_dropdown():
+    # An explicit choice list is a stronger instruction than a format hint.
+    schema = {
+        "type": "object",
+        "properties": {"day": {"type": "string", "format": "date", "enum": ["2026-09-27", "2026-09-28"]}},
+        "required": ["day"],
+    }
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "Dropdown"
+
+
+def test_option_bearing_outranks_format_date_and_still_renders_a_dropdown():
+    schema = {"type": "object", "properties": {"day": {"type": "string", "format": "date"}}, "required": ["day"]}
+
+    field = _controls(build_form_flow(schema, None, {"day"})[0])[0]
+    assert field["type"] == "Dropdown"
+
+
+def test_valid_date_prefill_rides_as_the_init_string():
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+
+    data = build_flow_data(schema, {"when": "2026-09-27"}, {})
+    assert data["when__init"] == "2026-09-27"
+
+
+def test_absent_date_prefill_defaults_to_empty_string():
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+
+    data = build_flow_data(schema, {}, {})
+    assert data["when__init"] == ""
+
+
+@pytest.mark.parametrize(
+    "bad", ["27/09/2026", "2026-9-7", "2026-13-40", "not-a-date", "20260927", "2026-09-27T00:00", 5]
+)
+def test_invalid_date_prefill_is_refused_naming_the_property(bad: object):
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+
+    with pytest.raises(ChannelInputError, match="when"):
+        build_flow_data(schema, {"when": bad}, {})
 
 
 # -- the vendor-legality invariants (no Form, control-level init-value, letters ids) --
@@ -487,6 +585,73 @@ def test_component_names_disambiguates_collisions_in_schema_order():
 def test_component_names_never_emits_the_reserved_flow_token():
     # A key sanitising to 'flow_token' is disambiguated away from Meta's reserved key.
     assert component_names({"flow.token": {}}) == {"flow.token": "flow_token_2"}
+
+
+# -- payload_labels: the human-readable completion-payload key rule ------------
+
+
+def test_payload_labels_uses_the_title_else_the_property_key():
+    labels = payload_labels({"start": {"type": "string", "title": "Start date"}, "note": {"type": "string"}})
+    # Title when a string; the property key when there is none.
+    assert labels == {"start": "Start date", "note": "note"}
+
+
+def test_payload_labels_allows_spaces_punctuation_and_unicode():
+    labels = payload_labels(
+        {
+            "quantity": {"type": "integer", "title": "Quantity"},
+            "email": {"type": "string", "title": "E-mail"},
+            "uni": {"type": "string", "title": "Ünïcödé"},
+        }
+    )
+    assert labels == {"quantity": "Quantity", "email": "E-mail", "uni": "Ünïcödé"}
+
+
+def test_payload_labels_disambiguates_colliding_labels_in_schema_order():
+    # Two properties share a title; the first keeps it, the rest take deterministic _2, _3
+    # suffixes in schema order — the same collision convention component_names uses.
+    labels = payload_labels(
+        {
+            "a": {"type": "string", "title": "Name"},
+            "b": {"type": "string", "title": "Name"},
+            "c": {"type": "string", "title": "Name"},
+        }
+    )
+    assert labels == {"a": "Name", "b": "Name_2", "c": "Name_3"}
+    # Injective, so the reverse (label -> key) is lossless.
+    assert len(set(labels.values())) == len(labels)
+
+
+def test_payload_labels_disambiguates_a_title_equal_to_the_reserved_flow_token():
+    # A property titled "flow_token" would otherwise key the completion payload with the exact
+    # correlation token Meta injects into every reply (and the inbound decode strips); the reserved
+    # guard bumps it to flow_token_2 — mirroring component_names — so no completion key clashes with it.
+    labels = payload_labels({"when": {"type": "string", "title": "flow_token"}})
+    assert labels == {"when": "flow_token_2"}
+
+
+def test_terminal_completion_payload_is_keyed_by_labels_with_component_reference_values():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "title": "Start date"},
+            "a.b=/c/4:d": {"type": "integer", "title": "Quantity"},
+        },
+        "required": [],
+    }
+    flow_json, _ = build_form_flow(schema)
+    footer = _screen_children(flow_json, 0)[-1]
+    action = footer["on-click-action"]
+    assert action["name"] == "complete"
+    # Keys are the human-readable labels; values are the identifier-safe component references
+    # (the odd property key never leaks into a reference).
+    names = component_names(schema["properties"])
+    assert action["payload"] == {
+        "Start date": f"${{form.{names['start']}}}",
+        "Quantity": f"${{form.{names['a.b=/c/4:d']}}}",
+    }
+    # Every wire name/data key/reference and the navigate-payload keys stay identifier-safe.
+    _assert_only_identifier_safe_wire_names(flow_json)
 
 
 # -- odd property names ride only identifier-safe wire names -------------------

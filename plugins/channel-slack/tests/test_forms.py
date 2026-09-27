@@ -155,6 +155,78 @@ def test_modal_blocks_map_each_supported_type():
     assert by_id["ratio"]["element"]["is_decimal_allowed"] is True
 
 
+_FORMAT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "on": {"type": "string", "format": "date", "title": "On"},
+        "at": {"type": "string", "format": "time", "title": "At"},
+        "when": {"type": "string", "format": "date-time", "title": "When"},
+    },
+}
+
+
+def test_date_format_renders_a_native_datepicker():
+    element = build_modal_blocks(_FORMAT_SCHEMA)[0]["element"]
+    assert element == {"type": "datepicker", "action_id": FIELD_ACTION_ID}
+
+
+def test_time_format_renders_a_native_timepicker():
+    element = build_modal_blocks(_FORMAT_SCHEMA)[1]["element"]
+    assert element == {"type": "timepicker", "action_id": FIELD_ACTION_ID}
+
+
+def test_date_time_format_stays_a_plain_text_input():
+    element = build_modal_blocks(_FORMAT_SCHEMA)[2]["element"]
+    assert element == {"type": "plain_text_input", "action_id": FIELD_ACTION_ID}
+
+
+def test_date_and_time_prefills_ride_the_native_initial_fields():
+    by_id = {b["block_id"]: b for b in build_modal_blocks(_FORMAT_SCHEMA, {"on": "2026-01-31", "at": "09:05"})}
+    assert by_id["on"]["element"]["initial_date"] == "2026-01-31"
+    assert by_id["at"]["element"]["initial_time"] == "09:05"
+
+
+@pytest.mark.parametrize("bad", ["2026/01/31", "31-01-2026", "2026-1-1", "2026-13-01", "not-a-date", ""])
+def test_invalid_date_prefill_is_refused_naming_the_field(bad):
+    with pytest.raises(FormSchemaError, match="on"):
+        build_modal_blocks(_FORMAT_SCHEMA, {"on": bad})
+
+
+@pytest.mark.parametrize("bad", ["09:05:00", "9:5", "24:00", "12:60", "0905", "noon", ""])
+def test_invalid_time_prefill_is_refused_naming_the_field(bad):
+    with pytest.raises(FormSchemaError, match="at"):
+        build_modal_blocks(_FORMAT_SCHEMA, {"at": bad})
+
+
+def test_time_prefill_with_seconds_is_refused_stating_slack_cannot_show_seconds():
+    with pytest.raises(FormSchemaError, match="seconds"):
+        build_modal_blocks(_FORMAT_SCHEMA, {"at": "09:05:30"})
+
+
+def test_per_send_options_win_over_a_date_format_string():
+    # A string with per-send options is a select regardless of its format.
+    schema = {"type": "object", "properties": {"on": {"type": "string", "format": "date"}}}
+    (block,) = build_modal_blocks(schema, {}, {"on": [{"value": "soon", "label": "Soon"}]})
+    assert block["element"]["type"] == "static_select"
+
+
+def test_extract_answer_reads_date_and_time_pickers_unchanged():
+    state = {
+        "on": {FIELD_ACTION_ID: {"type": "datepicker", "selected_date": "2026-01-31"}},
+        "at": {FIELD_ACTION_ID: {"type": "timepicker", "selected_time": "09:05"}},
+        "when": {FIELD_ACTION_ID: {"type": "plain_text_input", "value": "2026-01-31T09:05:00Z"}},
+    }
+    answer = extract_answer(_FORMAT_SCHEMA, state)
+    # The vendor's ISO strings return verbatim — no coercion.
+    assert answer == {"on": "2026-01-31", "at": "09:05", "when": "2026-01-31T09:05:00Z"}
+
+
+@pytest.mark.parametrize(("kind", "key"), [("datepicker", "selected_date"), ("timepicker", "selected_time")])
+def test_extract_answer_omits_an_empty_picker(kind, key):
+    state = {"on": {FIELD_ACTION_ID: {"type": kind, key: None}}}
+    assert extract_answer({"type": "object", "properties": {"on": {"type": "string", "format": "date"}}}, state) == {}
+
+
 def test_required_fields_have_no_optional_flag_others_do():
     by_id = {b["block_id"]: b for b in build_modal_blocks(_SCHEMA)}
 
@@ -317,7 +389,9 @@ def test_extract_answer_unrecognized_boolean_raises():
 def test_extract_answer_omits_absent_and_unknown_kind_fields():
     state = _state()
     state["full_name"] = {}  # no action entry at all -> absent
-    state["count"][FIELD_ACTION_ID] = {"type": "datepicker", "selected_date": "2026-01-01"}  # unknown kind
+    # An element kind this reader does not handle (the plugin never emits a checkbox group)
+    # yields no value -> the field is omitted, never guessed at.
+    state["count"][FIELD_ACTION_ID] = {"type": "checkboxes", "selected_options": []}
     answer = extract_answer(_SCHEMA, state)
     assert "full_name" not in answer
     assert "count" not in answer

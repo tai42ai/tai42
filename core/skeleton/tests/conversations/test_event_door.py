@@ -52,6 +52,49 @@ def _event(event_id: str = "evt-1", kind: str = "provider.update", payload: dict
     return ConversationEvent(event_id=event_id, kind=kind, payload=payload or {})
 
 
+async def test_the_event_door_turn_runs_in_its_own_run_context(env, monkeypatch):
+    # The in-process event door's turn is a NEW root: submitted from a caller carrying its own
+    # run-delivery context, the detached turn does not inherit it. Its DOOR frame mints its OWN
+    # run-delivery id and reads the ROUTE's completion address (never the caller's), so its
+    # terminal is keyed to the route's completion rather than the caller's run.
+    from tai42_contract.tools import get_run_delivery, get_run_delivery_id, tool_call_frame
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    await _seed_channel_thread(monkeypatch, env, channel)
+
+    seen: dict = {}
+
+    class _CapturingTools:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras=None):
+            seen["run_delivery_id"] = get_run_delivery_id()
+            seen["delivery"] = get_run_delivery()
+            self.calls.append(arguments)
+            return "handled"
+
+    monkeypatch.setattr(accessors_module, "_tools", lambda: _CapturingTools())
+
+    with tool_call_frame(name="caller_run"):
+        caller_run_id = get_run_delivery_id()
+        caller_delivery = get_run_delivery()
+        await turn_module.submit_event(
+            "tool-line",
+            _event_submission(address="+15550002222", event=_event()),
+            "svc-int",
+            client_connected=_connected,
+        )
+    await _settle()
+
+    assert caller_run_id is not None
+    assert caller_delivery is None  # the caller bound no completion address
+    assert seen["run_delivery_id"] is not None
+    assert seen["run_delivery_id"] != caller_run_id  # the turn minted its own id
+    assert seen["delivery"] is not None  # the turn read the route's own completion, not the caller's
+
+
 def _event_submission(
     *,
     address: str | None = None,

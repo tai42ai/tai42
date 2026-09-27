@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 import types
 
@@ -10,6 +11,7 @@ import pytest
 from tai42_contract.conversations import (
     DeliveryReceipt,
 )
+from tai42_contract.tools import get_run_delivery_id, tool_call_frame
 
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
@@ -18,6 +20,9 @@ from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import accessors as accessors_module
+from tai42_skeleton.conversations.turn import overlap as overlap_module
+from tai42_skeleton.conversations.turn import redrive as redrive_module
+from tai42_skeleton.conversations.turn import schedule as schedule_module
 
 from .conftest import (
     BlockingAgent,
@@ -32,6 +37,81 @@ from .conftest import (
     _wire,
 )
 from .fake_record_redis import FakeRecordRedis
+
+_PROBE: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_turn_probe", default="default")
+
+
+class _RunContextProbeAgent(EchoAgent):
+    """An echo agent that records the run-delivery id ambient while it runs (inside the turn's frame)."""
+
+    def __init__(self, sink: dict) -> None:
+        super().__init__()
+        self._sink = sink
+
+    async def run(self, **kwargs):
+        self._sink["minted"] = get_run_delivery_id()
+        return await super().run(**kwargs)
+
+
+async def test_the_turn_task_runs_in_a_fresh_root_context(env, monkeypatch):
+    # A turn is a NEW root of execution: scheduled from a caller carrying a run's context (a
+    # ContextVar and an ambient RunDelivery from an outer frame), its task inherits none of it.
+    # At the turn's start the caller var reads its default and no run delivery is ambient; the
+    # turn then mints its OWN delivery id through its frame, distinct from the caller's.
+    sink: dict = {}
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": _RunContextProbeAgent(sink)})
+
+    at_start: dict = {}
+    real_resolve = overlap_module.resolve_batch
+
+    async def _capture_at_start(route, intake):
+        at_start["probe"] = _PROBE.get()
+        at_start["run_delivery"] = get_run_delivery_id()
+        return await real_resolve(route, intake)
+
+    monkeypatch.setattr(overlap_module, "resolve_batch", _capture_at_start)
+
+    probe_token = _PROBE.set("caller-value")
+    try:
+        with tool_call_frame(name="caller_run"):
+            caller_run_id = get_run_delivery_id()
+            message_id = await turn_module.accept(
+                "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1"
+            )
+    finally:
+        _PROBE.reset(probe_token)
+    await _settle()
+
+    assert caller_run_id is not None
+    assert at_start["probe"] == "default"  # the caller ContextVar did not leak into the turn task
+    assert at_start["run_delivery"] is None  # no run delivery was ambient at the turn's start
+    assert sink["minted"] is not None  # the turn minted its own id through its frame
+    assert sink["minted"] != caller_run_id
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "echo: hi"
+
+
+async def test_intake_resolution_runs_in_a_fresh_root_context(env, monkeypatch):
+    # The stranded-intake resolution is a root too: spawned from a caller carrying a ContextVar,
+    # its task reads the var's default rather than the caller's value.
+    seen: dict = {}
+
+    async def _capture(message_id: str) -> None:
+        seen["probe"] = _PROBE.get()
+
+    monkeypatch.setattr(redrive_module, "_resolve_stranded_intake", _capture)
+
+    probe_token = _PROBE.set("caller-value")
+    try:
+        schedule_module._spawn_intake_resolution("some-record")
+    finally:
+        _PROBE.reset(probe_token)
+    await _settle()
+
+    assert seen["probe"] == "default"
 
 
 async def test_record_delivery_status_confirms_provisional(env, monkeypatch):

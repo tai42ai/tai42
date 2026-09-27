@@ -10,6 +10,7 @@ is the focused in-memory fake wired at the operation module's ``client_ctx`` sea
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -169,6 +170,69 @@ async def test_submit_returns_run_id_and_runs_through_the_offload_seam(wired):
     await _drain()
     # Background path runs through the same seam with the sync offload gate on.
     assert tools.calls == [("alpha", {"x": 2}, True)]
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "succeeded"
+
+
+async def test_background_submit_runs_in_a_fresh_root_with_an_explicit_acting_context(wired):
+    # The background-submit supervisor is a fresh root: a ContextVar the submitting caller set
+    # does NOT leak into the detached run, while the facts the run acts under — the bound
+    # execution identity, its secret-read capability, the run attribution and the acting
+    # principal — are captured in the submit's context and rebound inside the run.
+    from tai42_contract.access_control import (
+        caller_may_read_secrets,
+        reset_request_secret_capability,
+        set_request_secret_capability,
+    )
+    from tai42_contract.monitoring import RunAttribution
+
+    from tai42_skeleton.authz.execution_identity import (
+        get_execution_identity,
+        reset_execution_identity,
+        set_execution_identity,
+    )
+    from tai42_skeleton.authz.identity import CallerIdentity
+    from tai42_skeleton.tools.attribution import (
+        get_run_attribution,
+        reset_run_attribution,
+        set_run_attribution,
+    )
+
+    tools = wired.install()
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_supervisor_probe", default="default")
+    seen: dict = {}
+
+    async def _run_tool(key, arguments, *, offload_sync=False, extras=None):
+        seen["probe"] = probe.get()
+        identity = get_execution_identity()
+        seen["identity"] = identity.user_id if identity else None
+        seen["secret"] = caller_may_read_secrets()
+        attribution = get_run_attribution()
+        seen["attribution"] = attribution.user_id if attribution else None
+        seen["acting"] = ops.request_identity()
+        return {"ok": 1}
+
+    tools.run_tool = _run_tool
+
+    identity = CallerIdentity(user_id="svc-key", is_admin=True, execution_key_fingerprint="")
+    id_token = set_execution_identity(identity)
+    secret_token = set_request_secret_capability(True)
+    attribution_token = set_run_attribution(RunAttribution(user_id="svc-key"))
+    probe_token = probe.set("submitter-value")
+    try:
+        out = await ops.submit_run("alpha", {"x": 1})
+    finally:
+        probe.reset(probe_token)
+        reset_run_attribution(attribution_token)
+        reset_request_secret_capability(secret_token)
+        reset_execution_identity(id_token)
+    await _drain()
+
+    assert seen["probe"] == "default"  # the submitter ContextVar did not leak into the fresh root
+    assert seen["identity"] == "svc-key"  # the execution identity was captured and rebound
+    assert seen["secret"] is True  # the secret-read capability was captured and rebound
+    assert seen["attribution"] == "svc-key"  # the run attribution was captured and rebound
+    assert seen["acting"][0] == "svc-key"  # the acting principal is the captured one
     record = await wired.store.get_run(wired.fake, out["run_id"])
     assert record["status"] == "succeeded"
 

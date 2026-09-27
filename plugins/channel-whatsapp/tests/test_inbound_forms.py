@@ -14,13 +14,14 @@ from tai42_kit.settings import reset_all_settings
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_whatsapp.channel import WhatsAppChannel
 from tai42_channel_whatsapp.correlation import reserve_pending
-from tai42_channel_whatsapp.flows import build_form_flow, component_names
+from tai42_channel_whatsapp.flows import build_form_flow, payload_labels
 from tai42_channel_whatsapp.inbound.forms import (
     _CALLBACK_REJECTION_OPAQUE,
     _FLOW_BODY_MAX_CHARS,
     _FORM_REJECTION_LEAD,
     _FORM_UNPROCESSABLE,
     _MAX_FORM_REJECTIONS,
+    _coerce_value,
 )
 
 from .conftest import (
@@ -49,6 +50,15 @@ pytestmark = pytest.mark.usefixtures("whatsapp_env")
 # --- Form (Flow) replies: nfm_reply -------------------------------------------
 
 _WABA_ID = "WABA-100"
+
+
+def test_date_value_passes_the_decode_unchanged():
+    # Meta's date picker returns a ``YYYY-MM-DD`` string; a ``format: date`` property is a
+    # plain string, so the decode leaves it verbatim (no coercion) — the value then satisfies
+    # the schema's ``format: date`` at the door.
+    prop = {"type": "string", "format": "date"}
+    assert _coerce_value("2026-09-27", prop) == "2026-09-27"
+    assert isinstance(_coerce_value("2026-09-27", prop), str)
 
 
 def _flow_cache_key() -> str:
@@ -504,8 +514,8 @@ def _schema_cache_key() -> str:
 
 def _seed_schema_cache(fake_redis: FakeRedis) -> None:
     """The durable schema+map entry the notify-form send left beside the flow id."""
-    names = {c: k for k, c in component_names(_FORM_SCHEMA["properties"]).items()}
-    fake_redis.store[_schema_cache_key()] = json.dumps({"schema": _FORM_SCHEMA, "names": names})
+    labels = {label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()}
+    fake_redis.store[_schema_cache_key()] = json.dumps({"schema": _FORM_SCHEMA, "names": labels})
 
 
 async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
@@ -653,21 +663,27 @@ async def test_non_prefixed_form_reply_takes_the_ask_path_unchanged(
     assert stub_app.conversations.accept_calls == []
 
 
-# --- Odd (non-identifier) property names: component-name ↔ schema-key mapping --
+# --- Odd (non-identifier) property names: payload-label ↔ schema-key mapping ---
 
+# A schema whose property key carries characters Meta's grammar forbids AND whose title
+# differs from the key, so the completion-payload label ("Count") is neither the raw key
+# nor its identifier-safe component name — the decode must map the label back to the key.
 _ODD_SCHEMA = {
     "type": "object",
-    "properties": {"a.b=/c/4:d": {"type": "integer"}, "note": {"type": "string"}},
+    "properties": {
+        "a.b=/c/4:d": {"type": "integer", "title": "Count"},
+        "note": {"type": "string", "title": "Note"},
+    },
     "required": [],
 }
 
 
 async def _seed_pending_odd_form(interaction_id: str = "int-1") -> None:
     """A pending form ask whose schema uses a non-identifier property name, with the
-    component-name reverse map the deliver path stores."""
+    payload-label reverse map the deliver path stores."""
     from datetime import UTC, datetime, timedelta
 
-    names = {c: k for k, c in component_names(_ODD_SCHEMA["properties"]).items()}
+    labels = {label: key for key, label in payload_labels(_ODD_SCHEMA["properties"]).items()}
     await reserve_pending(
         PHONE_NUMBER_ID,
         WA_ID,
@@ -676,17 +692,17 @@ async def _seed_pending_odd_form(interaction_id: str = "int-1") -> None:
         interaction_id=interaction_id,
         schema=_ODD_SCHEMA,
         question="Q?",
-        form_names=names,
+        form_names=labels,
     )
 
 
-async def test_form_reply_maps_component_names_back_to_schema_keys(handler, channels, fake_redis: FakeRedis):
-    # Meta relays the completed form keyed by the Flow's COMPONENT names; the decode maps
+async def test_form_reply_maps_payload_labels_back_to_schema_keys(handler, channels, fake_redis: FakeRedis):
+    # Meta relays the completed form keyed by the completion-payload LABELS; the decode maps
     # every key back to the original schema key before coercion.
     await _seed_pending_odd_form()
     channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
-    names = component_names(_ODD_SCHEMA["properties"])
-    response = {"flow_token": "int-1", names["a.b=/c/4:d"]: "7", names["note"]: "hi"}
+    labels = payload_labels(_ODD_SCHEMA["properties"])
+    response = {"flow_token": "int-1", labels["a.b=/c/4:d"]: "7", labels["note"]: "hi"}
 
     result = await handler(signed_request(form_reply_payload(response)))
 
@@ -695,37 +711,69 @@ async def test_form_reply_maps_component_names_back_to_schema_keys(handler, chan
     assert channels.inbound_calls[0].answer == {"a.b=/c/4:d": 7, "note": "hi"}
 
 
-async def test_form_reply_unknown_component_name_forwarded_under_its_own_name(
+async def test_form_reply_unknown_payload_label_forwarded_under_its_own_key(
     handler, channels, fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
 ):
-    # A response key the map does not know is forwarded under its own name with a warning,
+    # A response key the map does not know is forwarded under its own key with a warning,
     # never dropped silently.
     await _seed_pending_odd_form()
     channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
-    names = component_names(_ODD_SCHEMA["properties"])
-    response = {"flow_token": "int-1", names["note"]: "hi", "ghost_field": "x"}
+    labels = payload_labels(_ODD_SCHEMA["properties"])
+    response = {"flow_token": "int-1", labels["note"]: "hi", "ghost_field": "x"}
 
     with caplog.at_level(logging.WARNING):
         result = await handler(signed_request(form_reply_payload(response)))
 
     assert result.status_code == 200
     assert channels.inbound_calls[0].answer == {"note": "hi", "ghost_field": "x"}
-    assert any("unknown component name" in record.getMessage() for record in caplog.records)
+    assert any("unknown payload label" in record.getMessage() for record in caplog.records)
 
 
-async def test_notify_form_reply_maps_component_names_back_to_schema_keys(
+async def test_form_reply_payload_label_equal_to_flow_token_round_trips(handler, channels, fake_redis: FakeRedis):
+    # A property titled "flow_token" keys the completion payload "flow_token_2" (the reserved guard
+    # keeps it clear of the correlation token Meta injects); the decode maps it back to the schema key
+    # while the injected flow_token is stripped, so the field is never lost to the token collision.
+    from datetime import UTC, datetime, timedelta
+
+    schema = {
+        "type": "object",
+        "properties": {"when": {"type": "string", "title": "flow_token"}, "note": {"type": "string"}},
+        "required": [],
+    }
+    plabels = payload_labels(schema["properties"])
+    assert plabels["when"] == "flow_token_2"
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        "https://app.example/api/interactions/callback/ticket-1",
+        datetime.now(UTC) + timedelta(minutes=5),
+        interaction_id="int-1",
+        schema=schema,
+        question="Q?",
+        form_names={label: key for key, label in plabels.items()},
+    )
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    response = {"flow_token": "int-1", plabels["when"]: "2026-05-01", plabels["note"]: "hi"}
+
+    result = await handler(signed_request(form_reply_payload(response)))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls[0].answer == {"when": "2026-05-01", "note": "hi"}
+
+
+async def test_notify_form_reply_maps_payload_labels_back_to_schema_keys(
     waba_env, handler, stub_app, channels, fake_redis: FakeRedis
 ):
     # The ask-less notify path decodes the same way: the sidecar carries the schema and the
-    # reverse map, and the reply's component-named keys resolve to schema keys.
+    # reverse map, and the reply's label-keyed answers resolve to schema keys.
     _, schema_hash = build_form_flow(_ODD_SCHEMA)
-    names = {c: k for k, c in component_names(_ODD_SCHEMA["properties"]).items()}
+    labels = {label: key for key, label in payload_labels(_ODD_SCHEMA["properties"]).items()}
     fake_redis.store[f"channel:whatsapp:flow-schema:{_WABA_ID}:{schema_hash}"] = json.dumps(
-        {"schema": _ODD_SCHEMA, "names": names}
+        {"schema": _ODD_SCHEMA, "names": labels}
     )
     token = f"{_NF_PREFIX}{schema_hash}:cafef00d"
-    cnames = component_names(_ODD_SCHEMA["properties"])
-    response = {"flow_token": token, cnames["a.b=/c/4:d"]: "7", cnames["note"]: "hi"}
+    plabels = payload_labels(_ODD_SCHEMA["properties"])
+    response = {"flow_token": token, plabels["a.b=/c/4:d"]: "7", plabels["note"]: "hi"}
 
     result = await handler(signed_request(form_reply_payload(response)))
 

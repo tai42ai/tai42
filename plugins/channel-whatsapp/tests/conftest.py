@@ -26,7 +26,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_whatsapp.correlation import reserve_pending
-from tai42_channel_whatsapp.flows import component_names
+from tai42_channel_whatsapp.flows import payload_labels
 
 
 class _ClientCtx:
@@ -595,7 +595,7 @@ async def _seed_pending_form(
         interaction_id=interaction_id,
         schema=_FORM_SCHEMA,
         question=delivery.question,
-        form_names={c: k for k, c in component_names(_FORM_SCHEMA["properties"]).items()},
+        form_names={label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()},
     )
 
 

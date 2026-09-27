@@ -604,19 +604,45 @@ def test_cold_start_both_attempts_connect_failure_returns_structured_unavailable
     assert health["consecutive_failures"] == 1
 
 
-def test_non_disconnect_error_is_never_retried():
-    """A non-disconnect error is never retried — the reconnect one-shot is scoped
-    to ``ClientDisconnectedError`` alone."""
+def _mcp_error(message: str):
+    import mcp.types
+    from mcp.shared.exceptions import McpError
 
-    class _BoomError(RuntimeError):
-        pass
+    return McpError(mcp.types.ErrorData(code=mcp.types.INTERNAL_ERROR, message=message))
 
-    client = _FakeMcpClient(responses=[_BoomError("unrelated failure")])
 
-    with pytest.raises(_BoomError, match="unrelated failure"):
-        asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+def test_upstream_error_is_typed_not_retried():
+    """A non-disconnect remote-call failure (an ``McpError`` protocol error / timeout) is never
+    retried — the reconnect one-shot is scoped to ``ClientDisconnectedError`` alone — and is
+    surfaced as a structured ``mcp_dispatch_failed`` tool-error result, never raised."""
+    client = _FakeMcpClient(responses=[_mcp_error("upstream protocol error")])
+
+    result = asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
 
     assert client.call_count == 1, "a non-disconnect error must not trigger the reconnect retry"
+    payload = extract_connector_error_payload(result)
+    assert payload is not None
+    assert payload["code"] == "mcp_dispatch_failed"
+    assert "local_http" in payload["message"]
+    assert "list_messages" in payload["message"]
+    # The raw upstream text is never the consumer-facing message.
+    assert "upstream protocol error" not in payload["message"]
+
+
+def test_output_schema_mismatch_is_typed():
+    """A response that violates the tool's advertised output schema surfaces from the SDK as a
+    plain ``RuntimeError`` at the remote-call seam; it becomes the SAME structured
+    ``mcp_dispatch_failed`` result, so a schema-lying upstream never reaches a door as a raw
+    exception."""
+    client = _FakeMcpClient(responses=[RuntimeError("Invalid structured content returned by tool list_messages: ...")])
+
+    result = asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+
+    assert client.call_count == 1
+    payload = extract_connector_error_payload(result)
+    assert payload is not None
+    assert payload["code"] == "mcp_dispatch_failed"
+    assert "Invalid structured content" not in payload["message"]
 
 
 def test_managed_uds_config_raises_in_preflight():
@@ -709,22 +735,62 @@ def test_dispatch_seam_records_failure_on_upstream_unavailable():
     assert health["failing_since"] is not None
 
 
-def test_dispatch_seam_records_failure_on_raw_propagation():
-    """A raw-propagating (non-disconnect) exception records a health failure first,
-    then re-raises unchanged."""
+def test_dispatch_seam_records_failure_on_typed_upstream_error():
+    """A typed remote-call failure records a health failure against the ORIGINAL cause (not the
+    wrapping ``McpDispatchError``), and the return value is the structured result."""
     mcp_health._HEALTH.clear()
 
-    class _BoomError(RuntimeError):
-        pass
+    client = _FakeMcpClient(responses=[_mcp_error("upstream protocol error")])
 
-    client = _FakeMcpClient(responses=[_BoomError("unrelated failure")])
+    result = asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
 
-    with pytest.raises(_BoomError, match="unrelated failure"):
+    payload = extract_connector_error_payload(result)
+    assert payload is not None
+    assert payload["code"] == "mcp_dispatch_failed"
+    health = mcp_health.snapshot("local_http")
+    assert health["last_error"]["type"] == "McpError"
+    assert health["consecutive_failures"] == 1
+
+
+def test_programming_error_reraises_loudly():
+    """A failure that is NOT a remote-call failure — here a ``TypeError`` from the adapter's own
+    resolution path (a programming error, modelled by a resolver that raises) — is never masked
+    as a tool result: the health failure is recorded and the error re-raises unchanged."""
+    mcp_health._HEALTH.clear()
+    resolver = AsyncMock(side_effect=TypeError("adapter bug"))
+    client = _FakeMcpClient(responses=[])  # never reached — resolution fails first
+
+    with patch(_RESOLVER, new=resolver), pytest.raises(TypeError, match="adapter bug"):
+        asyncio.run(_run_wrapper(client=client, config=_managed_config()))
+
+    assert client.call_count == 0
+    health = mcp_health.snapshot("google_gmail_work")
+    assert health["last_error"]["type"] == "TypeError"
+    assert health["consecutive_failures"] == 1
+
+
+def test_empty_resolved_token_reraises_loudly():
+    """A local managed-auth misconfiguration — a resolved credential with an empty access token
+    — is our fault, not the upstream's: it raises loudly (never masked as a tool result), even
+    though it is a ``RuntimeError`` and the token-expired retry never runs."""
+    resolver = AsyncMock(return_value=ManagedAuth(access_token=""))
+    client = _FakeMcpClient(responses=[])  # never reached — resolution rejects the empty token
+
+    with patch(_RESOLVER, new=resolver), pytest.raises(RuntimeError, match="empty access_token"):
+        asyncio.run(_run_wrapper(client=client, config=_managed_config()))
+
+    assert client.call_count == 0
+
+
+def test_cancellation_propagates():
+    """A cancellation is a ``BaseException`` and is never caught by the dispatch seam — it
+    propagates untouched so an await point can unwind."""
+    client = _FakeMcpClient(responses=[asyncio.CancelledError()])
+
+    with pytest.raises(asyncio.CancelledError):
         asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
 
-    health = mcp_health.snapshot("local_http")
-    assert health["last_error"]["type"] == "_BoomError"
-    assert health["consecutive_failures"] == 1
+    assert client.call_count == 1
 
 
 def test_dispatch_seam_records_nothing_for_auth_blocked():

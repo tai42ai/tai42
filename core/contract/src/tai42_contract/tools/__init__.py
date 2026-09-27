@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from tai42_contract.app.facets import RouteAction
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.tools.call_frame import (
+    NestedDoorFrameError,
     RunDelivery,
     current_call_chain,
     current_extras,
@@ -283,6 +284,7 @@ __all__ = [
     "MAX_ATTEMPTS_CEILING",
     "NEVER_RETRYABLE_KINDS",
     "AppTools",
+    "NestedDoorFrameError",
     "RunDelivery",
     "StateTemplateDetachReferee",
     "ToolDeleteReferee",

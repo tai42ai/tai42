@@ -11,13 +11,27 @@ Three shapes are built here, all from the same JSON answer schema (a top-level
 
 Supported property subset (identical to the callback door's own form renderer, so
 a modal answer validates there): ``string`` → ``plain_text_input``,
-``string``+``enum`` → ``static_select``, ``boolean`` → ``radio_buttons`` (Yes/No →
-``true``/``false``), ``integer``/``number`` → ``number_input``. Anything else, or a
-value past a Slack cap, raises :class:`FormSchemaError` naming the property — never
-a silently dropped or truncated field. A schema/cap violation is a permanent input
-refusal (the medium cannot render it BY NATURE), so :class:`FormSchemaError` is a
+``string``+``enum`` → ``static_select``, ``string``+``format: date`` →
+``datepicker`` (``initial_date``/``selected_date`` "YYYY-MM-DD"), ``string``+
+``format: time`` → ``timepicker`` (``initial_time``/``selected_time`` "HH:mm",
+24-hour, no seconds), ``string``+``format: date-time`` → ``plain_text_input``
+(Slack's ``datetimepicker`` returns a Unix timestamp, not an RFC 3339 string, so
+``date-time`` stays text), ``boolean`` → ``radio_buttons`` (Yes/No →
+``true``/``false``), ``integer``/``number`` → ``number_input``. A per-send
+``options`` list builds a ``static_select`` for a ``string`` property regardless of
+its ``format``. Anything else, or a value past a Slack cap, raises
+:class:`FormSchemaError` naming the property — never a silently dropped or
+truncated field. A schema/cap violation is a permanent input refusal (the medium
+cannot render it BY NATURE), so :class:`FormSchemaError` is a
 :class:`~tai42_contract.channels.ChannelInputError`, never a retryable delivery
 failure.
+
+A ``date`` prefill must be "YYYY-MM-DD" and a ``time`` prefill "HH:mm" (Slack's own
+control formats); a prefill Slack's control cannot display — a ``time`` value
+carrying seconds ("HH:MM:SS"), valid on the platform but impossible on Slack's
+``HH:mm`` — is refused at build naming the property, never truncated. The decode
+reads ``selected_date``/``selected_time`` from the ``view_submission`` state for
+these elements and returns the vendor's string unchanged (no coercion).
 
 Per-send enrichment rides the same mapping: a ``values`` map prefills each named
 property's control (``initial_value`` for a text/number input, ``initial_option``
@@ -34,7 +48,9 @@ it — never silently dropped.
 
 from __future__ import annotations
 
+import datetime
 import math
+import re
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
@@ -60,6 +76,11 @@ _MAX_STATIC_SELECT_OPTIONS = 100
 _MAX_BUTTON_VALUE_LEN = 2000
 # A ``header`` block's plain_text cap — the surface a form page's title renders on.
 _MAX_HEADER_LEN = 150
+
+# Slack's own picker formats: ``initial_date`` is "YYYY-MM-DD", ``initial_time`` is
+# "HH:mm" (24-hour hour 00-23, minutes 00-59, two digits each, no seconds).
+_SLACK_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SLACK_TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 
 class FormSchemaError(ChannelInputError):
@@ -147,16 +168,58 @@ def _find_option(options: list[dict[str, Any]], value: str) -> dict[str, Any] | 
     return next((option for option in options if option["value"] == value), None)
 
 
+def _slack_date(name: str, value: Any) -> str:
+    """A "YYYY-MM-DD" string Slack's ``initial_date``/``selected_date`` accepts.
+
+    Refuses (naming the field) anything not of that exact shape or not a real calendar date —
+    Slack's date picker cannot show any other value.
+    """
+    if not isinstance(value, str) or not _SLACK_DATE_RE.match(value):
+        raise FormSchemaError(f"form field {name!r} date value must be 'YYYY-MM-DD', got {value!r}")
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise FormSchemaError(f"form field {name!r} is not a valid calendar date: {value!r}") from exc
+    return value
+
+
+def _slack_time(name: str, value: Any) -> str:
+    """An "HH:mm" (24-hour, no seconds) string Slack's ``initial_time``/``selected_time`` accepts.
+
+    Refuses (naming the field) anything not of that exact shape or out of range. A platform
+    ``time`` value carrying seconds ("HH:MM:SS") is valid on the platform but impossible on
+    Slack's ``HH:mm`` — refused here, never truncated (truncation would silently drop the
+    seconds the input value carried).
+    """
+    if not isinstance(value, str) or not _SLACK_TIME_RE.match(value):
+        raise FormSchemaError(
+            f"form field {name!r} time value must be 'HH:mm' (24-hour, no seconds) — "
+            f"Slack's time picker cannot show seconds; got {value!r}"
+        )
+    try:
+        datetime.datetime.strptime(value, "%H:%M")
+    except ValueError as exc:
+        raise FormSchemaError(f"form field {name!r} is not a valid time of day: {value!r}") from exc
+    return value
+
+
 def _apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
     """Prefill one control from a per-send value.
 
-    ``initial_value`` for a text/number input, ``initial_option`` for a select or the Yes/No
-    radio. A select value that is not among the control's options — or a boolean value that is
-    not a bool — is a caller bug, refused naming the field rather than silently dropped.
+    ``initial_value`` for a text/number input, ``initial_date``/``initial_time`` for a
+    date/time picker, ``initial_option`` for a select or the Yes/No radio. A date/time value
+    Slack cannot display, a select value not among the control's options, or a boolean value
+    that is not a bool is a caller bug, refused naming the field rather than silently dropped.
     """
     etype = element["type"]
     if etype in ("plain_text_input", "number_input"):
         element["initial_value"] = value if isinstance(value, str) else str(value)
+        return
+    if etype == "datepicker":
+        element["initial_date"] = _slack_date(name, value)
+        return
+    if etype == "timepicker":
+        element["initial_time"] = _slack_time(name, value)
         return
     if etype == "static_select":
         match = _find_option(element["options"], str(value))
@@ -197,6 +260,13 @@ def _element(name: str, spec: dict[str, Any], per_send_options: list[dict[str, A
         enum = spec.get("enum")
         if enum is not None:
             return _static_select(name, enum)
+        fmt = spec.get("format")
+        if fmt == "date":
+            return {"type": "datepicker", "action_id": FIELD_ACTION_ID}
+        if fmt == "time":
+            return {"type": "timepicker", "action_id": FIELD_ACTION_ID}
+        # A date-time property stays a text input: Slack's datetimepicker returns a Unix
+        # timestamp, not an RFC 3339 string.
         return {"type": "plain_text_input", "action_id": FIELD_ACTION_ID}
     if ptype == "boolean":
         return _radio_buttons()
@@ -359,6 +429,11 @@ def _raw_value(entry: Any) -> str | None:
     kind = entry.get("type")
     if kind in ("plain_text_input", "number_input"):
         value = entry.get("value")
+        return value if isinstance(value, str) and value != "" else None
+    if kind in ("datepicker", "timepicker"):
+        # Slack keys the chosen value by element (``string | null``); an empty picker is
+        # an unfilled field, like an empty text input. The ISO string returns unchanged.
+        value = entry.get("selected_date" if kind == "datepicker" else "selected_time")
         return value if isinstance(value, str) and value != "" else None
     if kind in ("static_select", "radio_buttons"):
         selected = entry.get("selected_option")

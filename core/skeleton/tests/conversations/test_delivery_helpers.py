@@ -3,6 +3,8 @@ retry backoff, canonical address forms, and the rich-part notification/capabilit
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import hashlib
 import hmac
 import time
@@ -13,11 +15,33 @@ from tai42_contract.channels import Channel, LinkOption, OptionSection, ReplyOpt
 from tai42_contract.conversations import AnswerPart
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
+from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.delivery import _backoff_seconds, _sign, split_message
 from tai42_skeleton.conversations.delivery_channel import _part_notification, _unsupported_rich_capability
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
+
+
+async def test_delivery_spawn_runs_in_a_fresh_root_context():
+    # A delivery task is a root of execution (reached from a done-callback that runs in the
+    # caller's captured context): a ContextVar set by the spawner does not leak into it.
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_delivery_probe", default="default")
+    seen: dict = {}
+
+    async def _coro() -> None:
+        seen["probe"] = probe.get()
+
+    before = set(delivery_module._DELIVERY_TASKS)
+    token = probe.set("spawner-value")
+    try:
+        delivery_module._spawn(_coro())
+    finally:
+        probe.reset(token)
+    spawned = delivery_module._DELIVERY_TASKS - before
+    await asyncio.gather(*spawned)
+
+    assert seen["probe"] == "default"
 
 
 def test_split_short_message_is_one_chunk():

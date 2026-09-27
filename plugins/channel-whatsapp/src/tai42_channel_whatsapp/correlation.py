@@ -22,10 +22,12 @@ A published-Flow cache maps ``(waba_id, schema_hash)`` to a Meta flow id with NO
 TTL — a published Flow persists on Meta, so the id is reused for every form ask
 sharing that answer schema; a cache miss triggers a create + publish + store.
 Beside it, a schema sidecar maps the same ``(waba_id, schema_hash)`` to the answer
-schema itself PLUS the component-name reverse map (each identifier-safe Flow
-component name back to its schema key), for ask-less form notifications whose reply
-carries only the hash (inside its flow token) and no reservation — the map decodes
-the reply's component-named keys back to schema keys before coercion.
+schema itself PLUS the reverse of its schema-key → completion-payload-key map (each
+completion-payload key back to its schema key), for ask-less form notifications whose
+reply carries only the hash (inside its flow token) and no reservation — the map decodes
+the reply's payload-keyed answers back to schema keys before coercion. Each
+completion-payload key is the field's human-readable label (its schema ``title``, else
+the property key, disambiguated ``_2``, ``_3`` … on a collision).
 
 A handled-``wamid`` set is the replay guard (a redelivered webhook repeats the id).
 
@@ -88,10 +90,10 @@ class PendingQuestion:
     # Door-400 rejections already recovered by re-sending a fresh Flow. Bounds the
     # re-send loop (see the inbound handler's cap); starts at 0.
     rejections: int = 0
-    # A form ask also carries the reverse of its schema-key → component-name map — each
-    # identifier-safe Flow component name back to its original schema key — so the inbound
-    # nfm_reply decode (keyed by component names, as Meta relays them) maps every answer
-    # key back to the schema key before coercion; all None for a non-form ask.
+    # A form ask also carries the reverse of its schema-key → completion-payload-key map —
+    # each completion-payload key (the field's human-readable label) back to its schema key —
+    # so the inbound nfm_reply decode (keyed by those payload keys, as Meta relays them) maps
+    # every answer key back to the schema key before coercion; all None for a non-form ask.
     form_names: dict[str, str] | None = None
 
 
@@ -327,11 +329,11 @@ async def cache_flow_id(waba_id: str, schema_hash: str, flow_id: str) -> None:
 
 
 async def cache_flow_form(waba_id: str, schema_hash: str, schema: dict[str, Any], names: dict[str, str]) -> None:
-    """Store an ask-less form's schema and its component-name reverse map under ``(waba_id, schema_hash)``, no TTL.
+    """Store an ask-less form's schema and its completion-payload reverse map under ``(waba_id, schema_hash)``, no TTL.
 
-    Beside the published-flow id it renders as. ``names`` maps each identifier-safe Flow
-    component name back to its original schema key, so the notify reply (keyed by
-    component names, as Meta relays them) decodes to the schema keys and coerces by type.
+    Beside the published-flow id it renders as. ``names`` maps each completion-payload key
+    (the field's human-readable label) back to its schema key, so the notify reply (keyed by
+    those payload keys, as Meta relays them) decodes to the schema keys and coerces by type.
     Durability is load-bearing here, not an optimization: an inbound reply carries
     only the schema HASH (inside its flow token), never the schema, so this entry can
     NOT be repopulated from the reply — a miss is permanent for every form already
@@ -347,7 +349,7 @@ async def cache_flow_form(waba_id: str, schema_hash: str, schema: dict[str, Any]
 async def get_cached_flow_form(waba_id: str, schema_hash: str) -> tuple[dict[str, Any], dict[str, str]] | None:
     """Return the ``(schema, names)`` cached under ``(waba_id, schema_hash)``, or ``None``.
 
-    ``names`` is the component-name → schema-key reverse map. A miss means a reply for
+    ``names`` is the completion-payload-key → schema-key reverse map. A miss means a reply for
     that schema cannot be decoded/coerced and lands with its raw values (see
     :func:`cache_flow_form`). A stored value that is not a JSON object carrying both an
     object ``schema`` and an object ``names`` is treated as a miss (never a crash on the

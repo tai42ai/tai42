@@ -17,6 +17,7 @@ from typing import Any
 from tai42_contract.conversations import ConversationRoute, TurnSupersededError
 from tai42_contract.interactions import LocationElement, MediaItem
 
+from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import OVERLAP_DELIVERY_STATUSES, ConversationRecord, DeliveryStatus
@@ -107,7 +108,7 @@ async def _schedule_turn(
                 # ``superseded`` in favour of the newer message and deliver nothing.
                 return await overlap.supersede_lead(batch.lead, exc.successor_id)
 
-    task = asyncio.create_task(_run())
+    task = spawn_root_task(_run())
     _TURN_TASKS.add(task)
     if deliver_on_completion:
         task.add_done_callback(lambda t: _spawn_delivery_on_success(t, intake.message_id))
@@ -208,7 +209,7 @@ def _spawn_intake_resolution(message_id: str) -> None:
     This worker owns it, and waiting out its intake lease would hold the message unanswered for that
     long.
     """
-    task = asyncio.create_task(redrive._resolve_stranded_intake(message_id))
+    task = spawn_root_task(redrive._resolve_stranded_intake(message_id))
     _TURN_TASKS.add(task)
     task.add_done_callback(_on_intake_resolution_done)
 

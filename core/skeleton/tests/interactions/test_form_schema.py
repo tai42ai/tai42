@@ -144,3 +144,28 @@ def test_rejects_non_list_required():
 def test_rejects_non_object_property():
     with pytest.raises(ValueError, match="property 'x' must be an object"):
         validate_channel_form_schema({"type": "object", "properties": {"x": "string"}})
+
+
+@pytest.mark.parametrize("fmt", ["date", "time", "date-time"])
+def test_accepts_the_allowed_string_formats(fmt):
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": fmt}}}
+    assert validate_channel_form_schema(schema) is None
+
+
+def test_rejects_an_unsupported_format():
+    with pytest.raises(ValueError, match="property 'when' has unsupported format 'duration'"):
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"when": {"type": "string", "format": "duration"}}}
+        )
+
+
+def test_rejects_format_on_a_non_string_property():
+    with pytest.raises(ValueError, match="property 'n' has format 'date' but is not a 'string'"):
+        validate_channel_form_schema({"type": "object", "properties": {"n": {"type": "integer", "format": "date"}}})
+
+
+def test_accepts_format_alongside_an_enum():
+    # A dated enum is still an enum: the choice control is rendered and the format is
+    # enforced on the answer, so the two coexist rather than one refusing the other.
+    schema = {"type": "object", "properties": {"day": {"type": "string", "enum": ["2024-01-01"], "format": "date"}}}
+    assert validate_channel_form_schema(schema) is None

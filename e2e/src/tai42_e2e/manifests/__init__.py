@@ -73,13 +73,16 @@ from tai42_e2e.manifests.core import (
 from tai42_e2e.manifests.extensions import build_extensions_stack
 from tai42_e2e.manifests.feature_env import _base_env, _llm_env, _memory_agent_state_env, _redis_feature_env
 from tai42_e2e.manifests.manifest_mcp import (
+    MISBEHAVING_MCP_TITLE,
     POSTGRES_MCP_PROBE_ROW_NAME,
     POSTGRES_MCP_PROBE_SCHEMA,
     POSTGRES_MCP_PROBE_TABLE,
     POSTGRES_MCP_TITLE,
     RESILIENCE_MCP_TITLE,
+    build_misbehaving_mcp_stack,
     build_postgres_mcp_stack,
     build_resilience_mcp_stack,
+    misbehaving_mcp_tool_name,
     postgres_mcp_tool_name,
     resilience_mcp_tool_name,
 )
@@ -134,6 +137,7 @@ __all__ = [
     "BRIDGE_WHATSAPP_WABA_ID",
     "GITHUB_CLIENT_ID",
     "GOOGLE_CLIENT_ID",
+    "MISBEHAVING_MCP_TITLE",
     "POSTGRES_MCP_PROBE_ROW_NAME",
     "POSTGRES_MCP_PROBE_SCHEMA",
     "POSTGRES_MCP_PROBE_TABLE",
@@ -198,6 +202,7 @@ __all__ = [
     "build_marketplace_quarantine_stack",
     "build_marketplace_stack",
     "build_minimal_stack",
+    "build_misbehaving_mcp_stack",
     "build_monitoring_stack",
     "build_off_stack",
     "build_owned_keys_stack",
@@ -221,6 +226,7 @@ __all__ = [
     "build_stripe_stack",
     "build_studio_setup_stack",
     "build_studio_stack",
+    "misbehaving_mcp_tool_name",
     "postgres_mcp_tool_name",
     "resilience_mcp_tool_name",
 ]

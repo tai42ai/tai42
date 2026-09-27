@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import contextvars
 
+import pytest
+
 from tai42_contract.interactions.continuation import reset_park_completion, set_park_completion
 from tai42_contract.tools import (
+    NestedDoorFrameError,
+    RunDelivery,
     current_call_chain,
     current_extras,
     get_run_delivery,
     get_run_delivery_id,
+    run_delivery,
     tool_call_frame,
 )
 
@@ -146,6 +151,33 @@ def test_a_start_shaped_frame_does_not_re_mint_when_a_context_is_already_ambient
         assert current_call_chain() == ()
         with tool_call_frame("target"):  # start-shaped (empty prior chain) but ambient present
             assert get_run_delivery_id() == door_id
+
+
+def test_door_form_mints_on_a_fresh_context() -> None:
+    # The precondition PASSES on a fresh run context: an empty chain and no ambient
+    # run-delivery, exactly what a door's task carries when spawned as a fresh root.
+    assert current_call_chain() == ()
+    assert get_run_delivery_id() is None
+    with tool_call_frame():
+        assert get_run_delivery_id() is not None
+
+
+def test_door_form_refuses_a_non_empty_prior_chain() -> None:
+    # A DOOR frame is a run's outermost minting frame; opened inside a running dispatch
+    # (a non-empty chain) it would mis-key the new run's terminal to the caller's run.
+    with tool_call_frame("caller"), pytest.raises(NestedDoorFrameError) as excinfo, tool_call_frame():
+        pass
+    assert "caller" in str(excinfo.value)
+
+
+def test_door_form_refuses_an_ambient_run_delivery() -> None:
+    # Even with an empty chain, an ambient run-delivery context means a run is already in
+    # flight; a DOOR frame refuses to mint a second identity under it, naming the inherited id.
+    with run_delivery(RunDelivery(run_delivery_id="run-xyz", delivery=None)):
+        assert current_call_chain() == ()
+        with pytest.raises(NestedDoorFrameError) as excinfo, tool_call_frame():
+            pass
+    assert "run-xyz" in str(excinfo.value)
 
 
 def test_two_independent_runs_mint_different_ids() -> None:
