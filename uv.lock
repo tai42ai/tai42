@@ -5645,7 +5645,7 @@ dependencies = [
     { name = "tai42-storage-github" },
     { name = "tai42-storage-local" },
     { name = "tai42-storage-s3" },
-    { name = "tai42-toolbox", extra = ["chain", "embeddings", "http", "prometheus", "proxy"] },
+    { name = "tai42-toolbox", extra = ["chain", "classifier", "embeddings", "http", "prometheus", "proxy"] },
     { name = "tai42-tools-stripe" },
     { name = "tai42-webhook-verifier-github" },
     { name = "tai42-webhook-verifier-stripe" },
@@ -5706,7 +5706,7 @@ requires-dist = [
     { name = "tai42-storage-github", editable = "plugins/storage-github" },
     { name = "tai42-storage-local", editable = "plugins/storage-local" },
     { name = "tai42-storage-s3", editable = "plugins/storage-s3" },
-    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy"], editable = "plugins/toolbox" },
+    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy", "classifier"], editable = "plugins/toolbox" },
     { name = "tai42-tools-stripe", editable = "plugins/tools-stripe" },
     { name = "tai42-webhook-verifier-github", editable = "plugins/webhook-verifier-github" },
     { name = "tai42-webhook-verifier-stripe", editable = "plugins/webhook-verifier-stripe" },
@@ -6392,6 +6392,9 @@ dependencies = [
 chain = [
     { name = "tai42-kit", extra = ["jq"] },
 ]
+classifier = [
+    { name = "tai42-kit", extra = ["typesafe"] },
+]
 dev = [
     { name = "prometheus-client" },
     { name = "pyright" },
@@ -6400,7 +6403,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
-    { name = "tai42-kit", extra = ["curl", "jq", "llm"] },
+    { name = "tai42-kit", extra = ["curl", "jq", "llm", "typesafe"] },
     { name = "trustme" },
 ]
 embeddings = [
@@ -6439,10 +6442,11 @@ requires-dist = [
     { name = "tai42-kit", extras = ["curl"], marker = "extra == 'http'", editable = "core/kit" },
     { name = "tai42-kit", extras = ["jq"], marker = "extra == 'chain'", editable = "core/kit" },
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'embeddings'", editable = "core/kit" },
-    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy"], marker = "extra == 'dev'" },
+    { name = "tai42-kit", extras = ["typesafe"], marker = "extra == 'classifier'", editable = "core/kit" },
+    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "classifier", "proxy"], marker = "extra == 'dev'" },
     { name = "trustme", marker = "extra == 'dev'", specifier = ">=1.1" },
 ]
-provides-extras = ["http", "prometheus", "chain", "embeddings", "proxy", "dev"]
+provides-extras = ["http", "prometheus", "chain", "embeddings", "classifier", "proxy", "dev"]
 
 [package.metadata.requires-dev]
 docs = [

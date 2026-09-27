@@ -34,7 +34,14 @@ class LlmStub:
     It also serves ``/v1/embeddings`` with DETERMINISTIC vectors (a fixed-length
     hash of each input item), so the vector-store agents (retrieval) embed and
     search entirely offline. Embedding calls are NOT scripted — they answer any
-    body — so they never consume a chat turn."""
+    body — so they never consume a chat turn.
+
+    It also serves ``/v1/systemone`` with DETERMINISTIC classification answers
+    (each answer hashed from the request's ``state`` and the question), so the
+    classify tool runs offline and a ``state`` dropped or corrupted on the wire
+    shows up as a different answer. The classifier vendor points at
+    :attr:`root_url` (no ``/v1``) and appends ``/v1/systemone`` itself. These
+    calls are NOT scripted either."""
 
     # The fixed embedding dimensionality the stub reports; small but nonzero so a
     # store index has a stable width across put + query + the dims probe.
@@ -59,6 +66,12 @@ class LlmStub:
     def base_url(self) -> str:
         """The ``LLM_BASE_URL`` an agent stack points at (OpenAI ``/v1`` root)."""
         return f"http://{self.host}:{self.port}/v1"
+
+    @property
+    def root_url(self) -> str:
+        """The stub's site root (no ``/v1`` path); the classifier vendor appends
+        ``/v1/systemone`` beneath it itself."""
+        return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
         self._server.start()
@@ -164,6 +177,46 @@ class LlmStub:
                 }
             )
 
+        @app.post("/v1/systemone")
+        async def systemone(request: Request) -> Any:
+            """Answer a TypeSafe classification request DETERMINISTICALLY, so the
+            classify tool runs entirely offline. The request body carries a
+            ``model``, the ``state`` under judgement, and a non-empty
+            ``questions`` map; each answer is hashed from the ``state``, the
+            question's name, and the question body, so an identical request always
+            yields the identical answer and any change to the ``state`` on the wire
+            yields a different answer. The response is a vendor
+            ``ClassifierResponse`` body, and the ``x-typesafe-request-id`` header
+            is what the vendor copies into ``ClassifierResponse.request_id``.
+
+            A body with no non-empty ``questions`` map, or a question with an
+            unrecognized ``type`` or missing criteria, is a malformed call refused
+            loudly (a 400), never served a plausible-looking answer."""
+            body = await request.json()
+            questions = body.get("questions")
+            if not isinstance(questions, dict) or not questions:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": f"llmstub: /v1/systemone requires a non-empty 'questions' map; got {body!r}"
+                        }
+                    },
+                )
+            state = body.get("state")
+            try:
+                answers = {name: _classifier_answer(name, question, state) for name, question in questions.items()}
+            except _MalformedQuestionError as error:
+                return JSONResponse(status_code=400, content={"error": {"message": f"llmstub: {error}"}})
+            return JSONResponse(
+                content={
+                    "model": body.get("model", "e2e-classify"),
+                    "answers": answers,
+                    "usage": {"input_tokens": len(questions), "output_tokens": len(answers)},
+                },
+                headers={"x-typesafe-request-id": _classifier_request_id(body)},
+            )
+
         self._install_control_routes(app)
         return app
 
@@ -194,6 +247,88 @@ class LlmStub:
 
 class _UnscriptedError(Exception):
     """Raised when a completion arrives with an empty script queue."""
+
+
+class _MalformedQuestionError(Exception):
+    """Raised when a ``/v1/systemone`` question lacks a recognized ``type`` or the
+    criteria that type requires."""
+
+
+def _classifier_answer(name: str, question: Any, state: Any) -> dict[str, Any]:
+    """A deterministic vendor answer for one classification question, hashed from
+    the request's ``state``, the question's ``name``, and the question body, so an
+    identical request reproduces the answer and any change to the ``state`` moves
+    it. Every answer carries the ``type`` discriminator the vendor's answer models
+    require, and every distribution is a valid vendor shape (probabilities in
+    ``[0, 1]`` summing to 1).
+
+    A ``noul`` answer is one hashed fraction. A ``choice`` answer hashes one weight
+    per label (the label appended to the seed), normalises them to a distribution,
+    and picks the argmax label with the peak probability as its confidence. A
+    ``score`` answer hashes one weight per ordinal level, normalises them to a
+    distribution keyed by integer level, and reports the expected level as its
+    score with the peak probability as its confidence."""
+    if not isinstance(question, dict):
+        raise _MalformedQuestionError(f"a question must be an object; got {question!r}")
+    question_type = question.get("type")
+    seed = _answer_seed(state, name, question)
+    if question_type == "noul":
+        return {"type": "noul", "noul": _hash_fraction(seed)}
+    if question_type == "choice":
+        criteria = question.get("criteria")
+        if not isinstance(criteria, dict) or not criteria:
+            raise _MalformedQuestionError(f"a 'choice' question needs a non-empty 'criteria' map; got {question!r}")
+        labels = list(criteria)
+        probabilities = _normalise([_hash_fraction(f"{seed}{label}") for label in labels])
+        distribution = dict(zip(labels, probabilities, strict=True))
+        return {
+            "type": "choice",
+            "choice": max(distribution, key=distribution.__getitem__),
+            "probabilities": distribution,
+            "confidence": max(probabilities),
+        }
+    if question_type == "score":
+        criteria = question.get("criteria")
+        if not isinstance(criteria, list) or not criteria:
+            raise _MalformedQuestionError(f"a 'score' question needs a non-empty 'criteria' list; got {question!r}")
+        levels = range(len(criteria))
+        probabilities = _normalise([_hash_fraction(f"{seed}{level}") for level in levels])
+        return {
+            "type": "score",
+            "score": sum(level * probabilities[level] for level in levels),
+            "legend": {level: criteria[level] for level in levels},
+            "probabilities": {level: probabilities[level] for level in levels},
+            "confidence": max(probabilities),
+        }
+    raise _MalformedQuestionError(f"a question 'type' must be 'noul', 'choice', or 'score'; got {question_type!r}")
+
+
+def _answer_seed(state: Any, name: str, question: Any) -> str:
+    """The hash seed for one question's answer: the request ``state``, the
+    question name, and the question body, so the answer moves with any of them."""
+    return json.dumps(state, sort_keys=True, default=str) + name + json.dumps(question, sort_keys=True, default=str)
+
+
+def _hash_fraction(text: str) -> float:
+    """A deterministic float in ``[0, 1]``: the first 8 hex digits of
+    ``sha256(text)`` over ``0xFFFFFFFF``."""
+    return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+
+
+def _normalise(weights: list[float]) -> list[float]:
+    """Scale non-negative hashed weights into a probability distribution summing to
+    1. A zero total (every hashed weight zero) has no distribution and raises."""
+    total = sum(weights)
+    if total <= 0:
+        raise _MalformedQuestionError(f"hashed weights sum to {total}; no probability distribution exists")
+    return [weight / total for weight in weights]
+
+
+def _classifier_request_id(body: dict[str, Any]) -> str:
+    """A stable id per classification body; the vendor copies the
+    ``x-typesafe-request-id`` response header into ``ClassifierResponse.request_id``."""
+    seed = json.dumps(body, sort_keys=True, default=str).encode("utf-8")
+    return f"e2e-{hashlib.sha256(seed).hexdigest()[:16]}"
 
 
 def _deterministic_vector(item: Any) -> list[float]:

@@ -24,6 +24,7 @@ vendor it was never written to reach. The real leg for these is demonstrated on
 the dedicated e2e creds host, not in CI. The seams that step aside:
 
 - `llm`, `embeddings` — scripted-stub determinism legs.
+- `classifier` — the classify determinism leg against the stub's `/v1/systemone`.
 - `stripe` — the `FakeStripe` mint / webhook / reconcile legs.
 - `twilio`, `whatsapp`, `slack`, `telegram` — the channel **round-trip / notify /
   allowlist-delivery** legs (they wait for a send off the stub). Their real-safe

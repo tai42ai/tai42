@@ -91,10 +91,11 @@ def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
         "tools": [
             _probe_tools_entry(with_backend_branches=True),
             _toolbox_tools_entry(),
-            # The four toolbox tools not otherwise exercised (request / generate_embeddings /
-            # pad_embeddings / current_time_info) load on the core profile — its tests drive
-            # ``request`` against the harness target server and the embeddings tools against
-            # the LLM stub's ``/v1/embeddings`` via the tool's per-call ``base_url``.
+            # The five toolbox tools not otherwise exercised (request / generate_embeddings /
+            # pad_embeddings / current_time_info / classify) load on the core profile — its tests
+            # drive ``request`` against the harness target server, the embeddings tools against the
+            # LLM stub's ``/v1/embeddings``, and ``classify`` against the stub's ``/v1/systemone``,
+            # each via the tool's per-call ``base_url``.
             *_TOOLBOX_EXTRA_TOOL_ENTRIES,
             {"title": "builtin-file-loader", "module": "tai42_skeleton.tools.builtin.file_loader"},
             *_builtin_entries(),

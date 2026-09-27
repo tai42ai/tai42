@@ -98,6 +98,15 @@ def test_llm_required_cred_follows_selected_provider() -> None:
     assert s.missing_real_creds(full) == {}
 
 
+def test_classifier_required_cred_follows_selected_provider() -> None:
+    # The classifier seam is provider-configurable: the required key is the SELECTED
+    # provider's, resolved from CLASSIFIER_PROVIDERS (default typesafe -> TYPESAFE_API_KEY).
+    s = _settings("classifier")
+    assert s.missing_real_creds({}) == {"classifier": ["TYPESAFE_API_KEY"]}
+    # the provider's key present -> nothing missing
+    assert s.missing_real_creds({"TYPESAFE_API_KEY": "ts-x"}) == {}
+
+
 def test_storage_real_seam_requires_matching_axis() -> None:
     # storage-s3 named real but the storage axis still on the hermetic mock (default
     # 'local') -> a silent no-op the gate must catch.

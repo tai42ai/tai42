@@ -35,6 +35,21 @@ class LlmProvider:
     default_embedding_model: str | None
 
 
+@dataclass(frozen=True)
+class ClassifierProvider:
+    """One real-classifier provider the ``classifier`` seam can select.
+
+    ``provider`` is the kit's ``LLM_PROVIDER_CLASSIFIER`` value (the
+    ``tai42_kit.llm.classifier`` builder matches on it); ``api_key_env`` is the
+    credential template's env var holding that provider's key; ``default_model``
+    is the fallback model when the operator leaves ``REAL_E2E_CLASSIFIER_MODEL``
+    unset."""
+
+    provider: str
+    api_key_env: str
+    default_model: str
+
+
 # The real-LLM providers the kit builders accept (``tai42_kit.llm.models.get_llm`` /
 # ``embedding.get_embedding``), matched to the credential template's keys. A name
 # the operator puts in ``REAL_E2E_LLM_PROVIDER`` / ``_EMBEDDING_PROVIDER`` must be a key
@@ -52,6 +67,16 @@ LLM_PROVIDERS: dict[str, LlmProvider] = {
         "HuggingFaceH4/zephyr-7b-beta",
         "sentence-transformers/all-MiniLM-L6-v2",
     ),
+}
+
+
+# The real-classifier providers the kit classifier builder
+# (``tai42_kit.llm.classifier.get_classifier``) accepts, matched to the credential
+# template's keys. A name the operator puts in ``REAL_E2E_CLASSIFIER_PROVIDER`` must
+# be a key here; an unknown name raises rather than silently falling back. The model
+# carries the vendor's own default the operator overrides via ``REAL_E2E_CLASSIFIER_MODEL``.
+CLASSIFIER_PROVIDERS: dict[str, ClassifierProvider] = {
+    "typesafe": ClassifierProvider("typesafe", "TYPESAFE_API_KEY", "jev-latest"),
 }
 
 
@@ -80,6 +105,19 @@ def real_embedding_provider(environ: Mapping[str, str]) -> LlmProvider:
     return _resolve_llm_provider(environ, "REAL_E2E_EMBEDDING_PROVIDER", embeddings=True)
 
 
+def real_classifier_provider(environ: Mapping[str, str]) -> ClassifierProvider:
+    """The provider the real ``classifier`` seam uses — ``REAL_E2E_CLASSIFIER_PROVIDER``
+    (default ``typesafe``). An unknown name raises loudly at collection/build."""
+    name = (environ.get("REAL_E2E_CLASSIFIER_PROVIDER") or "typesafe").strip() or "typesafe"
+    provider = CLASSIFIER_PROVIDERS.get(name)
+    if provider is None:
+        valid = ", ".join(sorted(CLASSIFIER_PROVIDERS))
+        raise ValueError(
+            f"REAL_E2E_CLASSIFIER_PROVIDER={name!r} is not a known classifier provider; valid providers: {valid}"
+        )
+    return provider
+
+
 @dataclass(frozen=True)
 class RealService:
     """One external seam's real-leg contract.
@@ -89,15 +127,16 @@ class RealService:
     absent, and the real legs read the same list. ``inbound`` marks a seam whose
     real leg receives vendor callbacks (webhooks, OAuth redirects), so it needs a
     publicly reachable origin: ``E2E_PUBLIC_BASE_URL`` is required whenever any
-    inbound seam is selected real. ``provider_seam`` marks the two
-    provider-configurable seams (``llm`` / ``embeddings``): their required credential
-    is the SELECTED provider's key (resolved from ``REAL_E2E_LLM_PROVIDER`` /
-    ``_EMBEDDING_PROVIDER`` at collection), so the loud-fail names that provider's env
-    var rather than a hardcoded one."""
+    inbound seam is selected real. ``provider_seam`` marks the
+    provider-configurable seams (``llm`` / ``embeddings`` / ``classifier``): their
+    required credential is the SELECTED provider's key (resolved from
+    ``REAL_E2E_LLM_PROVIDER`` / ``_EMBEDDING_PROVIDER`` / ``_CLASSIFIER_PROVIDER`` at
+    collection), so the loud-fail names that provider's env var rather than a
+    hardcoded one."""
 
     required_env: tuple[str, ...]
     inbound: bool
-    provider_seam: Literal["llm", "embedding"] | None = None
+    provider_seam: Literal["llm", "embedding", "classifier"] | None = None
 
 
 # One entry per external seam (the ``TAI_E2E_REAL`` vocabulary). Names and
@@ -141,6 +180,9 @@ REAL_SERVICES: dict[str, RealService] = {
     # embeddings).
     "llm": RealService(required_env=(), inbound=False, provider_seam="llm"),
     "embeddings": RealService(required_env=(), inbound=False, provider_seam="embedding"),
+    # The classify seam is provider-configurable too: the required credential is the
+    # selected classifier provider's key (``CLASSIFIER_PROVIDERS``), resolved at collection.
+    "classifier": RealService(required_env=(), inbound=False, provider_seam="classifier"),
     "connector-google": RealService(
         required_env=(
             "CONNECTORS_GOOGLE_CLIENT_ID",
@@ -309,8 +351,8 @@ class HarnessSettings(BaseSettings):
         """For every selected real seam, the required env vars that are absent or
         empty in ``environ`` — keyed by service, empty when fully configured. The
         loud-fail names exactly these. For the provider-configurable ``llm`` /
-        ``embeddings`` seams the required key is the SELECTED provider's (an unknown
-        provider name raises here, loudly, at collection)."""
+        ``embeddings`` / ``classifier`` seams the required key is the SELECTED
+        provider's (an unknown provider name raises here, loudly, at collection)."""
         missing: dict[str, list[str]] = {}
         for name in sorted(self.real_services):
             service = REAL_SERVICES[name]
@@ -319,6 +361,8 @@ class HarnessSettings(BaseSettings):
                 required.append(real_llm_provider(environ).api_key_env)
             elif service.provider_seam == "embedding":
                 required.append(real_embedding_provider(environ).api_key_env)
+            elif service.provider_seam == "classifier":
+                required.append(real_classifier_provider(environ).api_key_env)
             absent = [var for var in required if not environ.get(var)]
             if absent:
                 missing[name] = absent

@@ -6,7 +6,12 @@ import json
 import os
 from typing import TYPE_CHECKING
 
-from tai42_e2e.settings import HarnessSettings, real_embedding_provider, real_llm_provider
+from tai42_e2e.settings import (
+    HarnessSettings,
+    real_classifier_provider,
+    real_embedding_provider,
+    real_llm_provider,
+)
 from tai42_e2e.topology import StackResources
 
 if TYPE_CHECKING:
@@ -64,23 +69,28 @@ def _redis_feature_env(res: StackResources) -> dict[str, str]:
 
 
 def _llm_env(res: StackResources) -> dict[str, str]:
-    """The agents' model + embedding access, per the ``llm`` / ``embeddings`` seams.
+    """The agents' model + embedding + classifier access, per the ``llm`` /
+    ``embeddings`` / ``classifier`` seams.
 
-    MOCK (default): both groups point at the scripted stub — it serves
-    ``/v1/chat/completions`` and ``/v1/embeddings`` off one origin, so they share
-    ``res.llm_base_url`` (empty when the stub URL is unset — the studio profile
-    allocates the stub port separately).
+    MOCK (default): the ``llm`` and ``embeddings`` groups point at the scripted stub —
+    it serves ``/v1/chat/completions`` and ``/v1/embeddings`` off one origin, so they
+    share ``res.llm_base_url`` (empty when the stub URL is unset — the studio profile
+    allocates the stub port separately). The ``classifier`` group points at the stub's
+    root origin (``res.classifier_base_url``, the vendor appends ``/v1/systemone``); it
+    is a no-op when that resource is unset — a stack wires it only when it runs the
+    classify tool against the stub, so the group stays absent everywhere else.
 
-    REAL: ``llm`` and ``embeddings`` toggle INDEPENDENTLY, each replacing only its
-    own group with the live provider. Both are PROVIDER-CONFIGURABLE (HARNESS-MAP):
-    ``REAL_E2E_LLM_PROVIDER`` / ``REAL_E2E_EMBEDDING_PROVIDER`` (default ``openai``)
-    picks the provider from ``LLM_PROVIDERS``; the harness sets ``LLM_PROVIDER_LLM`` /
-    ``_EMBEDDING`` to the provider id, maps that provider's template key
-    (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / …) to ``LLM_API_KEY`` /
-    ``EMBEDDING_API_KEY``, and sets the model from ``REAL_E2E_*_MODEL`` (else the
-    provider default). LangChain's native-env fallbacks are never relied on. A group
-    left mock still points at the stub, so a real-``llm`` / mock-``embeddings`` mix is
-    exact."""
+    REAL: ``llm``, ``embeddings`` and ``classifier`` toggle INDEPENDENTLY, each
+    replacing only its own group with the live provider. All three are
+    PROVIDER-CONFIGURABLE (HARNESS-MAP): ``REAL_E2E_LLM_PROVIDER`` /
+    ``REAL_E2E_EMBEDDING_PROVIDER`` (default ``openai``) /
+    ``REAL_E2E_CLASSIFIER_PROVIDER`` (default ``typesafe``) picks the provider; the
+    harness sets ``LLM_PROVIDER_LLM`` / ``_EMBEDDING`` / ``_CLASSIFIER`` to the provider
+    id, maps that provider's template key (``OPENAI_API_KEY`` / ``TYPESAFE_API_KEY`` /
+    …) to ``LLM_API_KEY`` / ``EMBEDDING_API_KEY`` / ``CLASSIFIER_API_KEY``, and sets the
+    model from ``REAL_E2E_*_MODEL`` (else the provider default). LangChain's native-env
+    fallbacks are never relied on. A group left mock still points at the stub, so a
+    real-``llm`` / mock-``embeddings`` mix is exact."""
     switch = _switch()
     env: dict[str, str] = {}
     if switch.is_real("llm"):
@@ -103,6 +113,17 @@ def _llm_env(res: StackResources) -> dict[str, str]:
         env["EMBEDDING_BASE_URL"] = res.llm_base_url
         env["EMBEDDING_API_KEY"] = "e2e-test"
         env["EMBEDDING_MODEL"] = "e2e-embed"
+    if switch.is_real("classifier"):
+        classifier_provider = real_classifier_provider(os.environ)
+        env["LLM_PROVIDER_CLASSIFIER"] = classifier_provider.provider
+        env["CLASSIFIER_API_KEY"] = os.environ[classifier_provider.api_key_env]
+        env["CLASSIFIER_MODEL"] = os.environ.get("REAL_E2E_CLASSIFIER_MODEL", classifier_provider.default_model)
+    elif res.classifier_base_url is not None:
+        # The mock arm emits the classifier group only when a stack sets
+        # classifier_base_url; when it is None the group is absent, never an error.
+        env["CLASSIFIER_BASE_URL"] = res.classifier_base_url
+        env["CLASSIFIER_API_KEY"] = "e2e-test"
+        env["CLASSIFIER_MODEL"] = "e2e-classifier"
     return env
 
 
