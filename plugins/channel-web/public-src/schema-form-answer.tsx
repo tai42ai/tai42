@@ -43,12 +43,37 @@ function initialFormValue(schema: JsonSchema, formData: FormPrefill | null): unk
   return formData !== null ? { ...start, ...formData.values } : start;
 }
 
+/** The one string `format` this door renders with a native control: `date` maps to
+ * `<input type="date">` (its ISO value posts unchanged). `time` and `date-time` render
+ * as plain text — the native `time` / `datetime-local` controls cannot emit the value
+ * shapes the answer door requires (a `date-time` needs an RFC 3339 offset). */
+const NATIVELY_RENDERED_FORMATS = new Set(['date']);
+
+/** A property normalised for this door: a string `format` the door does not render
+ * natively is dropped, so the SDK renders a plain text input rather than its native
+ * time / datetime-local control. Every other property passes through unchanged. */
+function widgetProperty(prop: JsonSchema): JsonSchema {
+  if (
+    prop.type === 'string' &&
+    typeof prop.format === 'string' &&
+    !NATIVELY_RENDERED_FORMATS.has(prop.format)
+  ) {
+    const { format: _format, ...rest } = prop;
+    return rest;
+  }
+  return prop;
+}
+
 /** A one-property object schema, so a single field renders through `SchemaForm`
  * with the same control and validation path it has in the whole form. */
 function singleFieldSchema(schema: JsonSchema, field: string): JsonSchema {
   const prop = isPlainObject(schema.properties) ? schema.properties[field] : undefined;
   const required = (schema.required ?? []).includes(field) ? [field] : [];
-  return { type: 'object', properties: prop !== undefined ? { [field]: prop } : {}, required };
+  return {
+    type: 'object',
+    properties: prop !== undefined ? { [field]: widgetProperty(prop) } : {},
+    required,
+  };
 }
 
 /** The top-level field an error path belongs to (the segment before the first `.`

@@ -22,7 +22,9 @@ import re
 from typing import Any
 
 import mcp
+from mcp.shared.exceptions import McpError
 from tai42_contract.connectors.models import ConnectorRef
+from tai42_contract.errors import ClientDisconnectedError
 from tai42_contract.manifest import TaiMCPConfig
 from tai42_kit.clients.impl.mcp import FastMCPClient
 
@@ -53,6 +55,29 @@ _RECONNECT_REQUIRED_CODE = "reconnect_required"
 _REFRESH_FAILING_CODE = "refresh_failing"
 _AUTH_EXPIRED_CODE = "auth_expired"
 _UPSTREAM_MCP_UNAVAILABLE_CODE = "upstream_mcp_unavailable"
+_MCP_DISPATCH_FAILED_CODE = "mcp_dispatch_failed"
+
+
+class McpDispatchError(Exception):
+    """The remote MCP tool call was reached but did not yield a usable result.
+
+    Raised only from :func:`call_with_auth` — the single point that performs the remote
+    ``tools/call`` — for a protocol error / timeout (``McpError``) or a response that violated
+    the tool's advertised output schema (the calling SDK's validation ``RuntimeError``). It
+    carries the entry title and tool name and chains the original failure as ``__cause__``.
+
+    A dedicated type so the dispatch seam types exactly the remote-call failures into a
+    structured tool-error result, while a local misconfiguration (an empty resolved token, a
+    missing connector ref), a force-refresh failure, or a programming error — none of which are
+    remote-call failures — still propagate raw and raise loudly. A lost/evicted session raises
+    :class:`ClientDisconnectedError` instead, which the one-shot reconnect handles first.
+    """
+
+    def __init__(self, title: str, tool_name: str) -> None:
+        """Record the MCP entry ``title`` and the ``tool_name`` whose remote call failed."""
+        super().__init__(f"remote MCP tool call {tool_name!r} on {title!r} failed")
+        self.title = title
+        self.tool_name = tool_name
 
 
 # The ``_meta`` token key and error prefix are the cross-repo wire contract with
@@ -262,6 +287,30 @@ def upstream_mcp_unavailable_result(config: TaiMCPConfig) -> mcp.types.CallToolR
     return mcp.types.CallToolResult(isError=True, content=[mcp.types.TextContent(type="text", text=text)])
 
 
+def mcp_dispatch_failed_result(config: TaiMCPConfig, tool_name: str) -> mcp.types.CallToolResult:
+    """Build an error ``CallToolResult`` for a reachable upstream whose tool call did not yield a usable result.
+
+    Covers a protocol error / timeout (``McpError``) and a response that violated the tool's
+    own advertised output schema (the calling SDK's validation ``RuntimeError``) — the upstream
+    answered (or was reached) but the call failed, which is distinct from an unreachable pooled
+    session (:func:`upstream_mcp_unavailable_result`) and from an auth block
+    (:func:`managed_auth_error_result`).
+
+    Mirrors their envelope — the connector-error prefix + a ``{"code": ...}`` payload recoverable
+    via :func:`extract_connector_error_payload`. The consumer-facing message names the tool and
+    the MCP entry by its configured title; the raw exception text (SDK/schema-validator internals)
+    is NEVER the message — it is logged at the dispatch seam and kept in the health store's
+    last_error, both operator surfaces.
+    """
+    message = (
+        f"the tool {tool_name!r} on MCP {config.title!r} could not be completed: the upstream "
+        "server returned an error or an invalid response"
+    )
+    payload = {"code": _MCP_DISPATCH_FAILED_CODE, "message": message}
+    text = f"{_error_prefix()}{json.dumps(payload)}"
+    return mcp.types.CallToolResult(isError=True, content=[mcp.types.TextContent(type="text", text=text)])
+
+
 def check_managed_transport(config: TaiMCPConfig, transport: str) -> None:
     """Allow managed entries only on transports with a token-injection path."""
     if config.is_managed and transport not in SUPPORTED_MANAGED_TRANSPORTS:
@@ -310,15 +359,27 @@ async def call_with_auth(
 
     On the retry path :func:`_merge_http_auth` returns a fresh config (rotated
     Authorization → distinct ``model_dump`` → fresh client).
+
+    A lost/evicted session raises :class:`ClientDisconnectedError` (the one-shot reconnect
+    handles it); any other failure of the remote call — a protocol error / timeout
+    (``McpError``) or a response that violated the tool's advertised output schema (the calling
+    SDK's validation ``RuntimeError``) — is wrapped as :class:`McpDispatchError` so the dispatch
+    seam types it into a structured tool-error result instead of leaking a raw exception. Request
+    preparation runs before the call so a preparation bug still raises loudly.
     """
     effective_config, meta = _prepare_request(config, auth, transport)
-    async with mcp_client.current(config=effective_config.model_dump()) as client:
-        return await client.call_tool_mcp(
-            tool_name,
-            arguments,
-            meta=meta,
-            timeout=mcp_dispatch_settings().call_timeout_seconds,
-        )
+    try:
+        async with mcp_client.current(config=effective_config.model_dump()) as client:
+            return await client.call_tool_mcp(
+                tool_name,
+                arguments,
+                meta=meta,
+                timeout=mcp_dispatch_settings().call_timeout_seconds,
+            )
+    except ClientDisconnectedError:
+        raise
+    except (McpError, RuntimeError) as exc:
+        raise McpDispatchError(config.title, tool_name) from exc
 
 
 async def evict_pooled_session(

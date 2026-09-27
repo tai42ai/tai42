@@ -10,10 +10,11 @@ DELIBERATELY DISTINCT from the request-scope identity vars —
 background identity can never be mistaken for an authenticated caller, or the reverse.
 Always release via :func:`reset_execution_identity` on the matching token in a ``finally``.
 
-Release is per-CONTEXT, not global: a task created inside the block runs on a COPY and
-keeps the identity for its own lifetime. That is load-bearing —
-:func:`~tai42_skeleton.operations.tool_runs.supervisor._spawn_supervisor` detaches such a task, and
-the inherited identity is what keeps the tool it later runs authorized as the submitter.
+Release is per-CONTEXT, not global: a task created inside the block runs on a COPY of the
+context and keeps the identity for its own lifetime, past the release. A background run that
+detaches as a fresh root inherits no such copy and rebinds this identity from a fact its spawner
+captured (:class:`~tai42_skeleton.operations.tool_runs.supervisor._SupervisedRunContext`), so the
+tool it later runs is authorized as the submitter without depending on an inherited context.
 """
 
 from __future__ import annotations

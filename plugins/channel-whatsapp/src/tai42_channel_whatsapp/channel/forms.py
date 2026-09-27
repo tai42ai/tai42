@@ -24,7 +24,7 @@ from tai42_channel_whatsapp.correlation import (
     release_pending,
     reserve_pending,
 )
-from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, build_flow_data, build_form_flow, component_names
+from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, build_flow_data, build_form_flow, payload_labels
 from tai42_channel_whatsapp.settings import WhatsAppSettings, require_delivery_setting, whatsapp_settings
 
 logger = logging.getLogger(__name__)
@@ -44,15 +44,15 @@ _NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"  # noqa: S105 constant identifier, not a
 _FLOW_NAME_PREFIX = "tai42-form-"
 
 
-def _reverse_component_names(schema: dict[str, Any]) -> dict[str, str]:
-    """The component-name → schema-key reverse map for a form schema.
+def _reverse_payload_labels(schema: dict[str, Any]) -> dict[str, str]:
+    """The completion-payload-label → schema-key reverse map for a form schema.
 
-    Inverts :func:`component_names` (schema key → identifier-safe component name) — the
-    single mapping definition both send paths, the re-send and the inbound decode share.
-    Both maps are injective, so the inversion is lossless. Stored on the pending record
-    and the notify sidecar so the reply decode reads the map, never re-derives it.
+    Inverts :func:`payload_labels` (schema key → human-readable payload label) — the single
+    mapping definition both send paths, the re-send and the inbound decode share. The label
+    map is injective, so the inversion is lossless. Stored on the pending record and the
+    notify sidecar so the reply decode reads the map, never re-derives it.
     """
-    return {component: key for key, component in component_names(schema["properties"]).items()}
+    return {label: key for key, label in payload_labels(schema["properties"]).items()}
 
 
 async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, Any]) -> str:
@@ -170,7 +170,7 @@ async def _deliver_form(
     reservation, or a send. The reservation carries the answer schema (so an inbound
     Flow response is coerced to its types), the question text (so a door-rejected answer
     is re-asked), the per-send pages/values/options (so a re-send reproduces the same
-    Flow) and the component-name reverse map (so the reply's component-named keys map
+    Flow) and the payload-label reverse map (so the reply's label-keyed answers map
     back to the schema keys), and uses the ``interaction_id`` as the ``flow_token`` correlating the
     completed form. The published Flow is keyed by the ``(schema, pages, option_fields)``
     triple and the emitted shape (the option-bearing fields decide which string
@@ -201,7 +201,7 @@ async def _deliver_form(
         form_pages=pages,
         form_values=values,
         form_options=options,
-        form_names=_reverse_component_names(delivery.schema),
+        form_names=_reverse_payload_labels(delivery.schema),
     )
     try:
         await send_form_ask_flow(
@@ -231,7 +231,7 @@ async def _send_form_notification(
     LAST — the actionable prompt stays at the foot of the chat. The Flow is
     resolved exactly like a form ask's (one published Flow per answer
     schema, cached under the WABA id), and the answer schema itself (with its
-    component-name reverse map) is cached beside
+    payload-label reverse map) is cached beside
     the flow id — the submission's reply carries only the schema hash inside its
     flow token, so that sidecar is the ONLY place the inbound side can recover the
     schema and map to decode and coerce the values (see :func:`cache_flow_form`). NO correlation is
@@ -255,8 +255,8 @@ async def _send_form_notification(
     sent = await _send_media_prelude(phone_number_id, target, list(notification.media or []))
     flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
     # Written beside every flow-id use — the reply side cannot repopulate it. The
-    # component-name reverse map rides with the schema so the reply decodes to schema keys.
-    await cache_flow_form(waba_id, schema_hash, notification.schema, _reverse_component_names(notification.schema))
+    # payload-label reverse map rides with the schema so the reply decodes to schema keys.
+    await cache_flow_form(waba_id, schema_hash, notification.schema, _reverse_payload_labels(notification.schema))
     flow_token = f"{_NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
     sent.append(
         await send_flow(

@@ -44,8 +44,9 @@ def _render_field(
 ) -> str:
     """Render one subset-validated schema property into an escaped form control.
 
-    ``string`` (per-send ``options`` or ``enum`` -> ``<select>``, else text),
-    ``boolean`` -> checkbox, ``integer``/``number`` -> number input. The property is
+    ``string`` (per-send ``options`` or ``enum`` -> ``<select>``, ``format: date`` -> a
+    ``type="date"`` input, else text — ``time``/``date-time`` are text), ``boolean`` ->
+    checkbox, ``integer``/``number`` -> number input. The property is
     pre-validated by ``channel_form_fields`` (the one subset definition), so its type
     is always a scalar and any ``enum`` is a non-empty list of strings; an unexpected
     type is a server bug and raises ``_FormRenderError``. ``value`` prefills the
@@ -64,8 +65,12 @@ def _render_field(
         elif prop.get("enum") is not None:
             control = _string_select(esc_name, req_attr, [(str(c), str(c)) for c in prop["enum"]], value)
         else:
+            # A ``format: date`` string renders the native date control (its ISO ``YYYY-MM-DD``
+            # value posts unchanged as the string it already is); ``time`` and ``date-time``
+            # render as text — no native control emits the value shape the answer door requires.
+            input_type = "date" if prop.get("format") == "date" else "text"
             val_attr = f' value="{html.escape(str(value), quote=True)}"' if value is not None else ""
-            control = f'<input data-field="{esc_name}" data-kind="string" type="text"{val_attr}{req_attr}>'
+            control = f'<input data-field="{esc_name}" data-kind="string" type="{input_type}"{val_attr}{req_attr}>'
     elif ptype == "boolean":
         # A checkbox always submits a boolean (checked/unchecked), so the field is
         # always present — no ``required`` attribute, which would force it checked.

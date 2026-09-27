@@ -58,6 +58,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
+from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
@@ -409,7 +410,7 @@ def _spawn_detached_delivery(
     (``receives_outcome=False``): no live caller, so the ladder fires the address / subject-tracks
     / drops the terminal.
     """
-    task = asyncio.create_task(
+    task = spawn_root_task(
         drive_and_deliver(
             store,
             identity=identity,

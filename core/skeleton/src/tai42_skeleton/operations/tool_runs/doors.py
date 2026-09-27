@@ -96,20 +96,20 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
     # An HTTP submit carries no execution identity, so an async-parking tool in the
     # detached run could never rebind its continuation (a fire's submit inherits the
     # fire's binding and is left untouched). Bind the caller's OWN key — the same
-    # rebuild the crash-resume re-drive uses, live grants and all — around the spawn
-    # so the copied context carries it; a key whose grants carry no authority binds
-    # nothing and the run has no subject context. The scope resets after the spawn,
-    # by which point the supervisor already copied the identity into its own context.
+    # rebuild the crash-resume re-drive uses, live grants and all — around the spawn so
+    # ``_spawn_supervisor`` captures it into the run's acting context; a key whose grants
+    # carry no authority binds nothing and the run has no subject context. The scope resets
+    # after the spawn, by which point the supervisor already captured the identity.
     from tai42_contract.monitoring import RunAttribution
 
     from tai42_skeleton.states.api_context import caller_execution_identity
     from tai42_skeleton.tools.attribution import reset_run_attribution, set_run_attribution
 
     async with caller_execution_identity(owning_identity):
-        # Deposit the caller's identity as this run's attribution around the spawn so the
-        # supervisor's copied context carries it: a runs-index row the detached dispatch
-        # registers (a preset target) is then born with a ``user_id`` rather than NULL. Reset
-        # after the spawn — the supervisor already copied it — exactly like the bind above.
+        # Deposit the caller's identity as this run's attribution around the spawn so
+        # ``_spawn_supervisor`` captures it into the run's acting context: a runs-index row the
+        # detached dispatch registers (a preset target) is then born with a ``user_id`` rather
+        # than NULL. Reset after the spawn — already captured — exactly like the bind above.
         attribution_token = (
             set_run_attribution(RunAttribution(user_id=owning_identity)) if owning_identity is not None else None
         )
@@ -128,8 +128,8 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
             supervisor.release_active_slot()
             raise
         finally:
-            # Release the submit-scope attribution: the spawned supervisor already copied it
-            # into its own context, and this request must not stay stamped past the submit.
+            # Release the submit-scope attribution: the spawned supervisor already captured it
+            # into the run's acting context, and this request must not stay stamped past the submit.
             if attribution_token is not None:
                 reset_run_attribution(attribution_token)
     return {"run_id": run_id}

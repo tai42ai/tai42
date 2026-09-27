@@ -8,8 +8,9 @@ execution-identity discipline) and the wrap helper that ENTERS
 interprets NOTHING the attribution carries.
 
 A task created inside :func:`run_attribution` runs on a COPY and keeps the attribution for
-its lifetime, exactly like the execution identity — so a detached fire's re-dispatch stays
-attributed.
+its lifetime, exactly like the execution identity. A background run that detaches as a fresh
+root inherits no such copy and rebinds the attribution its spawner captured, so its re-dispatch
+stays attributed without depending on an inherited context.
 """
 
 from __future__ import annotations

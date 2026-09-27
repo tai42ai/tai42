@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import mcp.types
 from fastmcp.tools.base import ToolResult
 from fastmcp.tools.function_tool import FunctionTool
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction, suspended_interaction_marker
@@ -34,6 +35,19 @@ class _SecretRevealingTool(FunctionTool):
     """
 
     def convert_result(self, raw_value: Any) -> ToolResult:
+        if isinstance(raw_value, mcp.types.CallToolResult) and raw_value.isError:
+            # An MCP-mounted tool body returns a whole ``CallToolResult`` only for a dispatch
+            # error (auth blocked, upstream unavailable, or a failed remote call): honour its
+            # ``isError`` on the wire so the MCP ``tools/call`` edge marks it a tool error rather
+            # than a schema-violating success. Without this, FastMCP's serialization would drop
+            # the flag and feed the serialized envelope into the tool's advertised output schema,
+            # which a strict-schema client then rejects. The framed connector envelope rides the
+            # content unchanged, so a client still recovers the code/message from it.
+            return ToolResult(
+                content=list(raw_value.content),
+                structured_content=raw_value.structuredContent,
+                is_error=True,
+            )
         gate = inprocess_reveal_gate.get()
         if gate is not None:
             if isinstance(raw_value, (SuspendedInteraction, ResumeBuffered)):

@@ -11,6 +11,8 @@ format.
 
 from __future__ import annotations
 
+import datetime
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -18,6 +20,64 @@ import jsonschema
 from tai42_contract.interactions import AnswerFormat, AnswerMismatchError, QuestionFormat
 
 from tai42_skeleton.interactions.form_schema import effective_answer_schema
+
+# The channel-form string formats, asserted by the answer door. python-jsonschema treats
+# ``format`` as a bare annotation unless a ``FormatChecker`` carrying a checker for that format
+# is passed to ``validate``; the default checker set needs ``rfc3339-validator`` for ``time`` and
+# ``date-time`` — a package the skeleton does not declare — so these explicit stdlib checkers
+# (shape by regex, calendar by the stdlib) are registered on a checker limited to exactly these
+# three formats. Every other format stays an annotation, matching the channel-form subset.
+_DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+_TIME_RE = re.compile(r"\A\d{2}:\d{2}(:\d{2})?\Z")
+_DATE_TIME_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z")
+
+
+def _is_date(value: object) -> bool:
+    """A ``date`` value is ``YYYY-MM-DD`` (zero-padded) naming a real calendar date."""
+    if not isinstance(value, str):
+        return True
+    if not _DATE_RE.match(value):
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_time(value: object) -> bool:
+    """A ``time`` value is ``HH:MM`` or ``HH:MM:SS`` naming a real wall-clock time."""
+    if not isinstance(value, str):
+        return True
+    if not _TIME_RE.match(value):
+        return False
+    try:
+        datetime.time.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_date_time(value: object) -> bool:
+    """A ``date-time`` value is an RFC 3339 timestamp with a mandatory ``Z``/``±HH:MM`` offset."""
+    if not isinstance(value, str):
+        return True
+    if not _DATE_TIME_RE.match(value):
+        return False
+    try:
+        # RFC 3339 permits a lowercase ``t``/``z``; the only letters a matched value can carry
+        # are those two designators, so upper-casing lets ``fromisoformat`` (which wants the
+        # canonical forms) validate the calendar without loosening the shape the regex fixed.
+        datetime.datetime.fromisoformat(value.upper())
+    except ValueError:
+        return False
+    return True
+
+
+_FORM_FORMAT_CHECKER = jsonschema.FormatChecker(formats=())
+_FORM_FORMAT_CHECKER.checks("date")(_is_date)
+_FORM_FORMAT_CHECKER.checks("time")(_is_time)
+_FORM_FORMAT_CHECKER.checks("date-time")(_is_date_time)
 
 
 def _schema_error_field(exc: Exception) -> str | None:
@@ -64,7 +124,7 @@ def schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None:
     for a root-level or otherwise non-locatable fault). Returns ``None`` when the answer conforms.
     """
     try:
-        jsonschema.validate(answer, schema)
+        jsonschema.validate(answer, schema, format_checker=_FORM_FORMAT_CHECKER)
     except _SCHEMA_VALIDATION_ERRORS as exc:
         return _schema_error_message(exc), _schema_error_field(exc)
     return None

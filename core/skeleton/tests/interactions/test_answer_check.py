@@ -52,6 +52,73 @@ def test_form_rejects_a_non_object_and_a_missing_schema():
         check_answer(_qf(AnswerFormat.FORM, {}), {"x": 1})
 
 
+@pytest.mark.parametrize(
+    ("fmt", "good", "bad"),
+    [
+        ("date", "2024-01-15", "2024-02-30"),
+        ("time", "09:30", "24:00"),
+        ("date-time", "2024-01-15T10:30:00Z", "2024-01-15T10:30:00"),
+    ],
+)
+def test_form_asserts_the_string_formats_on_the_answer(fmt, good, bad):
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": fmt}}}
+    qf = _qf(AnswerFormat.FORM, {"schema": schema})
+    check_answer(qf, {"when": good})
+    with pytest.raises(AnswerMismatchError, match="at when:") as exc:
+        check_answer(qf, {"when": bad})
+    assert exc.value.field == "when"
+
+
+def test_form_date_time_rejects_a_missing_offset_and_a_bad_time():
+    # An RFC 3339 date-time needs a Z/offset; a time out of range fails its own format.
+    dt = _qf(
+        AnswerFormat.FORM,
+        {"schema": {"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}}}},
+    )
+    check_answer(dt, {"at": "2024-01-15T10:30:00+01:00"})
+    with pytest.raises(AnswerMismatchError, match="at at:"):
+        check_answer(dt, {"at": "2024-01-15T10:30:00"})  # no offset
+    tm = _qf(
+        AnswerFormat.FORM, {"schema": {"type": "object", "properties": {"t": {"type": "string", "format": "time"}}}}
+    )
+    check_answer(tm, {"t": "09:30:00"})
+    with pytest.raises(AnswerMismatchError, match="at t:"):
+        check_answer(tm, {"t": "24:00"})
+
+
+@pytest.mark.parametrize(
+    ("fmt", "bad"),
+    [
+        # Regex-matching values whose calendar/wall-clock is invalid, so the shape passes
+        # but the stdlib parse rejects them: the format checker returns False either way.
+        ("time", "9:30"),  # single-digit hour: fails the HH:MM regex
+        ("date-time", "2024-02-30T10:30:00Z"),  # shape ok, calendar impossible
+    ],
+)
+def test_form_format_rejects_shape_ok_but_invalid_value(fmt, bad):
+    qf = _qf(AnswerFormat.FORM, {"schema": {"type": "object", "properties": {"v": {"type": "string", "format": fmt}}}})
+    with pytest.raises(AnswerMismatchError, match="at v:"):
+        check_answer(qf, {"v": bad})
+
+
+@pytest.mark.parametrize("fmt", ["date", "time", "date-time"])
+def test_form_format_leaves_a_non_string_to_the_type_check(fmt):
+    # A format checker only judges strings; a non-string value is a plain type mismatch,
+    # never a format complaint, so the checker passes it through to the ``type`` keyword.
+    qf = _qf(AnswerFormat.FORM, {"schema": {"type": "object", "properties": {"v": {"type": "string", "format": fmt}}}})
+    with pytest.raises(AnswerMismatchError, match="not of type 'string'"):
+        check_answer(qf, {"v": 5})
+
+
+def test_schema_only_asserts_a_declared_format():
+    # A FREE/EXTERNAL schema that declares one of the three formats has it enforced too,
+    # since every answer door flows through the same ``schema_mismatch`` seam.
+    schema = {"type": "object", "properties": {"d": {"type": "string", "format": "date"}}, "required": ["d"]}
+    check_answer(_qf(AnswerFormat.FREE, {"schema": schema}), {"d": "2024-01-15"})
+    with pytest.raises(AnswerMismatchError, match="does not match schema"):
+        check_answer(_qf(AnswerFormat.FREE, {"schema": schema}), {"d": "nope"})
+
+
 def test_free_accepts_any_json_without_a_schema():
     check_answer(_qf(AnswerFormat.FREE), "anything")
     check_answer(_qf(AnswerFormat.FREE), {"a": [1, 2, 3]})

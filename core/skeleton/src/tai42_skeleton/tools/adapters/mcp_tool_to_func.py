@@ -28,12 +28,14 @@ from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorConnectionError,
 )
 from tai42_skeleton.connectors.token_injection import (
+    McpDispatchError,
     call_with_auth,
     check_managed_transport,
     extract_connector_error_payload,
     handle_token_expired,
     is_token_expired,
     managed_auth_error_result,
+    mcp_dispatch_failed_result,
     resolve_managed_auth_for_config,
     upstream_mcp_unavailable_result,
 )
@@ -243,8 +245,10 @@ async def _dispatch_with_reconnect(
     evicting the dead session) OR a connect/init failure building the session
     (ClientConnectError, e.g. a down upstream on cold start) — gets exactly ONE
     fresh-session retry. A retry that still cannot reach the upstream converts to a
-    structured unavailable result so the raw fastmcp text never reaches the consumer;
-    any other dispatch failure propagates raw to the caller.
+    structured unavailable result so the raw fastmcp text never reaches the consumer.
+    Any other dispatch failure propagates to :func:`mcp_tool_call_wrapper`, which types an
+    upstream error/timeout or an output-schema mismatch into a structured tool-error result
+    and re-raises a local misconfiguration or a programming error.
     """
     try:
         response = await _dispatch_once(config, transport, tool_name, arguments, mcp_client)
@@ -307,9 +311,28 @@ async def mcp_tool_call_wrapper(
         # It then flows through the same span-annotation + output path below as any
         # tool error.
         response = managed_auth_error_result(exc)
+    except McpDispatchError as exc:
+        # The upstream was reached but the remote tool call did not yield a usable result — a
+        # protocol error / timeout or a response that violated the tool's advertised output
+        # schema (classified at the single remote-call seam, :func:`call_with_auth`). Record the
+        # health failure against the ORIGINAL cause and surface the SAME structured tool-error
+        # result the auth/unavailable paths produce, so no door sees a raw exception; the raw
+        # text lands in this log line and the health store's last_error, both operator surfaces.
+        # It then flows through the span-annotation + output path below as any tool error.
+        cause = exc.__cause__ or exc
+        logger.exception(
+            "MCP dispatch failed — upstream error or invalid response (mcp='%s' tool='%s')",
+            config.title,
+            _log_safe(tool_name),
+        )
+        mcp_health.record_failure(config.title, cause)
+        response = mcp_dispatch_failed_result(config, tool_name)
     except Exception as exc:
-        # Any other dispatch failure propagates raw to the caller unchanged; record
-        # the health failure first so the status op sees it, then re-raise.
+        # Anything that is NOT a remote-call failure — a local managed-auth misconfiguration (a
+        # resolved empty token, a missing connector ref), a force-refresh failure, or a
+        # programming error in the adapter — is not masked as a tool result: record the health
+        # failure and re-raise loudly. A cancellation (asyncio.CancelledError) is a
+        # BaseException and is never caught here — it always propagates.
         mcp_health.record_failure(config.title, exc)
         raise
 

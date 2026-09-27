@@ -59,12 +59,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# The smallest form answer schema: a text field and an integer field, both required — the
-# integer is what the Flow returns as a string and the coercion turns back into an int.
+# The smallest form answer schema: a text field, an integer field, and a date field, all
+# required — the integer is what the Flow returns as a string and the coercion turns back into
+# an int; the ``format: date`` field renders Meta's date picker and returns a ``YYYY-MM-DD``
+# string the decode leaves unchanged.
 _FORM_SCHEMA = {
     "type": "object",
-    "properties": {"label": {"type": "string"}, "amount": {"type": "integer"}},
-    "required": ["label", "amount"],
+    "properties": {
+        "label": {"type": "string"},
+        "amount": {"type": "integer"},
+        "when": {"type": "string", "format": "date"},
+    },
+    "required": ["label", "amount", "when"],
 }
 
 
@@ -73,20 +79,21 @@ _REFERENCE_RE = re.compile(r"\$\{(?:data|form|screen)\.([^}]+)\}")
 
 
 def _flow_control_names(flow_json: dict) -> list[str]:
-    """Every field component's ``name`` across the Flow's screens (the component names
-    Meta echoes back as the completed form's keys)."""
+    """Every field component's ``name`` across the Flow's screens (the identifier-safe
+    wire names — the completed form is echoed back keyed by the fields' labels instead)."""
     return [
         child["name"]
         for screen in flow_json["screens"]
         for child in screen["layout"]["children"]
-        if child.get("type") in {"TextInput", "Dropdown", "OptIn"}
+        if child.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"}
     ]
 
 
 def _assert_flow_wire_names_identifier_safe(flow_json: dict) -> None:
-    """Every component ``name``, screen-``data`` key, ``on-click-action`` payload key and
+    """Every component ``name``, screen-``data`` key, navigate-``payload`` key and
     ``${data.…}`` / ``${form.…}`` reference the created Flow carries is in Meta's
-    identifier grammar. Labels (which keep the property title) are not wire names."""
+    identifier grammar. Field labels and the terminal ``complete`` action's payload keys
+    (the human-readable completion labels) are not wire names and may carry any character."""
     for reference in _REFERENCE_RE.findall(json.dumps(flow_json)):
         assert _IDENTIFIER_RE.fullmatch(reference), reference
     for name in _flow_control_names(flow_json):
@@ -96,7 +103,7 @@ def _assert_flow_wire_names_identifier_safe(flow_json: dict) -> None:
             assert _IDENTIFIER_RE.fullmatch(data_key), data_key
         for child in screen["layout"]["children"]:
             action = child.get("on-click-action")
-            if isinstance(action, dict):
+            if isinstance(action, dict) and action.get("name") == "navigate":
                 for payload_key in action.get("payload", {}):
                     assert _IDENTIFIER_RE.fullmatch(payload_key), payload_key
 
@@ -467,7 +474,7 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     question = uniq("l7-form-q")
-    good_answer = {"label": uniq("l7-form-label"), "amount": 4}
+    good_answer = {"label": uniq("l7-form-label"), "amount": 4, "when": "2026-09-27"}
     wa_id = _fresh_wa_id()
 
     async def ask() -> object:
@@ -500,11 +507,17 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
         flow_token = params["flow_token"]
 
         # The completed form returns as an nfm_reply matched by the flow token; a Flow number
-        # input arrives as a string, so the answer carries ``"4"``.
+        # input arrives as a string, so the answer carries ``"4"``. The date picker returns a
+        # ``YYYY-MM-DD`` string the decode leaves unchanged.
         reply = bridge.whatsapp_nfm_reply(
             phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
             wa_id=wa_id,
-            response={"flow_token": flow_token, "label": good_answer["label"], "amount": "4"},
+            response={
+                "flow_token": flow_token,
+                "label": good_answer["label"],
+                "amount": "4",
+                "when": "2026-09-27",
+            },
         )
         resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
         assert resp.status_code == 200, resp.text
@@ -522,8 +535,8 @@ async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_ans
 ) -> None:
     # A schema property named with characters Meta's ${data.your_value} grammar forbids
     # still yields a publishable Flow: every component name/key/reference is identifier-safe,
-    # and the completed form (which Meta relays keyed by the COMPONENT names) answers under
-    # the ORIGINAL schema key.
+    # and the completed form (which Meta relays keyed by the fields' human-readable LABELS)
+    # answers under the ORIGINAL schema key.
     question = uniq("l7-odd-q")
     odd_key = "a.b=/c/4:d"
     label_value = uniq("l7-odd-label")
@@ -563,15 +576,14 @@ async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_ans
         flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
         _assert_flow_wire_names_identifier_safe(flow_json)
         assert odd_key not in json.dumps(_flow_control_names(flow_json))
-        # The odd field's component name is the one field name that is not the safe "amount".
-        odd_component = next(name for name in _flow_control_names(flow_json) if name != "amount")
 
         flow_token = send["payload"]["interactive"]["action"]["parameters"]["flow_token"]
-        # Meta relays the completed form keyed by the component names; a number input is a string.
+        # Meta relays the completed form keyed by the fields' human-readable labels ("Label"
+        # for the odd property, "Amount"); a number input arrives as a string.
         reply = bridge.whatsapp_nfm_reply(
             phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
             wa_id=wa_id,
-            response={"flow_token": flow_token, odd_component: label_value, "amount": "5"},
+            response={"flow_token": flow_token, "Label": label_value, "Amount": "5"},
         )
         resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
         assert resp.status_code == 200, resp.text
@@ -579,7 +591,7 @@ async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_ans
     finally:
         await cancel_and_join(ask_task)
 
-    # The component-named reply mapped back to the schema keys and coerced ("5" -> 5).
+    # The label-keyed reply mapped back to the schema keys and coerced ("5" -> 5).
     assert resolved == good_answer
 
 

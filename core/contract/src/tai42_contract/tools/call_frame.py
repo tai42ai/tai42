@@ -24,7 +24,9 @@ The frame has THREE forms:
   one dispatch.
 * DOOR (``name`` is ``None`` and ``continues_chain`` is ``None``) — push nothing:
   a door that opens the frame around a turn whose inner tool dispatch pushes the
-  chain entry itself.
+  chain entry itself. It opens ONLY on a fresh run context (an empty prior
+  ``call_chain`` and no ambient run-delivery context); a door opened while a run is
+  already in flight raises :class:`NestedDoorFrameError`.
 
 A run START — ``continues_chain`` is ``None`` onto an EMPTY prior ``call_chain``,
 whether it PUSHES a name or is the mint-only DOOR form — binds the run-delivery
@@ -63,6 +65,18 @@ class RunDelivery:
 
     run_delivery_id: str
     delivery: tuple[str | None, Mapping[str, Any] | None] | None
+
+
+class NestedDoorFrameError(RuntimeError):
+    """A DOOR-form :func:`tool_call_frame` was opened on a non-fresh run context.
+
+    A door frame is the outermost minting frame of a run: it opens only when no run is already in
+    flight in the current context. This is raised when the door's task inherited a running run's
+    ambient context — a non-empty call chain, or an already-bound run-delivery context — which
+    means the task was spawned as a new root of execution WITHOUT a fresh context. Minting the
+    run's delivery identity under an inherited one would key the new run's terminal to the caller's
+    run instead of to the door's own completion, so the frame refuses to open.
+    """
 
 
 _call_chain: ContextVar[tuple[str, ...]] = ContextVar("tai42_call_chain", default=())
@@ -134,6 +148,18 @@ def tool_call_frame(
     elif name is not None:
         new_chain = (*prior_chain, name)
     else:
+        # DOOR form: the outermost minting frame a door opens around a turn/run whose inner
+        # dispatch pushes the chain entry itself. It opens ONLY on a fresh run context; a
+        # non-empty prior chain or an ambient run-delivery context means the door's task
+        # inherited a running run's context (a root spawned without a fresh context), which
+        # would mis-key the new run's terminal to the caller's run. Refuse loudly.
+        ambient_delivery = _run_delivery.get()
+        if prior_chain or ambient_delivery is not None:
+            raise NestedDoorFrameError(
+                "a door frame opens only on a fresh run context; the door's task inherited a "
+                f"running run's context (call chain {prior_chain!r}, run delivery id "
+                f"{ambient_delivery.run_delivery_id if ambient_delivery is not None else None!r})"
+            )
         new_chain = prior_chain
 
     chain_token = _call_chain.set(new_chain)
@@ -159,6 +185,7 @@ def tool_call_frame(
 
 
 __all__ = [
+    "NestedDoorFrameError",
     "RunDelivery",
     "current_call_chain",
     "current_extras",
