@@ -33,7 +33,7 @@ dependencies = [
     # holds around every reload body, and `tai42_kit.signals` + `tai42_kit.backend`
     # (signal_chain, BackendDispatchSettings), which the backend CLI and the
     # dispatch settings use.
-    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=7.1,<8",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=7.2,<8",
     # The `tai` command client. The server owns no console script; it contributes
     # its local/runtime commands to the CLI through the `tai.commands` entry point.
     "tai42-cli>=12.2,<13",
@@ -106,7 +106,7 @@ skeleton = "tai42_skeleton.cli.local:register"
 # (chain, batch) and a collection of generic tools — loaded from the manifest,
 # never imported by skeleton code. Toolbox's own extras still gate its heavier
 # modules. Loose pin: track compatibility, don't pin the patch.
-toolbox = ["tai42-toolbox>=4.1,<5"]
+toolbox = ["tai42-toolbox>=4.2,<5"]
 
 # File loading + media: opt-in backing deps for the ResourceManager type-detect
 # registry (``load_file``) and the ``file_loader`` builtin. A module whose dep is
