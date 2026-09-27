@@ -13,6 +13,8 @@ discarded at teardown.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.states.errors import RegimeViolationError, ValueValidationError
@@ -66,6 +68,33 @@ def svc(pg: FakeStatesPg, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
     with tai42_app.bound(_FakeApp()):
         yield StatesService(store=PostgresStatesStore())
+
+
+async def test_a_root_task_does_not_inherit_the_ambient_unit(svc: StatesService) -> None:
+    # A unit of work is bound to the caller's scope alone: a root of execution spawned inside
+    # it (``spawn_root_task``) inherits no ambient unit, so its reads go to the store rather
+    # than the caller's staging. An ordinary ``create_task`` WOULD copy the unit; the contrast
+    # is the point.
+    from tai42_skeleton.app.root_task import spawn_root_task
+    from tai42_skeleton.states.service.unit import current_state_unit
+
+    seen: dict = {}
+
+    async def _in_root() -> None:
+        seen["root"] = current_state_unit()
+
+    async def _in_copied() -> None:
+        seen["copied"] = current_state_unit()
+
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        assert current_state_unit() is unit
+        root = spawn_root_task(_in_root())
+        copied = asyncio.create_task(_in_copied())
+        await asyncio.gather(root, copied)
+
+    assert seen["root"] is None  # the root task saw no ambient unit
+    assert seen["copied"] is unit  # a plain copy saw the caller's unit
 
 
 async def test_stage_projects_without_writing_the_store(svc: StatesService, pg: FakeStatesPg) -> None:

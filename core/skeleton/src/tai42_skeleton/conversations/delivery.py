@@ -21,6 +21,7 @@ from uuid import uuid4
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import DeliveryReceipt
 
+from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.delivery_api import _deliver_api, _post_callback
 from tai42_skeleton.conversations.delivery_channel import _deliver_channel
@@ -256,7 +257,7 @@ def spawn_delivery(message_id: str) -> None:
 
 
 def _spawn(coro) -> None:
-    task = asyncio.create_task(coro)
+    task = spawn_root_task(coro)
     _DELIVERY_TASKS.add(task)
     task.add_done_callback(_on_task_done)
 

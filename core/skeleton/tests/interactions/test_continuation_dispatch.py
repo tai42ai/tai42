@@ -9,6 +9,7 @@ the detached fire runs out of band.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -314,6 +315,43 @@ async def test_run_continuation_runs_tool_under_stored_identity(wired, monkeypat
     assert seen[0]["tool"] == "resume_tool"
     assert seen[0]["arguments"] == {"interaction_id": "rc1", "answer": "go"}
     assert seen[0]["user_id"] == "svc-key"  # the STORED identity, never "answerer-x"
+
+
+async def test_detached_continuation_drive_runs_in_a_fresh_root_context(wired, monkeypatch):
+    # The detached drive is a root: a ContextVar set by the answerer does not leak into it,
+    # while the STORED continuation identity is still rebound (never the answerer's).
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+    from tai42_skeleton.authz import execution as execution_module
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_continuation_probe", default="default")
+    seen: dict = {}
+
+    async def _fake_run_tool(tool, arguments, *, continues_chain=None):
+        identity = get_execution_identity()
+        seen["probe"] = probe.get()
+        seen["user_id"] = identity.user_id if identity else None
+        return {"ran": True}
+
+    fake_app = SimpleNamespace(tools=SimpleNamespace(run_tool=_fake_run_tool))
+    monkeypatch.setattr(continuation_module, "tai42_app", fake_app)
+
+    await wired.store.add(
+        wired.fake, async_req(wired.store, iid="fc1"), idle_ttl=86400, continuation_fingerprint="fp-1"
+    )
+    probe_token = probe.set("answerer-value")
+    token = set_request_user_id("answerer-x")
+    try:
+        assert await ops.answer_interaction("fc1", "go") == {"interaction_id": "fc1", "status": "answered"}
+    finally:
+        reset_request_user_id(token)
+        probe.reset(probe_token)
+    await drain()
+
+    assert seen["probe"] == "default"  # the answerer's ContextVar did not leak into the detached drive
+    assert seen["user_id"] == "svc-key"  # the stored identity is still rebound in the fresh root
 
 
 async def test_run_continuation_deposits_resume_origin_for_lifecycle_correlation(wired, monkeypatch):
