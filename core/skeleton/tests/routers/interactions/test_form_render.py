@@ -72,6 +72,27 @@ async def test_get_form_ticket_renders_prefill_and_per_send_options(wired):
     assert ">blue<" not in body
 
 
+async def test_get_form_ticket_renders_format_controls(wired):
+    schema = {
+        "type": "object",
+        "properties": {
+            "day": {"type": "string", "format": "date"},
+            "at": {"type": "string", "format": "time"},
+            "stamp": {"type": "string", "format": "date-time"},
+        },
+    }
+    data = {"values": {"day": "2024-01-15"}}
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # ``format: date`` renders the native date control with the prefilled ISO value.
+    assert 'data-field="day" data-kind="string" type="date" value="2024-01-15"' in body
+    # ``time`` and ``date-time`` render as text — no native control emits a conforming value.
+    assert 'data-field="at" data-kind="string" type="text"' in body
+    assert 'data-field="stamp" data-kind="string" type="text"' in body
+
+
 async def test_get_form_ticket_renders_pages_as_steps(wired):
     schema = {
         "type": "object",

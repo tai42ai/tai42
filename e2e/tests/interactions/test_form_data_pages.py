@@ -37,6 +37,7 @@ _SCHEMA = {
         "label": {"type": "string"},
         "color": {"type": "string", "enum": ["red", "blue"]},
         "count": {"type": "integer"},
+        "when": {"type": "string", "format": "date"},
     },
 }
 
@@ -86,11 +87,11 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
     # ``color`` is prefilled to a PER-SEND option value (``green``) that is NOT in the
     # published enum — the send-only option list replaces the enum, end to end.
     data = {
-        "values": {"label": label, "color": "green"},
+        "values": {"label": label, "color": "green", "when": "2024-01-15"},
         "options": {"color": [{"value": "green", "label": "Green"}, {"value": "amber", "label": "Amber"}]},
     }
-    pages = [{"title": "Who", "fields": ["label", "color"]}, {"title": "How many", "fields": ["count"]}]
-    answer = {"label": label, "color": "green", "count": 4}
+    pages = [{"title": "Who", "fields": ["label", "color"]}, {"title": "How many", "fields": ["count", "when"]}]
+    answer = {"label": label, "color": "green", "count": 4, "when": "2024-01-15"}
 
     async def ask() -> object:
         async with stack.mcp(port=stack.port_a) as mcp:
@@ -127,6 +128,8 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
         assert '<option value="amber">Amber</option>' in body
         assert ">red<" not in body
         assert ">blue<" not in body
+        # A ``format: date`` property renders the native date control, prefilled ISO value.
+        assert 'data-field="when" data-kind="string" type="date" value="2024-01-15"' in body
         # The pages render as ordered steps: the first visible, the rest hidden, with nav.
         assert '<section class="step" data-step="0">' in body
         assert '<section class="step" data-step="1" hidden>' in body
@@ -198,7 +201,7 @@ async def test_bad_form_data_and_pages_are_refused_at_the_ask_door_before_any_st
             "channel": "stub",
             "answer_format": "form",
             "schema": _SCHEMA,
-            "pages": [{"title": "Only", "fields": ["label", "color"]}],
+            "pages": [{"title": "Only", "fields": ["label", "color", "when"]}],
         }
     )
     assert missing_field.is_error

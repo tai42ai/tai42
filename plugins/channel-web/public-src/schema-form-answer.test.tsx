@@ -68,6 +68,43 @@ describe('SchemaFormAnswer', () => {
     expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'b' });
   });
 
+  it('renders a format:date property as a native date input and posts the ISO value', async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { day: { type: 'string', format: 'date', title: 'Day' } },
+    };
+    const { onAnswer, onAnswered } = renderCard(
+      formQuestion(schema, { values: { day: '2024-01-15' }, options: {} }, null),
+    );
+
+    // `format: date` renders the native date control, prefilled with the ISO value.
+    const dateInput = document.querySelector('input[type="date"]');
+    expect(dateInput).not.toBeNull();
+    expect(dateInput).toHaveValue('2024-01-15');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { day: '2024-01-15' });
+  });
+
+  it('renders time and date-time properties as plain text, not native pickers', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        at: { type: 'string', format: 'time', title: 'At' },
+        stamp: { type: 'string', format: 'date-time', title: 'Stamp' },
+      },
+    };
+    renderCard(formQuestion(schema, null, null));
+
+    // Neither native picker is rendered: the value shapes they emit do not conform.
+    expect(document.querySelector('input[type="time"]')).toBeNull();
+    expect(document.querySelector('input[type="datetime-local"]')).toBeNull();
+    // Both fields render as text controls.
+    expect(document.querySelectorAll('input[type="text"]').length).toBe(2);
+  });
+
   it('steps through pages and submits the union of every step', async () => {
     const user = userEvent.setup();
     const schema: JsonSchema = {

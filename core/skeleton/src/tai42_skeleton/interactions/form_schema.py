@@ -7,8 +7,12 @@ A channel form is answered on the server-rendered callback page, a flat HTML for
 the human fills and submits. Only a schema that renders into such a form is
 allowed: root ``{"type": "object"}`` with a non-empty ``properties`` map; every
 property a scalar (``string``/``boolean``/``integer``/``number``); ``enum`` only
-on a ``string`` property, a non-empty list of strings; a ``required`` list, when
-present, naming only declared properties. A property WITHOUT a scalar ``type`` — a
+on a ``string`` property, a non-empty list of strings; ``format`` only on a
+``string`` property, one of ``date``/``time``/``date-time`` (any other ``format``
+value, or a ``format`` on a non-string property, is refused naming the property);
+a ``required`` list, when present, naming only declared properties. ``format`` may
+ride alongside an ``enum`` — the enum's choice control is rendered and the format
+is still enforced when the answer is validated. A property WITHOUT a scalar ``type`` — a
 nested object, an array, a bare ``anyOf``/``oneOf``/``$ref``, a missing type —
 cannot be rendered into a control and is refused, naming the offending property. An
 extra constraint keyword riding alongside a scalar ``type`` (``pattern``,
@@ -27,6 +31,9 @@ from __future__ import annotations
 from typing import Any
 
 _SCALAR_TYPES = ("string", "boolean", "integer", "number")
+# The string formats a channel form may declare, each with a value shape the answer
+# door validates (``date`` -> YYYY-MM-DD, ``time`` -> HH:MM[:SS], ``date-time`` -> RFC 3339).
+_STRING_FORMATS = ("date", "time", "date-time")
 
 
 def _validate_property(name: str, prop: Any) -> None:
@@ -39,6 +46,15 @@ def _validate_property(name: str, prop: Any) -> None:
             f"type ({', '.join(_SCALAR_TYPES)}) — a property without one (nested object, array, bare "
             f"anyOf/oneOf/$ref, missing type) cannot be rendered into a control"
         )
+    fmt = prop.get("format")
+    if fmt is not None:
+        if ptype != "string":
+            raise ValueError(f"form schema property {name!r} has format {fmt!r} but is not a 'string' property")
+        if fmt not in _STRING_FORMATS:
+            raise ValueError(
+                f"form schema property {name!r} has unsupported format {fmt!r}; a channel form allows "
+                f"only {', '.join(_STRING_FORMATS)}"
+            )
     enum = prop.get("enum")
     if enum is None:
         return
