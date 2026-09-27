@@ -90,9 +90,6 @@ class StackResources:
     checkpoint_redis_idx: int | None = None
     checkpoint_redis_url: str | None = None
     llm_base_url: str | None = None
-    # The classifier vendor's root URL (no ``/v1`` path) an agent stack points at;
-    # ``None`` on every stack that does not run the classify tool against the stub.
-    classifier_base_url: str | None = None
     gh_webhook_secret: str | None = None
     # The Stripe integration profile's three coordinates. ``stripe_webhook_secret`` is the
     # HMAC secret the topic's ``stripe`` verifier reads and the test signs deliveries with
@@ -127,6 +124,9 @@ class StackResources:
     # ``{package_index_url}/simple/``). ``None`` on every non-marketplace stack.
     marketplace_url: str | None = None
     package_index_url: str | None = None
+    # The classifier vendor's root URL (no ``/v1`` path) an agent stack points at;
+    # ``None`` on every stack that does not run the classify tool against the stub.
+    classifier_base_url: str | None = None
 
 
 @dataclass(frozen=True)
