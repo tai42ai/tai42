@@ -5,10 +5,20 @@ publishable WhatsApp Flow the human fills in-chat. The supported subset is a
 top-level ``{"type": "object", "properties": {...}, "required": [...]}`` whose
 properties map one-to-one onto Flow field components:
 
-* ``string``                 → ``TextInput``
-* ``string`` with ``enum``   → ``Dropdown`` (dynamic ``data-source`` items)
-* ``boolean``                → ``OptIn``
-* ``integer`` / ``number``   → ``TextInput`` with ``input-type: "number"``
+* ``string``                    → ``TextInput``
+* ``string`` with ``enum``      → ``Dropdown`` (dynamic ``data-source`` items)
+* ``string`` + ``format: date`` → ``DatePicker`` (sets/returns a ``YYYY-MM-DD`` string)
+* ``string`` + ``format: time`` / ``date-time`` → ``TextInput`` (free text; the vendor has no
+  time-of-day picker, and its ``CalendarPicker`` is a calendar, not a date-time control)
+* ``boolean``                   → ``OptIn``
+* ``integer`` / ``number``      → ``TextInput`` with ``input-type: "number"``
+
+``format`` is part of the platform's form-schema subset (validated at the ask door); this
+module only chooses the WhatsApp control for it. A ``DatePicker`` carries no ``required`` field
+— the vendor's component reference defines one for every other input control but not for the
+``DatePicker`` — so a schema's required flag on a date field is not enforced by that control.
+An enum or option-bearing string stays a ``Dropdown`` even with ``format: date``: an explicit
+choice list outranks a format hint.
 
 Each property's ``title`` (else the property name) is the field label; the
 ``required`` list flags the components. Anything outside the subset — a nested
@@ -64,6 +74,7 @@ change to the emitted shape re-keys the published-Flow cache — and keys that c
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import re
@@ -100,6 +111,32 @@ _RESERVED_PROPERTY = "flow_token"
 # Meta's grammar for a Flow component ``name`` / screen-``data`` key / ``${data.…}``
 # reference: a letter or underscore, then letters, digits, underscores.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Meta's ``DatePicker`` (Flow JSON ≥ 5.0) sets and returns a ``YYYY-MM-DD`` string. A date
+# field's prefill must be exactly that shape, so the emitted ``init-value`` is a value the
+# control accepts. The regex fixes the hyphenated calendar-date form; the ``date.fromisoformat``
+# check then rejects an impossible date (e.g. ``2026-13-40``).
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_date_field(prop: Any) -> bool:
+    """Whether a property renders as a ``DatePicker`` — a ``string`` carrying ``"format": "date"``.
+
+    ``format: time`` and ``format: date-time`` are not this: the vendor has no time-of-day
+    picker, so they stay a ``TextInput``.
+    """
+    return isinstance(prop, dict) and prop.get("type") == "string" and prop.get("format") == "date"
+
+
+def _valid_iso_date(value: str) -> bool:
+    """Whether ``value`` is a ``YYYY-MM-DD`` calendar date the ``DatePicker`` accepts."""
+    if not _ISO_DATE_RE.match(value):
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _sanitize_name(key: str) -> str:
@@ -274,6 +311,11 @@ def _dynamic_component(
             "data-source": f"${{data.{cname}__ds}}",
             "init-value": init,
         }
+    if _is_date_field(prop):
+        # The vendor's DatePicker reference defines no ``required`` parameter (unlike every
+        # other input control), and Meta rejects an unknown component property at publish, so
+        # the required flag is deliberately not emitted here.
+        return {"type": "DatePicker", "name": cname, "label": label, "init-value": init}
     if prop_type == "string":
         return {"type": "TextInput", "name": cname, "label": label, "required": required, "init-value": init}
     if prop_type == "boolean":
@@ -544,7 +586,8 @@ def build_form_flow(
     supplies the values/options through ``flow_action_payload.data``. A string property
     renders as a choice ``Dropdown`` when it carries a schema ``enum`` or when
     ``option_fields`` (the ask's option-bearing set, the ``data.options`` keys) names it;
-    any other string stays a ``TextInput``. Collected values thread forward across
+    a plain string with ``format: date`` renders a ``DatePicker`` (``YYYY-MM-DD``); any other
+    string stays a ``TextInput``. Collected values thread forward across
     screens and the terminal screen completes with the flat union of every field.
     ``key`` is the hash of the ``(schema, pages, option_fields)`` and the emitted
     ``flow_json``. Pure — no I/O. Raises ``ChannelInputError`` naming any property
@@ -601,7 +644,9 @@ def build_flow_data(
     A choice field is a string property that carries a schema ``enum`` OR one the send
     marks option-bearing (a key in ``options``) — matching the published Flow's dynamic
     dropdowns. A per-send option list keyed on a NON-STRING property cannot be honored
-    (only a string maps to a dropdown) and is refused loudly, naming the field. Raises
+    (only a string maps to a dropdown) and is refused loudly, naming the field. A prefill
+    on a ``format: date`` field that is not a valid ``YYYY-MM-DD`` string is refused loudly
+    too — that is the only shape Meta's date picker accepts — before any network work. Raises
     ``ChannelInputError``.
     """
     values = values or {}
@@ -626,6 +671,11 @@ def build_flow_data(
         prop_type = prop.get("type") if isinstance(prop, dict) else None
         if name in values:
             raw = values[name]
+            if _is_date_field(prop) and not (isinstance(raw, str) and _valid_iso_date(raw)):
+                raise ChannelInputError(
+                    f"form property {name!r}: a date field prefill must be a 'YYYY-MM-DD' string "
+                    f"(the shape Meta's date picker sets and returns), got {raw!r}"
+                )
             data[f"{cname}__init"] = bool(raw) if prop_type == "boolean" else raw if isinstance(raw, str) else str(raw)
         else:
             data[f"{cname}__init"] = False if prop_type == "boolean" else ""

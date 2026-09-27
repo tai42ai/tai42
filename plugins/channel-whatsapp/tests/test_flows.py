@@ -36,7 +36,9 @@ def _assert_only_identifier_safe_wire_names(flow_json: dict) -> None:
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
-            if node.get("type") in {"TextInput", "Dropdown", "OptIn"} and isinstance(node.get("name"), str):
+            if node.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"} and isinstance(
+                node.get("name"), str
+            ):
                 assert _IDENTIFIER_RE.match(node["name"]), node["name"]
             if isinstance(node.get("data"), dict):
                 for key in node["data"]:
@@ -205,6 +207,88 @@ def test_integer_and_number_map_to_number_text_input(json_type: str):
         "input-type": "number",
         "init-value": "${data.qty__init}",
     }
+
+
+# -- the format: date → DatePicker mapping ------------------------------------
+
+
+def test_string_with_format_date_maps_to_date_picker_without_required():
+    # A DatePicker carries no ``required`` field: the vendor's component reference defines
+    # one for every other input control but not for the DatePicker, and Meta rejects an
+    # unknown component property at publish.
+    schema = {
+        "type": "object",
+        "properties": {"when": {"type": "string", "format": "date", "title": "Pick a date"}},
+        "required": ["when"],
+    }
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "DatePicker",
+        "name": "when",
+        "label": "Pick a date",
+        "init-value": "${data.when__init}",
+    }
+    assert "required" not in field
+
+
+@pytest.mark.parametrize("fmt", ["time", "date-time"])
+def test_string_with_format_time_or_date_time_stays_text_input(fmt: str):
+    # The vendor has no time-of-day picker, so these render as a plain text input; the ask
+    # door validates the submitted shape.
+    schema = {"type": "object", "properties": {"at": {"type": "string", "format": fmt}}, "required": ["at"]}
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "TextInput",
+        "name": "at",
+        "label": "at",
+        "required": True,
+        "init-value": "${data.at__init}",
+    }
+
+
+def test_enum_outranks_format_date_and_still_renders_a_dropdown():
+    # An explicit choice list is a stronger instruction than a format hint.
+    schema = {
+        "type": "object",
+        "properties": {"day": {"type": "string", "format": "date", "enum": ["2026-09-27", "2026-09-28"]}},
+        "required": ["day"],
+    }
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "Dropdown"
+
+
+def test_option_bearing_outranks_format_date_and_still_renders_a_dropdown():
+    schema = {"type": "object", "properties": {"day": {"type": "string", "format": "date"}}, "required": ["day"]}
+
+    field = _controls(build_form_flow(schema, None, {"day"})[0])[0]
+    assert field["type"] == "Dropdown"
+
+
+def test_valid_date_prefill_rides_as_the_init_string():
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+
+    data = build_flow_data(schema, {"when": "2026-09-27"}, {})
+    assert data["when__init"] == "2026-09-27"
+
+
+def test_absent_date_prefill_defaults_to_empty_string():
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+
+    data = build_flow_data(schema, {}, {})
+    assert data["when__init"] == ""
+
+
+@pytest.mark.parametrize(
+    "bad", ["27/09/2026", "2026-9-7", "2026-13-40", "not-a-date", "20260927", "2026-09-27T00:00", 5]
+)
+def test_invalid_date_prefill_is_refused_naming_the_property(bad: object):
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+
+    with pytest.raises(ChannelInputError, match="when"):
+        build_flow_data(schema, {"when": bad}, {})
 
 
 # -- the vendor-legality invariants (no Form, control-level init-value, letters ids) --

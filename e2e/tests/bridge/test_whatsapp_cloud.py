@@ -59,12 +59,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# The smallest form answer schema: a text field and an integer field, both required — the
-# integer is what the Flow returns as a string and the coercion turns back into an int.
+# The smallest form answer schema: a text field, an integer field, and a date field, all
+# required — the integer is what the Flow returns as a string and the coercion turns back into
+# an int; the ``format: date`` field renders Meta's date picker and returns a ``YYYY-MM-DD``
+# string the decode leaves unchanged.
 _FORM_SCHEMA = {
     "type": "object",
-    "properties": {"label": {"type": "string"}, "amount": {"type": "integer"}},
-    "required": ["label", "amount"],
+    "properties": {
+        "label": {"type": "string"},
+        "amount": {"type": "integer"},
+        "when": {"type": "string", "format": "date"},
+    },
+    "required": ["label", "amount", "when"],
 }
 
 
@@ -79,7 +85,7 @@ def _flow_control_names(flow_json: dict) -> list[str]:
         child["name"]
         for screen in flow_json["screens"]
         for child in screen["layout"]["children"]
-        if child.get("type") in {"TextInput", "Dropdown", "OptIn"}
+        if child.get("type") in {"TextInput", "Dropdown", "OptIn", "DatePicker"}
     ]
 
 
@@ -468,7 +474,7 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     question = uniq("l7-form-q")
-    good_answer = {"label": uniq("l7-form-label"), "amount": 4}
+    good_answer = {"label": uniq("l7-form-label"), "amount": 4, "when": "2026-09-27"}
     wa_id = _fresh_wa_id()
 
     async def ask() -> object:
@@ -501,11 +507,17 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
         flow_token = params["flow_token"]
 
         # The completed form returns as an nfm_reply matched by the flow token; a Flow number
-        # input arrives as a string, so the answer carries ``"4"``.
+        # input arrives as a string, so the answer carries ``"4"``. The date picker returns a
+        # ``YYYY-MM-DD`` string the decode leaves unchanged.
         reply = bridge.whatsapp_nfm_reply(
             phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
             wa_id=wa_id,
-            response={"flow_token": flow_token, "label": good_answer["label"], "amount": "4"},
+            response={
+                "flow_token": flow_token,
+                "label": good_answer["label"],
+                "amount": "4",
+                "when": "2026-09-27",
+            },
         )
         resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
         assert resp.status_code == 200, resp.text

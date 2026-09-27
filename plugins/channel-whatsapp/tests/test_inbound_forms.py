@@ -21,6 +21,7 @@ from tai42_channel_whatsapp.inbound.forms import (
     _FORM_REJECTION_LEAD,
     _FORM_UNPROCESSABLE,
     _MAX_FORM_REJECTIONS,
+    _coerce_value,
 )
 
 from .conftest import (
@@ -49,6 +50,15 @@ pytestmark = pytest.mark.usefixtures("whatsapp_env")
 # --- Form (Flow) replies: nfm_reply -------------------------------------------
 
 _WABA_ID = "WABA-100"
+
+
+def test_date_value_passes_the_decode_unchanged():
+    # Meta's date picker returns a ``YYYY-MM-DD`` string; a ``format: date`` property is a
+    # plain string, so the decode leaves it verbatim (no coercion) — the value then satisfies
+    # the schema's ``format: date`` at the door.
+    prop = {"type": "string", "format": "date"}
+    assert _coerce_value("2026-09-27", prop) == "2026-09-27"
+    assert isinstance(_coerce_value("2026-09-27", prop), str)
 
 
 def _flow_cache_key() -> str:
