@@ -117,8 +117,8 @@ async def test_plain_text_is_not_a_failure(misbehaving_mcp_stack: TaiStack) -> N
 
 @pytest.mark.parametrize("tool", [_BAD_SCHEMA_TOOL, _HANG_TOOL])
 async def test_dispatch_failure_typed_on_http_door(misbehaving_mcp_stack: TaiStack, tool: str) -> None:
-    # The sync run-tool HTTP door: the dispatch failure is no longer a raw 500 leaking the SDK's
-    # message — it is a 200 carrying the structured tool-error result the caller can read.
+    # The sync run-tool HTTP door: a dispatch failure is a 200 carrying the structured tool-error
+    # result the caller can read, never a 500 leaking the SDK's message.
     resp = await _run_tool_http(misbehaving_mcp_stack, tool)
     assert resp.status_code == 200, f"a typed tool-error result must not be a 500: {resp.status_code} {resp.text}"
     _assert_dispatch_failed(_framed_payload(_collect_strings(resp.json())), tool)
