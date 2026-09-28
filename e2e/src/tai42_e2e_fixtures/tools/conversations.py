@@ -28,3 +28,29 @@ async def e2e_sweep_stalled_deliveries() -> dict:
 
     await sweep_stalled_deliveries()
     return {"swept": True, "pid": os.getpid()}
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_channel_inbound(
+    channel: str,
+    our_identity: str,
+    client_address: str,
+    text: str,
+    provider_message_id: str,
+) -> dict:
+    """Accept one inbound message on ``channel`` IN THIS process and report its record id.
+
+    A stub channel registers no inbound HTTP door, so a test cannot POST a webhook to it;
+    this probe drives the same ``tai42_app.conversations.accept`` seam a real channel
+    adapter calls, scheduling a bridged turn on the ``(channel, our_identity)`` route. The
+    accountable per-address cap key is the ``client_address`` (a stub channel's attested
+    address). The turn runs in the background; the accepted ``message_id`` is returned at once."""
+    message_id = await tai42_app.conversations.accept(
+        channel=channel,
+        our_identity=our_identity,
+        client_address=client_address,
+        cap_key=client_address,
+        text=text,
+        provider_message_id=provider_message_id,
+    )
+    return {"message_id": message_id, "pid": os.getpid()}

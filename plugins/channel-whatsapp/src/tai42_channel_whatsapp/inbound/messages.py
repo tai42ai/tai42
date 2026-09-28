@@ -1,7 +1,7 @@
 """Per-message-type router: dispatch one inbound message to its handler.
 
 The type→handler dispatch table keeps ``_handle_message`` a flat pipeline
-(validate id → mark known contact → typing signal → extract context params →
+(validate id → mark known contact → mark read → extract context params →
 dispatch), with the media types sharing one handler via a bound ``message_type``.
 """
 
@@ -16,7 +16,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import InboundRejectionReason
 
-from tai42_channel_whatsapp.client import mark_read_typing
+from tai42_channel_whatsapp.client import mark_read
 from tai42_channel_whatsapp.correlation import already_seen, mark_known_contact, mark_seen
 from tai42_channel_whatsapp.inbound.params import _message_context_params
 from tai42_channel_whatsapp.inbound.replies import _handle_button, _handle_interactive, _handle_text
@@ -116,15 +116,17 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
     if phone_number_id and wa_id:
         await mark_known_contact(phone_number_id, wa_id)
 
-    # Signal "working on it" the moment an inbound lands — mark it read and show a
-    # typing indicator BEFORE the type branches so it covers text, interactive,
-    # media, and correlated question-replies alike. A delivery failure is logged,
-    # never raised: an error here would 5xx the batch and make Meta redeliver it.
+    # Mark the inbound read the moment it lands — the read receipt for every inbound,
+    # sent BEFORE the type branches so it covers text, interactive, media, and
+    # correlated question-replies alike. The turn-scoped working signal (the typing
+    # indicator) is owned by the skeleton's refresh loop, not this receipt. A delivery
+    # failure is logged, never raised: an error here would 5xx the batch and make Meta
+    # redeliver it.
     if phone_number_id:
         try:
-            await mark_read_typing(phone_number_id, wamid)
+            await mark_read(phone_number_id, wamid)
         except ChannelDeliveryError as exc:
-            logger.warning("whatsapp typing signal for %s failed: %s", wamid, exc)
+            logger.warning("whatsapp read receipt for %s failed: %s", wamid, exc)
 
     # Referral (ctwa/QR entry) and reply-to context are message-level and ride on
     # WHATEVER turn this message bridges, regardless of its type. Extract once, thread down.

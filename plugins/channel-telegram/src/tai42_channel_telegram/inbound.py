@@ -38,7 +38,7 @@ from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import InboundRejectionReason
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
-from tai42_channel_telegram.client import answer_callback_query, send_chat_action
+from tai42_channel_telegram.client import answer_callback_query
 from tai42_channel_telegram.correlation import get_options
 from tai42_channel_telegram.inbound_bridge import (
     _bridge,
@@ -287,16 +287,6 @@ async def inbound(request: Request) -> Response:
         return fields
     if isinstance(fields, _Unsupported):
         return await _reject_unsupported(settings, fields.chat_id, fields.kind)
-    chat_id = fields.chat_id
-
-    # Signal "working on it" the moment a processable message lands — a typing
-    # action shown BEFORE the ask/bridge split so it covers both paths. A delivery
-    # failure is logged, never raised: it must not fail the webhook (Telegram
-    # would redeliver the whole update).
-    try:
-        await send_chat_action(chat_id, "typing")
-    except ChannelDeliveryError as exc:
-        logger.warning("telegram inbound: typing action for chat_id=%s failed: %s", chat_id, exc)
 
     # A media message is fetched and ingested into served media FIRST, then routed by the same
     # reply-correlation the text path uses: a reply to a still-pending ask resolves it (text +

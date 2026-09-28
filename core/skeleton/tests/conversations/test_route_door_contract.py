@@ -15,6 +15,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, StructuredFinal
+from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.interactions import ParkedEntry, VisitOutcome
 from tai42_contract.template import TemplatedText
@@ -104,9 +105,12 @@ def _wire_agent(monkeypatch, route: ConversationRoute, agent: Agent) -> None:
 
 
 async def _run_agent(route: ConversationRoute):
-    return await agent_turn_module._run_agent_turn(
-        route, "hello", "bridge:chat:+15550002222", "+15550002222", **_turn_args(route)
-    )
+    # The agent turn reaches the interactions layer through the ``tai42_app`` proxy (the extras
+    # declaration check), which serve binds to ``instance.app`` at startup; bind it here the same way.
+    with tai42_app.bound(instance.app):
+        return await agent_turn_module._run_agent_turn(
+            route, "hello", "bridge:chat:+15550002222", "+15550002222", **_turn_args(route)
+        )
 
 
 async def test_tool_route_start_expr_null_starts_nothing(monkeypatch):
@@ -286,6 +290,8 @@ async def test_agent_route_extras_expr_undeclared_key_surfaces_the_refusal(monke
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
     assert outcome.answer_status == "error"
     assert "turn error" in (outcome.error or "")
+    # The refusal names the undeclared key, so no unrelated fault can satisfy this assertion.
+    assert "nope" in (outcome.error or "")
     assert agent.seen == []
 
 

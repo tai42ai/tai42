@@ -79,6 +79,12 @@ tai conversations create slack-chat \
   --channel slack --identity U0XXXXXXX
 ```
 
+## Working-on-it signal
+
+Slack shows no bot typing indicator: the Web API exposes none for a bot user (only
+the RTM/Socket `user_typing` frame this plugin does not use), so this channel emits
+no working-on-it signal while a turn runs. The answer posts back when it is ready.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

@@ -98,6 +98,16 @@ Content Telegram can send that this channel does not map to a media kind — a *
 participant gets one generic "unsupported" notice and a platform event records the drop,
 so nothing is silently lost.
 
+## Working-on-it signal
+
+While a message runs its turn, the platform keeps Telegram's **typing action**
+alive: it re-issues `sendChatAction "typing"` ahead of the action's ~5 s lifetime
+until the reply is sent, so the chat shows the bot typing for the whole wait rather
+than for a single burst at receipt. The refresh is bounded by the
+`CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling (`0` disables it entirely), with
+`CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS` the margin it refreshes ahead
+of each lapse.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

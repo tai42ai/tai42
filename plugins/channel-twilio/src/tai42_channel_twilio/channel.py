@@ -175,6 +175,9 @@ class TwilioChannel:
     """
 
     supports_media_notifications: ClassVar[bool] = True
+    # SMS and WhatsApp-over-Twilio carry no typing indicator, so this channel
+    # emits no working-on-it signal.
+    working_signal_expiry_seconds: ClassVar[None] = None
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Resolve the "To" number, then push the question to it.

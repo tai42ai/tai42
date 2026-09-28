@@ -503,6 +503,12 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
     fresh-send admission → send plan → send loop → mark provisional + fallback confirmation.
     """
     from tai42_skeleton.conversations import delivery as _pkg
+    from tai42_skeleton.conversations.turn import working_signal
+
+    # The turn's answer is about to send, so stop refreshing its working-on-it indicator. A
+    # cross-process delivery finds no task in its own registry and relies on the loop's own
+    # per-tick status read to stop instead.
+    working_signal.stop(record.message_id)
 
     settings = store.settings
     channel, channel_name, max_chars, answer = await _channel_delivery_preconditions(store, record, token)

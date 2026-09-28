@@ -98,6 +98,25 @@ async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
     return messages[0]["id"]
 
 
+async def mark_read(phone_number_id: str, wamid: str) -> None:
+    """Mark inbound ``wamid`` read (the read receipt only, no typing indicator).
+
+    POSTs the mark-as-read body to ``{api}/{phone_number_id}/messages`` (Graph
+    v23.0). Meta answers ``{"success": true}`` with no ``messages[].id``, so this
+    rides ``_send`` directly and discards the body — ``_post`` is unusable here (it
+    demands a returned message id). Raises ``ChannelDeliveryError`` on the ``_send``
+    failure modes; the inbound caller swallows it — a read receipt must never fail a
+    batch.
+    """
+    url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
+    payload: dict[str, object] = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": wamid,
+    }
+    await _send(url, payload)
+
+
 async def mark_read_typing(phone_number_id: str, wamid: str) -> None:
     """Mark inbound ``wamid`` read and show a typing indicator to its sender.
 
@@ -105,8 +124,9 @@ async def mark_read_typing(phone_number_id: str, wamid: str) -> None:
     ``{api}/{phone_number_id}/messages`` (Graph v23.0). Meta answers
     ``{"success": true}`` with no ``messages[].id``, so this rides ``_send``
     directly and discards the body — ``_post`` is unusable here (it demands a
-    returned message id). Raises ``ChannelDeliveryError`` on the ``_send`` failure
-    modes; the inbound caller swallows it — a typing hint must never fail a batch.
+    returned message id). Re-marking read is idempotent, so the working-signal loop
+    re-sends this to refresh the indicator, which Meta dismisses after 25 s or on the
+    reply. Raises ``ChannelDeliveryError`` on the ``_send`` failure modes.
     """
     url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
     payload = {

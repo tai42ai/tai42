@@ -84,6 +84,11 @@ tai conversations create chat-line \
 A `(channel, identity)` pair may be claimed by only one route; more senders are
 more rows.
 
+## Working-on-it signal
+
+SMS and WhatsApp-over-Twilio carry no typing indicator, so this channel emits no
+working-on-it signal while a turn runs. The answer is delivered when it is ready.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

@@ -20,7 +20,7 @@ from tai42_channel_whatsapp.channel.interactive import _INTERACTIVE_BODY_MAX_CHA
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
-from tai42_channel_whatsapp.client import send_message
+from tai42_channel_whatsapp.client import mark_read_typing, send_message
 from tai42_channel_whatsapp.correlation import release_pending, reserve_pending
 from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
@@ -44,6 +44,10 @@ class WhatsAppChannel:
     # This channel renders a form ask as a WhatsApp Flow; the ask helper reads
     # this before handing a form delivery over.
     supports_form_delivery: ClassVar[bool] = True
+    # Meta dismisses the typing indicator after 25 s (or on the reply); the skeleton's
+    # refresh loop re-asserts it under this lifetime until the answer is sent.
+    # https://developers.facebook.com/docs/whatsapp/cloud-api/guides/mark-messages-as-read#typing-indicators
+    working_signal_expiry_seconds: ClassVar[float] = 25.0
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
         """Enforce this channel's form-schema limits at ask-time, before any state is written.
@@ -160,3 +164,35 @@ class WhatsAppChannel:
         if notification.schema is not None:
             return await _send_form_notification(settings, phone_number_id, target, notification)
         return await _send_notification(phone_number_id, target, notification)
+
+    async def signal_working(
+        self,
+        *,
+        recipient: str,
+        sender_identity: str | None = None,
+        provider_message_id: str | None = None,
+        active: bool = True,
+    ) -> None:
+        """Assert the "working-on-it" typing indicator against the inbound message.
+
+        Meta ties the typing indicator to the mark-as-read request for a specific
+        inbound ``wamid`` and offers no explicit stop — it dismisses on the reply or
+        after 25 s — so ``active=False`` is a documented no-op. With no inbound
+        ``provider_message_id`` there is no message to attach typing to, so the call
+        returns quietly. Otherwise it resolves the sending ``phone_number_id`` exactly
+        as ``notify`` does (``sender_identity`` else the configured default) and
+        re-sends the combined read+typing body (re-marking read is idempotent). A send
+        failure raises ``ChannelDeliveryError`` for the caller's refresh loop to log
+        and count.
+        """
+        if not active:
+            return
+        if provider_message_id is None:
+            return
+        if sender_identity is not None:
+            phone_number_id = sender_identity
+        else:
+            phone_number_id = require_delivery_setting(
+                whatsapp_settings().default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
+            )
+        await mark_read_typing(phone_number_id, provider_message_id)

@@ -60,16 +60,6 @@ def _body(response: Any) -> dict[str, Any]:
     return json.loads(response.body)
 
 
-def _forward_requests(recorder: Any) -> list[httpx.Request]:
-    """Recorded outbound requests minus the inbound ``sendChatAction`` typing
-    signal, which fires for every processable message ahead of the ask/bridge split."""
-    return [r for r in recorder.requests if not str(r.url).endswith("/sendChatAction")]
-
-
-def _typing_requests(recorder: Any) -> list[httpx.Request]:
-    return [r for r in recorder.requests if str(r.url).endswith("/sendChatAction")]
-
-
 def test_route_metadata(stub_app):
     sys.modules.pop("tai42_channel_telegram.inbound", None)
     importlib.import_module("tai42_channel_telegram.inbound")
@@ -103,7 +93,7 @@ async def test_valid_reply_invokes_shared_ladder_and_acks_forwarded(http_recorde
     assert call.bridge.provider_message_id == "5"  # the update id
     assert call.bridge.bridge_text == "the blue one"
     # The plugin does not forward itself; the ladder owns that.
-    assert _forward_requests(http_recorder) == []
+    assert http_recorder.requests == []
 
 
 async def test_missing_wrong_and_wrong_length_secret_all_deny_identically(http_recorder, fake_redis):
@@ -263,7 +253,7 @@ async def test_uncorrelated_routed_message_reaches_bridge_with_verbatim_args(htt
     response = await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "accepted"}}
-    assert _forward_requests(http_recorder) == []  # bridge makes no forward call
+    assert http_recorder.requests == []  # bridge makes no forward call
     assert len(conversations.accept_calls) == 1
     call = conversations.accept_calls[0]
     assert call.channel == "telegram"
@@ -281,34 +271,14 @@ async def test_bridge_maps_the_sender_language_code_to_the_turn_locale(http_reco
     assert conversations.accept_calls[0].locale == "pt-BR"
 
 
-async def test_inbound_fires_typing_chat_action_before_bridge(http_recorder, fake_redis, conversations):
-    # Every processable message shows a "working on it" typing action: a
-    # sendChatAction POST carrying {chat_id, action: "typing"}, fired ahead of the
-    # ask/bridge split; the message still bridges.
+async def test_inbound_bridges_and_makes_no_chat_action(http_recorder, fake_redis, conversations):
+    # The inbound door bridges a processable message to a turn and makes no outbound
+    # Bot API call itself: the working-on-it typing action is the turn's refresh loop's
+    # job, driven by the channel's ``signal_working``, not the inbound path's.
     response = await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
-    typing = _typing_requests(http_recorder)
-    assert len(typing) == 1
-    assert typing[0].method == "POST"
-    assert str(typing[0].url).endswith("/sendChatAction")
-    assert json.loads(typing[0].content) == {"chat_id": 777, "action": "typing"}
-    assert len(conversations.accept_calls) == 1  # bridge still reached
-
-
-async def test_typing_action_failure_is_logged_and_webhook_survives(http_recorder, fake_redis, conversations, caplog):
-    # A non-200 on sendChatAction raises ChannelDeliveryError inside the client; the
-    # door catches it, logs at WARNING, and the message still bridges (never a 5xx
-    # that would make Telegram redeliver the whole update).
-    http_recorder.responder = lambda request: (
-        httpx.Response(500) if str(request.url).endswith("/sendChatAction") else httpx.Response(200, json={"ok": True})
-    )
-    with caplog.at_level("WARNING"):
-        response = await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
-    assert response.status_code == 200
-    assert _body(response) == {"data": {"status": "accepted"}}
-    assert len(_typing_requests(http_recorder)) == 1  # the signal was attempted
-    assert any("typing action" in record.message for record in caplog.records)
-    assert len(conversations.accept_calls) == 1  # bridge still reached
+    assert len(conversations.accept_calls) == 1  # bridge reached
+    assert http_recorder.requests == []  # no sendChatAction fired by inbound
 
 
 async def test_uncorrelated_unrouted_message_is_acked_no_turn(http_recorder, fake_redis, conversations):
@@ -354,7 +324,7 @@ async def test_expired_force_reply_falls_through_to_bridge(http_recorder, fake_r
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "accepted"}}
     assert len(channels.inbound_calls) == 1  # the ladder was consulted first
-    assert _forward_requests(http_recorder) == []  # bridge makes no forward call
+    assert http_recorder.requests == []  # bridge makes no forward call
     assert len(conversations.accept_calls) == 1
     call = conversations.accept_calls[0]
     assert call.client_address == "777"
@@ -716,7 +686,7 @@ async def test_recipient_reply_with_malformed_bot_token_misconfigures(
 ):
     # Resolving a recipient-chat answer derives this bot's numeric id from the token; a
     # token with no numeric prefix is a loud 500 (channel misconfigured), never a silent
-    # resolve. The typing action still fires (the token is non-empty, just malformed).
+    # resolve.
     monkeypatch.setenv("CHANNEL_TELEGRAM_BOT_TOKEN", "no-colon-token")
     reset_all_settings()
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
@@ -820,7 +790,7 @@ def _fake_open_stream(
 
 def _getfile_responder(*, file_path: str = "photos/file_1.jpg", status: int = 200, ok: bool = True):
     """An http_recorder responder: ``getFile`` answers per ``status``/``ok``/``file_path``; every
-    other call (the typing ``sendChatAction``) gets a generic ok:true result."""
+    other call gets a generic ok:true result."""
 
     def responder(request: httpx.Request) -> httpx.Response:
         if str(request.url).endswith("/getFile"):
@@ -1330,20 +1300,6 @@ async def test_telegram_placeholder_label_uses_sanitised_filename(
     assert call.text == f"[document: {sanitised}]"
     assert raw_name not in call.text
     assert all(raw_name not in value for value in call.params.values())
-
-
-async def test_media_fires_typing_before_fetch(
-    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
-):
-    # A media message is a processable message: the "working on it" typing action fires before the
-    # fetch/ingest, exactly as for a text message.
-    http_recorder.responder = _getfile_responder()
-    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
-    media.ingest_result = _ingested(MediaKind.IMAGE)
-    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
-    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
-    typing = [r for r in http_recorder.requests if str(r.url).endswith("/sendChatAction")]
-    assert len(typing) == 1
 
 
 async def test_unmappable_content_notifies_rejection_and_makes_no_turn(http_recorder, fake_redis, conversations):

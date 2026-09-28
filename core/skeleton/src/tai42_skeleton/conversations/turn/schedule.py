@@ -21,7 +21,7 @@ from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import OVERLAP_DELIVERY_STATUSES, ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.turn import accessors, overlap, redrive, target
+from tai42_skeleton.conversations.turn import accessors, overlap, redrive, target, working_signal
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
@@ -114,6 +114,7 @@ async def _schedule_turn(
         task.add_done_callback(lambda t: _spawn_delivery_on_success(t, intake.message_id))
     else:
         task.add_done_callback(_TURN_TASKS.discard)
+    working_signal.start(intake)
     return task
 
 

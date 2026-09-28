@@ -188,6 +188,17 @@ inbound webhook received a message from within
 `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS`. A template send to a cold,
 unlisted number is refused loudly.
 
+## Working-on-it signal
+
+While a message runs its turn, the platform keeps WhatsApp's **typing indicator**
+alive: it re-sends the indicator ahead of Meta's ~25 s dismissal window until the
+reply is sent, so the participant sees it for the whole wait rather than only the
+first few seconds. The refresh is bounded by the
+`CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling (`0` disables it entirely), with
+`CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS` the margin it refreshes ahead
+of each lapse. An inbound message is marked **read** the moment it is received,
+independent of the indicator.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

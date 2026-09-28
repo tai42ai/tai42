@@ -1,5 +1,6 @@
 """Outbound payload builders (wire shape) — image/document/video/audio/location,
-templates, the interactive button/list/cta_url shapes, and the read+typing signal."""
+templates, the interactive button/list/cta_url shapes, the read receipt, and the
+read+typing signal."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from tai42_contract.channels import (
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_whatsapp.client import (
+    mark_read,
     mark_read_typing,
     send_audio,
     send_document,
@@ -250,6 +252,33 @@ async def test_send_document_video_audio_location_builders(fake_redis: FakeRedis
         "type": "location",
         "location": {"latitude": 51.5, "longitude": -0.12, "name": "Office", "address": "1 High St"},
     }
+
+
+async def test_mark_read_rides_send_and_posts_read_only_body(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The read receipt answers {"success": true} with NO messages[].id, so it rides
+    # `_send` (which `_post`'s id-guard would reject) and posts the read-only Graph
+    # v23.0 body (no typing_indicator) to /{phone_number_id}/messages.
+    fake_httpx.typing_response = response(200, json={"success": True})
+    await mark_read(PHONE_NUMBER_ID, "wamid.IN")
+
+    assert len(fake_httpx.typing_calls) == 1
+    signal = fake_httpx.typing_calls[0]
+    assert signal["url"] == _MESSAGES_URL
+    assert signal["json"] == {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": "wamid.IN",
+    }
+    assert "typing_indicator" not in signal["json"]
+    assert signal["headers"]["Authorization"].startswith("Bearer ")
+
+
+async def test_mark_read_raises_channel_delivery_error_on_rejection(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # `_send` classifies a non-2xx into ChannelDeliveryError; the inbound caller is
+    # the one that swallows it, so the client function itself still raises loudly.
+    fake_httpx.typing_response = response(500, text="messages endpoint down")
+    with pytest.raises(ChannelDeliveryError):
+        await mark_read(PHONE_NUMBER_ID, "wamid.IN")
 
 
 async def test_mark_read_typing_rides_send_and_tolerates_no_message_id(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import secrets
 from typing import TYPE_CHECKING
@@ -108,6 +109,26 @@ WEB_MEDIA_EXPIRY_PENDING_TTL_SECONDS = 3
 
 
 WEB_MEDIA_EXPIRY_REAPER_INTERVAL_SECONDS = 1
+
+
+# The working-signal profile's hard ceiling on ONE turn's refresh loop, pinned LOW on the
+# CAPPED leg so the ceiling stops the loop after a couple of refreshes even on a long-held
+# turn — the observable a low ``CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS`` produces.
+WORKING_SIGNAL_CAPPED_MAX_SECONDS = 1.2
+
+
+# Every channel a working-signal profile can deliver a bridged answer on needs a split cap, or
+# the send fails as a config error. The vendor mediums keep their platform defaults; the two
+# stub channels are added so the loop's counting stub delivers its turn's answer.
+_WORKING_SIGNAL_MAX_MESSAGE_CHARS = {
+    "twilio": 1600,
+    "telegram": 4096,
+    "slack": 40000,
+    "whatsapp": 4096,
+    "web": 8000,
+    "stub_working": 8000,
+    "stub_working_off": 8000,
+}
 
 
 def _bridge_twilio_env(res: StackResources, *, real: bool) -> dict[str, str]:
@@ -367,6 +388,45 @@ def build_web_media_expiry_stack(res: StackResources, variants: Variants) -> Sta
         "MEDIA_INGEST_REAPER_INTERVAL_SECONDS": str(WEB_MEDIA_EXPIRY_REAPER_INTERVAL_SECONDS),
     }
     return dataclasses.replace(base, name="web-media-expiry", env=env)
+
+
+def build_working_signal_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The bridge profile carrying the working-signal counting stub channels.
+
+    Identical to :func:`build_bridge_stack` (access control ON, the redis conversations backend a
+    bridged turn accepts into, the probe tools whose ``e2e_channel_inbound`` drives a stub inbound
+    and whose ``e2e_overlap_probe`` holds a turn open) with the ``tai42_e2e_fixtures.stub_channel``
+    module added, which registers ``stub_working`` (a vendor indicator the loop refreshes) and
+    ``stub_working_off`` (no indicator — the loop never starts). The two stub channels are added to
+    ``CONVERSATIONS_MAX_MESSAGE_CHARS`` so a bridged answer on them delivers. The working-signal
+    ceiling stays at the operator default, so the loop stops at the first outbound send, not the
+    ceiling — the leg that proves the refresh-then-stop behaviour."""
+    base = build_bridge_stack(res, variants)
+    manifest = {
+        **base.manifest,
+        "channel_modules": [*base.manifest["channel_modules"], "tai42_e2e_fixtures.stub_channel"],
+    }
+    env = {
+        **base.env,
+        "CONVERSATIONS_MAX_MESSAGE_CHARS": json.dumps(_WORKING_SIGNAL_MAX_MESSAGE_CHARS),
+    }
+    return dataclasses.replace(base, name="working-signal", manifest=manifest, env=env)
+
+
+def build_working_signal_capped_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The working-signal profile with a LOW refresh ceiling — the ceiling-caps-the-count leg.
+
+    Identical to :func:`build_working_signal_stack` with ``CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS``
+    pinned low, so the loop stops at the ceiling after a couple of refreshes even while the turn is
+    still held open — the count a long turn would otherwise keep growing is capped. Kept apart from
+    the default-ceiling profile because a low ceiling would pre-empt that profile's stop-at-send
+    leg."""
+    base = build_working_signal_stack(res, variants)
+    env = {
+        **base.env,
+        "CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS": str(WORKING_SIGNAL_CAPPED_MAX_SECONDS),
+    }
+    return dataclasses.replace(base, name="working-signal-capped", env=env)
 
 
 def build_web_media_no_store_stack(res: StackResources, variants: Variants) -> StackConfig:

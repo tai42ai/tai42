@@ -1,4 +1,4 @@
-"""The per-message-type router — the known-contact marker, the read+typing signal,
+"""The per-message-type router — the known-contact marker, the read receipt,
 and the error-notice / unhandled-type dispatch fallbacks."""
 
 from __future__ import annotations
@@ -74,35 +74,35 @@ async def test_inbound_window_zero_writes_no_marker(
     assert _CONTACT_KEY not in fake_redis.store  # allowlist-only mode: no tracking
 
 
-# --- "Working on it" read + typing signal ------------------------------------
+# --- Inbound read receipt ----------------------------------------------------
 
-_TYPING_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
-_TYPING_BODY = {
+_READ_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
+_READ_BODY = {
     "messaging_product": "whatsapp",
     "status": "read",
     "message_id": _WAMID,
-    "typing_indicator": {"type": "text"},
 }
 
 
-async def test_inbound_fires_read_typing_signal_before_branches(
+async def test_inbound_fires_read_receipt_before_branches(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A bridge (uncorrelated) text still fires the mark-as-read + typing signal:
-    # the combined Graph v23.0 body to /{phone_number_id}/messages, Bearer-authed,
-    # and the message still bridges.
+    # A bridge (uncorrelated) text marks the inbound read: the read-only Graph v23.0
+    # body (no typing_indicator) to /{phone_number_id}/messages, Bearer-authed, and
+    # the message still bridges. The turn-scoped typing indicator is the loop's job.
     result = await handler(signed_request(message_payload(text="ship it")))
 
     assert result.status_code == 200
     assert len(fake_httpx.typing_calls) == 1
     signal = fake_httpx.typing_calls[0]
-    assert signal["url"] == _TYPING_URL
-    assert signal["json"] == _TYPING_BODY
+    assert signal["url"] == _READ_URL
+    assert signal["json"] == _READ_BODY
+    assert "typing_indicator" not in signal["json"]
     assert signal["headers"]["Authorization"].startswith("Bearer ")
     assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached
 
 
-async def test_correlated_question_reply_fires_typing_signal(
+async def test_correlated_question_reply_fires_read_receipt(
     handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # Firing at _handle_message (before the type branches) also covers a reply that
@@ -113,25 +113,25 @@ async def test_correlated_question_reply_fires_typing_signal(
     result = await handler(signed_request(message_payload(text="yes please")))
 
     assert result.status_code == 200
-    assert [c["json"] for c in fake_httpx.typing_calls] == [_TYPING_BODY]  # typing fired
+    assert [c["json"] for c in fake_httpx.typing_calls] == [_READ_BODY]  # read receipt fired
     assert channels.inbound_calls[0].answer == "yes please"  # the answer reached the ladder
     assert stub_app.conversations.accept_calls == []  # correlation hit, not the bridge
 
 
-async def test_typing_signal_delivery_failure_is_logged_and_batch_survives(
+async def test_read_receipt_delivery_failure_is_logged_and_batch_survives(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A 5xx on the typing send is classified by `_send` into ChannelDeliveryError,
+    # A 5xx on the read-receipt send is classified by `_send` into ChannelDeliveryError,
     # caught, and logged at WARNING — the inbound still 200-acks (never a 5xx that
     # would make Meta redeliver the whole batch) and the message still bridges.
-    fake_httpx.typing_response = response(500, text="typing endpoint down")
+    fake_httpx.typing_response = response(500, text="messages endpoint down")
 
     with caplog.at_level("WARNING"):
         result = await handler(signed_request(message_payload(text="ship it")))
 
     assert result.status_code == 200
-    assert len(fake_httpx.typing_calls) == 1  # the signal was attempted
-    assert any("typing signal" in record.message for record in caplog.records)
+    assert len(fake_httpx.typing_calls) == 1  # the receipt was attempted
+    assert any("read receipt" in record.message for record in caplog.records)
     assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached
 
 

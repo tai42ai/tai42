@@ -257,6 +257,14 @@ API key.
   </Step>
 </Steps>
 
+## Working-on-it signal
+
+While a turn runs, the chat page shows its own **typing bubble** from the moment the
+visitor's message is sent until the reply lands — driven entirely by the page, with
+no server-driven frame. Because the page owns the indicator it never lapses
+mid-turn, so this channel opts out of the platform's server-side working-on-it
+refresh.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model.

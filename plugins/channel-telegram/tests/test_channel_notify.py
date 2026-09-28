@@ -482,8 +482,8 @@ async def test_send_chat_action_ok_false_raises(http_recorder, fake_redis):
 async def test_send_chat_action_unset_token_raises_delivery_error(
     http_recorder, fake_redis, monkeypatch: pytest.MonkeyPatch
 ):
-    # An unset token is a ChannelDeliveryError (not a raw ValueError) so the inbound
-    # door's `except ChannelDeliveryError` swallows it and the webhook still acks.
+    # An unset token is a ChannelDeliveryError (not a raw ValueError) so a caller that
+    # tolerates a transient send fault (the working-signal loop) catches it uniformly.
     monkeypatch.delenv("CHANNEL_TELEGRAM_BOT_TOKEN")
     reset_all_settings()
     from tai42_channel_telegram.client import send_chat_action
@@ -491,3 +491,31 @@ async def test_send_chat_action_unset_token_raises_delivery_error(
     with pytest.raises(ChannelDeliveryError, match="CHANNEL_TELEGRAM_BOT_TOKEN"):
         await send_chat_action(555, "typing")
     assert http_recorder.requests == []
+
+
+def test_working_signal_expiry_seconds_is_the_chat_action_lifetime():
+    # The refresh loop reads this ClassVar to know how often to re-send the typing action.
+    assert TelegramChannel.working_signal_expiry_seconds == 5.0
+
+
+async def test_signal_working_active_sends_one_typing_chat_action(http_recorder, fake_redis):
+    await TelegramChannel().signal_working(recipient="777")
+    assert len(http_recorder.requests) == 1
+    request = http_recorder.requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == f"https://api.telegram.org/bot{_TOKEN}/sendChatAction"
+    assert json.loads(request.content) == {"chat_id": 777, "action": "typing"}
+
+
+async def test_signal_working_inactive_is_a_no_op(http_recorder, fake_redis):
+    # Telegram's chat action self-expires and the Bot API has no stop call, so a clear
+    # sends nothing.
+    await TelegramChannel().signal_working(recipient="777", active=False)
+    assert http_recorder.requests == []
+
+
+async def test_signal_working_raises_channel_delivery_error_on_rejection(http_recorder, fake_redis):
+    # A vendor rejection surfaces as ChannelDeliveryError; the loop logs and counts it.
+    http_recorder.responder = lambda request: httpx.Response(200, json={"ok": False, "description": "no"})
+    with pytest.raises(ChannelDeliveryError, match="sendChatAction rejected"):
+        await TelegramChannel().signal_working(recipient="777")

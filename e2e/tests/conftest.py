@@ -72,6 +72,8 @@ from tai42_e2e.manifests import (
     build_web_media_expiry_stack,
     build_web_media_no_store_stack,
     build_web_media_stack,
+    build_working_signal_capped_stack,
+    build_working_signal_stack,
 )
 from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pytest_plugin import gated_collect_ignore
@@ -412,6 +414,76 @@ def bridge_stack(
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
+
+
+def _working_signal_profile(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    builder: Callable[[StackResources, Variants], StackConfig],
+    name: str,
+) -> Iterator[tuple[TaiStack, str]]:
+    """Boot one working-signal profile, yielding ``(stack, root_token)``.
+
+    Same as ``bridge_stack`` (REPLICAS + backend + metrics, access control ON, the redis
+    conversations backend the bridged turn accepts into) with the counting stub channels added by
+    ``builder``. Seeded before boot with a root ``*`` key and the bridge route table, exactly as
+    ``bridge_stack``."""
+    resource_kwargs = {
+        "llm_base_url": llm_stub.base_url,
+        "twilio_api_base_url": fake_twilio.api_base_url,
+        "whatsapp_api_base_url": fake_whatsapp.api_base_url,
+    }
+    root = tmp_path_factory.mktemp(name)
+    resources, config = _allocate_and_build(infra, root, builder, resource_kwargs, False)
+    stack = TaiStack(config, infra, resources, root)
+    try:
+        root_token = seed_bridge_authz(infra, resources)
+    except BaseException:
+        stack.teardown()
+        raise
+    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
+    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    stack.auth_token = root_token
+    with stack, diagnostics.track(stack):
+        yield stack, root_token
+
+
+@pytest.fixture(scope="module")
+def working_signal_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The bridge profile carrying the working-signal counting stub channels, default refresh
+    ceiling — the stop-at-first-send, opt-out, and api-door legs."""
+    yield from _working_signal_profile(
+        infra, tmp_path_factory, llm_stub, fake_twilio, fake_whatsapp, build_working_signal_stack, "working-signal"
+    )
+
+
+@pytest.fixture(scope="module")
+def working_signal_capped_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The working-signal profile with a LOW refresh ceiling — the ceiling-caps-the-count leg."""
+    yield from _working_signal_profile(
+        infra,
+        tmp_path_factory,
+        llm_stub,
+        fake_twilio,
+        fake_whatsapp,
+        build_working_signal_capped_stack,
+        "working-signal-capped",
+    )
 
 
 @pytest.fixture(scope="module")
