@@ -35,10 +35,15 @@ jobs:
         # script's per-package gate calls. No secret or org value is read — the
         # package list and versions come from the repo's own release-please
         # config and manifest — so this runs unchanged on a fork.
+        # Sync is --frozen, not --locked: a release pull request's first head
+        # carries bumped package versions with the lock refreshed by a follow-up
+        # commit. The projection reads versions from the release manifest, and
+        # the lock as it stands only supplies the environment (the repo's own
+        # packages and the extra's tools).
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: >-
-          uv run --locked --package tai42-cli --extra api-gate
+          uv run --frozen --package tai42-cli --extra api-gate
           python scripts/release_label_check.py
           --base-ref ${{ github.event.pull_request.base.sha }}
