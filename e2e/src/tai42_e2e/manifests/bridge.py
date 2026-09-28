@@ -89,6 +89,27 @@ BRIDGE_MEDIA_INGEST_MAX_IMAGE_BYTES = 8192
 BRIDGE_MEDIA_INGEST_REAPER_INTERVAL_SECONDS = 1
 
 
+# Media-ingest bounds for the WEB upload suite. The image cap is pinned SMALL (so a slightly-over PNG
+# is a few KB, not multi-MB), and the other kinds are pinned so ``max_cap`` — which the web upload
+# door declares as its request-body bound — is small enough that a body a few KB larger is refused by
+# the body-limit backstop BEFORE it reaches the door, while an over-image-cap PNG UNDER that bound
+# still reaches the ingest seam and is refused there.
+WEB_MEDIA_INGEST_MAX_IMAGE_BYTES = 8192
+
+
+WEB_MEDIA_INGEST_MAX_OTHER_BYTES = 16384
+
+
+# Seconds an unreferenced upload is held PENDING before its horizon lapses (bind refuses, the reaper
+# reclaims it), pinned SHORT on the EXPIRY stack only so that leg lands within a test; the reaper
+# cadence pinned LOW there so its reclamation does too. Every other web-media leg keeps the operator
+# default, so an upload followed by a send never races the reaper.
+WEB_MEDIA_EXPIRY_PENDING_TTL_SECONDS = 3
+
+
+WEB_MEDIA_EXPIRY_REAPER_INTERVAL_SECONDS = 1
+
+
 def _bridge_twilio_env(res: StackResources, *, real: bool) -> dict[str, str]:
     if real:
         # HARNESS-MAP: TEST_TO -> default + sole allowlisted recipient; no API_BASE_URL
@@ -303,3 +324,58 @@ def build_media_bridge_no_store_stack(res: StackResources, variants: Variants) -
     base = build_media_bridge_stack(res, variants)
     manifest = {key: value for key, value in base.manifest.items() if key != "storage_module"}
     return dataclasses.replace(base, name="media-bridge-nostore", manifest=manifest)
+
+
+def build_web_media_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The bridge profile tuned for the WEB inbound-media (upload door + attachment bridging) suite.
+
+    Identical to :func:`build_bridge_stack` (the web channel + its public chat doors, the redis
+    conversations backend a bridged turn accepts into, and the ``storage_module`` blob provider the
+    ingest chokepoint writes through — already live on the base stack) with only the ``MEDIA_INGEST_*``
+    byte caps pinned: every per-kind cap is small so the upload door's declared body bound
+    (``max_cap``) is small. The pending-upload TTL and the reaper cadence stay at the operator
+    defaults, so an upload followed by a send never races the reaper; the expiry leg runs on
+    :func:`build_web_media_expiry_stack`."""
+    base = build_bridge_stack(res, variants)
+    env = {
+        **base.env,
+        "MEDIA_INGEST_MAX_IMAGE_BYTES": str(WEB_MEDIA_INGEST_MAX_IMAGE_BYTES),
+        "MEDIA_INGEST_MAX_AUDIO_BYTES": str(WEB_MEDIA_INGEST_MAX_OTHER_BYTES),
+        "MEDIA_INGEST_MAX_VIDEO_BYTES": str(WEB_MEDIA_INGEST_MAX_OTHER_BYTES),
+        "MEDIA_INGEST_MAX_DOCUMENT_BYTES": str(WEB_MEDIA_INGEST_MAX_OTHER_BYTES),
+        # The upload door charges its own ``channels_web_uploads`` limiter family; its stock 20/min +
+        # 5 burst is below the many uploads the suite's specs make against the shared 127.0.0.1
+        # bucket, so pin its windows high exactly as ``_web_channel_env`` pins ``channels_web`` — the
+        # limiter stays ON, no leg's determinism rests on the operator defaults.
+        "TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB_UPLOADS__LIMIT": "100000",
+        "TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB_UPLOADS__BURST": "100000",
+    }
+    return dataclasses.replace(base, name="web-media", env=env)
+
+
+def build_web_media_expiry_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The web-media profile with a SHORT pending-upload TTL — the unreferenced-upload expiry leg.
+
+    Identical to :func:`build_web_media_stack` with the pending TTL pinned short so an unreferenced
+    upload's horizon lapses within a test, and the reaper cadence pinned low so its reclamation does
+    too. Kept apart from the shared profile because a short TTL races every upload-then-send leg
+    against the reaper."""
+    base = build_web_media_stack(res, variants)
+    env = {
+        **base.env,
+        "MEDIA_INGEST_PENDING_TTL_SECONDS": str(WEB_MEDIA_EXPIRY_PENDING_TTL_SECONDS),
+        "MEDIA_INGEST_REAPER_INTERVAL_SECONDS": str(WEB_MEDIA_EXPIRY_REAPER_INTERVAL_SECONDS),
+    }
+    return dataclasses.replace(base, name="web-media-expiry", env=env)
+
+
+def build_web_media_no_store_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The web-media profile with NO blob provider registered — the upload store-unavailable leg.
+
+    Identical to :func:`build_web_media_stack` but with the ``storage_module`` dropped from the
+    manifest, so the storage registry stays dead and the ingest chokepoint raises
+    ``MediaStoreUnavailableError`` — the upload door then answers 503 ``media_store_unavailable``.
+    Only the missing provider drives the outcome."""
+    base = build_web_media_stack(res, variants)
+    manifest = {key: value for key, value in base.manifest.items() if key != "storage_module"}
+    return dataclasses.replace(base, name="web-media-nostore", manifest=manifest)

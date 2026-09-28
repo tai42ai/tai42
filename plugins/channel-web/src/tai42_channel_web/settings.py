@@ -84,6 +84,12 @@ class WebSettings(TaiBaseSettings):
     # guess rate is what bounds a brute force over the code space.
     entry_attempts_per_window: int = Field(default=10, gt=0)
     entry_throttle_window_seconds: int = Field(default=300, gt=0)
+    # The most served-media ids one message may reference in ``attachment_ids``, enforced
+    # in the messages door before any bind (the pure dtos wire layer bounds only each id's
+    # shape, not the count — it cannot import a setting). The per-kind byte caps and the
+    # pending-upload TTL are the ingestion seam's ``MEDIA_INGEST_*`` settings, not this
+    # channel's.
+    max_attachments_per_message: int = Field(default=10, gt=0)
 
 
 @settings_cache

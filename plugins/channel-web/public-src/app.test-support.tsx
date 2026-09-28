@@ -25,7 +25,15 @@ export function streamState(overrides: Partial<ChatStreamState> = {}): ChatStrea
 }
 
 export function agentSaid(id: string, text: string): ChatItem {
-  return { kind: 'message', id, direction: 'out', text, ts: TS, clientMessageId: null };
+  return {
+    kind: 'message',
+    id,
+    direction: 'out',
+    text,
+    ts: TS,
+    media: null,
+    clientMessageId: null,
+  };
 }
 
 /** The visitor's own message as the transcript replays it. `clientMessageId` is the
@@ -36,7 +44,7 @@ export function visitorSaid(
   text: string,
   clientMessageId: string | null = null,
 ): ChatItem {
-  return { kind: 'message', id, direction: 'in', text, ts: TS, clientMessageId };
+  return { kind: 'message', id, direction: 'in', text, ts: TS, media: null, clientMessageId };
 }
 
 export function agentSentMedia(id: string, options: readonly string[]): ChatItem {

@@ -2,7 +2,7 @@
 
 Importing this package registers every door as a side effect: each door submodule
 carries its ``@tai42_app.http.custom_route`` declaration, and the imports at the foot
-of this module load all six.
+of this module load all seven.
 
 The chat doors are PUBLIC; the entry-gate management doors are AUTHED — they carry the
 platform api key and declare an explicit action-class.
@@ -19,6 +19,12 @@ platform api key and declare an explicit action-class.
   conversation. The address comes from the session registration, never the body; the
   message is bridged through ``conversations.accept`` and, on success, appended to
   the transcript so the visitor's SSE stream replays it.
+* ``POST /api/channels/web/uploads`` — the visitor uploads one file (multipart, one
+  file per part) AHEAD of the send. The bytes stream through the ONE ``app.media``
+  ingest chokepoint as PENDING media (no owning message yet), and the door returns the
+  minted served-media id + reference the next message references in ``attachment_ids``.
+  The door declares its own rate-limit family and its per-kind body bound, disjoint
+  from the message door's.
 * ``GET /api/channels/web/stream`` — the SSE feed of the session's own conversation
   (backlog then live tail), keyed by ``(identity, visitor id)``.
 * ``POST /api/channels/web/questions/{interaction_id}/answer`` — answer a pending
@@ -48,7 +54,11 @@ a caller, so no session can be probed for which route it belongs to. Success bod
 ``{"data": {...}}``; failures are ``{"error": "<message>"}``, plus a ``code`` on the
 refusals a caller must tell apart from their status alone — ``session_missing`` (401),
 ``origin_mismatch`` (403), ``not_a_navigation`` (403), ``entry_refused`` (403),
-``web_transcript_store_off`` (501).
+``web_transcript_store_off`` (501), and the upload door's ingestion refusals
+``media_too_large`` (413), ``media_type_not_allowed`` (415),
+``media_store_unavailable`` (503), ``media_read_failed`` (400) and ``invalid_upload``
+(400), and the message door's attachment-bind refusals ``media_unbindable`` (400) and
+``media_already_bound`` (409).
 
 The chat page door is the exception: its caller is a browser NAVIGATION, which would
 render a JSON body as text, so every refusal it answers is a minimal HTML page under
@@ -86,4 +96,5 @@ from tai42_channel_web.routes import (  # noqa: F401  (route registration side-e
     page_routes,
     session_routes,
     stream_routes,
+    upload_routes,
 )

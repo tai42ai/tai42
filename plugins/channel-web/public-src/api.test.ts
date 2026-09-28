@@ -3,12 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   answerQuestion,
   ChatApiError,
+  isAttachmentGone,
   isSessionMissing,
   isStoreOff,
   openChatStream,
   rotateSession,
   sendMessage,
+  uploadAttachment,
 } from '@/api';
+
+const MEDIA_ID = 'M'.repeat(43);
 
 const fetchMock = vi.fn();
 
@@ -131,6 +135,43 @@ describe('sendMessage', () => {
     expect((error as ChatApiError).message).toBe('message text is blank');
   });
 
+  it('names an attachment the door can no longer bind, as a refusal no retry changes', async () => {
+    fetchMock.mockResolvedValue(
+      reply(400, { error: 'attachment is no longer available', code: 'media_unbindable' }),
+    );
+
+    const error = (await sendMessage('site-alpha', 'x', KEY, null, [MEDIA_ID]).catch(
+      (err: unknown) => err,
+    )) as ChatApiError;
+
+    expect(error.message).toBe(
+      'That attachment is no longer available — attach it again to send it.',
+    );
+    expect(isAttachmentGone(error)).toBe(true);
+  });
+
+  it('names an attachment already bound to another message, not an answered question', async () => {
+    fetchMock.mockResolvedValue(
+      reply(409, { error: 'attachment already used', code: 'media_already_bound' }),
+    );
+
+    const error = (await sendMessage('site-alpha', 'x', KEY, null, [MEDIA_ID]).catch(
+      (err: unknown) => err,
+    )) as ChatApiError;
+
+    expect(error.message).toBe('That attachment was already sent with another message.');
+    expect(isAttachmentGone(error)).toBe(true);
+  });
+
+  it('treats every other refusal as retryable as far as the attachment goes', async () => {
+    fetchMock.mockResolvedValue(reply(400, { error: 'message text is blank' }));
+
+    const error = await sendMessage('site-alpha', ' ', KEY).catch((err: unknown) => err);
+
+    expect(isAttachmentGone(error)).toBe(false);
+    expect(isAttachmentGone(new Error('network'))).toBe(false);
+  });
+
   it('says a body the door refused at the size cap is too long, not that it failed', async () => {
     // The body cap is checked before any field rule and before any parse, so the
     // same bytes are refused every time: the copy names the one thing that changes
@@ -172,6 +213,118 @@ describe('sendMessage', () => {
     fetchMock.mockResolvedValue(new Response('not json', { status: 200 }));
 
     await expect(sendMessage('site-alpha', 'hi', KEY)).rejects.toThrow('not JSON');
+  });
+
+  it('carries attachment ids on the body when the message has attachments', async () => {
+    fetchMock.mockResolvedValue(reply(200, { data: { message_id: 'msg-1' } }));
+
+    await sendMessage('site-alpha', 'look', KEY, null, [MEDIA_ID]);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(
+      JSON.stringify({
+        identity: 'site-alpha',
+        text: 'look',
+        client_message_id: KEY,
+        attachment_ids: [MEDIA_ID],
+      }),
+    );
+  });
+
+  it('omits attachment_ids when none are passed, so a plain message is unchanged', async () => {
+    fetchMock.mockResolvedValue(reply(200, { data: { message_id: 'msg-1' } }));
+
+    await sendMessage('site-alpha', 'plain', KEY, null, []);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(
+      JSON.stringify({ identity: 'site-alpha', text: 'plain', client_message_id: KEY }),
+    );
+  });
+});
+
+describe('uploadAttachment', () => {
+  function uploaded(overrides: Record<string, unknown> = {}): Response {
+    return reply(200, {
+      data: {
+        media_id: MEDIA_ID,
+        kind: 'image',
+        mime: 'image/png',
+        size: 2048,
+        filename: null,
+        url: `/api/interactions/media/${MEDIA_ID}`,
+        ...overrides,
+      },
+    });
+  }
+
+  function png(): File {
+    return new File(['x'], 'photo.png', { type: 'image/png' });
+  }
+
+  it('posts the file and identity as multipart and returns the door record', async () => {
+    fetchMock.mockResolvedValue(uploaded());
+
+    const record = await uploadAttachment('site-alpha', png(), new AbortController().signal);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/channels/web/uploads');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+    expect(form.get('identity')).toBe('site-alpha');
+    expect(form.get('file')).toBeInstanceOf(File);
+    // No content-type header: the browser writes the multipart boundary itself.
+    const headers = init.headers as Record<string, string>;
+    expect(Object.keys(headers).map((key) => key.toLowerCase())).toEqual(['accept']);
+    expect(record).toEqual({
+      media_id: MEDIA_ID,
+      kind: 'image',
+      mime: 'image/png',
+      size: 2048,
+      filename: null,
+      url: `/api/interactions/media/${MEDIA_ID}`,
+    });
+  });
+
+  it('carries a sanitised document filename through unchanged', async () => {
+    fetchMock.mockResolvedValue(
+      uploaded({ kind: 'document', mime: 'application/pdf', filename: 'report.pdf' }),
+    );
+
+    const record = await uploadAttachment('site-alpha', png(), new AbortController().signal);
+
+    expect(record.filename).toBe('report.pdf');
+  });
+
+  it('surfaces a disallowed type as a coded error the tray can map', async () => {
+    fetchMock.mockResolvedValue(
+      reply(415, { error: 'attachment type is not supported', code: 'media_type_not_allowed' }),
+    );
+
+    const error = await uploadAttachment('site-alpha', png(), new AbortController().signal).catch(
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(ChatApiError);
+    expect((error as ChatApiError).status).toBe(415);
+    expect((error as ChatApiError).code).toBe('media_type_not_allowed');
+  });
+
+  it('refuses a success body missing a required field', async () => {
+    fetchMock.mockResolvedValue(uploaded({ media_id: undefined }));
+
+    await expect(
+      uploadAttachment('site-alpha', png(), new AbortController().signal),
+    ).rejects.toThrow('no media_id');
+  });
+
+  it('refuses a success body whose size is not a number', async () => {
+    fetchMock.mockResolvedValue(uploaded({ size: 'big' }));
+
+    await expect(
+      uploadAttachment('site-alpha', png(), new AbortController().signal),
+    ).rejects.toThrow('no size');
   });
 });
 

@@ -26,6 +26,8 @@ from functools import lru_cache
 from html import escape
 from pathlib import Path
 
+from tai42_channel_web.settings import web_settings
+
 PUBLIC_MANIFEST_FILENAME = "public-manifest.json"
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 
@@ -213,10 +215,14 @@ def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) 
     The bundle reads the route it talks to from ``#root``'s ``data-identity`` and the
     mount its own API doors sit under from ``#root``'s ``data-api-base`` (this same
     ``mount_base``), so a remapped mount is followed there too rather than a default
-    assumed. Every interpolated value is HTML-escaped — the identity is a URL segment
+    assumed. ``data-max-attachments`` carries the operator's
+    ``max_attachments_per_message`` so the bundle refuses an over-cap selection in the
+    compose tray before it is sent; the messages door's 422 stays the authoritative
+    backstop. Every interpolated value is HTML-escaped — the identity is a URL segment
     and the title is operator config, neither of which may break out of its attribute
     or element.
     """
+    max_attachments = web_settings().max_attachments_per_message
     head = [
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
@@ -231,7 +237,8 @@ def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) 
         for name in build.styles
     ]
     body = [
-        f'<div id="root" data-identity="{escape(identity)}" data-api-base="{escape(mount_base)}"></div>',
+        f'<div id="root" data-identity="{escape(identity)}" data-api-base="{escape(mount_base)}" '
+        f'data-max-attachments="{escape(str(max_attachments))}"></div>',
         f'<script type="module" src="{escape(_asset_url(mount_base, build.entry))}" '
         f'integrity="{escape(build.integrity[build.entry])}"></script>',
     ]

@@ -76,6 +76,46 @@ def media_bridge_no_store(
 
 
 @pytest.fixture
+def web_media(
+    web_media_stack: tuple[TaiStack, str],
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    llm_stub: LlmStub,
+) -> BridgeHarness:
+    """A ``BridgeHarness`` over the web-media profile — the handle the web inbound-media suite
+    drives (the web channel's upload + message doors on a media-capable stack). The twilio/whatsapp
+    stubs are carried to satisfy the harness shape; the suite drives web alone."""
+    stack, root_token = web_media_stack
+    return BridgeHarness(stack, root_token, fake_twilio, fake_whatsapp, llm_stub)
+
+
+@pytest.fixture
+def web_media_expiry(
+    web_media_expiry_stack: tuple[TaiStack, str],
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    llm_stub: LlmStub,
+) -> BridgeHarness:
+    """A ``BridgeHarness`` over the web-media profile with a SHORT pending-upload TTL — the
+    unreferenced-upload expiry leg."""
+    stack, root_token = web_media_expiry_stack
+    return BridgeHarness(stack, root_token, fake_twilio, fake_whatsapp, llm_stub)
+
+
+@pytest.fixture
+def web_media_no_store(
+    web_media_no_store_stack: tuple[TaiStack, str],
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    llm_stub: LlmStub,
+) -> BridgeHarness:
+    """A ``BridgeHarness`` over the web-media profile with NO blob provider — the upload
+    store-unavailable leg (the ingest chokepoint raises ``MediaStoreUnavailableError``)."""
+    stack, root_token = web_media_no_store_stack
+    return BridgeHarness(stack, root_token, fake_twilio, fake_whatsapp, llm_stub)
+
+
+@pytest.fixture
 def agent_route_bridge(
     agent_route_park_stack: tuple[TaiStack, str],
     fake_twilio: FakeTwilio,

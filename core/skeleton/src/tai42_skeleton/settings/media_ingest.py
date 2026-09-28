@@ -1,9 +1,10 @@
 """``MEDIA_INGEST_*`` config for the served-media ingestion chokepoint and its reaper.
 
-Per-kind byte caps and MIME allowlists are SETTINGS, not wire constants: ingested bytes never
-ride the wire (they are fetched/uploaded, then served by reference), so their bounds depend on
-the deployment's storage quota. The outbound ``MEDIA_*`` constants
-(:mod:`tai42_contract.interactions.models.media`) bound wire payloads and stay constants.
+MIME allowlists are SETTINGS, not wire constants: ingested bytes never ride the wire (they are
+fetched/uploaded, then served by reference), so their bounds depend on the deployment's storage
+quota. The outbound ``MEDIA_*`` constants (:mod:`tai42_contract.interactions.models.media`) bound
+wire payloads and stay constants. The per-kind byte caps are a separate ``MEDIA_INGEST_*`` group
+(:class:`tai42_kit.interactions.MediaIngestCapSettings`) the ingest seam reads alongside these.
 
 A ``@model_validator`` proves at boot that every allowlisted image/audio/video type is
 identifiable by one of the seam's two matchers (``filetype`` 1.2.0 or the in-seam ISOBMFF brand
@@ -21,17 +22,9 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class MediaIngestSettings(TaiBaseSettings):
-    """``MEDIA_INGEST_*`` settings: the per-kind caps, the MIME allowlists, the pending TTL, the reaper cadence."""
+    """``MEDIA_INGEST_*`` settings: the MIME allowlists, the pending TTL, the reaper cadence."""
 
     model_config = SettingsConfigDict(env_prefix="MEDIA_INGEST_")
-
-    # Per-kind byte caps. Video and document clear the binding vendor download ceiling (~20 MB);
-    # image and audio take their own tighter bounds, well above typical payloads. A body over its
-    # sniffed kind's cap is rejected loudly mid-stream, never truncated. Must be positive.
-    max_image_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
-    max_audio_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
-    max_video_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
-    max_document_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
 
     # Per-kind MIME allowlists. Active/renderable content (svg/html/xhtml/xml/script) is ABSENT
     # from every default and must never be added — it is never served inline. A deployment
@@ -63,20 +56,6 @@ class MediaIngestSettings(TaiBaseSettings):
     # the interactions idle horizon so an abandoned upload's blob is short-lived. Must be positive.
     pending_ttl_seconds: int = Field(default=900, gt=0)
 
-    def cap_for(self, kind: MediaKind) -> int:
-        """The per-kind byte cap for a sniffed ``kind`` (image/audio/video/document)."""
-        caps = {
-            MediaKind.IMAGE: self.max_image_bytes,
-            MediaKind.AUDIO: self.max_audio_bytes,
-            MediaKind.VIDEO: self.max_video_bytes,
-            MediaKind.DOCUMENT: self.max_document_bytes,
-        }
-        if kind not in caps:
-            raise ValueError(
-                f"no ingest cap for media kind {kind.value!r} — only image/audio/video/document are ingested"
-            )
-        return caps[kind]
-
     def allowlist_for(self, kind: MediaKind) -> frozenset[str]:
         """The per-kind MIME allowlist for a sniffed ``kind`` (image/audio/video/document)."""
         lists = {
@@ -90,11 +69,6 @@ class MediaIngestSettings(TaiBaseSettings):
                 f"no ingest allowlist for media kind {kind.value!r} — only image/audio/video/document are ingested"
             )
         return lists[kind]
-
-    @property
-    def max_cap(self) -> int:
-        """The largest per-kind cap — the pre-read worst case when the kind is not yet known."""
-        return max(self.max_image_bytes, self.max_audio_bytes, self.max_video_bytes, self.max_document_bytes)
 
     @model_validator(mode="after")
     def _document_none_sniff_is_a_subset(self) -> MediaIngestSettings:

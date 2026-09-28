@@ -125,6 +125,7 @@ async def append_message(
     text: str,
     entry_id: str | None = None,
     client_message_id: str | None = None,
+    media: list[dict[str, Any]] | None = None,
 ) -> str:
     """Append one ``chat.message`` entry and return its id.
 
@@ -137,11 +138,18 @@ async def append_message(
     optimistically and retire the duplicate after a lost response. It is absent from
     the frame when the sender sent none — the key is the page's, not the server's,
     and an invented one would match nothing.
+
+    ``media`` is the visitor's own attached items, each ``{"kind", "url", "caption"?,
+    "filename"?}`` (the same shape a ``chat.media`` card carries so the page renders
+    them with the same component), carried in the frame ONLY when non-empty; a
+    text-only message carries no ``media`` key, so a reader tells absent from empty.
     """
     message_id = entry_id if entry_id is not None else _mint_id()
     data: dict[str, Any] = {"id": message_id, "direction": direction, "text": text, "ts": _now_iso()}
     if client_message_id is not None:
         data["client_message_id"] = client_message_id
+    if media:
+        data["media"] = media
     await _append(identity, address, MESSAGE_EVENT, data)
     return message_id
 

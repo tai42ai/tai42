@@ -34,6 +34,9 @@ from tai42_e2e.manifests.bridge import (
     build_bridge_stack,
     build_media_bridge_no_store_stack,
     build_media_bridge_stack,
+    build_web_media_expiry_stack,
+    build_web_media_no_store_stack,
+    build_web_media_stack,
 )
 from tai42_e2e.manifests.channels import (
     SLACK_ALLOWED_RECIPIENTS,
@@ -232,6 +235,9 @@ __all__ = [
     "build_stripe_stack",
     "build_studio_setup_stack",
     "build_studio_stack",
+    "build_web_media_expiry_stack",
+    "build_web_media_no_store_stack",
+    "build_web_media_stack",
     "misbehaving_mcp_tool_name",
     "postgres_mcp_tool_name",
     "resilience_mcp_tool_name",

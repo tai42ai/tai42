@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import base64
 import secrets
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import psycopg
 import pytest
@@ -69,6 +69,9 @@ from tai42_e2e.manifests import (
     build_setup_stack,
     build_shipped_connectors_stack,
     build_stripe_stack,
+    build_web_media_expiry_stack,
+    build_web_media_no_store_stack,
+    build_web_media_stack,
 )
 from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pytest_plugin import gated_collect_ignore
@@ -82,6 +85,8 @@ from tai42_e2e.seeding import (
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.stripe_stub import FakeStripe
+from tai42_e2e.topology import StackConfig
+from tai42_e2e.variants import Variants
 
 # The monitoring / marketplace / fleet suites only collect when their opt-in gate is
 # on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
@@ -483,6 +488,101 @@ def media_bridge_no_store_stack(
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
+
+
+def _web_media_profile(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    builder: Callable[[StackResources, Variants], StackConfig],
+    name: str,
+) -> Iterator[tuple[TaiStack, str]]:
+    """Boot one web-media profile, yielding ``(stack, root_token)``.
+
+    Same as ``bridge_stack`` (REPLICAS + backend + metrics, access control ON, the redis
+    conversations backend the bridged turn accepts into, and the storage-local blob provider the
+    ingest chokepoint writes through — the web channel's public chat + upload doors ARE the medium)
+    with the profile's ``MEDIA_INGEST_*`` bounds pinned by ``builder``. Seeded before boot with a
+    root ``*`` key and the bridge route table, exactly as ``bridge_stack``."""
+    resource_kwargs = {
+        "llm_base_url": llm_stub.base_url,
+        "twilio_api_base_url": fake_twilio.api_base_url,
+        "whatsapp_api_base_url": fake_whatsapp.api_base_url,
+    }
+    root = tmp_path_factory.mktemp(name)
+    resources, config = _allocate_and_build(infra, root, builder, resource_kwargs, False)
+    stack = TaiStack(config, infra, resources, root)
+    try:
+        root_token = seed_bridge_authz(infra, resources)
+    except BaseException:
+        stack.teardown()
+        raise
+    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
+    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    stack.auth_token = root_token
+    with stack, diagnostics.track(stack):
+        yield stack, root_token
+
+
+@pytest.fixture(scope="module")
+def web_media_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The bridge profile tuned for the WEB inbound-media suite: the per-kind byte caps pinned
+    small; the pending TTL and reaper cadence at the operator defaults."""
+    yield from _web_media_profile(
+        infra, tmp_path_factory, llm_stub, fake_twilio, fake_whatsapp, build_web_media_stack, "web-media"
+    )
+
+
+@pytest.fixture(scope="module")
+def web_media_expiry_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The web-media profile with a SHORT pending-upload TTL and a low reaper cadence — the
+    unreferenced-upload expiry leg, kept off the shared profile so no upload-then-send leg races
+    the reaper."""
+    yield from _web_media_profile(
+        infra,
+        tmp_path_factory,
+        llm_stub,
+        fake_twilio,
+        fake_whatsapp,
+        build_web_media_expiry_stack,
+        "web-media-expiry",
+    )
+
+
+@pytest.fixture(scope="module")
+def web_media_no_store_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The web-media profile with NO blob provider registered, so the ingest chokepoint raises
+    ``MediaStoreUnavailableError`` and the upload door answers 503 ``media_store_unavailable`` —
+    the upload store-unavailable leg."""
+    yield from _web_media_profile(
+        infra,
+        tmp_path_factory,
+        llm_stub,
+        fake_twilio,
+        fake_whatsapp,
+        build_web_media_no_store_stack,
+        "web-media-nostore",
+    )
 
 
 @pytest.fixture(scope="module")

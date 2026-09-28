@@ -12,11 +12,13 @@
  * countdown it is presentational, and what is SPOKEN changes only at coarse
  * thresholds so a keystroke cannot announce a keystroke.
  */
-import { ArrowUpIcon, Button, Textarea } from '@tai42/studio-sdk';
-import type { KeyboardEvent, ReactElement, Ref } from 'react';
+import { ArrowUpIcon, Button, FolderIcon, Textarea } from '@tai42/studio-sdk';
+import type { ChangeEvent, ClipboardEvent, KeyboardEvent, ReactElement, Ref } from 'react';
 import { useLayoutEffect, useRef } from 'react';
 
 import { MAX_MESSAGE_CHARS } from '@/api';
+import { AttachTray } from '@/attach-tray';
+import { attachCapCopy, type AttachItem, imagesFromClipboard } from '@/uploads';
 
 /** How tall the field may grow before it scrolls instead. */
 const MAX_HEIGHT_PX = 160;
@@ -46,6 +48,27 @@ export interface ComposerProps {
   readonly disabled: boolean;
   readonly placeholder: string;
   readonly inputRef: Ref<HTMLTextAreaElement>;
+  /** The compose tray's pending attachments, rendered above the input. */
+  readonly attachments: readonly AttachItem[];
+  /** Add files picked, pasted or dropped for the next message to the tray. */
+  readonly onAddFiles: (files: readonly File[]) => void;
+  /** Abort an in-flight upload (a cancel) or drop a ready/failed one (a remove). */
+  readonly onRemoveAttachment: (id: string) => void;
+  readonly onRetryAttachment: (id: string) => void;
+  /** The tray's live-region text, announced as an attachment's state changes. */
+  readonly attachAnnouncement: string;
+  /** An upload is still in flight — the send control waits until it settles, because
+   * a half-uploaded file cannot be referenced. */
+  readonly uploadsInFlight: boolean;
+  /** The tray already holds the most files one message may carry, so the attach
+   * control is stopped rather than letting a doomed selection be made. */
+  readonly attachAtCap: boolean;
+  /** The per-message attachment cap, for the at-cap message; `null` when the shell
+   * advertised none (in which case the tray is never at a cap). */
+  readonly maxAttachments: number | null;
+  /** The attach control was used at the cap: the reason is announced, since the
+   * control's tooltip reaches neither a touch nor a screen-reader user. */
+  readonly onAttachBlocked: () => void;
 }
 
 export function Composer({
@@ -55,10 +78,41 @@ export function Composer({
   disabled,
   placeholder,
   inputRef,
+  attachments,
+  onAddFiles,
+  onRemoveAttachment,
+  onRetryAttachment,
+  attachAnnouncement,
+  uploadsInFlight,
+  attachAtCap,
+  maxAttachments,
+  onAttachBlocked,
 }: ComposerProps): ReactElement {
   const localRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  // At the cap the control stays focusable (so its reason can be read) but refuses to
+  // open the picker; the copy names the one thing that changes the outcome.
+  const atCapMessage =
+    attachAtCap && maxAttachments !== null ? attachCapCopy(maxAttachments) : undefined;
   const blank = value.trim() === '';
   const remaining = MAX_MESSAGE_CHARS - value.length;
+  const hasReadyAttachment = attachments.some((item) => item.status === 'ready');
+  // Send goes out when there is something to send AND no upload is mid-flight: text
+  // on its own, a ready attachment on its own, or both — but never while a file is
+  // still uploading, since it cannot yet be referenced.
+  const canSend = (!blank || hasReadyAttachment) && !disabled && !uploadsInFlight;
+
+  const onPickFiles = (event: ChangeEvent<HTMLInputElement>): void => {
+    const files = event.target.files;
+    if (files !== null && files.length > 0) onAddFiles(Array.from(files));
+    // Clear the control so the same file can be picked again after it is removed.
+    event.target.value = '';
+  };
+
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const images = imagesFromClipboard(event.clipboardData.items);
+    if (images.length > 0) onAddFiles(images);
+  };
 
   // Grow to fit the text, up to the cap. Measured after layout and reset to `auto`
   // first, because scrollHeight of an element already sized to its content only
@@ -79,11 +133,42 @@ export function Composer({
     if (event.key !== 'Enter' || event.shiftKey) return;
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     event.preventDefault();
-    if (!blank && !disabled) onSend();
+    if (canSend) onSend();
   };
 
   return (
     <div className="tcw-composer">
+      <AttachTray
+        items={attachments}
+        announcement={attachAnnouncement}
+        onRemove={onRemoveAttachment}
+        onRetry={onRetryAttachment}
+        disabled={disabled}
+      />
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        className="tai-visually-hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={onPickFiles}
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        className="tcw-attach"
+        onClick={() => {
+          if (attachAtCap) onAttachBlocked();
+          else fileRef.current?.click();
+        }}
+        disabled={disabled}
+        aria-disabled={attachAtCap || undefined}
+        title={atCapMessage}
+        aria-label="Attach a file"
+      >
+        <FolderIcon aria-hidden="true" />
+      </Button>
       <Textarea
         ref={(el: HTMLTextAreaElement | null) => {
           localRef.current = el;
@@ -95,6 +180,7 @@ export function Composer({
         rows={1}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
+        onPaste={onPaste}
         placeholder={placeholder}
         disabled={disabled}
         maxLength={MAX_MESSAGE_CHARS}
@@ -106,7 +192,7 @@ export function Composer({
         variant="primary"
         className="tcw-send"
         onClick={onSend}
-        disabled={blank || disabled}
+        disabled={!canSend}
         aria-label="Send message"
       >
         <ArrowUpIcon aria-hidden="true" />

@@ -181,6 +181,11 @@ export type ChatItem =
       readonly direction: 'in' | 'out';
       readonly text: string;
       readonly ts: string;
+      /** The attachments the visitor sent with this message — the same shape a media
+       * card carries, so the visitor's own upload renders through the media
+       * components. Rides an inbound message only; `null` when the message carries
+       * none. */
+      readonly media: readonly MediaItem[] | null;
       /** The idempotency key the sender put on this message, echoed back onto their
        * own frame. It is what identifies a message as one THIS page sent even when
        * the door's answer never arrived, so the optimistic bubble can be retired

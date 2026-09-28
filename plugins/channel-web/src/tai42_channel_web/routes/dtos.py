@@ -38,6 +38,11 @@ _MAX_ANSWER_OBJECT_BYTES = 32 * 1024
 # thing that makes a re-POST resolve to the turn the lost first attempt started.
 _CLIENT_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
+# A referenced attachment id is a served-media id — the 43-char ``token_urlsafe(32)``
+# shape the served route matches — so an id of any other shape is refused at the body
+# before the door tries to bind it.
+_ATTACHMENT_ID = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
 
 _IDENTITY_REQUIREMENT = (
     f"identity must be a non-blank, ':'-free web route identity of at most {_MAX_IDENTITY_CHARS} characters"
@@ -142,6 +147,13 @@ class MessageBody(IdentityBody):
     # its echoed text. Absent on a typed message. Bounded by the contract's option-id
     # cap and shaped as a single-line token (it becomes an entry-param value).
     reply_id: str | None = None
+    # The served-media ids of the files the visitor attached to this message, uploaded
+    # ahead of the send through the upload door and referenced here so the send binds
+    # them. Absent (``None``) on a text-only message; a present list is non-empty and
+    # each id carries the served-media shape. The per-message COUNT is bounded in the
+    # messages door against the ``max_attachments_per_message`` operator setting, which
+    # this pure wire layer cannot read.
+    attachment_ids: list[str] | None = None
 
     @field_validator("client_message_id")
     @classmethod
@@ -162,6 +174,25 @@ class MessageBody(IdentityBody):
             raise ValueError(f"reply_id must be at most {OPTION_ID_MAX_CHARS} characters")
         if any(ch.isspace() or not ch.isprintable() for ch in value):
             raise ValueError("reply_id must be a single-line token with no whitespace or control characters")
+        return value
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def _attachment_ids_valid(cls, value: list[str] | None) -> list[str] | None:
+        # The wire SHAPE of the list only: non-empty when present, each id the 43-char
+        # served-media shape, and no id repeated (a repeat would bind and deliver one
+        # served object twice). A malformed list is refused at the body before any bind
+        # is attempted; the per-message COUNT is bounded in the messages door against
+        # the operator setting this pure layer cannot read.
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("attachment_ids must carry at least one attachment when present")
+        for media_id in value:
+            if _ATTACHMENT_ID.match(media_id) is None:
+                raise ValueError("each attachment id must be 43 characters of [A-Za-z0-9_-]")
+        if len(set(value)) != len(value):
+            raise ValueError("attachment_ids must not repeat an attachment")
         return value
 
 
@@ -199,6 +230,24 @@ class MessageAcceptedResponse(BaseModel):
     """
 
     message_id: str
+
+
+class UploadAcceptedResponse(BaseModel):
+    """Ack of one ingested upload — the served-media reference the next message references.
+
+    ``media_id`` is the 43-char served id the client sends back in
+    ``MessageBody.attachment_ids``; ``url`` is its same-origin served ref. ``kind`` is
+    the seam's SNIFFED kind (image/document/audio/video), ``mime`` the sniffed-and-agreed
+    type, ``size`` the actual bytes ingested. ``filename`` is the seam's sanitised display
+    name for a ``document`` and ``None`` for an inline kind (which needs no download name).
+    """
+
+    media_id: str
+    kind: str
+    mime: str
+    size: int
+    filename: str | None
+    url: str
 
 
 class AnswerResultResponse(BaseModel):

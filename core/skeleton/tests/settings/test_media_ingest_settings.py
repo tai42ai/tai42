@@ -16,15 +16,10 @@ def _clear_cache():
 
 
 def test_media_ingest_settings_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("MEDIA_INGEST_MAX_IMAGE_BYTES", "MEDIA_INGEST_PENDING_TTL_SECONDS"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("MEDIA_INGEST_PENDING_TTL_SECONDS", raising=False)
     media_ingest_settings.cache_clear()
     settings = media_ingest_settings()
 
-    assert settings.max_image_bytes == 8 * 1024 * 1024
-    assert settings.max_audio_bytes == 16 * 1024 * 1024
-    assert settings.max_video_bytes == 25 * 1024 * 1024
-    assert settings.max_document_bytes == 25 * 1024 * 1024
     assert settings.pending_ttl_seconds == 900
     assert settings.reaper_interval_seconds == 300
 
@@ -43,11 +38,9 @@ def test_media_ingest_settings_defaults_and_env(monkeypatch: pytest.MonkeyPatch)
     assert "video/3gpp" in settings.video_mime_allowlist
 
     # Env overrides apply.
-    monkeypatch.setenv("MEDIA_INGEST_MAX_IMAGE_BYTES", "1234")
     monkeypatch.setenv("MEDIA_INGEST_PENDING_TTL_SECONDS", "60")
     media_ingest_settings.cache_clear()
     overridden = media_ingest_settings()
-    assert overridden.max_image_bytes == 1234
     assert overridden.pending_ttl_seconds == 60
 
 

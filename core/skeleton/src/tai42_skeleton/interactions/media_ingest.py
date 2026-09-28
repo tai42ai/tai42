@@ -38,6 +38,7 @@ from tai42_contract.interactions.models.media_errors import (
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_kit.interactions import MediaIngestCapSettings, media_ingest_cap_settings
 
 from tai42_skeleton.channels.inbound import emit_inbound_media_ingested, emit_inbound_media_rejected
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore, inbound_media_blob_path
@@ -222,11 +223,12 @@ async def _read_capped(
     kind_hint: InboundMediaKind | str | None,
     declared_mime: str | None,
     settings: MediaIngestSettings,
+    cap_settings: MediaIngestCapSettings,
 ) -> tuple[bytearray, MediaKind, str, str]:
     # Stream the source into one buffer under the per-kind cap, sniffing the kind EARLY. The pre-read
     # cap guards the running total until the signature window is buffered (or the source ends), then
     # the SNIFFED kind's cap guards the remainder. Returns (buffer, kind, effective_mime, sha256_hex).
-    cap = settings.cap_for(mk) if (mk := _kind_hint_media_kind(kind_hint)) is not None else settings.max_cap
+    cap = cap_settings.cap_for(mk) if (mk := _kind_hint_media_kind(kind_hint)) is not None else cap_settings.max_cap
     buffer = bytearray()
     digest = hashlib.sha256()
     classified: tuple[MediaKind, str] | None = None
@@ -247,14 +249,14 @@ async def _read_capped(
             raise MediaTooLargeError(f"media exceeds the {cap}-byte cap")
         if classified is None and len(buffer) >= _SNIFF_WINDOW:
             classified = _classify(bytes(buffer), declared_mime, settings)
-            cap = settings.cap_for(classified[0])
+            cap = cap_settings.cap_for(classified[0])
             if len(buffer) > cap:
                 raise MediaTooLargeError(f"media exceeds the {cap}-byte cap for {classified[0].value}")
     if classified is None:
         classified = _classify(bytes(buffer), declared_mime, settings)
-        if len(buffer) > settings.cap_for(classified[0]):
+        if len(buffer) > cap_settings.cap_for(classified[0]):
             raise MediaTooLargeError(
-                f"media exceeds the {settings.cap_for(classified[0])}-byte cap for {classified[0].value}"
+                f"media exceeds the {cap_settings.cap_for(classified[0])}-byte cap for {classified[0].value}"
             )
     kind, effective_mime = classified
     return buffer, kind, effective_mime, digest.hexdigest()
@@ -290,12 +292,15 @@ async def ingest_media(
     seam trusts its OWN computed digest (returned as :attr:`IngestedMedia.sha256`).
     """
     settings = media_ingest_settings()
+    cap_settings = media_ingest_cap_settings()
     try:
-        cap = settings.cap_for(mk) if (mk := _kind_hint_media_kind(kind_hint)) is not None else settings.max_cap
+        cap = cap_settings.cap_for(mk) if (mk := _kind_hint_media_kind(kind_hint)) is not None else cap_settings.max_cap
         if declared_size is not None and declared_size > cap:
             raise MediaTooLargeError(f"declared media size {declared_size} exceeds the {cap}-byte cap")
 
-        buffer, media_kind, effective_mime, sha256_hex = await _read_capped(source, kind_hint, declared_mime, settings)
+        buffer, media_kind, effective_mime, sha256_hex = await _read_capped(
+            source, kind_hint, declared_mime, settings, cap_settings
+        )
         sanitized = _sanitize_filename(filename, kind=media_kind, mime=effective_mime)
 
         provider = _storage_provider()

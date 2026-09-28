@@ -75,9 +75,18 @@ function applyMessageFrame(
   if (typeof text !== 'string' || !isTimestamp(ts)) return malformed(event);
   const clientMessageId = clientMessageIdOf(payload.client_message_id);
   if (clientMessageId === undefined) return malformed(event);
+  // The visitor's own attachments ride the inbound message; parsed by the same
+  // vetted-media check a card's media is, so one off-shape item taints the frame
+  // rather than reaching an `src`/`href` unchecked.
+  const parsedMedia = mediaOf(payload.media);
+  if (parsedMedia === undefined) return malformed(event);
+  // A message's media is absent or non-empty: an empty list carries no attachment,
+  // so it folds to null and the message renders text-only rather than an empty
+  // media row above no bubble.
+  const media = parsedMedia !== null && parsedMedia.length === 0 ? null : parsedMedia;
   return {
     kind: 'model',
-    model: withItem(model, { kind: 'message', id, direction, text, ts, clientMessageId }),
+    model: withItem(model, { kind: 'message', id, direction, text, ts, media, clientMessageId }),
   };
 }
 

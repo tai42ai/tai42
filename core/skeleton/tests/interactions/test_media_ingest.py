@@ -26,6 +26,7 @@ from tai42_contract.interactions.models.media_errors import (
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_kit.interactions import media_ingest_cap_settings
 
 from tai42_skeleton.conversations import media_meta as meta_module
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
@@ -114,6 +115,7 @@ class _FakeStorage:
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     media_ingest_settings.cache_clear()
+    media_ingest_cap_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -347,7 +349,7 @@ async def test_declared_size_over_cap_raises_before_read(provider, monkeypatch):
 
 async def test_streamed_body_over_cap_raises_not_truncates(provider, monkeypatch):
     monkeypatch.setenv("MEDIA_INGEST_MAX_IMAGE_BYTES", "10000")
-    media_ingest_settings.cache_clear()
+    media_ingest_cap_settings.cache_clear()
     body = _PNG + b"\x00" * 20000
     with pytest.raises(MediaTooLargeError):
         await ingest_media(
@@ -366,7 +368,7 @@ async def test_sniffed_kind_cap_applies_after_early_sniff(provider, monkeypatch)
     # A web door (kind_hint None) sees the largest cap up front; after the early sniff derives IMAGE
     # the tighter image cap is applied to the remainder.
     monkeypatch.setenv("MEDIA_INGEST_MAX_IMAGE_BYTES", "10000")
-    media_ingest_settings.cache_clear()
+    media_ingest_cap_settings.cache_clear()
     body = _PNG + b"\x00" * 20000
     with pytest.raises(MediaTooLargeError):
         await ingest_media(

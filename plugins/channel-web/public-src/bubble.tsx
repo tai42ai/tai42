@@ -12,8 +12,10 @@ import { AlertTriangleIcon, Button, CheckIcon, Markdown, PendingIcon } from '@ta
 import type { ReactElement } from 'react';
 
 /** The delivery state of a message the visitor sent from this page. `null` on
- * anything that came off the transcript stream — that is already durable. */
-export type SendStatus = 'sending' | 'sent' | 'failed';
+ * anything that came off the transcript stream — that is already durable. `failed`
+ * is a send that may land on a retry; `rejected` is a refusal no retry can change,
+ * so the note row shows the reason without a Retry. */
+export type SendStatus = 'sending' | 'sent' | 'failed' | 'rejected';
 
 export interface BubbleProps {
   readonly direction: 'in' | 'out';
@@ -44,7 +46,7 @@ export function Bubble({
   onRetry,
   groupStart,
 }: BubbleProps): ReactElement {
-  const failed = status === 'failed';
+  const failed = status === 'failed' || status === 'rejected';
   const rowClass = [
     'tcw-row',
     direction === 'in' ? 'tcw-row--in' : 'tcw-row--out',

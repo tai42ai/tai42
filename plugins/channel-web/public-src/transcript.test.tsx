@@ -13,6 +13,7 @@ import {
   type TranscriptEntry,
   type TranscriptProps,
 } from '@/transcript';
+import type { MediaItem } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();
@@ -34,6 +35,7 @@ function said(
     direction,
     text,
     ts: new Date(at).toISOString(),
+    media: null,
     status: null,
     error: null,
     retryId: null,
@@ -42,6 +44,21 @@ function said(
 
 function unavailable(key: string, at: number): TranscriptEntry {
   return { kind: 'unavailable', key, ts: new Date(at).toISOString() };
+}
+
+/** The visitor's own message carrying attachments, on the `in` side. */
+function saidWithMedia(key: string, media: readonly MediaItem[], text = ''): TranscriptEntry {
+  return {
+    kind: 'message',
+    key,
+    direction: 'in',
+    text,
+    ts: new Date(NOW).toISOString(),
+    media,
+    status: null,
+    error: null,
+    retryId: null,
+  };
 }
 
 describe('isAtBottom', () => {
@@ -288,6 +305,7 @@ describe('Transcript', () => {
           direction: 'in',
           text: 'hello',
           ts: new Date(NOW).toISOString(),
+          media: null,
           status: 'failed',
           error: 'That did not send.',
           retryId: 'local-1',
@@ -397,5 +415,169 @@ describe('Transcript', () => {
     renderTranscript([media], { locked: true });
 
     expect(screen.getByRole('button', { name: 'See all' })).toBeDisabled();
+  });
+
+  it("renders a visitor's own inbound image above their bubble on the in side", () => {
+    renderTranscript([
+      saidWithMedia(
+        'a',
+        [
+          {
+            kind: 'image',
+            url: 'https://app.example/api/interactions/media/abc',
+            caption: 'a photo',
+            filename: null,
+          },
+        ],
+        'here you go',
+      ),
+    ]);
+
+    const image = screen.getByRole('img', { name: 'a photo' });
+    // The served ref reaches the src unchanged (same-origin under the page CSP).
+    expect(image).toHaveAttribute('src', 'https://app.example/api/interactions/media/abc');
+    const bubble = screen.getByText('here you go').closest('.tcw-bubble');
+    expect(bubble).not.toBeNull();
+    // The media element sits before the text bubble in the same group.
+    expect(image.compareDocumentPosition(bubble as Node)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("renders a visitor's own inbound document as a download chip with the served url", () => {
+    renderTranscript([
+      saidWithMedia('a', [
+        {
+          kind: 'document',
+          url: 'https://app.example/api/interactions/media/doc',
+          caption: null,
+          filename: 'report.pdf',
+        },
+      ]),
+    ]);
+
+    const link = screen.getByRole('link');
+    expect(link).toHaveAttribute('href', 'https://app.example/api/interactions/media/doc');
+    expect(link).toHaveAttribute('download', 'report.pdf');
+    expect(screen.getByText('report.pdf')).toBeInTheDocument();
+  });
+
+  it('renders a text-only inbound message as a bubble with no media element', () => {
+    const { container } = renderTranscript([said('a', NOW, 'in', 'just text')]);
+
+    expect(screen.getByText('just text')).toBeInTheDocument();
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.tcw-media-in')).toBeNull();
+  });
+
+  it('renders an out-direction message carrying media on the out side above its bubble', () => {
+    const { container } = renderTranscript([
+      {
+        kind: 'message',
+        key: 'a',
+        direction: 'out',
+        text: 'here you go',
+        ts: new Date(NOW).toISOString(),
+        media: [
+          {
+            kind: 'image',
+            url: 'https://app.example/api/interactions/media/abc',
+            caption: 'a photo',
+            filename: null,
+          },
+        ],
+        status: null,
+        error: null,
+        retryId: null,
+      },
+    ]);
+
+    // The media row keys its side off the message direction, so it never splits
+    // across sides from its bubble.
+    const mediaRow = container.querySelector('.tcw-media-out');
+    expect(mediaRow).not.toBeNull();
+    expect(container.querySelector('.tcw-media-in')).toBeNull();
+    expect(mediaRow?.classList.contains('tcw-row--out')).toBe(true);
+
+    const image = screen.getByRole('img', { name: 'a photo' });
+    const bubble = screen.getByText('here you go').closest('.tcw-bubble');
+    expect(bubble).not.toBeNull();
+    expect(image.compareDocumentPosition(bubble as Node)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it('keeps the bubble for a failed optimistic blank-text media send, with its error and Retry', async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    renderTranscript(
+      [
+        {
+          kind: 'message',
+          key: 'local-1',
+          direction: 'in',
+          text: '',
+          ts: new Date(NOW).toISOString(),
+          media: [
+            {
+              kind: 'image',
+              url: 'https://app.example/api/interactions/media/abc',
+              caption: 'a photo',
+              filename: null,
+            },
+          ],
+          status: 'failed',
+          error: 'That did not send.',
+          retryId: 'local-1',
+        },
+      ],
+      { onRetry },
+    );
+
+    // The media row and the bubble both render even though the text is blank —
+    // the bubble carries the failure and its Retry.
+    expect(screen.getByRole('img', { name: 'a photo' })).toBeInTheDocument();
+    expect(screen.getByText('That did not send.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledWith('local-1');
+  });
+
+  it('keeps the sending indicator on a still-sending optimistic blank-text media send', () => {
+    renderTranscript([
+      {
+        kind: 'message',
+        key: 'local-1',
+        direction: 'in',
+        text: '',
+        ts: new Date(NOW).toISOString(),
+        media: [
+          {
+            kind: 'image',
+            url: 'https://app.example/api/interactions/media/abc',
+            caption: 'a photo',
+            filename: null,
+          },
+        ],
+        status: 'sending',
+        error: null,
+        retryId: null,
+      },
+    ]);
+
+    expect(screen.getByRole('img', { name: 'a photo' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Sending')).toBeInTheDocument();
+  });
+
+  it('renders a caption-less media message as media alone, with no empty bubble', () => {
+    const { container } = renderTranscript([
+      saidWithMedia('a', [
+        {
+          kind: 'image',
+          url: 'https://app.example/api/interactions/media/abc',
+          caption: null,
+          filename: null,
+        },
+      ]),
+    ]);
+
+    expect(container.querySelector('.tcw-media-in')).not.toBeNull();
+    expect(container.querySelector('.tcw-bubble')).toBeNull();
   });
 });

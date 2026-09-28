@@ -105,6 +105,34 @@ page sends no `Referer`). Point card images only at a host the visitor may revea
 themselves to.
 </Warning>
 
+## Inbound attachments
+
+A visitor can attach files to a message — an **image**, a **document**, an **audio**
+clip, or a **video** — from the composer's attach button, by dragging a file onto the
+conversation, or by pasting an image. Each file is uploaded on its own, ahead of the
+send: the page shows a preview and a per-file progress indicator, and the visitor can
+cancel an upload in flight or remove a ready file before sending. Sending the message
+references the uploaded files, which then ride the turn as typed attachments — a
+tool target receives them on its payload under the `attachments` key (the first
+attachment also echoed on the `media_*` params), and a caption-less send is delivered
+as a media-only message.
+
+![The composer with a ready attachment in its tray, above the attach control and the message input](images/inbound-attachment-tray-light.png)
+
+The upload is a two-step exchange: the file is streamed to the upload door, which
+returns a **same-origin** reference the message send binds to the turn. The visitor's
+own attachments then render inline in their transcript — an image or player in the
+bubble, a document as a download card — and replay for a returning visitor exactly as
+any other message.
+
+![A visitor's own message on their side of the transcript: the inbound image and a document download card](images/inbound-attachment-row-light.png)
+
+Which types are accepted and how large a file may be are the deployment's
+media-ingestion settings (the `MEDIA_INGEST_` env group): each kind carries its own
+byte cap and its own allowlist of accepted types. A file over the cap, of a
+disallowed type, or that cannot be stored is refused with an inline message on the
+file itself — never a silent drop.
+
 ## Ask-less forms
 
 A `notify_user` carrying a `schema` renders an **ask-less form card**: the message is

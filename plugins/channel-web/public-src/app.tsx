@@ -26,6 +26,7 @@ import { Header } from '@/header';
 import { ResetConfirmDialog } from '@/reset-confirm-dialog';
 import { Transcript } from '@/transcript';
 import { buildTranscriptEntries } from '@/transcript-entries';
+import { useDropZone, useUploads } from '@/uploads';
 import { useAnswerSubmit } from '@/use-answer-submit';
 import { useChatStream } from '@/use-chat-stream';
 import { useConversationReset } from '@/use-conversation-reset';
@@ -69,6 +70,20 @@ function deriveChatBodyFlags(args: {
   };
 }
 
+/** The per-message attachment cap the page shell advertises on `#root`, read once at
+ * mount. Absent → `null`: the tray applies no client-side cap and the messages door's
+ * 422 remains the sole (authoritative) enforcer. Present but not a positive integer is
+ * a malformed shell and throws loudly rather than degrading to a silent guess. */
+function readAttachmentCap(): number | null {
+  const raw = document.getElementById('root')?.dataset.maxAttachments;
+  if (raw === undefined) return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`the chat page shell carries an invalid data-max-attachments: ${raw}`);
+  }
+  return value;
+}
+
 export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -110,21 +125,46 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     generationRef: reset.generationRef,
     onSessionEnded: reset.endConversation,
   });
+  const maxAttachments = useMemo(() => readAttachmentCap(), []);
+  const uploads = useUploads({
+    identity,
+    connected: stream.connected,
+    maxAttachments,
+    onSessionEnded: reset.endConversation,
+  });
 
   resetLocalStateRef.current = () => {
     outbox.clear();
+    uploads.clear();
     setDraft('');
     typing.clearTyping();
   };
 
   const send = outbox.send;
-  // The composer's own submission: send the draft and, only if it went out, clear it.
+  // The composer's own submission: send the draft with its ready attachments and,
+  // only if it went out, clear the draft and drop JUST the attachments that were sent
+  // — a failed or offline-queued item that was not part of this send stays in the tray
+  // with its retry/queue affordance.
   const onSend = useCallback(() => {
-    if (send(draft)) setDraft('');
-  }, [draft, send]);
+    const sentIds = uploads.readyMediaIds;
+    if (send(draft, null, sentIds, uploads.readyMedia)) {
+      setDraft('');
+      uploads.removeIds(sentIds);
+    }
+  }, [draft, send, uploads]);
   const focusComposer = useCallback(() => {
     composerRef.current?.focus();
   }, []);
+  // Removing or cancelling a tray item destroys the control that had focus, so it
+  // returns to the composer where the next action is.
+  const onRemoveAttachment = useCallback(
+    (id: string) => {
+      uploads.remove(id);
+      focusComposer();
+    },
+    [uploads, focusComposer],
+  );
+  const dropZone = useDropZone(uploads.addFiles, !ended);
 
   const entries = useMemo(
     () => buildTranscriptEntries(items, outbox.pending),
@@ -151,23 +191,32 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
       {bodyIsBroken ? (
         <BrokenBody disabled={stream.disabled} onRetry={reset.restartStream} />
       ) : (
-        <Transcript
-          // Keyed by the epoch, so a new conversation gets a NEW transcript:
-          // where the visitor had scrolled to, and what they had already seen,
-          // describe the conversation they left and must not outlive it.
-          key={reset.epoch}
-          entries={entries}
-          answeredIds={stream.answeredIds}
-          typing={typing.typing}
-          loading={loading}
-          locked={ended}
-          onAnswer={answer.onAnswer}
-          onAnswered={focusComposer}
-          onRetry={outbox.onRetry}
-          onSend={send}
-          onSubmitForm={answer.onSubmitForm}
-          pinToken={outbox.pinToken}
-        />
+        <div
+          className={dropZone.active ? 'tcw-drop-zone tcw-drop-active' : 'tcw-drop-zone'}
+          onDragEnter={dropZone.onDragEnter}
+          onDragOver={dropZone.onDragOver}
+          onDragLeave={dropZone.onDragLeave}
+          onDrop={dropZone.onDrop}
+          data-testid="drop-zone"
+        >
+          <Transcript
+            // Keyed by the epoch, so a new conversation gets a NEW transcript:
+            // where the visitor had scrolled to, and what they had already seen,
+            // describe the conversation they left and must not outlive it.
+            key={reset.epoch}
+            entries={entries}
+            answeredIds={stream.answeredIds}
+            typing={typing.typing}
+            loading={loading}
+            locked={ended}
+            onAnswer={answer.onAnswer}
+            onAnswered={focusComposer}
+            onRetry={outbox.onRetry}
+            onSend={send}
+            onSubmitForm={answer.onSubmitForm}
+            pinToken={outbox.pinToken}
+          />
+        </div>
       )}
       <ConnectionStatus reconnecting={reconnecting} frameDropped={frameDropped} />
       <Composer
@@ -177,6 +226,15 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
         disabled={ended}
         placeholder={ended ? 'Reload the page to keep chatting' : 'Write a message…'}
         inputRef={composerRef}
+        attachments={uploads.items}
+        onAddFiles={uploads.addFiles}
+        onRemoveAttachment={onRemoveAttachment}
+        onRetryAttachment={uploads.retry}
+        attachAnnouncement={uploads.announcement}
+        uploadsInFlight={uploads.anyInFlight}
+        attachAtCap={uploads.atCap}
+        maxAttachments={maxAttachments}
+        onAttachBlocked={uploads.announceCap}
       />
       {reset.confirmingReset ? (
         <ResetConfirmDialog

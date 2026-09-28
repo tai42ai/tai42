@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 from starlette.responses import StreamingResponse
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import BlankInboundTextError, inbound_media_placeholder
+from tai42_contract.interactions import MediaAlreadyBoundError, MediaKind, MediaNotFoundError
 
 import tai42_channel_web.routes  # noqa: F401  (route registration side-effect)
 from tai42_channel_web.channel import WebChannel
@@ -34,6 +35,7 @@ from .conftest import (
     _seed_old_shape_record,
     _stream_request,
     build_request,
+    make_ingested_media,
     make_notification,
     register,
 )
@@ -553,6 +555,264 @@ async def test_messages_refuse_a_malformed_reply_id_with_422(
     )
     assert resp.status_code == 422
     assert stub_app.conversations.accept_calls == []
+
+
+# -- POST /messages with attachments --------------------------------------------
+
+_ATTACHMENT_A = "A" * 43
+_ATTACHMENT_B = "B" * 43
+
+
+async def test_message_with_no_attachments_binds_nothing_and_accepts_without_them(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # A text-only send binds nothing and hands ``accept`` no attachments, so its payload
+    # matches a plain text send and carries no attachments key.
+    await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "hi"}, token=SESSION_TOKEN)
+    )
+    assert stub_app.media.bind_calls == []
+    assert stub_app.conversations.accept_calls[0]["attachments"] is None
+
+
+async def test_message_with_one_attachment_binds_then_accepts_and_frames_media(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # Bind BEFORE accept, with the pmid accept uses; accept receives the typed item and
+    # the first-item parity params; the visitor's own frame carries the media.
+    stub_app.conversations.accept_result = "turn-42"
+    ingested = make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE, mime="image/png", size=1234, sha256="d" * 64)
+    stub_app.media.bind_results = [ingested]
+
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "look", "attachment_ids": [_ATTACHMENT_A]}, token=SESSION_TOKEN
+        )
+    )
+
+    assert resp.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    bind = stub_app.media.bind_calls[0]
+    assert bind["media_id"] == _ATTACHMENT_A
+    assert bind["origin"].channel_id == "web"
+    # Ownership is keyed on the registered visitor id, and the media binds to the SAME
+    # provider message id accept uses.
+    assert bind["origin"].participant_identity == VISITOR_ID
+    assert bind["origin"].message_id == call["provider_message_id"]
+    assert call["attachments"] == [ingested.item]
+    assert call["params"] == {
+        "media_kind": "image",
+        "media_id": _ATTACHMENT_A,
+        "media_mime_type": "image/png",
+        "media_sha256": "d" * 64,
+        "media_size": "1234",
+    }
+    assert call["text"] == "look"
+    payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert payload["media"] == [{"kind": "image", "url": f"/api/interactions/media/{_ATTACHMENT_A}"}]
+    assert payload["text"] == "look"
+
+
+async def test_two_attachments_ride_one_turn_with_the_first_items_parity_params(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # Multiple attachments ride ONE turn; the typed list carries all, the parity params
+    # echo the FIRST only (the media_* vocabulary is single-media).
+    first = make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE, mime="image/png", size=11, sha256="1" * 64)
+    second = make_ingested_media(
+        _ATTACHMENT_B, kind=MediaKind.DOCUMENT, mime="application/pdf", size=22, sha256="2" * 64, filename="report.pdf"
+    )
+    stub_app.media.bind_results = [first, second]
+
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "two", "attachment_ids": [_ATTACHMENT_A, _ATTACHMENT_B]},
+            token=SESSION_TOKEN,
+        )
+    )
+
+    assert resp.status_code == 200
+    assert [call["media_id"] for call in stub_app.media.bind_calls] == [_ATTACHMENT_A, _ATTACHMENT_B]
+    call = stub_app.conversations.accept_calls[0]
+    assert call["attachments"] == [first.item, second.item]
+    assert call["params"]["media_id"] == _ATTACHMENT_A
+    assert call["params"]["media_mime_type"] == "image/png"
+    payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert payload["media"] == [
+        {"kind": "image", "url": f"/api/interactions/media/{_ATTACHMENT_A}"},
+        {"kind": "document", "url": f"/api/interactions/media/{_ATTACHMENT_B}", "filename": "report.pdf"},
+    ]
+
+
+async def test_a_blank_text_message_with_an_attachment_accepts_with_a_placeholder_and_a_blank_frame(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # The turn text handed to accept is the media placeholder (accept refuses blank text);
+    # the visitor's own frame keeps the RAW blank text, so the page renders a media-only bubble.
+    stub_app.conversations.accept_result = "turn-9"
+    stub_app.media.bind_results = [make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE)]
+
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "", "attachment_ids": [_ATTACHMENT_A]}, token=SESSION_TOKEN
+        )
+    )
+
+    assert resp.status_code == 200
+    assert stub_app.conversations.accept_calls[0]["text"] == inbound_media_placeholder(MediaKind.IMAGE.value)
+    payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert payload["text"] == ""
+    assert payload["media"] == [{"kind": "image", "url": f"/api/interactions/media/{_ATTACHMENT_A}"}]
+
+
+async def test_an_unbindable_attachment_is_400_media_unbindable(web_env, stub_app, registered_session: FakeRedis):
+    # An unknown / expired / not-owned id — one uniform bind error — is a loud 400, and
+    # no turn is accepted or appended.
+    stub_app.media.bind_error = MediaNotFoundError("gone")
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "look", "attachment_ids": [_ATTACHMENT_A]}, token=SESSION_TOKEN
+        )
+    )
+    assert resp.status_code == 400
+    assert _body(resp)["code"] == "media_unbindable"
+    assert stub_app.conversations.accept_calls == []
+    assert not registered_session.streams
+
+
+async def test_an_already_bound_attachment_is_409_media_already_bound(web_env, stub_app, registered_session: FakeRedis):
+    # An id already bound to ANOTHER message is a loud 409 conflict.
+    stub_app.media.bind_error = MediaAlreadyBoundError("taken")
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "look", "attachment_ids": [_ATTACHMENT_A]}, token=SESSION_TOKEN
+        )
+    )
+    assert resp.status_code == 409
+    assert _body(resp)["code"] == "media_already_bound"
+    assert stub_app.conversations.accept_calls == []
+
+
+async def test_over_the_attachment_count_cap_is_422_before_any_bind(
+    web_env, stub_app, registered_session: FakeRedis, monkeypatch
+):
+    # The count cap is the operator's ``max_attachments_per_message`` setting, enforced in
+    # the door before any bind — an over-count list never reaches the bind step.
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WEB_MAX_ATTACHMENTS_PER_MESSAGE", "2")
+    reset_all_settings()
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "x", "attachment_ids": [_ATTACHMENT_A, _ATTACHMENT_B, "C" * 43]},
+            token=SESSION_TOKEN,
+        )
+    )
+    assert resp.status_code == 422
+    assert "attachment_ids" in _body(resp)["error"]
+    assert "2 attachments" in _body(resp)["error"]
+    assert stub_app.media.bind_calls == []
+    assert stub_app.conversations.accept_calls == []
+
+
+async def test_at_the_attachment_count_cap_the_message_is_accepted(
+    web_env, stub_app, registered_session: FakeRedis, monkeypatch
+):
+    # The boundary: exactly the cap is accepted — the door binds every id and accepts one
+    # turn, so the cap admits its own limit rather than refusing at it.
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WEB_MAX_ATTACHMENTS_PER_MESSAGE", "2")
+    reset_all_settings()
+    stub_app.conversations.accept_result = "turn-cap"
+    stub_app.media.bind_results = [
+        make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE),
+        make_ingested_media(_ATTACHMENT_B, kind=MediaKind.IMAGE),
+    ]
+
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "two", "attachment_ids": [_ATTACHMENT_A, _ATTACHMENT_B]},
+            token=SESSION_TOKEN,
+        )
+    )
+
+    assert resp.status_code == 200
+    assert [call["media_id"] for call in stub_app.media.bind_calls] == [_ATTACHMENT_A, _ATTACHMENT_B]
+    assert len(stub_app.conversations.accept_calls) == 1
+
+
+async def test_media_params_overflowing_the_entry_param_cap_is_422_and_never_accepts(
+    web_env, stub_app, fake_redis: FakeRedis
+):
+    # The first attachment's parity media_* params merge into the session's captured link
+    # params and are re-bounded together; a merge over the entry-param count cap is a loud
+    # 422 the visitor's send is refused with. The bind precedes the merge, so it has
+    # already run — but no turn is accepted and no frame is appended.
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, params={f"k{i}": "v" for i in range(12)})
+    stub_app.media.bind_results = [
+        make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE, mime="image/png", size=1234, sha256="d" * 64)
+    ]
+
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "look", "attachment_ids": [_ATTACHMENT_A]}, token=SESSION_TOKEN
+        )
+    )
+
+    # 12 session params + 5 media_* params (kind, id, mime, sha256, size) = 17, one over
+    # the entry-param count cap of 16.
+    assert resp.status_code == 422
+    assert "over the 16 allowed" in _body(resp)["error"]
+    # Binding precedes the merge, so the bind ran; the overflow refuses the message, never
+    # the bind (there is no unbind).
+    assert stub_app.media.bind_calls[0]["media_id"] == _ATTACHMENT_A
+    assert stub_app.conversations.accept_calls == []
+    assert not fake_redis.streams
+
+
+@pytest.mark.parametrize("bad", ["", "short", "A" * 42, "A" * 44, "has/slash" + "A" * 34])
+async def test_a_malformed_attachment_id_is_422(web_env, stub_app, registered_session: FakeRedis, bad: str):
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "x", "attachment_ids": [bad]}, token=SESSION_TOKEN)
+    )
+    assert resp.status_code == 422
+    assert stub_app.media.bind_calls == []
+
+
+async def test_a_repeated_attachment_id_is_422(web_env, stub_app, registered_session: FakeRedis):
+    # A repeated id would bind and deliver one served object twice; the wire refuses it.
+    resp = await _handler(stub_app, _MESSAGES)(
+        build_request(
+            json_body={"identity": IDENTITY, "text": "x", "attachment_ids": [_ATTACHMENT_A, _ATTACHMENT_A]},
+            token=SESSION_TOKEN,
+        )
+    )
+    assert resp.status_code == 422
+    assert stub_app.media.bind_calls == []
+
+
+async def test_a_retry_of_the_same_key_rebinds_to_the_same_message_and_runs_one_turn(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # A retry re-derives the same provider message id, so each POST re-binds against the
+    # SAME message (the seam's bind is idempotent for it) and accept dedups to one turn.
+    stub_app.conversations = _IdempotentConversations()
+    stub_app.media.bind_results = [
+        make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE),
+        make_ingested_media(_ATTACHMENT_A, kind=MediaKind.IMAGE),
+    ]
+    body = {"identity": IDENTITY, "text": "look", "client_message_id": "abc-123_XY", "attachment_ids": [_ATTACHMENT_A]}
+    handler = _handler(stub_app, _MESSAGES)
+
+    first = await handler(build_request(json_body=body, token=SESSION_TOKEN))
+    retry = await handler(build_request(json_body=body, token=SESSION_TOKEN))
+
+    assert _body(first) == _body(retry)
+    assert len(stub_app.conversations.turns) == 1
+    origins = [call["origin"].message_id for call in stub_app.media.bind_calls]
+    assert len(origins) == 2
+    assert origins[0] == origins[1]
 
 
 # -- POST /forms/{token} --------------------------------------------------------

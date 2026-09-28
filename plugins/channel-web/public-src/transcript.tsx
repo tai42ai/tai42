@@ -19,8 +19,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { Bubble, type SendStatus } from '@/bubble';
 import { FormCard, type FormCardItem } from '@/form-card';
-import { MediaCard, type MediaCardItem, type SendReply } from '@/media-card';
+import { MediaCard, type MediaCardItem, MediaItems, type SendReply } from '@/media-card';
 import { QuestionCard, type QuestionItem } from '@/question-card';
+import type { MediaItem } from '@/transcript-model';
 import { UnavailableNotice } from '@/unavailable-notice';
 
 /** How close to the bottom edge (px) still counts as "pinned to the tail". */
@@ -45,6 +46,9 @@ export type TranscriptEntry =
       readonly direction: 'in' | 'out';
       readonly text: string;
       readonly ts: string;
+      /** The visitor's own attachments on this message, rendered above the bubble on
+       * their side; `null` when the message carries none. */
+      readonly media: readonly MediaItem[] | null;
       /** Non-null only while the message is the visitor's own and unconfirmed. */
       readonly status: SendStatus | null;
       readonly error: string | null;
@@ -391,14 +395,27 @@ function EntryRow({
       ) : entry.kind === 'form' ? (
         <FormCard item={entry.item} onSubmitForm={onSubmitForm} locked={locked} />
       ) : (
-        <Bubble
-          direction={entry.direction}
-          text={entry.text}
-          status={entry.status}
-          error={entry.error}
-          groupStart={row.groupStart}
-          {...(retryId !== null ? { onRetry: () => onRetry(retryId) } : {})}
-        />
+        <>
+          {entry.media !== null ? (
+            <div
+              className={`tcw-row tcw-row--${entry.direction} tcw-media-${entry.direction} ${
+                row.groupStart ? 'tcw-row--start' : 'tcw-row--continued'
+              }`}
+            >
+              <MediaItems media={entry.media} />
+            </div>
+          ) : null}
+          {entry.text !== '' || entry.status !== null || entry.media === null ? (
+            <Bubble
+              direction={entry.direction}
+              text={entry.text}
+              status={entry.status}
+              error={entry.error}
+              groupStart={entry.media === null && row.groupStart}
+              {...(retryId !== null ? { onRetry: () => onRetry(retryId) } : {})}
+            />
+          ) : null}
+        </>
       )}
     </div>
   );

@@ -249,6 +249,23 @@ async def test_append_message_carries_no_key_when_the_sender_sent_none(fake_redi
     assert "client_message_id" not in _data(_entries(fake_redis)[0])
 
 
+async def test_append_message_carries_the_visitor_media_when_present(fake_redis: FakeRedis):
+    # The visitor's own attached items ride their frame, so a returning visitor replays
+    # their attachment exactly as any other frame.
+    media = [{"kind": "image", "url": "/api/interactions/media/" + "a" * 43}]
+    await append_message(IDENTITY, VISITOR_ID, "in", "", entry_id="turn-1", media=media)
+    payload = _data(_entries(fake_redis)[0])
+    assert payload["media"] == media
+    # A caption-less send keeps its raw (blank) text — the page renders a media-only bubble.
+    assert payload["text"] == ""
+
+
+async def test_append_message_omits_media_when_absent(fake_redis: FakeRedis):
+    # A text-only message carries no media key, so a reader tells absent from empty.
+    await append_message(IDENTITY, VISITOR_ID, "in", "hi")
+    assert "media" not in _data(_entries(fake_redis)[0])
+
+
 async def test_capture_cursor_empty_stream_is_zero(fake_redis: FakeRedis):
     async with connection.pooled_redis_ctx() as redis:
         assert await capture_cursor(redis, IDENTITY, VISITOR_ID) == "0-0"

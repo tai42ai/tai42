@@ -81,6 +81,7 @@ describe('sending', () => {
       'hello there',
       expect.stringMatching(CLIENT_MESSAGE_ID),
       null,
+      [],
     );
   });
 
@@ -112,6 +113,7 @@ describe('sending', () => {
       'line one\nline two',
       expect.stringMatching(CLIENT_MESSAGE_ID),
       null,
+      [],
     );
   });
 
@@ -148,6 +150,7 @@ describe('sending', () => {
         'にほんご',
         expect.stringMatching(CLIENT_MESSAGE_ID),
         null,
+        [],
       ),
     );
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
@@ -263,6 +266,7 @@ describe('invite pairing', () => {
         'LINK-ABCD1234',
         expect.stringMatching(CLIENT_MESSAGE_ID),
         null,
+        [],
       ),
     );
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
@@ -312,6 +316,7 @@ describe('invite pairing', () => {
       'LINK-ABCD1234',
       expect.stringMatching(CLIENT_MESSAGE_ID),
       null,
+      [],
     );
     expect(window.location.search).toBe('');
   });
@@ -368,6 +373,7 @@ describe('media cards', () => {
         'See all',
         expect.stringMatching(CLIENT_MESSAGE_ID),
         null,
+        [],
       ),
     );
   });
@@ -397,6 +403,7 @@ describe('media cards', () => {
         'Item A',
         expect.stringMatching(CLIENT_MESSAGE_ID),
         'opt-a',
+        [],
       ),
     );
   });
@@ -420,6 +427,7 @@ describe('media cards', () => {
         'See all',
         expect.stringMatching(CLIENT_MESSAGE_ID),
         null,
+        [],
       ),
     );
     expect(field).toHaveValue('half a thought');

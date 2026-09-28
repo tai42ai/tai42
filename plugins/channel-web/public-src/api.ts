@@ -66,6 +66,23 @@ export function isStoreOff(error: unknown): boolean {
   return error instanceof ChatApiError && error.code === STORE_OFF_CODE;
 }
 
+/** The message door's codes for an attachment it can no longer bind to the message:
+ * its pending record expired or was never this visitor's, or it is already bound to
+ * another message. */
+const ATTACHMENT_GONE_CODES: ReadonlySet<string> = new Set([
+  'media_unbindable',
+  'media_already_bound',
+]);
+
+/** True when a send was refused because one of its attachments can no longer be
+ * bound. Terminal for that one message: re-sending the same ids can only be refused
+ * again, so the bubble says the attachment is gone instead of offering a retry. */
+export function isAttachmentGone(error: unknown): boolean {
+  return (
+    error instanceof ChatApiError && error.code !== null && ATTACHMENT_GONE_CODES.has(error.code)
+  );
+}
+
 const BUSY = "I'm getting a lot of messages right now — give me a minute and send that again.";
 
 /**
@@ -88,6 +105,7 @@ interface Door {
 }
 
 const MESSAGE_DOOR: Door = { what: 'sending a message', subject: 'That message' };
+const UPLOAD_DOOR: Door = { what: 'uploading a file', subject: 'That file' };
 const QUESTION_DOOR: Door = { what: 'answering a question', subject: 'That answer' };
 const FORM_DOOR: Door = { what: 'submitting a form', subject: 'That form' };
 const ROTATE_DOOR: Door = { what: 'starting a new conversation', subject: 'That request' };
@@ -99,7 +117,18 @@ const STREAM_DOOR: Door = { what: 'opening the chat stream', subject: 'That requ
  * else it is replaced, because a bridge lookup failure, a queue-overflow trace, or
  * a field-level validation message is not something a visitor can act on.
  */
-function friendlyMessage(status: number, detail: string | null, door: Door): string {
+function friendlyMessage(
+  status: number,
+  detail: string | null,
+  code: string | null,
+  door: Door,
+): string {
+  // An attachment the door can no longer bind is refused on every re-send of the
+  // same ids: the copy names the one thing that changes the outcome.
+  if (code === 'media_unbindable')
+    return 'That attachment is no longer available — attach it again to send it.';
+  if (code === 'media_already_bound')
+    return 'That attachment was already sent with another message.';
   if (status === 401) return 'Your chat session ended — reload the page to start a new one.';
   // The only 403 the doors this page FETCHES emit is an origin mismatch, which no
   // reload changes: the copy must not send the visitor after a fix that cannot
@@ -159,7 +188,11 @@ async function failure(response: Response, door: Door): Promise<ChatApiError> {
   // The door's own wording never reaches the transcript, so it is logged here —
   // a refusal stays diagnosable without a raw trace landing in a conversation.
   console.error(`${door.what} refused: HTTP ${response.status}`, detail ?? '(no error body)');
-  return new ChatApiError(friendlyMessage(response.status, detail, door), response.status, code);
+  return new ChatApiError(
+    friendlyMessage(response.status, detail, code, door),
+    response.status,
+    code,
+  );
 }
 
 async function readData<T>(response: Response, what: string): Promise<T> {
@@ -196,13 +229,23 @@ export async function sendMessage(
   text: string,
   clientMessageId: string,
   replyId: string | null = null,
+  attachmentIds: readonly string[] = [],
 ): Promise<string> {
-  const body: { identity: string; text: string; client_message_id: string; reply_id?: string } = {
+  const body: {
+    identity: string;
+    text: string;
+    client_message_id: string;
+    reply_id?: string;
+    attachment_ids?: string[];
+  } = {
     identity,
     text,
     client_message_id: clientMessageId,
   };
   if (replyId !== null) body.reply_id = replyId;
+  // Omitted from the body when empty, so a message with no attachment is
+  // byte-identical to one sent before this field existed.
+  if (attachmentIds.length > 0) body.attachment_ids = [...attachmentIds];
   const response = await fetch(`${apiBase()}/messages`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
@@ -213,6 +256,75 @@ export async function sendMessage(
   if (typeof data.message_id !== 'string')
     throw new Error('the message door returned no message_id');
   return data.message_id;
+}
+
+/** One accepted upload as the door describes it: the seam-minted capability id the
+ * message wire references (`media_id`), the sniffed `kind`/`mime`, the stored `size`,
+ * the SANITISED download `filename` (`null` on an inline kind), and the same-origin
+ * served `url`. The url 404s until a message binds the id, so a client preview uses
+ * its own `data:` URL rather than this. */
+export interface UploadedAttachment {
+  readonly media_id: string;
+  readonly kind: string;
+  readonly mime: string;
+  readonly size: number;
+  readonly filename: string | null;
+  readonly url: string;
+}
+
+/** The raw envelope shape the upload door returns, before it is proven well-typed. */
+interface UploadResponseData {
+  readonly media_id?: unknown;
+  readonly kind?: unknown;
+  readonly mime?: unknown;
+  readonly size?: unknown;
+  readonly filename?: unknown;
+  readonly url?: unknown;
+}
+
+/** Read one required string field off the upload response, or throw loudly naming it. */
+function uploadString(data: UploadResponseData, key: 'media_id' | 'kind' | 'mime' | 'url'): string {
+  const value = data[key];
+  if (typeof value !== 'string') throw new Error(`the upload door returned no ${key}`);
+  return value;
+}
+
+/**
+ * Upload one file to the visitor's PENDING media store and resolve with the door's
+ * typed record. The file rides as a multipart part alongside the `identity` field
+ * the door serves the session on; there is NO credential header — the `tai_web_session`
+ * cookie rides the same-origin request on its own, exactly as {@link sendMessage}.
+ *
+ * `signal` aborts the in-flight request (the compose tray's cancel), which rejects
+ * the returned promise with the abort reason. Every non-2xx becomes a
+ * {@link ChatApiError} carrying the door's `code`, which the caller maps to its own
+ * inline copy.
+ */
+export async function uploadAttachment(
+  identity: string,
+  file: File,
+  signal: AbortSignal,
+): Promise<UploadedAttachment> {
+  const form = new FormData();
+  form.append('identity', identity);
+  form.append('file', file, file.name);
+  const response = await fetch(`${apiBase()}/uploads`, {
+    method: 'POST',
+    headers: { accept: 'application/json' },
+    body: form,
+    signal,
+  });
+  if (!response.ok) throw await failure(response, UPLOAD_DOOR);
+  const data = await readData<UploadResponseData>(response, 'uploading a file');
+  if (typeof data.size !== 'number') throw new Error('the upload door returned no size');
+  return {
+    media_id: uploadString(data, 'media_id'),
+    kind: uploadString(data, 'kind'),
+    mime: uploadString(data, 'mime'),
+    size: data.size,
+    filename: typeof data.filename === 'string' ? data.filename : null,
+    url: uploadString(data, 'url'),
+  };
 }
 
 /** Answer one pending question. The door verifies the record belongs to this
