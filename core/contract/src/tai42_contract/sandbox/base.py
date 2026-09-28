@@ -137,7 +137,8 @@ class SandboxSession(ABC):
     async def get_file(self, path: str) -> bytes:
         """Read ``path`` (WORKSPACE-RELATIVE by default) from the workspace.
 
-        Raise a typed :class:`SandboxError` on a miss.
+        Raise :class:`~tai42_contract.sandbox.SandboxFileNotFoundError` when ``path`` does not
+        exist; any other read failure raises the base :class:`SandboxError` with the real message.
         """
 
     @abstractmethod

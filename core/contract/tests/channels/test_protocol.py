@@ -146,6 +146,45 @@ def test_validate_form_schema_hook_is_optional_and_does_not_tighten_the_check():
         with_hook.validate_form_schema({"type": "object"}, "q")
 
 
+def test_signal_working_is_optional_and_does_not_tighten_the_check():
+    from tai42_contract.channels import Channel, ChannelDelivery, ChannelNotification
+
+    # ``signal_working`` / ``working_signal_expiry_seconds`` follow the optional-member
+    # convention: not Protocol members, so a channel that omits both is still a Channel
+    # and getattr yields None; a channel that declares them is read the same way.
+    class _NoHook:
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            return None
+
+        async def notify(self, notification: ChannelNotification) -> list[str]:
+            return []
+
+    class _WithSignal(_NoHook):
+        working_signal_expiry_seconds: float | None = 25.0
+
+        async def signal_working(
+            self,
+            *,
+            recipient: str,
+            sender_identity: str | None = None,
+            provider_message_id: str | None = None,
+            active: bool = True,
+        ) -> None:
+            return None
+
+    no_hook = _NoHook()
+    with_signal = _WithSignal()
+    assert isinstance(no_hook, Channel)
+    assert isinstance(with_signal, Channel)
+    assert getattr(no_hook, "working_signal_expiry_seconds", None) is None
+    assert getattr(with_signal, "working_signal_expiry_seconds", None) == 25.0
+    assert getattr(no_hook, "signal_working", None) is None
+    assert getattr(with_signal, "signal_working", None) is not None
+    # Neither is a Protocol member.
+    assert not hasattr(Channel, "working_signal_expiry_seconds")
+    assert not hasattr(Channel, "signal_working")
+
+
 # -- notify_in_order: the default sequential in-order primitive ------------------
 
 

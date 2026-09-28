@@ -33,6 +33,15 @@ from tai42_contract.errors import (
     error_kind,
     register_error_kind,
 )
+from tai42_contract.interactions.models.media_errors import (
+    MediaAlreadyBoundError,
+    MediaIngestError,
+    MediaNotFoundError,
+    MediaSourceReadError,
+    MediaStoreUnavailableError,
+    MediaTooLargeError,
+    MediaTypeNotAllowedError,
+)
 from tai42_contract.monitoring.errors import (
     MonitoringError,
     MonitoringReadNotSupportedError,
@@ -48,6 +57,7 @@ from tai42_contract.presets.errors import (
 from tai42_contract.sandbox.errors import (
     SandboxError,
     SandboxExecTimeoutError,
+    SandboxFileNotFoundError,
     SandboxSessionNotFoundError,
     SandboxSpecRejectedError,
     SandboxUnavailableError,
@@ -113,6 +123,7 @@ _STAMPED_CONTRACT_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     (SandboxError("x"), ErrorKind.UPSTREAM_ERROR),
     (SandboxUnavailableError("x"), ErrorKind.UNAVAILABLE),
     (SandboxSessionNotFoundError("sid"), ErrorKind.NOT_FOUND),
+    (SandboxFileNotFoundError("/w/a.txt"), ErrorKind.NOT_FOUND),
     (SandboxExecTimeoutError(timeout_seconds=1.0, stdout_len=0, stderr_len=0), ErrorKind.TIMED_OUT),
     (SandboxSpecRejectedError("x"), ErrorKind.BAD_INPUT),
     # agent
@@ -156,6 +167,14 @@ _STAMPED_CONTRACT_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     (AliasInUseError("taken"), ErrorKind.CONFLICT),
     # webhooks
     (WebhookVerificationError("sig"), ErrorKind.UNAUTHORIZED),
+    # served-media ingestion family
+    (MediaIngestError("x"), ErrorKind.UPSTREAM_ERROR),
+    (MediaTooLargeError("x"), ErrorKind.BAD_INPUT),
+    (MediaTypeNotAllowedError("x"), ErrorKind.BAD_INPUT),
+    (MediaStoreUnavailableError("x"), ErrorKind.UNAVAILABLE),
+    (MediaSourceReadError("x"), ErrorKind.UPSTREAM_ERROR),
+    (MediaNotFoundError("x"), ErrorKind.NOT_FOUND),
+    (MediaAlreadyBoundError("x"), ErrorKind.CONFLICT),
 ]
 
 

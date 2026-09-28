@@ -40,6 +40,25 @@ class SandboxSessionNotFoundError(SandboxError):
         self.session_id = session_id
 
 
+class SandboxFileNotFoundError(SandboxError):
+    """No file exists at the requested path in the session's workspace.
+
+    Raised by a provider's ``get_file`` ONLY when ``path`` does not exist in the session's
+    workspace. Every OTHER read failure (an IO/permission/engine error, an unreadable non-file)
+    stays the base :class:`SandboxError` carrying the real message, so a caller can tell a genuine
+    miss (report the file absent) from a real fault (surface the error), never masking one as the
+    other.
+    """
+
+    # The addressed file does not exist in the workspace.
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
+
+    def __init__(self, path: str):
+        """Build the error for the missing ``path``, recording it on the instance."""
+        super().__init__(f"sandbox file {path!r} not found")
+        self.path = path
+
+
 class SandboxExecTimeoutError(SandboxError):
     """An ``exec`` / ``exec_start`` exceeded its ``timeout_seconds``.
 

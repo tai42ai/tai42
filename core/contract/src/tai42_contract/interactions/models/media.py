@@ -3,6 +3,8 @@
 ``MediaItem`` is one media element shown with a message (image/document/video/audio/link);
 ``check_media_list`` bounds a list of them; ``validate_action_url`` validates a tappable
 link-action URL; ``served_media_id`` extracts a served-media reference's stored id.
+``MediaOrigin`` and ``IngestedMedia`` are the origin/result shapes of the served-media
+ingestion seam.
 """
 
 from __future__ import annotations
@@ -306,6 +308,43 @@ class MediaItem(BaseModel):
         else:
             _validate_file_media_url(self.url, self.kind)
         return self
+
+
+class MediaOrigin(BaseModel):
+    """Whose message an ingested media rides on — ties the metadata record to the conversation.
+
+    Names the ``channel_id`` and the ``participant_identity`` (the sender) that OWN the item, and
+    the ``message_id`` the media belongs to. ``message_id`` is OPTIONAL: ``None`` means the media is
+    ingested PENDING (the owning message does not exist yet — the two-phase upload door), to be bound
+    later by :meth:`~tai42_contract.app.facets.media.AppMedia.bind_media` with the id known; a set
+    value binds the item at ingest. ``(channel_id, participant_identity)`` is the ownership key
+    :meth:`~tai42_contract.app.facets.media.AppMedia.bind_media` checks.
+    """
+
+    channel_id: str
+    participant_identity: str
+    message_id: str | None = None
+
+
+class IngestedMedia(BaseModel):
+    """The result of one ``ingest_media`` / ``bind_media`` call: the served item plus its metadata.
+
+    ``item`` is the served :class:`MediaItem` (``kind`` derived from the SNIFFED type; ``url`` the
+    ``{MEDIA_ROUTE_PREFIX}{media_id}`` reference); ``media_id`` is the 43-char served id; ``size``
+    is the ACTUAL bytes read; ``sha256`` is the computed hex digest; ``mime`` is the sniffed-and-
+    agreed type; ``pending`` is ``True`` when the item was ingested without an ``origin.message_id``
+    (retained under the short pending TTL until
+    :meth:`~tai42_contract.app.facets.media.AppMedia.bind_media` promotes it), ``False`` once bound
+    to the record's horizon. The channel builds both the typed ``attachments`` (from ``item``) and
+    the parity ``media_*`` params (from ``size``/``sha256``/``mime``) off ONE ingest.
+    """
+
+    item: MediaItem
+    media_id: str
+    size: int
+    sha256: str
+    mime: str
+    pending: bool = False
 
 
 def check_media_list(items: Sequence[MediaItem]) -> None:

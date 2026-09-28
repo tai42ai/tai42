@@ -18,6 +18,7 @@ from tai42_contract.app.facets.execution import (
     AppStorage,
 )
 from tai42_contract.app.facets.integrations import AppAccounts, AppConnectors
+from tai42_contract.app.facets.media import AppMedia
 from tai42_contract.app.facets.messaging import (
     AppChannels,
     AppConversations,
@@ -52,6 +53,7 @@ __all__ = [
     "AppHttp",
     "AppInteractions",
     "AppLifecycle",
+    "AppMedia",
     "AppMonitoring",
     "AppPresets",
     "AppSandboxes",

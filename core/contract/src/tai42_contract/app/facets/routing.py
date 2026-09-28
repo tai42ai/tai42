@@ -40,6 +40,17 @@ class DeclaredRouteMetadata:
     error_statuses: tuple[int, ...]
     success_status: int
     additional_success_statuses: tuple[int, ...] = ()
+    #: A per-route override of the app-wide request body cap
+    #: (``TAI_BODY_LIMIT_MAX_BODY_BYTES``): the app's request-body limit honours THIS bound for the
+    #: matched route (both its up-front Content-Length reject and its running-total guard) instead of
+    #: the global default. ``None`` = the global default applies. A door that streams a large payload
+    #: under its own bound (a media upload capped per-kind by the ingestion seam) declares it here.
+    max_body_bytes: int | None = None
+    #: A per-route override of the rate-limit family a public door charges. ``None`` = the family is
+    #: derived from the path. A door whose cost class differs from its path-siblings
+    #: (an upload door sized separately from a message door) names its own family here, so its counter
+    #: and budget stay disjoint from theirs.
+    rate_limit_family: str | None = None
 
 
 @runtime_checkable
@@ -118,7 +129,11 @@ class AppHttp(Protocol):
           declares these (the operations adapter passes its operation's metadata, a
           native handler passes its own); ``None`` (the default) records trivial
           defaults for a route outside the spec surface, whose behavioral metadata
-          is never emitted.
+          is never emitted. A route MAY also declare its own ``max_body_bytes`` (a
+          per-route request body cap the app's request-body limit honours; default
+          ``None`` defers to the app cap) and its own ``rate_limit_family`` (the
+          rate-limit family the door charges; default ``None`` defers to the
+          path-derived family).
 
         The handler's narrative docstring becomes the operation description, and
         the reload-gate ``503`` response is derived from the handler body.

@@ -31,6 +31,7 @@ from .facets import (
     AppHttp,
     AppInteractions,
     AppLifecycle,
+    AppMedia,
     AppMonitoring,
     AppPresets,
     AppSandboxes,
@@ -99,6 +100,11 @@ class TaiApp(Protocol):
     @property
     def conversations(self) -> AppConversations:
         """Inbound-message and delivery-status entry surface for medium adapters."""
+        ...
+
+    @property
+    def media(self) -> AppMedia:
+        """Served-media ingestion entry surface for channel adapters and the upload door."""
         ...
 
     @property
@@ -203,6 +209,7 @@ __all__ = [
     "AppHttp",
     "AppInteractions",
     "AppLifecycle",
+    "AppMedia",
     "AppMonitoring",
     "AppPresets",
     "AppSandboxes",

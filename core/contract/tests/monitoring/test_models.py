@@ -150,3 +150,25 @@ def test_monitoring_filter_tokens_inverted_raises():
 def test_monitoring_filter_latency_inverted_raises():
     with pytest.raises(ValueError, match="min_latency"):
         MonitoringFilter(min_latency=2.0, max_latency=1.0)
+
+
+def test_span_window_item_tags_available_defaults_true():
+    from datetime import datetime
+
+    from tai42_contract.monitoring.models import SpanWindowItem
+
+    item = SpanWindowItem(id="x", start=datetime(2026, 1, 1))
+    assert item.tags == []
+    assert item.tags_available is True
+
+
+def test_span_window_item_tags_unavailable_is_distinct_from_empty():
+    from datetime import datetime
+
+    from tai42_contract.monitoring.models import SpanWindowItem
+
+    # 'unavailable' is not 'empty': tags_available=False marks a failed tag
+    # fetch, while an empty tags list means the span is genuinely untagged.
+    item = SpanWindowItem(id="x", start=datetime(2026, 1, 1), tags=[], tags_available=False)
+    assert item.tags == []
+    assert item.tags_available is False

@@ -74,6 +74,27 @@ class Channel(Protocol):
     reaches the default sequential behaviour through :func:`notify_in_order`, which
     dispatches to ``deliver_ordered`` when declared and otherwise loops ``notify``; a
     channel that declares neither still delivers a batch one ``notify`` at a time.
+
+    A channel MAY also declare the OPTIONAL "working-on-it" (typing) signal — the
+    same documented-member convention as ``deliver_ordered``, ``validate_form_schema``
+    and the capability flags, NOT Protocol members (so declaring them never tightens
+    the runtime structural check and a channel that omits them stays a valid
+    ``Channel``). It is two members. An OPTIONAL ``ClassVar
+    working_signal_expiry_seconds: float | None`` gives the vendor indicator's lifetime
+    in seconds; ``None`` (or absent) means the channel emits no working signal and the
+    caller's refresh loop never starts, read defensively with ``getattr(channel,
+    "working_signal_expiry_seconds", None)``. An OPTIONAL method ``async def
+    signal_working(self, *, recipient: str, sender_identity: str | None = None,
+    provider_message_id: str | None = None, active: bool = True) -> None`` asserts
+    (``active=True``) or clears (``active=False``) the working-on-it indicator to
+    ``recipient`` (the participant address, as ``notify`` addresses one), optionally
+    from ``sender_identity`` (``None`` = channel default), referencing the inbound
+    ``provider_message_id`` where the medium's API ties the indicator to a specific
+    inbound message. A channel whose indicator self-expires implements only the assert
+    and treats ``active=False`` as a no-op; a channel that emits explicit frames sends a
+    start frame on ``True`` and a stop frame on ``False``. It is fire-and-forget,
+    carries no reply, and raises :class:`ChannelDeliveryError` ONLY on a genuine send
+    failure the caller logs, never for a transient it can ignore.
     """
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
