@@ -41,6 +41,7 @@ documents faithfully.
 
 from __future__ import annotations
 
+from tai42_skeleton.app.route_registry.door_table import Door, DoorTable, build_door_table
 from tai42_skeleton.app.route_registry.metadata import (
     CORE_OWNER,
     CrossOwnerRouteCollisionError,
@@ -72,6 +73,8 @@ __all__ = [
     "MOUNT_METHODS",
     "CrossOwnerRouteCollisionError",
     "DeclaredRouteMetadata",
+    "Door",
+    "DoorTable",
     "EpochRouteAuditError",
     "Handler",
     "RouteAction",
@@ -82,6 +85,7 @@ __all__ = [
     "_SpecApp",
     "_SpecLifecycle",
     "_import_all_router_modules",
+    "build_door_table",
     "derive_route_action",
     "load_all_routes",
     "load_api_routes",

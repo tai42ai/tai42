@@ -39,6 +39,7 @@ from tai42_skeleton.app.facets import (
     VersioningFacet,
     WebhookVerifiersFacet,
 )
+from tai42_skeleton.app.media_facet import MediaFacet
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 
 
@@ -256,6 +257,41 @@ def test_storage_facet_forwarding():
     assert f.register_storage(_Storage) is app._register_storage.return_value
     app._register_storage.assert_called_once_with(_Storage)
     assert f.resource_manager == "rm"
+
+
+# -- MediaFacet ---------------------------------------------------------------
+
+
+async def test_media_facet_forwarding():
+    app = _app()
+    app._media_ingest_media = AsyncMock(return_value="ingested")
+    app._media_bind_media = AsyncMock(return_value="bound")
+    f = MediaFacet(app)
+    source = MagicMock()
+    origin = MagicMock()
+    assert (
+        await f.ingest_media(
+            source=source,
+            kind_hint="image",
+            declared_mime="image/png",
+            filename="p.png",
+            declared_size=10,
+            integrity_sha256=None,
+            origin=origin,
+        )
+        == "ingested"
+    )
+    app._media_ingest_media.assert_awaited_once_with(
+        source=source,
+        kind_hint="image",
+        declared_mime="image/png",
+        filename="p.png",
+        declared_size=10,
+        integrity_sha256=None,
+        origin=origin,
+    )
+    assert await f.bind_media("mid", origin=origin) == "bound"
+    app._media_bind_media.assert_awaited_once_with("mid", origin=origin)
 
 
 # -- MonitoringFacet ----------------------------------------------------------

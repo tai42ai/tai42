@@ -173,3 +173,49 @@ def test_probe_mcp_uses_pooled_client_seam(monkeypatch):
             assert [t.name for t in tools] == ["ping"]
 
     asyncio.run(run())
+
+
+class _UnusableSchemaTool:
+    """An MCP tool whose empty union crashes the schema converter — the unusable-schema
+    case the per-tool skip contains and the reload result must name."""
+
+    name = "broken"
+    description = "malformed"
+    inputSchema: ClassVar[dict] = {"anyOf": []}
+    outputSchema: ClassVar[dict] = {}
+
+
+class _UsableSchemaTool:
+    name = "good"
+    description = "ok"
+    inputSchema: ClassVar[dict] = {"type": "object", "properties": {"q": {"type": "string"}}}
+    outputSchema: ClassVar[dict] = {}
+
+
+def test_unusable_schema_tool_named_in_skipped_tools(monkeypatch):
+    # A server advertising one unusable-schema tool + one usable one: the reload result
+    # NAMES the skipped tool (``skipped_tools``) and still binds the usable one — the skip
+    # is operator-visible on the result, not only in the log.
+    import mcp
+
+    from tai42_skeleton.app.reload_gate import reload_gate
+
+    manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    probe = AsyncMock(
+        return_value=[
+            cast(mcp.types.Tool, _UsableSchemaTool()),
+            cast(mcp.types.Tool, _UnusableSchemaTool()),
+        ]
+    )
+    monkeypatch.setattr(app, "_probe_mcp", probe)
+
+    async def run():
+        async with app.app_context(manifest):
+            result = await reload_gate.run(lambda: app.admin.reload_mcp("svc"), reimports=False)
+
+            assert result["status"] == "ok"
+            assert result["skipped_tools"] == ["svc_broken"]
+            assert "svc_good" in result["tools"]
+            assert "svc_broken" not in result["tools"]
+
+    asyncio.run(run())

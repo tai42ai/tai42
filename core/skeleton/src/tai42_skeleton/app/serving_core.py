@@ -260,10 +260,12 @@ class ServingCore:
         # Manifest MCP servers that failed their viability check (title -> the failure
         # record: status, credential-free category, redacted message, http_status),
         # the tools each live MCP bound (per title, so a targeted reload replaces cleanly),
-        # and the per-title names a scoped MCP (re)bind refused because a preset owns them.
+        # the per-title names a scoped MCP (re)bind refused because a preset owns them,
+        # and the per-title tools a (re)bind skipped because they advertised an unusable schema.
         self._failed_mcps: dict[str, dict[str, Any]] = {}
         self._mcp_bound_tools: dict[str, set[str]] = {}
         self._mcp_preset_conflicts: dict[str, set[str]] = {}
+        self._mcp_unusable_tools: dict[str, set[str]] = {}
         # Cached resource manager: dropped each start() so a reload rebuilds it against
         # the freshly-imported storage provider rather than pinning the previous pool.
         self._resource_manager_cache: ResourceManager | None = None

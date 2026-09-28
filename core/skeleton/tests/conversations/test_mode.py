@@ -108,7 +108,7 @@ class FakeManager:
         return self._routes.get(name)
 
     async def list_routes(self):
-        return dict(self._routes)
+        return dict(self._routes), 0
 
 
 def _two_route_person() -> Person:

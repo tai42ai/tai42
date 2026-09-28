@@ -57,11 +57,15 @@ def _config_store() -> ConversationTargetConfigStore:
     response_model=ConversationConfigListEnvelope,
 )
 async def list_conversation_configs() -> dict[str, Any]:
-    """Every stored per-target conversation config. Returns ``{"items", "total"}``."""
+    """Every stored per-target conversation config.
+
+    Returns ``{"items", "total", "unreadable"}``, where ``unreadable`` counts the indexed configs
+    whose row was gone or unparseable.
+    """
     _require_backend()
-    configs = await _config_store().list()
+    configs, unreadable = await _config_store().list()
     items = [config.model_dump(mode="json") for config in configs.values()]
-    return {"items": items, "total": len(items)}
+    return {"items": items, "total": len(items), "unreadable": unreadable}
 
 
 @operation(

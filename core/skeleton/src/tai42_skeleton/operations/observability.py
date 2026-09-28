@@ -193,6 +193,7 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
         "summary": summary_from_rows(summary_res.rows),
         "timeSeries": time_series_from_rows(series_res.rows),
         "byModel": map_model_rows(model_res),
+        "byModelAvailable": model_res is not None,
         "granularity": granularity,
     }
 

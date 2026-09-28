@@ -185,8 +185,8 @@ class _DictManager(BaseConversationsManager):
         self._redis.drop_route(route_name)
         return self.rows.pop(route_name, None) is not None
 
-    async def list_routes(self) -> dict[str, ConversationRoute]:
-        return dict(self.rows)
+    async def list_routes(self) -> tuple[dict[str, ConversationRoute], int]:
+        return dict(self.rows), 0
 
 
 class _AgentInput(BaseModel):
@@ -428,7 +428,7 @@ class FakeManager:
         self._routes = {r.route_name: r for r in routes}
 
     async def list_routes(self):
-        return dict(self._routes)
+        return dict(self._routes), 0
 
     async def get_route(self, name: str):
         return self._routes.get(name)
@@ -720,7 +720,7 @@ class MemoryAgent(Agent):
 
 
 async def _all_record_ids(store: ConversationRecordStore) -> list[str]:
-    return sorted(r.message_id for r in await store.list_by_status(frozenset(DeliveryStatus)))
+    return sorted(r.message_id for r in (await store.list_by_status(frozenset(DeliveryStatus))).items)
 
 
 # The channel-door tool payload with no params — the byte-identical baseline every

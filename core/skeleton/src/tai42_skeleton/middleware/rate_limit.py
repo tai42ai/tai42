@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,7 +47,6 @@ from datetime import UTC, datetime
 from redis.asyncio import Redis as AsyncRedis
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
-from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -59,7 +57,8 @@ from tai42_kit.utils.client_address import (
     warn_if_proxy_trust_undeclared,
 )
 
-from tai42_skeleton.app.route_registry import load_all_routes, route_registry
+from tai42_skeleton.access_control.path_canon import strip_root_path
+from tai42_skeleton.app.route_registry import Door, DoorTable, RouteMetadata, load_all_routes, route_registry
 from tai42_skeleton.middleware.audit_log import UNAUTHENTICATED, emit_audit_line
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.settings.rate_limit import RateLimitSettings, rate_limit_settings
@@ -150,80 +149,46 @@ def family_of(path: str) -> str:
 
 
 @dataclass(frozen=True)
-class _Door:
-    """One registered route as the limiter needs it.
+class _DoorFamily:
+    """What the limiter needs about a matched route.
 
-    How to recognise a request for it, whether it is public, and — when it is — which
-    family's budget it charges.
+    Whether it is public, and — when it is — which family's budget it charges.
     """
 
-    pattern: re.Pattern[str]
-    methods: frozenset[str]
-    # The path TEMPLATE with every parameter as its ``{name}``. The only request text
-    # a refusal may record: a path-borne capability (``/trigger/{token}``) never
-    # reaches the audit trail through it.
-    template: str
     authed: bool
     family: str
-    # Characters before the first path parameter — the specificity ordering, so a
-    # concrete route always outranks the SPA catch-all that also matches it.
-    static_prefix_length: int
+
+
+def _project_family(meta: RouteMetadata) -> _DoorFamily:
+    """Project every registered route into its family spec.
+
+    Both authed and public routes are projected: an authed route must be able to out-match
+    the public catch-all that also covers its path, or the limiter would throttle it.
+    """
+    # A route may DECLARE its family (a cost class its path-siblings do not share, e.g. an
+    # upload door under /api/channels/web/*); a three-segment family is not path-derivable
+    # (family_of reads at most two static segments), so the declaration is the only way in.
+    # Every route that declares none derives its family from the path, unchanged.
+    return _DoorFamily(authed=meta.authed, family=meta.rate_limit_family or family_of(meta.path))
 
 
 # The compiled door table, memoized against the registry version that produced it: a
 # reload re-records the route surface and bumps that version, so the next request
 # rebuilds instead of matching against the previous deployment's doors.
-_door_table: tuple[int, tuple[_Door, ...]] | None = None
+_door_table_obj: DoorTable[_DoorFamily] = DoorTable(
+    _project_family,
+    load_routes=lambda: load_all_routes(),
+    version_of=lambda: route_registry.version,
+)
 
 
-def _build_door_table() -> tuple[_Door, ...]:
-    """Compile every registered route into a matcher, most specific first.
-
-    Both authed and public routes are compiled: an authed route must be able to out-match
-    the public catch-all that also covers its path, or the limiter would throttle it.
-    """
-    doors: list[_Door] = []
-    for meta in load_all_routes():
-        pattern, template, _ = compile_path(meta.path)
-        methods = {method.upper() for method in meta.methods}
-        if "GET" in methods:
-            # Starlette answers HEAD from a GET route; the limiter must see the same.
-            methods.add("HEAD")
-        parameter = meta.path.find("{")
-        doors.append(
-            _Door(
-                pattern=pattern,
-                methods=frozenset(methods),
-                template=template,
-                authed=meta.authed,
-                family=family_of(meta.path),
-                static_prefix_length=len(meta.path) if parameter == -1 else parameter,
-            )
-        )
-    doors.sort(key=lambda door: (door.static_prefix_length, len(door.template)), reverse=True)
-    return tuple(doors)
-
-
-def _door_for(path: str, method: str) -> _Door | None:
+def _door_for(path: str, method: str) -> Door[_DoorFamily] | None:
     """The most specific registered route covering this request, or ``None`` when none matches.
 
     ``None`` when the registered surface holds none (an unrouted path, or one served by a
     mounted app the registry does not describe — neither is a declared public door).
     """
-    global _door_table
-    if _door_table is None or _door_table[0] != route_registry.version:
-        # The version is read BEFORE the build, so the memo can only ever UNDER-claim: a
-        # route recorded while the table compiles (an epoch build records on its own
-        # thread, and ``load_all_routes`` may itself import router modules) leaves the
-        # stored version behind the registry's and the next request rebuilds. Reading it
-        # after would stamp the table with a version whose doors it does not hold, and a
-        # public door recorded in that window would stay unthrottled.
-        version = route_registry.version
-        _door_table = (version, _build_door_table())
-    for door in _door_table[1]:
-        if method in door.methods and door.pattern.fullmatch(path):
-            return door
-    return None
+    return _door_table_obj.door_for(method, path)
 
 
 def _reset_door_table_cache() -> None:
@@ -232,8 +197,7 @@ def _reset_door_table_cache() -> None:
     Production invalidation rides the registry version; this is for a test that swaps the
     route surface underneath the middleware without recording into the live registry.
     """
-    global _door_table
-    _door_table = None
+    _door_table_obj.reset()
 
 
 async def _retry_after(r: AsyncRedis, prefix: str, family: str, bucket: str, limit: int, burst: int) -> int | None:
@@ -288,13 +252,17 @@ class RateLimitMiddleware:
         if not settings.redis.redis_url:
             await self.app(scope, receive, send)
             return
-        door = _door_for(conn.url.path, scope["method"].upper())
+        # Look the door up on the root_path-stripped path — the same canonical path the
+        # router (Starlette's ``get_route_path``) and access control (``strip_root_path``)
+        # match on — so a deployment that carries the mount prefix in ``scope["path"]``
+        # and one whose proxy strips it resolve the same registered door.
+        door = _door_for(strip_root_path(scope["path"], scope.get("root_path", "")), scope["method"].upper())
         # An authed route is gated by its credential; an unrecognised path declares no
         # public door. Neither is this limiter's business.
-        if door is None or door.authed:
+        if door is None or door.payload.authed:
             await self.app(scope, receive, send)
             return
-        budget = settings.budget_for(door.family)
+        budget = settings.budget_for(door.payload.family)
         # A disabled family means pass through, not block: an off switch opens the
         # door it names, it never closes it.
         if not budget.enabled:
@@ -303,7 +271,9 @@ class RateLimitMiddleware:
 
         bucket = client_bucket(conn.client.host if conn.client else None, conn.headers.get(XFF_HEADER, ""))
         async with client_ctx(RedisClient, settings.redis) as r:
-            retry_after = await _retry_after(r, settings.key_prefix, door.family, bucket, budget.limit, budget.burst)
+            retry_after = await _retry_after(
+                r, settings.key_prefix, door.payload.family, bucket, budget.limit, budget.burst
+            )
         if retry_after is not None:
             # Refusal audit at the outer door: the limiter rejects BEFORE the gate, so
             # the caller is unauthenticated. The matched route's TEMPLATE is the whole

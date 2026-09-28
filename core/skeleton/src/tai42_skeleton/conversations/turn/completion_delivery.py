@@ -80,7 +80,7 @@ async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute,
         if person is None:
             raise CompletionDeliveryError(f"no person for parked thread {thread_id!r}")
         person_routes = sorted({route for address in person.addresses for route in address.routes})
-        newest = await accessors._store().list_person_thread_records(
+        newest, _ = await accessors._store().list_person_thread_records(
             person_routes, thread_id, offset=0, limit=1, newest_first=True
         )
         if not newest.records:

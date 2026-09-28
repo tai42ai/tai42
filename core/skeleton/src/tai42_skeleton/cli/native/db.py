@@ -33,10 +33,12 @@ from tai42_kit.db import (
 
 from tai42_skeleton.db import (
     SKELETON_COMPONENT,
-    all_migration_entries,
-    installed_plugin_entries,
+    SkippedChain,
+    discover_all_migration_chains,
+    discover_plugin_chains,
     skeleton_entry,
 )
+from tai42_skeleton.db.discovery import chain_skip_message
 from tai42_skeleton.states.db import states_entry
 
 app = typer.Typer(
@@ -56,24 +58,26 @@ def _target() -> str:
     return f"database {name!r} at {settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
 
-async def _apply() -> list[AppliedMigration]:
+async def _apply() -> tuple[list[AppliedMigration], list[SkippedChain]]:
     """Apply the two skeleton-owned chains first, then discover and apply the plugin chains.
 
     Applies the skeleton baseline and the ``states`` record store FIRST. Plugin
     discovery reads skeleton-owned tables (the marketplace install store), so a fresh
     database must receive the skeleton baseline before the plugin chains can even be
-    enumerated.
+    enumerated. Returns both the applied migrations and every declared plugin chain
+    that was skipped because its override binding is unset.
     """
     applied = await apply_migrations([skeleton_entry(), states_entry()])
-    plugin_entries = await installed_plugin_entries()
-    if plugin_entries:
-        applied.extend(await apply_migrations(plugin_entries))
-    return applied
+    plugin = await discover_plugin_chains()
+    if plugin.entries:
+        applied.extend(await apply_migrations(plugin.entries))
+    return applied, plugin.skipped
 
 
-async def _status() -> list[ComponentStatus]:
-    entries = await all_migration_entries()
-    return await migration_status(entries)
+async def _status() -> tuple[list[ComponentStatus], list[SkippedChain]]:
+    discovery = await discover_all_migration_chains()
+    statuses = await migration_status(discovery.entries)
+    return statuses, discovery.skipped
 
 
 def _status_records(statuses: list[ComponentStatus]) -> list[dict[str, str]]:
@@ -89,12 +93,18 @@ def _status_records(statuses: list[ComponentStatus]) -> list[dict[str, str]]:
     ]
 
 
-def _emit_status(statuses: list[ComponentStatus], *, json_output: bool) -> None:
+def _skip_records(skips: list[SkippedChain]) -> list[dict[str, str]]:
+    return [{"component": skip.component} for skip in skips]
+
+
+def _emit_status(statuses: list[ComponentStatus], skips: list[SkippedChain], *, json_output: bool) -> None:
     records = _status_records(statuses)
     if json_output:
-        print_json(records)
+        print_json({"status": records, "skipped_chains": _skip_records(skips)})
     else:
         typer.echo(render_table(records, ["component", "applied", "pending", "mismatches", "status"]))
+        for skip in skips:
+            typer.echo(chain_skip_message(skip))
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
@@ -116,6 +126,50 @@ def _run(coro):  # type: ignore[no-untyped-def]
         raise typer.Exit(1) from exc
 
 
+def _emit_plan(*, json_output: bool) -> None:
+    """Report what ``migrate`` WOULD apply, and every skipped chain, without applying.
+
+    Exits non-zero when a declared chain was skipped so ``--plan`` is honest a chain will not run.
+    """
+    statuses, skips = _run(_status())
+    pending_total = sum(len(status.pending) for status in statuses)
+    if json_output:
+        _emit_status(statuses, skips, json_output=True)
+    else:
+        _emit_status(statuses, skips, json_output=False)
+        typer.echo(
+            f"{pending_total} pending migration(s) across {len(statuses)} component(s) — nothing applied (--plan)."
+        )
+    if skips:
+        raise typer.Exit(1)
+
+
+def _emit_applied(*, json_output: bool) -> None:
+    """Apply every pending migration, report what ran, then name every skipped chain.
+
+    Exits non-zero after reporting when a declared chain was skipped (its override binding is unset).
+    """
+    applied, skips = _run(_apply())
+    if json_output:
+        applied_records = [
+            {"component": item.component, "version": item.version, "name": item.name} for item in applied
+        ]
+        print_json({"applied": applied_records, "skipped_chains": _skip_records(skips)})
+        if skips:
+            raise typer.Exit(1)
+        return
+    if applied:
+        for item in applied:
+            typer.echo(f"Applied {item.component} {item.version:04d}_{item.name}.")
+        typer.echo(f"Applied {len(applied)} migration(s).")
+    elif not skips:
+        typer.echo("Schema is up to date — no migrations to apply.")
+    if skips:
+        for skip in skips:
+            typer.echo(chain_skip_message(skip))
+        raise typer.Exit(1)
+
+
 @app.command("migrate")
 def migrate_command(
     ctx: typer.Context,
@@ -124,32 +178,16 @@ def migrate_command(
     """Apply every pending migration across all discovered components.
 
     ``--plan`` lists what would be applied and changes nothing. Idempotent: with
-    nothing pending it reports so and exits 0. Loud on a connection failure, an
-    unconfigured connection, or a rewritten (checksum-mismatched) chain.
+    nothing pending it reports so and exits 0. Exits non-zero, after reporting what
+    ran, when a declared migration chain was skipped (its override binding is unset).
+    Loud on a connection failure, an unconfigured connection, or a rewritten
+    (checksum-mismatched) chain.
     """
     json_output = app_context(ctx).json_output
     if plan:
-        statuses = _run(_status())
-        pending_total = sum(len(status.pending) for status in statuses)
-        if json_output:
-            _emit_status(statuses, json_output=True)
-        else:
-            _emit_status(statuses, json_output=False)
-            typer.echo(
-                f"{pending_total} pending migration(s) across {len(statuses)} component(s) — nothing applied (--plan)."
-            )
-        return
-
-    applied = _run(_apply())
-    if json_output:
-        print_json([{"component": item.component, "version": item.version, "name": item.name} for item in applied])
-        return
-    if not applied:
-        typer.echo("Schema is up to date — no migrations to apply.")
-        return
-    for item in applied:
-        typer.echo(f"Applied {item.component} {item.version:04d}_{item.name}.")
-    typer.echo(f"Applied {len(applied)} migration(s).")
+        _emit_plan(json_output=json_output)
+    else:
+        _emit_applied(json_output=json_output)
 
 
 @app.command("status")
@@ -157,10 +195,11 @@ def status_command(ctx: typer.Context) -> None:
     """Report each component's applied / pending / checksum verdict.
 
     Exits non-zero when any component has pending migrations or a checksum
-    mismatch, so it doubles as a CI / pre-deploy gate. Loud on a connection failure
+    mismatch, or when a declared migration chain was skipped (its override binding
+    is unset), so it doubles as a CI / pre-deploy gate. Loud on a connection failure
     or an unconfigured connection.
     """
-    statuses = _run(_status())
-    _emit_status(statuses, json_output=app_context(ctx).json_output)
-    if any(not status.is_up_to_date for status in statuses):
+    statuses, skips = _run(_status())
+    _emit_status(statuses, skips, json_output=app_context(ctx).json_output)
+    if any(not status.is_up_to_date for status in statuses) or skips:
         raise typer.Exit(1)

@@ -38,6 +38,7 @@ from tai42_skeleton.operations.decorator import operation_metadata_of
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
+from tai42_skeleton.tools.binding.errors import UnknownToolError
 
 from .._fakes.interactions_redis import FakeRedis as InteractionsFakeRedis
 from .._fakes.tool_runs_redis import FakeRedis
@@ -122,7 +123,12 @@ class _FakeTools:
         self._registered = registered if registered is not None else {"alpha"}
 
     async def get_tools(self):
-        return {name: SimpleNamespace(name=name) for name in self._registered}
+        return {name: SimpleNamespace(name=name, meta=None) for name in self._registered}
+
+    async def get_tool(self, key):
+        if key not in self._registered:
+            raise UnknownToolError(key)
+        return SimpleNamespace(name=key, meta=None)
 
     async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.calls.append((key, arguments, offload_sync))

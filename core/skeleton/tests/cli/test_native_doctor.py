@@ -21,6 +21,7 @@ from tai42_kit.db import AdminIdentityIncompleteError, DatabaseNotConfiguredErro
 
 from tai42_skeleton.cli.native import doctor
 from tai42_skeleton.cli.native.doctor import Check
+from tai42_skeleton.db import MigrationChainDiscovery, SkippedChain
 
 
 def test_redact_url_masks_password() -> None:
@@ -205,13 +206,13 @@ def _component_status(component: str, *, pending: int, mismatch: int):
 
 
 def test_probe_schema_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _entries() -> list:
-        return []
+    async def _discovery() -> MigrationChainDiscovery:
+        return MigrationChainDiscovery(entries=[], skipped=[])
 
     async def _status(entries: object) -> list:
         return [_component_status("skeleton", pending=0, mismatch=0)]
 
-    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "discover_all_migration_chains", _discovery)
     monkeypatch.setattr(doctor, "migration_status", _status)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._OK
@@ -219,13 +220,13 @@ def test_probe_schema_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_probe_schema_out_of_date_names_migrate(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _entries() -> list:
-        return []
+    async def _discovery() -> MigrationChainDiscovery:
+        return MigrationChainDiscovery(entries=[], skipped=[])
 
     async def _status(entries: object) -> list:
         return [_component_status("skeleton", pending=2, mismatch=0)]
 
-    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "discover_all_migration_chains", _discovery)
     monkeypatch.setattr(doctor, "migration_status", _status)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._FAIL
@@ -233,14 +234,31 @@ def test_probe_schema_out_of_date_names_migrate(monkeypatch: pytest.MonkeyPatch)
     assert "skeleton" in check.detail
 
 
+def test_probe_schema_skipped_chain_is_fail_naming_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A declared chain whose override binding is unset comes back as a skip; the probe
+    # renders a FAIL naming the chain and its unset TAI_DB_BINDING_* env var.
+    async def _discovery() -> MigrationChainDiscovery:
+        return MigrationChainDiscovery(entries=[], skipped=[SkippedChain(component="acme_alerts")])
+
+    async def _status(entries: object) -> list:
+        return [_component_status("skeleton", pending=0, mismatch=0)]
+
+    monkeypatch.setattr(doctor, "discover_all_migration_chains", _discovery)
+    monkeypatch.setattr(doctor, "migration_status", _status)
+    check = asyncio.run(doctor._probe_schema(_TARGET))
+    assert check.status == doctor._FAIL
+    assert "acme_alerts" in check.detail
+    assert "TAI_DB_BINDING" in check.detail
+
+
 def test_probe_schema_connection_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _entries() -> list:
-        return []
+    async def _discovery() -> MigrationChainDiscovery:
+        return MigrationChainDiscovery(entries=[], skipped=[])
 
     async def _boom(entries: object) -> list:
         raise psycopg.OperationalError("connection refused")
 
-    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "discover_all_migration_chains", _discovery)
     monkeypatch.setattr(doctor, "migration_status", _boom)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._FAIL
@@ -252,13 +270,13 @@ def test_probe_schema_bad_chain_is_fail_not_traceback(monkeypatch: pytest.Monkey
     # discovery; the probe must render a FAIL naming ``tai db migrate``, not crash.
     from tai42_kit.db import MigrationDiscoveryError
 
-    async def _entries() -> list:
+    async def _discovery() -> MigrationChainDiscovery:
         raise MigrationDiscoveryError("migration file 'oops.sql' does not match the required form")
 
     async def _status(entries: object) -> list:  # pragma: no cover - discovery fails first
         raise AssertionError("status must not be reached when discovery fails")
 
-    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "discover_all_migration_chains", _discovery)
     monkeypatch.setattr(doctor, "migration_status", _status)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._FAIL
@@ -269,7 +287,7 @@ def test_probe_schema_bad_chain_is_fail_not_traceback(monkeypatch: pytest.Monkey
 def test_probe_schema_half_set_admin_is_fail_not_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
     # A half-set admin identity escapes discovery; the probe must render a clean FAIL,
     # not crash.
-    async def _entries() -> list:
+    async def _discovery() -> MigrationChainDiscovery:
         raise AdminIdentityIncompleteError(
             "database 'default' has a half-set admin identity: set BOTH "
             "TAI_DATABASE_DEFAULT_PG_ADMIN_USER and TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD, or neither."
@@ -278,7 +296,7 @@ def test_probe_schema_half_set_admin_is_fail_not_traceback(monkeypatch: pytest.M
     async def _status(entries: object) -> list:  # pragma: no cover - discovery fails first
         raise AssertionError("status must not be reached when discovery fails")
 
-    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "discover_all_migration_chains", _discovery)
     monkeypatch.setattr(doctor, "migration_status", _status)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._FAIL

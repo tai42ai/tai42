@@ -67,7 +67,7 @@ class _DictManager(BaseConversationsManager):
         return False
 
     async def list_routes(self):
-        return {self._route.route_name: self._route}
+        return {self._route.route_name: self._route}, 0
 
 
 @dataclass
@@ -338,6 +338,26 @@ async def test_an_admin_reads_the_whole_record_of_every_thread(store, monkeypatc
 
     assert "error" in read["items"][0]
     assert "attempts" in read["items"][0]
+    assert read["unreadable"] == 0
+
+
+async def test_a_transcript_counts_an_unreadable_member(monkeypatch):
+    # A door-level check: a thread whose member row is gone is skipped and COUNTED on the
+    # envelope's ``unreadable``, never a silently shorter transcript.
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
+    fake = FakeRecordRedis()
+    fake.seed_route(_ROUTE.route_name)
+    monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(ops, "get_conversations_manager", lambda: _DictManager())
+    store = ConversationRecordStore(ConversationsSettings())
+    await _seed_thread(store, caller_principal="alice")
+    fake._hashes.pop(ConversationsSettings().record_key("t0"))
+    _as_caller(monkeypatch, _Caller("root", is_admin=True))
+
+    read = await ops.get_conversation_thread("chat", _THREAD)
+
+    assert [item["message_id"] for item in read["items"]] == ["t1"]
+    assert read["unreadable"] == 1
 
 
 async def test_a_thread_reads_for_another_grant_holder(store, monkeypatch):

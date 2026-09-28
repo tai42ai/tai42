@@ -14,6 +14,7 @@ from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt
 
 if TYPE_CHECKING:
     from tai42_contract.app import PendingMessage
+    from tai42_contract.conversations import InboundRejectionReason
     from tai42_contract.interactions.models import LocationElement, MediaItem
 
     from tai42_skeleton.app.server import TaiMCP
@@ -60,6 +61,24 @@ class ConversationsFacet:
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:
         """Record a provider's terminal delivery status for an outbound message."""
         await self._app._conversation_record_delivery_status(channel, provider_message_id, status)
+
+    async def notify_inbound_rejected(
+        self,
+        *,
+        channel_id: str,
+        recipient: str,
+        sender_identity: str | None,
+        kind: str,
+        reason: InboundRejectionReason,
+    ) -> None:
+        """Reply once and record a platform event when a recognised inbound content cannot become a turn."""
+        await self._app._conversation_notify_inbound_rejected(
+            channel_id=channel_id,
+            recipient=recipient,
+            sender_identity=sender_identity,
+            kind=kind,
+            reason=reason,
+        )
 
     async def pending_messages(self, thread_id: str, *, after: str) -> list[PendingMessage]:
         """The thread's participant messages accepted after ``after`` and not yet carried into a turn."""

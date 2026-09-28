@@ -87,6 +87,11 @@ class McpReloadMixin(LifecycleState):
         conflicts = sorted(self._mcp_preset_conflicts.get(title, set()))
         if conflicts:
             result["preset_conflicts"] = conflicts
+        # A tool the (re)bind skipped because it advertised an unusable schema — surfaced
+        # loudly so the caller sees which tools this server did NOT bind.
+        unusable = sorted(self._mcp_unusable_tools.get(title, set()))
+        if unusable:
+            result["skipped_tools"] = unusable
         return result
 
     async def _reconcile_after_mcp_reload(self, title: str, old_bound: set[str], new_bound: set[str]) -> None:

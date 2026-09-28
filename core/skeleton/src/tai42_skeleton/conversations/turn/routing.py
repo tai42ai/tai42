@@ -148,7 +148,7 @@ async def _resolve_channel_route(channel: str, our_identity_canonical: str) -> C
     :class:`ConversationRouteResolutionError`; more than one is a corrupt table and
     raises rather than picking one.
     """
-    routes = await cache.get_conversations_manager().list_routes()
+    routes, _ = await cache.get_conversations_manager().list_routes()
     matches = [
         route
         for route in routes.values()

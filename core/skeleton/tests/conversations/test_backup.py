@@ -34,7 +34,7 @@ class _DictManager(BaseConversationsManager):
         return self.rows.pop(route_name, None) is not None
 
     async def list_routes(self):
-        return dict(self.rows)
+        return dict(self.rows), 0
 
 
 class _NoopScan:

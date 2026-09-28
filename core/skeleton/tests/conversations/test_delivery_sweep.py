@@ -274,7 +274,7 @@ async def test_the_periodic_loop_runs_every_recovery_pass(monkeypatch):
 
     class _Routes:
         async def list_routes(self):
-            return {"alpha": object()}
+            return {"alpha": object()}, 0
 
     monkeypatch.setattr(delivery_module, "sweep_stalled_deliveries", _broken_delivery_pass)
     monkeypatch.setattr(turn_module, "redrive_accepted", _intake_pass)
@@ -310,7 +310,7 @@ async def test_the_prune_pass_is_handed_every_live_route_and_the_last_cursor(mon
 
     class _Routes:
         async def list_routes(self):
-            return {"alpha": object(), "beta": object()}
+            return {"alpha": object(), "beta": object()}, 0
 
     monkeypatch.setattr(delivery_module, "get_conversations_manager", _Routes)
     monkeypatch.setattr(records_module.ConversationRecordStore, "prune_expired_terminal_indexes", _prune_pass)
@@ -356,3 +356,32 @@ async def test_stopping_the_sweep_cancels_and_clears_it(monkeypatch):
     assert task.cancelled()
     assert delivery_sweep_module._sweep_task is None
     await delivery_sweep_module.stop_delivery_sweep()  # nothing running: a clean no-op
+
+
+async def test_sweep_moves_unrecoverable_row_to_failed(monkeypatch, fake, store):
+    """A corrupt ``pending_delivery`` index member the sweep cannot parse is moved to the
+    terminal ``failed`` state, so it leaves the pending scan for good and surfaces on the
+    admin failed listing as an unreadable row — never re-skipped every pass."""
+    _wire_channel(monkeypatch, FakeChannel())
+    settings = ConversationsSettings()
+    fake.seed_hash(
+        settings.record_key("bad"),
+        {
+            "data": "{not json",
+            "delivery_status": "pending_delivery",
+            "outbound_ids": "[]",
+            "attempts": "0",
+            "grace_deadline": "",
+            "updated_at": "1",
+        },
+    )
+    await fake.zadd(settings.status_index_key("pending_delivery"), {"bad": float("inf")})
+
+    await delivery_module.sweep_stalled_deliveries()
+    await _drain_spawned(store)
+
+    assert fake._hashes[settings.record_key("bad")]["delivery_status"] == "failed"
+    assert [w.message_id for w in await store.pending_work()] == []
+    failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))
+    assert failed.items == []
+    assert failed.unreadable == 1

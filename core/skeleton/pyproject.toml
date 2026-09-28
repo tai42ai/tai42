@@ -88,6 +88,9 @@ dependencies = [
     # The marketplace installer shells out to `sys.executable -m pip`;
     # uv-managed venvs do not ship pip, so the skeleton declares it.
     "pip>=25",
+    # Magic-byte MIME sniffing for the served-media ingestion chokepoint — the
+    # declared-vs-sniffed type check. A pure-Python, no-native-deps sniffer.
+    "filetype>=1.2,<2",
 ]
 
 [project.urls]

@@ -45,6 +45,7 @@ from tai42_skeleton.app.facets import (
     WebhookVerifiersFacet,
 )
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+from tai42_skeleton.app.media_facet import MediaFacet
 from tai42_skeleton.app.serving_core import ServingCore, record_sse_surface, record_streamable_http_surface
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
 from tai42_skeleton.config import ConfigManagerFactory
@@ -56,12 +57,14 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from fastmcp.server.auth import TokenVerifier
     from fastmcp.tools import Tool
     from tai42_contract.app import PendingMessage, TaiApp
     from tai42_contract.connectors.models import ResolvedConnectionAuth
-    from tai42_contract.conversations import DeliveryReceipt
-    from tai42_contract.interactions.models import LocationElement, MediaItem
+    from tai42_contract.conversations import DeliveryReceipt, InboundMediaKind, InboundRejectionReason
+    from tai42_contract.interactions.models import IngestedMedia, LocationElement, MediaItem, MediaOrigin
     from tai42_contract.presets import PresetStore
     from tai42_contract.tool_meta import ToolMetaStore
 
@@ -211,6 +214,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._webhook_verifiers_facet = WebhookVerifiersFacet(self)
         self._channels_facet = ChannelsFacet(self)
         self._conversations_facet = ConversationsFacet(self)
+        self._media_facet = MediaFacet(self)
         self._monitoring_facet = MonitoringFacet(self)
         self._extensions_facet = ExtensionsFacet(self)
         self._http_facet = HttpFacet(self)
@@ -305,6 +309,11 @@ class TaiMCP(TaiMCPLifecycleMixin):
     def conversations(self) -> ConversationsFacet:
         """The conversation-bridge facet (``app.conversations``)."""
         return self._conversations_facet
+
+    @property
+    def media(self) -> MediaFacet:
+        """The served-media ingestion facet (``app.media``)."""
+        return self._media_facet
 
     @property
     def monitoring(self) -> MonitoringFacet:
@@ -640,6 +649,57 @@ class TaiMCP(TaiMCPLifecycleMixin):
         from tai42_skeleton.conversations import pending_messages
 
         return await pending_messages(thread_id, after=after)
+
+    async def _conversation_notify_inbound_rejected(
+        self,
+        *,
+        channel_id: str,
+        recipient: str,
+        sender_identity: str | None,
+        kind: str,
+        reason: "InboundRejectionReason",
+    ) -> None:
+        from tai42_skeleton.channels.inbound import notify_inbound_rejected
+
+        await notify_inbound_rejected(
+            channel_id=channel_id,
+            recipient=recipient,
+            sender_identity=sender_identity,
+            kind=kind,
+            reason=reason,
+        )
+
+    # -- Media (AppMedia facet body) ------------------------------------------
+    # ``app.media`` forwards here; the ingestion chokepoint lives in its own module,
+    # reached through a deferred import so the app package never imports it at construction.
+
+    async def _media_ingest_media(
+        self,
+        *,
+        source: "AsyncIterator[bytes]",
+        kind_hint: "InboundMediaKind | str | None",
+        declared_mime: str | None,
+        filename: str | None,
+        declared_size: int | None,
+        integrity_sha256: str | None,
+        origin: "MediaOrigin",
+    ) -> "IngestedMedia":
+        from tai42_skeleton.interactions.media_ingest import ingest_media
+
+        return await ingest_media(
+            source=source,
+            kind_hint=kind_hint,
+            declared_mime=declared_mime,
+            filename=filename,
+            declared_size=declared_size,
+            integrity_sha256=integrity_sha256,
+            origin=origin,
+        )
+
+    async def _media_bind_media(self, media_id: str, *, origin: "MediaOrigin") -> "IngestedMedia":
+        from tai42_skeleton.interactions.media_ingest import bind_media
+
+        return await bind_media(media_id, origin=origin)
 
     # -- Versioning + presets seams --------------------------------------------
     # ``app.versioning.store`` and ``app.presets.store`` forward here; ``bind`` is

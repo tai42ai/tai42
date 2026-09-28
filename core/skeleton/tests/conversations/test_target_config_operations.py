@@ -83,10 +83,21 @@ async def test_list_returns_items_and_total(wired):
     await ops.set_conversation_config("tool", "lookup")
     listed = await ops.list_conversation_configs()
     assert listed["total"] == 2
+    assert listed["unreadable"] == 0
     assert {(item["target_kind"], item["target_name"]) for item in listed["items"]} == {
         ("agent", "assistant"),
         ("tool", "lookup"),
     }
+
+
+async def test_list_counts_an_indexed_member_with_no_row(wired):
+    # A config member whose row is gone is skipped and COUNTED on the envelope, so the door
+    # reports a shorter page as a truthful count and never a silent cut.
+    await ops.set_conversation_config("agent", "assistant")
+    wired.seed_member(ConversationsSettings().target_config_names_key, "tool:ghost")
+    listed = await ops.list_conversation_configs()
+    assert listed["total"] == 1
+    assert listed["unreadable"] == 1
 
 
 async def test_set_refuses_an_unknown_agent(wired):

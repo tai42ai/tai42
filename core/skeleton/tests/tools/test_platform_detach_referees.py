@@ -75,8 +75,8 @@ def _patch_configs(monkeypatch, configs: dict[tuple[str, str], TargetConversatio
     class _FakeConfigStore:
         def __init__(self, *_a, **_k) -> None: ...
 
-        async def list(self) -> dict[tuple[str, str], TargetConversationConfig]:
-            return configs
+        async def list(self) -> tuple[dict[tuple[str, str], TargetConversationConfig], int]:
+            return configs, 0
 
     # A non-in-memory manager so the referee proceeds past its feature-off guard.
     monkeypatch.setattr(cache_mod, "get_conversations_manager", lambda: SimpleNamespace())

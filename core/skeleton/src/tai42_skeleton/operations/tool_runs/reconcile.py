@@ -21,6 +21,7 @@ from tai42_contract.states import StateContext
 
 import tai42_skeleton.operations.tool_runs as _pkg
 from tai42_skeleton.states.context import state_context
+from tai42_skeleton.tools.binding.errors import UnknownToolError
 
 from . import supervisor
 from .models import _CRASH_RESUME_META_KEY, _LOST, _RUNNING
@@ -76,7 +77,7 @@ async def _tool_declares_crash_resume(tool_name: str) -> bool:
     """
     try:
         tool = await tai42_app.tools.get_tool(tool_name)
-    except Exception:
+    except UnknownToolError:
         return False
     return bool((tool.meta or {}).get(_CRASH_RESUME_META_KEY))
 

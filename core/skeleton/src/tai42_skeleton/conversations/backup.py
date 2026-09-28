@@ -54,7 +54,7 @@ async def export_conversation_routes() -> dict[str, Any]:
     manager = get_conversations_manager()
     if isinstance(manager, InMemoryConversationsManager):
         return {"routes": []}
-    routes = await manager.list_routes()
+    routes, _ = await manager.list_routes()
     exported: list[dict[str, Any]] = []
     for route in routes.values():
         data = route.model_dump(mode="json")
@@ -177,7 +177,7 @@ async def import_conversation_routes(
         # section loudly rather than silently drop every route.
         raise RuntimeError("conversation routes require the redis conversations backend to restore")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
-    existing = await manager.list_routes()
+    existing, _ = await manager.list_routes()
     # Live ``(channel, identity)`` claims, tracked across the restore: two channel rows on
     # one identity are unresolvable, refused here as the create door refuses them.
     claimed = {pair: row.route_name for row in existing.values() if (pair := _channel_identity(row)) is not None}

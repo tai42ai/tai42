@@ -107,19 +107,30 @@ class RedisConversationsManager(BaseConversationsManager):
             )
         return bool(removed)
 
-    async def list_routes(self) -> dict[str, ConversationRoute]:
-        """Every stored route, keyed by route name."""
+    async def list_routes(self) -> tuple[dict[str, ConversationRoute], int]:
+        """Every stored route keyed by route name, with a count of unreadable ones.
+
+        ``unreadable`` counts the indexed names whose row was gone or unparseable, so a shorter
+        map is a truthful count and never a silent cut.
+        """
         routes: dict[str, ConversationRoute] = {}
         async with client_ctx(RedisClient, self.settings.redis) as r:
             names = await awaited(r.smembers(self.settings.route_names_key))
             if not names:
-                return {}
+                return {}, 0
             name_list = sorted(_as_str(name) for name in names)
             raws = await awaited(r.mget([self.settings.route_key(name) for name in name_list]))
+        unreadable = 0
         for name, raw in zip(name_list, raws, strict=True):
             if raw is None:
                 # Indexed name with no row: a corrupt state (the row key never expires).
                 logger.warning("conversations: route name %r is indexed but has no row; skipping", name)
+                unreadable += 1
                 continue
-            routes[name] = ConversationRoute.model_validate_json(_as_str(raw))
-        return routes
+            try:
+                routes[name] = ConversationRoute.model_validate_json(_as_str(raw))
+            except ValueError:
+                logger.warning("conversations: route name %r has an unparseable row and was skipped", name)
+                unreadable += 1
+                continue
+        return routes, unreadable

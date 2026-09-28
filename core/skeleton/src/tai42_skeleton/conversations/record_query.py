@@ -92,12 +92,13 @@ class RecordQueryMixin(RecordStoreBase):
         limit: int,
         status: frozenset[DeliveryStatus] | None = None,
         address: str | None = None,
-    ) -> ThreadPage:
-        """One page of ``route_name``'s threads, newest activity first.
+    ) -> tuple[ThreadPage, int]:
+        """One page of ``route_name``'s threads, newest activity first, with a count of unreadable ones.
 
         Each thread is summarized from its NEWEST readable record — so the cost is the page, never the
         route's whole history. Reads nothing back into the index: a thread with no readable record left is
-        logged and omitted from the page, and the prune pass reclaims it.
+        logged, omitted from the page and COUNTED in the returned unreadable total, and the prune pass
+        reclaims it — a shorter page is a truthful count, never a silent cut.
 
         With a ``status`` (the summary ``last_delivery_status`` must be one of the set) or an
         ``address`` (a substring of the thread id's client-address suffix) filter, the read is
@@ -112,11 +113,14 @@ class RecordQueryMixin(RecordStoreBase):
                 # never be computed against a count the walk itself moved.
                 total = int(await awaited(r.zcard(key)))
                 threads: list[ThreadSummary] = []
+                unreadable = 0
                 for member, score in await awaited(r.zrevrange(key, offset, offset + limit - 1, withscores=True)):
                     summary = await self._thread_summary(r, route_name, _member(member), last_activity_at=float(score))
                     if summary is not None:
                         threads.append(summary)
-                return ThreadPage(threads=threads, total=total)
+                    else:
+                        unreadable += 1
+                return ThreadPage(threads=threads, total=total), unreadable
             return await self._filter_route_threads(
                 r, route_name, key, offset=offset, limit=limit, status=status, address=address
             )
@@ -131,7 +135,7 @@ class RecordQueryMixin(RecordStoreBase):
         limit: int,
         status: frozenset[DeliveryStatus] | None,
         address: str | None,
-    ) -> ThreadPage:
+    ) -> tuple[ThreadPage, int]:
         """A FILTERED page of a route's threads: a bounded forward scan of the route index, newest activity first.
 
         Post-filters each candidate by the client address in its id (a cheap id test, applied first) and/or
@@ -149,6 +153,7 @@ class RecordQueryMixin(RecordStoreBase):
         examined = 0
         rank = 0
         truncated = False
+        unreadable = 0
         while True:
             window = await awaited(r.zrevrange(key, rank, rank + _records._FILTER_SCAN_WINDOW - 1, withscores=True))
             if not window:
@@ -165,6 +170,7 @@ class RecordQueryMixin(RecordStoreBase):
                         continue
                 summary = await self._thread_summary(r, route_name, thread_id, last_activity_at=float(score))
                 if summary is None:
+                    unreadable += 1
                     continue
                 if status is not None and summary.last_delivery_status not in status:
                     continue
@@ -172,7 +178,7 @@ class RecordQueryMixin(RecordStoreBase):
             if truncated:
                 break
             rank += len(window)
-        return ThreadPage(threads=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+        return ThreadPage(threads=matched[offset : offset + limit], total=len(matched), truncated=truncated), unreadable
 
     async def _load_searched_record(self, r: AsyncRedis, message_id: str) -> ConversationRecord | None:
         """The record ``message_id`` names, or ``None`` when its row is gone or unparseable.
@@ -202,16 +208,19 @@ class RecordQueryMixin(RecordStoreBase):
         limit: int,
         newest_first: bool = False,
         q: str | None = None,
-    ) -> TranscriptPage:
+    ) -> tuple[TranscriptPage, int]:
         """One page of a thread's records — oldest first by default, newest first with ``newest_first``.
+
+        Returned with a count of the members it could not read.
 
         ``newest_first`` is the live-tail order, where page 1 always holds the latest messages. Either way
         the window is ``offset``/``limit`` ranks from that end of the index, which is scored by ``created_at``.
 
         ``total`` is 0 exactly when the index holds no record for that thread, which is how
         an unknown or fully expired thread is told from an empty page. A member whose row is
-        gone or unparseable is logged and skipped; the index is left alone, so the page's
-        offsets and ``total`` stay the ones the caller asked against.
+        gone or unparseable is logged, skipped and COUNTED in the returned unreadable total; the
+        index is left alone, so the page's offsets and ``total`` stay the ones the caller asked
+        against — a shorter page is a truthful count, never a silent cut.
 
         With ``q`` the read is a BOUNDED text search over the record content: each candidate
         costs a full row read (the searched text lives inside the JSON blob), so the scan
@@ -225,44 +234,55 @@ class RecordQueryMixin(RecordStoreBase):
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             total = int(await awaited(r.zcard(thread_key)))
             if total == 0:
-                return TranscriptPage(records=[], total=0)
+                return TranscriptPage(records=[], total=0), 0
             if q is not None:
-                matched, truncated = await self._search_thread(
+                matched, truncated, unreadable = await self._search_thread(
                     r, thread_key, newest_first=newest_first, needle=q.lower()
                 )
-                return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+                return (
+                    TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated),
+                    unreadable,
+                )
             records: list[ConversationRecord] = []
+            unreadable = 0
             end = offset + limit - 1
             window = r.zrevrange(thread_key, offset, end) if newest_first else r.zrange(thread_key, offset, end)
             for member in await awaited(window):
                 record = await self._load_searched_record(r, _member(member))
                 if record is not None:
                     records.append(record)
-        return TranscriptPage(records=records, total=total)
+                else:
+                    unreadable += 1
+        return TranscriptPage(records=records, total=total), unreadable
 
     async def _search_thread(
         self, r: AsyncRedis, thread_key: str, *, newest_first: bool, needle: str
-    ) -> tuple[list[ConversationRecord], bool]:
+    ) -> tuple[list[ConversationRecord], bool, int]:
         """The records of one thread index matching ``needle``, walked in the requested order in bounded windows.
 
-        Spends at most :data:`_FILTER_RECORD_SCAN` candidate reads. Returns ``(matches, truncated)`` —
-        ``truncated`` True when the budget ran out before the index was exhausted.
+        Spends at most :data:`_FILTER_RECORD_SCAN` candidate reads. Returns ``(matches, truncated, unreadable)`` —
+        ``truncated`` True when the budget ran out before the index was exhausted, ``unreadable`` the count of
+        scanned members whose row was gone or unparseable.
         """
         matched: list[ConversationRecord] = []
         examined = 0
+        unreadable = 0
         rank = 0
         while True:
             end = rank + _records._FILTER_SCAN_WINDOW - 1
             window = r.zrevrange(thread_key, rank, end) if newest_first else r.zrange(thread_key, rank, end)
             members = await awaited(window)
             if not members:
-                return matched, False
+                return matched, False, unreadable
             for member in members:
                 if examined >= _records._FILTER_RECORD_SCAN:
-                    return matched, True
+                    return matched, True, unreadable
                 examined += 1
                 record = await self._load_searched_record(r, _member(member))
-                if record is not None and _record_matches(record, needle):
+                if record is None:
+                    unreadable += 1
+                    continue
+                if _record_matches(record, needle):
                     matched.append(record)
             rank += len(members)
 
@@ -275,8 +295,10 @@ class RecordQueryMixin(RecordStoreBase):
         limit: int,
         newest_first: bool = False,
         q: str | None = None,
-    ) -> TranscriptPage:
+    ) -> tuple[TranscriptPage, int]:
         """One page of a LINKED person's aggregated transcript — a k-way merge across N per-route indexes.
+
+        Returned with a count of the members it could not read.
 
         Merges the same ``thread_id`` (``bridge:@person:{id}``) across the person's N per-route indexes, so
         one full history is served and never a partial slice.
@@ -288,7 +310,8 @@ class RecordQueryMixin(RecordStoreBase):
         in that same direction — the ``message_id`` tie-break mirrors redis's own equal-score
         member ordering, so cross-index ties page deterministically — then sliced
         ``[offset : offset + limit]``. NEVER a per-index offset (wrong global pages) and never
-        an ascending fetch reversed (wrong descending window).
+        an ascending fetch reversed (wrong descending window). A member whose row is gone or
+        unparseable is logged, skipped and COUNTED in the returned unreadable total.
 
         With ``q`` the read is a BOUNDED text search: at most :data:`_FILTER_RECORD_SCAN`
         members are fetched from EACH index (an index that fills that window may hold more, so
@@ -303,7 +326,7 @@ class RecordQueryMixin(RecordStoreBase):
             for key in thread_keys:
                 total += int(await awaited(r.zcard(key)))
             if total == 0:
-                return TranscriptPage(records=[], total=0)
+                return TranscriptPage(records=[], total=0), 0
             if q is not None:
                 return await self._search_person_thread(
                     r, thread_keys, thread_id, offset=offset, limit=limit, newest_first=newest_first, needle=q.lower()
@@ -318,11 +341,14 @@ class RecordQueryMixin(RecordStoreBase):
                 scored.extend((float(score), _member(member)) for member, score in await awaited(window))
             scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=newest_first)
             records: list[ConversationRecord] = []
+            unreadable = 0
             for _score, message_id in scored[offset : offset + limit]:
                 record = await self._load_searched_record(r, message_id)
                 if record is not None:
                     records.append(record)
-        return TranscriptPage(records=records, total=total)
+                else:
+                    unreadable += 1
+        return TranscriptPage(records=records, total=total), unreadable
 
     async def _search_person_thread(
         self,
@@ -334,12 +360,13 @@ class RecordQueryMixin(RecordStoreBase):
         limit: int,
         newest_first: bool,
         needle: str,
-    ) -> TranscriptPage:
-        """The bounded text search over a person's aggregated transcript.
+    ) -> tuple[TranscriptPage, int]:
+        """The bounded text search over a person's aggregated transcript, with a count of unreadable ones.
 
         At most :data:`_FILTER_RECORD_SCAN` members from each index (a filled window means the index may
         hold more), merged in the requested order, read and matched up to the same budget. ``truncated``
-        if any index filled its window or the match scan spent its budget.
+        if any index filled its window or the match scan spent its budget. A member whose row is gone or
+        unparseable is logged, skipped and COUNTED in the returned unreadable total.
         """
         end = _records._FILTER_RECORD_SCAN - 1
         scored: list[tuple[float, str]] = []
@@ -354,16 +381,24 @@ class RecordQueryMixin(RecordStoreBase):
             scored.extend((float(score), _member(member)) for member, score in fetched)
         scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=newest_first)
         matched: list[ConversationRecord] = []
+        unreadable = 0
         for examined, (_score, message_id) in enumerate(scored):
             if examined >= _records._FILTER_RECORD_SCAN:
                 truncated = True
                 break
             record = await self._load_searched_record(r, message_id)
-            if record is not None and _record_matches(record, needle):
+            if record is None:
+                unreadable += 1
+                continue
+            if _record_matches(record, needle):
                 matched.append(record)
-        return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+        return TranscriptPage(
+            records=matched[offset : offset + limit], total=len(matched), truncated=truncated
+        ), unreadable
 
-    async def search_route_messages(self, route_name: str, *, offset: int, limit: int, q: str) -> TranscriptPage:
+    async def search_route_messages(
+        self, route_name: str, *, offset: int, limit: int, q: str
+    ) -> tuple[TranscriptPage, int]:
         """Every record on ``route_name`` whose text matches ``q``, across ALL the route's threads.
 
         A BOUNDED nested scan (the route's threads newest-active first, then each thread's records newest
@@ -373,13 +408,15 @@ class RecordQueryMixin(RecordStoreBase):
         too is load-bearing: a route of many stranded members whose per-thread index is momentarily empty
         would otherwise let the thread loop run unbounded without ever spending a record. ``total`` is the
         number of matches found; the page is the ``offset``/``limit`` slice of them. A member whose row is
-        gone or unparseable is logged LOUDLY and skipped.
+        gone or unparseable is logged LOUDLY, skipped and COUNTED in the returned unreadable total, never
+        a silent cut.
         """
         needle = q.lower()
         route_key = self.settings.route_threads_key(route_name)
         matched: list[ConversationRecord] = []
         examined = 0
         threads_examined = 0
+        unreadable = 0
         truncated = False
         thread_rank = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -397,29 +434,38 @@ class RecordQueryMixin(RecordStoreBase):
                         truncated = True
                         break
                     threads_examined += 1
-                    thread_matches, thread_examined, hit_budget = await self._scan_thread_for_matches(
+                    (
+                        thread_matches,
+                        thread_examined,
+                        hit_budget,
+                        thread_unreadable,
+                    ) = await self._scan_thread_for_matches(
                         r, route_name, thread_id, needle, _records._FILTER_RECORD_SCAN - examined
                     )
                     matched.extend(thread_matches)
                     examined += thread_examined
+                    unreadable += thread_unreadable
                     if hit_budget:
                         truncated = True
                         break
                 thread_rank += len(threads)
-        return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+        return TranscriptPage(
+            records=matched[offset : offset + limit], total=len(matched), truncated=truncated
+        ), unreadable
 
     async def _scan_thread_for_matches(
         self, r: AsyncRedis, route_name: str, thread_id: str, needle: str, record_budget: int
-    ) -> tuple[list[ConversationRecord], int, bool]:
+    ) -> tuple[list[ConversationRecord], int, bool, int]:
         """Scan ONE thread's records newest first for ``needle``, reading at most ``record_budget`` records.
 
-        Returns ``(matches, examined, hit_budget)`` — the matching records, how many records were examined,
-        and whether the budget ran out before the thread was exhausted. A member whose row is gone or
-        unparseable is logged LOUDLY and skipped by the shared loader.
+        Returns ``(matches, examined, hit_budget, unreadable)`` — the matching records, how many records were
+        examined, whether the budget ran out before the thread was exhausted, and how many members were
+        unreadable (row gone or unparseable, logged LOUDLY by the shared loader).
         """
         thread_key = self.settings.thread_index_key(route_name, thread_id)
         matches: list[ConversationRecord] = []
         examined = 0
+        unreadable = 0
         member_rank = 0
         while True:
             members = [
@@ -429,13 +475,16 @@ class RecordQueryMixin(RecordStoreBase):
                 )
             ]
             if not members:
-                return matches, examined, False
+                return matches, examined, False, unreadable
             for message_id in members:
                 if examined >= record_budget:
-                    return matches, examined, True
+                    return matches, examined, True, unreadable
                 examined += 1
                 record = await self._load_searched_record(r, message_id)
-                if record is not None and _record_matches(record, needle):
+                if record is None:
+                    unreadable += 1
+                    continue
+                if _record_matches(record, needle):
                     matches.append(record)
             member_rank += len(members)
 

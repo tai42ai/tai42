@@ -377,12 +377,15 @@ class MetricsResult(BaseModel):
     """The metrics body.
 
     The summary tile, the granularity series, the (optional, possibly-empty)
-    per-model breakdown, and the resolved ``granularity``.
+    per-model breakdown, and the resolved ``granularity``. ``byModelAvailable``
+    is ``False`` only when the by-model sub-query faulted, so a consumer can tell
+    an empty breakdown apart from an unavailable one.
     """
 
     summary: MetricsSummary
     timeSeries: list[MetricsTimePoint]
     byModel: list[ModelUsageRow]
+    byModelAvailable: bool = True
     granularity: str
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import pytest
 from tai42_contract.plugins import RouteDecl
@@ -131,3 +131,36 @@ def test_reload_registries_audits_dropped_plugin_routes(monkeypatch: pytest.Monk
             mixin._reload_registries(Manifest())
     finally:
         _forget(prefixes)
+
+
+def test_reload_result_omits_skipped_tools_when_all_bind(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When every advertised tool binds, the reload result carries NO ``skipped_tools``
+    # key — mirroring the omit-when-empty shape of ``preset_conflicts``.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import mcp
+    from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.app.reload_gate import reload_gate
+
+    class _UsableSchemaTool:
+        name = "good"
+        description = "ok"
+        inputSchema: ClassVar[dict] = {"type": "object", "properties": {"q": {"type": "string"}}}
+        outputSchema: ClassVar[dict] = {}
+
+    cfg = TaiMCPConfig(title="svc", include=[], config=MCPConfig(type="http", url="http://x/mcp"))
+    manifest = Manifest.model_validate({"mcp": [cfg.model_dump()]})
+    monkeypatch.setattr(app, "_probe_mcp", AsyncMock(return_value=[cast(mcp.types.Tool, _UsableSchemaTool())]))
+
+    async def run() -> None:
+        async with app.app_context(manifest):
+            result = await reload_gate.run(lambda: app.admin.reload_mcp("svc"), reimports=False)
+
+            assert result["status"] == "ok"
+            assert "svc_good" in result["tools"]
+            assert "skipped_tools" not in result
+
+    asyncio.run(run())

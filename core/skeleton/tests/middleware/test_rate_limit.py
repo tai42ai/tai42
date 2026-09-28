@@ -40,7 +40,7 @@ async def _ok(request):
     return PlainTextResponse("ok")
 
 
-def _meta(path: str, methods: list[str], *, authed: bool) -> RouteMetadata:
+def _meta(path: str, methods: list[str], *, authed: bool, rate_limit_family: str | None = None) -> RouteMetadata:
     """One registry entry with only the fields the limiter reads carrying meaning."""
     return RouteMetadata(
         path=path,
@@ -59,6 +59,7 @@ def _meta(path: str, methods: list[str], *, authed: bool) -> RouteMetadata:
         additional_success_statuses=(),
         success_media_types={},
         action="read",
+        rate_limit_family=rate_limit_family,
     )
 
 
@@ -155,7 +156,9 @@ def _rate_limit_redis_configured(monkeypatch):
     monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://localhost:6379/0")
 
 
-def _build_client(monkeypatch, settings: RateLimitSettings, fake: FakeRedis, *, peer: str = "testclient") -> TestClient:
+def _build_client(
+    monkeypatch, settings: RateLimitSettings, fake: FakeRedis, *, peer: str = "testclient", root_path: str = ""
+) -> TestClient:
     monkeypatch.setattr(rate_limit, "rate_limit_settings", lambda: settings)
     monkeypatch.setattr(rate_limit, "time", SimpleNamespace(time=lambda: 100.0))
     # The shipped per-family budgets are stood down for the request-level tests: they
@@ -168,7 +171,9 @@ def _build_client(monkeypatch, settings: RateLimitSettings, fake: FakeRedis, *, 
         yield fake
 
     monkeypatch.setattr(rate_limit, "client_ctx", _ctx)
-    return TestClient(rate_limit.RateLimitMiddleware(Starlette(routes=_ROUTES)), client=(peer, 50000))
+    return TestClient(
+        rate_limit.RateLimitMiddleware(Starlette(routes=_ROUTES)), client=(peer, 50000), root_path=root_path
+    )
 
 
 def _settings(**overrides) -> RateLimitSettings:
@@ -233,6 +238,36 @@ def test_a_public_door_the_limiter_never_heard_of_is_throttled(monkeypatch):
     statuses = [client.post("/api/channels/newvendor/inbound").status_code for _ in range(3)]
     assert statuses[0] == 200
     assert statuses[-1] == 429
+
+
+def test_public_door_matched_under_a_prefix_stripping_proxy(monkeypatch):
+    # A proxy that strips the mount prefix leaves ``scope["path"]`` unprefixed while
+    # ``root_path`` names the mount. The door lookup runs on the root_path-stripped path
+    # (unchanged here — it never carried the prefix), so the public door is still throttled.
+    client = _build_client(monkeypatch, _settings(), FakeRedis(), root_path="/prefix")
+    statuses = [client.get("/trigger/tok").status_code for _ in range(3)]
+    assert statuses[0] == 200
+    assert statuses[-1] == 429
+
+
+def test_public_door_matched_when_prefix_carried_in_path(monkeypatch):
+    # A deployment that keeps the mount prefix IN ``scope["path"]`` (a first-class
+    # ``Mount("/x", app)`` or a proxy that forwards the prefix under ``--root-path /x``).
+    # The lookup strips ``root_path`` first — the same canonical path the router matches —
+    # so ``/x/trigger/tok`` resolves to the same ``/trigger/{token}`` door and is throttled.
+    client = _build_client(monkeypatch, _settings(), FakeRedis(), root_path="/x")
+    statuses = [client.get("/x/trigger/tok").status_code for _ in range(3)]
+    assert statuses[0] == 200
+    assert statuses[-1] == 429
+
+
+def test_a_path_under_a_different_prefix_matches_no_door(monkeypatch):
+    # ``strip_root_path`` strips ONLY when the path starts with ``root_path``: a POST under
+    # ``/y`` while ``root_path`` is ``/x`` is left intact, so it resolves to no registered
+    # POST door (the SPA catch-all is GET-only) and the limiter passes it straight through.
+    client = _build_client(monkeypatch, _settings(), FakeRedis(), root_path="/x")
+    statuses = [client.post("/y/api/channels/newvendor/inbound").status_code for _ in range(10)]
+    assert 429 not in statuses
 
 
 def test_a_new_public_door_has_its_own_budget(monkeypatch):
@@ -379,33 +414,6 @@ def test_a_route_recorded_after_the_first_request_is_covered(monkeypatch):
     assert statuses[-1] == 429
 
 
-def test_the_door_table_is_stamped_with_the_pre_build_registry_version(monkeypatch):
-    # The version is read BEFORE the table compiles, so the memo can only ever
-    # UNDER-claim. A door can be recorded DURING a build (``load_all_routes`` imports
-    # router modules, and an epoch build records on its own thread): stamping the memo
-    # with the version read AFTER the build would claim doors the table does not hold,
-    # and that door would stay unthrottled for the life of the process.
-    registry = SimpleNamespace(version=1)
-    built_at: list[int] = []
-
-    def _load():
-        built_at.append(registry.version)
-        registry.version += 1  # a route recorded while this build is compiling
-        return list(_SURFACE)
-
-    monkeypatch.setattr(rate_limit, "load_all_routes", _load)
-    monkeypatch.setattr(rate_limit, "route_registry", registry)
-    rate_limit._reset_door_table_cache()
-
-    rate_limit._door_for("/health", "GET")
-    assert rate_limit._door_table is not None
-    assert rate_limit._door_table[0] == 1  # the PRE-build version, never the post-build 2
-    # ... so the next request sees the memo lagging the registry and rebuilds against the
-    # surface that grew mid-build.
-    rate_limit._door_for("/health", "GET")
-    assert built_at == [1, 2]
-
-
 @pytest.mark.parametrize(
     "budget",
     [
@@ -487,6 +495,56 @@ def test_shipped_budget_applies_with_no_configuration():
         600,
         120,
     )
+
+
+def test_shipped_budget_includes_web_uploads():
+    # The dedicated upload family ships a far tighter budget than the chat family — an upload's cost
+    # class is above a text message. A route charges it only by declaring it (below).
+    settings = RateLimitSettings()
+    budget = settings.budget_for("channels_web_uploads")
+    assert (budget.limit, budget.burst) == (20, 5)
+
+
+def test_declared_family_overrides_path_derivation(monkeypatch):
+    # A route DECLARING rate_limit_family is charged that family, disjoint from a path-sibling that
+    # derives its family; a route declaring none still derives via family_of.
+    surface = [
+        _meta("/api/channels/web/uploads", ["POST"], authed=False, rate_limit_family="channels_web_uploads"),
+        _meta("/api/channels/web/messages", ["POST"], authed=False),
+    ]
+    routes = [
+        Route("/api/channels/web/uploads", _ok, methods=["POST"]),
+        Route("/api/channels/web/messages", _ok, methods=["POST"]),
+    ]
+    monkeypatch.setattr(rate_limit, "load_all_routes", lambda: surface)
+    rate_limit._reset_door_table_cache()
+    # The declared family bursts at 1, the derived one at 5 — so the uploads door trips on its own
+    # counter while the sibling message door, on the disjoint channels_web counter, stays open.
+    settings = RateLimitSettings(
+        default_limit=1000,
+        default_burst=100,
+        families={
+            "channels_web": FamilyOverride(burst=5),
+            "channels_web_uploads": FamilyOverride(burst=1),
+        },
+    )
+    fake = FakeRedis()
+    monkeypatch.setattr(rate_limit, "rate_limit_settings", lambda: settings)
+    monkeypatch.setattr(rate_limit, "time", SimpleNamespace(time=lambda: 100.0))
+
+    @asynccontextmanager
+    async def _ctx(cls, s=None, *, fresh=False, **kw):
+        yield fake
+
+    monkeypatch.setattr(rate_limit, "client_ctx", _ctx)
+    client = TestClient(rate_limit.RateLimitMiddleware(Starlette(routes=routes)), client=("peer-uploads", 50000))
+    try:
+        assert client.post("/api/channels/web/uploads").status_code == 200
+        assert client.post("/api/channels/web/uploads").status_code == 429
+        # The sibling message door charges channels_web — a DISJOINT counter, still open.
+        assert client.post("/api/channels/web/messages").status_code == 200
+    finally:
+        rate_limit._reset_door_table_cache()
 
 
 def test_operator_override_beats_the_shipped_budget():

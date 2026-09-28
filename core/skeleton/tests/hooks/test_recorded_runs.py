@@ -30,6 +30,7 @@ from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
+from tai42_skeleton.tools.binding.errors import UnknownToolError
 
 from .._fakes.tool_runs_redis import FakeRedis
 from .._helpers import inline_templated_text
@@ -38,7 +39,11 @@ from .._helpers import inline_templated_text
 class _Tools:
     """A tool runner recording each call and its ``offload_sync`` flag; a name in
     ``raise_for`` raises so the failed-record path is exercised. A ``gate`` — an
-    ``asyncio.Event`` left unset — holds the tool in flight until a drain cancels it."""
+    ``asyncio.Event`` left unset — holds the tool in flight until a drain cancels it.
+
+    ``get_tool`` models the live lookup seam the reconciler reads for crash-resume meta:
+    a registered name yields its tool (meta ``None``), an unknown one raises
+    ``UnknownToolError``."""
 
     def __init__(self, raise_for: set[str] | None = None, gate: asyncio.Event | None = None) -> None:
         self.calls: list[tuple[str, dict, bool]] = []
@@ -47,6 +52,12 @@ class _Tools:
         self.detached_seen: list[bool] = []
         self._raise_for = raise_for or set()
         self._gate = gate
+        self._registered = {"echo_tool"}
+
+    async def get_tool(self, name):
+        if name not in self._registered:
+            raise UnknownToolError(name)
+        return SimpleNamespace(name=name, meta=None)
 
     async def run_tool(self, name, tool_input, *, offload_sync=False, extras=None):
         self.calls.append((name, tool_input, offload_sync))

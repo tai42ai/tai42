@@ -200,10 +200,15 @@ class ConversationRouteView(ConversationRouteCreate):
 
 
 class ConversationRouteListEnvelope(BaseModel):
-    """A page of conversation routes (each secret-stripped) with the total count."""
+    """A page of conversation routes (each secret-stripped) with the total count.
+
+    ``unreadable`` counts the indexed routes whose row was gone or unparseable, so a shorter
+    page is a truthful count and never a silent cut.
+    """
 
     items: list[ConversationRouteView]
     total: int
+    unreadable: int = 0
 
 
 class ConversationRouteCreateResult(BaseModel):
@@ -251,7 +256,8 @@ class ThreadSummaryEnvelope(BaseModel):
     """A page of thread summaries.
 
     ``next_page`` is ``null`` on the last page; ``truncated`` is ``true`` when a filtered scan spent its
-    budget before the page filled.
+    budget before the page filled; ``unreadable`` counts the threads with no readable record, omitted
+    from the page.
     """
 
     items: list[ThreadSummaryRow]
@@ -260,12 +266,14 @@ class ThreadSummaryEnvelope(BaseModel):
     page_size: int
     next_page: int | None
     truncated: bool
+    unreadable: int = 0
 
 
 class TranscriptEnvelope(BaseModel):
     """A page of a thread's records (admin full records or the caller_view subset).
 
-    ``order`` is the direction served; ``next_page`` is ``null`` on the last page.
+    ``order`` is the direction served; ``next_page`` is ``null`` on the last page; ``unreadable`` counts
+    the members whose row was gone or unparseable, omitted from the page.
     """
 
     items: list[ConversationRecordView]
@@ -275,10 +283,14 @@ class TranscriptEnvelope(BaseModel):
     next_page: int | None
     order: str
     truncated: bool
+    unreadable: int = 0
 
 
 class MessageSearchEnvelope(BaseModel):
-    """A page of a route's message-search matches (admin-only, so always full records)."""
+    """A page of a route's message-search matches (admin-only, so always full records).
+
+    ``unreadable`` counts the scanned members whose row was gone or unparseable, omitted from the results.
+    """
 
     items: list[ConversationRecordView]
     total: int
@@ -286,13 +298,19 @@ class MessageSearchEnvelope(BaseModel):
     page_size: int
     next_page: int | None
     truncated: bool
+    unreadable: int = 0
 
 
 class FailedConversationsEnvelope(BaseModel):
-    """Every answer record whose delivery ended ``failed`` (admin-only, full records)."""
+    """Every answer record whose delivery ended ``failed`` (admin-only, full records).
+
+    ``unreadable`` counts the indexed failed members whose row was gone or unparseable, omitted from
+    the list.
+    """
 
     items: list[ConversationRecordView]
     total: int
+    unreadable: int = 0
 
 
 class RouteRemoveResult(BaseModel):
@@ -353,10 +371,15 @@ class ThreadModeSetResult(BaseModel):
 
 
 class ConversationConfigListEnvelope(BaseModel):
-    """A page of per-target conversation configs with the total count."""
+    """A page of per-target conversation configs with the total count.
+
+    ``unreadable`` counts the indexed configs whose row was gone or unparseable, so a shorter page is a
+    truthful count and never a silent cut.
+    """
 
     items: list[TargetConversationConfig]
     total: int
+    unreadable: int = 0
 
 
 class ConversationConfigSetResult(BaseModel):

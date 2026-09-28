@@ -86,7 +86,7 @@ async def redrive_accepted() -> None:
     """
     store = accessors._store()
     token = uuid4().hex
-    for record in await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED})):
+    for record in (await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED}))).items:
         try:
             adopted = await store.claim_intake(
                 record.message_id, time.time(), token, store.settings.intake_claim_lease_seconds

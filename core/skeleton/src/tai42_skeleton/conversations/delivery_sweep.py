@@ -104,7 +104,7 @@ async def _prune_terminal_indexes() -> None:
     global _prune_cursor
     from tai42_skeleton.conversations import delivery
 
-    routes = await delivery.get_conversations_manager().list_routes()
+    routes, _ = await delivery.get_conversations_manager().list_routes()
     _prune_cursor = await delivery._store().prune_expired_terminal_indexes(routes.keys(), _prune_cursor)
 
 

@@ -182,6 +182,157 @@ async def test_over_cap_to_json_route_returns_413_not_400(monkeypatch):
     assert _status(sent) == 413
 
 
+# -- per-route body bound ----------------------------------------------------
+
+
+def _scope_for(path: str, content_length: bytes | None = None) -> Scope:
+    headers = [(b"content-length", content_length)] if content_length is not None else []
+    return {"type": "http", "method": "POST", "path": path, "headers": headers, "query_string": b""}
+
+
+def _uploads_surface() -> list:
+    from tai42_skeleton.app.route_registry import RouteMetadata
+
+    return [
+        RouteMetadata(
+            path="/api/channels/web/uploads",
+            methods=("POST",),
+            name="uploads",
+            summary="s",
+            description="",
+            tags=("t",),
+            authed=False,
+            request_model=None,
+            response_model=None,
+            reload_gated=False,
+            reads_body=True,
+            error_statuses=(),
+            success_status=200,
+            additional_success_statuses=(),
+            success_media_types={},
+            action="write",
+            max_body_bytes=30,
+        ),
+    ]
+
+
+async def test_per_route_bound_honoured_for_declared_route(monkeypatch):
+    # A route declaring max_body_bytes accepts a body over the global cap and rejects one over its
+    # OWN bound; a route declaring none still enforces the global cap. Both guards honour the bound.
+    _patch_cap(monkeypatch, 10)  # the app-wide default
+    monkeypatch.setattr(body_limit, "load_all_routes", _uploads_surface)
+    body_limit._reset_body_limit_door_table_cache()
+    try:
+        # 20 bytes: over the 10-byte global, under the route's 30-byte bound → accepted.
+        inner = _Recorder()
+        sent = await _run(BodyLimitMiddleware(inner), _scope_for("/api/channels/web/uploads"), [(b"x" * 20, False)])
+        assert _status(sent) == 200
+        assert inner.completed is True
+
+        # 40 bytes: over the route's 30-byte bound → 413 (the running-total guard honours the bound).
+        sent = await _run(
+            BodyLimitMiddleware(_Recorder()), _scope_for("/api/channels/web/uploads"), [(b"y" * 40, False)]
+        )
+        assert _status(sent) == 413
+
+        # A route declaring none still rejects a body over the 10-byte global.
+        sent = await _run(BodyLimitMiddleware(_Recorder()), _scope_for("/other"), [(b"z" * 20, False)])
+        assert _status(sent) == 413
+
+        # The up-front Content-Length reject honours the per-route bound: 40 > 30 → immediate 413.
+        rejected = _Recorder()
+        sent = await _run(BodyLimitMiddleware(rejected), _scope_for("/api/channels/web/uploads", b"40"), [])
+        assert _status(sent) == 413
+        assert rejected.called is False
+
+        # ... and a Content-Length within the per-route bound but over the global passes up front.
+        inner2 = _Recorder()
+        sent = await _run(
+            BodyLimitMiddleware(inner2), _scope_for("/api/channels/web/uploads", b"20"), [(b"x" * 20, False)]
+        )
+        assert _status(sent) == 200
+        assert inner2.completed is True
+    finally:
+        body_limit._reset_body_limit_door_table_cache()
+
+
+async def test_per_route_bound_matched_under_a_prefix_stripping_proxy(monkeypatch):
+    # A proxy that strips the mount prefix leaves ``scope["path"]`` unprefixed while
+    # ``root_path`` names the mount. The lookup runs on the root_path-stripped path
+    # (unchanged here — it never carried the prefix), so the route's declared 30-byte bound
+    # is still found: a 20-byte body over the 10-byte global cap but under it is accepted.
+    _patch_cap(monkeypatch, 10)
+    monkeypatch.setattr(body_limit, "load_all_routes", _uploads_surface)
+    body_limit._reset_body_limit_door_table_cache()
+    try:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/channels/web/uploads",
+            "root_path": "/prefix",
+            "headers": [],
+            "query_string": b"",
+        }
+        inner = _Recorder()
+        sent = await _run(BodyLimitMiddleware(inner), scope, [(b"x" * 20, False)])
+        assert _status(sent) == 200
+        assert inner.completed is True
+    finally:
+        body_limit._reset_body_limit_door_table_cache()
+
+
+async def test_per_route_bound_matched_when_prefix_carried_in_path(monkeypatch):
+    # A deployment that keeps the mount prefix IN ``scope["path"]`` (a first-class
+    # ``Mount("/x", app)`` or a proxy forwarding the prefix under ``--root-path /x``). The
+    # lookup strips ``root_path`` first — the same canonical path the router matches — so
+    # ``/x/api/channels/web/uploads`` resolves to the same door and its 30-byte bound
+    # applies: a 20-byte body over the 10-byte global cap is accepted, a 40-byte one is 413.
+    _patch_cap(monkeypatch, 10)
+    monkeypatch.setattr(body_limit, "load_all_routes", _uploads_surface)
+    body_limit._reset_body_limit_door_table_cache()
+    try:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/x/api/channels/web/uploads",
+            "root_path": "/x",
+            "headers": [],
+            "query_string": b"",
+        }
+        inner = _Recorder()
+        sent = await _run(BodyLimitMiddleware(inner), scope, [(b"x" * 20, False)])
+        assert _status(sent) == 200
+        assert inner.completed is True
+
+        # 40 bytes: over the route's own 30-byte bound → 413 (the declared bound was found).
+        sent = await _run(BodyLimitMiddleware(_Recorder()), dict(scope), [(b"y" * 40, False)])
+        assert _status(sent) == 413
+    finally:
+        body_limit._reset_body_limit_door_table_cache()
+
+
+async def test_per_route_bound_not_applied_under_a_different_prefix(monkeypatch):
+    # ``strip_root_path`` strips ONLY when the path starts with ``root_path``: a request
+    # under ``/y`` while ``root_path`` is ``/x`` is left intact, so it resolves to no
+    # declared door and the app-wide 10-byte cap applies — a 20-byte body is 413.
+    _patch_cap(monkeypatch, 10)
+    monkeypatch.setattr(body_limit, "load_all_routes", _uploads_surface)
+    body_limit._reset_body_limit_door_table_cache()
+    try:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/y/api/channels/web/uploads",
+            "root_path": "/x",
+            "headers": [],
+            "query_string": b"",
+        }
+        sent = await _run(BodyLimitMiddleware(_Recorder()), scope, [(b"x" * 20, False)])
+        assert _status(sent) == 413
+    finally:
+        body_limit._reset_body_limit_door_table_cache()
+
+
 async def test_over_cap_413_inside_server_error_middleware(monkeypatch):
     # Production layering: BodyLimitMiddleware runs INSIDE the base app's own
     # Starlette ``ServerErrorMiddleware`` (TaiMCP._base_middleware passes it into the

@@ -57,12 +57,17 @@ class FamilyOverride(BaseModel):
 # The three single-request doors are held at the tighter 60/min + 10/10s: one
 # request buys real work (a webhook fan-out, a ticket redemption, a tool run per
 # trigger GET). The web chat family is wider because ONE first page load is the page
-# plus every bundle file it links, all in one burst.
+# plus every bundle file it links, all in one burst. The web UPLOAD family is far
+# tighter than the chat family: an upload request carries up to the per-kind media
+# cap, so its cost class is far above a text message; a text-sized budget would admit
+# large byte volume. A route charges this family only by DECLARING it (a three-segment
+# family the path derivation never produces — see the rate-limit middleware).
 SHIPPED_FAMILY_BUDGETS: dict[str, FamilyOverride] = {
     "universal_webhook": FamilyOverride(limit=60, burst=10),
     "interactions_callback": FamilyOverride(limit=60, burst=10),
     "trigger": FamilyOverride(limit=60, burst=10),
     "channels_web": FamilyOverride(limit=120, burst=30),
+    "channels_web_uploads": FamilyOverride(limit=20, burst=5),
 }
 
 

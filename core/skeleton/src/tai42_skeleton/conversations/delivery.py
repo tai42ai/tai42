@@ -156,9 +156,10 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
     """Ingest a channel's out-of-band receipt for an outbound message.
 
     Resolves ``provider_message_id`` through the outbound reverse index and applies the
-    receipt atomically. Raises when the id maps to no record (unknown or already swept), and
-    when it names a record whose send is still in flight — a receipt for one chunk may not
-    terminalise a record whose remaining chunks are still going out.
+    receipt atomically. A receipt that lands while the record's send is still in flight is
+    PARKED and applied when the send completes, so the door acks. Raises when the id maps to no
+    record (unknown or already swept), and when it resolves to a record in a state that never
+    sent an answer — a programmer error, since such a record carries no outbound id to resolve.
     """
     store = _store()
     message_id = await store.resolve_outbound(channel, provider_message_id)
@@ -174,12 +175,21 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
         )
     if outcome == -3:
         raise RuntimeError(
-            f"conversations: delivery receipt {status.value} for outbound id {provider_message_id!r} names record "
-            f"{message_id}, whose send has not finished; the record keeps its in-flight state"
+            f"conversations: delivery receipt {status.value} for outbound id {provider_message_id!r} resolved to "
+            f"record {message_id}, which is in a state that never sent an answer"
         )
+    if outcome == 2:
+        logger.info(
+            "conversations: delivery receipt %s for record %s arrived before its send finished; parked to apply "
+            "when the send completes",
+            status.value,
+            message_id,
+        )
+        return
     if outcome == -2:
         logger.error(
-            "conversations: delivery receipt %s for record %s conflicts with an already-terminal state; ignored",
+            "conversations: delivery receipt %s for record %s conflicts with the record's settled outcome — an "
+            "already-terminal state, or a different receipt already parked on the still-sending record; ignored",
             status.value,
             message_id,
         )

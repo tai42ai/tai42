@@ -254,6 +254,16 @@ async def readiness_check(request: Request) -> JSONResponse:
             checks[name] = type(failure).__name__
             ready = False
 
+    # A perpetual background task that died (a subscription/re-probe/reaper that
+    # stopped) marks the live app; surface it as a named readiness failure so this
+    # worker drains. The process also requests its own graceful exit when the task
+    # dies, so this window is the pre-exit truth.
+    dead = instance.build_app().dead_perpetual_task()
+    if dead is not None:
+        name, reason = dead
+        checks[f"perpetual_task:{name}"] = reason
+        ready = False
+
     if ready:
         return JSONResponse({"status": "ready", "checks": checks})
     return JSONResponse({"status": "not_ready", "checks": checks}, status_code=503)

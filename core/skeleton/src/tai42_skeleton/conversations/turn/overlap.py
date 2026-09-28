@@ -131,7 +131,7 @@ async def _gather_superseded(store, lead: ConversationRecord, member_ids: set[st
     of this batch (the turn that took its place), it rides the payload's ``superseded`` so its
     text is not lost. Read from the thread's own index, bounded by the FIFO depth.
     """
-    page = await store.list_thread_records(
+    page, _ = await store.list_thread_records(
         lead.route_name, lead.thread_id, offset=0, limit=store.settings.thread_queue_depth, newest_first=True
     )
     carried = [r for r in page.records if _is_superseded(r) and r.successor_id in member_ids]

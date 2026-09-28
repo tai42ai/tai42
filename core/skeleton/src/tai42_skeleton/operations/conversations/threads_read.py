@@ -127,9 +127,10 @@ async def list_conversation_threads(
     route names exist to a caller with no business knowing. An unknown route is a loud 404
     to an admin; a ``page`` or ``page_size`` below 1, or a ``page`` above the served
     maximum, is a 400. Returns
-    ``{"items", "total", "page", "page_size", "next_page", "truncated"}``, where ``total``
-    counts the route's indexed threads for an unfiltered listing, or the matches the bounded
-    scan found for a filtered one.
+    ``{"items", "total", "page", "page_size", "next_page", "truncated", "unreadable"}``, where
+    ``total`` counts the route's indexed threads for an unfiltered listing, or the matches the
+    bounded scan found for a filtered one, and ``unreadable`` counts the threads with no readable
+    record.
     """
     _validate_route_name(route_name)
     manager = _require_backend()
@@ -141,7 +142,7 @@ async def list_conversation_threads(
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    listed = await ConversationRecordStore(ConversationsSettings()).list_route_threads(
+    listed, unreadable = await ConversationRecordStore(ConversationsSettings()).list_route_threads(
         route_name, offset=offset, limit=limit, status=status_filter, address=address_filter
     )
     items = [
@@ -161,6 +162,7 @@ async def list_conversation_threads(
         "page_size": limit,
         "next_page": _next_page(page, limit, listed.total),
         "truncated": listed.truncated,
+        "unreadable": unreadable,
     }
 
 
@@ -197,9 +199,10 @@ async def get_conversation_thread(
     NOT that 404: it reads as an empty page carrying the indexed ``total``, until the prune
     pass reclaims the members and the thread becomes unknown.
 
-    Returns ``{"items", "total", "page", "page_size", "next_page", "order", "truncated"}``,
-    where ``total`` counts the thread's indexed records for an unfiltered read, or the matches
-    a bounded ``q`` scan found.
+    Returns ``{"items", "total", "page", "page_size", "next_page", "order", "truncated",
+    "unreadable"}``, where ``total`` counts the thread's indexed records for an unfiltered read,
+    or the matches a bounded ``q`` scan found, and ``unreadable`` counts the members whose row
+    was gone or unparseable.
     """
     _validate_route_name(route_name)
     if not thread_id.strip():
@@ -218,7 +221,7 @@ async def get_conversation_thread(
             manager, route_name, thread_id, caller, page=page, offset=offset, limit=limit, order=order, q=needle
         )
     await _require_route(manager, route_name)
-    transcript = await ConversationRecordStore(ConversationsSettings()).list_thread_records(
+    transcript, unreadable = await ConversationRecordStore(ConversationsSettings()).list_thread_records(
         route_name, thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=needle
     )
     # An unknown/expired thread reads as total==0. Under a ``q`` search total is the MATCH
@@ -226,13 +229,16 @@ async def get_conversation_thread(
     # that found nothing in a thread that exists returns an empty page.
     if needle is None and transcript.total == 0:
         raise _thread_not_found(thread_id)
-    return _transcript_response(transcript, caller, page=page, limit=limit, order=order)
+    return _transcript_response(transcript, caller, page=page, limit=limit, order=order, unreadable=unreadable)
 
 
-def _transcript_response(transcript, caller: Caller, *, page: int, limit: int, order: str) -> dict[str, Any]:
+def _transcript_response(
+    transcript, caller: Caller, *, page: int, limit: int, order: str, unreadable: int
+) -> dict[str, Any]:
     """Build the shared transcript page shape both the route-keyed and aggregated-person reads return.
 
-    An admin reads whole records, a non-admin the caller-safe projection.
+    An admin reads whole records, a non-admin the caller-safe projection. ``unreadable`` counts
+    the members whose row was gone or unparseable, omitted from the page.
     """
     view = (lambda record: record.view()) if caller.is_admin else (lambda record: record.caller_view())
     return {
@@ -243,6 +249,7 @@ def _transcript_response(transcript, caller: Caller, *, page: int, limit: int, o
         "next_page": _next_page(page, limit, transcript.total),
         "order": order,
         "truncated": transcript.truncated,
+        "unreadable": unreadable,
     }
 
 
@@ -280,12 +287,12 @@ async def _read_person_thread(
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    transcript = await ConversationRecordStore(ConversationsSettings()).list_person_thread_records(
+    transcript, unreadable = await ConversationRecordStore(ConversationsSettings()).list_person_thread_records(
         sorted(_person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=q
     )
     if q is None and transcript.total == 0:
         raise _thread_not_found(thread_id)
-    return _transcript_response(transcript, caller, page=page, limit=limit, order=order)
+    return _transcript_response(transcript, caller, page=page, limit=limit, order=order, unreadable=unreadable)
 
 
 @operation(
@@ -308,8 +315,9 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     Authorization is decided BEFORE the route is looked up, so a non-admin is refused the same
     way whether the name routes or not. An unknown route is a loud 404 to an admin; a blank
     ``q``, a ``page``/``page_size`` below 1, or a ``page`` above the served maximum, is a 400.
-    Returns ``{"items", "total", "page", "page_size", "next_page", "truncated"}``, where
-    ``total`` is the matches the bounded scan found.
+    Returns ``{"items", "total", "page", "page_size", "next_page", "truncated", "unreadable"}``,
+    where ``total`` is the matches the bounded scan found and ``unreadable`` counts the scanned
+    members whose row was gone or unparseable.
     """
     _validate_route_name(route_name)
     if not q.strip():
@@ -321,7 +329,7 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    found = await ConversationRecordStore(ConversationsSettings()).search_route_messages(
+    found, unreadable = await ConversationRecordStore(ConversationsSettings()).search_route_messages(
         route_name, offset=offset, limit=limit, q=q
     )
     return {
@@ -331,6 +339,7 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
         "page_size": limit,
         "next_page": _next_page(page, limit, found.total),
         "truncated": found.truncated,
+        "unreadable": unreadable,
     }
 
 
@@ -343,7 +352,9 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
 async def list_failed_conversations() -> dict[str, Any]:
     """List every answer record whose delivery ended ``failed``.
 
-    The listing spans every route and caller, so it is admin-only. Returns ``{"items", "total"}``.
+    The listing spans every route and caller, so it is admin-only. Returns
+    ``{"items", "total", "unreadable"}``, where ``unreadable`` counts the indexed failed members whose
+    row was gone or unparseable.
     """
     _require_backend()
     require_admin(await _pkg.resolve_caller())
@@ -351,6 +362,6 @@ async def list_failed_conversations() -> dict[str, Any]:
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    records = await ConversationRecordStore(ConversationsSettings()).list_by_status(frozenset({DeliveryStatus.FAILED}))
-    items = [record.view() for record in records]
-    return {"items": items, "total": len(items)}
+    listing = await ConversationRecordStore(ConversationsSettings()).list_by_status(frozenset({DeliveryStatus.FAILED}))
+    items = [record.view() for record in listing.items]
+    return {"items": items, "total": len(items), "unreadable": listing.unreadable}

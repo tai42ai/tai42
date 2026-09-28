@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import cast
 
 from pydantic import SecretStr
@@ -383,6 +384,45 @@ async def test_wired_connections_enumerates_identity_provider_generically(monkey
     ac = [conn for conn in conns if conn[0] == "access_control"]
     assert ac == [("access_control", RedisClient, declared)]
     assert ac[0][2] is declared
+
+
+async def test_ready_names_dead_perpetual_task(monkeypatch) -> None:
+    # A dead perpetual task marks the live app; /ready surfaces it as a named
+    # readiness failure and 503s, so the worker drains even when every wired store
+    # pings clean. The marker is read through ``dead_perpetual_task()``.
+    monkeypatch.setattr(health, "_wired_connections", list)
+    monkeypatch.setattr(
+        health.instance,
+        "build_app",
+        lambda: cast(
+            object, SimpleNamespace(dead_perpetual_task=lambda: ("tai-worker-bus-subscription", "RuntimeError"))
+        ),
+    )
+
+    resp = await health.readiness_check(_request())
+
+    assert resp.status_code == 503
+    body = json.loads(bytes(resp.body))
+    assert body["status"] == "not_ready"
+    assert body["checks"]["perpetual_task:tai-worker-bus-subscription"] == "RuntimeError"
+
+
+async def test_ready_healthy_when_no_perpetual_task_dead(monkeypatch) -> None:
+    # With the marker unset the all-healthy path still returns 200 (no
+    # ``perpetual_task:*`` check appears).
+    monkeypatch.setattr(health, "_wired_connections", list)
+    monkeypatch.setattr(
+        health.instance,
+        "build_app",
+        lambda: cast(object, SimpleNamespace(dead_perpetual_task=lambda: None)),
+    )
+
+    resp = await health.readiness_check(_request())
+
+    assert resp.status_code == 200
+    body = json.loads(bytes(resp.body))
+    assert body["status"] == "ready"
+    assert not any(name.startswith("perpetual_task:") for name in body["checks"])
 
 
 async def test_ready_nothing_wired_returns_200_empty(monkeypatch) -> None:

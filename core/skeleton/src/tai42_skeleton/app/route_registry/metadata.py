@@ -121,6 +121,17 @@ class RouteMetadata:
     # ``None`` — so the emitter renders its 200 body as the model's ``$ref`` with no
     # ``data`` wrapper.
     enveloped: bool = True
+    # A per-route override of the app-wide request body cap
+    # (``TAI_BODY_LIMIT_MAX_BODY_BYTES``), mirrored from the route's
+    # :attr:`DeclaredRouteMetadata.max_body_bytes`. ``BodyLimitMiddleware`` honours it for the
+    # matched route — both the up-front Content-Length reject and the running-total guard — instead of
+    # the global default; ``None`` = the global default applies.
+    max_body_bytes: int | None = None
+    # A per-route override of the rate-limit family the door charges, mirrored from the route's
+    # :attr:`DeclaredRouteMetadata.rate_limit_family`. ``RateLimitMiddleware`` charges it over the
+    # path-derived family, so a door whose cost class differs from its path-siblings keeps a disjoint
+    # counter and budget; ``None`` = the family is derived from the path.
+    rate_limit_family: str | None = None
 
 
 @dataclass(frozen=True)

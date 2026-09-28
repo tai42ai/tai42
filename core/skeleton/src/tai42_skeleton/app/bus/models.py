@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from tai42_contract.errors import ClientDisconnectedError
@@ -243,6 +243,7 @@ class FleetResult(BaseModel):
     results: list[WorkerResult] = Field(default_factory=list)
     error: str | None = None
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def ok(self) -> bool:
         """True when the bus was reachable and every worker applied."""

@@ -95,7 +95,7 @@ async def test_blank_inbound_text_is_refused_before_any_state(env, monkeypatch):
             await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", blank, "PID1")
     await _settle()
 
-    assert await _store().list_by_status(frozenset(DeliveryStatus)) == []
+    assert (await _store().list_by_status(frozenset(DeliveryStatus))).items == []
 
 
 async def test_a_blank_accountable_cap_key_is_refused_loudly(env, monkeypatch):
@@ -109,7 +109,7 @@ async def test_a_blank_accountable_cap_key_is_refused_loudly(env, monkeypatch):
             await turn_module.accept("twilio", "+15550001111", "+15550002222", blank, "hi", "PID1")
     await _settle()
 
-    assert await _store().list_by_status(frozenset(DeliveryStatus)) == []
+    assert (await _store().list_by_status(frozenset(DeliveryStatus))).items == []
 
 
 async def test_two_messages_from_one_address_remember_via_the_thread_id(env, monkeypatch):
@@ -187,7 +187,7 @@ async def test_a_blank_provider_message_id_is_refused_with_nothing_written(env, 
 
     assert agent.calls == []
     assert channel.sends == []
-    assert await _store().list_by_status(frozenset(DeliveryStatus)) == []
+    assert (await _store().list_by_status(frozenset(DeliveryStatus))).items == []
 
 
 async def test_a_shed_reply_is_not_deliverable_until_it_owns_its_claim(env, monkeypatch):
@@ -216,7 +216,7 @@ async def test_a_shed_reply_is_not_deliverable_until_it_owns_its_claim(env, monk
 
     assert owner == first
     assert [n.message for n in channel.sends] == ["echo: one"]
-    assert await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY})) == []
+    assert (await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))).items == []
 
 
 _FORM = {"name": "Alice", "size": 42}
@@ -518,3 +518,28 @@ async def test_api_submit_with_attachments_and_location(env, monkeypatch):
     assert record is not None
     assert record.inbound_attachments == [_DOC]
     assert record.inbound_location == _LOCATION
+
+
+async def test_media_params_surface_on_target_payload(env, monkeypatch):
+    # The opaque media_* parity params a channel bridges alongside a byte-backed attachment reach a
+    # tool target's payload UNCHANGED, under the stable "params" key (never merged into the root).
+    channel = FakeChannel()
+    route = _tool_channel_route(start_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    media_params = {
+        "media_kind": "image",
+        "media_id": "/api/interactions/media/" + "A" * 43,
+        "media_mime_type": "image/png",
+        "media_sha256": "deadbeefcafe",
+        "media_size": "1234",
+    }
+    message_id = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "see photo", "PID1", params=media_params
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"]["params"] == media_params
+    record = await _store().get_record(message_id)
+    assert record is not None

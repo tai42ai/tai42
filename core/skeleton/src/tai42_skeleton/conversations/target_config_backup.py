@@ -36,7 +36,7 @@ async def export_target_configs() -> dict[str, Any]:
     """
     if ConversationsSettings().in_memory:
         return {"target_configs": []}
-    configs = await ConversationTargetConfigStore(ConversationsSettings()).list()
+    configs, _ = await ConversationTargetConfigStore(ConversationsSettings()).list()
     return {"target_configs": [config.model_dump(mode="json") for config in configs.values()]}
 
 
@@ -68,7 +68,8 @@ async def import_target_configs(payload: dict[str, Any], mode: Literal["skip", "
     # A MUTABLE snapshot of the stored pairs: a row written earlier IN THIS payload is added
     # below, so a later duplicate of the same pair is seen as existing rather than treated as
     # a second fresh create silently overwriting the first.
-    existing = set(await store.list())
+    stored, _ = await store.list()
+    existing = set(stored)
 
     for item in payload["target_configs"]:
         key = (item.get("target_kind"), item.get("target_name")) if isinstance(item, dict) else None

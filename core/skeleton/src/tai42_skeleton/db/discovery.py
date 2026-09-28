@@ -98,7 +98,7 @@ def _import_package_for_distribution(distribution: str) -> str:
 
 
 @dataclass(frozen=True)
-class _ChainSkip:
+class SkippedChain:
     """A declared chain whose ``migrations_component`` override binding is unset.
 
     A DISTINCT surfaced skip, never the silent ``None`` no-migrations outcome.
@@ -110,23 +110,40 @@ class _ChainSkip:
     component: str
 
 
-def _log_chain_skip(skip: _ChainSkip) -> None:
-    """Surface a skipped override chain as a visible line — WHICH chain did not run and WHY.
+@dataclass(frozen=True)
+class MigrationChainDiscovery:
+    """The outcome of resolving migration chains: the entries to run and the skips.
+
+    ``entries`` are the runnable chains; ``skipped`` are the declared chains whose
+    override binding is unset (surfaced, never silently dropped), so a caller can
+    both apply what runs and name what did not.
+    """
+
+    entries: list[MigrationEntry]
+    skipped: list[SkippedChain]
+
+
+def chain_skip_message(skip: SkippedChain) -> str:
+    """The visible line naming a skipped override chain: WHICH chain did not run and WHY.
 
     So an optional feature's store never silently migrates into the default database by fallback.
     """
-    logger.warning(
-        "db migrate: skipping the %r migration chain — its migrations-component database "
+    return (
+        f"skipping the {skip.component!r} migration chain — its migrations-component database "
         "binding (TAI_DB_BINDING_*) is not declared; set it so this component's store migrates "
-        "to the intended database.",
-        skip.component,
+        "to the intended database."
     )
 
 
-def _plugin_chain(spec: PluginSpec, *, package_root: Traversable | None = None) -> MigrationEntry | _ChainSkip | None:
+def _log_chain_skip(skip: SkippedChain) -> None:
+    """Log a skipped override chain as a warning, matching the CLI skip line text."""
+    logger.warning("db migrate: %s", chain_skip_message(skip))
+
+
+def _plugin_chain(spec: PluginSpec, *, package_root: Traversable | None = None) -> MigrationEntry | SkippedChain | None:
     """Resolve a plugin's declared chain to one of THREE distinct outcomes.
 
-    An entry to run, a :class:`_ChainSkip` (an override whose component binding is unset — surfaced, never a
+    An entry to run, a :class:`SkippedChain` (an override whose component binding is unset — surfaced, never a
     silent ``None``), or ``None`` when the plugin declares no chain.
     ``migrations_component`` (when set) names the database component the chain
     migrates instead of the distribution; it flows into BOTH the entry's ``component``
@@ -134,7 +151,7 @@ def _plugin_chain(spec: PluginSpec, *, package_root: Traversable | None = None) 
     the right identity into the wrong database. An override runs ONLY while its
     binding is EXPLICITLY declared; unset, the chain is skipped rather than run under
     the default-database fallback. With no override the component is the distribution
-    name, byte-identical to prior behavior.
+    name.
 
     ``package_root`` (when given) is the plugin's import-package root; the
     package-relative ``migrations`` path resolves against it directly. The
@@ -154,7 +171,7 @@ def _plugin_chain(spec: PluginSpec, *, package_root: Traversable | None = None) 
     # override chain never needs the feature package's SQL resolved.
     component = spec.migrations_component or spec.package
     if spec.migrations_component is not None and component_binding_declared(component) is None:
-        return _ChainSkip(component=component)
+        return SkippedChain(component=component)
     if package_root is None:
         package = _import_package_for_distribution(spec.package)
         package_root = importlib.resources.files(package)
@@ -178,7 +195,7 @@ def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
     well-formed chain.
     """
     outcome = _plugin_chain(spec)
-    if isinstance(outcome, _ChainSkip):
+    if isinstance(outcome, SkippedChain):
         _log_chain_skip(outcome)
         return None
     return outcome
@@ -275,26 +292,33 @@ def _merge_prefix_sources(
     return sources
 
 
-def _resolve_chain_entries(sources: dict[str, tuple[PluginSpec, Path | None]]) -> list[MigrationEntry]:
-    """Map each source's ``_plugin_chain`` outcome to entries.
+def _resolve_chain_discovery(sources: dict[str, tuple[PluginSpec, Path | None]]) -> MigrationChainDiscovery:
+    """Map each source's ``_plugin_chain`` outcome to a discovery result.
 
-    Surface and omit a :class:`_ChainSkip` (DISTINCT from the ``None`` no-migrations outcome, so
-    ``tai db migrate`` reports WHICH declared chain did not run rather than silently dropping it),
-    drop ``None``, keep each :class:`MigrationEntry`.
+    A :class:`SkippedChain` (DISTINCT from the ``None`` no-migrations outcome, so a caller reports
+    WHICH declared chain did not run rather than silently dropping it) is logged and collected in
+    ``skipped``; ``None`` is dropped; each :class:`MigrationEntry` is collected in ``entries``.
     """
     entries: list[MigrationEntry] = []
+    skipped: list[SkippedChain] = []
     for spec, package_root in sources.values():
         outcome = _plugin_chain(spec, package_root=package_root)
-        if isinstance(outcome, _ChainSkip):
+        if isinstance(outcome, SkippedChain):
             _log_chain_skip(outcome)
+            skipped.append(outcome)
             continue
         if outcome is not None:
             entries.append(outcome)
-    return entries
+    return MigrationChainDiscovery(entries=entries, skipped=skipped)
 
 
-async def installed_plugin_entries() -> list[MigrationEntry]:
-    """Runner entries for every installed plugin that declares a chain.
+def _resolve_chain_entries(sources: dict[str, tuple[PluginSpec, Path | None]]) -> list[MigrationEntry]:
+    """The runnable entries of :func:`_resolve_chain_discovery`, dropping the skips."""
+    return _resolve_chain_discovery(sources).entries
+
+
+async def discover_plugin_chains() -> MigrationChainDiscovery:
+    """Discovery result for every installed plugin that declares a chain.
 
     From BOTH install sources, one entry per distribution:
 
@@ -308,16 +332,42 @@ async def installed_plugin_entries() -> list[MigrationEntry]:
     prefix) is the same installed artifact and yields ONE entry; the prefix copy
     resolves the chain directly from the prefix filesystem, which needs no
     ``sys.path`` activation in a CLI process. Empty when the skeleton database
-    is not configured — with no database there is nowhere to migrate. Each plugin
-    chain runs under its own component's bound migrator identity.
+    is not configured — with no database there is nowhere to migrate. A declared
+    chain whose override binding is unset is carried in ``skipped``, never silently
+    dropped. Each plugin chain runs under its own component's bound migrator identity.
     """
     from tai42_kit.db import component_store_configured
 
     if not component_store_configured(SKELETON_COMPONENT):
-        return []
+        return MigrationChainDiscovery(entries=[], skipped=[])
     sources = await _collect_store_sources()
     sources = _merge_prefix_sources(sources)
-    return _resolve_chain_entries(sources)
+    return _resolve_chain_discovery(sources)
+
+
+async def installed_plugin_entries() -> list[MigrationEntry]:
+    """Runner entries for every installed plugin that declares a chain, dropping the skips."""
+    return (await discover_plugin_chains()).entries
+
+
+async def discover_all_migration_chains() -> MigrationChainDiscovery:
+    """Discovery result for every chain this process is responsible for, each under its bound identity.
+
+    The two skeleton-owned chains (the skeleton baseline and the ``states`` record store) are always
+    present in ``entries`` — neither declares a ``migrations_component`` override, so neither skips —
+    followed by every installed plugin chain; ``skipped`` carries every declared plugin chain whose
+    override binding is unset. The skeleton chains are resolved BEFORE plugin discovery so an
+    unresolvable skeleton migrator identity (an unconfigured or half-set-admin database) raises
+    eagerly, before plugin discovery opens a connection to enumerate the store.
+    """
+    from tai42_skeleton.states.db import states_entry
+
+    skeleton_chains = [skeleton_entry(), states_entry()]
+    plugin = await discover_plugin_chains()
+    return MigrationChainDiscovery(
+        entries=[*skeleton_chains, *plugin.entries],
+        skipped=plugin.skipped,
+    )
 
 
 async def all_migration_entries() -> list[MigrationEntry]:
@@ -326,6 +376,4 @@ async def all_migration_entries() -> list[MigrationEntry]:
     The two skeleton-owned chains (the skeleton baseline and the ``states`` record store) plus every
     installed plugin chain.
     """
-    from tai42_skeleton.states.db import states_entry
-
-    return [skeleton_entry(), states_entry(), *await installed_plugin_entries()]
+    return (await discover_all_migration_chains()).entries

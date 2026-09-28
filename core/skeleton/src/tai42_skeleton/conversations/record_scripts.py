@@ -26,6 +26,10 @@ _F_INTAKE = "intake_claim"
 # key it decides against whether the route still routes.
 _INDEXED_STATUSES = tuple(DeliveryStatus)
 _TARGET_INDEX_KEY = f"KEYS[{2 + len(_INDEXED_STATUSES)}]"
+# The per-status indexes a parked receipt's terminal names, addressed by the shared layout so a
+# script applying a parked receipt threads no extra key.
+_DELIVERED_INDEX_KEY = f"KEYS[{2 + _INDEXED_STATUSES.index(DeliveryStatus.DELIVERED)}]"
+_FAILED_INDEX_KEY = f"KEYS[{2 + _INDEXED_STATUSES.index(DeliveryStatus.FAILED)}]"
 _THREAD_INDEX_KEY = f"KEYS[{3 + len(_INDEXED_STATUSES)}]"
 _ROUTE_THREADS_KEY = f"KEYS[{4 + len(_INDEXED_STATUSES)}]"
 _ROUTE_ROW_KEY = f"KEYS[{5 + len(_INDEXED_STATUSES)}]"
@@ -66,7 +70,9 @@ return ARGV[1]
 # a door resolves its route a round trip before it lands here, and a delete completing in
 # that window has already reclaimed both indexes, so writing them would re-create a pair
 # for a route that no longer routes. Returns 1 when the thread indexes were written, 0 when
-# the route was gone. ARGV = content_json, delivery_status, outbound_json, attempts,
+# the route was gone — in which case the record's ``route_missing`` field is set, so the
+# operator read carries the honest marker and not only a log line. ARGV = content_json,
+# delivery_status, outbound_json, attempts,
 # updated_at, ttl_ms ('' for a record that must not expire yet), intake_claim ('' off the
 # intake path), message_id, index_score, thread_id, created_at.
 _CREATE_LUA = f"""
@@ -75,7 +81,10 @@ redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', ARGV[2], 'outbou
   'attempts', ARGV[4], 'claim', '', 'grace_deadline', '', 'updated_at', ARGV[5], 'intake_claim', ARGV[7])
 if ARGV[6] ~= '' then redis.call('PEXPIRE', KEYS[1], ARGV[6]) end
 {_reindex("ARGV[8]", "ARGV[9]")}
-if redis.call('EXISTS', {_ROUTE_ROW_KEY}) == 0 then return 0 end
+if redis.call('EXISTS', {_ROUTE_ROW_KEY}) == 0 then
+  redis.call('HSET', KEYS[1], 'route_missing', '1')
+  return 0
+end
 redis.call('ZADD', {_THREAD_INDEX_KEY}, ARGV[11], ARGV[8])
 redis.call('ZADD', {_ROUTE_THREADS_KEY}, ARGV[11], ARGV[10])
 return 1
@@ -229,13 +238,30 @@ end
 
 # Move a record to ``provisional``, recording the outbound ids and grace deadline and
 # releasing the lease: 1 transitioned, 0 already terminal, -1 gone, -3 a foreign live lease.
-# ARGV = outbound_json, attempts, grace_deadline, now, token, message_id, index_score.
+# A receipt that arrived during the send is staged on the record's ``pending_receipt`` field;
+# when it is set, this step applies it in the SAME script — straight to the parked terminal,
+# skipping ``provisional`` — and returns 2 (parked receipt was ``delivered``) or 3 (parked
+# receipt was ``failed``). ARGV = outbound_json, attempts, grace_deadline, now, token,
+# message_id, index_score, ttl_ms, terminal_index_score.
 _PROVISIONAL_LUA = f"""
 -- conversations:record:provisional
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
 if not status then return -1 end
 if status == 'delivered' or status == 'failed' or status == 'shed' then return 0 end
 {_foreign_lease_guard("ARGV[4]", "ARGV[5]")}
+local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
+if parked and parked ~= '' then
+  redis.call('HSET', KEYS[1], 'delivery_status', parked, 'outbound_ids', ARGV[1],
+    'attempts', ARGV[2], 'updated_at', ARGV[4], 'claim', '', 'grace_deadline', '', 'pending_receipt', '')
+  redis.call('PEXPIRE', KEYS[1], ARGV[8])
+  for i = 2, {1 + len(_INDEXED_STATUSES)} do redis.call('ZREM', KEYS[i], ARGV[6]) end
+  if parked == 'delivered' then
+    redis.call('ZADD', {_DELIVERED_INDEX_KEY}, ARGV[9], ARGV[6])
+    return 2
+  end
+  redis.call('ZADD', {_FAILED_INDEX_KEY}, ARGV[9], ARGV[6])
+  return 3
+end
 redis.call('HSET', KEYS[1], 'delivery_status', 'provisional', 'outbound_ids', ARGV[1],
   'attempts', ARGV[2], 'grace_deadline', ARGV[3], 'updated_at', ARGV[4], 'claim', '')
 {_reindex("ARGV[6]", "ARGV[7]")}
@@ -262,8 +288,9 @@ return 1
 
 # Terminal failed write from the send path (retries exhausted): 1 transitioned, 0 already
 # failed, -1 gone, -2 the send already completed (delivered/shed/provisional), -3 a foreign
-# live lease. Sets the retention TTL.
-# ARGV = attempts, now, ttl_ms, token, message_id, index_score.
+# live lease. A staged receipt is cleared in the same step and the write returns 2 when it
+# dropped a non-empty ``pending_receipt`` — first terminal wins, the send-side outcome stands.
+# Sets the retention TTL. ARGV = attempts, now, ttl_ms, token, message_id, index_score.
 _FAILED_LUA = f"""
 -- conversations:record:failed
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
@@ -271,17 +298,21 @@ if not status then return -1 end
 if status == 'delivered' or status == 'shed' or status == 'provisional' then return -2 end
 if status == 'failed' then return 0 end
 {_foreign_lease_guard("ARGV[2]", "ARGV[4]")}
+local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
 redis.call('HSET', KEYS[1], 'delivery_status', 'failed', 'attempts', ARGV[1],
-  'updated_at', ARGV[2], 'claim', '', 'grace_deadline', '')
+  'updated_at', ARGV[2], 'claim', '', 'grace_deadline', '', 'pending_receipt', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
 {_reindex("ARGV[5]", "ARGV[6]")}
+if parked and parked ~= '' then return 2 end
 return 1
 """
 
-# Ingest an out-of-band receipt against a fully sent (``provisional``) record: 1
-# transitioned, 0 already in the target terminal state, -1 gone, -2 conflicting terminal
-# state, -3 the send has not finished. ARGV = target_status, now, ttl_ms, message_id,
-# index_score.
+# Ingest an out-of-band receipt: 1 transitioned (a ``provisional`` record settled), 2 parked
+# (the send is still in flight — the target is staged on ``pending_receipt`` and applied by the
+# completing ``provisional`` write), 0 idempotent (already in the target state, or re-parked to
+# the same target), -1 gone, -2 conflicting terminal (a real terminal, or a different target
+# already parked — first parked wins), -3 a state that never sent an answer. ARGV =
+# target_status, now, ttl_ms, message_id, index_score.
 _RECEIPT_LUA = f"""
 -- conversations:record:receipt
 local status = redis.call('HGET', KEYS[1], 'delivery_status')
@@ -289,11 +320,45 @@ if not status then return -1 end
 local target = ARGV[1]
 if status == target then return 0 end
 if status == 'delivered' or status == 'failed' or status == 'shed' then return -2 end
+if status == 'pending_delivery' then
+  local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
+  if parked == target then return 0 end
+  if parked and parked ~= '' then return -2 end
+  redis.call('HSET', KEYS[1], 'pending_receipt', target)
+  return 2
+end
 if status ~= 'provisional' then return -3 end
 redis.call('HSET', KEYS[1], 'delivery_status', target, 'updated_at', ARGV[2],
   'claim', '', 'grace_deadline', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
 {_reindex("ARGV[4]", "ARGV[5]")}
+return 1
+"""
+
+# Move an unrecoverable sweep row to the terminal ``failed`` state. The sweep holds no
+# delivery lease, so the token/``attempts`` contract ``mark_failed`` guards on cannot serve a
+# corrupt row; this composes the same reusable fragments without calling ``_FAILED_LUA`` (which
+# refuses a ``provisional`` row). ``-1`` the row is gone (its hash is absent — not merely a
+# missing status field); ``0`` already ``failed``; ``-2`` already ``delivered``/``shed`` (moved
+# on since the index read, its writer answers for it); ``-3`` a DIFFERENT worker holds a live
+# delivery lease, so the row is left to the holder for this pass; otherwise (``pending_delivery``,
+# ``provisional``, ``accepted`` or an unreadable/missing status) HSET ``failed`` and reindex.
+# ``attempts`` is left untouched. A staged receipt on a corrupt row is cleared in the same step
+# and the write returns 2 when it dropped a non-empty ``pending_receipt`` — first terminal wins,
+# the sweep's outcome stands. ARGV = now, ttl_ms, message_id, index_score.
+_UNREADABLE_LUA = f"""
+-- conversations:record:unreadable
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local status = redis.call('HGET', KEYS[1], 'delivery_status')
+if status == 'failed' then return 0 end
+if status == 'delivered' or status == 'shed' then return -2 end
+{_foreign_lease_guard("ARGV[1]", "''")}
+local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
+redis.call('HSET', KEYS[1], 'delivery_status', 'failed', 'claim', '', 'grace_deadline', '',
+  'updated_at', ARGV[1], 'pending_receipt', '')
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+{_reindex("ARGV[3]", "ARGV[4]")}
+if parked and parked ~= '' then return 2 end
 return 1
 """
 

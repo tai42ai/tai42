@@ -28,8 +28,9 @@ from unittest.mock import AsyncMock
 import pytest
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
+from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.cache import mcp_reload_probe_timeout
@@ -400,12 +401,15 @@ async def test_pass_error_is_logged_and_loop_survives(monkeypatch, caplog):
 # -- the shutdown cancel swallows a non-CancelledError failure -----------------
 
 
-async def test_cancel_reprobe_task_swallows_non_cancel_error(caplog):
+async def test_cancel_reprobe_task_swallows_non_cancel_error(caplog, monkeypatch):
     """A re-probe task that died with a non-cancel exception is awaited-and-
     swallowed at shutdown, not re-raised: the failure is already surfaced at ERROR
     by the perpetual-task done-callback, and re-raising here (inside the app_context
     shutdown ``finally``) would skip the remaining teardown steps."""
     m = _Mixin()
+    # The death routes through the done-callback, which requests a graceful exit; stub
+    # it so the unit test never self-delivers a real SIGTERM.
+    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: None)
 
     async def boom():
         raise RuntimeError("task died")
@@ -425,12 +429,15 @@ async def test_cancel_reprobe_task_swallows_non_cancel_error(caplog):
 # -- the re-probe task's done-callback surfaces a runtime death at ERROR --------
 
 
-async def test_reprobe_task_death_is_logged_at_error(caplog):
+async def test_reprobe_task_death_is_logged_at_error(caplog, monkeypatch):
     """The perpetual-task done-callback the re-probe task carries logs a non-cancel
     runtime death at ERROR (mirroring the control-plane subscription), so a silently
     dead recovery loop is loud. Defensive: the loop itself already catches per-pass
     errors, so only an unexpected escape reaches here."""
     m = _Mixin()
+    # The death also requests a graceful exit; stub it so the unit test never
+    # self-delivers a real SIGTERM.
+    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: None)
 
     async def boom():
         raise RuntimeError("reprobe loop escaped")
@@ -458,3 +465,69 @@ async def test_app_context_spawns_and_cancels_reprobe_task():
     # Cleanly cancelled at shutdown — no pending-task warning, attr cleared.
     assert cast(asyncio.Task, task).cancelled()
     assert app._reprobe_task is None
+
+
+# -- a dead perpetual task marks LifecycleState and requests a graceful exit ----
+
+
+async def test_dead_reprobe_marks_and_requests_graceful_exit(monkeypatch, caplog):
+    """A perpetual task that dies with an exception routes through the shared
+    done-callback: the death is logged at ERROR, the dead-task marker carries the
+    task name + exception type, and the process requests its kind's graceful exit.
+    A cancellation (shutdown) instead sets no marker and requests no exit."""
+    m = _Mixin()
+    m._worker_kind = WorkerKind.backend
+    exits: list[WorkerKind] = []
+    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+
+    async def boom():
+        raise RuntimeError("reprobe loop escaped")
+
+    task = asyncio.create_task(boom(), name="tai-failed-mcp-reprobe")
+    task.add_done_callback(m._on_perpetual_task_done)
+    with caplog.at_level(logging.ERROR):
+        with contextlib.suppress(RuntimeError):
+            await task
+        await asyncio.sleep(0)  # let the done-callback run
+
+    assert m._dead_perpetual_task == ("tai-failed-mcp-reprobe", "RuntimeError")
+    assert exits == [WorkerKind.backend]
+    assert "terminated with an exception" in caplog.text
+
+    # A cancellation (shutdown) is not death: no marker, no exit.
+    m2 = _Mixin()
+    exits.clear()
+    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+
+    async def runs():
+        await asyncio.sleep(3600)
+
+    cancelled = asyncio.create_task(runs(), name="tai-failed-mcp-reprobe")
+    cancelled.add_done_callback(m2._on_perpetual_task_done)
+    cancelled.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await cancelled
+    await asyncio.sleep(0)
+    assert m2._dead_perpetual_task is None
+    assert exits == []
+
+
+async def test_clean_return_of_perpetual_task_marks_returned(monkeypatch, caplog):
+    """A perpetual task that RETURNS cleanly is also a death: the marker reason is
+    the literal ``"returned"`` and the process still requests its graceful exit."""
+    m = _Mixin()
+    exits: list[WorkerKind] = []
+    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+
+    async def returns():
+        return None
+
+    task = asyncio.create_task(returns(), name="tai-interactions-expiry-reaper")
+    task.add_done_callback(m._on_perpetual_task_done)
+    with caplog.at_level(logging.ERROR):
+        await task
+        await asyncio.sleep(0)  # let the done-callback run
+
+    assert m._dead_perpetual_task == ("tai-interactions-expiry-reaper", "returned")
+    assert exits == [WorkerKind.serve]
+    assert "returned unexpectedly" in caplog.text

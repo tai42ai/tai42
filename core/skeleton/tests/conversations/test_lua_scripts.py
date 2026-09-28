@@ -10,6 +10,7 @@ marshalling each one depends on is exercised with them.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ import pytest
 from fakeredis import aioredis
 from tai42_contract.conversations import DeliveryReceipt
 
+from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -432,18 +434,114 @@ async def test_a_receipt_reports_a_missing_record(store):
 
 
 @pytest.mark.parametrize("receipt", [DeliveryReceipt.DELIVERED, DeliveryReceipt.FAILED])
-@pytest.mark.parametrize("status", [DeliveryStatus.ACCEPTED, DeliveryStatus.PENDING_DELIVERY])
-async def test_a_receipt_before_the_send_finished_is_refused(store, lua_redis, status, receipt):
+async def test_a_receipt_before_provisional_is_parked_and_acked(store, lua_redis, receipt):
     """Chunk one's provider callback routinely lands while chunks two and three are still
-    going out. Settling the record on it would terminalise a half-sent answer."""
-    intake = "worker-1" if status is DeliveryStatus.ACCEPTED else None
-    await store.create_record(_record("m1", status=status), intake_token=intake)
+    going out. The receipt is staged on the still-``pending_delivery`` record for the
+    completing send to apply — never a refusal that becomes a 5xx and a redelivery storm."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+
+    assert await store.ingest_receipt("m1", receipt, now) == 2
+    record = await store.get_record("m1")
+    # The send is untouched: status stays pending_delivery, the receipt only staged.
+    assert record.delivery_status is DeliveryStatus.PENDING_DELIVERY
+    expected = DeliveryStatus.DELIVERED if receipt is DeliveryReceipt.DELIVERED else DeliveryStatus.FAILED
+    assert record.pending_receipt is expected
+    # No terminal write yet means no retention TTL: the record is still live work.
+    assert await lua_redis.ttl(_key("m1")) == -1
+
+
+async def test_a_parked_receipt_is_applied_when_the_send_completes(store, lua_redis):
+    """The staged receipt terminalises the record on the completing provisional write —
+    straight to delivered, skipping provisional entirely."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+
+    assert await store.mark_provisional("m1", ["out-1"], 1, now, "tok") == 2
+    record = await store.get_record("m1")
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+    assert record.pending_receipt is None
+    assert await _indexed_under(lua_redis, "m1") == ["delivered"]
+    assert 0 < await lua_redis.ttl(_key("m1")) <= ConversationsSettings().answer_retention_ttl_seconds
+
+
+async def test_a_parked_failed_receipt_drives_the_record_failed(store, lua_redis):
+    """A staged FAILED receipt drives the record to the failed terminal on completion."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, now) == 2
+
+    assert await store.mark_provisional("m1", ["out-1"], 1, now, "tok") == 3
+    record = await store.get_record("m1")
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert record.pending_receipt is None
+    assert await _indexed_under(lua_redis, "m1") == ["failed"]
+
+
+async def test_two_conflicting_parked_receipts_keep_the_first(store, lua_redis):
+    """First parked wins: a second receipt naming a different terminal is the conflict the
+    caller logs, never an overwrite."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+
+    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, now) == -2
+    assert (await store.get_record("m1")).pending_receipt is DeliveryStatus.DELIVERED
+
+
+async def test_a_re_parked_same_receipt_is_idempotent(store, lua_redis):
+    """A vendor redelivery during the window re-parks to the same target and reports it settled."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 0
+    assert (await store.get_record("m1")).pending_receipt is DeliveryStatus.DELIVERED
+
+
+async def test_a_sender_failure_drops_a_parked_receipt_loudly(store, lua_redis, caplog):
+    """A sender-side failure that reaches a real terminal beats a receipt only staged against
+    an in-flight record: the failed state stands, the drop is logged, the wrapper reports 1."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+
+    with caplog.at_level(logging.WARNING):
+        assert await store.mark_failed("m1", 1, now, "tok") == 1
+    record = await store.get_record("m1")
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert record.pending_receipt is None
+    assert any("m1" in message and "parked receipt is dropped" in message for message in caplog.messages)
+
+
+async def test_a_receipt_after_provisional_is_unchanged(store, lua_redis):
+    """The post-send receipt path is untouched: it settles a provisional record and returns 1."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.mark_provisional("m1", ["out-1"], 1, now, "tok") == 1
+
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 1
+    assert (await store.get_record("m1")).delivery_status is DeliveryStatus.DELIVERED
+
+
+@pytest.mark.parametrize("receipt", [DeliveryReceipt.DELIVERED, DeliveryReceipt.FAILED])
+async def test_an_answerless_record_still_refuses_a_receipt(store, lua_redis, receipt):
+    """An intake (``accepted``) record never sent an answer, so a receipt for it is a broken
+    invariant: ``ingest_receipt`` returns -3 and, were an id ever resolved to it, the door's
+    ``record_delivery_status`` raises loudly rather than settle a record that carries no answer."""
+    await store.create_record(_record("m1", status=DeliveryStatus.ACCEPTED), intake_token="worker-1")
     now = time.time()
 
     assert await store.ingest_receipt("m1", receipt, now) == -3
-    assert (await store.get_record("m1")).delivery_status is status
-    # No terminal write means no retention TTL: the record is still live work.
+    assert (await store.get_record("m1")).delivery_status is DeliveryStatus.ACCEPTED
     assert await lua_redis.ttl(_key("m1")) == -1
+
+    # The guard is unreachable from a real door — an answerless record has no outbound id —
+    # so the invariant break is simulated by seeding the reverse index straight to it.
+    await store.index_outbound("twilio", ["out-x"], "m1")
+    with pytest.raises(RuntimeError, match="never sent an answer"):
+        await delivery_module.record_delivery_status("twilio", "out-x", receipt)
 
 
 # -- the scans that drive the re-drive and the sweep --------------------------
@@ -469,7 +567,7 @@ async def test_the_scans_report_unfinished_work_and_skip_a_corrupt_row(store, lu
     assert work["m-prov"].grace_deadline is not None
     # The intake scan sees exactly the record whose turn never completed.
     intake = await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED}))
-    assert [record.message_id for record in intake] == ["m-intake"]
+    assert [record.message_id for record in intake.items] == ["m-intake"]
 
 
 # -- the per-status index those listings read ---------------------------------
@@ -530,7 +628,7 @@ async def test_deleting_a_record_unindexes_it_in_the_same_step(store, lua_redis)
     assert await store.delete_record(record) is True
     assert await lua_redis.exists(_key("m1")) == 0
     assert await _indexed_under(lua_redis, "m1") == []
-    assert await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED})) == []
+    assert (await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED}))).items == []
     # A second delete removes nothing, and says so.
     assert await store.delete_record(record) is False
 
@@ -755,7 +853,7 @@ async def test_the_orphan_unindex_drops_a_member_whose_row_is_gone(store, lua_re
     await store.create_record(_record("m1"))
     await lua_redis.delete(_key("m1"))
 
-    assert await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY})) == []
+    assert (await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))).items == []
     assert await _indexed_under(lua_redis, "m1") == []
 
 
@@ -770,7 +868,7 @@ async def test_the_largest_served_page_is_a_rank_redis_will_take(store, lua_redi
     thread = "bridge:line:t"
     await store.create_record(_aged("m1", thread, time.time()))
 
-    largest = await store.list_thread_records(
+    largest, _ = await store.list_thread_records(
         "line", thread, offset=(MAX_THREAD_PAGE - 1) * MAX_THREAD_PAGE_SIZE, limit=MAX_THREAD_PAGE_SIZE
     )
     assert largest.records == []
@@ -778,3 +876,69 @@ async def test_the_largest_served_page_is_a_rank_redis_will_take(store, lua_redi
 
     with pytest.raises(ResponseError):
         await store.list_thread_records("line", thread, offset=2**63, limit=MAX_THREAD_PAGE_SIZE)
+
+
+# -- the sweep-owned terminal write (conversations:record:unreadable) ----------
+
+
+async def test_mark_unreadable_transitions_provisional(store, lua_redis):
+    """A ``provisional`` row the sweep found unrecoverable moves to terminal ``failed`` —
+    the failed script would refuse a provisional row, this one owns it."""
+    await store.create_record(_record("m1", status=DeliveryStatus.PROVISIONAL))
+
+    assert await store.mark_unreadable("m1", time.time()) == 1
+    assert await lua_redis.hget(_key("m1"), "delivery_status") == "failed"
+    assert await _indexed_under(lua_redis, "m1") == ["failed"]
+
+
+async def test_mark_unreadable_transitions_missing_status(store, lua_redis):
+    """A present row whose ``delivery_status`` field is gone is still transitioned — a missing
+    status is not the gone row (which returns -1), it is an unreadable one."""
+    await store.create_record(_record("m1"))
+    await lua_redis.hdel(_key("m1"), "delivery_status")
+
+    assert await store.mark_unreadable("m1", time.time()) == 1
+    assert await lua_redis.hget(_key("m1"), "delivery_status") == "failed"
+
+
+async def test_mark_unreadable_reports_the_gone_row(store, lua_redis):
+    """A row whose hash is absent returns -1, distinct from a present row missing its status."""
+    assert await store.mark_unreadable("nope", time.time()) == -1
+
+
+async def test_mark_unreadable_foreign_live_lease_left_to_holder(store, lua_redis):
+    """A row under a DIFFERENT worker's live delivery lease is left to that holder (-3); once the
+    lease lapses the next call transitions it."""
+    now = time.time()
+    await store.create_record(_record("m1"))
+    assert await store.claim_delivery("m1", now, "worker-1", _LEASE) == 1
+
+    assert await store.mark_unreadable("m1", now) == -3
+    assert await lua_redis.hget(_key("m1"), "delivery_status") == "pending_delivery"
+
+    assert await store.mark_unreadable("m1", now + _LEASE + 1) == 1
+    assert await lua_redis.hget(_key("m1"), "delivery_status") == "failed"
+
+
+async def test_mark_unreadable_already_delivered_untouched(store, lua_redis):
+    """An already-``delivered`` row moved on since the index read — its writer answers for it,
+    so the sweep leaves it (-2) untouched."""
+    await store.create_record(_record("m1", status=DeliveryStatus.DELIVERED))
+
+    assert await store.mark_unreadable("m1", time.time()) == -2
+    assert await lua_redis.hget(_key("m1"), "delivery_status") == "delivered"
+
+
+async def test_mark_unreadable_drops_a_parked_receipt_loudly(store, lua_redis, caplog):
+    """A corrupt sweep row that still carried a staged receipt has it dropped in the same step:
+    the failed terminal stands, the drop is logged at WARNING, and the wrapper remaps 2 to 1."""
+    await store.create_record(_record("m1"))
+    now = time.time()
+    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+
+    with caplog.at_level(logging.WARNING):
+        assert await store.mark_unreadable("m1", now) == 1
+    record = await store.get_record("m1")
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert record.pending_receipt is None
+    assert any("m1" in message and "parked receipt is dropped" in message for message in caplog.messages)

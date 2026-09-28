@@ -15,8 +15,9 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 class RecordStoreBase(ABC):
     """The persistence contract every concern mixin shares.
 
-    The conversations settings and the three key-layout/codec primitives implemented once (by the write concern)
-    and reached through ``self`` by the delivery, index and query concerns on the composed store.
+    The conversations settings, the three key-layout/codec primitives implemented once (by the write concern),
+    and the sweep-owned terminal transition the index concern reaches through ``self`` — all shared by the
+    delivery, index and query concerns on the composed store.
     """
 
     settings: ConversationsSettings
@@ -43,3 +44,7 @@ class RecordStoreBase(ABC):
     @abstractmethod
     def _from_hash(self, hashed: dict[str, str]) -> ConversationRecord:
         """The record a stored hash decodes to."""
+
+    @abstractmethod
+    async def mark_unreadable(self, message_id: str, now: float) -> int:
+        """Move an unrecoverable sweep row to the terminal ``failed`` state (the delivery concern implements it)."""
