@@ -21,6 +21,7 @@ from starlette.requests import Request
 from tai42_contract.storage import ObjectStat, Storage, assert_not_root
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.operations.storage import _content_disposition
 from tai42_skeleton.routers import storage as router
 
 
@@ -178,7 +179,8 @@ async def test_download_content_type_and_disposition(install):
     assert resp.status_code == 200
     assert bytes(resp.body) == b"%PDF-bytes"
     assert resp.headers["content-type"] == "application/pdf"
-    assert resp.headers["content-disposition"] == 'attachment; filename="report.pdf"'
+    # An ASCII basename emits the quoted ``filename`` fallback plus the additive ``filename*``.
+    assert resp.headers["content-disposition"] == "attachment; filename=\"report.pdf\"; filename*=UTF-8''report.pdf"
 
 
 async def test_download_octet_stream_fallback(install):
@@ -435,6 +437,30 @@ async def test_download_disposition_escapes_quote_in_basename(install):
     fake.objects = {'weird".txt': (b"x", "text/plain")}
     resp = await router.download_resource(_req(resource_id='weird".txt'))
     assert resp.status_code == 200
-    # The literal ``"`` in the basename is backslash-escaped, so the quoted-string is
-    # well-formed rather than prematurely terminated.
-    assert resp.headers["content-disposition"] == 'attachment; filename="weird\\".txt"'
+    # The literal ``"`` in the basename is backslash-escaped in the ASCII fallback, and the
+    # additive ``filename*`` percent-encodes it — RFC 6266 § 4.3.
+    assert resp.headers["content-disposition"] == 'attachment; filename="weird\\".txt"; filename*=UTF-8\'\'weird%22.txt'
+
+
+def test_content_disposition_ascii_name_emits_both_parameters():
+    # An ASCII name yields the quoted ``filename`` fallback plus an additive
+    # ``filename*`` whose attr-char percent-encoding is a no-op.
+    assert _content_disposition("report.pdf") == "attachment; filename=\"report.pdf\"; filename*=UTF-8''report.pdf"
+
+
+def test_content_disposition_non_ascii_name_fallback_and_ext_value():
+    # Every non-ASCII character becomes ``_`` in the fallback; ``filename*`` carries the
+    # percent-encoded UTF-8 bytes.
+    assert (
+        _content_disposition("café☕.pdf")
+        == "attachment; filename=\"caf__.pdf\"; filename*=UTF-8''caf%C3%A9%E2%98%95.pdf"
+    )
+
+
+def test_content_disposition_escaping_preserved():
+    # A control character is stripped; ``"`` and ``\`` are backslash-escaped in the
+    # fallback and percent-encoded in ``filename*``.
+    assert (
+        _content_disposition('a"b\\c\x01.txt')
+        == 'attachment; filename="a\\"b\\\\c.txt"; filename*=UTF-8\'\'a%22b%5Cc.txt'
+    )

@@ -19,8 +19,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { Bubble, type SendStatus } from '@/bubble';
 import { FormCard, type FormCardItem } from '@/form-card';
-import { MediaCard, type MediaCardItem, type SendReply } from '@/media-card';
+import { MediaCard, type MediaCardItem, MediaItems, type SendReply } from '@/media-card';
 import { QuestionCard, type QuestionItem } from '@/question-card';
+import type { MediaItem } from '@/transcript-model';
+import { UnavailableNotice } from '@/unavailable-notice';
 
 /** How close to the bottom edge (px) still counts as "pinned to the tail". */
 const BOTTOM_SLACK_PX = 32;
@@ -44,6 +46,9 @@ export type TranscriptEntry =
       readonly direction: 'in' | 'out';
       readonly text: string;
       readonly ts: string;
+      /** The visitor's own attachments on this message, rendered above the bubble on
+       * their side; `null` when the message carries none. */
+      readonly media: readonly MediaItem[] | null;
       /** Non-null only while the message is the visitor's own and unconfirmed. */
       readonly status: SendStatus | null;
       readonly error: string | null;
@@ -67,15 +72,28 @@ export type TranscriptEntry =
       readonly key: string;
       readonly ts: string;
       readonly item: FormCardItem;
+    }
+  | {
+      /** A stored entry the server could not render — a persistent placeholder row,
+       * not a bubble. */
+      readonly kind: 'unavailable';
+      readonly key: string;
+      readonly ts: string;
     };
 
-/** A rendered row: a day divider, or one entry with its grouping decisions. */
+/** An entry that renders as a grouped message row: every kind except the
+ * placeholder, which is transparent to grouping and never carries a stamp. */
+export type MessageEntry = Exclude<TranscriptEntry, { kind: 'unavailable' }>;
+
+/** A rendered row: a day divider, the unavailable placeholder, or one entry with
+ * its grouping decisions. */
 export type TranscriptRow =
   | { readonly kind: 'day'; readonly key: string; readonly label: string }
+  | { readonly kind: 'unavailable'; readonly key: string }
   | {
       readonly kind: 'entry';
       readonly key: string;
-      readonly entry: TranscriptEntry;
+      readonly entry: MessageEntry;
       readonly groupStart: boolean;
       /** The group's time stamp — set on the first entry of a group only. */
       readonly time: string | null;
@@ -115,8 +133,8 @@ function timeLabel(at: number): string {
 }
 
 /** Who is speaking — a question or a media card is the agent's turn, like an
- * outbound message. */
-function speakerOf(entry: TranscriptEntry): 'in' | 'out' {
+ * outbound message. The placeholder never groups, so it is not a caller. */
+function speakerOf(entry: MessageEntry): 'in' | 'out' {
   return entry.kind === 'message' ? entry.direction : 'out';
 }
 
@@ -130,6 +148,13 @@ export function buildRows(entries: readonly TranscriptEntry[], now: number): Tra
   let previousAt: number | null = null;
   let previousSpeaker: 'in' | 'out' | null = null;
   for (const entry of entries) {
+    if (entry.kind === 'unavailable') {
+      // Transparent to grouping, like a day divider: its own row, no stamp, and
+      // the previous-speaker/gap state is left untouched so the next message
+      // groups exactly as if the placeholder were not there.
+      rows.push({ kind: 'unavailable', key: entry.key });
+      continue;
+    }
     const at = Date.parse(entry.ts);
     const newDay = previousAt === null || startOfDay(at) !== startOfDay(previousAt);
     if (newDay) rows.push({ kind: 'day', key: `day-${entry.key}`, label: dayLabel(at, now) });
@@ -285,6 +310,8 @@ export function Transcript({
             <p key={row.key} className="tcw-day">
               <span>{row.label}</span>
             </p>
+          ) : row.kind === 'unavailable' ? (
+            <UnavailableNotice key={row.key} />
           ) : (
             <EntryRow
               key={row.key}
@@ -368,14 +395,27 @@ function EntryRow({
       ) : entry.kind === 'form' ? (
         <FormCard item={entry.item} onSubmitForm={onSubmitForm} locked={locked} />
       ) : (
-        <Bubble
-          direction={entry.direction}
-          text={entry.text}
-          status={entry.status}
-          error={entry.error}
-          groupStart={row.groupStart}
-          {...(retryId !== null ? { onRetry: () => onRetry(retryId) } : {})}
-        />
+        <>
+          {entry.media !== null ? (
+            <div
+              className={`tcw-row tcw-row--${entry.direction} tcw-media-${entry.direction} ${
+                row.groupStart ? 'tcw-row--start' : 'tcw-row--continued'
+              }`}
+            >
+              <MediaItems media={entry.media} />
+            </div>
+          ) : null}
+          {entry.text !== '' || entry.status !== null || entry.media === null ? (
+            <Bubble
+              direction={entry.direction}
+              text={entry.text}
+              status={entry.status}
+              error={entry.error}
+              groupStart={entry.media === null && row.groupStart}
+              {...(retryId !== null ? { onRetry: () => onRetry(retryId) } : {})}
+            />
+          ) : null}
+        </>
       )}
     </div>
   );

@@ -141,7 +141,7 @@ async def test_the_thread_listing_summarizes_each_thread_from_its_newest_record(
     await store.create_record(_record("m2", created_at=now + 10, delivery_status=DeliveryStatus.FAILED))
     await store.create_record(_record("o1", created_at=now + 20, thread_id="bridge:line:+15550009999"))
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10)
+    page, _ = await store.list_route_threads(_ROUTE, offset=0, limit=10)
 
     assert page.total == 2
     # Newest activity first.
@@ -165,7 +165,7 @@ async def test_the_listed_activity_moment_is_the_key_the_listing_sorts_by(store,
     assert await store.complete_turn(_record("m1", created_at=now, updated_at=now + 30)) == 1
     assert await store.mark_delivered("m1", [], attempts=1, now=now + 900, token="worker-1") == 1
 
-    (summary,) = (await store.list_route_threads(_ROUTE, offset=0, limit=10)).threads
+    (summary,) = (await store.list_route_threads(_ROUTE, offset=0, limit=10))[0].threads
 
     # An absolute tolerance: these moments are ~1.8e9 apart from zero, so the default
     # RELATIVE one would swallow the whole 870-second discrepancy this test exists to catch.
@@ -180,8 +180,8 @@ async def test_the_thread_listing_pages(store):
             _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+1555000{index}")
         )
 
-    first = await store.list_route_threads(_ROUTE, offset=0, limit=2)
-    second = await store.list_route_threads(_ROUTE, offset=2, limit=2)
+    first, _ = await store.list_route_threads(_ROUTE, offset=0, limit=2)
+    second, _ = await store.list_route_threads(_ROUTE, offset=2, limit=2)
 
     assert [thread.thread_id for thread in first.threads] == ["bridge:line:+15550002", "bridge:line:+15550001"]
     assert [thread.thread_id for thread in second.threads] == ["bridge:line:+15550000"]
@@ -193,8 +193,8 @@ async def test_the_transcript_reads_oldest_first_and_pages(store):
     for index in range(3):
         await store.create_record(_record(f"m{index}", created_at=now + index))
 
-    first = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=2)
-    second = await store.list_thread_records(_ROUTE, _THREAD, offset=2, limit=2)
+    first, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=2)
+    second, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=2, limit=2)
 
     assert [record.message_id for record in first.records] == ["m0", "m1"]
     assert [record.message_id for record in second.records] == ["m2"]
@@ -209,8 +209,8 @@ async def test_the_transcript_reads_newest_first_and_pages_from_that_end(store):
     for index in range(3):
         await store.create_record(_record(f"m{index}", created_at=now + index))
 
-    first = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=2, newest_first=True)
-    second = await store.list_thread_records(_ROUTE, _THREAD, offset=2, limit=2, newest_first=True)
+    first, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=2, newest_first=True)
+    second, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=2, limit=2, newest_first=True)
 
     assert [record.message_id for record in first.records] == ["m2", "m1"]
     assert [record.message_id for record in second.records] == ["m0"]
@@ -218,7 +218,7 @@ async def test_the_transcript_reads_newest_first_and_pages_from_that_end(store):
 
 
 async def test_an_unknown_thread_reads_as_an_empty_index(store):
-    page = await store.list_thread_records(_ROUTE, "bridge:line:nobody", offset=0, limit=10)
+    page, _ = await store.list_thread_records(_ROUTE, "bridge:line:nobody", offset=0, limit=10)
     assert page.total == 0
     assert page.records == []
 
@@ -233,12 +233,13 @@ async def test_a_transcript_read_leaves_a_rowless_member_for_the_prune_pass(stor
     # The row swept by the retention TTL from under its index.
     fake._hashes.pop(ConversationsSettings().record_key("m1"))
 
-    page = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10)
+    page, unreadable = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10)
 
     assert [record.message_id for record in page.records] == ["m2"]
     # The index is untouched: the read reports what it walked over and reclaims nothing.
     assert await fake.zrange(_thread_key(), 0, -1) == ["m1", "m2"]
     assert page.total == 2
+    assert unreadable == 1
     assert "left for the prune pass" in caplog.text
 
 
@@ -253,7 +254,7 @@ async def test_paging_a_transcript_holding_rowless_members_never_skips_a_live_re
 
     seen: list[str] = []
     for page in range(3):
-        window = await store.list_thread_records(_ROUTE, _THREAD, offset=page * 2, limit=2)
+        window, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=page * 2, limit=2)
         seen.extend(record.message_id for record in window.records)
         assert window.total == 6
 
@@ -265,11 +266,13 @@ async def test_a_thread_listing_leaves_a_thread_with_no_readable_record_for_the_
     await store.create_record(_record("m1", created_at=now))
     fake._hashes.pop(ConversationsSettings().record_key("m1"))
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10)
+    page, unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10)
 
-    # Not shown — it has nothing to summarize — but not unindexed by the read either.
+    # Not shown — it has nothing to summarize — but not unindexed by the read either, and
+    # counted as unreadable rather than silently omitted.
     assert page.threads == []
     assert page.total == 1
+    assert unreadable == 1
     assert await fake.zrange(_route_threads_key(), 0, -1) == [_THREAD]
     assert "left for the prune pass" in caplog.text
 
@@ -285,7 +288,7 @@ async def test_paging_a_thread_listing_holding_dead_threads_never_skips_a_live_o
 
     seen: list[str] = []
     for page in range(3):
-        window = await store.list_route_threads(_ROUTE, offset=page * 2, limit=2)
+        window, _ = await store.list_route_threads(_ROUTE, offset=page * 2, limit=2)
         seen.extend(thread.thread_id for thread in window.threads)
         assert window.total == 5
 
@@ -333,13 +336,13 @@ async def test_the_prune_pass_reclaims_the_expired_members_of_an_ACTIVE_thread(s
     await store.create_record(_record("live", created_at=now))
     for index in range(3):
         fake._hashes.pop(ConversationsSettings().record_key(f"old{index}"))
-    assert (await store.list_route_threads(_ROUTE, offset=0, limit=10)).threads[0].message_count == 4
+    assert (await store.list_route_threads(_ROUTE, offset=0, limit=10))[0].threads[0].message_count == 4
 
     await store.prune_expired_terminal_indexes([_ROUTE])
 
     assert await fake.zrange(_thread_key(), 0, -1) == ["live"]
     assert await fake.zrange(_route_threads_key(), 0, -1) == [_THREAD]
-    assert (await store.list_route_threads(_ROUTE, offset=0, limit=10)).threads[0].message_count == 1
+    assert (await store.list_route_threads(_ROUTE, offset=0, limit=10))[0].threads[0].message_count == 1
 
 
 async def test_the_prune_pass_reads_a_thread_in_bounded_batches(store, fake, monkeypatch):
@@ -656,7 +659,7 @@ async def test_the_thread_listing_scans_past_a_corrupt_record_to_the_next_readab
         {"data": "{not json", "delivery_status": "delivered", "outbound_ids": "[]", "attempts": "0", "updated_at": "0"},
     )
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10)
+    page, _ = await store.list_route_threads(_ROUTE, offset=0, limit=10)
 
     assert [thread.thread_id for thread in page.threads] == [_THREAD]
     assert page.threads[0].message_count == 2
@@ -673,11 +676,12 @@ async def test_a_transcript_skips_a_corrupt_record_and_keeps_the_readable_ones(s
         {"data": "{not json", "delivery_status": "delivered", "outbound_ids": "[]", "attempts": "0", "updated_at": "0"},
     )
 
-    page = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10)
+    page, unreadable = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10)
 
     assert [record.message_id for record in page.records] == ["m0", "m2"]
     # The index is left alone, so the total the caller pages against is unchanged.
     assert page.total == 3
+    assert unreadable == 1
     assert await fake.zrange(_thread_key(), 0, -1) == ["m0", "m1", "m2"]
     assert "corrupt" in caplog.text
 

@@ -72,7 +72,7 @@ class _DictManager(BaseConversationsManager):
         return False
 
     async def list_routes(self):
-        return dict(self._routes)
+        return dict(self._routes), 0
 
 
 @dataclass
@@ -167,11 +167,13 @@ async def test_aggregated_read_merges_two_routes_in_both_orders(fake):
     await store.create_record(_person_record("a2", "line-a", door="channel", created_at=30.0))
     await store.create_record(_person_record("b2", "line-b", door="channel", created_at=40.0))
 
-    asc = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10)
+    asc, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10)
     assert [r.message_id for r in asc.records] == ["a1", "b1", "a2", "b2"]
     assert asc.total == 4
 
-    desc = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10, newest_first=True)
+    desc, _ = await store.list_person_thread_records(
+        ["line-a", "line-b"], _THREAD, offset=0, limit=10, newest_first=True
+    )
     assert [r.message_id for r in desc.records] == ["b2", "a2", "b1", "a1"]
 
 
@@ -183,8 +185,8 @@ async def test_aggregated_read_pages_across_the_index_boundary(fake):
     await store.create_record(_person_record("b1", "line-b", door="channel", created_at=20.0))
     await store.create_record(_person_record("a2", "line-a", door="channel", created_at=30.0))
 
-    page1 = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=2)
-    page2 = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=2, limit=2)
+    page1, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=2)
+    page2, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=2, limit=2)
     assert [r.message_id for r in page1.records] == ["a1", "b1"]
     assert [r.message_id for r in page2.records] == ["a2"]
     assert page1.total == page2.total == 3
@@ -198,15 +200,17 @@ async def test_aggregated_read_breaks_equal_created_at_ties_deterministically(fa
     await store.create_record(_person_record("m-aaa", "line-a", door="channel", created_at=50.0))
     await store.create_record(_person_record("m-bbb", "line-b", door="channel", created_at=50.0))
 
-    asc = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10)
+    asc, _ = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10)
     assert [r.message_id for r in asc.records] == ["m-aaa", "m-bbb"]
-    desc = await store.list_person_thread_records(["line-a", "line-b"], _THREAD, offset=0, limit=10, newest_first=True)
+    desc, _ = await store.list_person_thread_records(
+        ["line-a", "line-b"], _THREAD, offset=0, limit=10, newest_first=True
+    )
     assert [r.message_id for r in desc.records] == ["m-bbb", "m-aaa"]
 
 
 async def test_aggregated_read_of_an_empty_person_is_total_zero(fake):
     fake.seed_route("line-a")
-    page = await _store().list_person_thread_records(["line-a"], _THREAD, offset=0, limit=10)
+    page, _ = await _store().list_person_thread_records(["line-a"], _THREAD, offset=0, limit=10)
     assert page.total == 0
     assert page.records == []
 
@@ -223,9 +227,10 @@ async def test_aggregated_read_skips_a_missing_or_corrupt_row_keeping_the_total(
     fake._zsets[thread_key]["corrupt"] = 30.0
     fake.seed_hash(settings.record_key("corrupt"), {"data": "{}"})  # indexed, unparseable row
 
-    page = await store.list_person_thread_records(["line-a"], _THREAD, offset=0, limit=10)
+    page, unreadable = await store.list_person_thread_records(["line-a"], _THREAD, offset=0, limit=10)
     assert [r.message_id for r in page.records] == ["a1"]
     assert page.total == 3
+    assert unreadable == 2
 
 
 # -- the transcript door: authz + both directions ----------------------------

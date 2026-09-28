@@ -176,7 +176,10 @@ async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
     """Startup watchdog: restart enabled schedules whose pending job is missing, not found, or complete.
 
     Each runs under a short recovery lock so concurrent startups recover it once. A
-    per-schedule failure is logged, not fatal.
+    per-schedule failure is not fatal: it is logged and recorded onto that schedule's
+    hash (``recovery_error`` / ``recovery_failed_at``) so it is operator-visible via
+    the schedule read tools, and cleared on any later tick that processes the enabled
+    schedule without raising and finds it healthy or restarts it.
     """
     redis = ctx["redis"]
     settings = arq_settings()
@@ -209,6 +212,7 @@ async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
                 if status in (JobStatus.not_found, JobStatus.complete):
                     should_recover = True
 
+            recovered = False
             if should_recover and await redis.set(lock_key, "locked", nx=True, ex=10):
                 logger.warning("Watchdog: schedule '%s' is stalled. Restarting.", name)
                 restarted = await safe_schedule_transition(
@@ -221,10 +225,31 @@ async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
                 # None: schedule deleted between scan and transition.
                 if restarted is not None:
                     recovered_count += 1
+                    recovered = True
 
-        except Exception:
-            # One broken schedule must not stop recovery of the rest.
+            if not should_recover or recovered:
+                # This tick processed the enabled schedule without raising and found
+                # it healthy (or just restarted it): a recorded transient error no
+                # longer applies, so it stops reading as errored.
+                await redis.hdel(key, "recovery_error", "recovery_failed_at")
+
+        except Exception as exc:
+            # One broken schedule must not stop recovery of the rest. The fault is
+            # recorded onto the schedule's own hash so an operator reading it sees
+            # the terminal error state, not only a recurring log line. The existence
+            # check and the write share the per-schedule lock (every delete takes it
+            # too), so a hash gone before the write is not resurrected as a zombie.
             logger.error("Watchdog error checking schedule %s", key, exc_info=True)
+            name = key.decode().split(":")[-1]
+            async with schedule_lock(redis, name):
+                if await redis.exists(key):
+                    await redis.hset(
+                        key,
+                        mapping={
+                            "recovery_error": repr(exc),
+                            "recovery_failed_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
 
     logger.info("Watchdog: recovery complete. Restarted %d schedules.", recovered_count)
 

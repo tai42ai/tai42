@@ -528,6 +528,27 @@ def test_interrupt_result_detail_names_the_misconfiguration():
     assert tool_result_module._interrupt_result_detail({"status": "suspended"}) is None
 
 
+def test_suspended_without_missing_results_still_paused():
+    # The STATUS decides the pause, never `missing_results`: a suspended envelope with the key
+    # ABSENT still yields the paused note. The absence is "no enrichment" — the note carries no
+    # missing_results clause — never read as "nothing missing/produced".
+    note = tool_result_module._suspended_result_note({"status": "suspended", "result": {"reply": "later"}})
+    assert note is not None
+    assert "paused" in note
+    assert "reply pending" in note
+    assert "missing_results" not in note
+
+
+def test_interrupt_without_missing_results_still_errors():
+    # The STATUS decides the loud interrupt detail, never `missing_results`: an interrupt envelope
+    # with the key ABSENT still yields the route-misconfiguration detail. The absence is "no
+    # enrichment" — no missing_results clause — never read as "nothing missing/produced".
+    detail = tool_result_module._interrupt_result_detail({"status": "interrupt", "result": {"reply": "later"}})
+    assert detail is not None
+    assert "misconfiguration" in detail
+    assert "missing_results" not in detail
+
+
 @pytest.mark.parametrize(
     "result",
     [

@@ -1,10 +1,11 @@
-"""The per-message-type router — the known-contact marker, the read+typing signal,
+"""The per-message-type router — the known-contact marker, the read receipt,
 and the error-notice / unhandled-type dispatch fallbacks."""
 
 from __future__ import annotations
 
 import pytest
 from tai42_contract.channels import InboundAnswerOutcome
+from tai42_contract.conversations import InboundRejectionReason
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 
@@ -73,35 +74,35 @@ async def test_inbound_window_zero_writes_no_marker(
     assert _CONTACT_KEY not in fake_redis.store  # allowlist-only mode: no tracking
 
 
-# --- "Working on it" read + typing signal ------------------------------------
+# --- Inbound read receipt ----------------------------------------------------
 
-_TYPING_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
-_TYPING_BODY = {
+_READ_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
+_READ_BODY = {
     "messaging_product": "whatsapp",
     "status": "read",
     "message_id": _WAMID,
-    "typing_indicator": {"type": "text"},
 }
 
 
-async def test_inbound_fires_read_typing_signal_before_branches(
+async def test_inbound_fires_read_receipt_before_branches(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A bridge (uncorrelated) text still fires the mark-as-read + typing signal:
-    # the combined Graph v23.0 body to /{phone_number_id}/messages, Bearer-authed,
-    # and the message still bridges.
+    # A bridge (uncorrelated) text marks the inbound read: the read-only Graph v23.0
+    # body (no typing_indicator) to /{phone_number_id}/messages, Bearer-authed, and
+    # the message still bridges. The turn-scoped typing indicator is the loop's job.
     result = await handler(signed_request(message_payload(text="ship it")))
 
     assert result.status_code == 200
     assert len(fake_httpx.typing_calls) == 1
     signal = fake_httpx.typing_calls[0]
-    assert signal["url"] == _TYPING_URL
-    assert signal["json"] == _TYPING_BODY
+    assert signal["url"] == _READ_URL
+    assert signal["json"] == _READ_BODY
+    assert "typing_indicator" not in signal["json"]
     assert signal["headers"]["Authorization"].startswith("Bearer ")
     assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached
 
 
-async def test_correlated_question_reply_fires_typing_signal(
+async def test_correlated_question_reply_fires_read_receipt(
     handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # Firing at _handle_message (before the type branches) also covers a reply that
@@ -112,36 +113,37 @@ async def test_correlated_question_reply_fires_typing_signal(
     result = await handler(signed_request(message_payload(text="yes please")))
 
     assert result.status_code == 200
-    assert [c["json"] for c in fake_httpx.typing_calls] == [_TYPING_BODY]  # typing fired
+    assert [c["json"] for c in fake_httpx.typing_calls] == [_READ_BODY]  # read receipt fired
     assert channels.inbound_calls[0].answer == "yes please"  # the answer reached the ladder
     assert stub_app.conversations.accept_calls == []  # correlation hit, not the bridge
 
 
-async def test_typing_signal_delivery_failure_is_logged_and_batch_survives(
+async def test_read_receipt_delivery_failure_is_logged_and_batch_survives(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A 5xx on the typing send is classified by `_send` into ChannelDeliveryError,
+    # A 5xx on the read-receipt send is classified by `_send` into ChannelDeliveryError,
     # caught, and logged at WARNING — the inbound still 200-acks (never a 5xx that
     # would make Meta redeliver the whole batch) and the message still bridges.
-    fake_httpx.typing_response = response(500, text="typing endpoint down")
+    fake_httpx.typing_response = response(500, text="messages endpoint down")
 
     with caplog.at_level("WARNING"):
         result = await handler(signed_request(message_payload(text="ship it")))
 
     assert result.status_code == 200
-    assert len(fake_httpx.typing_calls) == 1  # the signal was attempted
-    assert any("typing signal" in record.message for record in caplog.records)
+    assert len(fake_httpx.typing_calls) == 1  # the receipt was attempted
+    assert any("read receipt" in record.message for record in caplog.records)
     assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached
 
 
 # --- Error-notice / unhandled-type dispatch fallbacks -------------------------
 
 
-async def test_inbound_error_notice_logged_warning_not_bridged(
+async def test_unsupported_type_error_notice_replies_and_warns(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A Meta inbound error notice (an unsupported message type the participant sent)
-    # is logged at WARNING with the detail and NOT bridged.
+    # A Meta inbound error notice whose code is 131051 ("Unsupported message type") names
+    # participant content the channel cannot receive: still logged at WARNING and never bridged,
+    # AND replied to once via the generic rejection facet, deduped per wamid.
     message = {
         "id": _WAMID,
         "from": WA_ID,
@@ -153,7 +155,91 @@ async def test_inbound_error_notice_logged_warning_not_bridged(
 
     assert result.status_code == 200
     assert stub_app.conversations.accept_calls == []  # never bridged
+    (rejected,) = stub_app.conversations.rejected_calls
+    assert rejected["channel_id"] == "whatsapp"
+    assert rejected["recipient"] == WA_ID
+    assert rejected["sender_identity"] == PHONE_NUMBER_ID
+    assert rejected["kind"] == "Unsupported message type"
+    assert rejected["reason"] == InboundRejectionReason.UNSUPPORTED_TYPE
     assert any("error notice" in record.message and "131051" in record.getMessage() for record in caplog.records)
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_other_code_error_notice_stays_warning_only(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # An error notice with any other code is an operator-facing vendor signal, not participant
+    # content the channel failed to bridge: WARNING only, no reply, no event.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "unsupported",
+        "errors": [{"code": 131047, "title": "Re-engagement message"}],
+    }
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.rejected_calls == []
+    assert stub_app.conversations.accept_calls == []
+    assert any("error notice" in record.message and "131047" in record.getMessage() for record in caplog.records)
+
+
+async def test_unknown_content_type_replies_and_infos(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # An unhandled participant CONTENT type (not a non-content notification) is logged at INFO
+    # AND replied to once via the generic rejection facet with the type as the kind.
+    with caplog.at_level("INFO"):
+        result = await handler(signed_request(message_payload(msg_type="hologram")))
+
+    assert result.status_code == 200
+    (rejected,) = stub_app.conversations.rejected_calls
+    assert rejected["kind"] == "hologram"
+    assert rejected["recipient"] == WA_ID
+    assert rejected["sender_identity"] == PHONE_NUMBER_ID
+    assert rejected["reason"] == InboundRejectionReason.UNSUPPORTED_TYPE
+    assert any(
+        record.levelname == "INFO" and "hologram" in record.getMessage() and "unhandled" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _SEEN_KEY in fake_redis.store
+
+
+@pytest.mark.parametrize("msg_type", ["system", "request_welcome"])
+async def test_non_content_notice_type_stays_info_only(
+    msg_type: str, handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # A vendor non-content notification (system / welcome-request) is not participant content:
+    # logged at INFO, never replied to, never marked seen.
+    with caplog.at_level("INFO"):
+        result = await handler(signed_request(message_payload(msg_type=msg_type)))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.rejected_calls == []
+    assert stub_app.conversations.accept_calls == []
+    assert _SEEN_KEY not in fake_redis.store
+    assert any(
+        record.levelname == "INFO" and msg_type in record.getMessage() and "unhandled" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_duplicate_unsupported_delivery_sends_no_second_reply(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A Meta redelivery of the same unsupported-type notice (same wamid) is short-circuited by
+    # already_seen: exactly one reply, never a second.
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "unsupported",
+        "errors": [{"code": 131051, "title": "Unsupported message type"}],
+    }
+    await handler(signed_request(_params_envelope(message)))
+    await handler(signed_request(_params_envelope(message)))
+
+    assert len(stub_app.conversations.rejected_calls) == 1
 
 
 async def test_unhandled_message_type_logged_at_info_naming_the_type(

@@ -87,7 +87,14 @@ class RecordWriteMixin(RecordStoreBase):
         unreadable. It raises here, at the write, instead.
         """
         content = record.model_dump(mode="json")
-        for control in ("delivery_status", "outbound_message_ids", "attempts", "updated_at"):
+        for control in (
+            "delivery_status",
+            "outbound_message_ids",
+            "attempts",
+            "updated_at",
+            "route_missing",
+            "pending_receipt",
+        ):
             content.pop(control, None)
         return json.dumps(content, allow_nan=False)
 
@@ -292,4 +299,7 @@ class RecordWriteMixin(RecordStoreBase):
         data["outbound_message_ids"] = json.loads(hashed[_F_OUTBOUND])
         data[_F_ATTEMPTS] = int(hashed[_F_ATTEMPTS])
         data[_F_UPDATED] = float(hashed[_F_UPDATED])
+        data["route_missing"] = hashed.get("route_missing") == "1"
+        parked = hashed.get("pending_receipt")
+        data["pending_receipt"] = DeliveryStatus(parked) if parked else None
         return ConversationRecord.model_validate(data)

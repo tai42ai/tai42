@@ -16,7 +16,11 @@ from tai42_skeleton.db.boot_gate import (
 )
 from tai42_skeleton.db.discovery import (
     SKELETON_COMPONENT,
+    MigrationChainDiscovery,
+    SkippedChain,
     all_migration_entries,
+    discover_all_migration_chains,
+    discover_plugin_chains,
     installed_plugin_entries,
     plugin_migration_entry,
     skeleton_entry,
@@ -27,11 +31,15 @@ from tai42_skeleton.db.not_configured import not_configured_message
 
 __all__ = [
     "SKELETON_COMPONENT",
+    "MigrationChainDiscovery",
     "SchemaOutOfDateError",
+    "SkippedChain",
     "advisory_name_lock",
     "all_migration_entries",
     "assert_chain_applied",
     "assert_skeleton_schema_applied",
+    "discover_all_migration_chains",
+    "discover_plugin_chains",
     "installed_plugin_entries",
     "not_configured_message",
     "plugin_migration_entry",

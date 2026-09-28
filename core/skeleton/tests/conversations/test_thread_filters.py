@@ -71,7 +71,9 @@ async def test_the_thread_listing_filters_by_summary_status(store):
         _record("f0", created_at=now + 1, thread_id="bridge:line:+2000", delivery_status=DeliveryStatus.FAILED)
     )
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10, status=frozenset({DeliveryStatus.FAILED}))
+    page, _unreadable = await store.list_route_threads(
+        _ROUTE, offset=0, limit=10, status=frozenset({DeliveryStatus.FAILED})
+    )
 
     assert [thread.thread_id for thread in page.threads] == ["bridge:line:+2000"]
     assert page.total == 1
@@ -86,7 +88,7 @@ async def test_the_thread_listing_filters_by_address_substring(store):
     await store.create_record(_record("a0", created_at=now, thread_id="bridge:line:+15550002222"))
     await store.create_record(_record("a1", created_at=now + 1, thread_id="bridge:line:+15559990000"))
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10, address="2222")
+    page, _unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10, address="2222")
 
     assert [thread.thread_id for thread in page.threads] == ["bridge:line:+15550002222"]
     assert page.total == 1
@@ -98,7 +100,7 @@ async def test_the_address_filter_never_matches_a_person_thread(store):
     now = time.time()
     await store.create_record(_record("p0", created_at=now, thread_id="bridge:@person:abc"))
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10, address="abc")
+    page, _unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10, address="abc")
 
     assert page.threads == []
     assert page.total == 0
@@ -114,7 +116,7 @@ async def test_status_and_address_filters_compose(store):
         _record("m2", created_at=now + 2, thread_id="bridge:line:+15559990000", delivery_status=DeliveryStatus.FAILED)
     )
 
-    page = await store.list_route_threads(
+    page, _unreadable = await store.list_route_threads(
         _ROUTE, offset=0, limit=10, status=frozenset({DeliveryStatus.FAILED}), address="2200"
     )
 
@@ -134,8 +136,8 @@ async def test_a_filtered_listing_pages_over_matches(store):
         )
     await store.create_record(_record("d0", created_at=now + 9, thread_id="bridge:line:+9999"))
 
-    first = await store.list_route_threads(_ROUTE, offset=0, limit=2, status=frozenset({DeliveryStatus.FAILED}))
-    second = await store.list_route_threads(_ROUTE, offset=2, limit=2, status=frozenset({DeliveryStatus.FAILED}))
+    first, _ = await store.list_route_threads(_ROUTE, offset=0, limit=2, status=frozenset({DeliveryStatus.FAILED}))
+    second, _ = await store.list_route_threads(_ROUTE, offset=2, limit=2, status=frozenset({DeliveryStatus.FAILED}))
 
     assert first.total == 3
     assert len(first.threads) == 2
@@ -150,7 +152,9 @@ async def test_a_filter_scan_that_spends_its_budget_reports_truncated(store, mon
     for index in range(3):
         await store.create_record(_record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+100{index}"))
 
-    page = await store.list_route_threads(_ROUTE, offset=0, limit=10, status=frozenset({DeliveryStatus.FAILED}))
+    page, _unreadable = await store.list_route_threads(
+        _ROUTE, offset=0, limit=10, status=frozenset({DeliveryStatus.FAILED})
+    )
 
     assert page.truncated is True
     assert page.threads == []
@@ -190,7 +194,7 @@ async def test_a_transcript_q_search_keeps_only_matching_records(store):
         _record("m2", created_at=now + 2, thread_id=_THREAD, inbound_text="ok", answer="your WIDGET is on the way")
     )
 
-    page = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
+    page, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
 
     # Case-insensitive, over BOTH inbound text and answer.
     assert [record.message_id for record in page.records] == ["m1", "m2"]
@@ -202,7 +206,7 @@ async def test_a_transcript_q_search_with_no_match_is_an_empty_page_not_total_ze
     now = time.time()
     await store.create_record(_record("m0", created_at=now, thread_id=_THREAD, inbound_text="hello"))
 
-    page = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="nothing")
+    page, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="nothing")
 
     assert page.records == []
     assert page.total == 0
@@ -216,9 +220,21 @@ async def test_a_transcript_q_search_reports_truncated_on_budget(store, monkeypa
             _record(f"m{index}", created_at=now + index, thread_id=_THREAD, inbound_text="no match here")
         )
 
-    page = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
+    page, _ = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
 
     assert page.truncated is True
+
+
+async def test_a_transcript_q_search_counts_an_unreadable_member(store, fake):
+    now = time.time()
+    await store.create_record(_record("m0", created_at=now, thread_id=_THREAD, inbound_text="a widget please"))
+    await store.create_record(_record("m1", created_at=now + 1, thread_id=_THREAD, inbound_text="another widget"))
+    fake._hashes.pop(ConversationsSettings().record_key("m0"))
+
+    page, unreadable = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
+
+    assert [record.message_id for record in page.records] == ["m1"]
+    assert unreadable == 1
 
 
 # -- route message search ----------------------------------------------------
@@ -234,7 +250,7 @@ async def test_search_route_messages_spans_every_thread(store):
         _record("b0", created_at=now + 2, thread_id="bridge:line:+2000", answer="your widget posted")
     )
 
-    found = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
+    found, _ = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
 
     assert {record.message_id for record in found.records} == {"a0", "b0"}
     assert found.total == 2
@@ -249,7 +265,7 @@ async def test_search_route_messages_reports_truncated_on_budget(store, monkeypa
             _record(f"m{index}", created_at=now + index, thread_id="bridge:line:+1000", inbound_text="no match")
         )
 
-    found = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
+    found, _ = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
 
     assert found.truncated is True
 
@@ -262,9 +278,10 @@ async def test_search_route_messages_skips_a_rowless_member_loudly(store, fake, 
     )
     fake._hashes.pop(ConversationsSettings().record_key("a0"))
 
-    found = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
+    found, unreadable = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
 
     assert [record.message_id for record in found.records] == ["a1"]
+    assert unreadable == 1
     assert "left for the prune pass" in caplog.text
 
 
@@ -278,7 +295,7 @@ async def test_search_route_messages_bounds_the_thread_dimension_on_empty_indexe
     for index in range(10):
         fake._zsets.setdefault(route_key, {})[f"bridge:line:+{index}"] = float(index)
 
-    found = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
+    found, _ = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
 
     assert found.records == []
     assert found.total == 0

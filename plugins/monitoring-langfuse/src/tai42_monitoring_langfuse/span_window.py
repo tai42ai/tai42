@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -24,6 +25,19 @@ from tai42_monitoring_langfuse.query_base import _PAGE_SIZE, _LangfuseQuery
 from tai42_monitoring_langfuse.sorting import _sort_window_items
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _TraceTags:
+    """A trace's tags with whether the fetch succeeded.
+
+    ``available`` is ``False`` only when the tag fetch itself faulted; an empty
+    ``tags`` with ``available=True`` is a genuinely untagged trace.
+    """
+
+    tags: list[str]
+    available: bool
+
 
 # Observation types that are never a tool/node execution.
 _EXCLUDED_TYPES = {"GENERATION", "EVENT", "TRACE"}
@@ -178,33 +192,35 @@ class SpanWindowQuery(_LangfuseQuery):
             return False
         return obs_type in {"SPAN", "TOOL", "AGENT", "CHAIN", "RETRIEVER"}
 
-    async def _resolve_trace_tags(self, client: Any, trace_ids: set[str]) -> dict[str, list[str]]:
+    async def _resolve_trace_tags(self, client: Any, trace_ids: set[str]) -> dict[str, _TraceTags]:
         """Tags per trace, resolved from the parent trace, fetching each distinct trace once.
 
         The observation row carries no tags, so the parent trace is the source.
 
-        A failed tag fetch is logged and degrades to an empty tag list; the span
+        A failed tag fetch is logged and marks the trace unavailable; the span
         itself stays in the result.
         """
-        trace_tags: dict[str, list[str]] = {}
+        trace_tags: dict[str, _TraceTags] = {}
         for trace_id in trace_ids:
             try:
                 trace = await asyncio.to_thread(
                     partial(client.api.trace.get, trace_id, request_options=self._request_options())
                 )
-                trace_tags[trace_id] = list(trace.tags or [])
+                trace_tags[trace_id] = _TraceTags(tags=list(trace.tags or []), available=True)
             except Exception:
                 logger.exception("failed to fetch tags for trace %s", trace_id)
-                trace_tags[trace_id] = []
+                trace_tags[trace_id] = _TraceTags(tags=[], available=False)
         return trace_tags
 
     @staticmethod
-    def _to_window_item(obs: Any, trace_tags: dict[str, list[str]]) -> SpanWindowItem:
+    def _to_window_item(obs: Any, trace_tags: dict[str, _TraceTags]) -> SpanWindowItem:
+        result = trace_tags.get(obs.trace_id)
         return SpanWindowItem(
             id=obs.id,
             parent_id=obs.parent_observation_id,
             name=obs.name,
-            tags=trace_tags.get(obs.trace_id, []),
+            tags=result.tags if result is not None else [],
+            tags_available=result.available if result is not None else True,
             input=obs.input,
             output=obs.output,
             metadata=obs.metadata,

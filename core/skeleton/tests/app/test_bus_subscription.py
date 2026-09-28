@@ -19,6 +19,7 @@ or the no-op local variant), subscribes with ``_apply_bus_op`` as the callback a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from types import SimpleNamespace
 from typing import Any, cast
@@ -30,7 +31,7 @@ from tai42_contract.storage import Storage
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template import resource_manager as rm_mod
@@ -411,6 +412,41 @@ def test_registry_mutating_ops_match_the_dispatch() -> None:
         "list_failed_mcps",
         "recycle",
     }
+
+
+@pytest.mark.parametrize(
+    "task_name",
+    [
+        "tai-worker-bus-subscription",
+        "tai-failed-mcp-reprobe",
+        "tai-interactions-expiry-reaper",
+        "tai-sandbox-reaper",
+        "tai-media-retention-reaper",
+    ],
+)
+async def test_dead_perpetual_task_marks_and_exits_for_every_registration(
+    task_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every one of the five perpetual tasks registers the SAME
+    ``_on_perpetual_task_done`` seam (the bus subscription, the re-probe loop, and
+    all three reapers — grep of ``add_done_callback``), so a death of any of them, named
+    by its task, marks ``LifecycleState`` and requests this process's graceful
+    exit. Parametrized over all five task names so no registration is uncovered."""
+    m = _Mixin()
+    exits: list[WorkerKind] = []
+    monkeypatch.setattr(lifespan, "graceful_exit_for", lambda kind: lambda: exits.append(kind))
+
+    async def boom():
+        raise RuntimeError("perpetual task died")
+
+    task = asyncio.create_task(boom(), name=task_name)
+    task.add_done_callback(m._on_perpetual_task_done)
+    with contextlib.suppress(RuntimeError):
+        await task
+    await asyncio.sleep(0)  # let the done-callback run
+
+    assert m._dead_perpetual_task == (task_name, "RuntimeError")
+    assert exits == [m._worker_kind]
 
 
 def test_the_bus_apply_window_matches_the_contract_agreement() -> None:

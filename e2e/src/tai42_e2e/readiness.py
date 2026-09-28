@@ -30,6 +30,52 @@ def wait_ready(stack: TaiStack) -> None:
     wait_fleet_converged(stack, deadline)
 
 
+def ready_status(stack: TaiStack, *, port: int | None = None) -> tuple[int, dict[str, Any]]:
+    """Read ``/ready`` ONCE for one app port, returning its status code and parsed body.
+
+    Unlike :func:`wait_ready`, which blocks until the fleet is green, this reads the
+    live readiness signal a single time — a caller asserting a transient readiness
+    state (a dead perpetual task 503ing before the process graceful-exits, naming the
+    task under a ``perpetual_task:<name>`` check) reads it here rather than waiting for
+    green."""
+    target = port if port is not None else stack.app_ports[0]
+    resp = httpx.get(f"http://{stack.host}:{target}/ready", timeout=5.0)
+    return resp.status_code, resp.json()
+
+
+def assert_no_dead_perpetual_task(stack: TaiStack, *, port: int | None = None) -> dict[str, Any]:
+    """Assert ``/ready`` is 200 and names NO dead perpetual task, returning its checks.
+
+    While the five perpetual tasks (the worker-bus subscription, the failed-MCP
+    re-probe loop, the interactions expiry reaper, the sandbox reaper, the inbound-media
+    retention reaper) all run, the readiness marker is unset, so ``/ready`` readies with
+    no ``perpetual_task:*`` check — the marker read must not false-positive on a healthy
+    fleet."""
+    status, body = ready_status(stack, port=port)
+    assert status == 200, f"/ready not ready with all perpetual tasks alive: {status} {body}"
+    checks = body["checks"]
+    dead = [name for name in checks if name.startswith("perpetual_task:")]
+    assert not dead, f"/ready named a dead perpetual task on a healthy fleet: {dead} in {checks}"
+    return checks
+
+
+def assert_ready_names_dead_perpetual_task(
+    stack: TaiStack, task_name: str, reason: str, *, port: int | None = None
+) -> dict[str, Any]:
+    """Assert ``/ready`` is 503 and names ``task_name`` dead with ``reason``.
+
+    A perpetual task whose death is marked flips ``/ready`` to 503 ``not_ready`` with an
+    additive ``perpetual_task:<task_name>`` check carrying the failure reason alongside
+    the store checks — the pre-exit truth this reads over real HTTP."""
+    status, body = ready_status(stack, port=port)
+    assert status == 503, f"/ready did not 503 with a dead perpetual task marked: {status} {body}"
+    assert body["status"] == "not_ready", f"/ready status was not not_ready: {body}"
+    checks = body["checks"]
+    key = f"perpetual_task:{task_name}"
+    assert checks.get(key) == reason, f"/ready did not name {key}={reason!r}: {checks}"
+    return checks
+
+
 def wait_fleet_converged(stack: TaiStack, deadline: float) -> None:
     """Block until the whole expected fleet is on the bus AND every serve worker
     has left its boot-time self-resync reload gate, so a test acting the instant

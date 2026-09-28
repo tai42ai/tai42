@@ -13,15 +13,59 @@ import itertools
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from tai42_e2e._threaded import ThreadedServer
 from tai42_e2e.ports import allocate_port
 from tai42_e2e.provider_stub import SignedInbound, _install_catch_all
+
+# Deterministic media bodies the fake vendors serve for the inbound-media ingest suites: a valid
+# 1x1 PNG (sniffs ``image/png``), a minimal PDF (sniffs ``application/pdf``), and an HTML buffer
+# (sniffs to nothing — the disallowed-content case under a declared image type).
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
+TINY_PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+HTML_BODY = b"<!DOCTYPE html><html><body><h1>not an image</h1></body></html>"
+
+# The default Slack sender id a synthesized event carries — a real Slack message/file_share event
+# always names the participant in the top-level ``user`` (the channel reads it for the media
+# origin). Distinct from the bot's own user id so a synthesized event is never taken as a self-echo.
+SLACK_PARTICIPANT_USER = "U0PARTICIPANT"
+
+
+@dataclass
+class MediaBlob:
+    """One fake vendor's byte-serving behaviour for a single media reference.
+
+    ``body`` + ``content_type`` are the healthy 200 response. A ``status`` other than 200 answers
+    that status with no body (a 404 miss, a 5xx). ``fail_times`` serves ``fail_status`` for the
+    first N fetches of the reference and the healthy body thereafter — the transient-then-redeliver
+    case (the fake fails once, the vendor redelivers, the retry succeeds)."""
+
+    body: bytes = b""
+    content_type: str | None = None
+    status: int = 200
+    fail_status: int = 502
+    fail_times: int = 0
+
+
+def _serve_blob(blob: MediaBlob, served: dict[str, int], ref: str) -> Response:
+    """Answer one configured media fetch for ``ref``, counting fetches so ``fail_times`` can serve
+    the transient fault first and the healthy body on the redelivery."""
+    count = served.get(ref, 0)
+    served[ref] = count + 1
+    if blob.fail_times and count < blob.fail_times:
+        return Response(status_code=blob.fail_status)
+    if blob.status != 200:
+        return Response(status_code=blob.status)
+    return Response(content=blob.body, media_type=blob.content_type)
 
 
 def _telegram_chat_id(raw: Any) -> int:
@@ -52,6 +96,11 @@ class FakeTelegram:
         self.port = allocate_port()
         self.sent: list[dict[str, Any]] = []
         self.webhooks: list[dict[str, Any]] = []
+        # Per-``file_id`` byte-serving behaviour for the inbound-media ingest suites, keyed by the
+        # file_id ``getFile`` resolves; ``_media_served`` counts fetches per file_id so a
+        # ``MediaBlob.fail_times`` can serve the transient fault before the healthy redelivery.
+        self.media: dict[str, MediaBlob] = {}
+        self._media_served: dict[str, int] = {}
         self._ids = itertools.count(1000)
         self._server = ThreadedServer(self._build_app(), host, self.port)
 
@@ -70,6 +119,8 @@ class FakeTelegram:
     def reset(self) -> None:
         self.sent.clear()
         self.webhooks.clear()
+        self.media.clear()
+        self._media_served.clear()
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         """Recorded ``sendMessage`` payloads whose text carries ``text`` — the
@@ -94,8 +145,78 @@ class FakeTelegram:
         headers = {"content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret}
         return SignedInbound(headers=headers, body=body)
 
+    def _inbound_update(
+        self, *, secret: str, chat_id: str, message: dict[str, Any], update_id: int | None = None
+    ) -> SignedInbound:
+        """A signed inbound update wrapping ``message`` (its own ``update_id``/``message_id``
+        minted unless ``update_id`` is pinned for a redelivery replay)."""
+        uid = update_id if update_id is not None else next(self._ids)
+        body = json.dumps(
+            {"update_id": uid, "message": {"message_id": next(self._ids), "chat": {"id": int(chat_id)}, **message}}
+        ).encode()
+        headers = {"content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret}
+        return SignedInbound(headers=headers, body=body)
+
+    def build_inbound_photo(
+        self,
+        *,
+        secret: str,
+        chat_id: str,
+        file_id: str,
+        caption: str | None = None,
+        file_size: int | None = None,
+        update_id: int | None = None,
+    ) -> SignedInbound:
+        """A genuine inbound PHOTO update (an uncorrelated bridge message, no reply_to): the
+        largest size carries ``file_id``/``file_size`` (Telegram sends sizes ascending, so the
+        door reads the last), with an optional ``caption``. ``update_id`` may be pinned to replay
+        the identical update (a vendor redelivery, deduped per ``update_id`` at the accept seam)."""
+        largest: dict[str, Any] = {"file_id": file_id, "width": 1280, "height": 960}
+        if file_size is not None:
+            largest["file_size"] = file_size
+        message: dict[str, Any] = {"from": {"id": int(chat_id)}, "photo": [{"file_id": f"{file_id}-thumb"}, largest]}
+        if caption is not None:
+            message["caption"] = caption
+        return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
+
+    def build_inbound_document(
+        self,
+        *,
+        secret: str,
+        chat_id: str,
+        file_id: str,
+        mime_type: str,
+        file_name: str,
+        caption: str | None = None,
+        file_size: int | None = None,
+        update_id: int | None = None,
+    ) -> SignedInbound:
+        """A genuine inbound DOCUMENT update: the ``document`` member carries ``file_id``, the
+        vendor-declared ``mime_type``/``file_name`` and an optional ``file_size``, with an optional
+        ``caption``. A document ingests to the served-attachment ``DOCUMENT`` kind."""
+        document: dict[str, Any] = {"file_id": file_id, "mime_type": mime_type, "file_name": file_name}
+        if file_size is not None:
+            document["file_size"] = file_size
+        message: dict[str, Any] = {"from": {"id": int(chat_id)}, "document": document}
+        if caption is not None:
+            message["caption"] = caption
+        return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
+
+    def build_inbound_poll(self, *, secret: str, chat_id: str, update_id: int | None = None) -> SignedInbound:
+        """A genuine inbound POLL update — content Telegram recognises that the channel cannot
+        map to a turn, so the door replies with the generic refusal + event. ``update_id`` may be
+        pinned to replay the identical update (a vendor redelivery)."""
+        message = {"from": {"id": int(chat_id)}, "poll": {"id": "poll-1", "question": "?", "options": []}}
+        return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
+
     def _build_app(self) -> FastAPI:
         app = FastAPI()
+
+        @app.post("/bot{token}/sendChatAction")
+        async def send_chat_action(token: str, request: Request) -> JSONResponse:
+            # The plugin fires a "typing" action per inbound; record nothing, ack like the real API.
+            await request.json()
+            return JSONResponse({"ok": True, "result": True})
 
         @app.post("/bot{token}/sendMessage")
         async def send_message(token: str, request: Request) -> JSONResponse:
@@ -143,6 +264,23 @@ class FakeTelegram:
             self.webhooks.append({"token": token, **payload})
             return JSONResponse({"ok": True, "result": True})
 
+        @app.post("/bot{token}/getFile")
+        async def get_file(token: str, request: Request) -> JSONResponse:
+            # Resolve a ``file_id`` to a temporary ``file_path``; the plugin then streams the bytes
+            # from ``/file/bot{token}/{file_path}``. The stub keys the path on the file_id itself so
+            # the byte handler can find the configured blob.
+            payload = await request.json()
+            file_id = str(payload.get("file_id"))
+            return JSONResponse({"ok": True, "result": {"file_id": file_id, "file_path": file_id}})
+
+        @app.get("/file/bot{token}/{file_path:path}")
+        async def download_file(token: str, file_path: str) -> Response:
+            # The file_path IS the file_id (see ``getFile``); serve the configured bytes for it.
+            blob = self.media.get(file_path)
+            if blob is None:
+                return Response(status_code=404)
+            return _serve_blob(blob, self._media_served, file_path)
+
         _install_catch_all(app, "telegram")
         return app
 
@@ -164,8 +302,19 @@ class FakeSlack:
         # The modal views ``views.open`` opened — the form leg reads the view a
         # ``block_actions`` click drove the interactivity door to open.
         self.views: list[dict[str, Any]] = []
+        # Per-``url_private``-path byte-serving behaviour for the inbound-media ingest suites, keyed
+        # by the path a test builds through :meth:`download_url`; the download requires the bot
+        # Bearer (a missing/wrong token answers a 302, which the plugin — redirects off — treats as
+        # not-the-bytes). ``_media_served`` counts fetches for ``MediaBlob.fail_times``.
+        self.media: dict[str, MediaBlob] = {}
+        self._media_served: dict[str, int] = {}
         self._ts = itertools.count(1)
         self._server = ThreadedServer(self._build_app(), host, self.port)
+
+    def download_url(self, ref: str) -> str:
+        """A ``url_private`` on this stub for media reference ``ref`` (the Bearer-guarded byte
+        endpoint the slack channel fetches with ``Authorization: Bearer <bot_token>``)."""
+        return f"http://{self.host}:{self.port}/files/{ref}"
 
     @property
     def api_base_url(self) -> str:
@@ -182,6 +331,8 @@ class FakeSlack:
     def reset(self) -> None:
         self.posts.clear()
         self.views.clear()
+        self.media.clear()
+        self._media_served.clear()
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         return [record for record in self.posts if text in record["text"]]
@@ -205,11 +356,19 @@ class FakeSlack:
         return SignedInbound(headers=headers, body=body)
 
     def build_inbound(
-        self, *, signing_secret: str, channel: str, thread_ts: str, text: str, event_id: str, valid: bool = True
+        self,
+        *,
+        signing_secret: str,
+        channel: str,
+        thread_ts: str,
+        text: str,
+        event_id: str,
+        user: str = SLACK_PARTICIPANT_USER,
+        valid: bool = True,
     ) -> SignedInbound:
         """A genuine Events API ``event_callback``: a thread reply whose
-        ``thread_ts`` is the delivered ``ts``, carrying a valid Slack v0 HMAC over
-        ``v0:{ts}:{body}`` computed with the signing secret. ``valid=False`` mints
+        ``thread_ts`` is the delivered ``ts``, carrying the sender ``user`` and a valid Slack v0
+        HMAC over ``v0:{ts}:{body}`` computed with the signing secret. ``valid=False`` mints
         the same envelope under the WRONG secret (the fail-closed negative)."""
         timestamp = str(int(time.time()))
         body = json.dumps(
@@ -219,12 +378,51 @@ class FakeSlack:
                 "event": {
                     "type": "message",
                     "channel": channel,
+                    "user": user,
                     "thread_ts": thread_ts,
                     "ts": f"{next(self._ts)}.000100",
                     "text": text,
                 },
             }
         ).encode()
+        key = signing_secret if valid else signing_secret + "-tampered"
+        base = b"v0:" + timestamp.encode("ascii") + b":" + body
+        digest = hmac.new(key.encode("utf-8"), base, hashlib.sha256).hexdigest()
+        headers = {
+            "content-type": "application/json",
+            "X-Slack-Request-Timestamp": timestamp,
+            "X-Slack-Signature": f"v0={digest}",
+        }
+        return SignedInbound(headers=headers, body=body)
+
+    def build_inbound_files(
+        self,
+        *,
+        signing_secret: str,
+        channel: str,
+        files: list[dict[str, Any]],
+        event_id: str,
+        text: str | None = None,
+        user: str = SLACK_PARTICIPANT_USER,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine ``file_share`` Events API delivery: a message subtype carrying the sender
+        ``user`` and ``files`` (each a Slack file object — ``url_private``/``name``/``mimetype``/
+        ``size``), signed X-Hub like ``build_inbound``. A file exposing neither ``url_private`` nor
+        ``name`` is the channel's unsupported case; every other file bridges one turn."""
+        event: dict[str, Any] = {
+            "type": "message",
+            "subtype": "file_share",
+            "channel": channel,
+            "user": user,
+            "ts": f"{next(self._ts)}.000200",
+            "files": files,
+        }
+        if text is not None:
+            event["text"] = text
+        value = {"type": "event_callback", "event_id": event_id, "event": event}
+        body = json.dumps(value).encode()
+        timestamp = str(int(time.time()))
         key = signing_secret if valid else signing_secret + "-tampered"
         base = b"v0:" + timestamp.encode("ascii") + b":" + body
         digest = hmac.new(key.encode("utf-8"), base, hashlib.sha256).hexdigest()
@@ -259,6 +457,17 @@ class FakeSlack:
             self.views.append(payload.get("view"))
             return JSONResponse({"ok": True})
 
+        @app.get("/files/{ref:path}")
+        async def download_file(ref: str, request: Request) -> Response:
+            # ``url_private`` needs the bot Bearer; a missing/wrong token 302s (a 3xx the plugin,
+            # redirects off, treats as not-the-bytes → permanent rejection), never leaking bytes.
+            if not request.headers.get("authorization", "").startswith("Bearer "):
+                return Response(status_code=302, headers={"location": "https://slack.com/signin"})
+            blob = self.media.get(ref)
+            if blob is None:
+                return Response(status_code=404)
+            return _serve_blob(blob, self._media_served, ref)
+
         _install_catch_all(app, "slack")
         return app
 
@@ -275,7 +484,23 @@ class FakeTwilio:
         self.host = host
         self.port = allocate_port()
         self.messages: list[dict[str, Any]] = []
+        # An optional async hook awaited inside the send handler after a message is recorded and
+        # before its response returns. A test that must interleave with a send in flight (the
+        # receipt-race reproduction: hold one chunk in ``pending_delivery`` while the receipt for
+        # an earlier chunk is posted) sets it; the default ``None`` leaves the handler unchanged.
+        self.send_barrier: Callable[[], Awaitable[None]] | None = None
+        # The SECOND origin, on its own loopback port — the CDN a ``MediaUrl`` 307s to. Serving the
+        # bytes from a DIFFERENT origin is what makes the fetch cross-origin, so the kit drops the
+        # HTTP Basic auth on the redirect hop; the CDN records the ``Authorization`` it saw per
+        # fetch (``cdn_authorizations``) so a test proves the credential did NOT ride to it.
+        self.cdn_port = allocate_port()
+        self.cdn_authorizations: list[str | None] = []
+        # Per-media-reference byte-serving behaviour (served by the CDN), keyed by the ref a test
+        # builds through :meth:`media_url`; ``_media_served`` counts fetches for ``fail_times``.
+        self.media: dict[str, MediaBlob] = {}
+        self._media_served: dict[str, int] = {}
         self._server = ThreadedServer(self._build_app(), host, self.port)
+        self._cdn_server = ThreadedServer(self._build_cdn_app(), host, self.cdn_port)
 
     @property
     def api_base_url(self) -> str:
@@ -283,14 +508,25 @@ class FakeTwilio:
         addresses ``{api_base_url}/Accounts/{AccountSid}/Messages.json``)."""
         return f"http://{self.host}:{self.port}"
 
+    def media_url(self, ref: str) -> str:
+        """A ``MediaUrl`` on this stub for media reference ``ref`` — a Basic-authed GET that 307s
+        to the CDN origin (a different port), where the bytes are served."""
+        return f"http://{self.host}:{self.port}/media/{ref}"
+
     def start(self) -> None:
         self._server.start()
+        self._cdn_server.start()
 
     def stop(self) -> None:
+        self._cdn_server.stop()
         self._server.stop()
 
     def reset(self) -> None:
         self.messages.clear()
+        self.send_barrier = None
+        self.media.clear()
+        self._media_served.clear()
+        self.cdn_authorizations.clear()
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         return [record for record in self.messages if text in record["body"]]
@@ -321,6 +557,39 @@ class FakeTwilio:
             "X-Twilio-Signature": signature,
         }
         return SignedInbound(headers=headers, body=body)
+
+    def build_inbound_mms(
+        self,
+        *,
+        auth_token: str,
+        public_url: str,
+        twilio_number: str,
+        human_number: str,
+        media_url: str,
+        content_type: str,
+        body: str = "",
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine inbound MMS webhook carrying ONE media item: ``NumMedia=1`` plus
+        ``MediaUrl0``/``MediaContentType0``, with an optional ``Body`` caption. Signed like
+        ``build_inbound`` (base64 HMAC-SHA1 over ``public_url`` + concat of sorted form pairs)."""
+        pairs = [
+            ("To", twilio_number),
+            ("From", human_number),
+            ("Body", body),
+            ("NumMedia", "1"),
+            ("MediaUrl0", media_url),
+            ("MediaContentType0", content_type),
+            ("MessageSid", f"MM{uuid.uuid4().hex}"),
+        ]
+        raw = urlencode(pairs).encode("utf-8")
+        key = auth_token if valid else auth_token + "-tampered"
+        signed_payload = public_url + "".join(name + value for name, value in sorted(pairs))
+        signature = base64.b64encode(
+            hmac.new(key.encode("utf-8"), signed_payload.encode("utf-8"), hashlib.sha1).digest()
+        ).decode("ascii")
+        headers = {"content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature}
+        return SignedInbound(headers=headers, body=raw)
 
     def build_status(
         self, *, auth_token: str, public_url: str, message_sid: str, status: str, valid: bool = True
@@ -358,9 +627,33 @@ class FakeTwilio:
                     "sid": sid,
                 }
             )
+            if self.send_barrier is not None:
+                await self.send_barrier()
             return JSONResponse({"sid": sid, "status": "queued"}, status_code=201)
 
+        @app.get("/media/{ref:path}")
+        async def media_redirect(ref: str) -> Response:
+            # A ``MediaUrl`` GET (carrying HTTP Basic auth on this first hop) 307s to the CDN on the
+            # other origin; the kit drops the Basic auth on that cross-origin hop.
+            return Response(status_code=307, headers={"location": f"http://{self.host}:{self.cdn_port}/cdn/{ref}"})
+
         _install_catch_all(app, "twilio")
+        return app
+
+    def _build_cdn_app(self) -> FastAPI:
+        app = FastAPI()
+
+        @app.get("/cdn/{ref:path}")
+        async def cdn_download(ref: str, request: Request) -> Response:
+            # Record whether an ``Authorization`` rode to the CDN (it must NOT — the kit drops the
+            # Basic auth on the cross-origin redirect) and serve the configured bytes.
+            self.cdn_authorizations.append(request.headers.get("authorization"))
+            blob = self.media.get(ref)
+            if blob is None:
+                return Response(status_code=404)
+            return _serve_blob(blob, self._media_served, ref)
+
+        _install_catch_all(app, "twilio-cdn")
         return app
 
 
@@ -389,6 +682,13 @@ class FakeWhatsApp:
         # ``published_flows`` the ids the publish step confirmed.
         self.flows: list[dict[str, Any]] = []
         self.published_flows: list[str] = []
+        # Per-``media_id`` inbound-media config for the ingest suites. ``media_meta`` holds the
+        # metadata GET response (``mime_type``/``sha256``/``file_size`` and an optional non-200
+        # ``status`` for a permanent miss); ``media`` holds the Bearer-guarded lookaside byte blob.
+        # ``_media_served`` counts lookaside fetches for ``MediaBlob.fail_times``.
+        self.media_meta: dict[str, dict[str, Any]] = {}
+        self.media: dict[str, MediaBlob] = {}
+        self._media_served: dict[str, int] = {}
         self._wamids = itertools.count(1)
         self._flow_ids = itertools.count(1)
         self._server = ThreadedServer(self._build_app(), host, self.port)
@@ -409,6 +709,9 @@ class FakeWhatsApp:
         self.sent.clear()
         self.flows.clear()
         self.published_flows.clear()
+        self.media_meta.clear()
+        self.media.clear()
+        self._media_served.clear()
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         return [record for record in self.sent if text in record["body"]]
@@ -462,6 +765,57 @@ class FakeWhatsApp:
         value = {
             "metadata": {"phone_number_id": phone_number_id},
             "messages": [{"id": message_id, "from": wa_id, "type": "text", "text": {"body": text}}],
+        }
+        return self._sign_batch(value, app_secret=app_secret, valid=valid)
+
+    def build_inbound_image(
+        self,
+        *,
+        app_secret: str,
+        phone_number_id: str,
+        wa_id: str,
+        media_id: str,
+        mime_type: str = "image/jpeg",
+        caption: str | None = None,
+        sha256: str | None = None,
+        wamid: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine inbound IMAGE message: the media object carries the Graph ``id``
+        (``media_id``), ``mime_type`` and an optional ``caption``/``sha256``. Signed
+        X-Hub-Signature-256 like ``build_inbound``; a pinned ``wamid`` lets a replay POST the
+        identical body (a vendor redelivery, deduped per ``wamid`` at the door)."""
+        message_id = wamid if wamid is not None else self._mint_wamid()
+        image: dict[str, Any] = {"id": media_id, "mime_type": mime_type}
+        if caption is not None:
+            image["caption"] = caption
+        if sha256 is not None:
+            image["sha256"] = sha256
+        value = {
+            "metadata": {"phone_number_id": phone_number_id},
+            "messages": [{"id": message_id, "from": wa_id, "type": "image", "image": image}],
+        }
+        return self._sign_batch(value, app_secret=app_secret, valid=valid)
+
+    def build_inbound_error(
+        self,
+        *,
+        app_secret: str,
+        phone_number_id: str,
+        wa_id: str,
+        code: int,
+        title: str,
+        wamid: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine inbound ERROR notice: a message carrying an ``errors`` array
+        ``[{"code", "title"}]`` and no type. ``code == 131051`` ("Unsupported message type") names
+        participant content the channel cannot receive → the generic refusal + event; other codes
+        stay operator-log-only. Signed like ``build_inbound``; a pinned ``wamid`` replays it."""
+        message_id = wamid if wamid is not None else self._mint_wamid()
+        value = {
+            "metadata": {"phone_number_id": phone_number_id},
+            "messages": [{"id": message_id, "from": wa_id, "errors": [{"code": code, "title": title}]}],
         }
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
@@ -596,6 +950,37 @@ class FakeWhatsApp:
         async def publish_flow(flow_id: str, request: Request) -> JSONResponse:
             self.published_flows.append(flow_id)
             return JSONResponse({"success": True})
+
+        @app.get("/lookaside/{media_id}")
+        async def lookaside(media_id: str, request: Request) -> Response:
+            # The short-lived lookaside URL the metadata GET handed back; the plugin sets the
+            # Bearer on this GET directly (no redirect hop, so the kit carries the caller header),
+            # and the bytes are served.
+            if not request.headers.get("authorization", "").startswith("Bearer "):
+                return Response(status_code=401)
+            blob = self.media.get(media_id)
+            if blob is None:
+                return Response(status_code=404)
+            return _serve_blob(blob, self._media_served, media_id)
+
+        @app.get("/{media_id}")
+        async def media_metadata(media_id: str, request: Request) -> Response:
+            # Meta's Graph media-by-id metadata endpoint (Bearer): returns a short-lived lookaside
+            # ``url`` on THIS origin plus the declared ``mime_type``/``sha256``/``file_size``. A
+            # configured non-200 ``status`` (an unknown/expired media) is a permanent miss.
+            if not request.headers.get("authorization", "").startswith("Bearer "):
+                return Response(status_code=401)
+            meta = self.media_meta.get(media_id)
+            if meta is None:
+                return Response(status_code=404)
+            status = int(meta.get("status", 200))
+            if status != 200:
+                return Response(status_code=status)
+            result: dict[str, Any] = {"id": media_id, "url": f"{self.api_base_url}/lookaside/{media_id}"}
+            for key in ("mime_type", "sha256", "file_size"):
+                if meta.get(key) is not None:
+                    result[key] = meta[key]
+            return JSONResponse(result)
 
         _install_catch_all(app, "whatsapp")
         return app

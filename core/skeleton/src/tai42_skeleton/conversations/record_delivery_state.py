@@ -7,6 +7,7 @@ plus the outbound reverse index (keyspace 3).
 from __future__ import annotations
 
 import json
+import logging
 
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_kit.clients.impl.redis import RedisClient
@@ -20,9 +21,12 @@ from tai42_skeleton.conversations.record_scripts import (
     _FAILED_LUA,
     _PROVISIONAL_LUA,
     _RECEIPT_LUA,
+    _UNREADABLE_LUA,
 )
 from tai42_skeleton.conversations.record_store_base import RecordStoreBase
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
+
+logger = logging.getLogger(__name__)
 
 
 class RecordDeliveryMixin(RecordStoreBase):
@@ -59,8 +63,10 @@ class RecordDeliveryMixin(RecordStoreBase):
     ) -> int:
         """Move ``message_id`` to ``provisional`` awaiting an async delivery receipt or grace expiry.
 
-        Returns 1 transitioned, 0 already terminal, -1 gone, -3 a different worker's live lease.
-        ``token`` is the delivery lease this caller holds.
+        Returns 1 transitioned, 0 already terminal, -1 gone, -3 a different worker's live lease. A
+        receipt that arrived during the send is applied in this same step, straight to its terminal
+        (skipping ``provisional``): 2 when the parked receipt was ``delivered``, 3 when it was
+        ``failed``. ``token`` is the delivery lease this caller holds.
         """
         grace_deadline = now + self.settings.delivery_grace_seconds
         keys = self._record_keys(message_id, DeliveryStatus.PROVISIONAL)
@@ -78,6 +84,8 @@ class RecordDeliveryMixin(RecordStoreBase):
                     token,
                     message_id,
                     self._index_score(DeliveryStatus.PROVISIONAL, now),
+                    self.settings.answer_retention_ttl_seconds * 1000,
+                    self._index_score(DeliveryStatus.DELIVERED, now),
                 )
             )
 
@@ -113,10 +121,16 @@ class RecordDeliveryMixin(RecordStoreBase):
         Returns 1 transitioned, 0 already failed, -1 gone, -2 the send already completed
         (delivered/shed/provisional), -3 a different worker's live lease. ``token`` is the delivery
         lease this caller holds.
+
+        A sender-side failure that reaches this real terminal beats a receipt only staged against
+        an in-flight record: the Lua drops the staged ``pending_receipt`` in the same step and
+        signals it with code 2, which this wrapper logs at WARNING (the drop is operator-visible)
+        and remaps to 1 — the record's failed state is the truthful outcome, so the drop is a
+        defined, logged next state, never an error hidden.
         """
         keys = self._record_keys(message_id, DeliveryStatus.FAILED)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            return int(
+            result = int(
                 await eval_script(
                     r,
                     _FAILED_LUA,
@@ -130,12 +144,65 @@ class RecordDeliveryMixin(RecordStoreBase):
                     self._index_score(DeliveryStatus.FAILED, now),
                 )
             )
+        if result == 2:
+            logger.warning(
+                "conversations: record %r failed while a receipt was parked; the parked receipt is dropped "
+                "— the send-side terminal is the outcome",
+                message_id,
+            )
+            return 1
+        return result
+
+    async def mark_unreadable(self, message_id: str, now: float) -> int:
+        """Move an unrecoverable sweep row to the terminal ``failed`` state, applying the retention TTL.
+
+        The sweep-owned terminal primitive: it holds no delivery lease, so it threads no token or
+        ``attempts`` and reads a corrupt row's status opaquely. Returns 1 transitioned, 0 already
+        failed, -1 the row is gone, -2 the send already completed (delivered/shed), -3 a DIFFERENT
+        worker holds a live delivery lease — in which case the row is left to that holder (it finishes
+        it, or its lease lapses and the next sweep transitions it) and the -3 is logged at WARNING, a
+        defined next state, never a swallow.
+
+        A corrupt row that carried a staged receipt has it dropped in the same step, signalled by
+        code 2, which this wrapper logs at WARNING and remaps to 1: first terminal wins, the sweep's
+        failed state is the truthful outcome and the drop is operator-visible, never hidden.
+        """
+        keys = self._record_keys(message_id, DeliveryStatus.FAILED)
+        async with _records.client_ctx(RedisClient, self.settings.redis) as r:
+            result = int(
+                await eval_script(
+                    r,
+                    _UNREADABLE_LUA,
+                    len(keys),
+                    *keys,
+                    now,
+                    self.settings.answer_retention_ttl_seconds * 1000,
+                    message_id,
+                    self._index_score(DeliveryStatus.FAILED, now),
+                )
+            )
+        if result == 2:
+            logger.warning(
+                "conversations: record %r unreadable while a receipt was parked; the parked receipt is dropped "
+                "— the send-side terminal is the outcome",
+                message_id,
+            )
+            return 1
+        if result == -3:
+            logger.warning(
+                "conversations: record %r is under a live foreign delivery lease; left to its holder this sweep",
+                message_id,
+            )
+        return result
 
     async def ingest_receipt(self, message_id: str, receipt: DeliveryReceipt, now: float) -> int:
-        """Ingest an out-of-band receipt against a fully sent (``provisional``) record.
+        """Ingest an out-of-band receipt for an outbound message.
 
-        Returns 1 transitioned, 0 already in the receipt's terminal state, -1 gone, -2 a conflicting
-        terminal state already recorded, -3 the record's send has not finished.
+        Returns 1 transitioned (a ``provisional`` record settled), 2 parked (the record's send is
+        still in flight — the receipt is staged and applied by the completing provisional write), 0
+        already in the receipt's terminal state or re-parked to the same target, -1 gone, -2 a
+        conflicting terminal or a different target already parked, -3 the id resolved to a record in
+        a state that never sent an answer.
         """
         target = DeliveryStatus.DELIVERED if receipt is DeliveryReceipt.DELIVERED else DeliveryStatus.FAILED
         keys = self._record_keys(message_id, target)

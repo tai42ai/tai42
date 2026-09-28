@@ -8,7 +8,12 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge
-from tai42_contract.conversations import ConversationTargetKind, DeliveryReceipt, TargetBindValidator
+from tai42_contract.conversations import (
+    ConversationTargetKind,
+    DeliveryReceipt,
+    InboundRejectionReason,
+    TargetBindValidator,
+)
 from tai42_contract.interactions.answer_check import QuestionFormat
 from tai42_contract.interactions.asker import Ask
 from tai42_contract.interactions.models import LocationElement, MediaItem
@@ -414,6 +419,31 @@ class AppConversations(Protocol):
         to the answer record through the outbound-id reverse index. ``FAILED`` marks the
         record failed; ``DELIVERED`` confirms a ``provisional`` record. Raises when the
         id resolves to no record.
+        """
+        ...
+
+    async def notify_inbound_rejected(
+        self,
+        *,
+        channel_id: str,
+        recipient: str,
+        sender_identity: str | None,
+        kind: str,
+        reason: InboundRejectionReason,
+    ) -> None:
+        """Reply once and record a platform event when an inbound content cannot become a turn.
+
+        The ONE shared chokepoint a channel adapter calls instead of silently ack-and-ignoring a
+        vendor content it recognises but cannot represent as a turn — an unmappable media kind, a
+        file over the platform cap, a byte source it could not fetch, or an unsupported content
+        type. Sends a single generic participant notice back over ``channel_id`` to ``recipient``
+        (from ``sender_identity`` when the channel fronts several identities, else the channel
+        default), and records a platform event naming the generic ``kind`` refused and the
+        ``reason``, so the drop is operator-visible. ``kind`` is a generic, domain-neutral label
+        (e.g. an :class:`~tai42_contract.conversations.InboundMediaKind` value or a channel's neutral
+        content word); it names WHAT was refused, never a participant value. ``reason`` selects the
+        generic notice the platform sends. A blank or unroutable message is a different fault and
+        stays its own handling — this seam is for content the channel recognises but cannot bridge.
         """
         ...
 

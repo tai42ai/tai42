@@ -138,6 +138,9 @@ class SpanWindowItem(BaseModel):
 
     The "smallest span" unit (one tool/node run). ``tags`` come from the
     parent trace. ``input`` / ``output`` / ``metadata`` are nullable.
+    ``tags_available`` is ``False`` when the parent trace's tags could not be
+    fetched — distinct from an empty ``tags`` meaning the span is genuinely
+    untagged; a reader shows 'unavailable', never 'untagged'.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -146,6 +149,7 @@ class SpanWindowItem(BaseModel):
     parent_id: str | None = None
     name: str | None = None
     tags: list[str] = Field(default_factory=list)
+    tags_available: bool = True
     input: Any = None
     output: Any = None
     metadata: dict[str, Any] | None = None

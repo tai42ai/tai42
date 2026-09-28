@@ -23,7 +23,7 @@ from tai42_kit.utils.schedule_subject import (
 )
 
 from tai42_backend_arq import tasks
-from tai42_backend_arq.settings import ArqSettings
+from tai42_backend_arq.settings import ArqSettings, TaskFailedError
 
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 _FORWARDED = {
@@ -173,18 +173,35 @@ async def test_callback_job_timeout_reports_not_finished(monkeypatch) -> None:
     assert "did not complete within 0s" in out["error"]
 
 
-async def test_callback_job_status_error_reported(monkeypatch) -> None:
+async def test_callback_job_propagates_unexpected_poll_error(monkeypatch) -> None:
+    # An unexpected polling error (a Redis fault reading the predecessor's status)
+    # is not a domain outcome: it propagates so arq marks the callback job failed.
     _bind_job(monkeypatch, _FakeJob(statuses=[ConnectionError("redis gone")], result=None))
-    out = await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
-    assert out["status"] == "error"
-    assert "redis gone" in out["error"]
+    with pytest.raises(ConnectionError, match="redis gone"):
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
 
 
-async def test_callback_job_result_failure_reported(monkeypatch) -> None:
-    _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result=ValueError("job failed")))
+async def test_callback_job_reports_failed_predecessor(monkeypatch) -> None:
+    # A failed predecessor replays out of wait_job_result as TaskFailedError, a
+    # domain outcome reported in the returned status dict.
+    _bind_job(
+        monkeypatch,
+        _FakeJob(statuses=[JobStatus.complete], result=TaskFailedError("ValueError", "ValueError('job failed')", None)),
+    )
     out = await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
     assert out["status"] == "failure"
+    assert out["job_id"] == "job-1"
     assert "job failed" in out["error"]
+
+
+async def test_callback_job_raises_when_callback_execution_fails(monkeypatch, stub_app) -> None:
+    # The predecessor succeeds, but the callback's own execution fails: that
+    # follow-up delivery failure raises into arq's failed-job machinery rather
+    # than being swallowed into a status dict.
+    _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result={"value": 3}))
+    monkeypatch.setattr(tasks, "callback_execution", AsyncMock(side_effect=RuntimeError("callback blew up")))
+    with pytest.raises(RuntimeError, match="callback blew up"):
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema(tool="next"))
 
 
 async def test_callback_job_aborted_predecessor_reported_as_failure(monkeypatch) -> None:

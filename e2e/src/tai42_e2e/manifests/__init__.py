@@ -18,6 +18,7 @@ from tai42_e2e.manifests.auth import (
 )
 from tai42_e2e.manifests.bridge import (
     BRIDGE_MAX_CONCURRENT_TURNS,
+    BRIDGE_MEDIA_INGEST_MAX_IMAGE_BYTES,
     BRIDGE_PER_ADDRESS_TURNS_PER_HOUR,
     BRIDGE_SYNC_DOOR_WAIT_SECONDS,
     BRIDGE_TWILIO_ACCOUNT_SID,
@@ -31,6 +32,13 @@ from tai42_e2e.manifests.bridge import (
     BRIDGE_WHATSAPP_PHONE_ID_C,
     BRIDGE_WHATSAPP_WABA_ID,
     build_bridge_stack,
+    build_media_bridge_no_store_stack,
+    build_media_bridge_stack,
+    build_web_media_expiry_stack,
+    build_web_media_no_store_stack,
+    build_web_media_stack,
+    build_working_signal_capped_stack,
+    build_working_signal_stack,
 )
 from tai42_e2e.manifests.channels import (
     SLACK_ALLOWED_RECIPIENTS,
@@ -123,6 +131,7 @@ from tai42_e2e.manifests.tool_entries import (
 __all__ = [
     "ATLASSIAN_CLIENT_ID",
     "BRIDGE_MAX_CONCURRENT_TURNS",
+    "BRIDGE_MEDIA_INGEST_MAX_IMAGE_BYTES",
     "BRIDGE_PER_ADDRESS_TURNS_PER_HOUR",
     "BRIDGE_SYNC_DOOR_WAIT_SECONDS",
     "BRIDGE_TWILIO_ACCOUNT_SID",
@@ -201,6 +210,8 @@ __all__ = [
     "build_marketplace_prefix_stack",
     "build_marketplace_quarantine_stack",
     "build_marketplace_stack",
+    "build_media_bridge_no_store_stack",
+    "build_media_bridge_stack",
     "build_minimal_stack",
     "build_misbehaving_mcp_stack",
     "build_monitoring_stack",
@@ -226,6 +237,11 @@ __all__ = [
     "build_stripe_stack",
     "build_studio_setup_stack",
     "build_studio_stack",
+    "build_web_media_expiry_stack",
+    "build_web_media_no_store_stack",
+    "build_web_media_stack",
+    "build_working_signal_capped_stack",
+    "build_working_signal_stack",
     "misbehaving_mcp_tool_name",
     "postgres_mcp_tool_name",
     "resilience_mcp_tool_name",

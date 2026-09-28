@@ -13,6 +13,7 @@ import {
   type TranscriptEntry,
   type TranscriptProps,
 } from '@/transcript';
+import type { MediaItem } from '@/transcript-model';
 
 afterEach(() => {
   cleanup();
@@ -34,6 +35,26 @@ function said(
     direction,
     text,
     ts: new Date(at).toISOString(),
+    media: null,
+    status: null,
+    error: null,
+    retryId: null,
+  };
+}
+
+function unavailable(key: string, at: number): TranscriptEntry {
+  return { kind: 'unavailable', key, ts: new Date(at).toISOString() };
+}
+
+/** The visitor's own message carrying attachments, on the `in` side. */
+function saidWithMedia(key: string, media: readonly MediaItem[], text = ''): TranscriptEntry {
+  return {
+    kind: 'message',
+    key,
+    direction: 'in',
+    text,
+    ts: new Date(NOW).toISOString(),
+    media,
     status: null,
     error: null,
     retryId: null,
@@ -107,6 +128,43 @@ describe('buildRows', () => {
     const entries = rows.filter((row) => row.kind === 'entry');
 
     expect(entries.map((row) => row.groupStart)).toEqual([true, true]);
+  });
+
+  it('emits the unavailable placeholder as its own stampless row, transparent to grouping', () => {
+    const rows = buildRows(
+      [said('a', NOW, 'in'), unavailable('u1', NOW), said('b', NOW, 'out')],
+      NOW,
+    );
+
+    // Its own row, in position, mirroring a day divider — never folded into an
+    // entry row and never carrying a stamp.
+    expect(rows.map((row) => row.kind)).toEqual(['day', 'entry', 'unavailable', 'entry']);
+
+    const entries = rows.filter((row) => row.kind === 'entry');
+    // The assistant reply after it groups exactly as if the placeholder were not
+    // there: the speaker changed, so it opens its own group with its own stamp.
+    expect(entries.map((row) => row.groupStart)).toEqual([true, true]);
+    expect(entries[1]?.time).not.toBeNull();
+  });
+
+  it('does not let the placeholder merge or break a same-speaker run', () => {
+    const close = buildRows(
+      [said('a', NOW - 60_000, 'in'), unavailable('u1', NOW), said('b', NOW, 'in')],
+      NOW,
+    ).filter((row) => row.kind === 'entry');
+    // Same speaker, close together: one group across the placeholder, no second
+    // stamp — the placeholder never forces a break.
+    expect(close.map((row) => row.groupStart)).toEqual([true, false]);
+    expect(close[1]?.time).toBeNull();
+
+    const apart = buildRows(
+      [said('a', NOW - GROUP_GAP_MS, 'in'), unavailable('u1', NOW), said('b', NOW, 'in')],
+      NOW,
+    ).filter((row) => row.kind === 'entry');
+    // The gap that breaks the run is measured between the two real messages, not
+    // reset by the placeholder — so the break happens only because the gap rule
+    // would break it anyway.
+    expect(apart.map((row) => row.groupStart)).toEqual([true, true]);
   });
 });
 
@@ -247,6 +305,7 @@ describe('Transcript', () => {
           direction: 'in',
           text: 'hello',
           ts: new Date(NOW).toISOString(),
+          media: null,
           status: 'failed',
           error: 'That did not send.',
           retryId: 'local-1',
@@ -319,6 +378,22 @@ describe('Transcript', () => {
     expect(onSubmitForm).toHaveBeenCalledWith('tok-1', { note: 'ship it' });
   });
 
+  it('renders an unavailable placeholder inside the log region, in order, not as a bubble', () => {
+    const unavailable: TranscriptEntry = {
+      kind: 'unavailable',
+      key: 'u1',
+      ts: new Date(NOW).toISOString(),
+    };
+    renderTranscript([said('a', NOW, 'out'), unavailable, said('b', NOW, 'in')]);
+
+    const notice = screen.getByTestId('tcw-unavailable');
+    expect(notice).toHaveTextContent('This message is unavailable.');
+    expect(notice).toHaveAttribute('role', 'note');
+    // Announced with the rest of the transcript: it sits inside the live log region.
+    expect(screen.getByRole('log')).toContainElement(notice);
+    expect(notice.querySelector('.tcw-bubble')).toBeNull();
+  });
+
   it('renders a media card chip disabled once the session is locked', () => {
     const media: TranscriptEntry = {
       kind: 'media',
@@ -340,5 +415,169 @@ describe('Transcript', () => {
     renderTranscript([media], { locked: true });
 
     expect(screen.getByRole('button', { name: 'See all' })).toBeDisabled();
+  });
+
+  it("renders a visitor's own inbound image above their bubble on the in side", () => {
+    renderTranscript([
+      saidWithMedia(
+        'a',
+        [
+          {
+            kind: 'image',
+            url: 'https://app.example/api/interactions/media/abc',
+            caption: 'a photo',
+            filename: null,
+          },
+        ],
+        'here you go',
+      ),
+    ]);
+
+    const image = screen.getByRole('img', { name: 'a photo' });
+    // The served ref reaches the src unchanged (same-origin under the page CSP).
+    expect(image).toHaveAttribute('src', 'https://app.example/api/interactions/media/abc');
+    const bubble = screen.getByText('here you go').closest('.tcw-bubble');
+    expect(bubble).not.toBeNull();
+    // The media element sits before the text bubble in the same group.
+    expect(image.compareDocumentPosition(bubble as Node)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("renders a visitor's own inbound document as a download chip with the served url", () => {
+    renderTranscript([
+      saidWithMedia('a', [
+        {
+          kind: 'document',
+          url: 'https://app.example/api/interactions/media/doc',
+          caption: null,
+          filename: 'report.pdf',
+        },
+      ]),
+    ]);
+
+    const link = screen.getByRole('link');
+    expect(link).toHaveAttribute('href', 'https://app.example/api/interactions/media/doc');
+    expect(link).toHaveAttribute('download', 'report.pdf');
+    expect(screen.getByText('report.pdf')).toBeInTheDocument();
+  });
+
+  it('renders a text-only inbound message as a bubble with no media element', () => {
+    const { container } = renderTranscript([said('a', NOW, 'in', 'just text')]);
+
+    expect(screen.getByText('just text')).toBeInTheDocument();
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.tcw-media-in')).toBeNull();
+  });
+
+  it('renders an out-direction message carrying media on the out side above its bubble', () => {
+    const { container } = renderTranscript([
+      {
+        kind: 'message',
+        key: 'a',
+        direction: 'out',
+        text: 'here you go',
+        ts: new Date(NOW).toISOString(),
+        media: [
+          {
+            kind: 'image',
+            url: 'https://app.example/api/interactions/media/abc',
+            caption: 'a photo',
+            filename: null,
+          },
+        ],
+        status: null,
+        error: null,
+        retryId: null,
+      },
+    ]);
+
+    // The media row keys its side off the message direction, so it never splits
+    // across sides from its bubble.
+    const mediaRow = container.querySelector('.tcw-media-out');
+    expect(mediaRow).not.toBeNull();
+    expect(container.querySelector('.tcw-media-in')).toBeNull();
+    expect(mediaRow?.classList.contains('tcw-row--out')).toBe(true);
+
+    const image = screen.getByRole('img', { name: 'a photo' });
+    const bubble = screen.getByText('here you go').closest('.tcw-bubble');
+    expect(bubble).not.toBeNull();
+    expect(image.compareDocumentPosition(bubble as Node)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it('keeps the bubble for a failed optimistic blank-text media send, with its error and Retry', async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    renderTranscript(
+      [
+        {
+          kind: 'message',
+          key: 'local-1',
+          direction: 'in',
+          text: '',
+          ts: new Date(NOW).toISOString(),
+          media: [
+            {
+              kind: 'image',
+              url: 'https://app.example/api/interactions/media/abc',
+              caption: 'a photo',
+              filename: null,
+            },
+          ],
+          status: 'failed',
+          error: 'That did not send.',
+          retryId: 'local-1',
+        },
+      ],
+      { onRetry },
+    );
+
+    // The media row and the bubble both render even though the text is blank —
+    // the bubble carries the failure and its Retry.
+    expect(screen.getByRole('img', { name: 'a photo' })).toBeInTheDocument();
+    expect(screen.getByText('That did not send.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledWith('local-1');
+  });
+
+  it('keeps the sending indicator on a still-sending optimistic blank-text media send', () => {
+    renderTranscript([
+      {
+        kind: 'message',
+        key: 'local-1',
+        direction: 'in',
+        text: '',
+        ts: new Date(NOW).toISOString(),
+        media: [
+          {
+            kind: 'image',
+            url: 'https://app.example/api/interactions/media/abc',
+            caption: 'a photo',
+            filename: null,
+          },
+        ],
+        status: 'sending',
+        error: null,
+        retryId: null,
+      },
+    ]);
+
+    expect(screen.getByRole('img', { name: 'a photo' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Sending')).toBeInTheDocument();
+  });
+
+  it('renders a caption-less media message as media alone, with no empty bubble', () => {
+    const { container } = renderTranscript([
+      saidWithMedia('a', [
+        {
+          kind: 'image',
+          url: 'https://app.example/api/interactions/media/abc',
+          caption: null,
+          filename: null,
+        },
+      ]),
+    ]);
+
+    expect(container.querySelector('.tcw-media-in')).not.toBeNull();
+    expect(container.querySelector('.tcw-bubble')).toBeNull();
   });
 });

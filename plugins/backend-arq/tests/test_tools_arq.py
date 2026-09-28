@@ -368,6 +368,8 @@ async def test_list_schedules(fake_redis, bind_pool) -> None:
             "target": "tool_execution",
             "args": [],
             "kwargs": {"backend_tool_name": "t"},
+            "recovery_error": None,
+            "recovery_failed_at": None,
         }
     ]
 

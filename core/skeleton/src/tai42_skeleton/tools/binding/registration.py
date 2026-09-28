@@ -126,6 +126,7 @@ class _RegistrationMixin(_BranchBindingMixin):
         # Reset so a reload cleanly re-tracks what this MCP binds now.
         self._mcp_bound_tools[config.title] = set()
         self._app._mcp_preset_conflicts[config.title] = set()
+        self._app._mcp_unusable_tools[config.title] = set()
 
         # Resolve the schema-depth bound ONCE, up front and outside the per-tool skip
         # guard below, so a malformed TAI_MCP_SCHEMA_MAX_DEPTH surfaces loudly as a
@@ -169,6 +170,9 @@ class _RegistrationMixin(_BranchBindingMixin):
                     t.name,
                     exc_info=True,
                 )
+                # Record the skip alongside the loud log so a subsequent reload result
+                # names it (``skipped_tools``); additive to the log, not a replacement.
+                self._app._mcp_unusable_tools[config.title].add(name)
                 continue
             self.bind_tool_func(owner=config.title)(adapted_tool)
 

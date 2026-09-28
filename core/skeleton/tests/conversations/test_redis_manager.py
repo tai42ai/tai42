@@ -92,10 +92,11 @@ async def test_list_routes_returns_every_row(monkeypatch):
     await manager.put_route(_api_route("a"))
     await manager.put_route(_channel_route("b"))
 
-    listed = await manager.list_routes()
+    listed, unreadable = await manager.list_routes()
     assert set(listed) == {"a", "b"}
     assert listed["a"].door == "api"
     assert listed["b"].door == "channel"
+    assert unreadable == 0
 
 
 async def test_list_routes_skips_an_indexed_but_missing_row(monkeypatch):
@@ -106,10 +107,24 @@ async def test_list_routes_skips_an_indexed_but_missing_row(monkeypatch):
     # Drop only the row key, leaving the name in the index behind.
     del fake._strings["conversations:route:orphan"]
 
-    listed = await manager.list_routes()
+    listed, unreadable = await manager.list_routes()
     assert set(listed) == {"live"}
+    assert unreadable == 1
+
+
+async def test_list_routes_skips_an_unparseable_row(monkeypatch):
+    fake = FakeRedis()
+    manager = _manager(monkeypatch, fake)
+    await manager.put_route(_api_route("live"))
+    await manager.put_route(_api_route("corrupt"))
+    # Overwrite the row with bytes that are not a valid route payload.
+    fake._strings["conversations:route:corrupt"] = "{not json"
+
+    listed, unreadable = await manager.list_routes()
+    assert set(listed) == {"live"}
+    assert unreadable == 1
 
 
 async def test_list_routes_empty_when_no_index(monkeypatch):
     manager = _manager(monkeypatch, FakeRedis())
-    assert await manager.list_routes() == {}
+    assert await manager.list_routes() == ({}, 0)

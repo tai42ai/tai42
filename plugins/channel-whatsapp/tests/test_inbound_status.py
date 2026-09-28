@@ -3,6 +3,8 @@ receipts, and benign handling of untracked ids / odd status shapes."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from tai42_contract.conversations import DeliveryReceipt
 
@@ -114,6 +116,48 @@ async def test_status_entry_missing_fields_is_skipped(handler, stub_app, caplog:
     assert result.status_code == 200
     assert stub_app.conversations.status_calls == []
     assert any("missing string id/status" in record.message for record in caplog.records)
+
+
+async def test_receipt_while_pending_delivery_is_acked_not_5xx(handler, stub_app):
+    # A status webhook whose record is still pending_delivery (the send loop published the
+    # outbound reverse index but has not reached mark_provisional): the seam PARKS the receipt
+    # and returns without raising, so the door acks 200 — never a 5xx that would have the
+    # provider redeliver. The receipt is asserted through the record: its pending_receipt is
+    # staged to the terminal target while it stays pending_delivery.
+    stub_app.conversations.records["wamid.OUT"] = SimpleNamespace(
+        delivery_status="pending_delivery", pending_receipt=None
+    )
+
+    result = await handler(signed_request(status_payload(wamid="wamid.OUT", state="delivered")))
+
+    assert result.status_code == 200
+    record = stub_app.conversations.records["wamid.OUT"]
+    assert record.delivery_status == "pending_delivery"
+    assert record.pending_receipt == "delivered"
+
+
+async def test_receipt_after_provisional_applies_terminal(handler, stub_app):
+    # The same door with a record that already reached provisional: the seam applies the
+    # terminal in place (the existing handling) and the door still acks 200.
+    stub_app.conversations.records["wamid.OUT"] = SimpleNamespace(delivery_status="provisional", pending_receipt=None)
+
+    result = await handler(signed_request(status_payload(wamid="wamid.OUT", state="delivered")))
+
+    assert result.status_code == 200
+    record = stub_app.conversations.records["wamid.OUT"]
+    assert record.delivery_status == "delivered"
+    assert record.pending_receipt is None
+
+
+async def test_receipt_conflicting_terminal_is_acked(handler, stub_app):
+    # A receipt that conflicts with an already-terminal record is a benign no-op the seam logs
+    # and returns from; the door still acks 200 and the record is left as it stands.
+    stub_app.conversations.records["wamid.OUT"] = SimpleNamespace(delivery_status="delivered", pending_receipt=None)
+
+    result = await handler(signed_request(status_payload(wamid="wamid.OUT", state="failed")))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.records["wamid.OUT"].delivery_status == "delivered"
 
 
 async def test_status_type_confused_field_is_acked_not_500(handler, stub_app, caplog: pytest.LogCaptureFixture):

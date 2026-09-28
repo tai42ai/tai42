@@ -297,9 +297,9 @@ class FakeRedis:
     """In-memory stand-in for the arq Redis handle.
 
     Supports the surface the schedule tools and ``safe_schedule_transition``
-    touch: ``scan_iter``, ``hgetall``, ``hset``, ``exists``, ``delete``,
-    ``set``, ``lock`` and ``enqueue_job``. Hash fields are stored as bytes to
-    mirror redis-py's decode-less responses.
+    touch: ``scan_iter``, ``hgetall``, ``hset``, ``hdel``, ``exists``,
+    ``delete``, ``set``, ``lock`` and ``enqueue_job``. Hash fields are stored as
+    bytes to mirror redis-py's decode-less responses.
     """
 
     def __init__(self) -> None:
@@ -329,6 +329,16 @@ class FakeRedis:
         items.update(kwargs)
         for field, value in items.items():
             bucket[self._bval(field)] = self._bval(value)
+
+    async def hdel(self, key: Any, *fields: Any) -> int:
+        bucket = self._store.get(self._skey(key))
+        if not bucket:
+            return 0
+        removed = 0
+        for field in fields:
+            if bucket.pop(self._bval(field), None) is not None:
+                removed += 1
+        return removed
 
     async def exists(self, key: Any) -> int:
         return 1 if self._skey(key) in self._store else 0

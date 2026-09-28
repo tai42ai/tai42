@@ -25,13 +25,14 @@ option). Keys, and where each is set:
   referral_body       — the referral's ``body`` when present.
   media_kind          — an inbound media message's wire type
                         (``image``/``document``/``audio``/``video``/``sticker``).
-  media_id            — the Graph media id of an inbound media object; a consumer with
-                        operator credentials fetches the bytes off the Graph media endpoint
-                        (see the INBOUND MEDIA design note in ``rich_content`` — the channel
-                        does not re-host the bytes, so the file is reached through this id).
-  media_mime_type     — the media object's ``mime_type``.
-  media_sha256        — the media object's ``sha256`` (content integrity).
-  media_filename      — an inbound document's ``filename`` (document only).
+  media_id            — the SERVED media id an inbound media object was ingested to; a consumer
+                        reads the bytes off the platform's served-media route by this id (the
+                        channel fetches, ingests, and re-hosts the bytes — see the INBOUND MEDIA
+                        note in ``rich_content``). Rides beside the typed ``attachments`` entry.
+  media_mime_type     — the ingested media's sniffed-and-agreed mime type.
+  media_sha256        — the ingested media's ``sha256`` (content integrity).
+  media_size          — the ingested media's actual byte size.
+  media_filename      — an inbound document's SANITISED filename (document only).
   media_voice         — ``"true"`` when an inbound audio is a voice note (``audio.voice``).
   sticker_animated    — ``"true"`` for an animated sticker (``sticker.animated``).
   reaction_emoji      — a reaction message's ``reaction.emoji`` (absent = a REMOVED reaction).

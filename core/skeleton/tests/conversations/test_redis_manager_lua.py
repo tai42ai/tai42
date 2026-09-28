@@ -141,6 +141,7 @@ async def test_list_reads_the_index_and_the_rows_in_lockstep(manager, lua_redis)
     await manager.put_route(_api_route("a"))
     await manager.put_route(_api_route("b"))
 
-    listed = await manager.list_routes()
+    listed, unreadable = await manager.list_routes()
     assert set(listed) == {"a", "b"}
+    assert unreadable == 0
     assert await lua_redis.smembers(_NAMES_KEY) == {"a", "b"}

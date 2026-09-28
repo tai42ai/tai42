@@ -70,9 +70,11 @@ class BaseConversationsManager(ABC):
         ...
 
     @abstractmethod
-    async def list_routes(self) -> dict[str, ConversationRoute]:
-        """Every stored routing row keyed by route name.
+    async def list_routes(self) -> tuple[dict[str, ConversationRoute], int]:
+        """Every stored routing row keyed by route name, with a count of unreadable ones.
 
-        Each ``callback_secret`` is included, for internal consumers.
+        Each ``callback_secret`` is included, for internal consumers. The second element counts
+        the indexed names whose row was gone or unparseable, so a shorter map is a truthful
+        count and never a silent cut.
         """
         ...

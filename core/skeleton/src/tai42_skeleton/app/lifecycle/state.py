@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from tai42_contract.manifest import TaiMCPConfig
 
-from tai42_skeleton.app.bus import WorkerBus
+from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.mount_map import MountBinding
 
 if TYPE_CHECKING:
@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from tai42_contract.config.manager import ConfigManager
 
     from tai42_skeleton.agent.binding import AgentBinding
-    from tai42_skeleton.app.bus import WorkerKind
     from tai42_skeleton.app.clients import ClientsFacet
     from tai42_skeleton.app.http import HttpSurface
     from tai42_skeleton.app.server import ServingCore
@@ -111,6 +110,19 @@ class LifecycleState(ABC):
         # onto it.
         self._serving_loop: asyncio.AbstractEventLoop | None = None
 
+        # This process's worker kind, captured by ``app_context`` before the
+        # perpetual tasks spawn so their shared done-callback can request the
+        # right graceful-exit primitive. Defaults to ``serve`` so it is always
+        # defined even before ``app_context`` runs.
+        self._worker_kind: WorkerKind = WorkerKind.serve
+        # Set once a perpetual task dies (an exception OR an unexpected clean
+        # return — cancellation at shutdown is not death): ``(task name, reason)``
+        # where the reason is the exception TYPE name or the literal ``"returned"``.
+        # ``/ready`` reads it through :meth:`dead_perpetual_task` and 503s naming
+        # the task; the done-callback that sets it also requests this process's
+        # graceful exit.
+        self._dead_perpetual_task: tuple[str, str] | None = None
+
         # Handlers fired with the OP NAME after every applied bus op AND after the
         # reconnect self-resync reload. Keyed by qualified name so a module re-import
         # replaces rather than accumulates (mirrors the startup/reload registries). A
@@ -134,9 +146,23 @@ class LifecycleState(ABC):
         # a fixed cadence; runs until cancelled at shutdown.
         self._sandbox_reaper_task: asyncio.Task[None] | None = None
 
+        # The inbound-media retention reaper loop, owned by app_context: the sole deleter
+        # of an ingested blob and its metadata past their horizon (an abandoned pending
+        # upload, an expired bound record). A no-op each pass absent a store/provider;
+        # runs until cancelled at shutdown.
+        self._media_reaper_task: asyncio.Task[None] | None = None
+
         # The module → mount-binding map for the CURRENT registration pass, rebuilt at
         # the top of ``_initialize_components`` before any manifest module imports.
         self._mount_map: dict[str, MountBinding] = {}
+
+    def dead_perpetual_task(self) -> tuple[str, str] | None:
+        """The ``(task name, reason)`` of a perpetual task that died, or ``None``.
+
+        ``/ready`` reads it here rather than the private attribute so a dead
+        perpetual task surfaces as a named readiness failure.
+        """
+        return self._dead_perpetual_task
 
     @abstractmethod
     def _mcp_tools(self, config: TaiMCPConfig, tools):
@@ -152,9 +178,8 @@ class LifecycleState(ABC):
         def _epoch_handlers(self) -> list[Callable]: ...
         def _refresh_manifest_mcp(self) -> None: ...
         def _require_live_manifest(self) -> "Manifest": ...
-        @classmethod
-        def _on_perpetual_task_done(cls, task: asyncio.Task[Any]) -> None: ...
-        def _build_bus(self, kind: "WorkerKind") -> WorkerBus: ...
+        def _on_perpetual_task_done(self, task: asyncio.Task[Any]) -> None: ...
+        def _build_bus(self, kind: WorkerKind) -> WorkerBus: ...
         def _spawn_bus_subscription(self) -> None: ...
         async def _cancel_bus_subscription(self) -> None: ...
         def start(self, manifest: "Manifest"):
@@ -192,6 +217,7 @@ class LifecycleState(ABC):
     _failed_mcps: dict[str, dict[str, Any]]
     _mcp_bound_tools: dict[str, set[str]]
     _mcp_preset_conflicts: dict[str, set[str]]
+    _mcp_unusable_tools: dict[str, set[str]]
     _resource_manager_cache: "ResourceManager | None"
     _fast_mcp: "FastMCP"
     _session_registry: "SessionRegistry"

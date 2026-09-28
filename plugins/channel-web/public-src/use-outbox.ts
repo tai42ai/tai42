@@ -12,9 +12,9 @@
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { isSessionMissing, sendMessage } from '@/api';
+import { isAttachmentGone, isSessionMissing, sendMessage } from '@/api';
 import type { SendStatus } from '@/bubble';
-import type { ChatItem } from '@/transcript-model';
+import type { ChatItem, MediaItem } from '@/transcript-model';
 
 /** One message this page sent, held until its transcript frame comes back. */
 export interface OutboxItem {
@@ -32,6 +32,13 @@ export interface OutboxItem {
    * one. It rides the send (and every retry of it) as `params.reply_id`; `null` on a
    * typed message or a chip without an id. */
   readonly replyId: string | null;
+  /** The seam media ids the visitor attached, sent on the wire as `attachment_ids`
+   * and re-sent by every retry. Empty on a text-only send. */
+  readonly attachmentIds: readonly string[];
+  /** The attachments' client-built preview items, shown on the optimistic bubble
+   * until the door's own frame carrying the served refs retires it. `null` when the
+   * send carries no attachment. */
+  readonly media: readonly MediaItem[] | null;
 }
 
 /**
@@ -87,15 +94,26 @@ export interface Outbox {
   /** Bumped on every send: the transcript takes it as "return to the tail". */
   readonly pinToken: number;
   /** The one send door. Reports whether a message actually went out, which is what
-   * lets the composer clear its own draft. */
-  readonly send: (raw: string, replyId?: string | null) => boolean;
+   * lets the composer clear its own draft and tray. A send goes out when its text is
+   * non-blank OR it carries at least one attachment. */
+  readonly send: (
+    raw: string,
+    replyId?: string | null,
+    attachmentIds?: readonly string[],
+    media?: readonly MediaItem[] | null,
+  ) => boolean;
   readonly onRetry: (localId: string) => void;
   /** Drop every optimistic bubble (a new conversation). */
   readonly clear: () => void;
 }
 
 /** A fresh optimistic bubble for a just-composed message, its ids minted once. */
-function createOutboxItem(text: string, replyId: string | null): OutboxItem {
+function createOutboxItem(
+  text: string,
+  replyId: string | null,
+  attachmentIds: readonly string[],
+  media: readonly MediaItem[] | null,
+): OutboxItem {
   return {
     localId: nextLocalId(),
     text,
@@ -105,6 +123,8 @@ function createOutboxItem(text: string, replyId: string | null): OutboxItem {
     messageId: null,
     clientMessageId: nextClientMessageId(),
     replyId,
+    attachmentIds,
+    media,
   };
 }
 
@@ -115,6 +135,16 @@ function withStatus(
   patch: Partial<OutboxItem>,
 ): readonly OutboxItem[] {
   return items.map((item) => (item.localId === localId ? { ...item, ...patch } : item));
+}
+
+/** The patch a refused send settles to: `rejected` when an attachment can no longer
+ * be bound — every re-send of the same ids is refused again, so no Retry is offered —
+ * else `failed`, which a retry may still land; both wear the visitor-facing reason. */
+function failurePatch(err: unknown): Pick<OutboxItem, 'status' | 'error'> {
+  return {
+    status: isAttachmentGone(err) ? 'rejected' : 'failed',
+    error: err instanceof Error ? err.message : String(err),
+  };
 }
 
 /**
@@ -142,11 +172,17 @@ function useOutboxActions(params: {
   const { outbox, setOutbox, setPinToken } = params;
 
   const deliver = useCallback(
-    (localId: string, text: string, clientMessageId: string, replyId: string | null) => {
+    (
+      localId: string,
+      text: string,
+      clientMessageId: string,
+      replyId: string | null,
+      attachmentIds: readonly string[],
+    ) => {
       // A message the visitor just sent always returns them to the tail.
       setPinToken((current) => current + 1);
       const generation = generationRef.current;
-      sendMessage(identity, text, clientMessageId, replyId).then(
+      sendMessage(identity, text, clientMessageId, replyId, attachmentIds).then(
         (messageId) => {
           if (generationRef.current !== generation) return;
           setOutbox((prev) =>
@@ -156,8 +192,7 @@ function useOutboxActions(params: {
         },
         (err: unknown) => {
           if (generationRef.current !== generation) return;
-          const message = err instanceof Error ? err.message : String(err);
-          setOutbox((prev) => withStatus(prev, localId, { status: 'failed', error: message }));
+          setOutbox((prev) => withStatus(prev, localId, failurePatch(err)));
           clearTyping();
           if (isSessionMissing(err)) onSessionEnded();
         },
@@ -175,13 +210,20 @@ function useOutboxActions(params: {
   );
 
   const send = useCallback(
-    (raw: string, replyId: string | null = null): boolean => {
+    (
+      raw: string,
+      replyId: string | null = null,
+      attachmentIds: readonly string[] = [],
+      media: readonly MediaItem[] | null = null,
+    ): boolean => {
       const text = raw.trim();
-      if (text === '' || ended) return false;
-      const item = createOutboxItem(text, replyId);
+      // The attachment IS content, so a caption-less message with one still sends;
+      // only a blank message with nothing attached is refused here.
+      if ((text === '' && attachmentIds.length === 0) || ended) return false;
+      const item = createOutboxItem(text, replyId, attachmentIds, media);
       setOutbox((prev) => [...prev, item]);
       composerRef.current?.focus();
-      deliver(item.localId, item.text, item.clientMessageId, item.replyId);
+      deliver(item.localId, item.text, item.clientMessageId, item.replyId, item.attachmentIds);
       return true;
     },
     [ended, deliver, composerRef, setOutbox],
@@ -195,7 +237,7 @@ function useOutboxActions(params: {
       // recognise a retry of a delivery it already accepted. The tapped reply id (if
       // any) rides the retry too, so a re-sent chip carries the same enrichment.
       setOutbox((prev) => withStatus(prev, localId, { status: 'sending', error: null }));
-      deliver(localId, item.text, item.clientMessageId, item.replyId);
+      deliver(localId, item.text, item.clientMessageId, item.replyId, item.attachmentIds);
     },
     [outbox, ended, deliver, setOutbox],
   );

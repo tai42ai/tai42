@@ -144,9 +144,18 @@ class _StubConversations:
     def __init__(self) -> None:
         self.accept_calls: list[dict[str, Any]] = []
         self.status_calls: list[dict[str, Any]] = []
+        self.rejected_calls: list[dict[str, Any]] = []
         self.accept_result: str = "msg-stub-id"
         self.accept_error: Exception | None = None
         self.status_error: Exception | None = None
+        # Records a receipt-race test seeds, keyed by the outbound ``wamid``. Each is a
+        # ``SimpleNamespace(delivery_status, pending_receipt)`` and ``record_delivery_status``
+        # applies the skeleton receipt seam's contract against it: a receipt on a
+        # ``pending_delivery`` record is PARKED (staged on ``pending_receipt``, acked, never
+        # raised), one on a ``provisional`` record applies the terminal, one on an
+        # already-terminal record is a benign acked no-op — so a door test asserts the parked
+        # receipt through the record the door never touches directly.
+        self.records: dict[str, SimpleNamespace] = {}
 
     async def accept(
         self,
@@ -179,10 +188,72 @@ class _StubConversations:
             raise self.accept_error
         return self.accept_result
 
+    async def notify_inbound_rejected(
+        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+    ) -> None:
+        self.rejected_calls.append(
+            {
+                "channel_id": channel_id,
+                "recipient": recipient,
+                "sender_identity": sender_identity,
+                "kind": kind,
+                "reason": reason,
+            }
+        )
+
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
         self.status_calls.append({"channel": channel, "provider_message_id": provider_message_id, "status": status})
         if self.status_error is not None:
             raise self.status_error
+        record = self.records.get(provider_message_id)
+        if record is None:
+            return
+        target = status.value
+        if record.delivery_status == "pending_delivery":
+            record.pending_receipt = target
+        elif record.delivery_status == "provisional":
+            record.delivery_status = target
+            record.pending_receipt = None
+
+
+class _StubMedia:
+    """Stands in for the skeleton's ``app.media`` served-media ingestion facet.
+
+    The plugin's test venv cannot import the skeleton, so the ingest chokepoint is faked at this
+    contract seam. A test sets ``ingest_result`` (an :class:`IngestedMedia`) or ``ingest_error``
+    (a ``MediaIngestError`` subclass to raise) and reads back the recorded ``ingest_calls`` —
+    including the ``source`` byte stream — to assert what the channel handed the seam."""
+
+    def __init__(self) -> None:
+        self.ingest_calls: list[dict[str, Any]] = []
+        self.ingest_result: Any = None
+        self.ingest_error: Exception | None = None
+
+    async def ingest_media(
+        self,
+        *,
+        source: Any,
+        kind_hint: Any,
+        declared_mime: str | None,
+        filename: str | None,
+        declared_size: int | None,
+        integrity_sha256: str | None,
+        origin: Any,
+    ) -> Any:
+        self.ingest_calls.append(
+            {
+                "source": source,
+                "kind_hint": kind_hint,
+                "declared_mime": declared_mime,
+                "filename": filename,
+                "declared_size": declared_size,
+                "integrity_sha256": integrity_sha256,
+                "origin": origin,
+            }
+        )
+        if self.ingest_error is not None:
+            raise self.ingest_error
+        return self.ingest_result
 
 
 class _StubApp:
@@ -191,6 +262,7 @@ class _StubApp:
         self.clients = _StubClients()
         self.http = _StubHttp()
         self.conversations = _StubConversations()
+        self.media = _StubMedia()
 
 
 _stub_app = _StubApp()
@@ -211,10 +283,25 @@ class FakeHttpx:
         self.calls: list[dict[str, Any]] = []
         self.typing_calls: list[dict[str, Any]] = []
         self.responses: list[httpx.Response | Exception] = []
+        # The inbound media-metadata lookup (``client.fetch_media_metadata``) is a GET; its
+        # calls and queued responses ride their own channels so they never disturb the
+        # message-send POST queue under test.
+        self.get_calls: list[dict[str, Any]] = []
+        self.get_responses: list[httpx.Response | Exception] = []
         # Override to exercise the typing-signal failure law (e.g. a 5xx that
         # `_send` classifies into ChannelDeliveryError, or a raised transport error).
         self.typing_response: httpx.Response | Exception | None = None
         self.events = events if events is not None else []
+
+    async def get(self, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+        self.events.append(("http_get", url))
+        self.get_calls.append({"url": url, "headers": headers})
+        if not self.get_responses:
+            raise AssertionError("FakeHttpx: no queued response for get")
+        item = self.get_responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     async def post(
         self,
@@ -290,6 +377,7 @@ def stub_app() -> Iterator[_StubApp]:
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
+    _stub_app.media = _StubMedia()
     _reset_channels(channels)
 
 

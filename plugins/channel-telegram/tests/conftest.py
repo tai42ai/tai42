@@ -143,6 +143,7 @@ class _StubConversations:
         self.accept_result = "msg-0001"
         self.accept_error: BaseException | None = None
         self.status_calls: list[SimpleNamespace] = []
+        self.rejected_calls: list[SimpleNamespace] = []
 
     async def accept(
         self,
@@ -153,6 +154,7 @@ class _StubConversations:
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        attachments: Any = None,
         locale: str | None = None,
     ) -> str:
         self.accept_calls.append(
@@ -164,6 +166,7 @@ class _StubConversations:
                 text=text,
                 provider_message_id=provider_message_id,
                 params=params,
+                attachments=attachments,
                 locale=locale,
             )
         )
@@ -176,6 +179,57 @@ class _StubConversations:
             SimpleNamespace(channel=channel, provider_message_id=provider_message_id, status=status)
         )
 
+    async def notify_inbound_rejected(
+        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+    ) -> None:
+        self.rejected_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id,
+                recipient=recipient,
+                sender_identity=sender_identity,
+                kind=kind,
+                reason=reason,
+            )
+        )
+
+
+class _StubMedia:
+    """Stands in for the skeleton's ``app.media`` seam (the plugin's test venv cannot import
+    the skeleton). ``ingest_media`` drains the streamed ``source`` (so a torn body surfaces),
+    records the call, then returns a test-set :class:`IngestedMedia` or raises a test-set error."""
+
+    def __init__(self) -> None:
+        self.ingest_calls: list[SimpleNamespace] = []
+        self.ingest_result: Any = None
+        self.ingest_error: BaseException | None = None
+
+    async def ingest_media(
+        self,
+        *,
+        source: Any,
+        kind_hint: Any,
+        declared_mime: str | None,
+        filename: str | None,
+        declared_size: int | None,
+        integrity_sha256: str | None,
+        origin: Any,
+    ) -> Any:
+        chunks = [chunk async for chunk in source]
+        self.ingest_calls.append(
+            SimpleNamespace(
+                chunks=chunks,
+                kind_hint=kind_hint,
+                declared_mime=declared_mime,
+                filename=filename,
+                declared_size=declared_size,
+                integrity_sha256=integrity_sha256,
+                origin=origin,
+            )
+        )
+        if self.ingest_error is not None:
+            raise self.ingest_error
+        return self.ingest_result
+
 
 class _StubApp:
     def __init__(self) -> None:
@@ -184,6 +238,7 @@ class _StubApp:
         self.lifecycle = _StubLifecycle()
         self.clients = _StubClients()
         self.conversations = _StubConversations()
+        self.media = _StubMedia()
 
 
 _stub_app = _StubApp()
@@ -228,18 +283,27 @@ def _reset_conversations() -> Any:
     conv = _stub_app.conversations
     conv.accept_calls.clear()
     conv.status_calls.clear()
+    conv.rejected_calls.clear()
     conv.accept_result = "msg-0001"
     conv.accept_error = None
     channels = _stub_app.channels
     channels.inbound_calls.clear()
     channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
     channels.inbound_error = None
+    media = _stub_app.media
+    media.ingest_calls.clear()
+    media.ingest_result = None
+    media.ingest_error = None
     yield
     conv.accept_calls.clear()
     conv.status_calls.clear()
+    conv.rejected_calls.clear()
     conv.accept_error = None
     channels.inbound_calls.clear()
     channels.inbound_error = None
+    media.ingest_calls.clear()
+    media.ingest_result = None
+    media.ingest_error = None
 
 
 @pytest.fixture
@@ -250,6 +314,11 @@ def conversations() -> _StubConversations:
 @pytest.fixture
 def channels() -> _StubChannels:
     return _stub_app.channels
+
+
+@pytest.fixture
+def media() -> _StubMedia:
+    return _stub_app.media
 
 
 @pytest.fixture

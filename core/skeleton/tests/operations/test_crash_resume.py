@@ -10,13 +10,16 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from tai42_contract.states import StateContext, SubjectCandidates
 
 import tai42_skeleton.operations.tool_runs as ops
 from tai42_skeleton.operations.tool_runs import ToolRunStore, _reconcile_lost_with_liveness
+from tai42_skeleton.operations.tool_runs import reconcile as reconcile_mod
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
+from tai42_skeleton.tools.binding.errors import UnknownToolError
 
 from .._fakes.tool_runs_redis import FakeRedis
 
@@ -146,6 +149,26 @@ async def test_reconcile_does_not_redispatch_an_unflagged_lost_run(wired, monkey
     # Today's quiet lost EXACTLY — no re-dispatch.
     assert result["status"] == "lost"
     assert spawned == []
+
+
+async def test_reconcile_transient_meta_read_raises(monkeypatch) -> None:
+    # A transient/store failure reading the tool's registration meta is NOT the
+    # absent-tool case: it propagates, so a flagged run is never silently un-flagged.
+    async def _boom(name):
+        raise RuntimeError("meta store unavailable")
+
+    monkeypatch.setattr(reconcile_mod, "tai42_app", SimpleNamespace(tools=SimpleNamespace(get_tool=_boom)))
+    with pytest.raises(RuntimeError, match="meta store unavailable"):
+        await reconcile_mod._tool_declares_crash_resume("alpha")
+
+
+async def test_reconcile_unregistered_tool_unflagged(monkeypatch) -> None:
+    # An unregistered name is the sole swallowed case → un-flagged (False).
+    async def _unknown(name):
+        raise UnknownToolError(name)
+
+    monkeypatch.setattr(reconcile_mod, "tai42_app", SimpleNamespace(tools=SimpleNamespace(get_tool=_unknown)))
+    assert await reconcile_mod._tool_declares_crash_resume("ghost") is False
 
 
 async def test_reconcile_leaves_a_live_run_untouched(wired, monkeypatch) -> None:

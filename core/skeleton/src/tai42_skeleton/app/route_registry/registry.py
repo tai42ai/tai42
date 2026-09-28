@@ -146,12 +146,16 @@ class RouteRegistry:
             error_statuses: tuple[int, ...] = ()
             success_status = 200
             additional_success_statuses: tuple[int, ...] = ()
+            max_body_bytes: int | None = None
+            rate_limit_family: str | None = None
         else:
             reload_gated = declared.reload_gated
             reads_body = declared.reads_body
             error_statuses = declared.error_statuses
             success_status = declared.success_status
             additional_success_statuses = declared.additional_success_statuses
+            max_body_bytes = declared.max_body_bytes
+            rate_limit_family = declared.rate_limit_family
         meta = RouteMetadata(
             path=path,
             methods=method_key,
@@ -175,6 +179,8 @@ class RouteRegistry:
             public=public,
             no_body_reason=no_body_reason,
             enveloped=enveloped,
+            max_body_bytes=max_body_bytes,
+            rate_limit_family=rate_limit_family,
         )
         self._record_shape(meta, method_key)
         self._routes[path, method_key] = meta

@@ -29,6 +29,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import inbound as inbound_module
 from tai42_skeleton.channels.inbound import (
     ANSWER_REJECTED_EVENT_TOPIC,
+    INBOUND_UNROUTED_EVENT_TOPIC,
     AnswerForwardError,
     InboundAnswerOutcome,
     InboundBridge,
@@ -594,6 +595,31 @@ async def test_404_bridge_tolerates_blank_or_unrouted_reply(wired, monkeypatch, 
 
     assert result.outcome is InboundAnswerOutcome.BRIDGED  # handled, not rethrown
     assert store.released == ["k"]
+
+
+async def test_unrouted_reply_emits_platform_event(wired, monkeypatch):
+    # A reply whose address has no bound route: _bridge catches LookupError, emits the
+    # distinct unrouted platform event naming the channel + address, and still acks
+    # (BRIDGED, never a re-raise that would provoke a provider retry-storm).
+    async def _raising_accept(*args, **kwargs):
+        raise LookupError("no route")
+
+    monkeypatch.setattr(app, "_conversation_accept", _raising_accept)
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(404))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="x", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.BRIDGED  # still acked, no re-raise
+    unrouted = [e for e in wired.events if e.topic == INBOUND_UNROUTED_EVENT_TOPIC]
+    assert len(unrouted) == 1
+    assert unrouted[0].payload == {
+        "channel": "fakechan",
+        "client_address": "+15550001111",
+        "reason": "no_route",
+    }
 
 
 # -- security carry-in (b): rejection-reason truncation --------------------------

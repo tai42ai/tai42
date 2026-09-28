@@ -4,12 +4,14 @@ max-entries trim, the one-pipeline write, and the backlog/tail replay reads."""
 from __future__ import annotations
 
 import json
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 
 from tai42_channel_web.store import connection
 from tai42_channel_web.store.transcript import (
+    UNAVAILABLE_EVENT,
+    _unavailable_frame,
     append_answered,
     append_media,
     append_message,
@@ -32,6 +34,14 @@ def _entries(fake: FakeRedis) -> list[tuple[str, dict[str, str]]]:
 
 def _data(entry: tuple[str, dict[str, str]]) -> dict:
     return json.loads(entry[1]["data"])
+
+
+def _frame_event(frame: str) -> str:
+    return frame.split("\n", 1)[0].removeprefix("event: ")
+
+
+def _frame_data(frame: str) -> dict:
+    return json.loads(frame.split("data: ", 1)[1].split("\n\n", 1)[0])
 
 
 async def test_append_message_writes_frame_and_refreshes_ttl(fake_redis: FakeRedis):
@@ -239,6 +249,23 @@ async def test_append_message_carries_no_key_when_the_sender_sent_none(fake_redi
     assert "client_message_id" not in _data(_entries(fake_redis)[0])
 
 
+async def test_append_message_carries_the_visitor_media_when_present(fake_redis: FakeRedis):
+    # The visitor's own attached items ride their frame, so a returning visitor replays
+    # their attachment exactly as any other frame.
+    media = [{"kind": "image", "url": "/api/interactions/media/" + "a" * 43}]
+    await append_message(IDENTITY, VISITOR_ID, "in", "", entry_id="turn-1", media=media)
+    payload = _data(_entries(fake_redis)[0])
+    assert payload["media"] == media
+    # A caption-less send keeps its raw (blank) text — the page renders a media-only bubble.
+    assert payload["text"] == ""
+
+
+async def test_append_message_omits_media_when_absent(fake_redis: FakeRedis):
+    # A text-only message carries no media key, so a reader tells absent from empty.
+    await append_message(IDENTITY, VISITOR_ID, "in", "hi")
+    assert "media" not in _data(_entries(fake_redis)[0])
+
+
 async def test_capture_cursor_empty_stream_is_zero(fake_redis: FakeRedis):
     async with connection.pooled_redis_ctx() as redis:
         assert await capture_cursor(redis, IDENTITY, VISITOR_ID) == "0-0"
@@ -251,18 +278,36 @@ async def test_capture_cursor_is_latest_entry(fake_redis: FakeRedis):
         assert await capture_cursor(redis, IDENTITY, VISITOR_ID) == latest[1]
 
 
-async def test_read_backlog_returns_frames_and_skips_malformed(fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture):
+def test_unavailable_frame_carries_the_entry_id_and_its_ordering_ts():
+    # The ts is the entry's own ordering timestamp, read off the stream id's ms
+    # component, so the placeholder sits where the lost message was.
+    frame = _unavailable_frame("1712500000000-0")
+    assert _frame_event(frame) == UNAVAILABLE_EVENT
+    payload = _frame_data(frame)
+    assert payload["id"] == "1712500000000-0"
+    assert payload["ts"] == datetime.fromtimestamp(1712500000000 / 1000, UTC).isoformat()
+
+
+async def test_read_backlog_emits_a_placeholder_for_a_malformed_entry(
+    fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
     await append_message(IDENTITY, VISITOR_ID, "in", "one")
-    # A malformed entry (missing event/data) is skipped, never fatal — and the skip is
-    # visible at WARNING, like every other recovered-from corruption in this store.
+    # A malformed entry (missing event/data) becomes a dedicated placeholder frame,
+    # never fatal and never a silent gap — and the recovery is still visible at WARNING,
+    # like every other recovered-from corruption in this store.
     fake_redis.streams[_TRANSCRIPT_KEY].append(("999-0", {"garbage": "x"}))
     with caplog.at_level("WARNING"):
         async with connection.pooled_redis_ctx() as redis:
             start, frames = await read_backlog_batch(redis, IDENTITY, VISITOR_ID, "-", "+", 100)
     assert start is None
-    assert len(frames) == 1
+    # The good entry still renders, in order, followed by the placeholder in the gap.
+    assert len(frames) == 2
     assert frames[0].startswith("event: chat.message\ndata: ")
-    assert any("malformed" in r.message for r in caplog.records)
+    assert _frame_event(frames[1]) == UNAVAILABLE_EVENT
+    placeholder = _frame_data(frames[1])
+    assert placeholder["id"] == "999-0"
+    assert datetime.fromisoformat(placeholder["ts"])  # a parseable ordering timestamp
+    assert any("malformed" in r.message and "999-0" in r.message for r in caplog.records)
 
 
 async def test_read_backlog_pages_the_transcript_by_count(fake_redis: FakeRedis):
@@ -284,11 +329,12 @@ async def test_read_backlog_pages_the_transcript_by_count(fake_redis: FakeRedis)
     assert [f'"text": "m{i}"' in frame for i, frame in enumerate(seen)] == [True] * 5
 
 
-async def test_read_backlog_skips_a_malformed_entry_in_a_later_page(
+async def test_read_backlog_places_a_placeholder_for_a_malformed_entry_in_a_later_page(
     fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
 ):
-    # The skip must survive paging: a corrupt entry past the first page is dropped
-    # exactly like one in it, and the page after it still starts in the right place.
+    # The placeholder must survive paging: a corrupt entry past the first page becomes a
+    # placeholder exactly like one in it, in its own position, and the page after it
+    # still starts in the right place.
     for i in range(3):
         await append_message(IDENTITY, VISITOR_ID, "in", f"m{i}")
     fake_redis.streams[_TRANSCRIPT_KEY].insert(2, ("2-5", {"garbage": "x"}))
@@ -301,8 +347,15 @@ async def test_read_backlog_skips_a_malformed_entry_in_a_later_page(
                 start, frames = await read_backlog_batch(redis, IDENTITY, VISITOR_ID, start, "+", 2)
                 seen += frames
 
-    assert len(seen) == 3
-    assert '"text": "m2"' in seen[2]
+    assert len(seen) == 4
+    assert [_frame_event(f) for f in seen] == [
+        "chat.message",
+        "chat.message",
+        UNAVAILABLE_EVENT,
+        "chat.message",
+    ]
+    assert _frame_data(seen[2])["id"] == "2-5"
+    assert '"text": "m2"' in seen[3]
     assert any("malformed" in r.message and "2-5" in r.message for r in caplog.records)
 
 
@@ -332,11 +385,17 @@ async def test_read_tail_advances_cursor_and_returns_new_frames(fake_redis: Fake
     assert new_cursor != cursor
 
 
-async def test_read_tail_skips_malformed(fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture):
+async def test_read_tail_emits_a_placeholder_for_a_malformed_entry(
+    fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
     fake_redis.streams[_TRANSCRIPT_KEY] = [("1-0", {"garbage": "x"})]
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("WARNING"):
         async with connection.pooled_redis_ctx() as redis:
             new_cursor, frames = await read_tail(redis, IDENTITY, VISITOR_ID, "0-0", 1)
-    assert frames == []
+    assert len(frames) == 1
+    assert _frame_event(frames[0]) == UNAVAILABLE_EVENT
+    placeholder = _frame_data(frames[0])
+    assert placeholder["id"] == "1-0"
+    assert datetime.fromisoformat(placeholder["ts"])  # a parseable ordering timestamp
     assert new_cursor == "1-0"
     assert any("malformed" in r.message for r in caplog.records)

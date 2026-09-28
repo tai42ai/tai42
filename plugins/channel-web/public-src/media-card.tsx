@@ -144,14 +144,12 @@ function MediaElement({ element }: { readonly element: MediaItem }): ReactElemen
  * link opens in a new tab as the fallback. */
 function DocumentCard({ element }: { readonly element: MediaItem }): ReactElement {
   const name = element.filename ?? element.caption ?? element.url;
-  return (
-    <a
-      className="tcw-doc-card"
-      href={element.url}
-      target="_blank"
-      rel="noreferrer noopener"
-      download={element.filename ?? undefined}
-    >
+  // An empty url is a preview of a file not yet served (the visitor's own bubble
+  // before its durable frame lands): there is nothing to open yet, so the card is a
+  // plain chip rather than a link that would open the page itself.
+  const pending = element.url === '';
+  const body = (
+    <>
       <span className="tcw-doc-icon" aria-hidden="true">
         <ExternalLinkIcon />
       </span>
@@ -160,8 +158,20 @@ function DocumentCard({ element }: { readonly element: MediaItem }): ReactElemen
         {element.caption !== null && element.caption !== name ? (
           <span className="tcw-doc-caption">{element.caption}</span>
         ) : null}
-        <span className="tcw-doc-hint">Download</span>
+        {pending ? null : <span className="tcw-doc-hint">Download</span>}
       </span>
+    </>
+  );
+  if (pending) return <span className="tcw-doc-card tcw-doc-card--pending">{body}</span>;
+  return (
+    <a
+      className="tcw-doc-card"
+      href={element.url}
+      target="_blank"
+      rel="noreferrer noopener"
+      download={element.filename ?? undefined}
+    >
+      {body}
     </a>
   );
 }

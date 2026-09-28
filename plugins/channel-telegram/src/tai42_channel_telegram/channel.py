@@ -88,7 +88,7 @@ from tai42_contract.channels import (
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 from tai42_kit.settings import require, require_secret
 
-from tai42_channel_telegram.client import call_method
+from tai42_channel_telegram.client import call_method, send_chat_action
 from tai42_channel_telegram.correlation import (
     StoredOption,
     scoped_correlation_key,
@@ -414,6 +414,10 @@ class TelegramChannel:
     # A ``form`` ticket is delivered as a web_app button opening the
     # schema-rendered callback page in an in-chat webview (see ``deliver``).
     supports_form_delivery: ClassVar[bool] = True
+    # A Bot API chat action lasts about 5 s before Telegram clears it
+    # (https://core.telegram.org/bots/api#sendchataction), so the working-on-it
+    # refresh loop re-sends the typing action under this lifetime.
+    working_signal_expiry_seconds: ClassVar[float] = 5.0
     # NOTE: ``supports_template_notifications`` and ``supports_form_notifications`` are
     # deliberately ABSENT (= False): Telegram has no vendor-template concept, and an ask-less
     # form notification has no callback sink for an in-chat webview to POST to. notify_user
@@ -573,6 +577,26 @@ class TelegramChannel:
                 raise ChannelDeliveryError(f"telegram multi-part send failed after delivering {sent}: {exc}") from exc
             sent.append(str(_result_message_id(location_data, "notification location")))
         return sent
+
+    async def signal_working(
+        self,
+        *,
+        recipient: str,
+        sender_identity: str | None = None,
+        provider_message_id: str | None = None,
+        active: bool = True,
+    ) -> None:
+        """Show ``recipient`` a "working on it" typing action; refreshed by the skeleton loop.
+
+        ``active=True`` sends one ``sendChatAction`` typing to the chat; ``active=False`` is a
+        documented no-op — the Bot API has no stop call and the action self-expires (~5 s). The
+        chat is ``recipient`` (the numeric chat id the conversation record stores); a non-integer
+        ``recipient`` is a caller error and lets ``int()`` raise. A send failure raises
+        :class:`~tai42_contract.channels.ChannelDeliveryError`, which the loop logs and counts.
+        """
+        if not active:
+            return
+        await send_chat_action(int(recipient), "typing")
 
     @staticmethod
     def _plain_body(notification: ChannelNotification) -> str:

@@ -17,8 +17,9 @@ import logging
 import pytest
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
 from tai42_skeleton.operations import _broadcast
-from tai42_skeleton.operations._broadcast import broadcast
+from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 
 from .._fakes.bus import FakeBus
 
@@ -103,3 +104,31 @@ async def test_op_start_census_failure_is_loud_but_never_aborts_the_op(
     assert len(warnings) == 1
     assert warnings[0].exc_info is not None
     assert "op-start census" in warnings[0].getMessage()
+
+
+async def test_fanout_body_carries_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every serialized fanout body carries convergence: the ``ok`` computed field
+    # rides through the ``fleet`` and ``unreachable`` branches; the ``local-only``
+    # branch reports a single worker applying and carries no fleet dump, so no ``ok``.
+    _install(monkeypatch, FakeBus(origin="serve-a", remotes=["serve-b"]))
+
+    partial = FleetResult(
+        op="reload",
+        results=[
+            WorkerResult(name="serve-a", outcome=OpOutcome.applied),
+            WorkerResult(name="serve-b", outcome=OpOutcome.failed, error="boom"),
+        ],
+    )
+    fleet_body = fleet_fanout(partial)
+    assert fleet_body["mode"] == "fleet"
+    assert fleet_body["ok"] is False
+
+    unreachable = FleetResult(op="reload", reachable=False, error="bus down")
+    unreachable_body = fleet_fanout(unreachable)
+    assert unreachable_body["mode"] == "unreachable"
+    assert unreachable_body["ok"] is False
+
+    local = FleetResult(op="reload", results=[WorkerResult(name="serve-a", outcome=OpOutcome.applied)])
+    local_body = fleet_fanout(local)
+    assert local_body["mode"] == "local-only"
+    assert "ok" not in local_body

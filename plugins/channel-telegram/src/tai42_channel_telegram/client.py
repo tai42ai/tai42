@@ -26,6 +26,19 @@ def telegram_http() -> AbstractAsyncContextManager[httpx.AsyncClient]:
     return tai42_app.clients.client_ctx(HttpxClient, timeout=telegram_settings().http_timeout_seconds)
 
 
+class TelegramFilePermanentError(Exception):
+    """A ``getFile`` failed permanently — the file is unknown/expired, not a transient fault.
+
+    Raised for a Bot API error response (``ok: false``, or a non-2xx status other than a
+    5xx, 408 or 429) and for a 2xx body carrying no ``file_path``: redelivering the same
+    ``file_id`` cannot succeed, so the caller rejects the media rather than raising for a
+    retry. A transport fault, a 5xx, a 408 or a 429 instead raises
+    :class:`~tai42_contract.channels.ChannelDeliveryError` (transient). The message
+    carries the vendor error detail only; the request URL embeds the bot token and never
+    appears in it.
+    """
+
+
 # The Bot API's error object, in the vendor's documented field order.
 _ERROR_FIELDS = ("error_code", "description", "parameters")
 
@@ -85,6 +98,42 @@ async def call_method(token: str, method: str, payload: dict[str, Any], *, conte
     if not data.get("ok"):
         raise ChannelDeliveryError(f"telegram {method} rejected {context}: {_error_detail(response)}")
     return data
+
+
+async def get_file(token: str, file_id: str) -> str:
+    """Resolve a Telegram ``file_id`` to its temporary ``file_path`` via ``getFile``.
+
+    Returns the ``file_path`` on ``ok: true``. A PERMANENT failure — a Bot API error
+    response (a non-2xx status below 500 other than 408/429, or ``ok: false``, for an
+    unknown/expired file), or a 2xx body missing ``file_path`` — raises
+    :class:`TelegramFilePermanentError`; a TRANSIENT failure — a transport fault, a
+    timeout, a 5xx, or a throttle status (408 Request Timeout, 429 Too Many Requests) —
+    raises :class:`~tai42_contract.channels.ChannelDeliveryError` so the caller redelivers.
+    A 2xx whose body is not JSON is transient (a proxy hiccup). The request URL embeds the
+    bot token and never appears in error text.
+    """
+    settings = telegram_settings()
+    context = f"file {file_id}"
+    try:
+        async with telegram_http() as client:
+            response = await client.post(f"{settings.api_base_url}/bot{token}/getFile", json={"file_id": file_id})
+    except httpx.HTTPError as exc:
+        raise ChannelDeliveryError(f"telegram getFile failed for {context}: {type(exc).__name__}: {exc}") from exc
+    if response.status_code >= 500 or response.status_code in (408, 429):
+        raise ChannelDeliveryError(f"telegram getFile rejected {context}: {_error_detail(response)}")
+    if response.status_code != 200:
+        raise TelegramFilePermanentError(f"telegram getFile rejected {context}: {_error_detail(response)}")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ChannelDeliveryError(f"telegram getFile returned a non-JSON body for {context}") from exc
+    if not data.get("ok"):
+        raise TelegramFilePermanentError(f"telegram getFile rejected {context}: {_error_detail(response)}")
+    result = data.get("result")
+    file_path = result.get("file_path") if isinstance(result, dict) else None
+    if not isinstance(file_path, str) or not file_path:
+        raise TelegramFilePermanentError(f"telegram getFile returned no file_path for {context}")
+    return file_path
 
 
 async def send_chat_action(chat_id: int, action: str) -> None:

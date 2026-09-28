@@ -622,7 +622,45 @@ async def test_list_withholds_secrets(wired):
     )
     listed = await ops.list_conversation_routes()
     assert listed["total"] == 1
+    assert listed["unreadable"] == 0
     assert all("callback_secret" not in item for item in listed["items"])
+
+
+async def test_list_counts_an_indexed_route_with_no_row(monkeypatch):
+    # A door-level check: a route name indexed with no row is skipped and COUNTED on the
+    # envelope's ``unreadable``, never a silently shorter listing.
+    from tai42_contract.conversations import ConversationRoute
+
+    from tai42_skeleton.conversations.managers import redis_conversations_manager as redis_module
+    from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
+
+    from .conftest import FakeRedis, make_client_ctx
+
+    fake = FakeRedis()
+    monkeypatch.setattr(redis_module, "client_ctx", make_client_ctx(fake))
+    manager = RedisConversationsManager(ConversationsSettings())
+    monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
+
+    def _route(name: str) -> ConversationRoute:
+        return ConversationRoute(
+            route_name=name,
+            door="api",
+            target_kind="agent",
+            target_name="relay",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+            execution_key_fingerprint="fp-1",
+            callback_secret="sec-1",
+        )
+
+    await manager.put_route(_route("live"))
+    await manager.put_route(_route("orphan"))
+    # Drop only the row key, leaving the name in the index behind.
+    del fake._strings[ConversationsSettings().route_key("orphan")]
+
+    listed = await ops.list_conversation_routes()
+    assert listed["total"] == 1
+    assert listed["unreadable"] == 1
 
 
 async def test_delete_removes_then_404s(wired):

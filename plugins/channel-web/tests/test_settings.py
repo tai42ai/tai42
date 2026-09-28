@@ -36,6 +36,9 @@ def test_defaults_construct_cleanly(no_web_env):
     assert settings.session_pending_ttl_seconds < settings.session_ttl_seconds
     # A refused answer may be re-answered, but never in an unbounded loop.
     assert settings.max_answer_restores == 5
+    # The per-message attachment count cap; the messages door enforces the count against
+    # this setting (the dtos layer bounds only each id's shape).
+    assert settings.max_attachments_per_message == 10
 
 
 def test_env_override(no_web_env, monkeypatch: pytest.MonkeyPatch):
@@ -69,11 +72,13 @@ def test_backlog_and_answer_env_override(no_web_env, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("CHANNEL_WEB_BACKLOG_BATCH_ENTRIES", "25")
     monkeypatch.setenv("CHANNEL_WEB_SESSION_PENDING_TTL_SECONDS", "90")
     monkeypatch.setenv("CHANNEL_WEB_MAX_ANSWER_RESTORES", "2")
+    monkeypatch.setenv("CHANNEL_WEB_MAX_ATTACHMENTS_PER_MESSAGE", "3")
     reset_all_settings()
     settings = WebSettings()
     assert settings.backlog_batch_entries == 25
     assert settings.session_pending_ttl_seconds == 90
     assert settings.max_answer_restores == 2
+    assert settings.max_attachments_per_message == 3
 
 
 @pytest.mark.parametrize(
@@ -91,6 +96,7 @@ def test_backlog_and_answer_env_override(no_web_env, monkeypatch: pytest.MonkeyP
         ("CHANNEL_WEB_BACKLOG_BATCH_ENTRIES", "0"),
         ("CHANNEL_WEB_SESSION_PENDING_TTL_SECONDS", "0"),
         ("CHANNEL_WEB_MAX_ANSWER_RESTORES", "0"),
+        ("CHANNEL_WEB_MAX_ATTACHMENTS_PER_MESSAGE", "0"),
     ],
 )
 def test_non_positive_numeric_rejected(no_web_env, monkeypatch: pytest.MonkeyPatch, env_var: str, value: str):

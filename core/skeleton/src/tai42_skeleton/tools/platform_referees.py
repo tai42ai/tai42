@@ -109,7 +109,7 @@ async def _conversation_route_referee(old_name: str) -> list[str]:
     from tai42_skeleton.operations import NotSupportedError
 
     try:
-        routes = await get_conversations_manager().list_routes()
+        routes, _ = await get_conversations_manager().list_routes()
     except NotSupportedError:
         # A backend without the routes capability holds no routes — no objection.
         return []
@@ -237,7 +237,7 @@ async def _conversation_config_detach_referee(state: str, template: str) -> list
 
     if isinstance(get_conversations_manager(), InMemoryConversationsManager):
         return []
-    configs = await ConversationTargetConfigStore(ConversationsSettings()).list()
+    configs, _ = await ConversationTargetConfigStore(ConversationsSettings()).list()
     return [
         f"conversation config {config.target_kind}/{config.target_name}"
         for config in configs.values()

@@ -114,6 +114,33 @@ async def test_installed_plugin_entries_reads_marketplace_store(monkeypatch: pyt
     assert [entry.component for entry in entries] == ["tai42-skeleton"]
 
 
+async def test_discover_plugin_chains_carries_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A plugin declaring a ``migrations_component`` override whose binding is unset is
+    # carried on the discovery result's ``.skipped`` and omitted from ``.entries``;
+    # ``installed_plugin_entries()`` keeps its signature and returns only ``.entries``.
+    from types import SimpleNamespace
+
+    from tai42_skeleton.db import SkippedChain, discover_plugin_chains
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.delenv("TAI_DB_BINDING_ACME_ALERTS", raising=False)
+    override_skip = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
+    override_skip["migrations_component"] = "acme_alerts"
+    plain_chain = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
+
+    class _FakeStore:
+        async def list_installed(self):
+            return [SimpleNamespace(spec=override_skip), SimpleNamespace(spec=plain_chain)]
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
+
+    discovery = await discover_plugin_chains()
+    assert [entry.component for entry in discovery.entries] == ["tai42-skeleton"]
+    assert discovery.skipped == [SkippedChain(component="acme_alerts")]
+    # The entry-only accessor stays signature-stable: only the runnable entries.
+    assert [entry.component for entry in await installed_plugin_entries()] == ["tai42-skeleton"]
+
+
 async def test_installed_plugin_entries_empty_when_database_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     # An unconfigured default database owns no store, so there are no plugin chains.
     monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)

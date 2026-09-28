@@ -125,21 +125,32 @@ class ConversationTargetConfigStore:
             )
         return bool(removed)
 
-    async def list(self) -> dict[tuple[str, str], TargetConversationConfig]:
-        """Every stored config keyed by its ``(target_kind, target_name)`` pair."""
+    async def list(self) -> tuple[dict[tuple[str, str], TargetConversationConfig], int]:
+        """Every stored config keyed by its ``(target_kind, target_name)`` pair, with a count of unreadable ones.
+
+        ``unreadable`` counts the indexed members whose row was gone or unparseable, so a shorter
+        map is a truthful count and never a silent cut.
+        """
         configs: dict[tuple[str, str], TargetConversationConfig] = {}
         async with client_ctx(RedisClient, self.settings.redis) as r:
             members = await awaited(r.smembers(self.settings.target_config_names_key))
             if not members:
-                return {}
+                return {}, 0
             member_list = sorted(_as_str(member) for member in members)
             prefix = self.settings.target_config_key_prefix
             raws = await awaited(r.mget([f"{prefix}{member}" for member in member_list]))
+        unreadable = 0
         for member, raw in zip(member_list, raws, strict=True):
             if raw is None:
                 # Indexed member with no row: a corrupt state (the row key never expires).
                 logger.warning("conversations: config member %r is indexed but has no row; skipping", member)
+                unreadable += 1
                 continue
-            config = TargetConversationConfig.model_validate_json(_as_str(raw))
+            try:
+                config = TargetConversationConfig.model_validate_json(_as_str(raw))
+            except ValueError:
+                logger.warning("conversations: config member %r has an unparseable row and was skipped", member)
+                unreadable += 1
+                continue
             configs[(config.target_kind, config.target_name)] = config
-        return configs
+        return configs, unreadable

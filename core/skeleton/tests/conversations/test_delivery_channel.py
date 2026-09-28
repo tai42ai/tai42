@@ -936,10 +936,11 @@ async def test_a_worker_that_lost_its_lease_cannot_terminalise_the_record(monkey
     assert _claim(fake, "m-stale")[0] == "worker-2"
 
 
-async def test_a_mid_send_receipt_does_not_truncate_the_answer(monkeypatch, fake, store):
+async def test_a_mid_send_receipt_is_parked_and_applied_when_the_send_completes(monkeypatch, fake, store):
     """A provider posts chunk one's DELIVERED callback while chunks two and three are still
-    going out — a sub-second window Twilio routinely hits. The receipt must be refused
-    loudly, not settle the record and strand the rest of the answer unsent."""
+    going out — a sub-second window Twilio routinely hits. The receipt is PARKED on the
+    in-flight record (the door acks, no raise) and applied by the completing send, never
+    truncating the rest of the answer."""
     await store.create_record(_record("m-early", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
     assert await store.claim_delivery("m-early", time.time(), "worker-1", 120) == 1
 
@@ -947,8 +948,11 @@ async def test_a_mid_send_receipt_does_not_truncate_the_answer(monkeypatch, fake
         # Chunk one is indexed and chunk two is in flight — the window a status callback
         # for chunk one actually lands in.
         if len(channel.sends) == 2:
-            with pytest.raises(RuntimeError, match="has not finished"):
-                await delivery_module.record_delivery_status("twilio", "w1-1", DeliveryReceipt.DELIVERED)
+            await delivery_module.record_delivery_status("twilio", "w1-1", DeliveryReceipt.DELIVERED)
+            # The receipt is staged, not applied — the send is still in flight.
+            staged = await _get(store, "m-early")
+            assert staged.delivery_status is DeliveryStatus.PENDING_DELIVERY
+            assert staged.pending_receipt is DeliveryStatus.DELIVERED
 
     channel = FakeChannel("w1", watch=_receipt_arrives)
     _wire_channel(monkeypatch, channel)
@@ -956,10 +960,10 @@ async def test_a_mid_send_receipt_does_not_truncate_the_answer(monkeypatch, fake
 
     assert channel.sends == ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"]
     record = await _get(store, "m-early")
-    assert record.delivery_status is DeliveryStatus.PROVISIONAL
-    # Now that the send IS finished, the same receipt settles it.
-    await delivery_module.record_delivery_status("twilio", "w1-1", DeliveryReceipt.DELIVERED)
-    assert (await _get(store, "m-early")).delivery_status is DeliveryStatus.DELIVERED
+    # The completing provisional write applied the parked receipt straight to delivered,
+    # skipping provisional entirely, and cleared the staged field.
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+    assert record.pending_receipt is None
 
 
 async def test_a_stale_failed_write_cannot_undo_a_completed_send(monkeypatch, fake, store):

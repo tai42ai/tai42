@@ -25,6 +25,7 @@ QUESTION_EVENT = "chat.question"
 ANSWERED_EVENT = "chat.answered"
 MEDIA_EVENT = "chat.media"
 FORM_EVENT = "chat.form"
+UNAVAILABLE_EVENT = "chat.unavailable"
 
 
 def _transcript_key(identity: str, address: str) -> str:
@@ -43,14 +44,26 @@ def frame(event: str, data: dict[str, Any]) -> str:
 def _decode_entry(fields: dict[str, str]) -> str | None:
     """Re-emit a stored transcript entry as its SSE frame, or ``None`` when malformed.
 
-    A malformed entry (missing ``event``/``data``) is skipped, never fatal to the whole
-    tail. The stored ``data`` is already compact JSON.
+    A malformed entry (missing ``event``/``data``) yields ``None`` so the reader emits
+    a placeholder frame in its place, never fatal to the whole tail. The stored ``data``
+    is already compact JSON.
     """
     event = fields.get("event")
     data = fields.get("data")
     if event is None or data is None:
         return None
     return f"event: {event}\ndata: {data}\n\n"
+
+
+def _unavailable_frame(entry_id: str) -> str:
+    """A placeholder SSE frame for a stored entry that cannot be rendered.
+
+    ``ts`` is the entry's own ordering timestamp, read from the millisecond component
+    of the Redis stream id, so the placeholder sits where the lost message was.
+    """
+    milliseconds = int(entry_id.partition("-")[0])
+    ts = datetime.fromtimestamp(milliseconds / 1000, UTC).isoformat()
+    return frame(UNAVAILABLE_EVENT, {"id": entry_id, "ts": ts})
 
 
 # One lock per ``(identity, address)`` conversation, refcounted so the map stays the
@@ -112,6 +125,7 @@ async def append_message(
     text: str,
     entry_id: str | None = None,
     client_message_id: str | None = None,
+    media: list[dict[str, Any]] | None = None,
 ) -> str:
     """Append one ``chat.message`` entry and return its id.
 
@@ -124,11 +138,18 @@ async def append_message(
     optimistically and retire the duplicate after a lost response. It is absent from
     the frame when the sender sent none — the key is the page's, not the server's,
     and an invented one would match nothing.
+
+    ``media`` is the visitor's own attached items, each ``{"kind", "url", "caption"?,
+    "filename"?}`` (the same shape a ``chat.media`` card carries so the page renders
+    them with the same component), carried in the frame ONLY when non-empty; a
+    text-only message carries no ``media`` key, so a reader tells absent from empty.
     """
     message_id = entry_id if entry_id is not None else _mint_id()
     data: dict[str, Any] = {"id": message_id, "direction": direction, "text": text, "ts": _now_iso()}
     if client_message_id is not None:
         data["client_message_id"] = client_message_id
+    if media:
+        data["media"] = media
     await _append(identity, address, MESSAGE_EVENT, data)
     return message_id
 
@@ -325,8 +346,9 @@ async def read_backlog_batch(
     Paging is what keeps a replay's peak memory at one page rather than a whole
     transcript held live for the length of the stream. ``end`` is the cursor the tail
     will resume from: reading past it would emit every entry written during a slow
-    replay twice, once here and once from the tail. A malformed entry is skipped
-    (logged) — one bad entry is never fatal to the replay.
+    replay twice, once here and once from the tail. A malformed entry becomes a
+    placeholder frame (logged) — one bad entry is never fatal to the replay, and its
+    gap is marked in place rather than silently dropped.
     """
     entries = await redis.xrange(_transcript_key(identity, address), min=start, max=end, count=count)
     frames: list[str] = []
@@ -334,6 +356,7 @@ async def read_backlog_batch(
         rendered = _decode_entry({_as_str(k): _as_str(v) for k, v in fields.items()})
         if rendered is None:
             logger.warning("skipping malformed web transcript backlog entry %s", _as_str(entry_id))
+            frames.append(_unavailable_frame(_as_str(entry_id)))
             continue
         frames.append(rendered)
     if len(entries) < count:
@@ -345,7 +368,7 @@ async def read_tail(redis: Any, identity: str, address: str, cursor: str, block_
     """One live-tail XREAD past ``cursor``.
 
     Returns the advanced cursor and the new entries as SSE frames (a malformed entry
-    skipped, logged).
+    becomes a placeholder frame, logged).
     """
     key = _transcript_key(identity, address)
     result = await redis.xread({key: cursor}, block=block_ms)
@@ -356,6 +379,7 @@ async def read_tail(redis: Any, identity: str, address: str, cursor: str, block_
             rendered = _decode_entry({_as_str(k): _as_str(v) for k, v in fields.items()})
             if rendered is None:
                 logger.warning("skipping malformed web transcript tail entry %s", cursor)
+                frames.append(_unavailable_frame(cursor))
                 continue
             frames.append(rendered)
     return cursor, frames

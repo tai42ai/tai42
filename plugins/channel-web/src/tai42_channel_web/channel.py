@@ -259,6 +259,9 @@ class WebChannel:
     # the same schema-driven widget as a fillable card, and the submission enters the
     # conversation as a participant message through this plugin's own form door.
     supports_form_notifications: ClassVar[bool] = True
+    # The chat page runs its own client-side typing bubble from send until the
+    # reply lands, so no server-driven working-on-it signal is emitted.
+    working_signal_expiry_seconds: ClassVar[None] = None
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Reserve the pending-question record, then append the question to the recipient's chat transcript.

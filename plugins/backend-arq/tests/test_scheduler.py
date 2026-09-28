@@ -11,7 +11,7 @@ import orjson
 import pytest
 from arq.jobs import JobStatus
 
-from tai42_backend_arq import scheduler
+from tai42_backend_arq import scheduler, tools
 from tai42_backend_arq.settings import TaskFailedError
 
 from .conftest import DeleteOnLockRedis
@@ -533,6 +533,19 @@ async def test_watchdog_does_not_resurrect_schedule_deleted_mid_recovery(fake_re
     assert fake_redis.enqueued == []
 
 
+async def test_watchdog_error_write_does_not_resurrect_deleted_schedule(fake_redis, monkeypatch) -> None:
+    """A schedule deleted before the watchdog records its recovery error (a concurrent
+    delete winning the per-schedule lock) must not be resurrected as a two-field zombie
+    hash -- the existence check and the error write share that lock."""
+    monkeypatch.setattr(scheduler, "Job", _job_type(**{"status:boom": ConnectionError("probe failed")}))
+    key = _seed(fake_redis, "boom", job_id=b"boom")
+    redis = DeleteOnLockRedis(fake_redis, key)
+
+    await scheduler.recover_stalled_schedules({"redis": redis})
+
+    assert key not in fake_redis._store
+
+
 async def test_watchdog_error_on_one_schedule_does_not_stop_others(fake_redis, monkeypatch, caplog) -> None:
     monkeypatch.setattr(
         scheduler,
@@ -548,3 +561,89 @@ async def test_watchdog_error_on_one_schedule_does_not_stop_others(fake_redis, m
     assert any("Watchdog error checking schedule" in record.message for record in caplog.records)
     assert fake_redis._store[broken][b"job_id"] == b"boom"
     assert fake_redis._store[lost][b"job_id"] != b"lost"
+
+
+async def test_watchdog_records_unrecoverable_schedule(fake_redis, monkeypatch, bind_pool) -> None:
+    bind_pool(fake_redis)
+    monkeypatch.setattr(
+        scheduler,
+        "Job",
+        _job_type(**{"status:boom": ConnectionError("probe failed"), "status:lost": JobStatus.not_found}),
+    )
+    broken = _seed(fake_redis, "a_broken", job_id=b"boom")
+    _seed(fake_redis, "z_lost", job_id=b"lost")
+
+    await scheduler.recover_stalled_schedules({"redis": fake_redis})
+
+    rows = {row["name"]: row for row in await tools.backend_list_schedules()}
+    assert rows["a_broken"]["recovery_error"] is not None
+    assert "probe failed" in rows["a_broken"]["recovery_error"]
+    assert rows["a_broken"]["recovery_failed_at"] is not None
+    # The broken schedule stays unrecovered; recovery of the other still proceeds.
+    assert fake_redis._store[broken][b"job_id"] == b"boom"
+    assert rows["z_lost"]["recovery_error"] is None
+
+
+async def test_watchdog_clears_error_on_recovery(fake_redis, monkeypatch, bind_pool) -> None:
+    bind_pool(fake_redis)
+    monkeypatch.setattr(scheduler, "Job", _job_type(**{"status:lost": JobStatus.not_found}))
+    key = _seed(
+        fake_redis,
+        "lost",
+        job_id=b"lost",
+        recovery_error=b"ConnectionError('stale')",
+        recovery_failed_at=b"2020-01-01T00:00:00+00:00",
+    )
+
+    await scheduler.recover_stalled_schedules({"redis": fake_redis})
+
+    (row,) = await tools.backend_list_schedules()
+    assert row["recovery_error"] is None
+    assert row["recovery_failed_at"] is None
+    assert b"recovery_error" not in fake_redis._store[key]
+    assert b"recovery_failed_at" not in fake_redis._store[key]
+
+
+async def test_watchdog_clears_error_on_a_healthy_tick(fake_redis, monkeypatch) -> None:
+    """A schedule that errored on one tick (transient probe fault) and is observed
+    healthy on a later tick has both fields cleared without any restart."""
+    monkeypatch.setattr(
+        scheduler,
+        "Job",
+        _job_type(**{"status:pending-1": [ConnectionError("transient probe fault"), JobStatus.deferred]}),
+    )
+    key = _seed(fake_redis, "s1")
+
+    # Tick 1: the per-schedule probe raises a transient fault; the error is recorded.
+    await scheduler.recover_stalled_schedules({"redis": fake_redis})
+    assert b"transient probe fault" in fake_redis._store[key][b"recovery_error"]
+    assert b"recovery_failed_at" in fake_redis._store[key]
+
+    # Tick 2: the job reads healthy; both fields clear with no restart.
+    await scheduler.recover_stalled_schedules({"redis": fake_redis})
+    assert fake_redis._store[key][b"job_id"] == b"pending-1"
+    assert b"recovery_error" not in fake_redis._store[key]
+    assert b"recovery_failed_at" not in fake_redis._store[key]
+
+
+async def test_backend_get_schedule_surfaces_recovery_error(fake_redis, monkeypatch, bind_pool) -> None:
+    bind_pool(fake_redis)
+    monkeypatch.setattr(
+        scheduler,
+        "Job",
+        _job_type(**{"status:boom": [ConnectionError("probe failed"), JobStatus.not_found]}),
+    )
+    _seed(fake_redis, "s1", job_id=b"boom")
+
+    # Error tick: the per-schedule probe raises; the fault surfaces on the read door.
+    await scheduler.recover_stalled_schedules({"redis": fake_redis})
+    errored = await tools.backend_get_schedule("s1")
+    assert errored["recovery_error"] is not None
+    assert "probe failed" in errored["recovery_error"]
+    assert errored["recovery_failed_at"] is not None
+
+    # Recovery tick: the schedule recovers and the read door reports it cleared.
+    await scheduler.recover_stalled_schedules({"redis": fake_redis})
+    recovered = await tools.backend_get_schedule("s1")
+    assert recovered["recovery_error"] is None
+    assert recovered["recovery_failed_at"] is None

@@ -83,6 +83,24 @@ async def test_backlog_then_backlog_done(fake_redis: FakeRedis):
     assert frames[2] == "event: chat.backlog_done\ndata: {}\n\n"
 
 
+async def test_backlog_emits_a_placeholder_for_a_malformed_entry(
+    fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
+    await append_message(IDENTITY, VISITOR_ID, "in", "one")
+    # A stored entry the generator cannot render is replayed as a dedicated
+    # placeholder frame, in place, rather than a silent gap in the history.
+    fake_redis.streams[_TRANSCRIPT_KEY].append(("999-0", {"garbage": "x"}))
+
+    with caplog.at_level("WARNING"):
+        frames = await _collect(_open_stream(_DisconnectedRequest(), web_settings()))
+
+    assert frames[0].startswith("event: chat.message\ndata: ")
+    assert frames[1].startswith("event: chat.unavailable\ndata: ")
+    assert '"id": "999-0"' in frames[1]
+    assert frames[2] == "event: chat.backlog_done\ndata: {}\n\n"
+    assert any("malformed" in r.message for r in caplog.records)
+
+
 async def test_tail_forwards_new_entry(fake_redis: FakeRedis):
     gen = _open_stream(_AliveRequest(alive=1), web_settings())
     frames: list[str] = []

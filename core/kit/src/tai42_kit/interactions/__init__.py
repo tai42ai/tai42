@@ -10,10 +10,16 @@ from tai42_kit.interactions.door_contract import (
     evaluate_door_contract,
     parked_entries_for_jq,
 )
+from tai42_kit.interactions.media_caps import (
+    MediaIngestCapSettings,
+    media_ingest_cap_settings,
+)
 
 __all__ = [
     "DOOR_START_DEFAULT",
     "DoorContractOutcome",
+    "MediaIngestCapSettings",
     "evaluate_door_contract",
+    "media_ingest_cap_settings",
     "parked_entries_for_jq",
 ]

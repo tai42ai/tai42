@@ -17,6 +17,7 @@ from tai42_contract.sandbox.base import Sandbox, SandboxExecHandle, SandboxSessi
 from tai42_contract.sandbox.errors import (
     SandboxError,
     SandboxExecTimeoutError,
+    SandboxFileNotFoundError,
     SandboxSessionNotFoundError,
     SandboxSpecRejectedError,
     SandboxUnavailableError,
@@ -44,6 +45,7 @@ __all__ = [
     "SandboxError",
     "SandboxExecHandle",
     "SandboxExecTimeoutError",
+    "SandboxFileNotFoundError",
     "SandboxIsolation",
     "SandboxNetwork",
     "SandboxPolicy",

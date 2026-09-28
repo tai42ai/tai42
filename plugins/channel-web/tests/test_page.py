@@ -5,6 +5,7 @@ and the asset content-type map."""
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,8 +93,22 @@ def test_render_page_links_every_asset_with_its_integrity(public_build: Path):
     assert (
         f'<link rel="stylesheet" href="/api/channels/web/assets/{STYLE_ASSET}" integrity="sha384-{STYLE_ASSET}">'
     ) in html
-    assert '<div id="root" data-identity="site-alpha" data-api-base="/api/channels/web"></div>' in html
+    assert (
+        '<div id="root" data-identity="site-alpha" data-api-base="/api/channels/web" data-max-attachments="10"></div>'
+    ) in html
     assert 'name="theme-color"' in html
+
+
+def test_render_page_carries_the_attachment_cap_on_root_for_the_bundle(
+    public_build: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The operator's ``max_attachments_per_message`` rides #root so the bundle refuses
+    # an over-cap selection before send; the value is the operator's, not a hardcoded
+    # default.
+    monkeypatch.setattr(page, "web_settings", lambda: SimpleNamespace(max_attachments_per_message=3))
+    html = render_page(IDENTITY, "Chat", load_build(), "/api/channels/web")
+    assert 'data-max-attachments="3"' in html
+    assert 'data-max-attachments="10"' not in html
 
 
 def test_render_page_hangs_asset_urls_off_the_given_mount_base(public_build: Path):

@@ -181,14 +181,55 @@ class WebChatClient:
             return await client.get(self._url(f"/assets/{name}"))
 
     async def send(
-        self, text: str, *, identity: str | None = None, cookies: dict[str, str] | None = None
+        self,
+        text: str,
+        *,
+        identity: str | None = None,
+        attachment_ids: list[str] | None = None,
+        client_message_id: str | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> httpx.Response:
         """POST one visitor message. The address is taken from the cookie's registration
         alone — the body names only the route identity and the text, and ``identity``
-        overrides the route name for the refusal legs."""
-        body = {"identity": self.identity if identity is None else identity, "text": text}
+        overrides the route name for the refusal legs.
+
+        ``attachment_ids`` are the served-media ids an upload minted (see :meth:`upload`), carried
+        in the body only when given so a text-only send stays byte-identical. ``client_message_id``
+        is the retry key: two sends carrying the same one resolve to the ONE turn."""
+        body: dict[str, object] = {"identity": self.identity if identity is None else identity, "text": text}
+        if attachment_ids is not None:
+            body["attachment_ids"] = attachment_ids
+        if client_message_id is not None:
+            body["client_message_id"] = client_message_id
         async with self._client(15.0, cookies) as client:
             return await client.post(self._url("/messages"), json=body)
+
+    async def upload(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        content_type: str,
+        *,
+        identity: str | None = None,
+        cookies: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """POST one file to the upload door as multipart — the ``file`` part plus the ``identity``
+        field, exactly as the page's composer does. The address is the cookie's registration; the
+        body's ``identity`` names the route the session was minted on. Returns the raw response —
+        200 carries ``data.{media_id, kind, mime, size, filename, url}``, a rejection its typed
+        ``{error, code}``."""
+        target = self.identity if identity is None else identity
+        files = {"file": (filename, file_bytes, content_type)}
+        data = {"identity": target}
+        async with self._client(15.0, cookies) as client:
+            return await client.post(self._url("/uploads"), files=files, data=data)
+
+    async def get_media(self, url: str, *, cookies: dict[str, str] | None = None) -> httpx.Response:
+        """GET a served-media reference (``/api/interactions/media/<id>``, an absolute path off the
+        page origin — NOT under ``/api/channels/web``). The capability id IS the secret, so no auth
+        is needed; the visitor's cookie is carried only to mirror a browser ``<img>`` load."""
+        async with self._client(10.0, cookies) as client:
+            return await client.get(f"{self.base_url}{url}")
 
     async def answer(
         self, interaction_id: str, value: object, *, cookies: dict[str, str] | None = None

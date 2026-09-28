@@ -163,7 +163,8 @@ async def _unclaimed_channel_identity(
         identity = canonical_address(our_identity)
     except ValueError as exc:
         raise BadRequestError(f"invalid our_identity: {exc}") from exc
-    for row in (await manager.list_routes()).values():
+    routes, _ = await manager.list_routes()
+    for row in routes.values():
         if (
             row.route_name != route_name
             and row.door == "channel"
@@ -184,12 +185,13 @@ async def _unclaimed_channel_identity(
 async def list_conversation_routes() -> dict[str, Any]:
     """Every stored conversation route, each with its ``callback_secret`` withheld.
 
-    Returns ``{"items", "total"}``.
+    Returns ``{"items", "total", "unreadable"}``, where ``unreadable`` counts the indexed routes
+    whose row was gone or unparseable.
     """
     manager = _require_backend()
-    routes = await manager.list_routes()
+    routes, unreadable = await manager.list_routes()
     items = [_public_route_view(route) for route in routes.values()]
-    return {"items": items, "total": len(items)}
+    return {"items": items, "total": len(items), "unreadable": unreadable}
 
 
 @operation(

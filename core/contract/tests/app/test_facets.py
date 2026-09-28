@@ -28,7 +28,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 137 (sub-protocol, member) pairs over 133
+# The frozen facade surface: the 141 (sub-protocol, member) pairs over 137
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -86,11 +86,15 @@ EXPECTED_FACADE = {
     "names",
     "handle_inbound_answer",
     "record_send_receipt",
-    # conversations (4)
+    # conversations (5)
     "accept",
     "pending_messages",
     "record_delivery_status",
     "register_target_validator",
+    "notify_inbound_rejected",
+    # media (2)
+    "ingest_media",
+    "bind_media",
     # monitoring (2)
     "register_monitoring",
     "active",
@@ -212,6 +216,29 @@ def test_declared_route_metadata_reexported():
     assert FromApp is Source
 
 
+def test_declared_route_metadata_body_and_family_default_none():
+    from tai42_contract.app import DeclaredRouteMetadata
+
+    meta = DeclaredRouteMetadata(reload_gated=False, reads_body=False, error_statuses=(), success_status=200)
+    assert meta.max_body_bytes is None
+    assert meta.rate_limit_family is None
+
+
+def test_declared_route_metadata_carries_body_and_family_overrides():
+    from tai42_contract.app import DeclaredRouteMetadata
+
+    meta = DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=True,
+        error_statuses=(),
+        success_status=200,
+        max_body_bytes=26214400,
+        rate_limit_family="channels_web_uploads",
+    )
+    assert meta.max_body_bytes == 26214400
+    assert meta.rate_limit_family == "channels_web_uploads"
+
+
 def test_facade_partition_against_frozen_surface():
     from tai42_contract.app import (
         AppAccounts,
@@ -228,6 +255,7 @@ def test_facade_partition_against_frozen_surface():
         AppHttp,
         AppInteractions,
         AppLifecycle,
+        AppMedia,
         AppMonitoring,
         AppPresets,
         AppSandboxes,
@@ -251,6 +279,7 @@ def test_facade_partition_against_frozen_surface():
         AppWebhookVerifiers,
         AppChannels,
         AppConversations,
+        AppMedia,
         AppMonitoring,
         AppExtensions,
         AppInteractions,
@@ -275,14 +304,14 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 138 (sub-protocol, member) pairs over 134 distinct names — ``store`` is exposed
+    # 141 (sub-protocol, member) pairs over 137 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 134, f"union={len(union)}"
-    assert total == 138 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 137, f"union={len(union)}"
+    assert total == 141 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
-def test_taiapp_exposes_twenty_four_namespaces():
+def test_taiapp_exposes_twenty_five_namespaces():
     from tai42_contract.app import TaiApp
 
     assert protocol_members(TaiApp) == {
@@ -296,6 +325,7 @@ def test_taiapp_exposes_twenty_four_namespaces():
         "webhook_verifiers",
         "channels",
         "conversations",
+        "media",
         "monitoring",
         "extensions",
         "interactions",
@@ -518,6 +548,17 @@ def test_app_conversations_is_runtime_checkable_and_shaped():
         def register_target_validator(self, target_kind: object, validator: object) -> None:
             return None
 
+        async def notify_inbound_rejected(
+            self,
+            *,
+            channel_id: str,
+            recipient: str,
+            sender_identity: str | None,
+            kind: str,
+            reason: object,
+        ) -> None:
+            return None
+
     class _Missing:
         async def accept(
             self, channel: str, our_identity: str, client_address: str, text: str, provider_message_id: str
@@ -557,3 +598,32 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
     pending_sig = inspect.signature(AppConversations.pending_messages)
     assert list(pending_sig.parameters) == ["self", "thread_id", "after"]
     assert pending_sig.parameters["after"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert inspect.iscoroutinefunction(AppConversations.notify_inbound_rejected)
+    rejected_sig = inspect.signature(AppConversations.notify_inbound_rejected)
+    assert list(rejected_sig.parameters) == ["self", "channel_id", "recipient", "sender_identity", "kind", "reason"]
+    for name in ("channel_id", "recipient", "sender_identity", "kind", "reason"):
+        assert rejected_sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_app_media_facet_methods_are_coroutines_with_the_expected_parameters():
+    from tai42_contract.app import AppMedia
+
+    assert inspect.iscoroutinefunction(AppMedia.ingest_media)
+    ingest_sig = inspect.signature(AppMedia.ingest_media)
+    assert list(ingest_sig.parameters) == [
+        "self",
+        "source",
+        "kind_hint",
+        "declared_mime",
+        "filename",
+        "declared_size",
+        "integrity_sha256",
+        "origin",
+    ]
+    for name in ("source", "kind_hint", "declared_mime", "filename", "declared_size", "integrity_sha256", "origin"):
+        assert ingest_sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    assert inspect.iscoroutinefunction(AppMedia.bind_media)
+    bind_sig = inspect.signature(AppMedia.bind_media)
+    assert list(bind_sig.parameters) == ["self", "media_id", "origin"]
+    assert bind_sig.parameters["media_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert bind_sig.parameters["origin"].kind is inspect.Parameter.KEYWORD_ONLY

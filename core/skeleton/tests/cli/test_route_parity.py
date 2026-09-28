@@ -32,6 +32,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("GET", "/api/interactions/callback/{ticket}"),  # unauthenticated external answer door
     ("POST", "/api/interactions/callback/{ticket}"),  # unauthenticated external answer door
     ("GET", "/api/interactions/media/{media_id}"),  # unauthenticated served-media capability url (browser/vendor)
+    ("HEAD", "/api/interactions/media/{media_id}"),  # same capability url, headers-only probe (browser/vendor)
     ("POST", "/api/conversations/{route_name}/messages"),  # authed client/adapter door, not an operator function
     ("POST", "/api/conversations/{route_name}/events"),  # authed integration event door, not an operator function
     ("GET", "/api/plugins/{name}/studio/{path:path}"),  # studio SPA asset serving

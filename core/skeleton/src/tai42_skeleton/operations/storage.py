@@ -23,6 +23,7 @@ are ``destructive``.
 from __future__ import annotations
 
 import base64
+from urllib.parse import quote
 
 from pydantic import BaseModel
 from tai42_contract.storage import Storage, StoragePathConflictError
@@ -88,15 +89,20 @@ def _reject_unsafe(kind: str, value: str) -> None:
 
 
 def _content_disposition(filename: str) -> str:
-    r"""A ``Content-Disposition: attachment`` header with a well-formed quoted ``filename``.
+    r"""A ``Content-Disposition: attachment`` header with an ASCII ``filename`` fallback and an RFC 8187 ``filename*``.
 
-    Per RFC 6266 / RFC 2616 quoted-string rules a literal ``"`` or ``\\`` must be
-    backslash-escaped and control characters are not permitted, so the basename is
-    sanitized before interpolation.
+    Per RFC 6266 § 4.3 a recipient that understands ``filename*`` uses it and ignores
+    ``filename``; older agents fall back to the ASCII ``filename``. The fallback is the
+    control-stripped name with every non-ASCII character replaced by ``_`` and the
+    quoted-string ``"``/``\\`` escaping kept; the ``filename*`` value percent-encodes
+    every byte outside the RFC 8187 § 3.2.1 attr-char set (``urllib.parse.quote`` leaves
+    the attr-char set literal via ``safe`` and percent-encodes the rest of the UTF-8 bytes).
     """
     sanitized = "".join(ch for ch in filename if ch >= " " and ch != "\x7f")
-    sanitized = sanitized.replace("\\", "\\\\").replace('"', '\\"')
-    return f'attachment; filename="{sanitized}"'
+    ascii_fallback = "".join(ch if ord(ch) < 128 else "_" for ch in sanitized)
+    ascii_fallback = ascii_fallback.replace("\\", "\\\\").replace('"', '\\"')
+    ext_value = quote(sanitized, safe="!#$&+-.^_`|~")  # RFC 8187 § 3.2.1 attr-char set
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{ext_value}"
 
 
 @operation(summary="Get the storage provider identity", tags=["storage"], response_model=StorageInfo)

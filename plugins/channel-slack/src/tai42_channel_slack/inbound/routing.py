@@ -8,6 +8,7 @@ as a fresh turn), plus the recipient allowlist both doors gate against.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
@@ -16,6 +17,9 @@ from tai42_contract.conversations import BlankInboundTextError
 
 from tai42_channel_slack.correlation import slack_thread_correlation_store
 from tai42_channel_slack.settings import SlackSettings
+
+if TYPE_CHECKING:
+    from tai42_contract.interactions.models import MediaItem
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,8 @@ async def _bridge(
     event_id: str,
     *,
     params: dict[str, str] | None = None,
+    provider_message_id: str | None = None,
+    attachments: list[MediaItem] | None = None,
 ) -> Response:
     """Hand one uncorrelated human message to the conversation bridge.
 
@@ -55,8 +61,13 @@ async def _bridge(
     unset is operator misconfig, raised loudly. A message with no text/channel, or
     with whitespace-only text, is nothing to bridge and is acked. ``params`` is the
     optional opaque channel enrichment the turn carries (e.g. ``reply_id`` from a tapped
-    reply option); ``None`` for a plain message. No route bound acks with a debug log; an
-    infrastructure failure propagates so Slack redelivers.
+    reply option, or the ``media_*`` vocabulary a file share bridges); ``None`` for a
+    plain message. ``attachments`` is the typed served :class:`MediaItem` list a file
+    share ingested, delivered alongside the parity ``media_*`` params; ``None`` for a
+    text-only turn. ``provider_message_id`` overrides the intake dedupe id (a file share
+    passes a per-file id so each file of one message dedupes distinctly); it defaults to
+    ``event_id``. No route bound acks with a debug log; an infrastructure failure
+    propagates so Slack redelivers.
     """
     if not isinstance(text, str) or not text or not isinstance(channel, str) or not channel:
         return JSONResponse({"status": "ignored"})
@@ -71,8 +82,9 @@ async def _bridge(
             # and the party the turn cap holds accountable.
             cap_key=channel,
             text=text,
-            provider_message_id=event_id,
+            provider_message_id=provider_message_id if provider_message_id is not None else event_id,
             params=params,
+            attachments=attachments,
         )
     except BlankInboundTextError:
         logger.debug("slack inbound: blank text for channel=%s; acking", channel)

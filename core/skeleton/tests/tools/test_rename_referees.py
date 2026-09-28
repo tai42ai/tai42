@@ -244,8 +244,8 @@ async def test_conversation_route_referee_blocks_on_tool_target(monkeypatch) -> 
         "r3": SimpleNamespace(route_name="other-route", target_kind="tool", target_name="alerts"),
     }
 
-    async def fake_list_routes() -> dict[str, object]:
-        return routes
+    async def fake_list_routes() -> tuple[dict[str, object], int]:
+        return routes, 0
 
     import tai42_skeleton.conversations as conversations_mod
 

@@ -27,6 +27,6 @@ class InMemoryConversationsManager(BaseConversationsManager):
         """Refuse to delete ``route_name``; the in-memory backend has no routing table (501)."""
         raise NotSupportedError(_IN_MEMORY_REFUSAL)
 
-    async def list_routes(self) -> dict[str, ConversationRoute]:
+    async def list_routes(self) -> tuple[dict[str, ConversationRoute], int]:
         """Refuse to list routes; the in-memory backend has no routing table (501)."""
         raise NotSupportedError(_IN_MEMORY_REFUSAL)

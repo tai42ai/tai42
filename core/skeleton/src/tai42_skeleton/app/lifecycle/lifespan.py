@@ -1,4 +1,4 @@
-"""The worker lifespan context manager, resource teardown, and the interactions/sandbox reaper task spawn/cancel."""
+"""The worker lifespan context manager, resource teardown, and the reaper task spawn/cancel."""
 
 import asyncio
 import logging
@@ -9,6 +9,7 @@ from typing import Any
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_shared_config
 from tai42_skeleton.app.bus import WorkerKind
+from tai42_skeleton.app.graceful_exit import graceful_exit_for
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -57,6 +58,10 @@ class LifespanMixin(LifecycleState):
             # raises loudly on a failed establisher (never a healthy-looking half-start).
             # A reload re-establishes them post-swap through the build+swap primitive.
             await self._run_post_swap_handlers(raise_on_error=True)
+            # Remember this process's kind before the perpetual tasks spawn, so
+            # their shared done-callback requests the matching graceful-exit
+            # primitive when one of them dies.
+            self._worker_kind = kind
             # Join the worker bus: construct this process's one bus (worker kind
             # ``serve`` or ``backend``) and open its single long-lived subscription.
             # The subscription registers presence and self-resyncs (reload_config)
@@ -73,6 +78,11 @@ class LifespanMixin(LifecycleState):
             # slot — the reaper is a no-op door otherwise, so it is never spawned
             # without a provider to reap through.
             self._spawn_sandbox_reaper()
+            # Start the inbound-media retention reaper so an abandoned pending upload and
+            # an expired bound blob are reclaimed on a fixed cadence. Spawned
+            # unconditionally (a no-op each pass absent a store/provider), so both the
+            # serve and backend processes reap.
+            self._spawn_media_reaper()
             yield self
         finally:
             # Shutdown start: drop the readiness sentinel FIRST so the readiness probe
@@ -83,6 +93,7 @@ class LifespanMixin(LifecycleState):
             await self._cancel_reprobe_task()
             await self._cancel_interactions_reaper()
             await self._cancel_sandbox_reaper()
+            await self._cancel_media_reaper()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()
@@ -112,22 +123,32 @@ class LifespanMixin(LifecycleState):
             return False
         return True
 
-    @classmethod
-    def _on_perpetual_task_done(cls, task: asyncio.Task[Any]) -> None:
-        """Done-callback for a run-until-cancelled lifespan-owned task.
+    def _on_perpetual_task_done(self, task: asyncio.Task[Any]) -> None:
+        """Done-callback shared by all five run-until-cancelled lifespan tasks.
 
-        Covers the worker-bus subscription and the failed-MCP re-probe loop.
-        A clean cancellation stays silent and a runtime exception is logged at
-        ERROR — and, unlike a bounded task, a NORMAL return is ALSO logged at
-        ERROR: these tasks are contractually perpetual, so returning means the
-        worker silently stopped doing its job (a subscription that returns stops
-        receiving sibling reloads; the re-probe loop stops self-healing).
+        The worker-bus subscription, the failed-MCP re-probe loop, the
+        interactions expiry reaper, the sandbox reaper and the media retention
+        reaper, in both the serve and the backend process, register this. A clean
+        cancellation (shutdown) stays
+        silent and does nothing. Otherwise the perpetual task stopped doing its
+        job — a runtime exception OR a NORMAL return, both a death, since these
+        tasks are contractually perpetual — so the death is logged at ERROR, the
+        marker ``_dead_perpetual_task`` is set (``/ready`` then names the task and
+        503s), and this process requests its own graceful exit so a
+        ``restart: unless-stopped`` supervisor reboots it from a clean baseline.
         """
-        if cls._log_task_exception(task):
+        if task.cancelled():
+            return
+        if self._log_task_exception(task):
             logger.error(
                 "perpetual background task %r returned unexpectedly; it must run until cancelled",
                 task.get_name(),
             )
+            reason = "returned"
+        else:
+            reason = type(task.exception()).__name__
+        self._dead_perpetual_task = (task.get_name(), reason)
+        graceful_exit_for(self._worker_kind)()
 
     async def _teardown_resources(self) -> None:
         """Release process-wide resources at shutdown.
@@ -230,6 +251,43 @@ class LifespanMixin(LifecycleState):
         """
         task = self._sandbox_reaper_task
         self._sandbox_reaper_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
+            pass
+
+    def _spawn_media_reaper(self) -> None:
+        """Start the inbound-media retention reaper loop on the serving loop.
+
+        Owned by ``app_context``; runs until cancelled at shutdown. A no-op each pass when the
+        conversations store is unconfigured or no blob provider is registered.
+        """
+        from tai42_skeleton.conversations.media_reaper import run_media_reaper_loop
+
+        self._media_reaper_task = asyncio.create_task(
+            run_media_reaper_loop(),
+            name="tai-media-retention-reaper",
+        )
+        # Backstop a silent death OR an unexpected normal return loudly, mirroring the
+        # interactions expiry reaper: a run-until-cancelled task.
+        self._media_reaper_task.add_done_callback(self._on_perpetual_task_done)
+
+    async def _cancel_media_reaper(self) -> None:
+        """Cancel the media retention reaper and await its termination at shutdown.
+
+        The shutdown counterpart of ``_spawn_media_reaper``.
+        A non-``CancelledError`` death was already surfaced at ERROR by the
+        done-callback, so it is awaited-and-swallowed here (this runs inside
+        ``app_context``'s shutdown ``finally``, where re-raising would skip the
+        remaining teardown).
+        """
+        task = self._media_reaper_task
+        self._media_reaper_task = None
         if task is None:
             return
         task.cancel()

@@ -22,7 +22,7 @@ import pytest
 from tai42_contract.plugins import PluginSpec
 
 from tai42_skeleton.db import installed_plugin_entries, plugin_migration_entry
-from tai42_skeleton.db.discovery import _ChainSkip, _plugin_chain
+from tai42_skeleton.db.discovery import SkippedChain, _plugin_chain
 
 _DISCOVERY_LOGGER = "tai42_skeleton.db.discovery"
 
@@ -86,7 +86,7 @@ def test_override_with_unset_binding_is_a_visible_skip(
     spec = _spec(migrations="sql/migrations", migrations_component="acme_alerts")
 
     # The three-outcome resolver returns the DISTINCT skip sentinel, not None/entry.
-    assert _plugin_chain(spec) == _ChainSkip(component="acme_alerts")
+    assert _plugin_chain(spec) == SkippedChain(component="acme_alerts")
 
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):
         entry = plugin_migration_entry(spec)
@@ -157,3 +157,27 @@ async def test_installed_entries_omit_and_surface_the_skip(
     assert [entry.component for entry in entries] == ["tai42-skeleton"]
     # ...and the omission is surfaced, naming the skipped chain.
     assert any(r.name == _DISCOVERY_LOGGER and "acme_alerts" in r.getMessage() for r in caplog.records)
+
+
+async def test_all_chains_discovery_includes_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole-process discovery result carries the two skeleton-owned chains as
+    # entries AND the unset-binding override chain as a skip — never silently dropped.
+    from tai42_skeleton.db import SKELETON_COMPONENT, SkippedChain, discover_all_migration_chains
+    from tai42_skeleton.marketplace import store as mp_store
+    from tai42_skeleton.states.db import STATES_COMPONENT
+
+    monkeypatch.delenv("TAI_DB_BINDING_ACME_ALERTS", raising=False)
+    override_skip = _spec(migrations="sql/migrations", migrations_component="acme_alerts").model_dump(mode="json")
+
+    class _FakeStore:
+        async def list_installed(self):
+            return [SimpleNamespace(spec=override_skip)]
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
+
+    discovery = await discover_all_migration_chains()
+
+    # The two skeleton-owned chains are present as entries; the override chain is not.
+    assert [entry.component for entry in discovery.entries] == [SKELETON_COMPONENT, STATES_COMPONENT]
+    # ...and the skipped chain is carried, not dropped.
+    assert discovery.skipped == [SkippedChain(component="acme_alerts")]

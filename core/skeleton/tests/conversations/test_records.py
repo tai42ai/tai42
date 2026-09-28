@@ -587,7 +587,7 @@ async def test_list_by_status_failed(monkeypatch):
     await store.mark_delivered("b", [], 1, time.time(), "tok")
 
     failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))
-    assert [r.message_id for r in failed] == ["a"]
+    assert [r.message_id for r in failed.items] == ["a"]
 
 
 async def test_retention_ttl_applied_only_on_a_terminal_transition(monkeypatch):
@@ -659,7 +659,7 @@ async def test_a_terminal_index_member_expires_with_its_row(monkeypatch):
     # Terminal a full retention window ago: the index must not name it any more.
     await store.mark_failed("old", 1, time.time() - 10, "tok")
 
-    assert await store.list_by_status(frozenset({DeliveryStatus.FAILED})) == []
+    assert (await store.list_by_status(frozenset({DeliveryStatus.FAILED}))).items == []
 
 
 async def test_a_member_whose_row_is_gone_is_unindexed(monkeypatch):
@@ -687,9 +687,11 @@ async def test_delete_record_unindexes_the_row_it_removes(monkeypatch):
     )
 
 
-async def test_pending_work_skips_a_row_whose_content_blob_is_corrupt(monkeypatch):
-    # Control fields fine, ``data`` unparseable: the whole-row parse must skip it here, not
-    # hand it to a delivery that re-reads it unguarded and re-drives it every lease forever.
+async def test_pending_work_moves_a_corrupt_row_to_terminal_failed(monkeypatch):
+    # Control fields fine, ``data`` unparseable: the whole-row parse must not hand it to a
+    # delivery that re-reads it unguarded and re-drives it every lease forever. Instead the
+    # sweep moves it to the terminal failed state, so it leaves the pending scan for good and
+    # surfaces on the admin failed listing as an unreadable row.
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
@@ -709,6 +711,14 @@ async def test_pending_work_skips_a_row_whose_content_blob_is_corrupt(monkeypatc
 
     work = await store.pending_work()
     assert [w.message_id for w in work] == ["good"]
+    # The corrupt row is now terminal ``failed`` and is not re-enumerated by a second pass.
+    assert fake._hashes[settings.record_key("bad-data")]["delivery_status"] == "failed"
+    assert [w.message_id for w in await store.pending_work()] == ["good"]
+    # It rides the FAILED index but stays unreadable (its blob is still corrupt), so the
+    # failed listing counts it rather than silently dropping it.
+    failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))
+    assert failed.items == []
+    assert failed.unreadable == 1
 
 
 async def test_prune_expired_terminal_indexes_drops_only_expired_members(monkeypatch):
@@ -741,3 +751,84 @@ async def test_a_record_must_carry_the_inbound_text_it_answers(monkeypatch):
         ConversationRecord.model_validate(fields)
     with pytest.raises(ValueError, match="inbound_text"):
         ConversationRecord.model_validate({**fields, "inbound_text": None})
+
+
+async def test_list_by_status_counts_unreadable(monkeypatch):
+    # A status index holding one parseable and one corrupt member: the read returns the good
+    # record and a truthful count of the one it could not read — never a silently shorter list.
+    fake = FakeRecordRedis()
+    store = _store(monkeypatch, fake)
+    settings = ConversationsSettings()
+    await store.create_record(_record("good"))
+    fake.seed_hash(
+        settings.record_key("bad"),
+        {
+            "data": "{not json",
+            "delivery_status": "pending_delivery",
+            "outbound_ids": "[]",
+            "attempts": "0",
+            "grace_deadline": "",
+            "updated_at": "1",
+        },
+    )
+    await fake.zadd(settings.status_index_key("pending_delivery"), {"bad": float("inf")})
+
+    listing = await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))
+    assert [r.message_id for r in listing.items] == ["good"]
+    assert listing.unreadable == 1
+
+
+async def test_list_by_status_counts_orphan_member(monkeypatch, caplog):
+    # An indexed id whose row is gone is unindexed LOUDLY and counted toward unreadable.
+    fake = FakeRecordRedis()
+    store = _store(monkeypatch, fake)
+    settings = ConversationsSettings()
+    await store.create_record(_record("gone"))
+    fake._hashes.pop(settings.record_key("gone"))
+
+    with caplog.at_level("WARNING"):
+        listing = await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))
+    assert listing.items == []
+    assert listing.unreadable == 1
+    assert "indexed but has no row" in caplog.text
+    assert await fake.zrange(settings.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
+
+
+async def test_create_marks_route_missing_when_route_gone(monkeypatch):
+    # The route row vanished before the accept landed: the record stands and is status-listable,
+    # but no transcript names it and it carries the honest ``route_missing`` marker.
+    fake = FakeRecordRedis()
+    store = _store(monkeypatch, fake)
+    settings = ConversationsSettings()
+    await store.create_record(_record("m1"))
+
+    assert fake._hashes[settings.record_key("m1")].get("route_missing") == "1"
+    record = await store.get_record("m1")
+    assert record is not None
+    assert record.route_missing is True
+    listing = await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))
+    assert [(r.message_id, r.route_missing) for r in listing.items] == [("m1", True)]
+    assert await fake.zrange(settings.thread_index_key("line", "bridge:line:m1"), 0, -1) == []
+
+
+async def test_create_route_present_not_missing(monkeypatch):
+    # The route still routes: the record is thread-indexed and carries no route-missing marker.
+    fake = FakeRecordRedis()
+    fake.seed_route("line")
+    store = _store(monkeypatch, fake)
+    settings = ConversationsSettings()
+    await store.create_record(_record("m1"))
+
+    record = await store.get_record("m1")
+    assert record is not None
+    assert record.route_missing is False
+    assert await fake.zrange(settings.thread_index_key("line", "bridge:line:m1"), 0, -1) == ["m1"]
+
+
+def test_pending_receipt_on_admin_view_absent_from_caller_view():
+    # A receipt staged on an in-flight record is delivery bookkeeping: the operator read sees it,
+    # the caller-scoped read withholds it, like the other delivery-control fields.
+    record = _record("m1", pending_receipt=DeliveryStatus.DELIVERED)
+
+    assert record.view()["pending_receipt"] == DeliveryStatus.DELIVERED.value
+    assert "pending_receipt" not in record.caller_view()

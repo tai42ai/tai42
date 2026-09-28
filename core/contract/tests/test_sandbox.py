@@ -173,6 +173,7 @@ def test_error_family_all_derive_from_sandbox_error():
     from tai42_contract.sandbox import (
         SandboxError,
         SandboxExecTimeoutError,
+        SandboxFileNotFoundError,
         SandboxSessionNotFoundError,
         SandboxSpecRejectedError,
         SandboxUnavailableError,
@@ -181,6 +182,7 @@ def test_error_family_all_derive_from_sandbox_error():
     for cls in (
         SandboxUnavailableError,
         SandboxSessionNotFoundError,
+        SandboxFileNotFoundError,
         SandboxSpecRejectedError,
     ):
         assert issubclass(cls, SandboxError)
@@ -193,6 +195,22 @@ def test_session_not_found_carries_id():
     err = SandboxSessionNotFoundError("s9")
     assert err.session_id == "s9"
     assert "s9" in str(err)
+
+
+def test_file_not_found_carries_path():
+    from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError
+
+    err = SandboxFileNotFoundError("/w/a.txt")
+    assert err.path == "/w/a.txt"
+    assert "/w/a.txt" in str(err)
+    assert isinstance(err, SandboxError)
+
+
+def test_file_not_found_importable_from_public_path():
+    import tai42_contract.sandbox as sandbox
+
+    assert hasattr(sandbox, "SandboxFileNotFoundError")
+    assert "SandboxFileNotFoundError" in sandbox.__all__
 
 
 def test_exec_timeout_carries_lengths_never_content():

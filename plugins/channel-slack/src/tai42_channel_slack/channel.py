@@ -409,6 +409,10 @@ class SlackChannel:
     supports_interactive_notifications: ClassVar[bool] = True
     supports_location_notifications: ClassVar[bool] = True
     supports_form_delivery: ClassVar[bool] = True
+    # The Slack Web API exposes no bot typing indicator (only the RTM/Socket
+    # user_typing frame, unsupported by this plugin), so this channel emits no
+    # working-on-it signal.
+    working_signal_expiry_seconds: ClassVar[None] = None
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
         """Enforce this channel's ask-time-knowable Block Kit caps at ask-time, before any state is written.

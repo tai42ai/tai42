@@ -11,8 +11,25 @@ describe('applyFrame: chat.message', () => {
     const model = fold(EMPTY_MODEL, message);
 
     expect(model.items).toEqual([
-      { kind: 'message', id: 'm1', direction: 'out', text: 'hi', ts: TS, clientMessageId: null },
+      {
+        kind: 'message',
+        id: 'm1',
+        direction: 'out',
+        text: 'hi',
+        ts: TS,
+        media: null,
+        clientMessageId: null,
+      },
     ]);
+  });
+
+  it('folds an inbound message with no media key as a text-only message', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      frame('chat.message', { id: 'm1', direction: 'in', text: 'hi', ts: TS }),
+    );
+
+    expect(model.items[0]).toMatchObject({ kind: 'message', media: null });
   });
 
   it("carries the sender's own idempotency key back off the frame", () => {

@@ -125,8 +125,9 @@ async def _bridge_inbound(
     forwarded verbatim to the tool target's payload. ``attachments`` (typed participant media) and
     ``location`` (a shared geographic point) are the structured inbound content that lands on
     a tool target's payload under the stable ``attachments``/``location`` keys; inbound media
-    currently carries none (see the INBOUND MEDIA design note in ``rich_content``), while an
-    inbound location passes its typed :class:`LocationElement`. A message with no route bound,
+    passes the served :class:`MediaItem` it was ingested to (see the INBOUND MEDIA note in
+    ``rich_content``), and an inbound location passes its typed :class:`LocationElement`. A
+    message with no route bound,
     or with blank text (an empty interactive title), is logged and skipped; a retryable
     overflow or infrastructure failure propagates as a 5xx so Meta redelivers.
 

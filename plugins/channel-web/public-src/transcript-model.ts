@@ -2,11 +2,12 @@
  * The transcript data model: the typed shapes one visitor's conversation folds
  * into, and the empty model a fresh subscription starts from.
  *
- * The wire carries six events. `chat.message`, `chat.question`, `chat.media` and
- * `chat.form` are transcript ENTRIES and become items in arrival order;
- * `chat.answered` is not an entry of its own — it settles the question it names,
- * so it only records an interaction id; `chat.backlog_done` marks the replayed
- * backlog as complete.
+ * The wire carries seven events. `chat.message`, `chat.question`, `chat.media`,
+ * `chat.form` and `chat.unavailable` are transcript ENTRIES and become items in
+ * arrival order (`chat.unavailable` is the placeholder for a stored entry the server
+ * could not render); `chat.answered` is not an entry of its own — it settles the
+ * question it names, so it only records an interaction id; `chat.backlog_done` marks
+ * the replayed backlog as complete.
  */
 import type { JsonSchema } from '@tai42/studio-sdk';
 
@@ -180,6 +181,11 @@ export type ChatItem =
       readonly direction: 'in' | 'out';
       readonly text: string;
       readonly ts: string;
+      /** The attachments the visitor sent with this message — the same shape a media
+       * card carries, so the visitor's own upload renders through the media
+       * components. Rides an inbound message only; `null` when the message carries
+       * none. */
+      readonly media: readonly MediaItem[] | null;
       /** The idempotency key the sender put on this message, echoed back onto their
        * own frame. It is what identifies a message as one THIS page sent even when
        * the door's answer never arrived, so the optimistic bubble can be retired
@@ -204,7 +210,15 @@ export type ChatItem =
       readonly location: LocationPoint | null;
       readonly ts: string;
     }
-  | (QuestionBase & QuestionFacet);
+  | (QuestionBase & QuestionFacet)
+  | {
+      /** A stored entry the server could not render, replayed as a dedicated
+       * placeholder so the visitor sees a persistent marker where the message was
+       * rather than a silent gap. Ordered by its own `ts` like every other entry. */
+      readonly kind: 'unavailable';
+      readonly id: string;
+      readonly ts: string;
+    };
 
 /** The folded stream: the ordered items, a fast id index for the dedupe, and the
  * interaction ids a `chat.answered` frame has settled. */

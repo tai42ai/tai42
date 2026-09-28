@@ -95,7 +95,7 @@ class FakeManager:
         self._route = route
 
     async def list_routes(self):
-        return {self._route.route_name: self._route}
+        return {self._route.route_name: self._route}, 0
 
     async def get_route(self, name: str):
         return self._route if name == self._route.route_name else None

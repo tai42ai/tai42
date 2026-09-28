@@ -505,5 +505,5 @@ async def test_an_overlap_terminal_record_is_never_redriven_or_stranded(env, mon
     assert agent.calls == []
     assert channel.sends == []
     # Neither scan the re-drive and the delivery sweep read ever names it.
-    assert await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED})) == []
+    assert (await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED}))).items == []
     assert [work.message_id for work in await store.pending_work()] == []

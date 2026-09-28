@@ -45,17 +45,18 @@ async def test_list_returns_every_config_keyed_by_pair(store):
     await store.upsert(
         TargetConversationConfig(target_kind="tool", target_name="lookup", greeting_template="hi {pairing_code}")
     )
-    listed = await store.list()
+    listed, unreadable = await store.list()
     assert set(listed) == {("agent", "assistant"), ("tool", "lookup")}
     assert listed[("tool", "lookup")].greeting_template == "hi {pairing_code}"
+    assert unreadable == 0
 
 
 async def test_delete_removes_row_and_index_member(store):
     await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
     assert await store.delete("agent", "assistant") is True
     assert await store.get("agent", "assistant") is None
-    assert await store.list() == {}
-    # ``list() == {}`` alone passes even on a leaked index member (it orphan-skips an
+    assert await store.list() == ({}, 0)
+    # ``list() == ({}, 0)`` alone passes even on a leaked index member (it orphan-skips an
     # indexed-but-rowless member), so assert the names set itself no longer carries the member.
     assert await store.fake.smembers(store.settings.target_config_names_key) == set()
     # A second delete of the now-absent key removes nothing.
@@ -67,8 +68,21 @@ async def test_list_skips_an_indexed_member_with_no_row(store):
     # An index member whose row never landed (or was dropped from under it) is logged and
     # skipped, never surfaced as a half-row.
     store.fake.seed_member(store.settings.target_config_names_key, "tool:ghost")
-    listed = await store.list()
+    listed, unreadable = await store.list()
     assert set(listed) == {("agent", "assistant")}
+    assert unreadable == 1
+
+
+async def test_list_skips_an_unparseable_row(store):
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
+    # A row whose bytes are not a valid config payload is logged and skipped, never aborting
+    # the whole listing.
+    member = "tool:corrupt"
+    store.fake.seed_member(store.settings.target_config_names_key, member)
+    store.fake._strings[f"{store.settings.target_config_key_prefix}{member}"] = "{not json"
+    listed, unreadable = await store.list()
+    assert set(listed) == {("agent", "assistant")}
+    assert unreadable == 1
 
 
 async def test_a_target_name_bearing_a_colon_round_trips(store):
@@ -77,7 +91,8 @@ async def test_a_target_name_bearing_a_colon_round_trips(store):
     got = await store.get("tool", "ns:lookup")
     assert got is not None
     assert got.target_name == "ns:lookup"
-    assert set(await store.list()) == {("tool", "ns:lookup")}
+    listed, _ = await store.list()
+    assert set(listed) == {("tool", "ns:lookup")}
 
 
 def test_construction_refuses_without_the_backend(monkeypatch):

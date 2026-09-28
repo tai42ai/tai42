@@ -9,6 +9,30 @@ server/worker process."""
 
 from __future__ import annotations
 
-from tai42_e2e_fixtures.tools import basic, caller, connector, door_probe, driving, overlap, park, sandbox, tool_target
+from tai42_e2e_fixtures.tools import (
+    basic,
+    caller,
+    connector,
+    conversations,
+    door_probe,
+    driving,
+    overlap,
+    park,
+    readiness,
+    sandbox,
+    tool_target,
+)
 
-__all__ = ["basic", "caller", "connector", "door_probe", "driving", "overlap", "park", "sandbox", "tool_target"]
+__all__ = [
+    "basic",
+    "caller",
+    "connector",
+    "conversations",
+    "door_probe",
+    "driving",
+    "overlap",
+    "park",
+    "readiness",
+    "sandbox",
+    "tool_target",
+]

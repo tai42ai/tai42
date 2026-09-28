@@ -39,6 +39,35 @@ Subscriptions to `{public base URL}/api/channels/slack/inbound` and subscribe to
 the message events the bot should hear. Slack verifies the URL against the
 signing secret.
 
+A `me_message` (a `/me …` post) and a `thread_broadcast` (a threaded reply also sent
+to the channel) carry the participant's own text and bridge like a plain message — a
+threaded broadcast resolves a pending question when it lands in an allowlisted
+recipient. Other subtypes — edits (`message_changed` / `message_deleted`),
+joins/leaves, `bot_message`, pins and the `message_replied` container — carry no
+participant utterance and are acknowledged without bridging.
+
+## Inbound media
+
+A message that shares files (`subtype` `file_share`) bridges one turn per file, so
+a message with several files never drops any of them. Each file's bytes are fetched
+from Slack (the bot token authorizes the download and rides the request only) and
+ingested into the platform's served media: the turn carries a typed attachment whose
+`url` is the served `/api/interactions/media/<id>` reference, alongside the parity
+`media_*` entry-params (`media_kind`, `media_id` — the served id, `media_mime_type`,
+`media_sha256`, `media_filename` for a document, `media_size`). The mime major type
+resolves the kind (`image`/`video`/`audio`, `application`/`text` → `document`, any
+other or missing type → `file`). The message text rides the first bridged file's turn;
+every other turn gets a `[kind]` placeholder, so a caption-less share is never
+dropped as empty.
+
+A fetch that fails temporarily (a Slack 5xx, a timeout, a torn download) makes the
+door answer non-2xx so Slack redelivers and the turn is ingested on the retry. A
+permanent failure — a missing or unreachable body, a file over the operator's byte
+cap, a disallowed type, or no media store configured — bridges no turn: the
+participant gets a single notice (`unsupported type`, `too large`, or `could not
+receive`) and a platform event records it, while the message's other files still
+bridge.
+
 ## Create a bridge route
 
 The route's `our_identity` is the bot user id; `client_address` is the Slack
@@ -49,6 +78,12 @@ tai conversations create slack-chat \
   --door channel --target-name chat --execution-key chat-bot \
   --channel slack --identity U0XXXXXXX
 ```
+
+## Working-on-it signal
+
+Slack shows no bot typing indicator: the Web API exposes none for a bot user (only
+the RTM/Socket `user_typing` frame this plugin does not use), so this channel emits
+no working-on-it signal while a turn runs. The answer posts back when it is ready.
 
 ## See also
 

@@ -24,7 +24,8 @@ from tai42_kit.db import (
 )
 
 from tai42_skeleton.config.config_mode import config_mode
-from tai42_skeleton.db import SKELETON_COMPONENT, all_migration_entries
+from tai42_skeleton.db import SKELETON_COMPONENT, discover_all_migration_chains
+from tai42_skeleton.db.discovery import chain_skip_message
 
 _OK = "ok"
 _FAIL = "fail"
@@ -83,9 +84,11 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
 
     ``migration_status`` never raises on a mismatch — a pending migration or a
     rewritten (checksum-diverged) chain comes back as data, rendered here as a FAIL
-    naming ``tai db migrate``. A connection failure, a malformed installed-plugin
-    chain (a kit :class:`~tai42_kit.db.MigrationError` from discovery/checksum), or a
-    component bound to an unconfigured named database (a kit
+    naming ``tai db migrate``. A declared chain whose override binding is unset comes
+    back as a skip and is rendered as a FAIL naming it and its unset binding. A
+    connection failure, a malformed installed-plugin chain (a kit
+    :class:`~tai42_kit.db.MigrationError` from discovery/checksum), or a component
+    bound to an unconfigured named database (a kit
     :class:`~tai42_kit.db.DatabaseNotConfiguredError`, which names the env var) or one
     with a half-set admin identity (a kit
     :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars)
@@ -95,14 +98,17 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     import psycopg
 
     try:
-        entries = await all_migration_entries()
-        statuses = await migration_status(entries)
+        discovery = await discover_all_migration_chains()
+        statuses = await migration_status(discovery.entries)
     except psycopg.OperationalError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema at {_pg_target(settings)}: {exc}")
     except MigrationError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema (run 'tai db migrate'): {exc}")
     except (DatabaseNotConfiguredError, AdminIdentityIncompleteError) as exc:
         return Check("schema", _FAIL, str(exc))
+    if discovery.skipped:
+        detail = "; ".join(chain_skip_message(skip) for skip in discovery.skipped)
+        return Check("schema", _FAIL, f"declared migration chain(s) skipped: {detail}")
     stale = [status for status in statuses if not status.is_up_to_date]
     if stale:
         detail = ", ".join(

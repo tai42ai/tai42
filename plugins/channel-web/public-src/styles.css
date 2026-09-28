@@ -146,6 +146,7 @@
 /* One readable column, centred on a wide screen. */
 .tcw-group,
 .tcw-day,
+.tcw-unavailable,
 .tcw-row {
   width: 100%;
   max-width: 46rem;
@@ -191,6 +192,17 @@
 
 .tcw-time--in {
   text-align: right;
+}
+
+/* A stored entry the server could not render: a centred, muted, italic system
+   notice, styled like the day divider (no bubble, no avatar) so it reads as
+   subordinate to real messages in both themes via the muted-foreground token. */
+.tcw-unavailable {
+  margin: var(--tai-space-2) auto;
+  text-align: center;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+  font-style: italic;
 }
 
 /* -- Bubbles --------------------------------------------------------------- */
@@ -485,6 +497,12 @@
   gap: var(--tai-space-3);
 }
 
+/* The visitor's own attachments render above their bubble, on their (right) side and
+   at the bubble's own reading width rather than the full row. */
+.tcw-media-in .tcw-media-items {
+  max-width: min(85%, 40rem);
+}
+
 .tcw-media-figure {
   margin: 0;
   display: flex;
@@ -541,6 +559,11 @@
 
 .tcw-doc-card:hover {
   border-color: var(--tai-color-border-strong);
+}
+
+/* A preview of a file not yet served: nothing to open, so no hover affordance. */
+.tcw-doc-card--pending:hover {
+  border-color: var(--tai-color-border);
 }
 
 .tcw-doc-card:focus-visible {
@@ -801,17 +824,132 @@
   font-size: 1rem;
 }
 
-.tcw-send {
+.tcw-send,
+.tcw-attach {
   flex: none;
   width: var(--tai-control-height);
   padding: 0;
   justify-content: center;
 }
 
+/* At the per-message cap the attach control stays focusable, so its reason can be
+   read, but looks stopped. */
+.tcw-attach[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 @media (pointer: coarse) {
-  .tcw-send {
+  .tcw-send,
+  .tcw-attach {
     width: var(--tai-control-height-coarse);
   }
+}
+
+/* -- Compose tray ---------------------------------------------------------- */
+
+/* The pending attachments, stacked on their own full-width row above the input. */
+.tcw-compose-tray {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-2);
+  margin-bottom: var(--tai-space-1);
+}
+
+.tcw-attach-item {
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-2);
+  padding: var(--tai-space-1) var(--tai-space-2);
+  border-radius: var(--tai-radius-md);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-surface);
+}
+
+.tcw-attach-item[data-status='failed'] {
+  border-color: var(--tai-color-err-text);
+}
+
+.tcw-attach-preview {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--tai-radius-sm);
+  overflow: hidden;
+  color: var(--tai-color-text-muted);
+  background: var(--tai-color-bg);
+}
+
+.tcw-attach-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tcw-attach-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.tcw-attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--tai-text-sm);
+  font-weight: 600;
+}
+
+.tcw-attach-meta {
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+}
+
+.tcw-attach-meta--wait {
+  color: var(--tai-color-warn-text);
+}
+
+.tcw-attach-progress {
+  display: block;
+  margin-top: 2px;
+}
+
+/* The failed reason is itself the retry control, so it reads as tappable. */
+.tcw-attach-error {
+  align-self: flex-start;
+  padding: 0;
+  color: var(--tai-color-err-text);
+  font-size: var(--tai-text-xs);
+  text-decoration: underline;
+}
+
+.tcw-attach-remove {
+  flex: none;
+  padding: var(--tai-space-1);
+  color: var(--tai-color-text-muted);
+}
+
+/* -- Drag-and-drop --------------------------------------------------------- */
+
+/* Wraps the transcript so a file dragged anywhere over the conversation is a drop
+   target; it passes the flex sizing straight through to the transcript frame. */
+.tcw-drop-zone {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.tcw-drop-active {
+  outline: 2px dashed var(--tai-color-focus-ring);
+  outline-offset: -6px;
+  border-radius: var(--tai-radius-md);
 }
 
 /* -- Motion ---------------------------------------------------------------- */

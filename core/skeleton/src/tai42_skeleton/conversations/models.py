@@ -192,9 +192,19 @@ class ConversationRecord(BaseModel):
     successor_id: str | None = None
 
     delivery_status: DeliveryStatus = DeliveryStatus.PENDING_DELIVERY
+    # ``True`` when the record's route row had vanished by the time it was accepted, so no
+    # transcript names it (the thread indexes were deliberately not written). Written ONCE by
+    # the create step's route-gone branch and read back from that hash field; the operator sees
+    # the honest marker on the record, not only a log line.
+    route_missing: bool = False
     # Provider-assigned ids of this record's sends, correlated by out-of-band receipts.
     outbound_message_ids: list[str] = Field(default_factory=list)
     attempts: int = 0
+    # A terminal receipt (``delivered``/``failed``) that arrived while the send was still in
+    # flight, staged on the record until the completing provisional write applies it straight to
+    # that terminal. ``None`` while none is staged. Written ONLY by the atomic transitions (never
+    # by ``create_record``), so a fresh record carries ``None``.
+    pending_receipt: DeliveryStatus | None = None
 
     created_at: float
     updated_at: float
@@ -389,6 +399,7 @@ class ConversationRecord(BaseModel):
                 "answer_parts",
                 "successor_id",
                 "delivery_status",
+                "route_missing",
                 "created_at",
                 "updated_at",
             },

@@ -142,6 +142,14 @@ class ServingCoreAccessMixin(LifecycleState):
         self._serving_core._mcp_preset_conflicts = value
 
     @property
+    def _mcp_unusable_tools(self) -> dict[str, set[str]]:
+        return self._serving_core._mcp_unusable_tools
+
+    @_mcp_unusable_tools.setter
+    def _mcp_unusable_tools(self, value: dict[str, set[str]]) -> None:
+        self._serving_core._mcp_unusable_tools = value
+
+    @property
     def _resource_manager_cache(self) -> "ResourceManager | None":
         return self._serving_core._resource_manager_cache
 

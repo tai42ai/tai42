@@ -3,8 +3,7 @@ title: Twilio channel
 description: Configure the Twilio WhatsApp channel — the CHANNEL_TWILIO_ env group, the two webhooks, and the whatsapp-prefixed route identity.
 ---
 
-Bridge a WhatsApp number carried by Twilio to an agent. Twilio sends and receives
-text only.
+Bridge a WhatsApp number carried by Twilio to an agent.
 
 ## Enable it
 
@@ -46,6 +45,31 @@ resolved to that send and posted as a `delivery_receipt` event onto its
 monitoring trace — `failed` as an `ERROR`. A status neither owns is acknowledged
 and ignored.
 
+## Inbound media
+
+A message that carries media (`NumMedia > 0`) bridges as a turn per media item.
+Each item's bytes are fetched from Twilio (`MediaUrl{N}`, HTTP Basic auth,
+following the vendor's redirect to its CDN) and ingested into the platform's
+served media store: the turn gets a typed attachment whose url is
+`/api/interactions/media/<id>`, plus the parity `media_*` entry-params
+(`media_kind`, `media_id`, `media_mime_type`, `media_sha256`, `media_size`, and
+`media_filename` for a document) carrying the served id. The `MediaContentType{N}`
+major type resolves the kind (`image`/`audio`/`video`, `application`/`text` →
+`document`, otherwise `file`). The `Body` caption rides the first item's text; an
+item with no caption gets a `[kind]` placeholder (a document reads
+`[document: <name>]` from the platform-sanitised filename), so a media message with
+a blank body is never dropped as empty.
+
+When an item cannot be received, the participant is notified once and the message
+is acknowledged, never silently dropped: a gone media, an unfetchable byte source,
+or no configured store reads as *could not receive*; a file over the platform cap as
+*too large*; a disallowed content type as *unsupported*. A caption on a rejected
+first item is still bridged as its own text turn. A transient fault (a `5xx` or
+timeout from Twilio or its CDN, a torn read) instead returns a non-2xx webhook so
+Twilio redelivers; the `MessageSid` dedupe keeps the redelivery from
+double-processing. A message with no body and no media stays the legitimate
+acknowledged drop.
+
 ## Create a bridge route
 
 `our_identity` is the number the client texts — the Twilio WhatsApp sender,
@@ -59,6 +83,11 @@ tai conversations create chat-line \
 
 A `(channel, identity)` pair may be claimed by only one route; more senders are
 more rows.
+
+## Working-on-it signal
+
+SMS and WhatsApp-over-Twilio carry no typing indicator, so this channel emits no
+working-on-it signal while a turn runs. The answer is delivered when it is ready.
 
 ## See also
 

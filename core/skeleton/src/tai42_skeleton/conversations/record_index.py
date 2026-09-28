@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 
 from redis.asyncio import Redis as AsyncRedis
 from tai42_kit.clients.impl.redis import RedisClient
@@ -28,6 +29,18 @@ from tai42_skeleton.conversations.record_store_base import RecordStoreBase
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StatusListing:
+    """A status listing with the rows it could read and a count of the ones it could not.
+
+    ``unreadable`` counts the members omitted because their row was gone (an orphan the read
+    unindexed) or unparseable, so a shorter list is never a silent cut.
+    """
+
+    items: list[ConversationRecord] = field(default_factory=list)
+    unreadable: int = 0
 
 
 class RecordIndexMixin(RecordStoreBase):
@@ -63,9 +76,11 @@ class RecordIndexMixin(RecordStoreBase):
         The listing behind the boot re-drive and the periodic sweep. Read from the status
         index, so it costs the work outstanding and not the whole retained keyspace.
         Terminal and intake records are not read (an intake record is the turn engine's to
-        resolve); a corrupt row is logged and skipped rather than crashing the pass.
+        resolve); an unrecoverable row is moved to the terminal ``failed`` state so it stops
+        being re-enumerated every pass, never silently skipped.
         """
         work: list[PendingWork] = []
+        unreadable_ids: list[str] = []
         wanted = frozenset({DeliveryStatus.PENDING_DELIVERY, DeliveryStatus.PROVISIONAL})
         now = time.time()
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -76,7 +91,7 @@ class RecordIndexMixin(RecordStoreBase):
                     continue
                 try:
                     # Parse the WHOLE row (content blob included), as list_by_status does: a
-                    # row malformed anywhere is skipped here, not handed to a delivery that
+                    # row malformed anywhere is caught here, not handed to a delivery that
                     # re-reads it unguarded and re-drives forever.
                     self._from_hash(hashed)
                     status = DeliveryStatus(hashed[_F_STATUS])
@@ -92,21 +107,29 @@ class RecordIndexMixin(RecordStoreBase):
                         grace_deadline=float(grace) if grace else None,
                     )
                 except (ValueError, KeyError):
-                    # One unreadable row must not abort the pass, or every other record
-                    # with unfinished work stays stranded behind it forever.
+                    # One unreadable row must not abort the pass, nor be re-skipped forever:
+                    # move it to the terminal failed state so it leaves the sweep and appears
+                    # on the admin failed listing.
                     logger.warning(
-                        "conversations: record %r is corrupt and was skipped in the delivery sweep", message_id
+                        "conversations: record %r is corrupt; moving it to terminal failed in the delivery sweep",
+                        message_id,
                     )
+                    unreadable_ids.append(message_id)
                     continue
                 work.append(found)
+        for message_id in unreadable_ids:
+            await self.mark_unreadable(message_id, now)
         return work
 
-    async def list_by_status(self, statuses: frozenset[DeliveryStatus]) -> list[ConversationRecord]:
+    async def list_by_status(self, statuses: frozenset[DeliveryStatus]) -> StatusListing:
         """Every record whose ``delivery_status`` is in ``statuses``, read from the status index.
 
-        An unparseable row is logged and skipped rather than crashing the listing.
+        Returns the readable records and a count of the members it could not read — an orphan
+        (indexed, row gone) it unindexed loudly, or an unparseable row it logged — so a shorter
+        list is a truthful count, never a silent cut.
         """
         records: list[ConversationRecord] = []
+        unreadable = 0
         wanted = {status.value for status in statuses}
         now = time.time()
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -114,6 +137,7 @@ class RecordIndexMixin(RecordStoreBase):
                 hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
                 if not hashed:
                     await self._drop_orphan(r, message_id)
+                    unreadable += 1
                     continue
                 if hashed.get(_F_STATUS) not in wanted:
                     continue
@@ -123,7 +147,8 @@ class RecordIndexMixin(RecordStoreBase):
                     logger.warning(
                         "conversations: record %r is corrupt and was skipped in the status listing", message_id
                     )
-        return records
+                    unreadable += 1
+        return StatusListing(items=records, unreadable=unreadable)
 
     async def thread_has_live_intake(self, thread_id: str) -> bool:
         """Whether a turn is IN FLIGHT on ``thread_id`` — an ``accepted`` intake record still holding a LIVE lease.

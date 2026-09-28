@@ -20,7 +20,7 @@ from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 from tai42_backend_arq.scheduler import wait_job_result
-from tai42_backend_arq.settings import arq_settings, job_deserializer
+from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deserializer
 
 # Task options every backend extension appends to its branch tool's signature.
 ARQ_TASK_OPTS: dict[str, Any] = {
@@ -43,8 +43,9 @@ async def callback_job(
 ) -> Any:
     """Wait for ``previous_job_id`` to complete, then run ``callback`` over its result.
 
-    Reports an error/not-finished status when the predecessor is missing, times out, or
-    fails.
+    A missing, timed-out, or failed predecessor is a domain outcome returned as a
+    status dict. An unexpected polling error, and any failure of the callback's own
+    execution, raise so arq records this callback a failed job.
     """
     # The schema crosses the queue as JSON, so it arrives as a plain mapping.
     if not isinstance(callback, CallbackSchema):
@@ -54,34 +55,32 @@ async def callback_job(
     start_time = time.time()
 
     while True:
-        try:
-            status = await job.status()
+        status = await job.status()
 
-            if status == JobStatus.complete:
-                break
+        if status == JobStatus.complete:
+            break
 
-            if status == JobStatus.not_found:
-                return {"status": "error", "job_id": previous_job_id, "error": "Job not found"}
+        if status == JobStatus.not_found:
+            return {"status": "error", "job_id": previous_job_id, "error": "Job not found"}
 
-            if (time.time() - start_time) > timeout:
-                return {
-                    "status": "not_finished",
-                    "job_id": previous_job_id,
-                    "error": f"Job status '{status}' did not complete within {timeout}s",
-                }
+        if (time.time() - start_time) > timeout:
+            return {
+                "status": "not_finished",
+                "job_id": previous_job_id,
+                "error": f"Job status '{status}' did not complete within {timeout}s",
+            }
 
-            await asyncio.sleep(0.1)
-
-        except Exception as e:
-            return {"status": "error", "job_id": previous_job_id, "error": repr(e)}
+        await asyncio.sleep(0.1)
 
     try:
-        # wait_job_result surfaces an aborted predecessor as TaskFailedError,
-        # not a raw CancelledError that would read as this job's cancellation.
+        # wait_job_result surfaces a failed or aborted predecessor as TaskFailedError:
+        # the predecessor's own failure is a domain outcome reported as a status dict.
         result = await wait_job_result(job)
-        return await callback_execution(result, callback)
-    except Exception as e:
+    except TaskFailedError as e:
         return {"status": "failure", "job_id": previous_job_id, "error": repr(e)}
+
+    # The follow-up delivery is left to raise into arq's failed-job machinery.
+    return await callback_execution(result, callback)
 
 
 async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:

@@ -63,6 +63,51 @@ A bridged tap on an option with an **author-set id** carries that id back as
 `params.reply_id` (and a sectioned row's description as `params.reply_description`) —
 opaque enrichment a `tool` target can read from the turn's `params`.
 
+## Inbound media
+
+A message carrying media is fetched from Telegram and ingested into the platform's
+served media. A **photo** (largest size), **document**, **audio**, **voice**,
+**video**, **video_note**, **animation**, or **sticker** has its bytes pulled — via
+`getFile` and the file host — through the ingestion seam, which caps, sniffs, stores,
+and mints a served reference. The message then bridges as one turn whose text is the
+caption when present, else a non-blank placeholder (`[voice message]`,
+`[document: <name>]`, or the bracketed kind), carrying BOTH a typed **attachment** (the
+served `MediaItem` a tool consumer reads as structured content) and the parity `media_*`
+entry-params: `media_kind` (`image`/`document`/`audio`/`video`/`sticker`), `media_id`
+(the **served** media reference, not the raw Telegram `file_id`), `media_mime_type` (the
+sniffed-and-agreed type), `media_size` (the actual bytes stored), and, where they apply,
+`media_filename` (the sanitised display name), `media_voice` (a voice note), and
+`sticker_animated`. The placeholder label and `media_filename` both use the sanitised
+name, never the raw vendor filename.
+
+A media message that **replies** to a pending question answers it just as a text reply
+does: the ask is resolved with the caption (or the placeholder) as the answer text and the
+`media_*` parameters, while the typed attachment rides only a fresh-turn bridge (the answer
+carries text and parameters). A media reply that cannot be received leaves the ask pending.
+
+If the media cannot be received, the participant gets one generic notice and a platform
+event records why — `too_large` (over the operator's per-kind cap), `unsupported_type`
+(a disallowed or mismatched type), or `could_not_receive` (a gone/expired file, a store
+outage, or an unfetchable source). A caption on a rejected media is still bridged as a
+text-only turn, so the participant's words are never lost. A transient failure (a
+timeout, a 5xx, or a torn read) is not acked, so Telegram redelivers the update — the
+update id dedupes a redelivery that later succeeds.
+
+Content Telegram can send that this channel does not map to a media kind — a **poll**,
+**dice**, **venue**, **contact**, **location**, or **game** — is not bridged: the
+participant gets one generic "unsupported" notice and a platform event records the drop,
+so nothing is silently lost.
+
+## Working-on-it signal
+
+While a message runs its turn, the platform keeps Telegram's **typing action**
+alive: it re-issues `sendChatAction "typing"` ahead of the action's ~5 s lifetime
+until the reply is sent, so the chat shows the bot typing for the whole wait rather
+than for a single burst at receipt. The refresh is bounded by the
+`CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling (`0` disables it entirely), with
+`CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS` the margin it refreshes ahead
+of each lapse.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

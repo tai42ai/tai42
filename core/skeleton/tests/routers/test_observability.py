@@ -234,6 +234,51 @@ async def test_metrics_bymodel_omitted_when_subquery_rejected():
     assert _json(resp)["data"]["byModel"] == []  # omitted, tiles intact
 
 
+async def test_by_model_available_true_with_rows():
+    reader = _install(_FakeReader())
+    reader.model_rows = [
+        MetricsRow(
+            dimensions={"providedModelName": "gpt-4o"},
+            metrics={"count": 7, "totalCost": 2.0, "totalTokens": 700, "latency": 1600},
+        )
+    ]
+    resp = await router.get_metrics(_req(""))
+    data = _json(resp)["data"]
+    assert data["byModelAvailable"] is True
+    assert data["byModel"] == [
+        {"model": "gpt-4o", "calls": 7, "cost": 2.0, "totalTokens": 700, "avgLatencyMs": 1600},
+    ]
+
+
+async def test_by_model_available_true_when_empty():
+    # A successful but empty by-model sub-query is AVAILABLE — empty is not unavailable.
+    _install(_FakeReader())  # all row sets empty
+    resp = await router.get_metrics(_req(""))
+    data = _json(resp)["data"]
+    assert data["byModelAvailable"] is True
+    assert data["byModel"] == []
+
+
+async def test_by_model_unavailable_when_safe_query_none():
+    reader = _install(_FakeReader())
+    reader.summary_rows = [MetricsRow(metrics={"count": 1})]
+
+    # Reject only the by-model OBSERVATIONS query → ``_safe_query`` returns None.
+    async def query(filter_):
+        if filter_.view == MetricsView.OBSERVATIONS:
+            raise MonitoringReadNotSupportedError("no observations metrics")
+        return MetricsResult(rows=reader.summary_rows if not filter_.granularity else [])
+
+    reader.query_metrics = query  # type: ignore[method-assign]
+    resp = await router.get_metrics(_req(""))
+    assert resp.status_code == 200
+    data = _json(resp)["data"]
+    assert data["byModelAvailable"] is False
+    assert data["byModel"] == []
+    assert data["summary"]["totalRuns"] == 1  # tiles intact
+    assert "timeSeries" in data
+
+
 async def test_metrics_bad_token_400():
     _install(_FakeReader())
     resp = await router.get_metrics(_req("from=nonsense"))

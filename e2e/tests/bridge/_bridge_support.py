@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from tai42_e2e.channel_stubs import FakeTwilio, FakeWhatsApp
+from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio, FakeWhatsApp
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import BRIDGE_TWILIO_FROM
@@ -32,6 +32,8 @@ from tai42_e2e.waiting import wait_for_async
 TWILIO_INBOUND_PATH = "/api/channels/twilio/inbound"
 TWILIO_STATUS_PATH = "/api/channels/twilio/status"
 WHATSAPP_INBOUND_PATH = "/api/channels/whatsapp/inbound"
+TELEGRAM_INBOUND_PATH = "/api/channels/telegram/inbound"
+SLACK_INBOUND_PATH = "/api/channels/slack/inbound"
 
 # The client-safe text a failed or denied turn delivers (mirrors the turn engine's constant);
 # a leg asserting an error outcome matches the answer against this.
@@ -74,6 +76,10 @@ class BridgeHarness:
     fake_twilio: FakeTwilio
     fake_whatsapp: FakeWhatsApp
     llm_stub: LlmStub
+    # Present only on the media-bridge profile (all four channels); ``None`` on the plain bridge
+    # profile, which loads twilio + whatsapp + web alone.
+    fake_telegram: FakeTelegram | None = None
+    fake_slack: FakeSlack | None = None
 
     # -- credentials read back from the stack env -----------------------------
 
@@ -84,6 +90,32 @@ class BridgeHarness:
     @property
     def whatsapp_secret(self) -> str:
         return self.stack.config.env["CHANNEL_WHATSAPP_APP_SECRET"]
+
+    @property
+    def telegram_secret(self) -> str:
+        return self.stack.config.env["CHANNEL_TELEGRAM_WEBHOOK_SECRET"]
+
+    @property
+    def slack_secret(self) -> str:
+        return self.stack.config.env["CHANNEL_SLACK_SIGNING_SECRET"]
+
+    @property
+    def telegram(self) -> FakeTelegram:
+        """The telegram stub, present only on the media-bridge profile (raises otherwise)."""
+        assert self.fake_telegram is not None, "the telegram stub requires the media-bridge profile"
+        return self.fake_telegram
+
+    @property
+    def slack(self) -> FakeSlack:
+        """The slack stub, present only on the media-bridge profile (raises otherwise)."""
+        assert self.fake_slack is not None, "the slack stub requires the media-bridge profile"
+        return self.fake_slack
+
+    @property
+    def telegram_our_identity(self) -> str:
+        """The bot's numeric id (the digits before the ``:`` in the configured token) — a
+        telegram channel route's ``our_identity`` and the identity a bridged turn is sent from."""
+        return self.stack.config.env["CHANNEL_TELEGRAM_BOT_TOKEN"].split(":", 1)[0]
 
     @property
     def whatsapp_verify_token(self) -> str:
@@ -367,6 +399,83 @@ class BridgeHarness:
             valid=valid,
         )
 
+    # -- media inbound synthesis (media-bridge profile) -----------------------
+
+    def telegram_inbound_photo(
+        self,
+        *,
+        chat_id: str,
+        file_id: str,
+        caption: str | None = None,
+        file_size: int | None = None,
+        update_id: int | None = None,
+    ) -> SignedInbound:
+        """A genuinely-signed inbound photo update (an uncorrelated bridge message) from ``chat_id``.
+        ``update_id`` may be pinned to replay the identical update (a vendor redelivery)."""
+        assert self.fake_telegram is not None, "telegram_inbound_photo requires the media-bridge profile"
+        return self.fake_telegram.build_inbound_photo(
+            secret=self.telegram_secret,
+            chat_id=chat_id,
+            file_id=file_id,
+            caption=caption,
+            file_size=file_size,
+            update_id=update_id,
+        )
+
+    def slack_inbound_files(
+        self, *, channel: str, files: list[dict[str, Any]], event_id: str, text: str | None = None
+    ) -> SignedInbound:
+        """A genuinely-signed ``file_share`` Events API delivery carrying ``files`` on ``channel``."""
+        assert self.fake_slack is not None, "slack_inbound_files requires the media-bridge profile"
+        return self.fake_slack.build_inbound_files(
+            signing_secret=self.slack_secret, channel=channel, files=files, event_id=event_id, text=text
+        )
+
+    def twilio_inbound_mms(
+        self,
+        *,
+        our_identity: str,
+        client: str,
+        media_url: str,
+        content_type: str,
+        body: str = "",
+        port: int | None = None,
+    ) -> SignedInbound:
+        """A genuinely-signed inbound MMS (one media item) from ``client`` to ``our_identity``."""
+        public_url = f"http://{self.stack.host}:{port or self.stack.port_b}{TWILIO_INBOUND_PATH}"
+        return self.fake_twilio.build_inbound_mms(
+            auth_token=self.twilio_secret,
+            public_url=public_url,
+            twilio_number=our_identity,
+            human_number=client,
+            media_url=media_url,
+            content_type=content_type,
+            body=body,
+        )
+
+    def whatsapp_inbound_image(
+        self,
+        *,
+        phone_number_id: str,
+        wa_id: str,
+        media_id: str,
+        mime_type: str = "image/jpeg",
+        caption: str | None = None,
+        sha256: str | None = None,
+        wamid: str | None = None,
+    ) -> SignedInbound:
+        """A genuinely-signed inbound image message from ``wa_id`` to ``phone_number_id``."""
+        return self.fake_whatsapp.build_inbound_image(
+            app_secret=self.whatsapp_secret,
+            phone_number_id=phone_number_id,
+            wa_id=wa_id,
+            media_id=media_id,
+            mime_type=mime_type,
+            caption=caption,
+            sha256=sha256,
+            wamid=wamid,
+        )
+
 
 async def post_inbound(stack: TaiStack, path: str, inbound: SignedInbound, *, port: int | None = None) -> Any:
     """POST a synthesized inbound to a replica's channel door (default B). Returns the raw
@@ -376,6 +485,21 @@ async def post_inbound(stack: TaiStack, path: str, inbound: SignedInbound, *, po
     url = f"http://{stack.host}:{port or stack.port_b}{path}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.post(url, content=inbound.body, headers=inbound.headers)
+
+
+# The served-media capability reference a bridged attachment carries: the route prefix + a 43-char
+# urlsafe-base64 stored-media id.
+MEDIA_REF_RE = re.compile(r"^/api/interactions/media/[A-Za-z0-9_-]{43}$")
+
+
+async def get_served_media(stack: TaiStack, url: str, *, port: int | None = None) -> Any:
+    """GET a served-media reference (``/api/interactions/media/<id>``, relative) off a replica
+    (default B). The capability id IS the secret, so no auth is carried. Returns the raw response."""
+    import httpx
+
+    full = f"http://{stack.host}:{port or stack.port_b}{url}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        return await client.get(full)
 
 
 async def whatsapp_get_verify(stack: TaiStack, params: dict[str, str], *, port: int | None = None) -> Any:
@@ -522,8 +646,8 @@ async def drive_status_to_failed(
     terminal and surfaces on the admin failed listing; return that record view.
 
     Retried because a status can arrive in the sub-second window before the send's record
-    reaches ``provisional``, where the receipt is refused; the repeat is idempotent once the
-    record has flipped."""
+    reaches ``provisional``, where the receipt is PARKED on the record and applied once the send
+    completes; the repeat is idempotent once the record has flipped."""
 
     async def probe() -> dict | None:
         await post_status()

@@ -46,6 +46,10 @@ provides:
           methods:
             - POST
           public: true
+        - path: /uploads
+          methods:
+            - POST
+          public: true
         - path: /stream
           methods:
             - GET

@@ -21,6 +21,8 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelNotification
+from tai42_contract.interactions import IngestedMedia, MediaItem, MediaKind, MediaOrigin
+from tai42_contract.interactions.models.media import MEDIA_ROUTE_PREFIX
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -126,6 +128,7 @@ class _StubConversations:
         provider_message_id: str,
         params: dict[str, str] | None = None,
         form: dict[str, Any] | None = None,
+        attachments: list[MediaItem] | None = None,
         locale: str | None = None,
     ) -> str:
         self.accept_calls.append(
@@ -138,6 +141,7 @@ class _StubConversations:
                 "provider_message_id": provider_message_id,
                 "params": params,
                 "form": form,
+                "attachments": attachments,
                 "locale": locale,
             }
         )
@@ -146,12 +150,47 @@ class _StubConversations:
         return self.accept_result
 
 
+class _StubMedia:
+    """Records ``bind_media`` calls and replays queued ``IngestedMedia`` results or raises
+    a queued exception, so the message-door tests assert the bind origin/id and drive the
+    unbindable/already-bound outcomes."""
+
+    def __init__(self) -> None:
+        self.bind_calls: list[dict[str, Any]] = []
+        self.bind_results: list[IngestedMedia] = []
+        self.bind_error: Exception | None = None
+
+    async def bind_media(self, media_id: str, *, origin: MediaOrigin) -> IngestedMedia:
+        self.bind_calls.append({"media_id": media_id, "origin": origin})
+        if self.bind_error is not None:
+            raise self.bind_error
+        if not self.bind_results:
+            raise AssertionError("_StubMedia: no queued IngestedMedia for bind_media")
+        return self.bind_results.pop(0)
+
+
+def make_ingested_media(
+    media_id: str = "a" * 43,
+    *,
+    kind: MediaKind = MediaKind.IMAGE,
+    mime: str = "image/png",
+    size: int = 1234,
+    sha256: str = "f" * 64,
+    filename: str | None = None,
+) -> IngestedMedia:
+    """One bound ``IngestedMedia`` as ``bind_media`` returns it — the served item plus its
+    metadata, its url the same-origin ``{MEDIA_ROUTE_PREFIX}{media_id}`` reference."""
+    item = MediaItem(kind=kind, url=f"{MEDIA_ROUTE_PREFIX}{media_id}", filename=filename)
+    return IngestedMedia(item=item, media_id=media_id, size=size, sha256=sha256, mime=mime, pending=False)
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.channels = _StubChannels()
         self.clients = _StubClients()
         self.http = _StubHttp()
         self.conversations = _StubConversations()
+        self.media = _StubMedia()
 
 
 _stub_app = _StubApp()
@@ -392,6 +431,7 @@ def stub_app() -> Iterator[_StubApp]:
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
+    _stub_app.media = _StubMedia()
 
 
 _ENV_VARS = (

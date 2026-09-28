@@ -132,6 +132,17 @@ describe('MediaCard', () => {
 
   // -- new media kinds ---------------------------------------------------------
 
+  it('renders a not-yet-served document preview as a plain chip, never a link', () => {
+    // The visitor's own bubble carries a preview with no url until its durable frame
+    // lands; a link there would open the page itself.
+    const preview: MediaItem = { kind: 'document', url: '', caption: null, filename: 'report.pdf' };
+    renderCard(card({ media: [preview] }));
+
+    expect(screen.getByText('report.pdf')).toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.queryByText('Download')).not.toBeInTheDocument();
+  });
+
   it('renders a document as a download card labelled by its filename', () => {
     const doc: MediaItem = {
       kind: 'document',

@@ -29,6 +29,13 @@ describe('the chat page stylesheet', () => {
     );
   });
 
+  it('styles the unavailable notice from the muted-foreground token so it reads in both themes', () => {
+    // The token swaps with the theme, so binding the notice to it is what keeps the
+    // placeholder legible under the dark preference without a hard-coded colour.
+    const notice = /\.tcw-unavailable \{[^}]*\}/.exec(css)?.[0] ?? '';
+    expect(notice).toMatch(/color: var\(--tai-color-text-muted\)/);
+  });
+
   it('paints its native select from the surface + text + border tokens', () => {
     const select = /\.tcw-select \{[^}]*\}/.exec(css)?.[0] ?? '';
     expect(select).toMatch(/background: var\(--tai-color-surface\)/);

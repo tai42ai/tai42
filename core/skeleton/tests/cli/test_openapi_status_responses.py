@@ -118,6 +118,11 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     # (retriable), and none is reload-gated, so each carries that 503 alone.
     ("DELETE", "/api/conversations/{route_name}/thread"),
     ("DELETE", "/api/conversations/persons/{person_id}"),
+    # The served-media door answers a declared 503 (a record present but the blob provider
+    # gone) with the plain ``{"error": ...}`` envelope; it is not reload-gated, so both its
+    # GET and HEAD carry that 503 alone.
+    ("GET", "/api/interactions/media/{media_id}"),
+    ("HEAD", "/api/interactions/media/{media_id}"),
     ("GET", "/api/schedules"),
     ("GET", "/api/schedules/server-datetime"),
     ("POST", "/api/conversations/{route_name}/thread/messages"),

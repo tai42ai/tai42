@@ -40,6 +40,11 @@ from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deseri
 logger = logging.getLogger(__name__)
 
 
+def _decode_optional(value: bytes | None) -> str | None:
+    """Decode an optional schedule-hash field, ``None`` when the field is absent."""
+    return value.decode() if value else None
+
+
 def _failure_detail(result: Any) -> str:
     """Human-readable detail of a stored failure result.
 
@@ -235,7 +240,9 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
     ``next_run_at_ts`` and ``next_run_at_iso`` (the pending job's due time,
     read from the schedule hash; null when none is recorded yet), plus the
     backend-specific extras ``schedule`` (the canonical schedule dict),
-    ``target``, ``args``, and ``kwargs``.
+    ``target``, ``args``, and ``kwargs``. ``recovery_error`` and
+    ``recovery_failed_at`` name the terminal error state a schedule the startup
+    watchdog cannot recover carries (both null on a healthy schedule).
     """
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
@@ -260,6 +267,8 @@ async def backend_list_schedules() -> list[dict[str, Any]]:
                 "target": data.get(b"target", b"").decode(),
                 "args": orjson.loads(data.get(b"args", b"[]")),
                 "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
+                "recovery_error": _decode_optional(data.get(b"recovery_error")),
+                "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
             }
         )
     return schedules
@@ -386,6 +395,8 @@ async def backend_get_schedule(name: str) -> dict[str, Any]:
         "target": data.get(b"target", b"").decode(),
         "args": orjson.loads(data.get(b"args", b"[]")),
         "kwargs": orjson.loads(data.get(b"kwargs", b"{}")),
+        "recovery_error": _decode_optional(data.get(b"recovery_error")),
+        "recovery_failed_at": _decode_optional(data.get(b"recovery_failed_at")),
     }
 
 

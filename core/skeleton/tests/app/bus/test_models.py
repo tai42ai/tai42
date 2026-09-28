@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from tai42_skeleton.app.bus import OpOutcome, WorkerResult, presence_fresh
+from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult, presence_fresh
 from tai42_skeleton.app.bus.models import _beat_age_seconds, _decode, _merge_terminal
 
 from .conftest import make_bus
@@ -58,3 +58,25 @@ def test_merge_terminal_failure_is_never_overridden() -> None:
     _merge_terminal(terminal, "serve-1", failed)
     _merge_terminal(terminal, "serve-1", applied)
     assert terminal["serve-1"].outcome == OpOutcome.failed
+
+
+def test_fleet_result_model_dump_carries_ok() -> None:
+    # ``ok`` is a computed field, so it serializes onto every dumped body — a
+    # status-only client can read convergence without re-deriving it.
+    reachable_applied = FleetResult(op="reload", results=[WorkerResult(name="serve-1", outcome=OpOutcome.applied)])
+    assert reachable_applied.model_dump(mode="json")["ok"] is True
+    assert reachable_applied.model_dump()["ok"] is True
+
+    partial = FleetResult(
+        op="reload",
+        results=[
+            WorkerResult(name="serve-1", outcome=OpOutcome.applied),
+            WorkerResult(name="serve-2", outcome=OpOutcome.failed, error="boom"),
+        ],
+    )
+    assert partial.model_dump(mode="json")["ok"] is False
+
+    unreachable = FleetResult(op="reload", reachable=False, error="bus down")
+    dumped = unreachable.model_dump(mode="json")
+    assert "ok" in dumped
+    assert dumped["ok"] is False

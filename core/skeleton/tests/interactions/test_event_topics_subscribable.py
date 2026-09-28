@@ -6,7 +6,14 @@ subscribe to fails here at introduction, not in production."""
 
 from tai42_contract.hooks.models import HookRegister
 
-from tai42_skeleton.channels.inbound import ANSWER_REJECTED_EVENT_TOPIC, CALLBACK_DISCARDED_EVENT_TOPIC
+from tai42_skeleton.channels.inbound import (
+    ANSWER_REJECTED_EVENT_TOPIC,
+    CALLBACK_DISCARDED_EVENT_TOPIC,
+    INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
+    INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
+    INBOUND_REJECTED_EVENT_TOPIC,
+    INBOUND_UNROUTED_EVENT_TOPIC,
+)
 from tai42_skeleton.interactions.helper import DELIVERY_FAILED_EVENT_TOPIC
 from tai42_skeleton.interactions.reaper import (
     ASK_EXPIRED_UNANSWERED_EVENT_TOPIC,
@@ -17,6 +24,10 @@ from tai42_skeleton.interactions.reaper import (
 PLATFORM_EVENT_TOPICS = (
     ANSWER_REJECTED_EVENT_TOPIC,
     CALLBACK_DISCARDED_EVENT_TOPIC,
+    INBOUND_UNROUTED_EVENT_TOPIC,
+    INBOUND_REJECTED_EVENT_TOPIC,
+    INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
+    INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
     DELIVERY_FAILED_EVENT_TOPIC,
     ASK_EXPIRED_UNANSWERED_EVENT_TOPIC,
     KILL_ABANDONED_EVENT_TOPIC,

@@ -30,6 +30,9 @@ ALLOWED_THIRD_PARTY = frozenset(
         "_openssl",
         "annotated_types",
         "anyio",
+        # certifi/h11/httpcore/sniffio are the httpx backend closure the inbound media
+        # fetch (``open_media_stream``) pulls in eagerly at import.
+        "certifi",
         # jsonschema and its closure (attr/attrs/referencing/rpds) reach the graph
         # through tai42_kit.utils.data, the package that exports the form-text renderer.
         "attr",
@@ -37,6 +40,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "click",
         "cryptography",
         "dotenv",
+        "h11",
+        "httpcore",
         "httpx",
         "idna",
         "jsonschema",
@@ -55,6 +60,7 @@ ALLOWED_THIRD_PARTY = frozenset(
         "rpds",
         # ruamel (YAML) reaches the graph through tai42_kit.utils.data.
         "ruamel",
+        "sniffio",
         "starlette",
         "typing_extensions",
         "typing_inspection",

@@ -503,6 +503,12 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
     fresh-send admission → send plan → send loop → mark provisional + fallback confirmation.
     """
     from tai42_skeleton.conversations import delivery as _pkg
+    from tai42_skeleton.conversations.turn import working_signal
+
+    # The turn's answer is about to send, so stop refreshing its working-on-it indicator. A
+    # cross-process delivery finds no task in its own registry and relies on the loop's own
+    # per-tick status read to stop instead.
+    working_signal.stop(record.message_id)
 
     settings = store.settings
     channel, channel_name, max_chars, answer = await _channel_delivery_preconditions(store, record, token)
@@ -540,18 +546,31 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
         return
 
     outcome = await store.mark_provisional(record.message_id, outbound_ids, attempts, time.time(), token)
-    if outcome != 1:
-        # The record left this worker's hands; its ledger belongs to whoever holds it now.
-        logger.warning(
-            "conversations: record %s was not moved to provisional after a full send (provisional write returned "
-            "%d); the send ledger is left for the worker that owns it now",
+    if outcome == 1:
+        await ledger.clear(record.message_id)
+        # Fallback confirmation for a medium whose receipt never arrives.
+        _pkg._spawn(_pkg._confirm_after_grace(record.message_id, settings.delivery_grace_seconds))
+        return
+    if outcome == 2:
+        # A receipt parked during the send terminalised the record delivered in the same step; no
+        # grace fallback is needed, the outcome is already recorded.
+        await ledger.clear(record.message_id)
+        logger.info("conversations: record %s delivered via a receipt parked during send", record.message_id)
+        return
+    if outcome == 3:
+        await ledger.clear(record.message_id)
+        logger.error(
+            "conversations: record %s reported FAILED by the channel via a receipt parked during send",
             record.message_id,
-            outcome,
         )
         return
-    await ledger.clear(record.message_id)
-    # Fallback confirmation for a medium whose receipt never arrives.
-    _pkg._spawn(_pkg._confirm_after_grace(record.message_id, settings.delivery_grace_seconds))
+    # The record left this worker's hands; its ledger belongs to whoever holds it now.
+    logger.warning(
+        "conversations: record %s was not moved to provisional after a full send (provisional write returned "
+        "%d); the send ledger is left for the worker that owns it now",
+        record.message_id,
+        outcome,
+    )
 
 
 async def _refuse_oversized_answer(

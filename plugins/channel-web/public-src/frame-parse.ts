@@ -199,8 +199,9 @@ function filenameOf(raw: unknown): string | null | undefined {
 }
 
 /** The file media kinds — a fetchable body constrained to an absolute `https:`
- * source (an `image`, `document`, `video`, or `audio`), as opposed to a `link`
- * anchor which the human clicks through (`http(s):`). */
+ * source or the platform's same-origin served-media reference (an `image`,
+ * `document`, `video`, or `audio`), as opposed to a `link` anchor which the human
+ * clicks through (`http(s):`). */
 const FILE_MEDIA_KINDS: ReadonlySet<string> = new Set<MediaKind>([
   'image',
   'document',
@@ -208,17 +209,31 @@ const FILE_MEDIA_KINDS: ReadonlySet<string> = new Set<MediaKind>([
   'audio',
 ]);
 
-/** One media attachment, validated: a known kind, a scheme-appropriate absolute
- * URL, an optional string caption, and a `filename` that rides a `document` ONLY
- * (present on any other kind is off-contract and malformed). `undefined` on
+/** The platform's served-media reference exactly as the server mints it: the
+ * root-relative served route followed by one 43-character stored-media id and
+ * nothing else. Same-origin by construction, so it is as safe a source as an
+ * absolute `https:` one; any other relative path is refused. */
+const SERVED_MEDIA_REF = /^\/api\/interactions\/media\/[A-Za-z0-9_-]{43}$/;
+
+function isServedMediaRef(value: unknown): value is string {
+  return typeof value === 'string' && SERVED_MEDIA_REF.test(value);
+}
+
+/** One media attachment, validated: a known kind, a vetted source (a
+ * scheme-appropriate absolute URL, or for a file kind the same-origin served-media
+ * reference), an optional string caption, and a `filename` that rides a `document`
+ * ONLY (present on any other kind is off-contract and malformed). `undefined` on
  * anything off-shape. */
 function mediaItemOf(raw: unknown): MediaItem | undefined {
   if (!isRecord(raw)) return undefined;
   const { kind, url } = raw;
   if (typeof kind !== 'string' || (!FILE_MEDIA_KINDS.has(kind) && kind !== 'link'))
     return undefined;
-  const protocols = kind === 'link' ? ['http:', 'https:'] : ['https:'];
-  if (!isAbsoluteUrl(url, protocols)) return undefined;
+  if (kind === 'link') {
+    if (!isAbsoluteUrl(url, ['http:', 'https:'])) return undefined;
+  } else if (!isAbsoluteUrl(url, ['https:']) && !isServedMediaRef(url)) {
+    return undefined;
+  }
   const caption = captionOf(raw.caption);
   if (caption === undefined) return undefined;
   const filename = filenameOf(raw.filename);

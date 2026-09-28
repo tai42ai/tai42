@@ -455,8 +455,10 @@ class FakeRecordRedis:
             self._reindex(created_threaded, argv[7], argv[8])
             # Written only while the route still routes, as the script's guard does: the
             # indexes of a route whose row is gone are reclaimed already and nothing walks
-            # the name again, so re-creating them would strand the pair.
+            # the name again, so re-creating them would strand the pair. The record is marked
+            # so the operator read carries the honest marker, not only a log line.
             if await self.exists(route_row_key) == 0:
+                self._hashes[key]["route_missing"] = "1"
                 return 0
             self._zsets.setdefault(created_thread_keys[0], {})[argv[7]] = float(argv[10])
             self._zsets.setdefault(created_thread_keys[1], {})[argv[9]] = float(argv[10])
@@ -539,6 +541,26 @@ class FakeRecordRedis:
                 return 0
             if self._foreign_lease(h, now=argv[3], token=argv[4]):
                 return -3
+            parked = h.get("pending_receipt", "") if h else ""
+            if parked:
+                # A receipt staged during the send terminalises the record in this same step,
+                # straight to the parked terminal, skipping ``provisional``.
+                h.update(  # type: ignore[union-attr]
+                    delivery_status=parked,
+                    outbound_ids=argv[0],
+                    attempts=argv[1],
+                    updated_at=argv[3],
+                    claim="",
+                    grace_deadline="",
+                    pending_receipt="",
+                )
+                self.ttl_ms[key] = int(argv[7])
+                member = argv[5]
+                for index_key in indexes[:-1]:
+                    self._zsets.get(index_key, {}).pop(member, None)
+                terminal_index = indexes[3] if parked == "delivered" else indexes[4]
+                self._zsets.setdefault(terminal_index, {})[member] = float(argv[8])
+                return 2 if parked == "delivered" else 3
             h.update(  # type: ignore[union-attr]
                 delivery_status="provisional",
                 outbound_ids=argv[0],
@@ -578,10 +600,34 @@ class FakeRecordRedis:
                 return 0
             if self._foreign_lease(h, now=argv[1], token=argv[3]):
                 return -3
-            h.update(delivery_status="failed", attempts=argv[0], updated_at=argv[1], claim="", grace_deadline="")  # type: ignore[union-attr]
+            parked = h.get("pending_receipt", "") if h else ""
+            h.update(  # type: ignore[union-attr]
+                delivery_status="failed",
+                attempts=argv[0],
+                updated_at=argv[1],
+                claim="",
+                grace_deadline="",
+                pending_receipt="",
+            )
             self.ttl_ms[key] = int(argv[2])
             self._reindex(indexes, argv[4], argv[5])
-            return 1
+            return 2 if parked else 1
+        if "conversations:record:unreadable" in script:
+            # The sweep-owned terminal write: no lease token is threaded, a corrupt row's status
+            # is read opaquely, and a provisional row (which the failed script refuses) is owned.
+            if h is None:
+                return -1
+            if status == "failed":
+                return 0
+            if status in ("delivered", "shed"):
+                return -2
+            if self._foreign_lease(h, now=argv[0], token=""):
+                return -3
+            parked = h.get("pending_receipt", "") if h else ""
+            h.update(delivery_status="failed", claim="", grace_deadline="", updated_at=argv[0], pending_receipt="")
+            self.ttl_ms[key] = int(argv[1])
+            self._reindex(indexes, argv[2], argv[3])
+            return 2 if parked else 1
         if "conversations:record:receipt" in script:
             target = argv[0]
             if status is None:
@@ -590,6 +636,16 @@ class FakeRecordRedis:
                 return 0
             if status in ("delivered", "failed", "shed"):
                 return -2
+            if status == "pending_delivery":
+                # The send is still in flight: stage the receipt on the record for the completing
+                # provisional write to apply; first parked wins.
+                parked = h.get("pending_receipt", "") if h else ""
+                if parked == target:
+                    return 0
+                if parked:
+                    return -2
+                h["pending_receipt"] = target  # type: ignore[index]
+                return 2
             if status != "provisional":
                 return -3
             h.update(delivery_status=target, updated_at=argv[1], claim="", grace_deadline="")  # type: ignore[union-attr]

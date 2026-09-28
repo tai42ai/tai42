@@ -20,6 +20,7 @@ export function buildTranscriptEntries(
         direction: item.direction,
         text: item.text,
         ts: item.ts,
+        media: item.media,
         status: null,
         error: null,
         retryId: null,
@@ -31,6 +32,9 @@ export function buildTranscriptEntries(
     if (item.kind === 'form') {
       return { kind: 'form', key: item.id, ts: item.ts, item };
     }
+    if (item.kind === 'unavailable') {
+      return { kind: 'unavailable', key: item.id, ts: item.ts };
+    }
     return { kind: 'question', key: item.id, ts: item.ts, question: item };
   });
   const unconfirmed: TranscriptEntry[] = pending.map((item) => ({
@@ -39,6 +43,7 @@ export function buildTranscriptEntries(
     direction: 'in',
     text: item.text,
     ts: item.ts,
+    media: item.media,
     status: item.status,
     error: item.error,
     retryId: item.status === 'failed' ? item.localId : null,

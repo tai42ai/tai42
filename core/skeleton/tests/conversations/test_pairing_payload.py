@@ -70,7 +70,7 @@ class FakeManager:
         self._routes = {r.route_name: r for r in routes}
 
     async def list_routes(self):
-        return dict(self._routes)
+        return dict(self._routes), 0
 
     async def get_route(self, name: str):
         return self._routes.get(name)
