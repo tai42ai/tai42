@@ -146,6 +146,7 @@
 /* One readable column, centred on a wide screen. */
 .tcw-group,
 .tcw-day,
+.tcw-unavailable,
 .tcw-row {
   width: 100%;
   max-width: 46rem;
@@ -191,6 +192,17 @@
 
 .tcw-time--in {
   text-align: right;
+}
+
+/* A stored entry the server could not render: a centred, muted, italic system
+   notice, styled like the day divider (no bubble, no avatar) so it reads as
+   subordinate to real messages in both themes via the muted-foreground token. */
+.tcw-unavailable {
+  margin: var(--tai-space-2) auto;
+  text-align: center;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+  font-style: italic;
 }
 
 /* -- Bubbles --------------------------------------------------------------- */

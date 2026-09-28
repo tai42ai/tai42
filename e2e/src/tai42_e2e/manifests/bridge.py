@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import secrets
 from typing import TYPE_CHECKING
 
-from tai42_e2e.manifests.channels import _require_stub, _web_channel_env
+from tai42_e2e.manifests.channels import (
+    _require_stub,
+    _slack_channel_env,
+    _telegram_channel_env,
+    _web_channel_env,
+)
 from tai42_e2e.manifests.feature_env import _base_env, _llm_env, _memory_agent_state_env, _switch
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
@@ -234,4 +240,38 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
         replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
         public_base_url_env_keys=bridge_public_keys,
         public_base_url=switch.public_base_url,
+    )
+
+
+def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The bridge profile carrying ALL FOUR vendor channels — telegram + slack alongside
+    twilio + whatsapp (and web) — for the inbound-media bridge and unsupported-inbound suites.
+
+    Identical to :func:`build_bridge_stack` (backend + metrics + the redis conversations backend +
+    the hooks manager an unsupported event is observed through) with the telegram + slack channel
+    plugins added, so one stack bridges a media inbound to a turn AND replies + emits the platform
+    rejection event on every channel. Telegram's ``setWebhook`` needs its inbound-door origin, so
+    ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` joins the replica-B origin fill; the shared
+    ``^/api/channels/.*$`` public route already covers the telegram + slack inbound doors."""
+    base = build_bridge_stack(res, variants)
+    switch = _switch()
+    manifest = {
+        **base.manifest,
+        "channel_modules": [
+            *base.manifest["channel_modules"],
+            "tai42_channel_telegram.register",
+            "tai42_channel_slack.register",
+        ],
+    }
+    env = {
+        **base.env,
+        **_telegram_channel_env(res, real=switch.is_real("telegram")),
+        **_slack_channel_env(res, real=switch.is_real("slack")),
+    }
+    return dataclasses.replace(
+        base,
+        name="media-bridge",
+        manifest=manifest,
+        env=env,
+        replica_b_origin_env_keys=[*base.replica_b_origin_env_keys, "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"],
     )

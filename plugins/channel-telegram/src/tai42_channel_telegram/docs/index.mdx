@@ -63,6 +63,23 @@ A bridged tap on an option with an **author-set id** carries that id back as
 `params.reply_id` (and a sectioned row's description as `params.reply_description`) —
 opaque enrichment a `tool` target can read from the turn's `params`.
 
+## Inbound media
+
+A message carrying media bridges as one turn. A **photo** (largest size),
+**document**, **audio**, **voice**, **video**, **video_note**, **animation**, or
+**sticker** becomes a turn whose text is the caption when present, else a non-blank
+placeholder (`[voice message]`, `[document: <name>]`, or the bracketed kind), and
+whose opaque `media_*` entry-params name the content: `media_kind`
+(`image`/`document`/`audio`/`video`/`sticker`), `media_id` (the Telegram `file_id`),
+and, where the member carries them, `media_mime_type`, `media_filename`, `media_size`,
+`media_voice` (a voice note), and `sticker_animated` (an animated sticker). A captioned
+photo bridges as an image turn whose text is the caption.
+
+Content Telegram can send that this channel does not map to a media kind — a **poll**,
+**dice**, **venue**, **contact**, **location**, or **game** — is not bridged: the
+participant gets one generic "unsupported" notice and a platform event records the drop,
+so nothing is silently lost.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.

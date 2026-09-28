@@ -31,6 +31,7 @@ from tai42_e2e.manifests.bridge import (
     BRIDGE_WHATSAPP_PHONE_ID_C,
     BRIDGE_WHATSAPP_WABA_ID,
     build_bridge_stack,
+    build_media_bridge_stack,
 )
 from tai42_e2e.manifests.channels import (
     SLACK_ALLOWED_RECIPIENTS,
@@ -201,6 +202,7 @@ __all__ = [
     "build_marketplace_prefix_stack",
     "build_marketplace_quarantine_stack",
     "build_marketplace_stack",
+    "build_media_bridge_stack",
     "build_minimal_stack",
     "build_misbehaving_mcp_stack",
     "build_monitoring_stack",

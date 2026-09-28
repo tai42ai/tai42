@@ -29,6 +29,7 @@ from tai42_contract.sandbox import (
     SandboxError,
     SandboxExecHandle,
     SandboxExecTimeoutError,
+    SandboxFileNotFoundError,
     SandboxStreamChunk,
     SandboxStreamExit,
 )
@@ -374,7 +375,7 @@ class DockerSandboxSession(ManagedSandboxSession):
             tar = await self._container.get_archive(target)
         except DockerError as exc:
             if exc.status == 404:
-                raise SandboxError(f"sandbox file {path!r} not found") from exc
+                raise SandboxFileNotFoundError(path) from exc
             raise self._sandbox._engine_error(exc) from exc
         member = posixpath.basename(target)
         extracted = tar.extractfile(member)

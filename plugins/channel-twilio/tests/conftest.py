@@ -132,9 +132,24 @@ class _StubConversations:
         self.accept_result: str = "msg-stub-id"
         self.accept_error: Exception | None = None
         self.status_error: Exception | None = None
+        # Records a receipt-race test seeds, keyed by the outbound ``MessageSid``. Each is a
+        # ``SimpleNamespace(delivery_status, pending_receipt)`` and ``record_delivery_status``
+        # applies the skeleton receipt seam's contract against it: a receipt on a
+        # ``pending_delivery`` record is PARKED (staged on ``pending_receipt``, acked, never
+        # raised), one on a ``provisional`` record applies the terminal, one on an
+        # already-terminal record is a benign acked no-op — so a door test asserts the parked
+        # receipt through the record the door never touches directly.
+        self.records: dict[str, SimpleNamespace] = {}
 
     async def accept(
-        self, channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
+        self,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        cap_key: str,
+        text: str,
+        provider_message_id: str,
+        params: dict[str, str] | None = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -144,6 +159,7 @@ class _StubConversations:
                 "cap_key": cap_key,
                 "text": text,
                 "provider_message_id": provider_message_id,
+                "params": params,
             }
         )
         if self.accept_error is not None:
@@ -154,6 +170,15 @@ class _StubConversations:
         self.status_calls.append({"channel": channel, "provider_message_id": provider_message_id, "status": status})
         if self.status_error is not None:
             raise self.status_error
+        record = self.records.get(provider_message_id)
+        if record is None:
+            return
+        target = status.value
+        if record.delivery_status == "pending_delivery":
+            record.pending_receipt = target
+        elif record.delivery_status == "provisional":
+            record.delivery_status = target
+            record.pending_receipt = None
 
 
 class _StubApp:

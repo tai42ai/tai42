@@ -40,6 +40,10 @@ function said(
   };
 }
 
+function unavailable(key: string, at: number): TranscriptEntry {
+  return { kind: 'unavailable', key, ts: new Date(at).toISOString() };
+}
+
 describe('isAtBottom', () => {
   it('is true at the edge and within the slack', () => {
     expect(isAtBottom({ scrollHeight: 1000, scrollTop: 900, clientHeight: 100 })).toBe(true);
@@ -107,6 +111,43 @@ describe('buildRows', () => {
     const entries = rows.filter((row) => row.kind === 'entry');
 
     expect(entries.map((row) => row.groupStart)).toEqual([true, true]);
+  });
+
+  it('emits the unavailable placeholder as its own stampless row, transparent to grouping', () => {
+    const rows = buildRows(
+      [said('a', NOW, 'in'), unavailable('u1', NOW), said('b', NOW, 'out')],
+      NOW,
+    );
+
+    // Its own row, in position, mirroring a day divider — never folded into an
+    // entry row and never carrying a stamp.
+    expect(rows.map((row) => row.kind)).toEqual(['day', 'entry', 'unavailable', 'entry']);
+
+    const entries = rows.filter((row) => row.kind === 'entry');
+    // The assistant reply after it groups exactly as if the placeholder were not
+    // there: the speaker changed, so it opens its own group with its own stamp.
+    expect(entries.map((row) => row.groupStart)).toEqual([true, true]);
+    expect(entries[1]?.time).not.toBeNull();
+  });
+
+  it('does not let the placeholder merge or break a same-speaker run', () => {
+    const close = buildRows(
+      [said('a', NOW - 60_000, 'in'), unavailable('u1', NOW), said('b', NOW, 'in')],
+      NOW,
+    ).filter((row) => row.kind === 'entry');
+    // Same speaker, close together: one group across the placeholder, no second
+    // stamp — the placeholder never forces a break.
+    expect(close.map((row) => row.groupStart)).toEqual([true, false]);
+    expect(close[1]?.time).toBeNull();
+
+    const apart = buildRows(
+      [said('a', NOW - GROUP_GAP_MS, 'in'), unavailable('u1', NOW), said('b', NOW, 'in')],
+      NOW,
+    ).filter((row) => row.kind === 'entry');
+    // The gap that breaks the run is measured between the two real messages, not
+    // reset by the placeholder — so the break happens only because the gap rule
+    // would break it anyway.
+    expect(apart.map((row) => row.groupStart)).toEqual([true, true]);
   });
 });
 
@@ -317,6 +358,22 @@ describe('Transcript', () => {
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(onSubmitForm).toHaveBeenCalledWith('tok-1', { note: 'ship it' });
+  });
+
+  it('renders an unavailable placeholder inside the log region, in order, not as a bubble', () => {
+    const unavailable: TranscriptEntry = {
+      kind: 'unavailable',
+      key: 'u1',
+      ts: new Date(NOW).toISOString(),
+    };
+    renderTranscript([said('a', NOW, 'out'), unavailable, said('b', NOW, 'in')]);
+
+    const notice = screen.getByTestId('tcw-unavailable');
+    expect(notice).toHaveTextContent('This message is unavailable.');
+    expect(notice).toHaveAttribute('role', 'note');
+    // Announced with the rest of the transcript: it sits inside the live log region.
+    expect(screen.getByRole('log')).toContainElement(notice);
+    expect(notice.querySelector('.tcw-bubble')).toBeNull();
   });
 
   it('renders a media card chip disabled once the session is locked', () => {

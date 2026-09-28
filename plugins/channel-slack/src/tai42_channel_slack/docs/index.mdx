@@ -39,6 +39,26 @@ Subscriptions to `{public base URL}/api/channels/slack/inbound` and subscribe to
 the message events the bot should hear. Slack verifies the URL against the
 signing secret.
 
+A `me_message` (a `/me …` post) and a `thread_broadcast` (a threaded reply also sent
+to the channel) carry the participant's own text and bridge like a plain message — a
+threaded broadcast resolves a pending question when it lands in an allowlisted
+recipient. Other subtypes — edits (`message_changed` / `message_deleted`),
+joins/leaves, `bot_message`, pins and the `message_replied` container — carry no
+participant utterance and are acknowledged without bridging.
+
+## Inbound media
+
+A message that shares files (`subtype` `file_share`) bridges one turn per file, so
+a message with several files never drops any of them. Each file's `url_private`,
+`mimetype`, `name` and `size` become the opaque `media_*` entry-params on its turn
+(`media_kind`, `media_id`, `media_mime_type`, `media_filename`, `media_size`); the
+mime major type resolves the kind (`image`/`video`/`audio`, `application`/`text` →
+`document`, any other or missing type → `file`). The message text rides the first file's turn;
+every other turn gets a `[kind]` placeholder, so a caption-less share is never
+dropped as empty. A file exposing neither a fetchable `url_private` nor a `name`
+cannot be bridged — the participant gets a single generic notice and a platform
+event records the drop.
+
 ## Create a bridge route
 
 The route's `our_identity` is the bot user id; `client_address` is the Slack

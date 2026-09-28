@@ -5,9 +5,12 @@
 the configured webhook secret
 (constant-time over sha256 digests; FAIL CLOSED on missing config). A ForceReply
 reply from a configured recipient chat whose question is still pending resolves
-that ask — forwarded to its callback door. Every other user text message, and a
-ForceReply reply whose question has expired, is a bridge message handed to the
-conversation bridge keyed by this bot's numeric id and the chat id.
+that ask — forwarded to its callback door. Every other user message — text or a
+media member (photo/document/audio/voice/video/video_note/animation/sticker) — and
+a ForceReply reply whose question has expired, is a bridge message handed to the
+conversation bridge keyed by this bot's numeric id and the chat id. A content this
+channel recognises but cannot map to a turn (poll/dice/venue/contact/location/game)
+gets the one generic refusal notice instead of a silent drop.
 
 Transport authentication runs first on every path; the recipient allowlist and
 the reply shape gate only the ask path, never the bridge.
@@ -23,7 +26,7 @@ import hashlib
 import hmac
 import json
 import logging
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 from starlette.requests import Request
@@ -33,6 +36,10 @@ from tai42_contract.channels import ChannelDeliveryError, InboundAnswerOutcome, 
 from tai42_contract.conversations import (
     ENTRY_PARAM_VALUE_MAX_CHARS,
     BlankInboundTextError,
+    InboundMediaKind,
+    InboundRejectionReason,
+    build_inbound_media_params,
+    inbound_media_placeholder,
     validate_entry_params,
 )
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
@@ -94,6 +101,18 @@ class StatusAck(BaseModel):
 def _misconfigured(env_name: str) -> JSONResponse:
     logger.error("telegram inbound: %s is unset or malformed; failing closed", env_name)
     return JSONResponse({"error": "channel misconfigured"}, status_code=500)
+
+
+def _our_identity(settings: TelegramSettings) -> str | JSONResponse:
+    """This bot's numeric id (the digits before the ``:`` in the token), or a loud 500.
+
+    A malformed/unset token yields the misconfigured 500 — the same fail-closed response
+    every door path returns when the identity it must reply from cannot be resolved.
+    """
+    try:
+        return bot_numeric_id(require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN"))
+    except ValueError:
+        return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
 
 
 def _denied() -> JSONResponse:
@@ -215,12 +234,9 @@ async def _resolve_answer(
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
         return JSONResponse({"error": "update carries no integer update_id"}, status_code=400)
-    try:
-        our_identity = bot_numeric_id(
-            require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
-        )
-    except ValueError:
-        return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
+    our_identity = _our_identity(settings)
+    if isinstance(our_identity, JSONResponse):
+        return our_identity
 
     result = await tai42_app.channels.handle_inbound_answer(
         channel_id="telegram",
@@ -325,12 +341,9 @@ async def _bridge(
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
         return JSONResponse({"error": "update carries no integer update_id"}, status_code=400)
-    try:
-        our_identity = bot_numeric_id(
-            require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
-        )
-    except ValueError:
-        return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
+    our_identity = _our_identity(settings)
+    if isinstance(our_identity, JSONResponse):
+        return our_identity
 
     try:
         await tai42_app.conversations.accept(
@@ -408,11 +421,117 @@ async def _read_update(request: Request) -> dict[str, object]:
     return update
 
 
-def _message_fields(message: dict[str, object]) -> tuple[dict[str, object], int, str] | Response:
-    """The ``(chat, chat_id, text)`` a text message must carry to be bridgeable.
+class _Bridgeable(NamedTuple):
+    """A message that becomes a turn: its chat, numeric chat id, turn text, and media params.
 
-    Returns an acked-ignored 200 (naming the missing field) for a message with no
-    chat, no numeric chat id, or no text (a media message is not bridgeable).
+    ``media_params`` is the opaque ``media_*`` vocabulary for a media turn, ``None`` for a
+    plain text turn.
+    """
+
+    chat: dict[str, object]
+    chat_id: int
+    text: str
+    media_params: dict[str, str] | None
+
+
+class _Unsupported(NamedTuple):
+    """A content this channel recognises but cannot map to a turn — the vendor member word refused."""
+
+    chat_id: int
+    kind: str
+
+
+class _MediaSpec(NamedTuple):
+    """How one Telegram media member maps onto the generic inbound-media vocabulary."""
+
+    member: str
+    kind: InboundMediaKind
+    has_mime: bool
+    has_filename: bool
+    voice: bool
+    animated_field: str | None
+
+
+# Dict-valued media members, in resolution order: ``animation`` before ``document`` because
+# Telegram sends an animation as BOTH members and the animation mapping is the correct one.
+_MEDIA_SPECS = (
+    _MediaSpec("animation", InboundMediaKind.VIDEO, has_mime=True, has_filename=True, voice=False, animated_field=None),
+    _MediaSpec(
+        "video_note", InboundMediaKind.VIDEO, has_mime=False, has_filename=False, voice=False, animated_field=None
+    ),
+    _MediaSpec("video", InboundMediaKind.VIDEO, has_mime=True, has_filename=True, voice=False, animated_field=None),
+    _MediaSpec("audio", InboundMediaKind.AUDIO, has_mime=True, has_filename=True, voice=False, animated_field=None),
+    _MediaSpec("voice", InboundMediaKind.AUDIO, has_mime=True, has_filename=False, voice=True, animated_field=None),
+    _MediaSpec(
+        "sticker",
+        InboundMediaKind.STICKER,
+        has_mime=False,
+        has_filename=False,
+        voice=False,
+        animated_field="is_animated",
+    ),
+    _MediaSpec(
+        "document", InboundMediaKind.DOCUMENT, has_mime=True, has_filename=True, voice=False, animated_field=None
+    ),
+)
+
+# Content Telegram can send that this channel recognises but does not map to a media kind —
+# each routes to the one generic unsupported reply + event, never a silent drop.
+_UNSUPPORTED_MEMBERS = ("poll", "dice", "venue", "contact", "location", "game")
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _parse_media(message: dict[str, object]) -> tuple[dict[str, str], str] | None:
+    """The ``(media_params, placeholder)`` for a media message, or ``None`` when it carries none.
+
+    ``media_params`` is the opaque ``media_*`` vocabulary the bridged turn carries;
+    ``placeholder`` is the non-blank turn text used when the message has no caption. A photo
+    resolves to its largest size (Telegram sends sizes in ascending order, so the last entry).
+    """
+    photo = message.get("photo")
+    if isinstance(photo, list) and photo:
+        largest = photo[-1]
+        if isinstance(largest, dict):
+            params = build_inbound_media_params(
+                kind=InboundMediaKind.IMAGE,
+                media_id=_str_or_none(largest.get("file_id")),
+                size=_int_or_none(largest.get("file_size")),
+            )
+            return params, inbound_media_placeholder(InboundMediaKind.IMAGE)
+    for spec in _MEDIA_SPECS:
+        member = message.get(spec.member)
+        if not isinstance(member, dict):
+            continue
+        filename = _str_or_none(member.get("file_name")) if spec.has_filename else None
+        params = build_inbound_media_params(
+            kind=spec.kind,
+            media_id=_str_or_none(member.get("file_id")),
+            mime_type=_str_or_none(member.get("mime_type")) if spec.has_mime else None,
+            filename=filename,
+            voice=spec.voice,
+            animated=bool(member.get(spec.animated_field)) if spec.animated_field else False,
+            size=_int_or_none(member.get("file_size")),
+        )
+        return params, inbound_media_placeholder(spec.kind, filename=filename, voice=spec.voice)
+    return None
+
+
+def _message_fields(message: dict[str, object]) -> _Bridgeable | _Unsupported | Response:
+    """Classify a message into a bridgeable turn, an unsupported-content refusal, or an ack.
+
+    A text message bridges its ``text``; a media message (photo/document/audio/voice/video/
+    video_note/animation/sticker) bridges ONE turn carrying the opaque ``media_*`` vocabulary,
+    with the caption as the turn text or a non-blank placeholder when there is none. A content
+    this channel recognises but cannot map (poll/dice/venue/contact/location/game) returns
+    :class:`_Unsupported` so the door sends the one generic refusal. A message with no chat,
+    no numeric chat id, or no recognised content returns an acked-ignored 200.
     """
     chat = message.get("chat")
     if not isinstance(chat, dict):
@@ -421,9 +540,38 @@ def _message_fields(message: dict[str, object]) -> tuple[dict[str, object], int,
     if not isinstance(chat_id, int):
         return _ignored("message carries no chat id")
     text = message.get("text")
-    if not isinstance(text, str):
-        return _ignored("message carries no text (a media message is not bridgeable)")
-    return chat, chat_id, text
+    if isinstance(text, str):
+        return _Bridgeable(chat, chat_id, text, None)
+    media = _parse_media(message)
+    if media is not None:
+        media_params, placeholder = media
+        caption = message.get("caption")
+        caption = caption.strip() if isinstance(caption, str) and caption.strip() else None
+        return _Bridgeable(chat, chat_id, caption or placeholder, media_params)
+    for member in _UNSUPPORTED_MEMBERS:
+        if member in message:
+            return _Unsupported(chat_id, member)
+    return _ignored("message carries no bridgeable content")
+
+
+async def _reject_unsupported(settings: TelegramSettings, chat_id: int, kind: str) -> Response:
+    """Send the one generic refusal for a recognised-but-unmappable content, then ack.
+
+    Routes through the shared ``notify_inbound_rejected`` chokepoint (the single participant
+    notice + operator event) rather than silently dropping the update, then acks so Telegram
+    stops redelivering it.
+    """
+    our_identity = _our_identity(settings)
+    if isinstance(our_identity, JSONResponse):
+        return our_identity
+    await tai42_app.conversations.notify_inbound_rejected(
+        channel_id="telegram",
+        recipient=str(chat_id),
+        sender_identity=our_identity,
+        kind=kind,
+        reason=InboundRejectionReason.UNSUPPORTED_TYPE,
+    )
+    return _ignored("unsupported content")
 
 
 @tai42_app.http.custom_route(
@@ -462,7 +610,9 @@ async def inbound(request: Request) -> Response:
     fields = _message_fields(message)
     if isinstance(fields, Response):
         return fields
-    chat, chat_id, text = fields
+    if isinstance(fields, _Unsupported):
+        return await _reject_unsupported(settings, fields.chat_id, fields.kind)
+    chat, chat_id, text, media_params = fields
 
     # Signal "working on it" the moment a processable message lands — a typing
     # action shown BEFORE the ask/bridge split so it covers both paths. A delivery
@@ -479,8 +629,8 @@ async def inbound(request: Request) -> Response:
     reply_to = message.get("reply_to_message")
     replied_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
     if isinstance(replied_id, int) and _is_recipient_chat(chat, settings):
-        resolved = await _resolve_answer(settings, replied_id, chat_id, text, update)
+        resolved = await _resolve_answer(settings, replied_id, chat_id, text, update, params=media_params)
         if resolved is not None:
             return resolved
 
-    return await _bridge(settings, chat_id, text, update)
+    return await _bridge(settings, chat_id, text, update, params=media_params)

@@ -170,12 +170,14 @@ class _StubConversations:
         self.accept_result = "conv-msg-1"
         self.accept_error: BaseException | None = None
         self.status_calls: list[SimpleNamespace] = []
+        self.rejected_calls: list[SimpleNamespace] = []
 
     def reset(self) -> None:
         self.accept_calls.clear()
         self.accept_result = "conv-msg-1"
         self.accept_error = None
         self.status_calls.clear()
+        self.rejected_calls.clear()
 
     async def accept(
         self,
@@ -205,6 +207,19 @@ class _StubConversations:
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
         self.status_calls.append(
             SimpleNamespace(channel=channel, provider_message_id=provider_message_id, status=status)
+        )
+
+    async def notify_inbound_rejected(
+        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+    ) -> None:
+        self.rejected_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id,
+                recipient=recipient,
+                sender_identity=sender_identity,
+                kind=kind,
+                reason=reason,
+            )
         )
 
 

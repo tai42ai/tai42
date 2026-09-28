@@ -30,7 +30,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
-from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
+from tai42_contract.conversations import (
+    BlankInboundTextError,
+    DeliveryReceipt,
+    InboundMediaKind,
+    build_inbound_media_params,
+    inbound_media_placeholder,
+)
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require_secret
 
@@ -203,32 +209,94 @@ async def twilio_inbound(request: Request) -> Response:
     return Response(status_code=204)
 
 
+def _media_count(form: dict[str, str]) -> int:
+    """The number of MMS media items the inbound carries (``NumMedia``; absent → 0).
+
+    A present-but-non-integer value is a Twilio protocol violation and raises loudly
+    (propagated as a 5xx so the malformed delivery is never silently treated as media-less).
+    """
+    raw = form.get("NumMedia")
+    if raw is None:
+        return 0
+    return int(raw)
+
+
+def _media_kind(content_type: str) -> InboundMediaKind:
+    """Map a Twilio ``MediaContentType`` onto the generic inbound-media wire kind.
+
+    By the mime major type: ``image``/``audio``/``video`` map to themselves,
+    ``application``/``text`` to ``document``; any other or missing major type to ``file``.
+    """
+    major = content_type.split("/", 1)[0].strip().lower()
+    if major == "image":
+        return InboundMediaKind.IMAGE
+    if major == "audio":
+        return InboundMediaKind.AUDIO
+    if major == "video":
+        return InboundMediaKind.VIDEO
+    if major in ("application", "text"):
+        return InboundMediaKind.DOCUMENT
+    return InboundMediaKind.FILE
+
+
 async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     """Route an uncorrelated inbound message into the conversation bridge.
 
-    ``our_identity`` = To, ``client_address`` = From (verbatim). A message with no
-    route bound, or with a blank body, is logged and success-acked (the provider must
-    not retry-storm a permanently-unrouted or empty message); a retryable overflow or
-    infrastructure failure propagates as a 5xx so Twilio redelivers rather than silently
-    dropping it.
+    ``our_identity`` = To, ``client_address`` = From (verbatim). A text-only message
+    bridges one turn under the bare ``MessageSid``; an MMS bridges ONE turn per media
+    item (``provider_message_id=f"{sid}-{N}"``) carrying the opaque ``media_*`` params —
+    the ``Body`` caption rides the first item, a caption-less item a ``[kind]``
+    placeholder so the turn is never blank. A message with no route bound, or with no
+    body and no media, is logged and success-acked (the provider must not retry-storm a
+    permanently-unrouted or empty message); a retryable overflow or infrastructure
+    failure propagates as a 5xx so Twilio redelivers rather than silently dropping it.
     """
     try:
-        await tai42_app.conversations.accept(
-            channel="twilio",
-            our_identity=form.get("To", ""),
-            client_address=form.get("From", ""),
-            # The provider attests the From number, so it is both the conversation identity
-            # and the party the turn cap holds accountable.
-            cap_key=form.get("From", ""),
-            text=form.get("Body", ""),
-            provider_message_id=message_sid,
-        )
+        await _accept_inbound(form, message_sid)
     except BlankInboundTextError as exc:
         logger.warning("blank Twilio inbound %s dropped: %s", message_sid, exc)
     except LookupError as exc:
         logger.warning("unrouted Twilio inbound %s dropped: %s", message_sid, exc)
     await mark_seen(message_sid)
     return Response(status_code=204)
+
+
+async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
+    """Accept the inbound as one text turn, or one turn per MMS media item.
+
+    The provider attests the From number, so it is both the conversation identity and
+    the party the turn cap holds accountable.
+    """
+    our_identity = form.get("To", "")
+    client_address = form.get("From", "")
+    media_count = _media_count(form)
+    if media_count <= 0:
+        await tai42_app.conversations.accept(
+            channel="twilio",
+            our_identity=our_identity,
+            client_address=client_address,
+            cap_key=client_address,
+            text=form.get("Body", ""),
+            provider_message_id=message_sid,
+        )
+        return
+
+    body = form.get("Body", "")
+    has_caption = bool(body.strip())
+    for index in range(media_count):
+        media_url = form.get(f"MediaUrl{index}", "")
+        content_type = form.get(f"MediaContentType{index}", "")
+        kind = _media_kind(content_type)
+        text = body if index == 0 and has_caption else inbound_media_placeholder(kind)
+        await tai42_app.conversations.accept(
+            channel="twilio",
+            our_identity=our_identity,
+            client_address=client_address,
+            cap_key=client_address,
+            text=text,
+            provider_message_id=f"{message_sid}-{index}",
+            params=build_inbound_media_params(kind=kind, media_id=media_url, mime_type=content_type),
+        )
 
 
 @tai42_app.http.custom_route(

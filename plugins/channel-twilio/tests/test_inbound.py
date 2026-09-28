@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 
 import pytest
 from starlette.responses import Response
@@ -66,7 +67,7 @@ async def _pending_intact(fake_redis: FakeRedis) -> bool:
 async def test_valid_signature_hands_reply_to_shared_ladder(handler, channels, fake_redis: FakeRedis):
     # The signed reply is handed to the ONE shared ladder with the number-pair key,
     # the Body as the answer, and the bridge context; a FORWARDED outcome acks 204
-    # and marks the sid seen. The plugin no longer forwards itself — the ladder does.
+    # and marks the sid seen. The ladder does the forwarding, not the plugin.
     channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(_pairs()))
@@ -332,9 +333,143 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "cap_key": _HUMAN,
             "text": "ship it",
             "provider_message_id": "SM777",
+            "params": None,
         }
     ]
     assert _SEEN_KEY in fake_redis.store
+
+
+# --- Bridge branch: MMS media (correlation miss) ------------------------------
+
+_MEDIA0 = "https://media.example/ME0"
+_MEDIA1 = "https://media.example/ME1"
+
+
+async def test_mms_single_image_with_caption_bridges_media_turn(handler, stub_app, fake_redis: FakeRedis):
+    # An MMS with one image and a caption bridges one media turn: the Body rides as the
+    # text, the media_* params carry the kind/url/mime, the provider id is sid-0.
+    pairs = [
+        ("MessageSid", "SM777"),
+        ("To", _TWILIO),
+        ("From", _HUMAN),
+        ("Body", "look at this"),
+        ("NumMedia", "1"),
+        ("MediaUrl0", _MEDIA0),
+        ("MediaContentType0", "image/jpeg"),
+    ]
+
+    result = await handler(signed_request(pairs))
+
+    assert result.status_code == 204
+    assert stub_app.conversations.accept_calls == [
+        {
+            "channel": "twilio",
+            "our_identity": _TWILIO,
+            "client_address": _HUMAN,
+            "cap_key": _HUMAN,
+            "text": "look at this",
+            "provider_message_id": "SM777-0",
+            "params": {"media_kind": "image", "media_id": _MEDIA0, "media_mime_type": "image/jpeg"},
+        }
+    ]
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_mms_multiple_media_bridges_one_turn_per_item(handler, stub_app, fake_redis: FakeRedis):
+    # NumMedia=2 with a blank Body: one turn per media, each with a distinct provider id
+    # sid-N and its own kind/url/mime; a caption-less item uses the [kind] placeholder.
+    pairs = [
+        ("MessageSid", "SM777"),
+        ("To", _TWILIO),
+        ("From", _HUMAN),
+        ("Body", ""),
+        ("NumMedia", "2"),
+        ("MediaUrl0", _MEDIA0),
+        ("MediaContentType0", "image/png"),
+        ("MediaUrl1", _MEDIA1),
+        ("MediaContentType1", "video/mp4"),
+    ]
+
+    result = await handler(signed_request(pairs))
+
+    assert result.status_code == 204
+    calls = stub_app.conversations.accept_calls
+    assert [call["provider_message_id"] for call in calls] == ["SM777-0", "SM777-1"]
+    assert calls[0]["text"] == "[image]"
+    assert calls[0]["params"] == {"media_kind": "image", "media_id": _MEDIA0, "media_mime_type": "image/png"}
+    assert calls[1]["text"] == "[video]"
+    assert calls[1]["params"] == {"media_kind": "video", "media_id": _MEDIA1, "media_mime_type": "video/mp4"}
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_mms_blank_body_with_media_bridges_with_placeholder_text(handler, stub_app, fake_redis: FakeRedis):
+    # A blank Body + media bridges: the [kind] placeholder keeps the turn non-blank, so
+    # the media bridges instead of raising BlankInboundTextError.
+    pairs = [
+        ("MessageSid", "SM777"),
+        ("To", _TWILIO),
+        ("From", _HUMAN),
+        ("Body", "   "),
+        ("NumMedia", "1"),
+        ("MediaUrl0", _MEDIA0),
+        ("MediaContentType0", "application/pdf"),
+    ]
+
+    result = await handler(signed_request(pairs))
+
+    assert result.status_code == 204
+    (call,) = stub_app.conversations.accept_calls
+    assert call["text"] == "[document]"
+    assert call["provider_message_id"] == "SM777-0"
+    assert call["params"] == {"media_kind": "document", "media_id": _MEDIA0, "media_mime_type": "application/pdf"}
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_sms_text_only_num_media_zero_bridges_single_text_turn(handler, stub_app, fake_redis: FakeRedis):
+    # NumMedia=0 is the unchanged text path: one turn under the bare sid, the Body verbatim,
+    # no media_* params.
+    pairs = [
+        ("MessageSid", "SM777"),
+        ("To", _TWILIO),
+        ("From", _HUMAN),
+        ("Body", "ship it"),
+        ("NumMedia", "0"),
+    ]
+
+    result = await handler(signed_request(pairs))
+
+    assert result.status_code == 204
+    assert stub_app.conversations.accept_calls == [
+        {
+            "channel": "twilio",
+            "our_identity": _TWILIO,
+            "client_address": _HUMAN,
+            "cap_key": _HUMAN,
+            "text": "ship it",
+            "provider_message_id": "SM777",
+            "params": None,
+        }
+    ]
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_non_integer_num_media_propagates_and_makes_no_turn(handler, stub_app, fake_redis: FakeRedis):
+    # A present-but-non-integer NumMedia is a Twilio protocol violation: _media_count raises
+    # ValueError, which the door propagates (surfaced as a 5xx) rather than treating the
+    # delivery as media-less; no turn is accepted and the sid is not marked seen.
+    pairs = [
+        ("MessageSid", "SM777"),
+        ("To", _TWILIO),
+        ("From", _HUMAN),
+        ("Body", "ship it"),
+        ("NumMedia", "x"),
+    ]
+
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        await handler(signed_request(pairs))
+
+    assert stub_app.conversations.accept_calls == []
+    assert _SEEN_KEY not in fake_redis.store
 
 
 async def test_pending_question_resolves_before_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
@@ -506,6 +641,46 @@ async def test_status_send_hit_posts_receipt_no_untracked_log(
     assert call["provider_message_id"] == "SM777"
     assert call["status"] is DeliveryReceipt.DELIVERED
     assert not any("untracked message SM777" in record.message for record in caplog.records)
+
+
+async def test_receipt_while_pending_delivery_is_acked_not_5xx(status_handler, stub_app):
+    # A status callback whose record is still pending_delivery (the send loop published the
+    # outbound reverse index but has not reached mark_provisional): the seam PARKS the receipt
+    # and returns without raising, so the door acks 204 — never a 5xx that would have Twilio
+    # redeliver. The receipt is asserted through the record: its pending_receipt is staged to
+    # the terminal target while it stays pending_delivery.
+    stub_app.conversations.records["SM777"] = SimpleNamespace(delivery_status="pending_delivery", pending_receipt=None)
+
+    result = await status_handler(signed_request(_status_pairs("delivered"), path=_STATUS_PATH))
+
+    assert result.status_code == 204
+    record = stub_app.conversations.records["SM777"]
+    assert record.delivery_status == "pending_delivery"
+    assert record.pending_receipt == "delivered"
+
+
+async def test_receipt_after_provisional_applies_terminal(status_handler, stub_app):
+    # The same door with a record that already reached provisional: the seam applies the
+    # terminal in place (the existing handling) and the door still acks 204.
+    stub_app.conversations.records["SM777"] = SimpleNamespace(delivery_status="provisional", pending_receipt=None)
+
+    result = await status_handler(signed_request(_status_pairs("delivered"), path=_STATUS_PATH))
+
+    assert result.status_code == 204
+    record = stub_app.conversations.records["SM777"]
+    assert record.delivery_status == "delivered"
+    assert record.pending_receipt is None
+
+
+async def test_receipt_conflicting_terminal_is_acked(status_handler, stub_app):
+    # A receipt that conflicts with an already-terminal record is a benign no-op the seam logs
+    # and returns from; the door still acks 204 and the record is left as it stands.
+    stub_app.conversations.records["SM777"] = SimpleNamespace(delivery_status="delivered", pending_receipt=None)
+
+    result = await status_handler(signed_request(_status_pairs("failed"), path=_STATUS_PATH))
+
+    assert result.status_code == 204
+    assert stub_app.conversations.records["SM777"].delivery_status == "delivered"
 
 
 async def test_status_bad_signature_is_401(status_handler, stub_app):

@@ -48,6 +48,7 @@ async def _bridge(
     event_id: str,
     *,
     params: dict[str, str] | None = None,
+    provider_message_id: str | None = None,
 ) -> Response:
     """Hand one uncorrelated human message to the conversation bridge.
 
@@ -55,8 +56,11 @@ async def _bridge(
     unset is operator misconfig, raised loudly. A message with no text/channel, or
     with whitespace-only text, is nothing to bridge and is acked. ``params`` is the
     optional opaque channel enrichment the turn carries (e.g. ``reply_id`` from a tapped
-    reply option); ``None`` for a plain message. No route bound acks with a debug log; an
-    infrastructure failure propagates so Slack redelivers.
+    reply option, or the ``media_*`` vocabulary a file share bridges); ``None`` for a
+    plain message. ``provider_message_id`` overrides the intake dedupe id (a file share
+    passes a per-file id so each file of one message dedupes distinctly); it defaults to
+    ``event_id``. No route bound acks with a debug log; an infrastructure failure
+    propagates so Slack redelivers.
     """
     if not isinstance(text, str) or not text or not isinstance(channel, str) or not channel:
         return JSONResponse({"status": "ignored"})
@@ -71,7 +75,7 @@ async def _bridge(
             # and the party the turn cap holds accountable.
             cap_key=channel,
             text=text,
-            provider_message_id=event_id,
+            provider_message_id=provider_message_id if provider_message_id is not None else event_id,
             params=params,
         )
     except BlankInboundTextError:

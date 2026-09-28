@@ -6,11 +6,12 @@ from typing import Any
 
 import pytest
 from aiodocker.exceptions import DockerError  # pyright: ignore[reportMissingImports]
-from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
+from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError, SandboxSessionSpec
 from tai42_kit.sandbox import LABEL_DURABILITY, permissive_policy
 
 from tai42_sandbox_docker import provider as provider_module
 from tai42_sandbox_docker.provider import INTERNAL_NETWORK, DockerSandbox, container_name, volume_name
+from tai42_sandbox_docker.sessions import DockerSandboxSession
 from tai42_sandbox_docker.settings import DockerSandboxSettings
 
 from .conftest import FakeContainer, FakeDocker
@@ -38,6 +39,18 @@ class _DockerRecorder:
     def __init__(self, *, url=None, ssl_context=None) -> None:
         self.url = url
         self.ssl_context = ssl_context
+
+
+def _session(container: FakeContainer) -> DockerSandboxSession:
+    sandbox = DockerSandbox(docker=object(), settings=_settings())
+    return DockerSandboxSession(
+        sandbox=sandbox,
+        session_id=container.id,
+        container=container,
+        workspace_key="ws1",
+        durability="ephemeral",
+        base_env={},
+    )
 
 
 # -- engine construction ---------------------------------------------------------
@@ -348,3 +361,28 @@ async def test_reconcile_orphans_delete_error_is_loud(fake_docker: FakeDocker) -
     # A non-404 failure destroying an orphan is a genuine engine error: surfaced loudly.
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox._reconcile_orphans(fake_docker)
+
+
+# -- get_file miss typing --------------------------------------------------------
+
+
+async def test_get_file_404_raises_typed_not_found() -> None:
+    container = FakeContainer(container_id="cGf", name=None, config={})
+    session = _session(container)
+    # The workspace has no such path: the engine's archive endpoint 404s, which is a
+    # genuine miss and surfaces as the typed subclass carrying the requested path.
+    with pytest.raises(SandboxFileNotFoundError) as excinfo:
+        await session.get_file("absent.txt")
+    assert excinfo.value.path == "absent.txt"
+    assert str(excinfo.value) == "sandbox file 'absent.txt' not found"
+
+
+async def test_get_file_non_404_raises_base_sandbox_error() -> None:
+    container = FakeContainer(container_id="cGe", name=None, config={})
+    container.get_archive_error = 500
+    session = _session(container)
+    # A non-404 engine error is a real fault, not a miss: it stays the base error and is
+    # never mistaken for the not-found subclass.
+    with pytest.raises(SandboxError) as excinfo:
+        await session.get_file("note.txt")
+    assert not isinstance(excinfo.value, SandboxFileNotFoundError)

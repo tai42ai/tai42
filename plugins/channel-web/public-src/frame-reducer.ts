@@ -227,6 +227,22 @@ function applyQuestionFrame(
   };
 }
 
+function applyUnavailableFrame(
+  model: StreamModel,
+  payload: Record<string, unknown>,
+  id: string,
+  event: string,
+): FrameOutcome {
+  // The server emits this in place of a stored entry it could not render, so the
+  // only fields it carries are the entry id (already checked) and its ordering
+  // timestamp; an unparsable ts taints the frame like every other entry's.
+  if (!isTimestamp(payload.ts)) return malformed(event);
+  return {
+    kind: 'model',
+    model: withItem(model, { kind: 'unavailable', id, ts: payload.ts }),
+  };
+}
+
 function applyAnsweredFrame(
   model: StreamModel,
   payload: Record<string, unknown>,
@@ -270,6 +286,8 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
       return applyQuestionFrame(model, payload, id, frame.event);
     case 'chat.answered':
       return applyAnsweredFrame(model, payload, frame.event);
+    case 'chat.unavailable':
+      return applyUnavailableFrame(model, payload, id, frame.event);
     default:
       return malformed(frame.event);
   }

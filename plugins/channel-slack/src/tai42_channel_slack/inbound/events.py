@@ -25,6 +25,12 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import (
+    InboundMediaKind,
+    InboundRejectionReason,
+    build_inbound_media_params,
+    inbound_media_placeholder,
+)
 
 from tai42_channel_slack.correlation import claim_dedupe, release_dedupe
 from tai42_channel_slack.inbound.routing import _bridge, _recipients, _resolve_answer
@@ -34,6 +40,12 @@ from tai42_channel_slack.settings import slack_settings
 logger = logging.getLogger(__name__)
 
 _RETRY_NUM_HEADER = "X-Slack-Retry-Num"
+
+# Message subtypes whose top-level ``text`` is the participant's own words:
+# ``me_message`` (a ``/me …`` post) and ``thread_broadcast`` (a threaded reply also
+# posted to the channel, carrying ``thread_ts``). They route exactly like a plain
+# message. Every other subtype's payload is not a participant utterance.
+_PARTICIPANT_TEXT_SUBTYPES = frozenset({"me_message", "thread_broadcast"})
 
 
 @tai42_app.http.custom_route(
@@ -114,12 +126,22 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     if not isinstance(event, dict):
         raise ValueError("event_callback without an event object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
 
-    if event.get("type") != "message" or "subtype" in event or event.get("bot_id") is not None:
-        # Not a plain human message: edits/joins/file shares carry a subtype, the
-        # bot's own post echoes with a bot_id.
+    if event.get("type") != "message" or event.get("bot_id") is not None:
+        # Not a message event, or the bot's own post echoing with a bot_id.
         return JSONResponse({"status": "ignored"})
     if settings.bot_user_id is not None and event.get("user") == settings.bot_user_id:
         # A message the bot itself authored (posted under a user token, no bot_id).
+        return JSONResponse({"status": "ignored"})
+
+    subtype = event.get("subtype")
+    if subtype == "file_share":
+        # A file share is participant content and bridges one turn per file.
+        return await _bridge_files(event, settings.bot_user_id, event_id)
+    if subtype is not None and subtype not in _PARTICIPANT_TEXT_SUBTYPES:
+        # A subtype whose payload is not a participant utterance is not content this
+        # door represents and stays ack-ignored: edits such as message_changed and
+        # message_deleted, joins and leaves, bot_message, pins, and the message_replied
+        # container. A participant-text subtype falls through to the message path below.
         return JSONResponse({"status": "ignored"})
 
     text = event.get("text")
@@ -130,3 +152,115 @@ async def _process_event(payload: dict, event_id: str) -> Response:
         return await _resolve_answer(thread_ts, text, settings.bot_user_id, channel, event_id)
 
     return await _bridge(settings.bot_user_id, channel, text, event_id)
+
+
+def _media_kind(mimetype: str | None) -> InboundMediaKind:
+    """Map a Slack file ``mimetype`` onto the generic inbound-media wire kind.
+
+    By the mime major type: ``image``/``video``/``audio`` map to themselves,
+    ``application``/``text`` to ``document``; any other present major type
+    (e.g. ``model``/``font``) and a missing/blank ``mimetype`` (external or unprocessed
+    files may carry none) to ``file``.
+    """
+    if not mimetype:
+        return InboundMediaKind.FILE
+    major = mimetype.split("/", 1)[0].strip().lower()
+    if major == "image":
+        return InboundMediaKind.IMAGE
+    if major == "video":
+        return InboundMediaKind.VIDEO
+    if major == "audio":
+        return InboundMediaKind.AUDIO
+    if major in ("application", "text"):
+        return InboundMediaKind.DOCUMENT
+    return InboundMediaKind.FILE
+
+
+async def _bridge_files(event: dict, our_identity: str | None, event_id: str) -> Response:
+    """Bridge a ``file_share`` message — one turn per file, none dropped.
+
+    Slack allows several files in one message and the ``media_*`` vocabulary is
+    single-media, so each file bridges its own turn under ``f"{event_id}-{index}"`` (so
+    distinct files of one message dedupe distinctly at intake). The message ``text``
+    caption rides the first bridged turn when non-blank; every other turn carries the
+    generic placeholder so it is never empty. A file exposing neither a fetchable
+    ``url_private`` nor a ``name`` cannot be represented — it gets the shared rejection
+    reply + event, never a silent drop — while its siblings still bridge. That rejection
+    is claimed under the file's own ``f"{event_id}-{index}"`` key (the key its bridged
+    siblings dedupe under) before the reply is sent and released if the send fails, so a
+    retry driven by a later file's transient fault never repeats a rejection already
+    delivered. When no file bridges (every one was unfetchable) but the message carried a
+    caption, the caption bridges as a plain text turn under the message's own
+    ``event_id``.
+    """
+    channel = event.get("channel")
+    if not isinstance(channel, str) or not channel:
+        raise ValueError(f"slack file_share event {event_id} carries no channel")
+    files = event.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError(f"slack file_share event {event_id} carries no files")
+
+    text = event.get("text")
+    caption = text if isinstance(text, str) and text.strip() else None
+    caption_pending = caption is not None
+    bridged = False
+
+    for index, file in enumerate(files):
+        if not isinstance(file, dict):
+            raise ValueError(f"slack file_share event {event_id} file {index} is not an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+        url_private = file.get("url_private")
+        name = file.get("name")
+        media_id = url_private if isinstance(url_private, str) and url_private else None
+        filename = name if isinstance(name, str) and name else None
+        if media_id is None and filename is None:
+            item_key = f"{event_id}-{index}"
+            if not await claim_dedupe(item_key):
+                # A reprocess whose prior pass already delivered this file's rejection
+                # reply (a later file's transient fault made the door re-raise): skip so
+                # the participant is not notified a second time.
+                continue
+            try:
+                await tai42_app.conversations.notify_inbound_rejected(
+                    channel_id="slack",
+                    recipient=channel,
+                    sender_identity=our_identity,
+                    kind="file",
+                    reason=InboundRejectionReason.UNSUPPORTED_TYPE,
+                )
+            except BaseException:
+                # The reply never reached the participant: free the claim so a retry
+                # sends it, then re-raise into the door's release-and-500 guard.
+                await release_dedupe(item_key)
+                raise
+            continue
+
+        mimetype = file.get("mimetype")
+        mime = mimetype if isinstance(mimetype, str) and mimetype else None
+        kind = _media_kind(mime)
+        size = file.get("size")
+        turn_text = caption if caption_pending else inbound_media_placeholder(kind, filename=filename)
+        caption_pending = False
+        await _bridge(
+            our_identity,
+            channel,
+            turn_text,
+            event_id,
+            params=build_inbound_media_params(
+                kind=kind,
+                media_id=media_id,
+                mime_type=mime,
+                filename=filename,
+                size=size if isinstance(size, int) else None,
+            ),
+            provider_message_id=f"{event_id}-{index}",
+        )
+        bridged = True
+
+    if caption is not None and not bridged:
+        # Every file was unfetchable (each got its own rejection reply), but the
+        # message carried a caption: bridge it as a plain text turn under the
+        # message's own event_id so participant text is never silently dropped.
+        await _bridge(our_identity, channel, caption, event_id)
+        bridged = True
+
+    return JSONResponse({"status": "accepted" if bridged else "ignored"})

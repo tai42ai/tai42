@@ -11,7 +11,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.inbound import inbound
@@ -739,3 +739,112 @@ async def test_callback_tap_without_anchor_message_id_is_ignored(http_recorder, 
     assert _body(response) == {"data": {"status": "ignored"}}
     assert channels.inbound_calls == []
     assert len(_answered_callbacks(http_recorder)) == 1
+
+
+def _media_update(
+    chat_id: int = 777,
+    update_id: int = 7,
+    caption: str | None = None,
+    **members: Any,
+) -> dict[str, Any]:
+    """A plain (non-reply) message carrying one media member — a bridge message, not an answer."""
+    message: dict[str, Any] = {"message_id": 1001, "chat": {"id": chat_id}, **members}
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+async def test_captioned_photo_bridges_with_caption_and_image_params(http_recorder, fake_redis, conversations):
+    # A captioned photo bridges one turn: the caption is the turn text, the largest photo
+    # size feeds media_id/media_size, and media_kind is the generic image.
+    update = _media_update(
+        photo=[{"file_id": "small", "file_size": 100}, {"file_id": "big", "file_size": 900}],
+        caption="look at this",
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "look at this"
+    assert call.params["media_kind"] == "image"
+    assert call.params["media_id"] == "big"
+    assert call.params["media_size"] == "900"
+
+
+async def test_captionless_document_bridges_with_filename_placeholder(http_recorder, fake_redis, conversations):
+    # A caption-less document bridges with the "[document: <name>]" placeholder as the non-blank
+    # turn text and the filename/mime carried as opaque media params.
+    update = _media_update(
+        document={"file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": 2048},
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "[document: report.pdf]"
+    assert call.params["media_kind"] == "document"
+    assert call.params["media_id"] == "doc1"
+    assert call.params["media_filename"] == "report.pdf"
+    assert call.params["media_mime_type"] == "application/pdf"
+
+
+async def test_animation_with_document_member_bridges_as_animation_video(http_recorder, fake_redis, conversations):
+    # Telegram sends an animation as BOTH an animation and a document member; _MEDIA_SPECS
+    # orders animation first, so the message bridges exactly one turn mapped to the animation
+    # (generic video) kind, never the document member's document kind.
+    update = _media_update(
+        animation={"file_id": "anim1", "file_name": "clip.gif", "mime_type": "video/mp4", "file_size": 4096},
+        document={"file_id": "doc1", "file_name": "clip.gif", "mime_type": "video/mp4", "file_size": 4096},
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.params["media_kind"] == "video"
+    assert call.params["media_kind"] != "document"
+    assert call.params["media_id"] == "anim1"
+
+
+async def test_voice_note_bridges_as_voice_audio(http_recorder, fake_redis, conversations):
+    # A voice note maps to the generic audio kind with media_voice=true and the "[voice message]"
+    # placeholder as its turn text.
+    update = _media_update(voice={"file_id": "v1", "mime_type": "audio/ogg", "file_size": 512})
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "[voice message]"
+    assert call.params["media_kind"] == "audio"
+    assert call.params["media_voice"] == "true"
+    assert call.params["media_id"] == "v1"
+
+
+async def test_animated_sticker_bridges_with_animated_flag(http_recorder, fake_redis, conversations):
+    # An animated sticker carries sticker_animated=true; its turn text is the "[sticker]" placeholder.
+    update = _media_update(sticker={"file_id": "s1", "is_animated": True, "file_size": 64})
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "[sticker]"
+    assert call.params["media_kind"] == "sticker"
+    assert call.params["sticker_animated"] == "true"
+
+
+async def test_unmappable_content_notifies_rejection_and_makes_no_turn(http_recorder, fake_redis, conversations):
+    # A poll is content Telegram sends that this channel cannot map to a turn: the door routes it
+    # to the shared notify_inbound_rejected chokepoint (one generic notice + operator event) and
+    # acks it, never a silent drop and never a bridged turn.
+    update = _media_update(poll={"id": "p1", "question": "which?"})
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert len(conversations.rejected_calls) == 1
+    rejected = conversations.rejected_calls[0]
+    assert rejected.channel_id == "telegram"
+    assert rejected.recipient == "777"
+    assert rejected.sender_identity == "123456"
+    assert rejected.kind == "poll"
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE

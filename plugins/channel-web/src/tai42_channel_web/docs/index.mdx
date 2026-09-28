@@ -128,6 +128,16 @@ Submitted values are **transport, never validated**: the platform bounds their s
 and nesting but does not check them against the schema — treat them exactly as you
 treat typed participant text.
 
+## Unavailable messages
+
+If a stored transcript entry cannot be rendered — a corrupt record in the replay
+stream — the page shows a persistent **"This message is unavailable."** notice in its
+place, ordered where the entry belonged, rather than a silent gap in the history. The
+server emits a dedicated `chat.unavailable` frame for it (carrying the entry id and its
+ordering timestamp) on both the backlog replay and the live tail; the corruption is
+logged at `WARNING`. This is distinct from the transient error banner shown when a
+frame fails to parse on the page itself.
+
 ## Link parameters
 
 Query parameters on the chat page URL are **captured with the visitor's session**

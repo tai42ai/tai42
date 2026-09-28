@@ -143,6 +143,7 @@ class _StubConversations:
         self.accept_result = "msg-0001"
         self.accept_error: BaseException | None = None
         self.status_calls: list[SimpleNamespace] = []
+        self.rejected_calls: list[SimpleNamespace] = []
 
     async def accept(
         self,
@@ -174,6 +175,19 @@ class _StubConversations:
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
         self.status_calls.append(
             SimpleNamespace(channel=channel, provider_message_id=provider_message_id, status=status)
+        )
+
+    async def notify_inbound_rejected(
+        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+    ) -> None:
+        self.rejected_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id,
+                recipient=recipient,
+                sender_identity=sender_identity,
+                kind=kind,
+                reason=reason,
+            )
         )
 
 
@@ -228,6 +242,7 @@ def _reset_conversations() -> Any:
     conv = _stub_app.conversations
     conv.accept_calls.clear()
     conv.status_calls.clear()
+    conv.rejected_calls.clear()
     conv.accept_result = "msg-0001"
     conv.accept_error = None
     channels = _stub_app.channels
@@ -237,6 +252,7 @@ def _reset_conversations() -> Any:
     yield
     conv.accept_calls.clear()
     conv.status_calls.clear()
+    conv.rejected_calls.clear()
     conv.accept_error = None
     channels.inbound_calls.clear()
     channels.inbound_error = None

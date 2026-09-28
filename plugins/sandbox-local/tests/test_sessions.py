@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from tai42_contract.sandbox import (
     SandboxError,
     SandboxExecTimeoutError,
+    SandboxFileNotFoundError,
     SandboxSessionSpec,
     SandboxStreamChunk,
 )
@@ -193,5 +194,30 @@ async def test_get_file_directory_oserror_surfaces_typed(sandbox: LocalSandbox) 
         await session.put_file("adir/inner.txt", b"x")
         with pytest.raises(SandboxError, match="get_file failed for 'adir'"):
             await session.get_file("adir")
+    finally:
+        await session.destroy()
+
+
+async def test_get_file_miss_raises_typed_not_found(sandbox: LocalSandbox) -> None:
+    """A genuine miss surfaces as the typed subclass carrying the requested path."""
+    session = await sandbox.create_session(_spec())
+    try:
+        with pytest.raises(SandboxFileNotFoundError) as excinfo:
+            await session.get_file("absent.txt")
+        assert excinfo.value.path == "absent.txt"
+        assert str(excinfo.value) == "sandbox file 'absent.txt' not found"
+    finally:
+        await session.destroy()
+
+
+async def test_get_file_real_error_raises_base_sandbox_error(sandbox: LocalSandbox) -> None:
+    """A real read failure (a directory, not an absent path) stays the base error and is
+    never mistaken for the not-found subclass."""
+    session = await sandbox.create_session(_spec())
+    try:
+        await session.put_file("adir/inner.txt", b"x")
+        with pytest.raises(SandboxError) as excinfo:
+            await session.get_file("adir")
+        assert not isinstance(excinfo.value, SandboxFileNotFoundError)
     finally:
         await session.destroy()

@@ -34,6 +34,7 @@ from tai42_contract.sandbox import (
     SandboxError,
     SandboxExecHandle,
     SandboxExecTimeoutError,
+    SandboxFileNotFoundError,
     SandboxPolicy,
     SandboxSessionSpec,
     SandboxStreamChunk,
@@ -282,7 +283,7 @@ class FakeSandboxSession(ManagedSandboxSession):
         try:
             return target.read_bytes()
         except FileNotFoundError as exc:
-            raise SandboxError(f"sandbox get_file miss for {path!r}") from exc
+            raise SandboxFileNotFoundError(path) from exc
         except OSError as exc:
             raise SandboxError(f"sandbox get_file failed for {path!r}: {exc}") from exc
 

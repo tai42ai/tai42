@@ -69,6 +69,36 @@ async def test_list_spans_failed_tag_fetch_degrades_to_empty(manager, mock_clien
     assert items[0].tags == []
 
 
+async def test_tag_fetch_failure_marks_tags_unavailable(manager, mock_client, obs, obs_page):
+    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([obs(id="a", type="TOOL", name="x")])
+    mock_client.api.trace.get.side_effect = RuntimeError("boom")
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    items = await LangfuseReader(manager).list_spans_in_window(now, now)
+    assert items[0].tags == []
+    assert items[0].tags_available is False
+
+
+async def test_tags_present_are_available(manager, mock_client, obs, obs_page):
+    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([obs(id="a", type="TOOL", name="x")])
+    mock_client.api.trace.get.return_value = SimpleNamespace(tags=["run:7"])
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    items = await LangfuseReader(manager).list_spans_in_window(now, now)
+    assert items[0].tags == ["run:7"]
+    assert items[0].tags_available is True
+
+
+async def test_no_trace_id_is_available_empty(manager, mock_client, obs, obs_page):
+    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(
+        [obs(id="a", trace_id=None, type="TOOL", name="x")]
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    items = await LangfuseReader(manager).list_spans_in_window(now, now)
+    assert items[0].tags == []
+    assert items[0].tags_available is True
+    # An obs with no trace_id is never fetched for tags.
+    mock_client.api.trace.get.assert_not_called()
+
+
 async def test_list_spans_tag_filter_and_pagination(manager, mock_client, obs, obs_page):
     page1 = obs_page([obs(id="a", type="TOOL", name="x")], page=1, total_pages=2)
     page2 = obs_page([obs(id="b", type="TOOL", name="y")], page=2, total_pages=2)

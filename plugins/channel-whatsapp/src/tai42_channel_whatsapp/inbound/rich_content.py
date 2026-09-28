@@ -2,7 +2,7 @@
 
 None of these can answer a pending ask — each bridges as a fresh conversation turn.
 
-INBOUND MEDIA DESIGN NOTE (design gap — see the plugin README and this lane's report):
+INBOUND MEDIA NOTE (see the plugin README):
 WhatsApp inbound media arrives as a Graph media ``id`` (``GET {graph}/{id}`` returns a
 SHORT-LIVED, Bearer-AUTHENTICATED lookaside url — not a durable public https url, and not a
 valid :class:`MediaItem` source). Turning that id into a durable typed ``attachments`` entry
@@ -25,6 +25,7 @@ import json
 import logging
 from typing import Any
 
+from tai42_contract.conversations import build_inbound_media_params, inbound_media_placeholder
 from tai42_contract.interactions.models import LocationElement
 
 from tai42_channel_whatsapp.correlation import already_seen
@@ -32,31 +33,6 @@ from tai42_channel_whatsapp.inbound.answers import _bridge_inbound
 from tai42_channel_whatsapp.inbound.params import _merged_params, _put_param
 
 logger = logging.getLogger(__name__)
-
-# The faithful, ALWAYS non-blank placeholder text a caption-less media/location/contacts/
-# reaction turn carries (``accept`` refuses blank text — the message must never be lost).
-_MEDIA_PLACEHOLDERS = {
-    "image": "[image]",
-    "document": "[document]",
-    "audio": "[audio]",
-    "video": "[video]",
-    "sticker": "[sticker]",
-}
-
-
-def _media_placeholder(message_type: str, media: dict[str, Any]) -> str:
-    """A faithful, non-blank turn text for a caption-less media message.
-
-    The bracketed type label, enriched for a document with a filename and a voice note. Never blank
-    (``accept`` refuses blank text).
-    """
-    if message_type == "document":
-        filename = media.get("filename")
-        if isinstance(filename, str) and filename.strip():
-            return f"[document: {filename.strip()}]"
-    if message_type == "audio" and media.get("voice") is True:
-        return "[voice message]"
-    return _MEDIA_PLACEHOLDERS.get(message_type, "[media]")
 
 
 async def _handle_media(
@@ -83,18 +59,21 @@ async def _handle_media(
     media = message.get(message_type)
     media = media if isinstance(media, dict) else {}
     caption = media.get("caption")
-    text = caption.strip() if isinstance(caption, str) and caption.strip() else _media_placeholder(message_type, media)
+    text = (
+        caption.strip()
+        if isinstance(caption, str) and caption.strip()
+        else inbound_media_placeholder(message_type, filename=media.get("filename"), voice=media.get("voice") is True)
+    )
 
-    media_params: dict[str, str] = {}
-    _put_param(media_params, "media_kind", message_type)
-    _put_param(media_params, "media_id", media.get("id"))
-    _put_param(media_params, "media_mime_type", media.get("mime_type"))
-    _put_param(media_params, "media_sha256", media.get("sha256"))
-    _put_param(media_params, "media_filename", media.get("filename"))
-    if media.get("voice") is True:
-        _put_param(media_params, "media_voice", "true")
-    if media.get("animated") is True:
-        _put_param(media_params, "sticker_animated", "true")
+    media_params = build_inbound_media_params(
+        kind=message_type,
+        media_id=media.get("id"),
+        mime_type=media.get("mime_type"),
+        sha256=media.get("sha256"),
+        filename=media.get("filename"),
+        voice=media.get("voice") is True,
+        animated=media.get("animated") is True,
+    )
 
     await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, media_params))
 

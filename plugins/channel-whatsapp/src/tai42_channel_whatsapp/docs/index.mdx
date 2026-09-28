@@ -135,8 +135,14 @@ with operator credentials (a flagged platform gap — see the plugin README).
 
 Params ride only on the bridge path — a tap or quick-reply that **answers** a
 pending question surfaces none (the answer path carries no params). Meta inbound
-error notices (`errors[]`, e.g. an unsupported participant message type) are logged at
-warning, never bridged.
+error notices (`errors[]`) are always logged at warning and never bridged; an
+**unsupported-message-type** notice (`code 131051`) — participant content the
+channel cannot receive — additionally sends the participant one generic
+"unsupported content" reply and records a rejection event, while every other error
+code stays log-only (an operator-facing vendor signal, not participant content). An
+unhandled participant **content type** the plugin has no handler for likewise gets
+the generic reply + event; a vendor **non-content** notification (`system` /
+`request_welcome`) stays log-only. Each reply is sent once, deduped per message.
 
 ## The 24-hour window and templates
 

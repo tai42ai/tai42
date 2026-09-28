@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
+from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
 from tai42_kit.settings import reset_all_settings
 
-from tai42_channel_slack.inbound.events import slack_inbound
+from tai42_channel_slack.inbound.events import _media_kind, slack_inbound
 
 from .conftest import (
     TEST_ALLOWED_RECIPIENT,
+    TEST_BOT_USER_ID,
     TEST_DEFAULT_RECIPIENT,
     TEST_SIGNING_SECRET,
     body_json,
@@ -294,12 +296,13 @@ async def test_event_callback_without_event_object_raises(fake_redis):
     "event",
     [
         pytest.param(_reply_event(subtype="message_changed"), id="subtype-present"),
+        pytest.param(_reply_event(subtype="channel_join"), id="join-subtype"),
         pytest.param(_reply_event(type="reaction_added"), id="not-a-message"),
     ],
 )
 async def test_non_message_traffic_is_acked_ignored_never_bridged(fake_redis, http_script, stub_conversations, event):
-    # Edits/joins carry a subtype; a non-message event is not text at all. Neither
-    # forwards nor bridges.
+    # An edit or a join carries a subtype whose payload is not a participant utterance;
+    # a non-message event is not text at all. Neither forwards nor bridges.
     _seed_correlation(fake_redis)
 
     response = await slack_inbound(_signed(_event_body(event=event)))
@@ -308,3 +311,214 @@ async def test_non_message_traffic_is_acked_ignored_never_bridged(fake_redis, ht
     assert body_json(response) == {"status": "ignored"}
     assert http_script.requests == []
     assert stub_conversations.accept_calls == []
+
+
+async def test_me_message_bridges_like_a_plain_message(fake_redis, stub_conversations):
+    # A `/me …` post arrives with subtype me_message and its top-level text is the
+    # participant's own words: it bridges as a plain (non-threaded) message.
+    event = {
+        "type": "message",
+        "subtype": "me_message",
+        "channel": TEST_DEFAULT_RECIPIENT,
+        "text": "is on it",
+        "user": "U012345",
+        "ts": "1712345679.000200",
+    }
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "accepted"}
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "is on it"
+    assert call.client_address == TEST_DEFAULT_RECIPIENT
+    assert call.provider_message_id == "Ev001"
+    assert call.params is None
+
+
+async def test_thread_broadcast_in_allowlisted_channel_resolves_answer(fake_redis, channels):
+    # A thread reply also sent to the channel (subtype thread_broadcast) carries thread_ts:
+    # inside an allowlisted recipient with a pending question it resolves the answer.
+    _seed_correlation(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    event = _reply_event(subtype="thread_broadcast", channel=TEST_ALLOWED_RECIPIENT)
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "forwarded"}
+    (call,) = channels.inbound_calls
+    assert call.correlation_key == _THREAD_TS
+    assert call.answer == "yes, deploy it"
+
+
+async def test_thread_broadcast_without_pending_question_bridges(fake_redis, stub_conversations):
+    # A thread_broadcast whose thread has no pending question (never seeded) bridges like
+    # any uncorrelated message rather than being dropped.
+    event = _reply_event(subtype="thread_broadcast")
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "accepted"}
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "yes, deploy it"
+    assert call.client_address == TEST_DEFAULT_RECIPIENT
+
+
+@pytest.mark.parametrize(
+    ("mimetype", "kind"),
+    [
+        ("image/png", InboundMediaKind.IMAGE),
+        ("video/mp4", InboundMediaKind.VIDEO),
+        ("audio/mpeg", InboundMediaKind.AUDIO),
+        ("application/pdf", InboundMediaKind.DOCUMENT),
+        ("text/plain", InboundMediaKind.DOCUMENT),
+        ("model/gltf-binary", InboundMediaKind.FILE),
+        (None, InboundMediaKind.FILE),
+        ("", InboundMediaKind.FILE),
+    ],
+)
+def test_media_kind_maps_by_major_type(mimetype, kind):
+    assert _media_kind(mimetype) is kind
+
+
+def _file_share_event(files: list[Any], *, text: str | None = None, **overrides: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": "message",
+        "subtype": "file_share",
+        "channel": TEST_DEFAULT_RECIPIENT,
+        "user": "U012345",
+        "ts": "1712345679.000200",
+        "files": files,
+    }
+    if text is not None:
+        event["text"] = text
+    event.update(overrides)
+    return event
+
+
+async def test_file_share_single_file_bridges_turn_with_caption(fake_redis, stub_conversations):
+    event = _file_share_event(
+        [
+            {
+                "id": "F1",
+                "url_private": "https://files.slack.com/f1",
+                "name": "chart.png",
+                "mimetype": "image/png",
+                "size": 2048,
+            }
+        ],
+        text="look at this",
+    )
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "accepted"}
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "look at this"  # the caption rides the file's turn
+    assert call.provider_message_id == "Ev001-0"
+    assert call.params == {
+        "media_kind": "image",
+        "media_id": "https://files.slack.com/f1",
+        "media_mime_type": "image/png",
+        "media_filename": "chart.png",
+        "media_size": "2048",
+    }
+    assert stub_conversations.rejected_calls == []
+
+
+async def test_file_share_two_files_bridge_two_turns_with_per_item_ids(fake_redis, stub_conversations):
+    event = _file_share_event(
+        [
+            {"id": "F1", "url_private": "https://files.slack.com/f1", "name": "a.pdf", "mimetype": "application/pdf"},
+            {"id": "F2", "url_private": "https://files.slack.com/f2", "name": "b.mp4", "mimetype": "video/mp4"},
+        ],
+        text="two files",
+    )
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "accepted"}
+    first, second = stub_conversations.accept_calls
+    assert first.provider_message_id == "Ev001-0"
+    assert first.text == "two files"  # the caption rides the FIRST file only
+    assert first.params["media_kind"] == "document"
+    assert second.provider_message_id == "Ev001-1"
+    assert second.text == "[video]"  # every later file gets the placeholder
+    assert second.params["media_kind"] == "video"
+
+
+async def test_file_share_blank_text_uses_placeholder(fake_redis, stub_conversations):
+    event = _file_share_event(
+        [{"id": "F1", "url_private": "https://files.slack.com/f1", "name": "notes.pdf", "mimetype": "application/pdf"}],
+        text="   ",
+    )
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "accepted"}
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "[document: notes.pdf]"  # whitespace-only caption is not a caption
+
+
+async def test_file_share_unfetchable_file_notifies_rejected_and_acks(fake_redis, stub_conversations):
+    # A file with neither a fetchable url_private nor a name cannot be represented as a
+    # turn: with no caption to bridge, the shared rejection reply + event fires and the
+    # event is acked, no turn.
+    event = _file_share_event([{"id": "F1", "filetype": "binary"}])
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "ignored"}
+    assert stub_conversations.accept_calls == []
+    (rejected,) = stub_conversations.rejected_calls
+    assert rejected.channel_id == "slack"
+    assert rejected.recipient == TEST_DEFAULT_RECIPIENT
+    assert rejected.sender_identity == TEST_BOT_USER_ID
+    assert rejected.kind == "file"
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+
+
+async def test_file_share_all_unfetchable_with_caption_bridges_caption(fake_redis, stub_conversations):
+    # Every file is unfetchable (each gets its own rejection reply), but the message
+    # carried a caption: the caption bridges as a plain text turn under the message's own
+    # event_id, no media params — participant text is never silently dropped.
+    event = _file_share_event([{"id": "F1", "filetype": "binary"}], text="just a note")
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "accepted"}
+    (rejected,) = stub_conversations.rejected_calls
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "just a note"
+    assert call.provider_message_id == "Ev001"
+    assert call.params is None
+
+
+async def test_file_share_rejection_not_repeated_when_a_later_file_faults_and_slack_retries(
+    fake_redis, stub_conversations
+):
+    # files=[unfetchable, good image]: file 0 is rejected, then file 1's accept faults
+    # once, so the door frees the message dedupe and re-raises (Slack retries). On the
+    # retry the good file bridges cleanly and file 0's rejection reply — already
+    # delivered — is deduped on its own f"{event_id}-{index}" key, not sent again.
+    event = _file_share_event(
+        [
+            {"id": "F0", "filetype": "binary"},
+            {"id": "F1", "url_private": "https://files.slack.com/f1", "name": "chart.png", "mimetype": "image/png"},
+        ]
+    )
+
+    stub_conversations.accept_error = RuntimeError("transient bus fault")
+    with pytest.raises(RuntimeError, match="transient bus fault"):
+        await slack_inbound(_signed(_event_body(event=event)))
+    assert len(stub_conversations.rejected_calls) == 1  # file 0 rejected once
+    assert _DEDUPE_KEY not in fake_redis.store  # message claim freed for the retry
+
+    stub_conversations.accept_error = None
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "accepted"}
+    assert len(stub_conversations.rejected_calls) == 1  # still exactly one across both passes
+    # The good file is (idempotently) bridged on both passes; the rejection is not repeated.
+    assert [c.provider_message_id for c in stub_conversations.accept_calls] == ["Ev001-1", "Ev001-1"]

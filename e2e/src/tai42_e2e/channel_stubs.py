@@ -13,6 +13,7 @@ import itertools
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlencode
 
@@ -94,8 +95,47 @@ class FakeTelegram:
         headers = {"content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret}
         return SignedInbound(headers=headers, body=body)
 
+    def _inbound_update(
+        self, *, secret: str, chat_id: str, message: dict[str, Any], update_id: int | None = None
+    ) -> SignedInbound:
+        """A signed inbound update wrapping ``message`` (its own ``update_id``/``message_id``
+        minted unless ``update_id`` is pinned for a redelivery replay)."""
+        uid = update_id if update_id is not None else next(self._ids)
+        body = json.dumps(
+            {"update_id": uid, "message": {"message_id": next(self._ids), "chat": {"id": int(chat_id)}, **message}}
+        ).encode()
+        headers = {"content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret}
+        return SignedInbound(headers=headers, body=body)
+
+    def build_inbound_photo(
+        self, *, secret: str, chat_id: str, file_id: str, caption: str | None = None, file_size: int | None = None
+    ) -> SignedInbound:
+        """A genuine inbound PHOTO update (an uncorrelated bridge message, no reply_to): the
+        largest size carries ``file_id``/``file_size`` (Telegram sends sizes ascending, so the
+        door reads the last), with an optional ``caption``."""
+        largest: dict[str, Any] = {"file_id": file_id, "width": 1280, "height": 960}
+        if file_size is not None:
+            largest["file_size"] = file_size
+        message: dict[str, Any] = {"from": {"id": int(chat_id)}, "photo": [{"file_id": f"{file_id}-thumb"}, largest]}
+        if caption is not None:
+            message["caption"] = caption
+        return self._inbound_update(secret=secret, chat_id=chat_id, message=message)
+
+    def build_inbound_poll(self, *, secret: str, chat_id: str, update_id: int | None = None) -> SignedInbound:
+        """A genuine inbound POLL update — content Telegram recognises that the channel cannot
+        map to a turn, so the door replies with the generic refusal + event. ``update_id`` may be
+        pinned to replay the identical update (a vendor redelivery)."""
+        message = {"from": {"id": int(chat_id)}, "poll": {"id": "poll-1", "question": "?", "options": []}}
+        return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
+
     def _build_app(self) -> FastAPI:
         app = FastAPI()
+
+        @app.post("/bot{token}/sendChatAction")
+        async def send_chat_action(token: str, request: Request) -> JSONResponse:
+            # The plugin fires a "typing" action per inbound; record nothing, ack like the real API.
+            await request.json()
+            return JSONResponse({"ok": True, "result": True})
 
         @app.post("/bot{token}/sendMessage")
         async def send_message(token: str, request: Request) -> JSONResponse:
@@ -235,6 +275,42 @@ class FakeSlack:
         }
         return SignedInbound(headers=headers, body=body)
 
+    def build_inbound_files(
+        self,
+        *,
+        signing_secret: str,
+        channel: str,
+        files: list[dict[str, Any]],
+        event_id: str,
+        text: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine ``file_share`` Events API delivery: a message subtype carrying ``files``
+        (each a Slack file object — ``url_private``/``name``/``mimetype``/``size``), signed
+        X-Hub like ``build_inbound``. A file exposing neither ``url_private`` nor ``name`` is the
+        channel's unsupported case; every other file bridges one turn."""
+        event: dict[str, Any] = {
+            "type": "message",
+            "subtype": "file_share",
+            "channel": channel,
+            "ts": f"{next(self._ts)}.000200",
+            "files": files,
+        }
+        if text is not None:
+            event["text"] = text
+        value = {"type": "event_callback", "event_id": event_id, "event": event}
+        body = json.dumps(value).encode()
+        timestamp = str(int(time.time()))
+        key = signing_secret if valid else signing_secret + "-tampered"
+        base = b"v0:" + timestamp.encode("ascii") + b":" + body
+        digest = hmac.new(key.encode("utf-8"), base, hashlib.sha256).hexdigest()
+        headers = {
+            "content-type": "application/json",
+            "X-Slack-Request-Timestamp": timestamp,
+            "X-Slack-Signature": f"v0={digest}",
+        }
+        return SignedInbound(headers=headers, body=body)
+
     def _build_app(self) -> FastAPI:
         app = FastAPI()
 
@@ -275,6 +351,11 @@ class FakeTwilio:
         self.host = host
         self.port = allocate_port()
         self.messages: list[dict[str, Any]] = []
+        # An optional async hook awaited inside the send handler after a message is recorded and
+        # before its response returns. A test that must interleave with a send in flight (the
+        # receipt-race reproduction: hold one chunk in ``pending_delivery`` while the receipt for
+        # an earlier chunk is posted) sets it; the default ``None`` leaves the handler unchanged.
+        self.send_barrier: Callable[[], Awaitable[None]] | None = None
         self._server = ThreadedServer(self._build_app(), host, self.port)
 
     @property
@@ -291,6 +372,7 @@ class FakeTwilio:
 
     def reset(self) -> None:
         self.messages.clear()
+        self.send_barrier = None
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         return [record for record in self.messages if text in record["body"]]
@@ -321,6 +403,39 @@ class FakeTwilio:
             "X-Twilio-Signature": signature,
         }
         return SignedInbound(headers=headers, body=body)
+
+    def build_inbound_mms(
+        self,
+        *,
+        auth_token: str,
+        public_url: str,
+        twilio_number: str,
+        human_number: str,
+        media_url: str,
+        content_type: str,
+        body: str = "",
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine inbound MMS webhook carrying ONE media item: ``NumMedia=1`` plus
+        ``MediaUrl0``/``MediaContentType0``, with an optional ``Body`` caption. Signed like
+        ``build_inbound`` (base64 HMAC-SHA1 over ``public_url`` + concat of sorted form pairs)."""
+        pairs = [
+            ("To", twilio_number),
+            ("From", human_number),
+            ("Body", body),
+            ("NumMedia", "1"),
+            ("MediaUrl0", media_url),
+            ("MediaContentType0", content_type),
+            ("MessageSid", f"MM{uuid.uuid4().hex}"),
+        ]
+        raw = urlencode(pairs).encode("utf-8")
+        key = auth_token if valid else auth_token + "-tampered"
+        signed_payload = public_url + "".join(name + value for name, value in sorted(pairs))
+        signature = base64.b64encode(
+            hmac.new(key.encode("utf-8"), signed_payload.encode("utf-8"), hashlib.sha1).digest()
+        ).decode("ascii")
+        headers = {"content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature}
+        return SignedInbound(headers=headers, body=raw)
 
     def build_status(
         self, *, auth_token: str, public_url: str, message_sid: str, status: str, valid: bool = True
@@ -358,6 +473,8 @@ class FakeTwilio:
                     "sid": sid,
                 }
             )
+            if self.send_barrier is not None:
+                await self.send_barrier()
             return JSONResponse({"sid": sid, "status": "queued"}, status_code=201)
 
         _install_catch_all(app, "twilio")
@@ -462,6 +579,57 @@ class FakeWhatsApp:
         value = {
             "metadata": {"phone_number_id": phone_number_id},
             "messages": [{"id": message_id, "from": wa_id, "type": "text", "text": {"body": text}}],
+        }
+        return self._sign_batch(value, app_secret=app_secret, valid=valid)
+
+    def build_inbound_image(
+        self,
+        *,
+        app_secret: str,
+        phone_number_id: str,
+        wa_id: str,
+        media_id: str,
+        mime_type: str = "image/jpeg",
+        caption: str | None = None,
+        sha256: str | None = None,
+        wamid: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine inbound IMAGE message: the media object carries the Graph ``id``
+        (``media_id``), ``mime_type`` and an optional ``caption``/``sha256``. Signed
+        X-Hub-Signature-256 like ``build_inbound``; a pinned ``wamid`` lets a replay POST the
+        identical body (a vendor redelivery, deduped per ``wamid`` at the door)."""
+        message_id = wamid if wamid is not None else self._mint_wamid()
+        image: dict[str, Any] = {"id": media_id, "mime_type": mime_type}
+        if caption is not None:
+            image["caption"] = caption
+        if sha256 is not None:
+            image["sha256"] = sha256
+        value = {
+            "metadata": {"phone_number_id": phone_number_id},
+            "messages": [{"id": message_id, "from": wa_id, "type": "image", "image": image}],
+        }
+        return self._sign_batch(value, app_secret=app_secret, valid=valid)
+
+    def build_inbound_error(
+        self,
+        *,
+        app_secret: str,
+        phone_number_id: str,
+        wa_id: str,
+        code: int,
+        title: str,
+        wamid: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine inbound ERROR notice: a message carrying an ``errors`` array
+        ``[{"code", "title"}]`` and no type. ``code == 131051`` ("Unsupported message type") names
+        participant content the channel cannot receive → the generic refusal + event; other codes
+        stay operator-log-only. Signed like ``build_inbound``; a pinned ``wamid`` replays it."""
+        message_id = wamid if wamid is not None else self._mint_wamid()
+        value = {
+            "metadata": {"phone_number_id": phone_number_id},
+            "messages": [{"id": message_id, "from": wa_id, "errors": [{"code": code, "title": title}]}],
         }
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 

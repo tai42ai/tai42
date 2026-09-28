@@ -41,11 +41,11 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
-from tai42_contract.sandbox import SandboxError, SandboxSession
+from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError, SandboxSession
 
-# Read-only imports of the sibling-owned skills backend + mount point (Part D widens the
-# skills backend there; this module never edits it) — reused verbatim so the durable
-# composite routes skills exactly as the non-sandbox ``build_backend`` does.
+# Read-only imports of the sibling-owned skills backend + mount point (this module never
+# edits them) — reused verbatim so the durable composite routes skills exactly as the
+# non-sandbox ``build_backend`` does.
 from tai42_agents.langchain_deep_agent.backend import (
     SKILLS_ROOT,
     InlineSkillsBackend,
@@ -227,16 +227,19 @@ class SandboxSessionBackend(BaseSandbox):
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """Read each path from the project tree via ``session.get_file``.
 
-        A miss maps to ``FileDownloadResponse(error="file_not_found")`` for that path (the
-        normalized deepagents literal), so a partial batch still yields the files present.
+        A genuine miss maps to ``FileDownloadResponse(error="file_not_found")`` (the deepagents
+        literal), so a partial batch still yields the files present. Every other read failure
+        carries its real message, so a real IO/permission fault is never reported as absence.
         """
         responses: list[FileDownloadResponse] = []
         for path in paths:
             try:
                 content = await self._session.get_file(self._rooted(path))
                 responses.append(FileDownloadResponse(path=path, content=content, error=None))
-            except SandboxError:
+            except SandboxFileNotFoundError:
                 responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
+            except SandboxError as exc:
+                responses.append(FileDownloadResponse(path=path, content=None, error=str(exc)))
         return responses
 
 

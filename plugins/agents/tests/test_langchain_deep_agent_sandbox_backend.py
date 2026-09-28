@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from tai42_contract.sandbox import SandboxError, SandboxSession, SandboxSessionSpec
+from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError, SandboxSession, SandboxSessionSpec
 from tests._sandbox_fake import FakeSandbox, make_fake_sandbox
 
 from tai42_agents.langchain_deep_agent.sandbox_backend import SandboxSessionBackend
@@ -114,6 +114,23 @@ def test_download_miss_reports_file_not_found(sandbox: FakeSandbox) -> None:
     assert asyncio.run(run()) == "file_not_found"
 
 
+def test_download_real_read_error_preserves_message(sandbox: FakeSandbox) -> None:
+    real_error = "sandbox get_file failed for 'x': disk on fire"
+
+    async def run() -> str | None:
+        session = await _session(sandbox, "ws-realerr")
+
+        async def get_file(path: str) -> bytes:
+            raise SandboxError(real_error)
+
+        session.get_file = get_file  # type: ignore[method-assign]
+        backend = SandboxSessionBackend(session)
+        responses = await backend.adownload_files(["x"])
+        return responses[0].error
+
+    assert asyncio.run(run()) == real_error
+
+
 def test_sync_methods_raise_async_only(sandbox: FakeSandbox) -> None:
     async def build() -> SandboxSessionBackend:
         return SandboxSessionBackend(await _session(sandbox, "ws-sync"))
@@ -204,8 +221,10 @@ def _honor_absolute_paths(session: SandboxSession) -> SandboxSession:
         if os.path.isabs(path):
             try:
                 return Path(path).read_bytes()
+            except FileNotFoundError as exc:
+                raise SandboxFileNotFoundError(path) from exc
             except OSError as exc:
-                raise SandboxError(f"absolute get_file miss for {path!r}") from exc
+                raise SandboxError(f"absolute get_file failed for {path!r}: {exc}") from exc
         return await base_get(path)
 
     session.put_file = put_file  # type: ignore[method-assign]

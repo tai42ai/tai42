@@ -53,6 +53,16 @@ per signal; arq's install would replace that outright and take the server's
 teardown with it, which is what makes a recycle drain cleanly instead of
 severing in-flight jobs.
 
+## Schedule recovery
+
+On startup a watchdog restarts enabled schedules whose pending job was lost,
+never found, or completed without rescheduling. A schedule it cannot recover
+(its record throws every tick) is recorded as an operator-visible error state
+rather than only logged: its row from `backend_list_schedules` and
+`backend_get_schedule` carries `recovery_error` (the failure detail) and
+`recovery_failed_at` (an ISO-8601 timestamp). Both are null on a healthy
+schedule and are cleared on any later tick that finds the schedule healthy or restarts it.
+
 ## Quirks
 
 - `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
