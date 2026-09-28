@@ -4,9 +4,17 @@ The app is a FastMCP + Starlette ``custom_route`` server, so it emits no schema
 of its own. This module walks the shared route-enumeration primitive
 (:func:`tai42_skeleton.app.route_registry.load_api_routes`) and builds a valid
 OpenAPI 3.1 document: one operation per method, api-key ``security`` for authed
-routes, request bodies from ``request_model.model_json_schema()``, and responses
-that wrap the ``{"data": ...}`` success envelope and the ``{"error": ...}``
-failure envelope.
+routes, request bodies and query parameters described in pydantic's VALIDATION
+mode (what a client may SEND), responses described in pydantic's SERIALIZATION
+mode (what the server EMITS — a ``@computed_field`` and a field the server always
+writes are present and required), and responses that wrap the ``{"data": ...}``
+success envelope and the ``{"error": ...}`` failure envelope.
+
+The two modes are generated together in a single :func:`pydantic.json_schema.models_json_schema`
+pass over every ``(model, mode)`` pair the routes reference. A model that appears in
+both roles with schemas that differ between the modes is split into pydantic's
+``-Input`` / ``-Output`` components automatically, and each ``$ref`` resolves to the
+component for its role; a model used in one mode keeps its bare name.
 
 The two sources of a ``503`` are kept apart, because they answer with different
 bodies. A route's ``error_statuses`` are the statuses it answers with the plain
@@ -25,16 +33,29 @@ emission must never need one.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator, Mapping
 from importlib.metadata import version
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic.json_schema import JsonSchemaMode, models_json_schema
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes, method_to_action
 
 _SECURITY_SCHEME = "ApiKeyAuth"
 _API_KEY_HEADER = "x-api-key"
+
+# The literal prefix of every component ``$ref`` target the document carries.
+_REF_PREFIX = "#/components/schemas/"
+
+# The pydantic ``$ref`` target for every generated component schema.
+_REF_TEMPLATE = _REF_PREFIX + "{model}"
+
+# A request body or query parameter describes what a client may SEND; a response
+# describes what the server EMITS.
+_VALIDATION: JsonSchemaMode = "validation"
+_SERIALIZATION: JsonSchemaMode = "serialization"
 
 # Shared response-envelope component schemas.
 _ERROR_SCHEMA = "Error"
@@ -119,16 +140,70 @@ def _assign_component(components: dict[str, Any], name: str, schema: dict[str, A
     components[name] = schema
 
 
-def _register_model(model: type[BaseModel], components: dict[str, Any]) -> str:
-    """Merge ``model``'s JSON schema (and its ``$defs``) into ``components``.
+class _ComponentSchemas:
+    """The role-correct component ``$ref`` for a model, from one shared generation.
 
-    Returns the component name to ``$ref``.
+    Built by :func:`_component_schemas` from every ``(model, mode)`` pair the routes
+    reference through a single :func:`models_json_schema` call. ``ref`` returns
+    the ``{"$ref": ...}`` for a model in a given mode — pointing at its ``-Input`` /
+    ``-Output`` component when the two modes differ, or its bare name when they do not.
+    ``validation_schema`` returns a model's validation-mode definition, from which the
+    query-parameter builder reads properties and required flags.
     """
-    schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
-    for def_name, def_schema in schema.pop("$defs", {}).items():
-        _assign_component(components, def_name, def_schema)
-    _assign_component(components, model.__name__, schema)
-    return model.__name__
+
+    def __init__(
+        self,
+        refs: Mapping[tuple[Any, JsonSchemaMode], dict[str, Any]],
+        definitions: dict[str, dict[str, Any]],
+    ) -> None:
+        self._refs = dict(refs)
+        self._definitions = definitions
+
+    def ref(self, model: type[BaseModel], mode: JsonSchemaMode) -> dict[str, Any]:
+        return dict(self._refs[(model, mode)])
+
+    def validation_schema(self, model: type[BaseModel]) -> dict[str, Any]:
+        name = self._refs[(model, _VALIDATION)]["$ref"].rsplit("/", 1)[-1]
+        return self._definitions[name]
+
+
+def _route_model_modes(
+    metas: Iterable[RouteMetadata],
+) -> set[tuple[type[BaseModel], JsonSchemaMode]]:
+    """Every ``(model, mode)`` pair the routes reference.
+
+    A request body and a query model describe what a client SENDS, so they are collected
+    in VALIDATION mode; a response model describes what the server EMITS, so it is
+    collected in SERIALIZATION mode.
+    """
+    pairs: set[tuple[type[BaseModel], JsonSchemaMode]] = set()
+    for meta in metas:
+        if meta.response_model is not None:
+            pairs.add((meta.response_model, _SERIALIZATION))
+        if meta.request_model is not None:
+            pairs.add((meta.request_model, _VALIDATION))
+        if meta.query_model is not None:
+            pairs.add((meta.query_model, _VALIDATION))
+    return pairs
+
+
+def _component_schemas(
+    pairs: Iterable[tuple[type[BaseModel], JsonSchemaMode]], components: dict[str, Any]
+) -> _ComponentSchemas:
+    """Generate the given ``(model, mode)`` component schemas in one pass and merge them.
+
+    The pairs are sorted by ``(qualname, mode)`` for byte-stable output, then produced
+    through a single :func:`models_json_schema` call so a model used in both modes gets
+    pydantic's ``-Input`` / ``-Output`` split and every ``$ref`` resolves. Each definition is
+    merged into ``components`` through :func:`_assign_component`, so a model that claims a
+    reserved envelope name still raises LOUDLY.
+    """
+    ordered = sorted(set(pairs), key=lambda pair: (pair[0].__qualname__, pair[1]))
+    mapping, definitions = models_json_schema(ordered, ref_template=_REF_TEMPLATE)
+    defs = definitions.get("$defs", {})
+    for name, schema in defs.items():
+        _assign_component(components, name, schema)
+    return _ComponentSchemas(mapping, defs)
 
 
 _NULL_BRANCH = {"type": "null"}
@@ -157,7 +232,7 @@ def _query_schema(prop_schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def _query_parameters(model: type[BaseModel], components: dict[str, Any]) -> list[dict[str, Any]]:
+def _query_parameters(model: type[BaseModel], schemas: _ComponentSchemas) -> list[dict[str, Any]]:
     """A model's fields as ``in: query`` parameters — a read method's ``request_model``, or any ``query_model``.
 
     A model whose fields are query inputs (a GET reading its inputs from the query string,
@@ -168,12 +243,11 @@ def _query_parameters(model: type[BaseModel], components: dict[str, Any]) -> lis
     ``required`` exactly when the model marks it required (a field with a default is
     optional). The field's description rides on the PARAMETER, not on its schema: it is the
     Parameter Object's own ``description`` that a generator renders, so it is moved there
-    rather than left where only a schema-aware reader would find it. Any ``$defs`` a field
-    schema references are merged into ``components`` so the ``$ref``s resolve.
+    rather than left where only a schema-aware reader would find it. The model's
+    validation-mode schema is read from the shared definitions, so any ``$defs`` a field
+    schema references are already merged into ``components`` and the ``$ref``s resolve.
     """
-    schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
-    for def_name, def_schema in schema.pop("$defs", {}).items():
-        _assign_component(components, def_name, def_schema)
+    schema = schemas.validation_schema(model)
     required = set(schema.get("required", []))
     parameters: list[dict[str, Any]] = []
     for name, prop_schema in schema.get("properties", {}).items():
@@ -207,11 +281,11 @@ def _check_unique_parameters(parameters: list[dict[str, Any]], *, path: str, met
         seen.add(key)
 
 
-def _json_envelope_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[str, Any]:
+def _json_envelope_schema(meta: RouteMetadata, schemas: _ComponentSchemas) -> dict[str, Any]:
     if meta.response_model is None:
         data_schema: dict[str, Any] = {}
     else:
-        data_schema = {"$ref": f"#/components/schemas/{_register_model(meta.response_model, components)}"}
+        data_schema = schemas.ref(meta.response_model, _SERIALIZATION)
     return {
         "type": "object",
         "properties": {"data": data_schema},
@@ -219,7 +293,7 @@ def _json_envelope_schema(meta: RouteMetadata, components: dict[str, Any]) -> di
     }
 
 
-def _json_body_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[str, Any]:
+def _json_body_schema(meta: RouteMetadata, schemas: _ComponentSchemas) -> dict[str, Any]:
     """The ``application/json`` success body schema.
 
     An enveloped route (the default) wraps its model in ``{"data": <model>}``. A route
@@ -229,13 +303,13 @@ def _json_body_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[s
     here is a broken registration, raised LOUDLY rather than emitting an empty body.
     """
     if meta.enveloped:
-        return _json_envelope_schema(meta, components)
+        return _json_envelope_schema(meta, schemas)
     if meta.response_model is None:
         raise ValueError(f"route {meta.path} declares enveloped=False without a response_model")
-    return {"$ref": f"#/components/schemas/{_register_model(meta.response_model, components)}"}
+    return schemas.ref(meta.response_model, _SERIALIZATION)
 
 
-def _success_response(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
+def _success_response(meta: RouteMetadata, method: str, schemas: _ComponentSchemas) -> dict[str, Any]:
     """The 200/2xx response for ``method``, documenting every content type it serves.
 
     ``application/json`` carries the ``{"data": ...}`` envelope by default, or the
@@ -254,7 +328,7 @@ def _success_response(meta: RouteMetadata, method: str, components: dict[str, An
     content: dict[str, Any] = {}
     for media_type in media_types:
         if media_type == "application/json":
-            content[media_type] = {"schema": _json_body_schema(meta, components)}
+            content[media_type] = {"schema": _json_body_schema(meta, schemas)}
         else:
             content[media_type] = {"schema": {"type": "string"}}
     no_body_reason = meta.response_model is None and meta.no_body_reason
@@ -309,16 +383,16 @@ def _reload_gate_response(*, also_unavailable: bool) -> dict[str, Any]:
     }
 
 
-def _operation_responses(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
+def _operation_responses(meta: RouteMetadata, method: str, schemas: _ComponentSchemas) -> dict[str, Any]:
     """The operation's ``responses`` map.
 
     Covers the success status, any additional success statuses, the plain-envelope error statuses,
     and — merged into the ``503`` slot, OVERWRITING a declared 503 so one slot admits both bodies —
     the reload gate's response when the route is ``reload_gated``.
     """
-    responses: dict[str, Any] = {str(meta.success_status): _success_response(meta, method, components)}
+    responses: dict[str, Any] = {str(meta.success_status): _success_response(meta, method, schemas)}
     for status in meta.additional_success_statuses:
-        responses[str(status)] = _success_response(meta, method, components)
+        responses[str(status)] = _success_response(meta, method, schemas)
     for status in meta.error_statuses:
         responses[str(status)] = _error_response(status)
     if meta.reload_gated:
@@ -326,7 +400,7 @@ def _operation_responses(meta: RouteMetadata, method: str, components: dict[str,
     return responses
 
 
-def _operation_parameters(meta: RouteMetadata, method: str, components: dict[str, Any]) -> list[dict[str, Any]]:
+def _operation_parameters(meta: RouteMetadata, method: str, schemas: _ComponentSchemas) -> list[dict[str, Any]]:
     """The operation's parameters.
 
     Path params, then a read method's ``request_model`` fields as ``in: query`` (a GET reads its
@@ -335,35 +409,35 @@ def _operation_parameters(meta: RouteMetadata, method: str, components: dict[str
     """
     parameters = _path_parameters(meta.path)
     if meta.request_model is not None and method_to_action(method) == "read":
-        parameters = parameters + _query_parameters(meta.request_model, components)
+        parameters = parameters + _query_parameters(meta.request_model, schemas)
     if meta.query_model is not None:
-        parameters = parameters + _query_parameters(meta.query_model, components)
+        parameters = parameters + _query_parameters(meta.query_model, schemas)
     if parameters:
         _check_unique_parameters(parameters, path=meta.path, method=method)
     return parameters
 
 
-def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> dict[str, Any]:
+def _operation(meta: RouteMetadata, method: str, schemas: _ComponentSchemas) -> dict[str, Any]:
     operation: dict[str, Any] = {
         "operationId": _operation_id(method, meta.path),
         "summary": meta.summary,
         "tags": list(meta.tags),
-        "responses": _operation_responses(meta, method, components),
+        "responses": _operation_responses(meta, method, schemas),
     }
     if meta.description:
         operation["description"] = meta.description
 
-    parameters = _operation_parameters(meta, method, components)
+    parameters = _operation_parameters(meta, method, schemas)
     if parameters:
         operation["parameters"] = parameters
 
     # A body-reading (write) method takes a JSON ``requestBody`` from its
-    # ``request_model``; a read method documents the model as query params instead.
+    # ``request_model`` in validation mode; a read method documents the model as query
+    # params instead.
     if meta.request_model is not None and method_to_action(method) == "write":
-        ref = _register_model(meta.request_model, components)
         operation["requestBody"] = {
             "required": True,
-            "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{ref}"}}},
+            "content": {"application/json": {"schema": schemas.ref(meta.request_model, _VALIDATION)}},
         }
 
     if meta.authed:
@@ -375,6 +449,60 @@ def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> 
         operation["x-destructive"] = True
 
     return operation
+
+
+def _ref_targets(node: Any) -> Iterator[str]:
+    """Every component name a ``#/components/schemas/<name>`` reference inside ``node`` points at.
+
+    Walks nested mappings and lists, yielding the bare name after the prefix. Two forms carry
+    such a reference in OpenAPI 3.1: a ``$ref`` string, and each value of a
+    ``discriminator.mapping`` object (a mapping value may also be a bare schema name, which
+    is not a ``#/components/schemas/`` reference and is skipped). A reference to anything else
+    (a header, an external target) is skipped.
+    """
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and value.startswith(_REF_PREFIX):
+                yield value[len(_REF_PREFIX) :]
+            elif key == "discriminator" and isinstance(value, Mapping):
+                mapping = value.get("mapping")
+                if isinstance(mapping, Mapping):
+                    for target in mapping.values():
+                        if isinstance(target, str) and target.startswith(_REF_PREFIX):
+                            yield target[len(_REF_PREFIX) :]
+                yield from _ref_targets(value)
+            else:
+                yield from _ref_targets(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _ref_targets(item)
+
+
+def _referenced_components(paths: Mapping[str, Any], components: Mapping[str, Any]) -> set[str]:
+    """The component names the document actually uses.
+
+    Seeds from every ``$ref`` in ``paths`` plus the reserved response-envelope names the
+    emitter builds and references itself, then follows ``$ref``s transitively through the
+    definitions in ``components`` so a nested schema a kept schema references stays too. The
+    walk drains its frontier in sorted order for a deterministic traversal; the result is a
+    set, so it is order-independent regardless.
+
+    A query model is inlined as parameters by :func:`_query_parameters` and its own top-level
+    schema is never ``$ref``'d, so it falls out of this set — unless something else references
+    it, in which case it legitimately stays.
+    """
+    reachable: set[str] = set()
+    frontier = sorted(set(_ref_targets(paths)) | _RESERVED_SCHEMA_NAMES)
+    while frontier:
+        name = frontier.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        schema = components.get(name)
+        if schema is None:
+            continue
+        frontier.extend(sorted(target for target in _ref_targets(schema) if target not in reachable))
+    return reachable
 
 
 def build_openapi_spec() -> dict[str, Any]:
@@ -413,11 +541,23 @@ def build_openapi_spec() -> dict[str, Any]:
         },
     }
 
+    metas = list(load_api_routes())
+    schemas = _component_schemas(_route_model_modes(metas), components)
+
     paths: dict[str, dict[str, Any]] = {}
-    for meta in load_api_routes():
+    for meta in metas:
         oapath = paths.setdefault(_openapi_path(meta.path), {})
         for method in meta.methods:
-            oapath[method.lower()] = _operation(meta, method, components)
+            oapath[method.lower()] = _operation(meta, method, schemas)
+
+    # Publish only the components the document references. Every ``(model, mode)`` pair was
+    # generated so ``schemas`` can resolve a query model's validation schema for
+    # :func:`_query_parameters`, but a query model is inlined as parameters and never
+    # ``$ref``'d, so its own top-level definition must not leak into the spec. Prune to the
+    # set reachable from ``paths`` (plus the reserved envelopes); the resolver keeps every
+    # definition internally, untouched.
+    reachable = _referenced_components(paths, components)
+    published = {name: schema for name, schema in components.items() if name in reachable}
 
     return {
         "openapi": "3.1.0",
@@ -428,7 +568,7 @@ def build_openapi_spec() -> dict[str, Any]:
         },
         "paths": paths,
         "components": {
-            "schemas": components,
+            "schemas": published,
             "securitySchemes": {_SECURITY_SCHEME: {"type": "apiKey", "in": "header", "name": _API_KEY_HEADER}},
         },
     }

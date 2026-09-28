@@ -18,10 +18,34 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
+from pydantic.json_schema import JsonSchemaMode
 
 import tai42_skeleton.cli.mcp_app as mcp_app
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes
-from tai42_skeleton.cli.openapi import _openapi_path, build_openapi_spec
+from tai42_skeleton.cli.openapi import (
+    _component_schemas,
+    _ComponentSchemas,
+    _openapi_path,
+    _route_model_modes,
+    build_openapi_spec,
+)
+
+
+def schemas_for_pairs(
+    pairs: list[tuple[type[BaseModel], JsonSchemaMode]], components: dict | None = None
+) -> tuple[_ComponentSchemas, dict]:
+    """Build the emitter's schema resolver from explicit ``(model, mode)`` pairs and
+    populate a components dict, for the per-operation builder unit tests. Returns
+    ``(schemas, components)``."""
+    components = {} if components is None else components
+    return _component_schemas(pairs, components), components
+
+
+def schemas_for(metas: list[RouteMetadata], components: dict | None = None) -> tuple[_ComponentSchemas, dict]:
+    """Build the resolver over the ``(model, mode)`` pairs the given routes reference and
+    populate a components dict. Returns ``(schemas, components)``."""
+    return schemas_for_pairs(sorted(_route_model_modes(metas), key=lambda p: (p[0].__qualname__, p[1])), components)
 
 
 @pytest.fixture(autouse=True)
