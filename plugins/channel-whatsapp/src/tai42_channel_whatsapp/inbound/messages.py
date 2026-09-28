@@ -30,9 +30,9 @@ from tai42_channel_whatsapp.inbound.rich_content import (
 logger = logging.getLogger(__name__)
 
 # Inbound media message types whose object lives under ``message[type]`` (image/document/
-# audio/video/sticker). Each bridges as a turn (caption → text, identity → ``media_*`` params);
-# see the INBOUND MEDIA design note in ``rich_content`` for why no typed ``attachments`` entry
-# is minted.
+# audio/video/sticker). Each fetches the bytes, ingests them through the served-media chokepoint,
+# and bridges a turn carrying the typed ``attachments`` entry + parity ``media_*`` params; see the
+# INBOUND MEDIA note in ``rich_content``.
 _MEDIA_TYPES = frozenset({"image", "document", "audio", "video", "sticker"})
 
 # Vendor message types that are NOT participant content and stay operator-log-only (no reply):

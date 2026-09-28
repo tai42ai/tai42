@@ -34,11 +34,20 @@ from tai42_contract.conversations import (
     BlankInboundTextError,
     DeliveryReceipt,
     InboundMediaKind,
+    InboundRejectionReason,
     build_inbound_media_params,
     inbound_media_placeholder,
 )
+from tai42_contract.interactions import (
+    MediaOrigin,
+    MediaSourceReadError,
+    MediaStoreUnavailableError,
+    MediaTooLargeError,
+    MediaTypeNotAllowedError,
+)
+from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
-from tai42_kit.settings import require_secret
+from tai42_kit.settings import require, require_secret
 
 from tai42_channel_twilio.correlation import (
     already_seen,
@@ -243,13 +252,16 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = To, ``client_address`` = From (verbatim). A text-only message
-    bridges one turn under the bare ``MessageSid``; an MMS bridges ONE turn per media
-    item (``provider_message_id=f"{sid}-{N}"``) carrying the opaque ``media_*`` params —
-    the ``Body`` caption rides the first item, a caption-less item a ``[kind]``
-    placeholder so the turn is never blank. A message with no route bound, or with no
-    body and no media, is logged and success-acked (the provider must not retry-storm a
-    permanently-unrouted or empty message); a retryable overflow or infrastructure
-    failure propagates as a 5xx so Twilio redelivers rather than silently dropping it.
+    bridges one turn under the bare ``MessageSid``; an MMS fetches and ingests each
+    media item, bridging ONE served turn per item (``provider_message_id=f"{sid}-{N}"``)
+    with the typed attachment and the parity ``media_*`` params — the ``Body`` caption
+    rides the first item, a caption-less item a sanitised ``[kind]`` placeholder so the
+    turn is never blank. A permanent media failure notifies the participant once and acks;
+    a transient fetch/read fault propagates so Twilio redelivers. A message with no route
+    bound, or with no body and no media, is logged and success-acked (the provider must
+    not retry-storm a permanently-unrouted or empty message); a retryable overflow or
+    infrastructure failure propagates as a 5xx so Twilio redelivers rather than silently
+    dropping it.
     """
     try:
         await _accept_inbound(form, message_sid)
@@ -262,10 +274,13 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
 
 
 async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
-    """Accept the inbound as one text turn, or one turn per MMS media item.
+    """Accept the inbound as one text turn, or one served turn per MMS media item.
 
     The provider attests the From number, so it is both the conversation identity and
-    the party the turn cap holds accountable.
+    the party the turn cap holds accountable. Each MMS media item is fetched from Twilio
+    and ingested into the platform's served store; a transient fetch/read fault RAISES so
+    Twilio redelivers (the ``MessageSid`` stays unmarked), a permanent one notifies the
+    participant once and acks.
     """
     our_identity = form.get("To", "")
     client_address = form.get("From", "")
@@ -281,21 +296,175 @@ async def _accept_inbound(form: dict[str, str], message_sid: str) -> None:
         )
         return
 
+    settings = twilio_settings()
+    account_sid = require(settings.account_sid, "Twilio channel", "CHANNEL_TWILIO_ACCOUNT_SID")
+    auth_token = require_secret(settings.auth_token, "Twilio channel", "CHANNEL_TWILIO_AUTH_TOKEN")
     body = form.get("Body", "")
     has_caption = bool(body.strip())
     for index in range(media_count):
-        media_url = form.get(f"MediaUrl{index}", "")
-        content_type = form.get(f"MediaContentType{index}", "")
-        kind = _media_kind(content_type)
-        text = body if index == 0 and has_caption else inbound_media_placeholder(kind)
+        caption = body if index == 0 and has_caption else None
+        await _accept_media_item(
+            form=form,
+            message_sid=message_sid,
+            index=index,
+            our_identity=our_identity,
+            client_address=client_address,
+            account_sid=account_sid,
+            auth_token=auth_token,
+            caption=caption,
+        )
+
+
+# The kit fetch faults and the contract ingest faults one inbound media fetch can raise; every
+# other exception propagates (a bare or unexpected ingest failure must surface loudly).
+_MEDIA_FAILURES = (
+    MediaFetchError,
+    UrlGuardError,
+    MediaTooLargeError,
+    MediaTypeNotAllowedError,
+    MediaStoreUnavailableError,
+    MediaSourceReadError,
+)
+
+
+def _media_rejection_reason(exc: Exception) -> InboundRejectionReason | None:
+    """The rejection reason for a PERMANENT media failure, or ``None`` when the failure is TRANSIENT.
+
+    ``None`` means the caller must re-raise (redeliver): a transport fault, a 5xx, a 408 or a 429 at
+    fetch (``MediaFetchError.transient``) and a torn body read (``MediaSourceReadError``). Every other
+    caught failure is permanent: over-cap → ``TOO_LARGE``, disallowed type → ``UNSUPPORTED_TYPE``,
+    a gone media / SSRF-blocked url / absent store → ``COULD_NOT_RECEIVE``.
+    """
+    if isinstance(exc, MediaFetchError):
+        return None if exc.transient else InboundRejectionReason.COULD_NOT_RECEIVE
+    if isinstance(exc, MediaSourceReadError):
+        return None
+    if isinstance(exc, MediaTooLargeError):
+        return InboundRejectionReason.TOO_LARGE
+    if isinstance(exc, MediaTypeNotAllowedError):
+        return InboundRejectionReason.UNSUPPORTED_TYPE
+    return InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def _accept_media_item(
+    *,
+    form: dict[str, str],
+    message_sid: str,
+    index: int,
+    our_identity: str,
+    client_address: str,
+    account_sid: str,
+    auth_token: str,
+    caption: str | None,
+) -> None:
+    """Fetch one MMS media item from Twilio, ingest it, and bridge one served turn.
+
+    ``MediaUrl{index}`` 307s to a foreign CDN; the fetch carries HTTP Basic auth on the
+    first hop only — the kit drops it on the cross-origin redirect, and the vendor URL is
+    pre-signed. A transient fetch/read fault propagates (Twilio redelivers, the
+    ``MessageSid`` stays unmarked); a permanent one (a gone media, an over-cap or
+    disallowed body, no store) notifies the participant once and, when a caption rides this
+    item, still bridges the caption as a text turn so it is never lost.
+    """
+    media_url = form[f"MediaUrl{index}"]
+    content_type = form[f"MediaContentType{index}"]
+    kind = _media_kind(content_type)
+    provider_message_id = f"{message_sid}-{index}"
+    try:
+        async with open_media_stream(media_url, auth=(account_sid, auth_token), follow_redirects=True) as stream:
+            ingested = await tai42_app.media.ingest_media(
+                source=stream.chunks,
+                kind_hint=kind,
+                declared_mime=content_type,
+                filename=None,
+                declared_size=stream.content_length,
+                integrity_sha256=None,
+                origin=MediaOrigin(
+                    channel_id="twilio",
+                    participant_identity=client_address,
+                    message_id=provider_message_id,
+                ),
+            )
+    except _MEDIA_FAILURES as exc:
+        reason = _media_rejection_reason(exc)
+        if reason is None:
+            # Transient (a 5xx/timeout at fetch, a torn body read): propagate so Twilio
+            # redelivers — the ``MessageSid`` stays unmarked, so the redelivery is re-processed
+            # rather than deduped away.
+            raise
+        await _reject_media_item(
+            our_identity=our_identity,
+            client_address=client_address,
+            kind=kind,
+            reason=reason,
+            caption=caption,
+            declared_mime=content_type,
+            message_sid=message_sid,
+            index=index,
+        )
+        return
+
+    text = caption if caption is not None else inbound_media_placeholder(kind, filename=ingested.item.filename)
+    await tai42_app.conversations.accept(
+        channel="twilio",
+        our_identity=our_identity,
+        client_address=client_address,
+        cap_key=client_address,
+        text=text,
+        provider_message_id=provider_message_id,
+        attachments=[ingested.item],
+        params=build_inbound_media_params(
+            kind=kind,
+            media_id=ingested.media_id,
+            mime_type=ingested.mime,
+            sha256=ingested.sha256,
+            filename=ingested.item.filename,
+            size=ingested.size,
+        ),
+    )
+
+
+async def _reject_media_item(
+    *,
+    our_identity: str,
+    client_address: str,
+    kind: InboundMediaKind,
+    reason: InboundRejectionReason,
+    caption: str | None,
+    declared_mime: str,
+    message_sid: str,
+    index: int,
+) -> None:
+    """Notify the participant once that one media could not be received, then keep any caption.
+
+    The notice is guarded by a per-item seen marker (``f"{message_sid}:media:{index}:rejected"`` —
+    which cannot collide with a bare ``MessageSid``, as Twilio sids carry no colon): the notice
+    fires and the marker is set ONLY after the send succeeds, so a redelivery driven by a SIBLING
+    item's transient fault never repeats a rejection already delivered. A failed send leaves the
+    marker unset and raises into the door's guard, so the retry re-sends. When the item carried the
+    message ``Body`` as a caption, that text is still bridged as a turn (with the kind/mime parity
+    params but no served reference — the media does not exist); that turn is idempotent under its
+    ``provider_message_id``.
+    """
+    item_key = f"{message_sid}:media:{index}:rejected"
+    if not await already_seen(item_key):
+        await tai42_app.conversations.notify_inbound_rejected(
+            channel_id="twilio",
+            recipient=client_address,
+            sender_identity=our_identity,
+            kind=kind.value,
+            reason=reason,
+        )
+        await mark_seen(item_key)
+    if caption is not None:
         await tai42_app.conversations.accept(
             channel="twilio",
             our_identity=our_identity,
             client_address=client_address,
             cap_key=client_address,
-            text=text,
+            text=caption,
             provider_message_id=f"{message_sid}-{index}",
-            params=build_inbound_media_params(kind=kind, media_id=media_url, mime_type=content_type),
+            params=build_inbound_media_params(kind=kind, mime_type=declared_mime),
         )
 
 

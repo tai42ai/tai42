@@ -30,9 +30,14 @@ ALLOWED_THIRD_PARTY = frozenset(
         "_openssl",
         "annotated_types",
         "anyio",
+        # certifi/h11/httpcore/sniffio are the httpx backend closure the inbound media
+        # fetch (``open_media_stream``) pulls in eagerly at import.
+        "certifi",
         "click",
         "cryptography",
         "dotenv",
+        "h11",
+        "httpcore",
         "httpx",
         "idna",
         # redis<6 imports PyJWT eagerly at import time.
@@ -45,6 +50,7 @@ ALLOWED_THIRD_PARTY = frozenset(
         "python_multipart",
         "redis",
         "rich",
+        "sniffio",
         "starlette",
         "typing_extensions",
         "typing_inspection",

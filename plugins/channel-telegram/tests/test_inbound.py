@@ -5,15 +5,28 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from pydantic import SecretStr
-from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
+from tai42_contract.channels import AnswerForwardError, ChannelDeliveryError, InboundAnswerOutcome
 from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
+from tai42_contract.interactions import (
+    IngestedMedia,
+    MediaItem,
+    MediaKind,
+    MediaSourceReadError,
+    MediaStoreUnavailableError,
+    MediaTooLargeError,
+    MediaTypeNotAllowedError,
+)
+from tai42_kit.net import MediaFetchError, UrlGuardError
 from tai42_kit.settings import reset_all_settings
 
+import tai42_channel_telegram.inbound_media as inbound_media_module
 from tai42_channel_telegram.inbound import inbound
 from tai42_channel_telegram.settings import TelegramSettings
 
@@ -361,7 +374,7 @@ async def test_bridge_client_address_is_numeric_chat_id_even_with_username(http_
 
 async def test_bridge_cap_key_is_the_attested_chat_id(http_recorder, fake_redis, conversations):
     # A provider channel attests the address, so the accountable turn-cap key it passes
-    # is that same attested chat id — no behavior change from keying on the address.
+    # is that same attested chat id — the cap key equals the client address.
     response = await inbound(make_inbound_request(_text_update(chat_id=555), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert len(conversations.accept_calls) == 1
@@ -745,18 +758,91 @@ def _media_update(
     chat_id: int = 777,
     update_id: int = 7,
     caption: str | None = None,
+    reply_to_message_id: int | None = None,
     **members: Any,
 ) -> dict[str, Any]:
-    """A plain (non-reply) message carrying one media member — a bridge message, not an answer."""
+    """A message carrying one media member; a ``reply_to_message_id`` makes it a ForceReply reply."""
     message: dict[str, Any] = {"message_id": 1001, "chat": {"id": chat_id}, **members}
     if caption is not None:
         message["caption"] = caption
+    if reply_to_message_id is not None:
+        message["reply_to_message"] = {"message_id": reply_to_message_id}
     return {"update_id": update_id, "message": message}
 
 
-async def test_captioned_photo_bridges_with_caption_and_image_params(http_recorder, fake_redis, conversations):
-    # A captioned photo bridges one turn: the caption is the turn text, the largest photo
-    # size feeds media_id/media_size, and media_kind is the generic image.
+# A well-formed served-media id: 43 urlsafe-base64 chars, matching the contract's route id.
+_SERVED_ID = "A" * 43
+# The bot token the test env injects (conftest ``channel_env``) — asserted absent from faults.
+_BOT_TOKEN = "123456:test-token"
+
+
+def _ingested(
+    kind: MediaKind,
+    *,
+    media_id: str = _SERVED_ID,
+    size: int = 900,
+    sha256: str = "sha-hex",
+    mime: str = "image/png",
+    filename: str | None = None,
+) -> IngestedMedia:
+    """A served :class:`IngestedMedia` the media-seam stub returns for the happy path."""
+    item = MediaItem(kind=kind, url=f"/api/interactions/media/{media_id}", filename=filename)
+    return IngestedMedia(item=item, media_id=media_id, size=size, sha256=sha256, mime=mime)
+
+
+def _fake_open_stream(
+    *,
+    chunks: tuple[bytes, ...] = (b"bytes",),
+    content_type: str | None = None,
+    content_length: int | None = None,
+    raise_at_open: BaseException | None = None,
+):
+    """A stand-in for the kit's ``open_media_stream`` async context manager.
+
+    Yields a ``MediaStream``-shaped object (``content_type``/``content_length``/``host``/
+    ``chunks``); ``raise_at_open`` makes entering the context raise (a fetch-open fault)."""
+
+    @asynccontextmanager
+    async def _open(url: str, *, headers: Any = None, auth: Any = None, follow_redirects: bool = False):
+        if raise_at_open is not None:
+            raise raise_at_open
+
+        async def _chunks():
+            for chunk in chunks:
+                yield chunk
+
+        yield SimpleNamespace(
+            content_type=content_type, content_length=content_length, host="file.telegram.test", chunks=_chunks()
+        )
+
+    return _open
+
+
+def _getfile_responder(*, file_path: str = "photos/file_1.jpg", status: int = 200, ok: bool = True):
+    """An http_recorder responder: ``getFile`` answers per ``status``/``ok``/``file_path``; every
+    other call (the typing ``sendChatAction``) gets a generic ok:true result."""
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/getFile"):
+            if status != 200:
+                return httpx.Response(status, json={"ok": False, "error_code": status, "description": "nope"})
+            if not ok:
+                return httpx.Response(200, json={"ok": False, "error_code": 400, "description": "nope"})
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": file_path}})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42, "chat": {"id": 777}}})
+
+    return responder
+
+
+async def test_captioned_photo_fetches_ingests_and_bridges_served_attachment(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A captioned photo: getFile -> stream -> ingest_media -> a served attachment. The caption is
+    # the turn text, media_id is the SERVED id (never the raw file_id), media_size is the actual
+    # bytes read, and the typed MediaItem rides ``attachments``.
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE, size=900, mime="image/png")
     update = _media_update(
         photo=[{"file_id": "small", "file_size": 100}, {"file_id": "big", "file_size": 900}],
         caption="look at this",
@@ -768,13 +854,28 @@ async def test_captioned_photo_bridges_with_caption_and_image_params(http_record
     call = conversations.accept_calls[0]
     assert call.text == "look at this"
     assert call.params["media_kind"] == "image"
-    assert call.params["media_id"] == "big"
+    assert call.params["media_id"] == _SERVED_ID
+    assert call.params["media_sha256"] == media.ingest_result.sha256  # the seam's digest of the served bytes
     assert call.params["media_size"] == "900"
+    assert call.attachments == [media.ingest_result.item]
+    # The largest photo size's file_id was the one fetched; the vendor gives photos no mime, so the
+    # seam's declared_mime falls back to the stream's content type.
+    ingest = media.ingest_calls[0]
+    assert ingest.declared_mime == "image/png"
+    assert ingest.kind_hint == "image"
+    assert ingest.origin.channel_id == "telegram"
+    assert ingest.origin.participant_identity == "777"
+    assert ingest.origin.message_id == "7"
 
 
-async def test_captionless_document_bridges_with_filename_placeholder(http_recorder, fake_redis, conversations):
-    # A caption-less document bridges with the "[document: <name>]" placeholder as the non-blank
-    # turn text and the filename/mime carried as opaque media params.
+async def test_captionless_document_bridges_served_attachment_and_sanitised_placeholder(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A caption-less document: the "[document: <name>]" placeholder is the non-blank turn text and
+    # the served id/mime/filename ride the parity params; media_id is the SERVED id.
+    http_recorder.responder = _getfile_responder(file_path="documents/file_1.pdf")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_result = _ingested(MediaKind.DOCUMENT, mime="application/pdf", filename="report.pdf")
     update = _media_update(
         document={"file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": 2048},
     )
@@ -784,15 +885,26 @@ async def test_captionless_document_bridges_with_filename_placeholder(http_recor
     call = conversations.accept_calls[0]
     assert call.text == "[document: report.pdf]"
     assert call.params["media_kind"] == "document"
-    assert call.params["media_id"] == "doc1"
+    assert call.params["media_id"] == _SERVED_ID
+    assert call.params["media_sha256"] == media.ingest_result.sha256  # the seam's digest of the served bytes
     assert call.params["media_filename"] == "report.pdf"
     assert call.params["media_mime_type"] == "application/pdf"
+    assert call.attachments == [media.ingest_result.item]
+    # The seam is handed the vendor-declared mime and the RAW filename to sanitise.
+    assert media.ingest_calls[0].declared_mime == "application/pdf"
+    assert media.ingest_calls[0].filename == "report.pdf"
+    assert media.ingest_calls[0].declared_size == 2048
 
 
-async def test_animation_with_document_member_bridges_as_animation_video(http_recorder, fake_redis, conversations):
-    # Telegram sends an animation as BOTH an animation and a document member; _MEDIA_SPECS
-    # orders animation first, so the message bridges exactly one turn mapped to the animation
-    # (generic video) kind, never the document member's document kind.
+async def test_animation_with_document_member_bridges_as_animation_video(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # Telegram sends an animation as BOTH an animation and a document member; _MEDIA_SPECS orders
+    # animation first, so the one bridged turn maps to the animation (generic video) kind and the
+    # animation member's file_id is the one fetched, never the document member's.
+    http_recorder.responder = _getfile_responder(file_path="animations/file_1.mp4")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="video/mp4"))
+    media.ingest_result = _ingested(MediaKind.VIDEO, mime="video/mp4")
     update = _media_update(
         animation={"file_id": "anim1", "file_name": "clip.gif", "mime_type": "video/mp4", "file_size": 4096},
         document={"file_id": "doc1", "file_name": "clip.gif", "mime_type": "video/mp4", "file_size": 4096},
@@ -803,12 +915,17 @@ async def test_animation_with_document_member_bridges_as_animation_video(http_re
     call = conversations.accept_calls[0]
     assert call.params["media_kind"] == "video"
     assert call.params["media_kind"] != "document"
-    assert call.params["media_id"] == "anim1"
+    assert call.params["media_id"] == _SERVED_ID
 
 
-async def test_voice_note_bridges_as_voice_audio(http_recorder, fake_redis, conversations):
+async def test_voice_note_bridges_as_voice_audio(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
     # A voice note maps to the generic audio kind with media_voice=true and the "[voice message]"
-    # placeholder as its turn text.
+    # placeholder as its turn text; media_id is the served reference.
+    http_recorder.responder = _getfile_responder(file_path="voice/file_1.ogg")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="audio/ogg"))
+    media.ingest_result = _ingested(MediaKind.AUDIO, mime="audio/ogg")
     update = _media_update(voice={"file_id": "v1", "mime_type": "audio/ogg", "file_size": 512})
     response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
     assert response.status_code == 200
@@ -817,11 +934,18 @@ async def test_voice_note_bridges_as_voice_audio(http_recorder, fake_redis, conv
     assert call.text == "[voice message]"
     assert call.params["media_kind"] == "audio"
     assert call.params["media_voice"] == "true"
-    assert call.params["media_id"] == "v1"
+    assert call.params["media_id"] == _SERVED_ID
+    assert media.ingest_calls[0].declared_mime == "audio/ogg"
 
 
-async def test_animated_sticker_bridges_with_animated_flag(http_recorder, fake_redis, conversations):
-    # An animated sticker carries sticker_animated=true; its turn text is the "[sticker]" placeholder.
+async def test_animated_sticker_bridges_with_animated_flag(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # An animated sticker carries sticker_animated=true and media_kind "sticker"; the served
+    # attachment resolves to an image/video item. Its turn text is the "[sticker]" placeholder.
+    http_recorder.responder = _getfile_responder(file_path="stickers/file_1.webp")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/webp"))
+    media.ingest_result = _ingested(MediaKind.IMAGE, mime="image/webp")
     update = _media_update(sticker={"file_id": "s1", "is_animated": True, "file_size": 64})
     response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
     assert response.status_code == 200
@@ -830,6 +954,396 @@ async def test_animated_sticker_bridges_with_animated_flag(http_recorder, fake_r
     assert call.text == "[sticker]"
     assert call.params["media_kind"] == "sticker"
     assert call.params["sticker_animated"] == "true"
+    assert call.params["media_id"] == _SERVED_ID
+
+
+async def test_media_bridge_dedupe_key_is_the_update_id(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # The bridged media turn's provider_message_id and the ingest origin.message_id are BOTH the
+    # update id — the idempotency key a Telegram redelivery is deduped by.
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}], update_id=4242)
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert conversations.accept_calls[0].provider_message_id == "4242"
+    assert media.ingest_calls[0].origin.message_id == "4242"
+
+
+async def test_getfile_permanent_failure_rejects_could_not_receive(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A getFile error response for an unknown/expired file is PERMANENT: notify COULD_NOT_RECEIVE
+    # and ack (no caption -> notice + ack only), never a raise/redelivery and never a bridged turn.
+    http_recorder.responder = _getfile_responder(status=404)
+    update = _media_update(photo=[{"file_id": "gone", "file_size": 900}])
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert len(conversations.rejected_calls) == 1
+    rejected = conversations.rejected_calls[0]
+    assert rejected.kind == "image"
+    assert rejected.reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_getfile_transient_5xx_raises_for_redelivery(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A getFile 5xx is TRANSIENT: the handler raises (-> 500) so Telegram redelivers; no turn, no
+    # rejection notice, no dedupe record.
+    http_recorder.responder = _getfile_responder(status=503)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    with pytest.raises(ChannelDeliveryError):
+        await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert conversations.accept_calls == []
+    assert conversations.rejected_calls == []
+
+
+async def test_getfile_429_raises_for_redelivery(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A getFile 429 (Too Many Requests — a vendor throttle) is TRANSIENT: the handler raises
+    # (-> 500) so Telegram redelivers; the update is neither acked nor deduped, no turn, no notice.
+    http_recorder.responder = _getfile_responder(status=429)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    with pytest.raises(ChannelDeliveryError):
+        await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert conversations.accept_calls == []
+    assert conversations.rejected_calls == []
+
+
+async def test_getfile_ok_false_body_rejects_could_not_receive(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A 200 getFile body carrying ok:false (an unknown/expired file) is a PERMANENT
+    # TelegramFilePermanentError: the door notifies COULD_NOT_RECEIVE and acks, never a raise.
+    http_recorder.responder = _getfile_responder(ok=False)
+    update = _media_update(photo=[{"file_id": "gone", "file_size": 900}])
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert len(conversations.rejected_calls) == 1
+    assert conversations.rejected_calls[0].kind == "image"
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_getfile_missing_file_path_rejects_could_not_receive(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A 200 getFile body that is ok:true but carries no file_path leaves nothing to fetch: a PERMANENT
+    # TelegramFilePermanentError -> the door notifies COULD_NOT_RECEIVE and acks, never a raise.
+    def responder(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42, "chat": {"id": 777}}})
+
+    http_recorder.responder = responder
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert len(conversations.rejected_calls) == 1
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_over_cap_media_rejects_too_large(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # The ingest seam raising MediaTooLargeError is a PERMANENT reject mapped to TOO_LARGE + ack.
+    http_recorder.responder = _getfile_responder(file_path="documents/file_1.pdf")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_error = MediaTooLargeError("declared media size exceeds the cap")
+    update = _media_update(
+        document={"file_id": "doc1", "file_name": "big.pdf", "mime_type": "application/pdf", "file_size": 99_999_999},
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert conversations.rejected_calls[0].kind == "document"
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.TOO_LARGE
+
+
+async def test_disallowed_media_type_rejects_unsupported_type_and_bridges_caption(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # The ingest seam raising MediaTypeNotAllowedError is a PERMANENT reject mapped to
+    # UNSUPPORTED_TYPE; a caption present ALSO bridges as a text-only turn (the served media does not
+    # exist, so no media_id/sha/size/filename — only the kind and the vendor-declared mime).
+    http_recorder.responder = _getfile_responder(file_path="documents/file_1.svg")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_error = MediaTypeNotAllowedError("svg is active content")
+    update = _media_update(
+        document={"file_id": "doc1", "file_name": "x.svg", "mime_type": "image/svg+xml", "file_size": 2048},
+        caption="have a look",
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}  # the caption turn bridged
+    assert conversations.rejected_calls[0].kind == "document"
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.UNSUPPORTED_TYPE
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "have a look"
+    assert call.attachments is None
+    assert "media_id" not in call.params
+    assert call.params["media_kind"] == "document"
+    assert call.params["media_mime_type"] == "image/svg+xml"
+
+
+async def test_media_store_unavailable_rejects_could_not_receive(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # The ingest seam raising MediaStoreUnavailableError (no blob provider configured) is a PERMANENT
+    # reject mapped to COULD_NOT_RECEIVE; no caption -> notice + ack only, never a raise/redelivery.
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_error = MediaStoreUnavailableError("no blob provider")
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert conversations.rejected_calls[0].kind == "image"
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_url_guard_reject_at_open_rejects_could_not_receive(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # An SSRF UrlGuardError raised while opening the file stream is a PERMANENT reject mapped to
+    # COULD_NOT_RECEIVE + ack, never a raise/redelivery.
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(
+        inbound_media_module,
+        "open_media_stream",
+        _fake_open_stream(raise_at_open=UrlGuardError("SSRF guard: blocked host")),
+    )
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.accept_calls == []
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_torn_body_read_raises_for_redelivery(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A body-read fault surfaced by the seam as MediaSourceReadError is TRANSIENT: it raises so
+    # Telegram redelivers, never a permanent reject.
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_error = MediaSourceReadError("media source read failed: ReadError")
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    with pytest.raises(MediaSourceReadError):
+        await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert conversations.rejected_calls == []
+
+
+async def test_stream_open_transient_fetch_fault_raises(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A connect/timeout/5xx at stream open is a transient MediaFetchError (.transient True): raise
+    # for redelivery, never a permanent reject.
+    http_recorder.responder = _getfile_responder()
+    fault = MediaFetchError(host="file.telegram.test", cause_class="ConnectTimeout")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(raise_at_open=fault))
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    with pytest.raises(MediaFetchError):
+        await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert conversations.rejected_calls == []
+
+
+async def test_stream_open_permanent_fetch_fault_rejects_could_not_receive(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # A 4xx at stream open is a non-transient MediaFetchError (.transient False): a permanent
+    # COULD_NOT_RECEIVE reject + ack, never a raise.
+    http_recorder.responder = _getfile_responder()
+    fault = MediaFetchError(host="file.telegram.test", status_code=403)
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(raise_at_open=fault))
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_fetch_fault_never_leaks_the_bot_token(http_recorder, fake_redis, monkeypatch: pytest.MonkeyPatch):
+    # The file URL carries the bot token in its PATH. A fetch fault's message and its whole
+    # __cause__/__context__ chain must never contain the token (the kit's faults are URL-free).
+    http_recorder.responder = _getfile_responder()
+    fault = MediaFetchError(host="file.telegram.test", cause_class="ReadError")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(raise_at_open=fault))
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    with pytest.raises(MediaFetchError) as excinfo:
+        await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    exc: BaseException | None = excinfo.value
+    seen: list[BaseException] = []
+    while exc is not None and exc not in seen:
+        seen.append(exc)
+        assert _BOT_TOKEN not in str(exc)
+        exc = exc.__cause__ or exc.__context__
+
+
+async def test_rejected_media_with_caption_also_bridges_the_caption(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A permanent reject with a caption present: the participant is notified AND a text-only turn
+    # carrying the caption is bridged (the served media does not exist, so no media_id/sha/size/
+    # filename and never the raw vendor filename — only the kind and the vendor-declared mime).
+    http_recorder.responder = _getfile_responder(file_path="documents/file_1.pdf")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_error = MediaTooLargeError("over cap")
+    update = _media_update(
+        document={"file_id": "doc1", "file_name": "big.pdf", "mime_type": "application/pdf", "file_size": 99_999_999},
+        caption="please review",
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.TOO_LARGE
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "please review"
+    assert call.attachments is None
+    assert "media_id" not in call.params
+    assert "media_filename" not in call.params
+    assert call.params["media_kind"] == "document"
+    assert call.params["media_mime_type"] == "application/pdf"
+
+
+async def test_media_reply_to_pending_ask_resolves_the_ask_with_ingested_params(
+    http_recorder, fake_redis, conversations, channels, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A photo REPLYING to a pending ForceReply question resolves that ask exactly as a text reply
+    # does: the answer text is the caption and the parity media_* params ride the ask (with the
+    # SERVED media_id and the seam's sha256 — the answer ladder carries no typed attachment), so the
+    # ask is resolved via the ladder and no fresh-turn bridge is made.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE, size=900, mime="image/png")
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}], caption="the blue one", reply_to_message_id=42)
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "forwarded"}}
+    assert len(media.ingest_calls) == 1  # the bytes are ingested FIRST, before the resolve/bridge split
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.correlation_key == "777:42"  # the replied-to anchor scoped by its chat
+    assert call.answer == "the blue one"  # the caption is the answer text
+    assert call.bridge.params["media_kind"] == "image"
+    assert call.bridge.params["media_id"] == _SERVED_ID  # the SERVED id, never the raw file_id
+    assert call.bridge.params["media_sha256"] == media.ingest_result.sha256
+    assert conversations.accept_calls == []  # a resolved ask never bridges an accept turn
+
+
+async def test_media_reply_to_unknown_message_bridges_as_a_turn(
+    http_recorder, fake_redis, conversations, channels, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A photo replying to a message that is NOT a pending ask: the ladder returns NO_CORRELATION and
+    # the media turn bridges as a fresh turn, carrying the typed attachment and the parity params.
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}], caption="look", reply_to_message_id=99)
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(channels.inbound_calls) == 1  # the ladder was consulted first
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "look"
+    assert call.attachments == [media.ingest_result.item]  # the typed attachment rides the bridge alone
+    assert call.params["media_id"] == _SERVED_ID
+
+
+async def test_rejected_media_reply_leaves_the_ask_pending(
+    http_recorder, fake_redis, conversations, channels, media, monkeypatch: pytest.MonkeyPatch
+):
+    # An over-cap photo REPLYING to a pending ask never resolves it: the participant is told the
+    # media could not be received (TOO_LARGE) and the ask stays pending (the ladder is never
+    # consulted); a caption present is still bridged as a text-only turn so the words are not lost.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED  # would resolve if ever consulted
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_error = MediaTooLargeError("over cap")
+    update = _media_update(
+        photo=[{"file_id": "big", "file_size": 99_999_999}], caption="please review", reply_to_message_id=42
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}  # the caption turn bridged
+    assert channels.inbound_calls == []  # the ask was never resolved
+    assert conversations.rejected_calls[0].reason is InboundRejectionReason.TOO_LARGE
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "please review"
+    assert call.attachments is None
+    assert "media_id" not in call.params
+
+
+async def test_telegram_parity_media_filename_equals_sanitised(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A document whose vendor file_name carries a control char and a bidi override: the parity
+    # media_filename is the seam's SANITISED name, and the raw vendor name is in NO param value.
+    raw_name = "re‮port\x00.pdf"
+    sanitised = "report.pdf"
+    http_recorder.responder = _getfile_responder(file_path="documents/file_1.pdf")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_result = _ingested(MediaKind.DOCUMENT, mime="application/pdf", filename=sanitised)
+    update = _media_update(
+        document={"file_id": "doc1", "file_name": raw_name, "mime_type": "application/pdf", "file_size": 2048},
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    call = conversations.accept_calls[0]
+    assert call.params["media_filename"] == sanitised
+    assert all(raw_name not in value and "‮" not in value for value in call.params.values())
+    # The seam receives the RAW vendor filename to sanitise; the raw name never leaves via params.
+    assert media.ingest_calls[0].filename == raw_name
+
+
+async def test_telegram_placeholder_label_uses_sanitised_filename(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # The same document with no caption: the bridged turn text is "[document: <sanitised>]" and
+    # the raw vendor file_name appears nowhere in the turn text or params.
+    raw_name = "re‮port\x00.pdf"
+    sanitised = "report.pdf"
+    http_recorder.responder = _getfile_responder(file_path="documents/file_1.pdf")
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream())
+    media.ingest_result = _ingested(MediaKind.DOCUMENT, mime="application/pdf", filename=sanitised)
+    update = _media_update(
+        document={"file_id": "doc1", "file_name": raw_name, "mime_type": "application/pdf", "file_size": 2048},
+    )
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    call = conversations.accept_calls[0]
+    assert call.text == f"[document: {sanitised}]"
+    assert raw_name not in call.text
+    assert all(raw_name not in value for value in call.params.values())
+
+
+async def test_media_fires_typing_before_fetch(
+    http_recorder, fake_redis, conversations, media, monkeypatch: pytest.MonkeyPatch
+):
+    # A media message is a processable message: the "working on it" typing action fires before the
+    # fetch/ingest, exactly as for a text message.
+    http_recorder.responder = _getfile_responder()
+    monkeypatch.setattr(inbound_media_module, "open_media_stream", _fake_open_stream(content_type="image/png"))
+    media.ingest_result = _ingested(MediaKind.IMAGE)
+    update = _media_update(photo=[{"file_id": "big", "file_size": 900}])
+    await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    typing = [r for r in http_recorder.requests if str(r.url).endswith("/sendChatAction")]
+    assert len(typing) == 1
 
 
 async def test_unmappable_content_notifies_rejection_and_makes_no_turn(http_recorder, fake_redis, conversations):

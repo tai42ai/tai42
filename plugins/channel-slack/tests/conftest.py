@@ -14,8 +14,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 import time
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -26,7 +28,13 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
-from tai42_contract.interactions.models import MediaItem
+from tai42_contract.interactions.models import (
+    MEDIA_ROUTE_PREFIX,
+    IngestedMedia,
+    MediaItem,
+    MediaKind,
+    MediaOrigin,
+)
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -188,6 +196,7 @@ class _StubConversations:
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        attachments: list[MediaItem] | None = None,
     ) -> str:
         self.accept_calls.append(
             SimpleNamespace(
@@ -198,6 +207,7 @@ class _StubConversations:
                 text=text,
                 provider_message_id=provider_message_id,
                 params=params,
+                attachments=attachments,
             )
         )
         if self.accept_error is not None:
@@ -223,6 +233,60 @@ class _StubConversations:
         )
 
 
+class _StubMedia:
+    """Stands in for the served-media ingestion facet (``app.media``).
+
+    The plugin's test venv cannot import the skeleton that hosts the real chokepoint, so it
+    is faked at this contract seam. Each ``ingest_media`` call drains the streamed ``source``
+    (mirroring the real per-chunk read), records the arguments, then returns the next queued
+    :class:`IngestedMedia` — or raises the next queued error — so a test drives success and
+    every failure class. ``ingest_default`` answers when the queue is empty; a dry queue with
+    no default is a loud test error, never a silent stand-in.
+    """
+
+    def __init__(self) -> None:
+        self.ingest_calls: list[SimpleNamespace] = []
+        self.ingest_results: list[IngestedMedia | BaseException] = []
+        self.ingest_default: IngestedMedia | None = None
+
+    def reset(self) -> None:
+        self.ingest_calls.clear()
+        self.ingest_results.clear()
+        self.ingest_default = None
+
+    async def ingest_media(
+        self,
+        *,
+        source: AsyncIterator[bytes],
+        kind_hint: Any,
+        declared_mime: str | None,
+        filename: str | None,
+        declared_size: int | None,
+        integrity_sha256: str | None,
+        origin: MediaOrigin,
+    ) -> IngestedMedia:
+        chunks = [chunk async for chunk in source]
+        self.ingest_calls.append(
+            SimpleNamespace(
+                chunks=chunks,
+                kind_hint=kind_hint,
+                declared_mime=declared_mime,
+                filename=filename,
+                declared_size=declared_size,
+                integrity_sha256=integrity_sha256,
+                origin=origin,
+            )
+        )
+        if self.ingest_results:
+            result = self.ingest_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        if self.ingest_default is not None:
+            return self.ingest_default
+        raise AssertionError("no ingest result configured for this call")
+
+
 class _StubLifecycle:
     """Records ``on_startup`` hooks so a test can drive the boot config guard."""
 
@@ -243,6 +307,7 @@ class _StubApp:
         self.http = _StubHttp()
         self.clients = _StubClients()
         self.conversations = _StubConversations()
+        self.media = _StubMedia()
         self.lifecycle = _StubLifecycle()
 
 
@@ -311,6 +376,18 @@ def stub_conversations() -> Iterator[_StubConversations]:
         yield conversations
     finally:
         conversations.reset()
+
+
+@pytest.fixture
+def stub_media() -> Iterator[_StubMedia]:
+    """The served-media ingestion stub on ``app.media``, state reset around each test so
+    ingest-call and result-queue assertions never leak."""
+    media = _stub_app.media
+    media.reset()
+    try:
+        yield media
+    finally:
+        media.reset()
 
 
 @pytest.fixture
@@ -459,3 +536,86 @@ def _ok_response(ts: str | None = "1712345678.000100") -> httpx.Response:
     if ts is not None:
         body["ts"] = ts
     return httpx.Response(200, json=body)
+
+
+def make_ingested(
+    *,
+    media_id: str | None = None,
+    kind: MediaKind = MediaKind.IMAGE,
+    mime: str = "image/png",
+    size: int = 2048,
+    sha256: str = "a" * 64,
+    filename: str | None = None,
+    pending: bool = False,
+) -> IngestedMedia:
+    """An :class:`IngestedMedia` a stubbed ``ingest_media`` returns.
+
+    ``media_id`` is the SERVED id (a valid 43-char token minted fresh when unset, so each
+    call is distinct); ``item`` carries the served route url and, for a document, the
+    SANITISED filename — set ``filename`` distinct from a test's raw vendor name to prove the
+    bridge sources the sanitised value, never the raw one. Assert against the returned
+    ``media_id`` / ``item.url``, not a literal.
+    """
+    resolved_id = media_id if media_id is not None else secrets.token_urlsafe(32)
+    item = MediaItem(
+        kind=kind,
+        url=f"{MEDIA_ROUTE_PREFIX}{resolved_id}",
+        caption=None,
+        filename=filename if kind is MediaKind.DOCUMENT else None,
+    )
+    return IngestedMedia(item=item, media_id=resolved_id, size=size, sha256=sha256, mime=mime, pending=pending)
+
+
+class FakeStream:
+    """A :class:`~tai42_kit.net.MediaStream`-shaped object a fake ``open_media_stream`` yields."""
+
+    def __init__(
+        self,
+        *,
+        content_type: str | None = "image/png",
+        content_length: int | None = None,
+        host: str = "files.slack.com",
+        chunks: tuple[bytes, ...] = (b"\x89PNG\r\n\x1a\n", b"payload"),
+    ) -> None:
+        self.content_type = content_type
+        self.content_length = content_length
+        self.host = host
+        self._chunks = chunks
+
+    @property
+    def chunks(self) -> AsyncIterator[bytes]:
+        async def _gen() -> AsyncIterator[bytes]:
+            for chunk in self._chunks:
+                yield chunk
+
+        return _gen()
+
+
+def fake_open_media_stream(
+    stream: FakeStream | None = None,
+    *,
+    error: BaseException | None = None,
+    calls: list[SimpleNamespace] | None = None,
+) -> Any:
+    """A stand-in for ``events.open_media_stream`` (patch it at that import site).
+
+    Records each open into ``calls`` (url, headers, auth, follow_redirects), then raises
+    ``error`` at open when set, else yields ``stream``.
+    """
+    resolved = stream if stream is not None else FakeStream()
+
+    @asynccontextmanager
+    async def _open(
+        url: str,
+        *,
+        headers: Any = None,
+        auth: Any = None,
+        follow_redirects: bool = False,
+    ) -> AsyncIterator[FakeStream]:
+        if calls is not None:
+            calls.append(SimpleNamespace(url=url, headers=headers, auth=auth, follow_redirects=follow_redirects))
+        if error is not None:
+            raise error
+        yield resolved
+
+    return _open

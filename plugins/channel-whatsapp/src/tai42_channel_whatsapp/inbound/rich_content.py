@@ -2,21 +2,20 @@
 
 None of these can answer a pending ask — each bridges as a fresh conversation turn.
 
-INBOUND MEDIA NOTE (see the plugin README):
-WhatsApp inbound media arrives as a Graph media ``id`` (``GET {graph}/{id}`` returns a
-SHORT-LIVED, Bearer-AUTHENTICATED lookaside url — not a durable public https url, and not a
-valid :class:`MediaItem` source). Turning that id into a durable typed ``attachments`` entry
-needs a served-media INGESTION seam (fetch the bytes, persist them, mint a
-``{MEDIA_ROUTE_PREFIX}{id}`` served reference). The platform's served-media store
-(``tai42_skeleton.interactions.media``) is NOT reachable from a channel plugin and handles
-only outbound ``data:image`` substitution, so NO such seam exists for a channel today.
-Rather than invent infrastructure or fabricate an unfetchable url, inbound media therefore
-bridges as a turn WITHOUT a typed ``attachments`` entry: the caption becomes the turn text
-(a faithful ``[kind]`` placeholder when caption-less) and the media's identity rides the
-``media_*`` params (a consumer re-fetches via ``media_id`` with operator credentials).
-The durable fix is a platform served-media ingestion seam on the app handle; until then this
-is the honest minimal alternative. Inbound LOCATION, by contrast, has a fully in-contract
-typed shape (:class:`LocationElement`) and DOES land on ``accept(location=...)``.
+INBOUND MEDIA: WhatsApp media arrives as a Graph media ``id``. The channel looks up the object's
+short-lived, Bearer-authenticated lookaside url (:func:`~tai42_channel_whatsapp.client.fetch_media_metadata`),
+downloads the bytes in a single Bearer-authenticated request
+(:func:`~tai42_channel_whatsapp.client.open_media_download`; redirects are not followed — a redirect
+answer is a permanent fetch fault), and ingests them through the platform's ``app.media.ingest_media``
+chokepoint, which caps, sniffs,
+stores, and mints a served ``{MEDIA_ROUTE_PREFIX}{id}`` reference. The bridged turn then carries
+BOTH the typed :class:`MediaItem` ``attachments`` entry and the parity ``media_*`` params off that
+one ingest. A transient fetch fault (a 5xx, a timeout, a torn read) raises so the webhook returns
+non-2xx and Meta redelivers (idempotent through ``already_seen``/``mark_seen``); a permanent fault
+(the media is gone, over the cap, a disallowed type, or no store) rejects with a participant notice
+and, when a caption rode with it, bridges the caption as a text-only turn so no message is lost.
+Inbound LOCATION has a fully in-contract typed shape (:class:`LocationElement`) and lands on
+``accept(location=...)``.
 """
 
 from __future__ import annotations
@@ -25,10 +24,26 @@ import json
 import logging
 from typing import Any
 
-from tai42_contract.conversations import build_inbound_media_params, inbound_media_placeholder
+from tai42_contract.app import tai42_app
+from tai42_contract.conversations import (
+    InboundMediaKind,
+    InboundRejectionReason,
+    build_inbound_media_params,
+    inbound_media_placeholder,
+)
+from tai42_contract.interactions import (
+    IngestedMedia,
+    MediaOrigin,
+    MediaSourceReadError,
+    MediaStoreUnavailableError,
+    MediaTooLargeError,
+    MediaTypeNotAllowedError,
+)
 from tai42_contract.interactions.models import LocationElement
+from tai42_kit.net import MediaFetchError, UrlGuardError
 
-from tai42_channel_whatsapp.correlation import already_seen
+from tai42_channel_whatsapp.client import fetch_media_metadata, media_endpoint_host, open_media_download
+from tai42_channel_whatsapp.correlation import already_seen, mark_seen
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound
 from tai42_channel_whatsapp.inbound.params import _merged_params, _put_param
 
@@ -44,38 +59,149 @@ async def _handle_media(
     *,
     message_type: str,
 ) -> None:
-    """Bridge an inbound media message (image/document/audio/video/sticker) as a fresh turn.
+    """Fetch an inbound media message's bytes, ingest them, and bridge it as a fresh turn.
 
-    The caption becomes the turn text (a faithful ``[kind]`` placeholder when caption-less),
-    and the media's identity rides ``params`` (``media_kind``/``media_id``/``media_mime_type``/
-    ``media_sha256``/``media_filename``/``media_voice``/``sticker_animated``). No typed
-    ``attachments`` entry is minted — the Graph media id is not a durable :class:`MediaItem`
-    source and no served-media ingestion seam is reachable from a channel; see the module's
-    INBOUND MEDIA design note. Media never answers a pending ask (a photo cannot satisfy a
-    text/select/form question): it always bridges, leaving any parked ask untouched.
+    Looks up the Graph media object's lookaside url, streams the bytes through
+    ``app.media.ingest_media`` (which caps/sniffs/stores and mints a served reference), and
+    bridges a turn carrying the typed :class:`MediaItem` ``attachments`` entry AND the parity
+    ``media_*`` params off that one ingest. The caption is the turn text (a faithful ``[kind]``
+    placeholder when caption-less); the placeholder label and ``media_filename`` both use the
+    seam's SANITISED ``ingested.item.filename``, never the raw vendor name. A TRANSIENT fetch
+    fault raises so Meta redelivers (the wamid is NOT marked seen); a PERMANENT fault rejects with
+    a participant notice via :func:`_reject_media`. Media never answers a pending ask (a photo
+    cannot satisfy a text/select/form question): it always bridges, leaving any parked ask
+    untouched.
     """
     if await already_seen(wamid):
         return
     media = message.get(message_type)
     media = media if isinstance(media, dict) else {}
-    caption = media.get("caption")
-    text = (
-        caption.strip()
-        if isinstance(caption, str) and caption.strip()
-        else inbound_media_placeholder(message_type, filename=media.get("filename"), voice=media.get("voice") is True)
-    )
+    kind = InboundMediaKind(message_type)
+    caption = _media_caption(media)
+    voice = media.get("voice") is True
+    animated = media.get("animated") is True
+    declared_mime = media.get("mime_type")
 
+    try:
+        ingested = await _fetch_and_ingest(media, kind, wa_id, wamid)
+    except _MEDIA_FAILURES as exc:
+        reason = _media_rejection_reason(exc)
+        if reason is None:
+            # Transient (a 5xx/timeout/torn read): 5xx the webhook so Meta redelivers — the wamid
+            # is NOT marked seen, so the redelivery is re-processed rather than deduped away.
+            raise
+        await _reject_media(phone_number_id, wa_id, wamid, kind, caption, declared_mime, reason, params)
+        return
+
+    text = caption or inbound_media_placeholder(kind, filename=ingested.item.filename, voice=voice)
     media_params = build_inbound_media_params(
-        kind=message_type,
-        media_id=media.get("id"),
-        mime_type=media.get("mime_type"),
-        sha256=media.get("sha256"),
-        filename=media.get("filename"),
-        voice=media.get("voice") is True,
-        animated=media.get("animated") is True,
+        kind=kind,
+        media_id=ingested.media_id,
+        mime_type=ingested.mime,
+        sha256=ingested.sha256,
+        filename=ingested.item.filename,
+        voice=voice,
+        animated=animated,
+        size=ingested.size,
+    )
+    await _bridge_inbound(
+        phone_number_id, wa_id, text, wamid, params=_merged_params(params, media_params), attachments=[ingested.item]
     )
 
-    await _bridge_inbound(phone_number_id, wa_id, text, wamid, params=_merged_params(params, media_params))
+
+# The kit fetch faults and the contract ingest faults one inbound media fetch can raise; every
+# other exception propagates (a bare or unexpected ingest failure must surface loudly).
+_MEDIA_FAILURES = (
+    MediaFetchError,
+    UrlGuardError,
+    MediaTooLargeError,
+    MediaTypeNotAllowedError,
+    MediaStoreUnavailableError,
+    MediaSourceReadError,
+)
+
+
+def _media_caption(media: dict[str, Any]) -> str | None:
+    """The inbound media message's caption, stripped, or ``None`` when blank or absent."""
+    caption = media.get("caption")
+    if isinstance(caption, str) and caption.strip():
+        return caption.strip()
+    return None
+
+
+def _media_rejection_reason(exc: Exception) -> InboundRejectionReason | None:
+    """The rejection reason for a PERMANENT media failure, or ``None`` when the failure is TRANSIENT.
+
+    ``None`` means the caller must re-raise (redeliver): a transport fault, a 5xx, a 408 or a 429 at
+    fetch (``MediaFetchError.transient``) and a torn body read (``MediaSourceReadError``). Every other
+    caught failure is permanent: over-cap → ``TOO_LARGE``, disallowed type → ``UNSUPPORTED_TYPE``,
+    a gone media / SSRF-blocked url / absent store → ``COULD_NOT_RECEIVE``.
+    """
+    if isinstance(exc, MediaFetchError):
+        return None if exc.transient else InboundRejectionReason.COULD_NOT_RECEIVE
+    if isinstance(exc, MediaSourceReadError):
+        return None
+    if isinstance(exc, MediaTooLargeError):
+        return InboundRejectionReason.TOO_LARGE
+    if isinstance(exc, MediaTypeNotAllowedError):
+        return InboundRejectionReason.UNSUPPORTED_TYPE
+    return InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def _fetch_and_ingest(media: dict[str, Any], kind: InboundMediaKind, wa_id: str, wamid: str) -> IngestedMedia:
+    """Look up the media object, stream its bytes, and ingest them into the served-media store.
+
+    Raises the kit fetch faults / contract ingest faults for :func:`_handle_media` to classify; a
+    media object with no fetchable id is a permanent, participant-visible failure (the metadata
+    lookup already makes an absent lookaside ``url`` one). The vendor-declared mime/size/sha256 ride
+    the ingest, and the origin binds the item to this message at ingest.
+    """
+    media_id = media.get("id")
+    if not isinstance(media_id, str) or not media_id:
+        raise MediaFetchError(host=media_endpoint_host(), status_code=404)
+    meta = await fetch_media_metadata(media_id)
+    async with open_media_download(meta["url"]) as stream:
+        return await tai42_app.media.ingest_media(
+            source=stream.chunks,
+            kind_hint=kind,
+            declared_mime=meta.get("mime_type") or media.get("mime_type") or stream.content_type,
+            filename=media.get("filename"),
+            declared_size=meta.get("file_size") or stream.content_length,
+            integrity_sha256=meta.get("sha256"),
+            origin=MediaOrigin(channel_id="whatsapp", participant_identity=wa_id, message_id=wamid),
+        )
+
+
+async def _reject_media(
+    phone_number_id: str,
+    wa_id: str,
+    wamid: str,
+    kind: InboundMediaKind,
+    caption: str | None,
+    declared_mime: str | None,
+    reason: InboundRejectionReason,
+    base_params: dict[str, str],
+) -> None:
+    """Reject an inbound media the platform could not receive, notifying the participant once.
+
+    Tells the participant once via the rejection facet. When a caption rode with the media its
+    text is not lost — it bridges as a text-only turn carrying the generic kind + declared-mime
+    params (no served id, sha, size, or filename: the media does not exist). With no caption the
+    notice is the whole outcome. Either way the wamid is marked seen so a Meta redelivery is not
+    re-processed.
+    """
+    await tai42_app.conversations.notify_inbound_rejected(
+        channel_id="whatsapp",
+        recipient=wa_id,
+        sender_identity=phone_number_id,
+        kind=kind.value,
+        reason=reason,
+    )
+    if caption:
+        media_params = build_inbound_media_params(kind=kind, mime_type=declared_mime)
+        await _bridge_inbound(phone_number_id, wa_id, caption, wamid, params=_merged_params(base_params, media_params))
+    else:
+        await mark_seen(wamid)
 
 
 async def _handle_location(

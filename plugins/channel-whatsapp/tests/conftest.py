@@ -216,12 +216,53 @@ class _StubConversations:
             record.pending_receipt = None
 
 
+class _StubMedia:
+    """Stands in for the skeleton's ``app.media`` served-media ingestion facet.
+
+    The plugin's test venv cannot import the skeleton, so the ingest chokepoint is faked at this
+    contract seam. A test sets ``ingest_result`` (an :class:`IngestedMedia`) or ``ingest_error``
+    (a ``MediaIngestError`` subclass to raise) and reads back the recorded ``ingest_calls`` —
+    including the ``source`` byte stream — to assert what the channel handed the seam."""
+
+    def __init__(self) -> None:
+        self.ingest_calls: list[dict[str, Any]] = []
+        self.ingest_result: Any = None
+        self.ingest_error: Exception | None = None
+
+    async def ingest_media(
+        self,
+        *,
+        source: Any,
+        kind_hint: Any,
+        declared_mime: str | None,
+        filename: str | None,
+        declared_size: int | None,
+        integrity_sha256: str | None,
+        origin: Any,
+    ) -> Any:
+        self.ingest_calls.append(
+            {
+                "source": source,
+                "kind_hint": kind_hint,
+                "declared_mime": declared_mime,
+                "filename": filename,
+                "declared_size": declared_size,
+                "integrity_sha256": integrity_sha256,
+                "origin": origin,
+            }
+        )
+        if self.ingest_error is not None:
+            raise self.ingest_error
+        return self.ingest_result
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.channels = _StubChannels()
         self.clients = _StubClients()
         self.http = _StubHttp()
         self.conversations = _StubConversations()
+        self.media = _StubMedia()
 
 
 _stub_app = _StubApp()
@@ -242,10 +283,25 @@ class FakeHttpx:
         self.calls: list[dict[str, Any]] = []
         self.typing_calls: list[dict[str, Any]] = []
         self.responses: list[httpx.Response | Exception] = []
+        # The inbound media-metadata lookup (``client.fetch_media_metadata``) is a GET; its
+        # calls and queued responses ride their own channels so they never disturb the
+        # message-send POST queue under test.
+        self.get_calls: list[dict[str, Any]] = []
+        self.get_responses: list[httpx.Response | Exception] = []
         # Override to exercise the typing-signal failure law (e.g. a 5xx that
         # `_send` classifies into ChannelDeliveryError, or a raised transport error).
         self.typing_response: httpx.Response | Exception | None = None
         self.events = events if events is not None else []
+
+    async def get(self, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+        self.events.append(("http_get", url))
+        self.get_calls.append({"url": url, "headers": headers})
+        if not self.get_responses:
+            raise AssertionError("FakeHttpx: no queued response for get")
+        item = self.get_responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     async def post(
         self,
@@ -321,6 +377,7 @@ def stub_app() -> Iterator[_StubApp]:
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
+    _stub_app.media = _StubMedia()
     _reset_channels(channels)
 
 

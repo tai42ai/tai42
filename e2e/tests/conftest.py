@@ -49,6 +49,7 @@ from tai42_e2e.manifests import (
     build_door_schedule_stack,
     build_embed_stack,
     build_extensions_stack,
+    build_media_bridge_no_store_stack,
     build_media_bridge_stack,
     build_minimal_stack,
     build_monitoring_stack,
@@ -444,6 +445,41 @@ def media_bridge_stack(
         raise
     # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
     # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    stack.auth_token = root_token
+    with stack, diagnostics.track(stack):
+        yield stack, root_token
+
+
+@pytest.fixture(scope="module")
+def media_bridge_no_store_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+    fake_telegram: FakeTelegram,
+    fake_slack: FakeSlack,
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The media-bridge profile with NO blob provider registered, yielding ``(stack, root_token)``.
+
+    Identical to ``media_bridge_stack`` but the ``storage_module`` is dropped, so the ingest
+    chokepoint raises ``MediaStoreUnavailableError`` and the channel rejects the media with the
+    ``could_not_receive`` notice + event — the store-unavailable rejection leg."""
+    resource_kwargs = {
+        "llm_base_url": llm_stub.base_url,
+        "telegram_api_base_url": fake_telegram.api_base_url,
+        "slack_api_base_url": fake_slack.api_base_url,
+        "twilio_api_base_url": fake_twilio.api_base_url,
+        "whatsapp_api_base_url": fake_whatsapp.api_base_url,
+    }
+    root = tmp_path_factory.mktemp("media-bridge-nostore")
+    resources, config = _allocate_and_build(infra, root, build_media_bridge_no_store_stack, resource_kwargs, False)
+    stack = TaiStack(config, infra, resources, root)
+    try:
+        root_token = seed_bridge_authz(infra, resources)
+    except BaseException:
+        stack.teardown()
+        raise
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token

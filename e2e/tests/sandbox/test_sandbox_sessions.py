@@ -126,7 +126,7 @@ async def test_ephemeral_workspace_does_not_survive_its_session(
         await _probe(mcp, "destroy", session_id=created["session_id"])
 
         # A new ephemeral session on the same key gets a FRESH scratch workspace — the prior
-        # bytes are gone, so the read is a loud miss.
+        # bytes are gone, so the read is the typed file-not-found miss.
         reborn = await _probe(mcp, "create", workspace_key=key, durability="ephemeral")
         miss = await mcp.call_tool(
             "e2e_sandbox_probe",
@@ -135,5 +135,5 @@ async def test_ephemeral_workspace_does_not_survive_its_session(
         )
         assert miss.is_error, miss
         text = " ".join(getattr(part, "text", "") for part in miss.content)
-        assert "miss" in text, text
+        assert "not found" in text, text
         await _probe(mcp, "destroy", session_id=reborn["session_id"])

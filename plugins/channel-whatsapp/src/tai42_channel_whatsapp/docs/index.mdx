@@ -119,19 +119,41 @@ keys it understands:
 - `referral_source_url` / `referral_source_id` / `referral_source_type` /
   `referral_ctwa_clid` / `referral_headline` / `referral_body` — a click-to-WhatsApp
   or QR entry (`referral`) forwards its fields.
-- `media_kind` / `media_id` / `media_mime_type` / `media_sha256` /
+- `media_kind` / `media_id` / `media_mime_type` / `media_sha256` / `media_size` /
   `media_filename` / `media_voice` / `sticker_animated` — an inbound **media**
   message (image/document/audio/video/sticker) bridges with its caption as the
-  turn text and its identity in these params.
+  turn text and its ingested identity in these params (see **Inbound media** below).
 - `reaction_emoji` / `reaction_message_id` — an inbound emoji **reaction**.
 - `contacts_count` / `contacts` — shared **contact** card(s).
 
-Participant **media**, **location**, **contacts**, and **reactions** now bridge as
+Participant **media**, **location**, **contacts**, and **reactions** all bridge as
 turns. An inbound **location** additionally lands as a typed `LocationElement` on
-the turn (not a param). Inbound media carries **no typed `attachments`** entry:
-the Graph media id is not a durable media source and no served-media ingestion
-seam is reachable from a channel, so a consumer re-fetches bytes via `media_id`
-with operator credentials (a flagged platform gap — see the plugin README).
+the turn (not a param).
+
+## Inbound media
+
+When a participant sends **media** (image / document / audio / video / sticker), the
+channel looks up the Graph media object's short-lived lookaside url, streams the bytes,
+and ingests them into the platform's served-media store. The bridged turn then carries
+both a typed **`attachments`** entry — a `MediaItem` whose url is the served
+`/api/interactions/media/<id>` reference — and the parity `media_*` params off that one
+ingest (`media_id` is the served id, `media_mime_type` the sniffed-and-agreed type,
+`media_sha256`/`media_size` the ingested content's digest and byte size, `media_filename`
+the sanitised document name). The caption is the turn text, or a `[kind]` placeholder when
+there is none.
+
+If the bytes cannot be received, the participant is told once and the media is not bridged:
+
+- **too large** — the object exceeds the operator's per-kind byte cap;
+- **unsupported type** — the sniffed content is not on its kind's allowlist (or the declared
+  and sniffed types disagree);
+- **could not receive** — the media object has expired or is gone, or no media store is
+  configured.
+
+When a caption rode with a rejected media, the caption still bridges as a text-only turn so
+the message is never lost. A **transient** fetch fault (a `5xx`, a timeout, or a torn read)
+is not rejected: the webhook returns non-2xx, Meta redelivers, and the per-message dedupe
+guards against a double turn.
 
 Params ride only on the bridge path — a tap or quick-reply that **answers** a
 pending question surfaces none (the answer path carries no params). Meta inbound

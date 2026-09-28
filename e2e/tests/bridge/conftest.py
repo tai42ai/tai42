@@ -59,6 +59,23 @@ def media_bridge(
 
 
 @pytest.fixture
+def media_bridge_no_store(
+    media_bridge_no_store_stack: tuple[TaiStack, str],
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    fake_telegram: FakeTelegram,
+    fake_slack: FakeSlack,
+    llm_stub: LlmStub,
+) -> BridgeHarness:
+    """A ``BridgeHarness`` over the all-four-channels media-bridge profile with NO blob provider —
+    the store-unavailable rejection leg (the ingest chokepoint raises ``MediaStoreUnavailableError``)."""
+    stack, root_token = media_bridge_no_store_stack
+    return BridgeHarness(
+        stack, root_token, fake_twilio, fake_whatsapp, llm_stub, fake_telegram=fake_telegram, fake_slack=fake_slack
+    )
+
+
+@pytest.fixture
 def agent_route_bridge(
     agent_route_park_stack: tuple[TaiStack, str],
     fake_twilio: FakeTwilio,

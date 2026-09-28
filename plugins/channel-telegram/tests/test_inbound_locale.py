@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tai42_channel_telegram.inbound import _inbound_locale
+from tai42_channel_telegram.inbound_bridge import _inbound_locale
 
 
 @pytest.mark.parametrize(

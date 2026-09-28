@@ -217,10 +217,11 @@ whichever keys it understands. This is the channel's public inbound contract:
 | `referral_headline` | " (when present) | `referral.headline` |
 | `referral_body` | " (when present) | `referral.body` |
 | `media_kind` | An inbound **media** message (image/document/audio/video/sticker) | The wire type |
-| `media_id` | " | The Graph media id (re-fetch handle — see the design note below) |
-| `media_mime_type` | " | The media object's `mime_type` |
-| `media_sha256` | " | The media object's `sha256` (content integrity) |
-| `media_filename` | An inbound **document** | `document.filename` |
+| `media_id` | " | The **served** media id the bytes were ingested to (see the inbound media note below) |
+| `media_mime_type` | " | The ingested media's sniffed-and-agreed mime type |
+| `media_sha256` | " | The ingested media's `sha256` (content integrity) |
+| `media_size` | " | The ingested media's actual byte size |
+| `media_filename` | An inbound **document** | The sanitised `document.filename` |
 | `media_voice` | An inbound **audio** that is a voice note | `"true"` (`audio.voice`) |
 | `sticker_animated` | An animated **sticker** | `"true"` (`sticker.animated`) |
 | `reaction_emoji` | An inbound **reaction** (absent = a removed reaction) | `reaction.emoji` |
@@ -235,18 +236,20 @@ placeholder when caption-less); an inbound **location** lands as a typed
 `LocationElement` on the turn's `location` (a machine-consumable field, not a
 param), with the place name/coordinates as the text.
 
-> **Inbound media design note (design gap).** WhatsApp inbound media arrives as a
-> Graph media **id**; resolving it to bytes is a two-step Graph call that returns a
-> **short-lived, Bearer-authenticated** lookaside URL — not a durable public
-> `https` URL and not a valid `MediaItem` source. Minting a durable **typed
-> `attachments`** entry needs a served-media **ingestion** seam (fetch → persist →
-> mint a `{MEDIA_ROUTE_PREFIX}{id}` served reference); the platform's served-media
-> store is not reachable from a channel plugin and handles only outbound
-> `data:image` substitution, so no such seam exists today. Rather than invent
-> infrastructure or fabricate an unfetchable URL, inbound media therefore bridges
-> **without** a typed `attachments` entry — its identity rides the `media_*` params
-> above and a consumer re-fetches via `media_id` with operator credentials. The
-> durable fix is a platform served-media ingestion seam on the app handle.
+> **Inbound media.** WhatsApp inbound media arrives as a Graph media **id**; the
+> channel looks up the object's short-lived, Bearer-authenticated lookaside URL,
+> streams the bytes, and ingests them through the platform's `app.media.ingest_media`
+> chokepoint, which caps, sniffs, stores, and mints a served
+> `{MEDIA_ROUTE_PREFIX}{id}` reference. The bridged turn then carries **both** a typed
+> `attachments` entry (a `MediaItem` at the served URL) and the parity `media_*` params
+> off that one ingest. A **transient** fetch fault (a `5xx`, a timeout, a torn read)
+> raises so the webhook `5xx`s and Meta redelivers (idempotent through the per-`wamid`
+> dedupe); a **permanent** fault rejects with a participant notice — `too_large` (over
+> the operator's per-kind cap), `unsupported_type` (the sniffed content is not on its
+> allowlist), or `could_not_receive` (the media is gone, the URL is guarded, or no store
+> is configured) — and, when a caption rode with it, bridges the caption as a text-only
+> turn so no message is lost. The Bearer rides the fetch calls only, never a log, param,
+> or error string.
 
 Params ride **only on the bridge path**. A tap or quick-reply that **answers** a
 pending question does not surface them: the answer path forwards `{"answer": …}`
@@ -305,7 +308,6 @@ status is acknowledged, never retried.
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Inbound media carries no typed attachment | Inbound **media** (image/document/audio/video/sticker) bridges as a turn (caption → text, identity → `media_*` params) but **without** a typed `attachments` entry: the Graph media id is not a durable `MediaItem` source and no served-media ingestion seam is reachable from a channel (see the inbound media design note). A consumer re-fetches bytes via `media_id` + operator credentials. Inbound **location** DOES land a typed `LocationElement`; **contacts**/**reactions** ride `params` |
 | Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel |
 | Template audio header unsupported | A `ChannelTemplate` maps `header_media` (image/video/document), `body_parameters`, and quick-reply/url `buttons` onto the template-message components. An **audio** `header_media` has no Cloud API template representation and is refused loudly (`ChannelInputError`); an audio interactive **header** on a notification is instead sent as its own message ahead of the interactive |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |

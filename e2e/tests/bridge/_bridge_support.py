@@ -100,6 +100,18 @@ class BridgeHarness:
         return self.stack.config.env["CHANNEL_SLACK_SIGNING_SECRET"]
 
     @property
+    def telegram(self) -> FakeTelegram:
+        """The telegram stub, present only on the media-bridge profile (raises otherwise)."""
+        assert self.fake_telegram is not None, "the telegram stub requires the media-bridge profile"
+        return self.fake_telegram
+
+    @property
+    def slack(self) -> FakeSlack:
+        """The slack stub, present only on the media-bridge profile (raises otherwise)."""
+        assert self.fake_slack is not None, "the slack stub requires the media-bridge profile"
+        return self.fake_slack
+
+    @property
     def telegram_our_identity(self) -> str:
         """The bot's numeric id (the digits before the ``:`` in the configured token) — a
         telegram channel route's ``our_identity`` and the identity a bridged turn is sent from."""
@@ -390,12 +402,24 @@ class BridgeHarness:
     # -- media inbound synthesis (media-bridge profile) -----------------------
 
     def telegram_inbound_photo(
-        self, *, chat_id: str, file_id: str, caption: str | None = None, file_size: int | None = None
+        self,
+        *,
+        chat_id: str,
+        file_id: str,
+        caption: str | None = None,
+        file_size: int | None = None,
+        update_id: int | None = None,
     ) -> SignedInbound:
-        """A genuinely-signed inbound photo update (an uncorrelated bridge message) from ``chat_id``."""
+        """A genuinely-signed inbound photo update (an uncorrelated bridge message) from ``chat_id``.
+        ``update_id`` may be pinned to replay the identical update (a vendor redelivery)."""
         assert self.fake_telegram is not None, "telegram_inbound_photo requires the media-bridge profile"
         return self.fake_telegram.build_inbound_photo(
-            secret=self.telegram_secret, chat_id=chat_id, file_id=file_id, caption=caption, file_size=file_size
+            secret=self.telegram_secret,
+            chat_id=chat_id,
+            file_id=file_id,
+            caption=caption,
+            file_size=file_size,
+            update_id=update_id,
         )
 
     def slack_inbound_files(
@@ -461,6 +485,21 @@ async def post_inbound(stack: TaiStack, path: str, inbound: SignedInbound, *, po
     url = f"http://{stack.host}:{port or stack.port_b}{path}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.post(url, content=inbound.body, headers=inbound.headers)
+
+
+# The served-media capability reference a bridged attachment carries: the route prefix + a 43-char
+# urlsafe-base64 stored-media id.
+MEDIA_REF_RE = re.compile(r"^/api/interactions/media/[A-Za-z0-9_-]{43}$")
+
+
+async def get_served_media(stack: TaiStack, url: str, *, port: int | None = None) -> Any:
+    """GET a served-media reference (``/api/interactions/media/<id>``, relative) off a replica
+    (default B). The capability id IS the secret, so no auth is carried. Returns the raw response."""
+    import httpx
+
+    full = f"http://{stack.host}:{port or stack.port_b}{url}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        return await client.get(full)
 
 
 async def whatsapp_get_verify(stack: TaiStack, params: dict[str, str], *, port: int | None = None) -> Any:

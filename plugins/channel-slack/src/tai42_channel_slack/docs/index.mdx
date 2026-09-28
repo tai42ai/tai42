@@ -49,15 +49,24 @@ participant utterance and are acknowledged without bridging.
 ## Inbound media
 
 A message that shares files (`subtype` `file_share`) bridges one turn per file, so
-a message with several files never drops any of them. Each file's `url_private`,
-`mimetype`, `name` and `size` become the opaque `media_*` entry-params on its turn
-(`media_kind`, `media_id`, `media_mime_type`, `media_filename`, `media_size`); the
-mime major type resolves the kind (`image`/`video`/`audio`, `application`/`text` →
-`document`, any other or missing type → `file`). The message text rides the first file's turn;
+a message with several files never drops any of them. Each file's bytes are fetched
+from Slack (the bot token authorizes the download and rides the request only) and
+ingested into the platform's served media: the turn carries a typed attachment whose
+`url` is the served `/api/interactions/media/<id>` reference, alongside the parity
+`media_*` entry-params (`media_kind`, `media_id` — the served id, `media_mime_type`,
+`media_sha256`, `media_filename` for a document, `media_size`). The mime major type
+resolves the kind (`image`/`video`/`audio`, `application`/`text` → `document`, any
+other or missing type → `file`). The message text rides the first bridged file's turn;
 every other turn gets a `[kind]` placeholder, so a caption-less share is never
-dropped as empty. A file exposing neither a fetchable `url_private` nor a `name`
-cannot be bridged — the participant gets a single generic notice and a platform
-event records the drop.
+dropped as empty.
+
+A fetch that fails temporarily (a Slack 5xx, a timeout, a torn download) makes the
+door answer non-2xx so Slack redelivers and the turn is ingested on the retry. A
+permanent failure — a missing or unreachable body, a file over the operator's byte
+cap, a disallowed type, or no media store configured — bridges no turn: the
+participant gets a single notice (`unsupported type`, `too large`, or `could not
+receive`) and a platform event records it, while the message's other files still
+bridge.
 
 ## Create a bridge route
 

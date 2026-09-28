@@ -80,6 +80,15 @@ BRIDGE_PER_ADDRESS_TURNS_PER_HOUR = 5
 BRIDGE_SYNC_DOOR_WAIT_SECONDS = 2
 
 
+# Media-ingest bounds for the inbound-media suites, pinned SMALL so the over-cap image case uses a
+# small body (a few KB over the cap) instead of multi-MB fixtures, while a tiny valid PNG/PDF
+# clears it. The reaper interval is pinned LOW so a retention-reaper pass lands within a test.
+BRIDGE_MEDIA_INGEST_MAX_IMAGE_BYTES = 8192
+
+
+BRIDGE_MEDIA_INGEST_REAPER_INTERVAL_SECONDS = 1
+
+
 def _bridge_twilio_env(res: StackResources, *, real: bool) -> dict[str, str]:
     if real:
         # HARNESS-MAP: TEST_TO -> default + sole allowlisted recipient; no API_BASE_URL
@@ -263,10 +272,16 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
             "tai42_channel_slack.register",
         ],
     }
+    # The blob provider the ingest chokepoint writes through is already live on the base stack (its
+    # ``storage_module`` = ``variants.storage.module`` registers ``tai42_storage_local``, rooted at
+    # ``STORAGE_LOCAL_ROOT_PATH`` from ``_base_env``); this profile only pins the ingest caps + the
+    # reaper cadence the media suites need.
     env = {
         **base.env,
         **_telegram_channel_env(res, real=switch.is_real("telegram")),
         **_slack_channel_env(res, real=switch.is_real("slack")),
+        "MEDIA_INGEST_MAX_IMAGE_BYTES": str(BRIDGE_MEDIA_INGEST_MAX_IMAGE_BYTES),
+        "MEDIA_INGEST_REAPER_INTERVAL_SECONDS": str(BRIDGE_MEDIA_INGEST_REAPER_INTERVAL_SECONDS),
     }
     return dataclasses.replace(
         base,
@@ -275,3 +290,16 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
         env=env,
         replica_b_origin_env_keys=[*base.replica_b_origin_env_keys, "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"],
     )
+
+
+def build_media_bridge_no_store_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The media-bridge profile with NO blob provider registered — the store-unavailable leg.
+
+    Identical to :func:`build_media_bridge_stack` but with the ``storage_module`` dropped from the
+    manifest, so the storage registry stays dead by default and the ingest chokepoint raises
+    ``MediaStoreUnavailableError`` — the channel then rejects the media with the
+    ``could_not_receive`` notice + event. Every other seam (channels, conversations backend, hooks)
+    is unchanged, so only the missing provider drives the outcome."""
+    base = build_media_bridge_stack(res, variants)
+    manifest = {key: value for key, value in base.manifest.items() if key != "storage_module"}
+    return dataclasses.replace(base, name="media-bridge-nostore", manifest=manifest)

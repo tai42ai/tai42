@@ -129,6 +129,7 @@ class _StubConversations:
     def __init__(self) -> None:
         self.accept_calls: list[dict[str, Any]] = []
         self.status_calls: list[dict[str, Any]] = []
+        self.rejected_calls: list[dict[str, Any]] = []
         self.accept_result: str = "msg-stub-id"
         self.accept_error: Exception | None = None
         self.status_error: Exception | None = None
@@ -150,6 +151,7 @@ class _StubConversations:
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        attachments: list[Any] | None = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -160,11 +162,25 @@ class _StubConversations:
                 "text": text,
                 "provider_message_id": provider_message_id,
                 "params": params,
+                "attachments": attachments,
             }
         )
         if self.accept_error is not None:
             raise self.accept_error
         return self.accept_result
+
+    async def notify_inbound_rejected(
+        self, *, channel_id: str, recipient: str, sender_identity: str | None, kind: str, reason: Any
+    ) -> None:
+        self.rejected_calls.append(
+            {
+                "channel_id": channel_id,
+                "recipient": recipient,
+                "sender_identity": sender_identity,
+                "kind": kind,
+                "reason": reason,
+            }
+        )
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: Any) -> None:
         self.status_calls.append({"channel": channel, "provider_message_id": provider_message_id, "status": status})
@@ -181,12 +197,52 @@ class _StubConversations:
             record.pending_receipt = None
 
 
+class _StubMedia:
+    """Stands in for the skeleton's ``app.media`` served-ingestion facet. A test queues one
+    ``IngestedMedia``-shaped result (or an error to raise) per media item and reads back the
+    recorded ``ingest_media`` call arguments."""
+
+    def __init__(self) -> None:
+        self.ingest_calls: list[dict[str, Any]] = []
+        self.ingest_results: list[Any] = []
+
+    async def ingest_media(
+        self,
+        *,
+        source: Any,
+        kind_hint: Any,
+        declared_mime: str | None,
+        filename: str | None,
+        declared_size: int | None,
+        integrity_sha256: str | None,
+        origin: Any,
+    ) -> Any:
+        self.ingest_calls.append(
+            {
+                "source": source,
+                "kind_hint": kind_hint,
+                "declared_mime": declared_mime,
+                "filename": filename,
+                "declared_size": declared_size,
+                "integrity_sha256": integrity_sha256,
+                "origin": origin,
+            }
+        )
+        if not self.ingest_results:
+            raise AssertionError("_StubMedia: no queued ingest result")
+        item = self.ingest_results.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.channels = _StubChannels()
         self.clients = _StubClients()
         self.http = _StubHttp()
         self.conversations = _StubConversations()
+        self.media = _StubMedia()
 
 
 _stub_app = _StubApp()
@@ -263,6 +319,7 @@ def stub_app() -> Iterator[_StubApp]:
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
+    _stub_app.media = _StubMedia()
     channels.inbound_calls.clear()
     channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
     channels.inbound_error = None

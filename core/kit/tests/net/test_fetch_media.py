@@ -22,7 +22,8 @@ import pytest
 
 from tai42_kit.logging.logger import _HttpxRequestLineRedactor, setup_logging
 from tai42_kit.logging.settings import LoggingSettings
-from tai42_kit.net import MediaFetchError, fetch_media, url_guard
+from tai42_kit.net import MediaFetchError, MediaStream, fetch_media, open_media_stream, url_guard
+from tai42_kit.net.fetch_media import _content_length, _media_type
 from tai42_kit.net.request_body import RequestBodyTooLargeError
 from tai42_kit.net.url_guard import UrlGuardError, UrlGuardSettings
 
@@ -60,7 +61,9 @@ class _MediaHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(config["status"])
         if config["content_type"] is not None:
             self.send_header("Content-Type", config["content_type"])
-        self.send_header("Content-Length", str(len(body)))
+        if config["include_content_length"]:
+            override = config["content_length_override"]
+            self.send_header("Content-Length", override if override is not None else str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -78,9 +81,21 @@ class _MediaServer:
         return self._server.records  # type: ignore[attr-defined]
 
     def configure(
-        self, *, body: bytes = b"", status: int = 200, content_type: str | None = "application/octet-stream"
+        self,
+        *,
+        body: bytes = b"",
+        status: int = 200,
+        content_type: str | None = "application/octet-stream",
+        include_content_length: bool = True,
+        content_length_override: str | None = None,
     ) -> None:
-        self._server.config = {"body": body, "status": status, "content_type": content_type}  # type: ignore[attr-defined]
+        self._server.config = {  # type: ignore[attr-defined]
+            "body": body,
+            "status": status,
+            "content_type": content_type,
+            "include_content_length": include_content_length,
+            "content_length_override": content_length_override,
+        }
 
     def redirect(self, from_path: str, to_location: str, *, status: int = 307) -> None:
         self._server.redirects[from_path] = (status, to_location)  # type: ignore[attr-defined]
@@ -89,7 +104,13 @@ class _MediaServer:
 def _serve() -> Iterator[_MediaServer]:
     server = http.server.HTTPServer(("127.0.0.1", 0), _MediaHandler)
     port = server.server_address[1]
-    server.config = {"body": b"", "status": 200, "content_type": "application/octet-stream"}  # type: ignore[attr-defined]
+    server.config = {  # type: ignore[attr-defined]
+        "body": b"",
+        "status": 200,
+        "content_type": "application/octet-stream",
+        "include_content_length": True,
+        "content_length_override": None,
+    }
     server.redirects = {}  # type: ignore[attr-defined]
     server.records = []  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -212,15 +233,16 @@ async def test_fetch_media_follow_redirects(
     assert [r["path"] for r in media_server_2.records] == ["/final"]
 
 
+@pytest.mark.parametrize("status", [302, 307])
 async def test_fetch_media_unfollowed_redirect_is_a_fault(
-    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer, media_server_2: _MediaServer
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer, media_server_2: _MediaServer, status: int
 ) -> None:
     """With ``follow_redirects`` off, a redirect is a permanent fault, not a silent empty body."""
     _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
-    media_server.redirect("/start", f"{media_server_2.base_url}/final")
+    media_server.redirect("/start", f"{media_server_2.base_url}/final", status=status)
     with pytest.raises(MediaFetchError) as ei:
         await fetch_media(f"{media_server.base_url}/start", max_bytes=1024)
-    assert ei.value.status_code == 307
+    assert ei.value.status_code == status
     assert ei.value.transient is False
     assert media_server_2.records == []
 
@@ -365,20 +387,21 @@ async def test_fetch_media_error_text_never_contains_url_or_token(
     assert "404" in log_text
 
 
-async def test_fetch_media_status_error_transience(monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer) -> None:
-    """A 5xx is transient (redeliver); a 4xx is permanent (notify)."""
+@pytest.mark.parametrize(
+    ("status", "transient"),
+    [(503, True), (408, True), (429, True), (404, False), (410, False)],
+)
+async def test_fetch_media_status_error_transience(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer, status: int, transient: bool
+) -> None:
+    """A 5xx, a 408 (Request Timeout) or a 429 (Too Many Requests, a vendor throttle) is transient
+    (redeliver); every other 4xx is permanent (notify)."""
     _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
-    media_server.configure(body=b"boom", status=503, content_type="text/plain")
-    with pytest.raises(MediaFetchError) as ei_5xx:
+    media_server.configure(body=b"boom", status=status, content_type="text/plain")
+    with pytest.raises(MediaFetchError) as ei:
         await fetch_media(f"{media_server.base_url}/x", max_bytes=1024)
-    assert ei_5xx.value.status_code == 503
-    assert ei_5xx.value.transient is True
-
-    media_server.configure(body=b"nope", status=404, content_type="text/plain")
-    with pytest.raises(MediaFetchError) as ei_4xx:
-        await fetch_media(f"{media_server.base_url}/x", max_bytes=1024)
-    assert ei_4xx.value.status_code == 404
-    assert ei_4xx.value.transient is False
+    assert ei.value.status_code == status
+    assert ei.value.transient is transient
 
 
 async def test_fetch_media_transport_fault_is_redacted_and_transient(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -476,13 +499,234 @@ async def test_httpx_request_line_is_redacted_on_success(
     assert len(redactors) == 1
 
 
-def test_fetch_media_first_leaves_fetch_url_callable():
-    """Resolving ``fetch_media`` before ``fetch_url`` must not turn ``net.fetch_url`` into a module."""
+def test_media_symbol_first_leaves_fetch_url_callable():
+    """Resolving a media symbol before ``fetch_url`` must not turn ``net.fetch_url`` into a module."""
     probe = (
-        "from tai42_kit.net import fetch_media\n"
+        "from tai42_kit.net import open_media_stream\n"
         "from tai42_kit.net import fetch_url\n"
+        "from tai42_kit.net import MediaStream, MediaFetchError, fetch_media\n"
         "import tai42_kit.net as net\n"
         "assert callable(fetch_url) and callable(net.fetch_url), type(net.fetch_url)\n"
-        "assert callable(fetch_media)\n"
+        "assert callable(fetch_media) and callable(open_media_stream)\n"
+        "assert isinstance(MediaStream, type) and isinstance(MediaFetchError, type)\n"
     )
     subprocess.run([sys.executable, "-c", probe], check=True)
+
+
+def test_media_type_strips_parameters_and_lowercases() -> None:
+    """``_media_type`` returns the bare media type, parameters stripped and lower-cased; absent/empty → None."""
+    assert _media_type(httpx.Response(200, headers=[("Content-Type", "image/PNG; charset=binary")])) == "image/png"
+    assert _media_type(httpx.Response(200, headers=[("Content-Type", "application/pdf")])) == "application/pdf"
+    assert _media_type(httpx.Response(200)) is None
+    assert _media_type(httpx.Response(200, headers=[("Content-Type", "  ; x=1")])) is None
+
+
+def test_content_length_parses_absent_and_malformed() -> None:
+    """``_content_length`` parses a numeric header, returns None when absent, and faults (permanent) on garbage."""
+    assert _content_length(httpx.Response(200, headers=[("Content-Length", "1234")]), "h") == 1234
+    assert _content_length(httpx.Response(200), "h") is None
+    with pytest.raises(MediaFetchError) as ei:
+        _content_length(httpx.Response(200, headers=[("Content-Length", "not-a-number")]), "api.example.com")
+    assert ei.value.transient is False
+    assert ei.value.status_code is None
+    assert ei.value.__cause__ is None
+    assert ei.value.__context__ is None
+
+
+async def test_open_media_stream_streams_chunks_in_order(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """The body is delivered incrementally over ``chunks`` and reassembles, in order, to the sent bytes."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    body = bytes(i % 256 for i in range(512 * 1024))
+    media_server.configure(body=body, content_type="video/mp4")
+    async with open_media_stream(f"{media_server.base_url}/obj") as stream:
+        assert isinstance(stream, MediaStream)
+        assert stream.content_type == "video/mp4"
+        assert stream.content_length == len(body)
+        assert stream.host == "127.0.0.1"
+        collected = [chunk async for chunk in stream.chunks]
+    assert len(collected) >= 2  # a half-MiB body over loopback arrives in several reads
+    assert b"".join(collected) == body
+
+
+async def test_open_media_stream_parses_content_type_and_length(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """The final response's Content-Type (params stripped, lower-cased) and Content-Length reach the stream."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.configure(body=b"data", content_type="IMAGE/PNG; charset=utf-8")
+    async with open_media_stream(f"{media_server.base_url}/obj") as stream:
+        assert stream.content_type == "image/png"
+        assert stream.content_length == 4
+
+
+async def test_open_media_stream_content_type_and_length_absent_are_none(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """A response without Content-Type/Content-Length yields ``None`` for both, body read to close."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.configure(body=b"body-bytes", content_type=None, include_content_length=False)
+    async with open_media_stream(f"{media_server.base_url}/obj") as stream:
+        assert stream.content_type is None
+        assert stream.content_length is None
+        assert b"".join([chunk async for chunk in stream.chunks]) == b"body-bytes"
+
+
+async def test_open_media_stream_status_error_transience(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """A 5xx at open is a transient fault; a 4xx at open is permanent — both raised before any chunk."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.configure(body=b"boom", status=503, content_type="text/plain")
+    with pytest.raises(MediaFetchError) as ei_5xx:
+        async with open_media_stream(f"{media_server.base_url}/x"):
+            pass
+    assert ei_5xx.value.status_code == 503
+    assert ei_5xx.value.transient is True
+
+    media_server.configure(body=b"nope", status=404, content_type="text/plain")
+    with pytest.raises(MediaFetchError) as ei_4xx:
+        async with open_media_stream(f"{media_server.base_url}/x"):
+            pass
+    assert ei_4xx.value.status_code == 404
+    assert ei_4xx.value.transient is False
+
+
+async def test_open_media_stream_transport_fault_is_redacted_and_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connection fault at open re-wraps as a transient ``MediaFetchError`` carrying no URL/token."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    closed = http.server.HTTPServer(("127.0.0.1", 0), _MediaHandler)
+    port = closed.server_address[1]
+    closed.server_close()
+    token = "1234567:AAtoken-SECRET"
+    with pytest.raises(MediaFetchError) as ei:
+        async with open_media_stream(f"http://127.0.0.1:{port}/file/bot{token}/x"):
+            pass
+    exc = ei.value
+    assert exc.status_code is None
+    assert exc.transient is True
+    assert token not in str(exc)
+    assert exc.__context__ is None
+    assert exc.__cause__ is None
+
+
+@pytest.mark.parametrize("url", ["file:///etc/hostname", "data:text/plain;base64,SGk="])
+async def test_open_media_stream_unsupported_scheme_is_permanent_and_url_free(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """An unsupported URL scheme faults permanently (not transient) with no URL in the chain.
+
+    httpx raises ``UnsupportedProtocol`` (an ``httpx.TransportError`` subclass) for a scheme it
+    cannot dispatch; a redelivery would carry the same scheme, so the fault must be permanent —
+    else the vendor redelivers a malformed URL forever.
+    """
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    with pytest.raises(MediaFetchError) as ei:
+        async with open_media_stream(url):
+            pass
+    exc = ei.value
+    assert exc.transient is False
+    assert exc.status_code is None
+    chain_text = ""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        chain_text += f"{current!s}{current!r}"
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    assert url not in chain_text
+    assert "/etc/hostname" not in chain_text
+
+
+async def test_open_media_stream_mid_body_disconnect_raises_from_iterator(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """A body that ends before its declared length faults from ``chunks``, transient and URL-free."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    token = "1234567:AAtoken-SECRET"
+    # Declares far more bytes than it writes, then the loopback (HTTP/1.0) closes the socket.
+    media_server.configure(body=b"partial", content_type="image/png", content_length_override="100000")
+
+    async def _drain(url: str) -> None:
+        async with open_media_stream(url) as stream:
+            async for _chunk in stream.chunks:
+                pass
+
+    with pytest.raises(MediaFetchError) as ei:
+        await _drain(f"{media_server.base_url}/file/bot{token}/x.png")
+    exc = ei.value
+    assert exc.transient is True
+    assert exc.status_code is None
+    chain_text = ""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        chain_text += f"{current!s}{current!r}"
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    assert token not in chain_text
+    assert "/file/bot" not in chain_text
+
+
+async def test_open_media_stream_drops_credentials_on_cross_origin_redirect(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer, media_server_2: _MediaServer
+) -> None:
+    """On the stream path a cross-origin hop is sent with no header and no ``auth``; a same-origin hop keeps them."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.redirect("/start", f"{media_server_2.base_url}/final")
+    media_server_2.configure(body=b"cross", content_type="image/png")
+    async with open_media_stream(
+        f"{media_server.base_url}/start",
+        headers={"X-Vendor-Token": "SECRET"},
+        auth=("user", "pass"),
+        follow_redirects=True,
+    ) as stream:
+        assert b"".join([chunk async for chunk in stream.chunks]) == b"cross"
+    # base64("user:pass") == dXNlcjpwYXNz
+    assert media_server.records[0]["authorization"] == "Basic dXNlcjpwYXNz"  # first hop keeps auth
+    assert media_server.records[0]["x-vendor-token"] == "SECRET"  # and the caller header
+    assert media_server_2.records[0]["authorization"] is None  # cross-origin hop dropped auth
+    assert media_server_2.records[0]["x-vendor-token"] is None  # and the caller header
+
+    media_server.redirect("/again", f"{media_server.base_url}/local-final")
+    media_server.configure(body=b"same", content_type="image/png")
+    async with open_media_stream(
+        f"{media_server.base_url}/again",
+        headers={"X-Vendor-Token": "SECRET"},
+        follow_redirects=True,
+    ) as stream:
+        async for _chunk in stream.chunks:
+            pass
+    local_final = [r for r in media_server.records if r["path"] == "/local-final"]
+    assert local_final[0]["x-vendor-token"] == "SECRET"  # same-origin hop keeps it
+
+
+async def test_open_media_stream_closes_the_response_on_early_exit(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """Leaving the context after reading one chunk (body not drained) still closes the response."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    body = bytes(i % 256 for i in range(512 * 1024))
+    media_server.configure(body=body, content_type="video/mp4")
+
+    closed: list[httpx.Response] = []
+    original_aclose = httpx.Response.aclose
+
+    async def _spy_aclose(self: httpx.Response) -> None:
+        closed.append(self)
+        await original_aclose(self)
+
+    monkeypatch.setattr(httpx.Response, "aclose", _spy_aclose)
+    async with open_media_stream(f"{media_server.base_url}/obj") as stream:
+        async for _chunk in stream.chunks:
+            break  # leave the body undrained
+    assert closed  # the exit stack closed the final response even though it was not read to completion
+
+
+async def test_open_media_stream_ssrf_blocks_private_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A URL resolving to a private/loopback address is blocked by the pinning transport at open."""
+    _enable(monkeypatch)  # loopback NOT opted in
+    with pytest.raises(UrlGuardError):
+        async with open_media_stream("http://10.0.0.1/obj"):
+            pass
