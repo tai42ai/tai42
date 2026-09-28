@@ -62,10 +62,12 @@ def test_declared_destructive_route_emits_x_destructive():
     )
 
     # The emitter reads the registry; find the recorded route directly and emit.
+    from tai42_skeleton.cli.openapi import _component_schemas, _route_model_modes
     from tai42_skeleton.cli.openapi import _operation as emit_operation
 
     meta = next(r for r in route_registry.routes() if r.path == "/api/things/wipe")
-    op = emit_operation(meta, "POST", {})
+    schemas = _component_schemas(_route_model_modes([meta]), {})
+    op = emit_operation(meta, "POST", schemas)
     assert op["x-destructive"] is True
 
 

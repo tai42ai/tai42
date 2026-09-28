@@ -13,6 +13,8 @@ from tai42_skeleton.cli.openapi import (
 )
 from tai42_skeleton.operations.conversations import MAX_THREAD_PAGE
 
+from .conftest import schemas_for, schemas_for_pairs
+
 
 def test_the_thread_read_doors_document_their_query_parameters(spec: dict) -> None:
     # Both doors parse their query at the HTTP edge, so nothing else tells a generated
@@ -249,7 +251,8 @@ def test_a_multi_type_optional_query_param_keeps_its_real_branches() -> None:
     class _Multi(BaseModel):
         value: str | int | None = Field(default=None, description="Either shape, or omitted.")
 
-    (param,) = _query_parameters(_Multi, {})
+    schemas, _ = schemas_for_pairs([(_Multi, "validation")])
+    (param,) = _query_parameters(_Multi, schemas)
     assert param["required"] is False
     assert param["description"] == "Either shape, or omitted."
     assert param["schema"]["anyOf"] == [{"type": "string"}, {"type": "integer"}]
@@ -302,8 +305,8 @@ def test_query_model_composes_with_a_write_body_without_conflict() -> None:
     meta = _probe_meta(
         "/api/_probe/{id}", method="POST", action="write", reads_body=True, request_model=_Body, query_model=_Query
     )
-    components: dict = {}
-    op = _emit_operation(meta, "POST", components)
+    schemas, _ = schemas_for([meta])
+    op = _emit_operation(meta, "POST", schemas)
     assert op["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith("/_Body")
     params = {p["name"]: p for p in op["parameters"]}
     assert params["id"]["in"] == "path"
@@ -324,13 +327,15 @@ def test_emission_refuses_a_route_whose_query_sources_claim_one_name() -> None:
         token: str = Field(description="The same query key, declared twice.")
 
     meta = _probe_meta("/api/_probe", request_model=_Read, query_model=_Query)
+    schemas, _ = schemas_for([meta])
     with pytest.raises(ValueError, match=r"GET /api/_probe declares parameter 'token' in query twice"):
-        _emit_operation(meta, "GET", {})
+        _emit_operation(meta, "GET", schemas)
 
 
 def test_emission_refuses_a_route_whose_path_repeats_a_parameter() -> None:
     # Path parameters take part in the same uniqueness scan: a path naming one twice emits two
     # identical ``in: path`` entries, which is equally invalid and equally loud.
     meta = _probe_meta("/api/_probe/{id}/nested/{id}")
+    schemas, _ = schemas_for([meta])
     with pytest.raises(ValueError, match=r"declares parameter 'id' in path twice"):
-        _emit_operation(meta, "GET", {})
+        _emit_operation(meta, "GET", schemas)

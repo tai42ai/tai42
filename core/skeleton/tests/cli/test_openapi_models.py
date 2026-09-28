@@ -5,6 +5,7 @@ and the ``tai openapi`` command."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 
@@ -12,20 +13,32 @@ import pytest
 from click.testing import CliRunner
 from jsonschema import Draft202012Validator
 from openapi_spec_validator import validate
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, RootModel, computed_field
 from tai42_cli import app as app_module
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
 from tai42_skeleton.app.route_registry import RouteMetadata, method_to_action
 from tai42_skeleton.cli.openapi import (
     _assign_component,
-    _register_model,
+    _component_schemas,
     _success_response,
     build_openapi_spec,
 )
 from tai42_skeleton.cli.openapi import _operation as _emit_operation
 
-from .conftest import _operation
+from .conftest import _operation, schemas_for
+
+
+def _data_ref(op: dict) -> str:
+    """The ``$ref`` a success operation points its enveloped ``{"data": ...}`` at."""
+    return op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+
+
+def _dangling_refs(document: dict) -> list[str]:
+    """Every ``#/components/schemas`` ``$ref`` in ``document`` with no matching component."""
+    schemas = document.get("components", {}).get("schemas", {})
+    refs = set(re.findall(r'"#/components/schemas/([^"]+)"', json.dumps(document)))
+    return sorted(ref for ref in refs if ref not in schemas)
 
 
 def test_runs_export_documents_both_csv_and_json_download(spec: dict) -> None:
@@ -36,37 +49,41 @@ def test_runs_export_documents_both_csv_and_json_download(spec: dict) -> None:
     assert "application/octet-stream" in content
 
 
-def test_register_model_rejects_a_reserved_envelope_name() -> None:
+def test_a_model_claiming_a_reserved_envelope_name_raises() -> None:
+    # A model whose component name would collide with a reserved response-envelope name
+    # (``Error`` / ``ReloadingError``) must not silently overwrite the envelope: the merge
+    # of its generated definition raises LOUDLY.
     class Error(BaseModel):
         detail: str
 
     with pytest.raises(ValueError, match="reserved"):
-        _register_model(Error, {})
+        _component_schemas([(Error, "serialization")], {})
 
 
-def test_register_model_rejects_a_conflicting_same_name_schema() -> None:
+def test_assign_component_rejects_a_conflicting_same_name_schema() -> None:
     components: dict = {}
     _assign_component(components, "Widget", {"type": "object", "properties": {"a": {"type": "integer"}}})
     with pytest.raises(ValueError, match="collision"):
         _assign_component(components, "Widget", {"type": "object", "properties": {"b": {"type": "string"}}})
 
 
-def test_register_model_allows_idempotent_reregistration() -> None:
-    class Gadget(BaseModel):
-        a: int
-
+def test_assign_component_allows_idempotent_reregistration() -> None:
+    # A component name mapping to an IDENTICAL schema is a no-op, never a collision — the
+    # same nested model reached from two definitions merges once.
     components: dict = {}
-    assert _register_model(Gadget, components) == "Gadget"
-    # The same model reached from a second route registers identically — no raise.
-    assert _register_model(Gadget, components) == "Gadget"
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+    _assign_component(components, "Gadget", schema)
+    _assign_component(components, "Gadget", dict(schema))
+    assert components["Gadget"] == schema
 
 
 # -- no_body_reason: the reasoned no-body declaration surfaces in the spec ------
 
 
-def _typed_meta(response_model, *, no_body_reason=None, enveloped=True) -> RouteMetadata:
-    """A synthetic core JSON route carrying ``response_model`` (or a reasoned no-body),
-    for the emitter's per-operation/success builders — no product surface loaded."""
+def _typed_meta(response_model, *, request_model=None, no_body_reason=None, enveloped=True) -> RouteMetadata:
+    """A synthetic core JSON route carrying ``response_model`` (or a reasoned no-body) and an
+    optional ``request_model`` body, for the emitter's per-operation/success builders — no
+    product surface loaded."""
     return RouteMetadata(
         path="/api/_probe",
         methods=("POST",),
@@ -75,7 +92,7 @@ def _typed_meta(response_model, *, no_body_reason=None, enveloped=True) -> Route
         description="",
         tags=("probe",),
         authed=True,
-        request_model=None,
+        request_model=request_model,
         response_model=response_model,
         reload_gated=False,
         reads_body=False,
@@ -95,7 +112,8 @@ def test_no_body_reason_becomes_the_success_description_and_extension() -> None:
     # schema is a described, declared exception rather than a silent empty data.
     reason = "serves a raw streaming body, not the {data} envelope"
     meta = _typed_meta(None, no_body_reason=reason)
-    response = _success_response(meta, "POST", {})
+    schemas, _ = schemas_for([meta])
+    response = _success_response(meta, "POST", schemas)
     assert response["description"] == reason
     assert response["x-no-body"] == reason
     # The data schema stays the empty None-branch object (no reshaping of the wire).
@@ -108,8 +126,8 @@ def test_typed_route_success_carries_no_no_body_extension() -> None:
         value: int
 
     meta = _typed_meta(_Body)
-    components: dict = {}
-    response = _success_response(meta, "POST", components)
+    schemas, _ = schemas_for([meta])
+    response = _success_response(meta, "POST", schemas)
     assert "x-no-body" not in response
     assert response["description"] == "Success."
     assert response["content"]["application/json"]["schema"]["properties"]["data"] == {
@@ -129,8 +147,8 @@ def test_unwrapped_model_renders_as_a_top_level_body_schema() -> None:
         status: str
 
     meta = _typed_meta(_Raw, enveloped=False)
-    components: dict = {}
-    response = _success_response(meta, "POST", components)
+    schemas, components = schemas_for([meta])
+    response = _success_response(meta, "POST", schemas)
     schema = response["content"]["application/json"]["schema"]
     assert schema == {"$ref": "#/components/schemas/_Raw"}
     assert "properties" not in schema  # no data envelope
@@ -158,8 +176,8 @@ def test_the_four_raw_json_routes_emit_their_real_top_level_schema() -> None:
         assert meta is not None, f"{path} not registered"
         assert meta.enveloped is False, f"{path} is not declared enveloped=False"
         assert meta.no_body_reason is None, f"{path} still carries a no_body_reason"
-        components: dict = {}
-        op = _emit_operation(meta, method, components)
+        schemas, components = schemas_for([meta])
+        op = _emit_operation(meta, method, schemas)
         schema = op["responses"]["200"]["content"]["application/json"]["schema"]
         assert schema == {"$ref": f"#/components/schemas/{model_name}"}, path
         assert "x-no-body" not in op["responses"]["200"], path
@@ -173,9 +191,9 @@ def test_opaque_json_root_model_renders_a_resolvable_ref() -> None:
     from tai42_contract.app.responses import OpaqueJson
 
     meta = _typed_meta(OpaqueJson)
-    components: dict = {}
-    op = _emit_operation(meta, "POST", components)
-    ref = op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+    schemas, components = schemas_for([meta])
+    op = _emit_operation(meta, "POST", schemas)
+    ref = _data_ref(op)
     assert ref == "#/components/schemas/OpaqueJson"
     # The named subclass registers under its own stable name and its schema matches
     # the model's own JSON schema (a bare alias would register the ugly RootModel name).
@@ -191,9 +209,9 @@ def test_named_root_model_list_subclass_renders_and_resolves() -> None:
         pass
 
     meta = _typed_meta(PointList)
-    components: dict = {}
-    op = _emit_operation(meta, "POST", components)
-    ref = op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+    schemas, components = schemas_for([meta])
+    op = _emit_operation(meta, "POST", schemas)
+    ref = _data_ref(op)
     assert ref == "#/components/schemas/PointList"
     # The component resolves and its members' $defs are registered (no dangling ref).
     assert components["PointList"] == {
@@ -216,11 +234,212 @@ def test_already_typed_core_models_render_their_ref() -> None:
     from tai42_skeleton.operations.backend import WorkerListing
 
     for model in (ProjectionResult, WorkerListing, FleetResult):
-        components: dict = {}
-        op = _emit_operation(_typed_meta(model), "POST", components)
-        ref = op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["data"]["$ref"]
+        meta = _typed_meta(model)
+        schemas, components = schemas_for([meta])
+        op = _emit_operation(meta, "POST", schemas)
+        ref = _data_ref(op)
         assert ref == f"#/components/schemas/{model.__name__}"
         assert model.__name__ in components
+
+
+# -- serialization vs validation: computed fields and the -Input/-Output split --
+
+
+def test_response_computed_field_is_present_and_required() -> None:
+    # A response describes what the server EMITS: a @computed_field is serialized on every
+    # response, so it appears in the response component's ``properties`` AND its ``required``
+    # — a validation-mode schema would omit it entirely.
+    class WithComputed(BaseModel):
+        reachable: bool = True
+
+        @computed_field  # type: ignore[prop-decorator]
+        @property
+        def ok(self) -> bool:
+            return self.reachable
+
+    meta = _typed_meta(WithComputed)
+    schemas, components = schemas_for([meta])
+    op = _emit_operation(meta, "POST", schemas)
+    component = components[_data_ref(op).rsplit("/", 1)[-1]]
+    assert "ok" in component["properties"]
+    assert "ok" in component["required"]
+
+
+def test_dual_role_model_splits_into_input_and_output_components() -> None:
+    # A model used as BOTH a request body and a response, whose validation and serialization
+    # schemas differ (a @computed_field is serialized but never accepted on input), is split
+    # into pydantic's ``-Input`` and ``-Output`` components: the request body $refs ``-Input``,
+    # the response $refs ``-Output``, and every $ref resolves.
+    class Dual(BaseModel):
+        value: int
+
+        @computed_field  # type: ignore[prop-decorator]
+        @property
+        def derived(self) -> int:
+            return self.value * 2
+
+    meta = _typed_meta(Dual, request_model=Dual)
+    schemas, components = schemas_for([meta])
+    op = _emit_operation(meta, "POST", schemas)
+
+    body_ref = op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    assert body_ref == "#/components/schemas/Dual-Input"
+    assert _data_ref(op) == "#/components/schemas/Dual-Output"
+
+    assert "derived" not in components["Dual-Input"]["properties"]
+    assert "derived" in components["Dual-Output"]["properties"]
+    assert "derived" in components["Dual-Output"]["required"]
+
+    document = {"paths": {"/api/_probe": {"post": op}}, "components": {"schemas": components}}
+    assert _dangling_refs(document) == []
+
+
+def test_response_only_model_keeps_its_bare_name() -> None:
+    # A model used in a single mode is not split: a response-only model keeps its bare name,
+    # never gaining an ``-Output`` suffix.
+    class SoloResponse(BaseModel):
+        value: int
+
+    meta = _typed_meta(SoloResponse)
+    schemas, components = schemas_for([meta])
+    op = _emit_operation(meta, "POST", schemas)
+    assert _data_ref(op) == "#/components/schemas/SoloResponse"
+    assert "SoloResponse" in components
+    assert "SoloResponse-Output" not in components
+
+
+def test_full_spec_serializes_responses_and_leaves_no_dangling_ref(spec: dict) -> None:
+    # The real registry, emitted through the CLI's own entry point: FleetResult's
+    # @computed_field ``ok`` is present and required in its response component (the server
+    # always serializes it), and no $ref anywhere in the document dangles.
+    fleet = spec["components"]["schemas"]["FleetResult"]
+    assert "ok" in fleet["properties"]
+    assert "ok" in fleet["required"]
+    assert _dangling_refs(spec) == []
+
+
+def test_every_component_is_referenced(spec: dict) -> None:
+    # Every published component is reachable from a $ref in paths (transitively), or is one of
+    # the reserved response-envelope names the emitter builds and references itself. A query
+    # model is inlined as parameters and its own top-level schema is never $ref'd, so it must
+    # not leak into the published components. And no component name is a module-qualified
+    # pydantic name (containing ``__``), which would expose an internal module path.
+    from tai42_skeleton.cli.openapi import _RESERVED_SCHEMA_NAMES
+
+    schemas = spec["components"]["schemas"]
+
+    # Transitive reachability from paths, recomputed independently of the emitter's own walk.
+    reachable = set(_RESERVED_SCHEMA_NAMES)
+    frontier = list(re.findall(r'"#/components/schemas/([^"]+)"', json.dumps(spec["paths"])))
+    while frontier:
+        name = frontier.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        component = schemas.get(name)
+        if component is None:
+            continue
+        frontier.extend(re.findall(r'"#/components/schemas/([^"]+)"', json.dumps(component)))
+
+    unreferenced = sorted(name for name in schemas if name not in reachable)
+    assert unreferenced == [], f"unreferenced components leaked into the spec: {unreferenced}"
+
+    module_qualified = sorted(name for name in schemas if "__" in name)
+    assert module_qualified == [], f"module-qualified component names leaked: {module_qualified}"
+
+
+def test_query_only_model_is_not_published_but_a_referenced_nested_model_is() -> None:
+    # A query model is inlined as parameters and its own top-level schema is never $ref'd, so
+    # the prune drops it from the published components. A nested model one of its fields
+    # references rides a $ref in that field's parameter schema, so it stays a component.
+    from tai42_skeleton.cli.openapi import _openapi_path, _referenced_components
+
+    class QNested(BaseModel):
+        depth: int
+
+    class OnlyQuery(BaseModel):
+        flag: bool = False
+        nested: QNested
+
+    meta = RouteMetadata(
+        path="/api/_probe",
+        methods=("GET",),
+        name="_probe",
+        summary="probe",
+        description="",
+        tags=("probe",),
+        authed=True,
+        request_model=None,
+        response_model=None,
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(),
+        success_status=200,
+        additional_success_statuses=(),
+        success_media_types={"GET": ("application/json",)},
+        action="read",
+        query_model=OnlyQuery,
+    )
+    schemas, components = schemas_for([meta])
+    op = _emit_operation(meta, "GET", schemas)
+
+    param_names = {p["name"] for p in op["parameters"]}
+    assert param_names == {"flag", "nested"}
+    nested_param = next(p for p in op["parameters"] if p["name"] == "nested")
+    assert nested_param["schema"] == {"$ref": "#/components/schemas/QNested"}
+
+    # Both definitions are generated and available to the resolver; the prune keeps only what
+    # the assembled paths reference.
+    assert "OnlyQuery" in components
+    assert "QNested" in components
+    paths = {_openapi_path(meta.path): {"get": op}}
+    reachable = _referenced_components(paths, components)
+    published = {name for name in components if name in reachable}
+    assert "OnlyQuery" not in published  # the query model's own schema does not leak
+    assert "QNested" in published  # a $defs entry a parameter references stays
+
+
+def test_variant_reached_only_through_a_discriminator_mapping_survives_the_prune() -> None:
+    # OpenAPI 3.1 carries a reference not only as a ``$ref`` string but also as each
+    # ``#/components/schemas/<name>`` value of a ``discriminator.mapping`` object. A variant
+    # reachable ONLY through such a mapping value (no sibling ``$ref``) must still be kept by
+    # the reachability prune.
+    from tai42_skeleton.cli.openapi import _referenced_components
+
+    components = {
+        "Envelope": {
+            "type": "object",
+            "properties": {"body": {"$ref": "#/components/schemas/Union"}},
+        },
+        "Union": {
+            "oneOf": [{"type": "object"}],
+            "discriminator": {
+                "propertyName": "kind",
+                "mapping": {"only": "#/components/schemas/MappingOnlyVariant"},
+            },
+        },
+        "MappingOnlyVariant": {
+            "type": "object",
+            "properties": {"kind": {"type": "string"}},
+        },
+    }
+    paths = {
+        "/api/_probe": {
+            "get": {
+                "responses": {
+                    "200": {
+                        "description": "ok",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}},
+                    }
+                }
+            }
+        }
+    }
+
+    reachable = _referenced_components(paths, components)
+    # The variant hangs off the union solely through the discriminator mapping value, yet the
+    # walker follows it, so the prune keeps it.
+    assert "MappingOnlyVariant" in reachable
 
 
 def test_error_schema_documents_the_optional_machine_readable_code(spec: dict) -> None:
@@ -262,16 +481,21 @@ def test_body_routes_declare_a_request_body(spec: dict, api_routes: list[RouteMe
     # A requestBody is documented ONLY for a body-reading (write) method. A read method
     # (GET/HEAD) parses its typed parameters from the query string, so even when its
     # operation carries a ``request_model`` it documents no body — a GET request body
-    # would misdocument the endpoint.
+    # would misdocument the endpoint. A write body references its model's VALIDATION-mode
+    # component: its bare name, or the ``-Input`` component when the model's validation and
+    # serialization schemas differ.
+    schemas = spec["components"]["schemas"]
     for meta in api_routes:
         if meta.request_model is None:
             continue
+        name = meta.request_model.__name__
         for method in meta.methods:
             op = _operation(spec, meta, method)
             if method_to_action(method) == "write":
                 ref = op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
-                assert ref.endswith("/" + meta.request_model.__name__)
-                assert meta.request_model.__name__ in spec["components"]["schemas"]
+                component = ref.rsplit("/", 1)[-1]
+                assert component in (name, f"{name}-Input"), f"{meta.path} body $ref {ref}"
+                assert component in schemas
             else:
                 assert "requestBody" not in op, f"{method} {meta.path} must not document a request body"
 
