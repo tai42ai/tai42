@@ -74,7 +74,8 @@ def assert_real_selection_ready(settings: HarnessSettings, environ: Mapping[str,
         )
 
 
-_TARGET = pytest.StashKey[Target | None]()
+# The e2e target this pytest process drives, resolved once in ``pytest_configure``.
+_target: Target | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -98,7 +99,8 @@ def pytest_configure(config: pytest.Config) -> None:
             target = fetch_kinds(load_target(settings.target, config.rootpath / "targets"))
         except TargetError as exc:
             pytest.exit(str(exc), returncode=1)
-    config.stash[_TARGET] = target
+    global _target  # one target per pytest process, resolved here
+    _target = target
 
 
 def declared_needs(item: pytest.Item) -> list[str] | None:
@@ -113,7 +115,8 @@ def declared_needs(item: pytest.Item) -> list[str] | None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Check every declared need against the vocabulary, and against an e2e target
     skip each test the target cannot serve, with the unmet need as the reason."""
-    target = config.stash[_TARGET]
+    del config
+    target = _target
     for item in items:
         needs = declared_needs(item)
         try:
@@ -126,31 +129,27 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(pytest.mark.skip(reason=reason))
 
 
-def pytest_report_header(config: pytest.Config) -> list[str]:
+def pytest_report_header() -> list[str]:
     """Stamp the variant triple this process runs under, and the e2e target when the
     run drives one, into the run header so a console log or CI artifact is
     self-identifying."""
     s = HarnessSettings()
     lines = [f"tai42-e2e variants: backend={s.backend} identity={s.identity} storage={s.storage}"]
-    target = config.stash[_TARGET]
-    if target is not None:
-        lines.append(f"tai42-e2e target: {target.url}")
+    if _target is not None:
+        lines.append(f"tai42-e2e target: {_target.url}")
     return lines
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _stamp_variant_properties(
-    request: pytest.FixtureRequest, record_testsuite_property: Callable[[str, object], None]
-) -> None:
+def _stamp_variant_properties(record_testsuite_property: Callable[[str, object], None]) -> None:
     """Record the variant triple — and the e2e target when the run drives one — as
     junit testsuite properties so a CI xml artifact carries what produced it."""
     s = HarnessSettings()
     record_testsuite_property("tai42_e2e_backend", s.backend)
     record_testsuite_property("tai42_e2e_identity", s.identity)
     record_testsuite_property("tai42_e2e_storage", s.storage)
-    target = request.config.stash[_TARGET]
-    if target is not None:
-        record_testsuite_property("tai42_e2e_target", target.url)
+    if _target is not None:
+        record_testsuite_property("tai42_e2e_target", _target.url)
 
 
 @pytest.fixture(scope="session")
@@ -159,12 +158,12 @@ def harness_settings() -> HarnessSettings:
 
 
 @pytest.fixture(scope="session")
-def infra(request: pytest.FixtureRequest, harness_settings: HarnessSettings) -> Iterator[Infra]:
+def infra(harness_settings: HarnessSettings) -> Iterator[Infra]:
     """Verify Redis + Postgres reachability (loudly, with the compose hint on
     failure), create the DDL-applied template DB, and expose the admin clients.
     Against an e2e target no store is connected."""
     try:
-        infra = connect_infra(harness_settings, request.config.stash[_TARGET])
+        infra = connect_infra(harness_settings, _target)
     except InfraUnavailableError as exc:
         pytest.exit(str(exc), returncode=1)
     try:
