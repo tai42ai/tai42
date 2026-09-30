@@ -5759,7 +5759,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "7.3.1"
+version = "7.4.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -6107,7 +6107,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "21.3.2"
+version = "21.4.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
