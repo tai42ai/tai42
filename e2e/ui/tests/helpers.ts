@@ -20,11 +20,15 @@ import {
   type Response,
 } from '@playwright/test';
 
-/** The pinned ports + seeded key; defaults MUST match the studio_runner. */
+import { TARGET } from './target';
+
+/** The pinned ports + seeded key; defaults MUST match the studio_runner. Against a
+ * target the key is the target's login key. */
 export const UI_PORT = Number(process.env.TAI_E2E_UI_PORT ?? 8770);
 export const LLM_PORT = Number(process.env.TAI_E2E_UI_LLM_PORT ?? 8771);
 export const IDP_PORT = Number(process.env.TAI_E2E_UI_IDP_PORT ?? 8772);
-export const API_KEY = process.env.TAI_E2E_UI_API_KEY ?? 'sk-e2e-ui-DO-NOT-USE-IN-PRODUCTION-000';
+export const API_KEY =
+  TARGET?.key ?? process.env.TAI_E2E_UI_API_KEY ?? 'sk-e2e-ui-DO-NOT-USE-IN-PRODUCTION-000';
 
 /** The scripted-LLM control origin the authored-agent spec drives over HTTP. */
 export const LLM_CONTROL_URL = `http://127.0.0.1:${String(LLM_PORT)}`;

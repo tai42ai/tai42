@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import SESSION_COOKIE, WebChatClient, get_chat_page
 
@@ -75,6 +77,10 @@ async def _wait_record_count(bridge: BridgeHarness, key: str, count: int, *, dea
     return entries
 
 
+pytestmark = pytest.mark.needs("kind:identity", "probe-tools", "setting:conversations", "setting:seeded-access-control")
+
+
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_link_params_reach_the_tool_and_sender_is_the_unspoofable_visitor_id(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -103,6 +109,7 @@ async def test_link_params_reach_the_tool_and_sender_is_the_unspoofable_visitor_
     assert payload["spoofed"] == "fake"
 
 
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_params_persist_across_every_message_of_the_session(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -124,6 +131,7 @@ async def test_params_persist_across_every_message_of_the_session(
         assert entry["value"] == value, "a later message of the same session dropped the captured params"
 
 
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_renavigation_replaces_params_and_a_bare_renavigation_keeps_them(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -158,6 +166,7 @@ async def test_renavigation_replaces_params_and_a_bare_renavigation_keeps_them(
     assert entry3["value"] == second, "a param-less re-navigation must not clear the stored params"
 
 
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_rotate_mints_a_clean_registration_with_no_params(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -180,6 +189,7 @@ async def test_rotate_mints_a_clean_registration_with_no_params(
     assert entry["value"] == "false", "a rotated session must deliver a payload with no params key"
 
 
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_a_no_params_visitor_delivers_a_byte_identical_payload(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -202,6 +212,7 @@ async def test_a_no_params_visitor_delivers_a_byte_identical_payload(
     assert "params" not in keys, "a no-params turn must add no params key"
 
 
+@pytest.mark.needs("kind:channels:web")
 async def test_bounds_violations_answer_a_400_page_and_mint_no_session(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -224,6 +235,7 @@ async def test_bounds_violations_answer_a_400_page_and_mint_no_session(
         assert SESSION_COOKIE not in response.cookies, "a refused navigation must mint no session"
 
 
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_reserved_query_names_never_reach_the_delivered_params(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -249,6 +261,7 @@ async def test_reserved_query_names_never_reach_the_delivered_params(
     assert "tai_entry" not in delivered_keys
 
 
+@pytest.mark.needs("store:redis")
 async def test_api_door_carries_params_and_refuses_an_invalid_value_without_echoing_it(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

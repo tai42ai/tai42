@@ -42,12 +42,23 @@ from tai42_e2e.variants import Variants
 # a second, so exceeding this means the pool re-forked but stopped dispatching.
 _WEDGE_DEADLINE = 30.0
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TAI_E2E_PIN_LIMITATIONS"),
-    reason="pinned celery-prefork limitation: a schedule_task-branched tool under heavy reload churn can leave the "
-    "worker's re-forked pool unable to dispatch (timing-dependent, tracked for an in-place-reload fix — see this "
-    "module's docstring). Opt in with TAI_E2E_PIN_LIMITATIONS=1 TAI_E2E_BACKEND=celery.",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not os.environ.get("TAI_E2E_PIN_LIMITATIONS"),
+        reason="pinned celery-prefork limitation: a schedule_task-branched tool under heavy reload churn can leave the "
+        "worker's re-forked pool unable to dispatch (timing-dependent, tracked for an in-place-reload fix — see this "
+        "module's docstring). Opt in with TAI_E2E_PIN_LIMITATIONS=1 TAI_E2E_BACKEND=celery.",
+    ),
+    pytest.mark.needs(
+        "kind:backend:celery",
+        "probe-tools",
+        "mutable",
+        "process",
+        "topology:replicas",
+        "setting:extension:schedule_task",
+        "setting:extension:sync_task",
+    ),
+]
 
 
 def _replicas_with_schedule_branch(res: StackResources, variants: Variants) -> StackConfig:

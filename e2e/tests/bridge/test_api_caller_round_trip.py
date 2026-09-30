@@ -30,10 +30,15 @@ from ._bridge_support import BridgeHarness, script_reply, wait_record_status
 # The real-provider leg runs on the dedicated e2e creds host, not in CI, so the
 # module steps aside. Inert in the default mock run — is_real("llm") is False, so collection is
 # byte-for-byte today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity", "helper:llm", "setting:agent", "setting:conversations", "setting:seeded-access-control"
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host",
+    ),
+]
 
 # An https callback URL with no server behind it — the delivery POST connection-refuses, so
 # the record exhausts its (shortened) attempts and lands terminal ``failed``.
@@ -73,6 +78,7 @@ async def test_sync_wait_returns_answer_inline(bridge: BridgeHarness, uniq: Call
     assert record["delivery_status"] == "delivered"
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_DELIVERY_MAX_ATTEMPTS=2")
 async def test_gone_client_sync_wait_falls_to_the_callback(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     # A caller that hangs up during the sync wait must NOT have its answer claimed inline: the
     # turn finishes inside the window, but the disconnect probe reads gone, so the answer is
@@ -112,6 +118,7 @@ async def test_gone_client_sync_wait_falls_to_the_callback(bridge: BridgeHarness
     assert any(item["message_id"] == message_id for item in failed["items"])
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_DELIVERY_MAX_ATTEMPTS=2")
 async def test_async_callback_permanent_failure_marks_failed(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     route_name = await _api_route(bridge, uniq, callback_url=_UNREACHABLE_CALLBACK)
     answer = uniq("l3-async")

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from ._bridge_support import BridgeHarness
+
+pytestmark = pytest.mark.needs("kind:identity", "setting:checkpoint:memory", "setting:router:checkpoints")
 
 
 async def test_checkpoint_sweep_runs_and_reports_provider(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

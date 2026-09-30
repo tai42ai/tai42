@@ -44,10 +44,26 @@ from ._bridge_support import (
 
 # Scripted-LLM turns are the 'llm' mock leg; the twilio + whatsapp signed inbound the
 # 'twilio'/'whatsapp' one. Any real breaks the scripting or the stubs.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:channels:whatsapp",
+        "kind:identity",
+        "mutable",
+        "helper:llm",
+        "helper:twilio",
+        "helper:whatsapp",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm")
+        or HarnessSettings().is_real("twilio")
+        or HarnessSettings().is_real("whatsapp"),
+        reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 

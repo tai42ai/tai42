@@ -11,11 +11,23 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from ._bridge_support import BridgeHarness, wait_probe_entries
 from ._overlap_support import create_web_tool_route, open_visitor, reply_matching, send_web
 
 _HOLD_SECONDS = 3.0
 _EVENT_KIND = "status.update"
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_an_event_turn_on_a_cancel_route_is_never_batched_superseded_or_a_canceller(

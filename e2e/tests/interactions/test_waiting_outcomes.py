@@ -20,7 +20,10 @@ from tai42_e2e.stack import TaiStack
 
 from ._caller_support import await_result, await_status, await_terminal, caller_ask_id, subject, submit
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("kind:tool_runs", "kind:interactions", "probe-tools", "topology:replicas"),
+]
 
 
 async def _take_when_ready(stack: TaiStack, subj: dict[str, str], *, deadline: float = 20.0) -> dict[str, Any]:
@@ -80,6 +83,7 @@ async def test_taking_a_failed_waiting_outcome_fails_the_taker(
     assert take_view["error"]
 
 
+@pytest.mark.needs("store:redis", "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1")
 async def test_a_resumer_killed_mid_resume_is_redelivered_and_the_outcome_is_taken(
     caller_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -105,6 +109,7 @@ async def test_a_resumer_killed_mid_resume_is_redelivered_and_the_outcome_is_tak
     assert len(records) == 2, f"the drive must run twice (fail then redeliver), saw {records!r}"
 
 
+@pytest.mark.needs("setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1")
 async def test_a_redelivered_resume_that_re_parks_records_the_restored_chain(
     caller_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -136,6 +141,11 @@ async def test_a_redelivered_resume_that_re_parks_records_the_restored_chain(
     assert "held_run_resume" not in reparked["asked_by"]
 
 
+@pytest.mark.needs(
+    "store:redis",
+    "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1",
+    "setting:INTERACTIONS_IDLE_TTL_SECONDS=5",
+)
 async def test_an_untaken_waiting_outcome_is_swept_and_fires_its_event(
     caller_sweep_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

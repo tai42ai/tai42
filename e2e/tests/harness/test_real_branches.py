@@ -27,6 +27,8 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.topology import InfraUnavailableError
 from tai42_e2e.variants import STORAGES, resolve_variants
 
+pytestmark = pytest.mark.needs("no-stack")
+
 
 def _res(**overrides: object) -> StackResources:
     base: dict[str, object] = {

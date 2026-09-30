@@ -48,10 +48,20 @@ from ._bridge_support import (
 # The four channels mock over their in-process stubs; a real selection sends outbound to the live
 # vendor (never the stub) and breaks the deterministic scripted round-trip, so the module steps
 # aside — the real legs run on the dedicated creds host. Inert on the all-mock default.
-pytestmark = pytest.mark.skipif(
-    any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
-    reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity",
+        "kind:storage",
+        "probe-tools",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
+        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+    ),
+]
 
 # The start_expr records the bridged turn's text, the media params the tool saw, and the typed
 # attachment's served url — all as one JSON string.
@@ -110,6 +120,7 @@ async def _bridge_media(
     await wait_channel_send_count(fake, reply_marker, 1)
 
 
+@pytest.mark.needs("kind:channels:telegram", "helper:telegram")
 async def test_telegram_photo_with_caption_bridges_one_turn(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -131,6 +142,7 @@ async def test_telegram_photo_with_caption_bridges_one_turn(
     )
 
 
+@pytest.mark.needs("kind:channels:slack", "helper:slack")
 async def test_slack_file_share_bridges_one_turn(media_bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     channel = f"C0{uniq('slk').upper().replace('_', '')[:8]}"
     ref = uniq("slk-file")
@@ -160,6 +172,7 @@ async def test_slack_file_share_bridges_one_turn(media_bridge: BridgeHarness, un
     )
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_twilio_mms_bridges_one_turn(media_bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     ref = uniq("mms")
     media_bridge.fake_twilio.media[ref] = MediaBlob(body=TINY_PNG, content_type="image/png")
@@ -182,6 +195,7 @@ async def test_twilio_mms_bridges_one_turn(media_bridge: BridgeHarness, uniq: Ca
     )
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:whatsapp")
 async def test_whatsapp_image_with_caption_bridges_one_turn(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

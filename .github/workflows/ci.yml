@@ -16,6 +16,10 @@ on:
         type: choice
         default: all
         options: [all, chromium]
+      e2e_target:
+        description: Run the e2e against this running stack (an origin, or the name of a file in e2e/targets) instead of building one
+        type: string
+        default: ""
   schedule:
     # Weekly full-matrix run (Mondays 04:23 UTC). Like workflow_dispatch it forces
     # core=true so every member + backend leg runs and the monitoring/browser gates
@@ -694,14 +698,16 @@ jobs:
         backend: ${{ fromJSON(needs.changes.outputs.e2e_backends) }}
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     services:
+      # The services back the stacks this job builds; a run against a target builds
+      # none and touches no store, so their images are empty and they do not start.
       redis:
-        image: redis:7-alpine
+        image: ${{ (inputs.e2e_target || vars.TAI_E2E_TARGET) == '' && 'redis:7-alpine' || '' }}
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s
           --health-timeout 3s --health-retries 20
       postgres:
-        image: postgres:16-alpine
+        image: ${{ (inputs.e2e_target || vars.TAI_E2E_TARGET) == '' && 'postgres:16-alpine' || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -711,7 +717,7 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 2s
           --health-timeout 3s --health-retries 20
       redis-agents:
-        image: redis:8
+        image: ${{ (inputs.e2e_target || vars.TAI_E2E_TARGET) == '' && 'redis:8' || '' }}
         ports: ["6380:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s
@@ -725,6 +731,11 @@ jobs:
       TAI_E2E_IDENTITY: redis
       TAI_E2E_STORAGE: local
       TAI_E2E_FLEET: "1"
+      # The e2e target: a running stack to drive instead of building one — an origin
+      # or the name of a file in e2e/targets, from the dispatch input or the
+      # repository variable. TAI_E2E_KEY is its login key.
+      TAI_E2E_TARGET: ${{ inputs.e2e_target || vars.TAI_E2E_TARGET }}
+      TAI_E2E_KEY: ${{ secrets.TAI_E2E_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -758,7 +769,7 @@ jobs:
         # install reach the private source).
         run: uv sync --locked --package tai42-e2e
       - name: Bring up RabbitMQ (celery leg only)
-        if: matrix.backend == 'celery'
+        if: env.TAI_E2E_TARGET == '' && matrix.backend == 'celery'
         working-directory: e2e
         run: docker compose --profile celery up -d rabbitmq --wait
       - name: Opt into the pinned celery limitation (scheduled celery leg)
@@ -776,7 +787,7 @@ jobs:
         # The langfuse observability suite is backendless, so it runs only on the
         # default leg — and only when its own paths changed or the run is manual
         # (the `run_monitoring` gate).
-        if: ${{ matrix.backend == 'arq' && needs.changes.outputs.run_monitoring == 'true' }}
+        if: ${{ env.TAI_E2E_TARGET == '' && matrix.backend == 'arq' && needs.changes.outputs.run_monitoring == 'true' }}
         working-directory: e2e
         # Name only the langfuse services (their infra deps come via depends_on).
         # A bare `--profile monitoring up` also starts the profile-less core redis
@@ -790,7 +801,7 @@ jobs:
       - name: Run the suite
         working-directory: e2e
         run: >-
-          uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit.xml -o log_cli=true
+          uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true
           ${{ matrix.backend != 'arq' && '-m "not backendless"' || '' }}
           --splits 10 --group ${{ matrix.shard }} --durations-path .test_durations --splitting-algorithm least_duration
       - name: Run the fixture identity/storage axis (default leg)
@@ -798,13 +809,15 @@ jobs:
         # switch itself is exercised rather than pinned to one provider. Only the
         # identity/storage-bearing suites — the other seams do not touch these axes.
         # An explicit-path invocation, so it runs on one shard only, not per shard.
-        if: matrix.backend == 'arq' && matrix.shard == 1
+        # The variant axes configure stacks this job builds, so these extra legs run
+        # only when it builds them.
+        if: env.TAI_E2E_TARGET == '' && matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_IDENTITY: fixture
           TAI_E2E_STORAGE: fixture
         run: >-
-          uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true
+          uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true --junitxml=junit-fixture-axis.xml
           tests/redis_semantics tests/storage tests/harness
       - name: Run the s3 storage axis (default leg)
         # Third storage-axis value: the s3 provider against a MinIO object store. A
@@ -813,23 +826,23 @@ jobs:
         # user minio / secret miniosecret) match the compose service, so no coordinate
         # env is needed. Only the storage suite touches this axis.
         # An explicit-path invocation, so it runs on one shard only, not per shard.
-        if: matrix.backend == 'arq' && matrix.shard == 1
+        if: env.TAI_E2E_TARGET == '' && matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_STORAGE: s3
         run: |
           docker compose --profile storage up -d --wait storage-minio
-          uv run --no-sync pytest -x -q --timeout=120 tests/storage
+          uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit-s3-storage.xml tests/storage
       - name: Run the github storage axis (default leg)
         # Fourth storage-axis value: the github provider against the in-process fake
         # GitHub REST stub (brought up by tests/storage/conftest; variant default base
         # :9099), so no external infra. Only the storage suite touches this axis.
         # An explicit-path invocation, so it runs on one shard only, not per shard.
-        if: matrix.backend == 'arq' && matrix.shard == 1
+        if: env.TAI_E2E_TARGET == '' && matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_STORAGE: github
-        run: uv run --no-sync pytest -x -q --timeout=120 tests/storage
+        run: uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit-github-storage.xml tests/storage
       - name: Run the docker sandbox isolation leg (default leg)
         # The one docker-gated sandbox leg (tests/sandbox_docker): the real
         # sandbox-docker provider driven against a REAL rootless-dind engine, for
@@ -842,7 +855,7 @@ jobs:
         # into the bind-mounted dir; it is pre-created world-writable so the
         # rootless daemon's mapped uid can write into it (the entrypoint then
         # relaxes the *.pem to world-readable for the host SUT's mTLS dial).
-        if: matrix.backend == 'arq' && matrix.shard == 1
+        if: env.TAI_E2E_TARGET == '' && matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_SANDBOX_DOCKER: "1"
@@ -865,16 +878,26 @@ jobs:
           # reaches the run log — dump the engine's own logs before failing.
           docker compose --profile sandbox up -d --wait sandbox-engine \
             || { echo "::group::sandbox-engine logs"; docker compose --profile sandbox logs sandbox-engine; echo "::endgroup::"; exit 1; }
-          uv run --no-sync pytest -x -q --timeout=120 tests/sandbox_docker
+          uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit-sandbox-docker.xml tests/sandbox_docker
           docker compose --profile sandbox down -v
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-junit-${{ matrix.backend }}-s${{ matrix.shard }}
+          path: e2e/junit*.xml
+          if-no-files-found: error
+      - name: Summarize the JUnit report
+        if: ${{ !cancelled() }}
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
+        with:
+          paths: e2e/junit*.xml
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-diagnostics-${{ matrix.backend }}-s${{ matrix.shard }}
-          path: |
-            e2e/junit.xml
-            e2e/**/stack-*/
+          path: e2e/**/stack-*/
           if-no-files-found: ignore
 
   ui-e2e:
@@ -893,14 +916,16 @@ jobs:
     # browser run beyond the old masked 50m budget.
     timeout-minutes: 75
     services:
+      # The services back the stack this job boots; with the e2e target set no stack
+      # is built, so their images are empty and they do not start.
       redis:
-        image: redis:7-alpine
+        image: ${{ (inputs.e2e_target || vars.TAI_E2E_TARGET) == '' && 'redis:7-alpine' || '' }}
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s
           --health-timeout 3s --health-retries 20
       postgres:
-        image: postgres:16-alpine
+        image: ${{ (inputs.e2e_target || vars.TAI_E2E_TARGET) == '' && 'postgres:16-alpine' || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -914,13 +939,20 @@ jobs:
       TAI_E2E_PG_HOST: localhost
       TAI_E2E_PG_PASSWORD: postgres
       TAI_E2E_KEEP_STACKS: "1"
+      # The e2e target: a running stack to drive instead of building one — an origin
+      # or the name of a file in e2e/targets, from the dispatch input or the
+      # repository variable. TAI_E2E_KEY is its login key.
+      TAI_E2E_TARGET: ${{ inputs.e2e_target || vars.TAI_E2E_TARGET }}
+      TAI_E2E_KEY: ${{ secrets.TAI_E2E_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        if: env.TAI_E2E_TARGET == ''
         with:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
+        if: env.TAI_E2E_TARGET == ''
       - name: Detect marketplace access
         # The marketplace browser leg clones the PRIVATE tai-marketplace monorepo
         # (its web/ workspace is the browse site), installs the PRIVATE
@@ -939,7 +971,7 @@ jobs:
             echo "::warning::marketplace e2e skipped — fork PRs have no access to the private marketplace repos"
           fi
       - name: Configure git auth for the private tai42-marketplace source
-        if: steps.mp.outputs.enabled == 'true'
+        if: env.TAI_E2E_TARGET == '' && steps.mp.outputs.enabled == 'true'
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
@@ -947,12 +979,14 @@ jobs:
         # The registry is not in the lock; the marketplace browser leg installs it
         # out-of-band at boot from its pinned ref (the git auth above lets that
         # install reach the private source).
+        if: env.TAI_E2E_TARGET == ''
         run: uv sync --locked --package tai42-e2e
       - name: Resolve the tai-studio ref this pull request declares (default main)
         # A pull request that pairs a change in this repo with one in tai-studio
         # names the studio ref to test against with a `tai-studio-ref: <branch-or-sha>`
         # line in its body; absent (and on a push, which has no pull-request body)
         # the browser suite runs against studio `main`.
+        if: env.TAI_E2E_TARGET == ''
         id: studio_ref
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -960,6 +994,7 @@ jobs:
           set -euo pipefail
           echo "ref=$(python3 scripts/pr_declared_ref.py --field tai-studio-ref)" >> "$GITHUB_OUTPUT"
       - name: Clone tai-studio at the declared ref (public, no token)
+        if: env.TAI_E2E_TARGET == ''
         env:
           STUDIO_REF: ${{ steps.studio_ref.outputs.ref }}
         run: |
@@ -979,6 +1014,7 @@ jobs:
         # TAI_STUDIO_SHA — the Playwright run below inherits it (job env), so
         # playwright.config.ts can surface it as report metadata via
         # `metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA }`.
+        if: env.TAI_E2E_TARGET == ''
         env:
           STUDIO_REF: ${{ steps.studio_ref.outputs.ref }}
         run: |
@@ -991,12 +1027,14 @@ jobs:
             echo "Browser suite ran against tai-studio \`$STUDIO_REF\` @ \`$studio_sha\`."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Clone tai-marketplace (private, marketplace browser leg)
-        if: steps.mp.outputs.enabled == 'true'
+        if: env.TAI_E2E_TARGET == '' && steps.mp.outputs.enabled == 'true'
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: git clone --depth 1 "https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace"
       - name: Build the Studio SPA
         uses: ./.github/actions/studio-spa
+        with:
+          build: ${{ env.TAI_E2E_TARGET == '' }}
       - name: Install the ui/ workspace
         working-directory: e2e/ui
         run: pnpm install --frozen-lockfile
@@ -1013,6 +1051,18 @@ jobs:
         env:
           PLAYWRIGHT_HTML_REPORT: playwright-report/${{ matrix.engine }}
         run: pnpm exec playwright test --project=${{ matrix.engine }} --output=test-results/${{ matrix.engine }}
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-e2e-junit-${{ matrix.engine }}
+          path: e2e/ui/junit.xml
+          if-no-files-found: error
+      - name: Summarize the JUnit report
+        if: ${{ !cancelled() }}
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
+        with:
+          paths: e2e/ui/junit.xml
       - name: Upload browser diagnostics
         # Playwright keeps traces + screenshots only on failure; this leg's report,
         # trace and its kept stack server logs (KEEP_STACKS) travel together, named

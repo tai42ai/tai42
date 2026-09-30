@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
+import pytest
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
@@ -32,6 +33,7 @@ async def _reload(api: ApiClient, targets: list[str] | None) -> httpx.Response:
     return await wait_for_async(settled, deadline=10.0, message="fleet reload never left the reload gate")
 
 
+@pytest.mark.needs("kind:backend", "setting:harness-backend-variant")
 async def test_backend_identity(core_stack: TaiStack) -> None:
     # The door reports ``type(backend).__name__`` / ``__module__``; each backend
     # variant owns that identity, exactly as the storage variant owns the
@@ -42,6 +44,7 @@ async def test_backend_identity(core_stack: TaiStack) -> None:
     assert info == {"present": True, "backend": backend.provider_class, "module": backend.provider_module}
 
 
+@pytest.mark.needs("kind:backend", "store:redis")
 async def test_fleet_workers_lists_the_live_fleet(core_stack: TaiStack) -> None:
     api = core_stack.api()
     workers = (await api.get("/api/fleet/workers"))["workers"]
@@ -56,6 +59,7 @@ async def test_fleet_workers_lists_the_live_fleet(core_stack: TaiStack) -> None:
     assert {w["name"] for w in workers} == {worker.name for worker in core_stack.census()}
 
 
+@pytest.mark.needs("kind:backend", "mutable", "store:redis")
 async def test_fleet_reload_config_all_confirms(core_stack: TaiStack) -> None:
     api = core_stack.api()
     resp = await _reload(api, None)
@@ -70,6 +74,7 @@ async def test_fleet_reload_config_all_confirms(core_stack: TaiStack) -> None:
     assert {worker.name for worker in core_stack.census()} <= outcomes.keys()
 
 
+@pytest.mark.needs
 async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: TaiStack) -> None:
     bogus = "no-such-worker-99999"
     api = core_stack.api()
@@ -96,6 +101,7 @@ async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: Tai
     assert bogus in " ".join(getattr(part, "text", "") for part in result.content), result
 
 
+@pytest.mark.needs("mutable", "topology:single-worker", "setting:backend-absent")
 async def test_backend_absent_is_honest(bare_stack: TaiStack) -> None:
     api = bare_stack.api()
 
@@ -118,6 +124,7 @@ async def test_backend_absent_is_honest(bare_stack: TaiStack) -> None:
     assert [r["outcome"] for r in result["results"]] == ["applied"], f"the local worker did not apply: {result}"
 
 
+@pytest.mark.needs("kind:identity", "kind:accounts:postgres")
 async def test_reload_door_is_admin_fenced_census_is_open(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """The fleet reload door is admin-only — a recovery/ops action — so editor and
     viewer are denied it; the census door stays open to any authenticated role."""

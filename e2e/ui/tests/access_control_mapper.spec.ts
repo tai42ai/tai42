@@ -16,8 +16,11 @@
  * writable (`GET /api/config/mode` returns `{config_mode}`; the client treats the
  * absent `read_only` as `false`).
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity', 'mutable');
 
 test('map /api/templates to a new scope; UI + API + AND-across-tiers enforcement', async ({ page, request }) => {
   const scope = uniq('scope');

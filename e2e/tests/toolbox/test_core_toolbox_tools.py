@@ -29,6 +29,11 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
 
+@pytest.mark.needs(
+    "setting:tool:toolbox.request",
+    "helper:target-server",
+    "setting:TAI_URL_GUARD_ALLOW_CIDRS=loopback",
+)
 async def test_request_tool_hits_the_target_server(core_stack: TaiStack, target_server: TargetServer) -> None:
     before = len(target_server.records)
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
@@ -48,6 +53,7 @@ async def test_request_tool_hits_the_target_server(core_stack: TaiStack, target_
     HarnessSettings().is_real("embeddings"),
     reason="stub-embeddings determinism is the 'embeddings' mock leg; the real leg on the creds host",
 )
+@pytest.mark.needs("setting:tool:toolbox.generate_embeddings", "setting:tool:toolbox.pad_embeddings", "helper:llm")
 async def test_generate_and_pad_embeddings(core_stack: TaiStack, llm_stub: LlmStub) -> None:
     call_args = {
         "texts": ["alpha", "beta"],
@@ -76,6 +82,7 @@ async def test_generate_and_pad_embeddings(core_stack: TaiStack, llm_stub: LlmSt
     assert padded[0][width:] == [0.0] * 8, padded[0]
 
 
+@pytest.mark.needs("setting:tool:toolbox.current_time_info")
 async def test_current_time_info(core_stack: TaiStack) -> None:
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
         info = (await mcp.call_tool("current_time_info", retry_on_reloading=True)).data
@@ -143,6 +150,7 @@ def _assert_classify_values(response: ClassifyResponse) -> None:
     HarnessSettings().is_real("classifier"),
     reason="stub-classify determinism is the 'classifier' mock leg; the real leg on the creds host",
 )
+@pytest.mark.needs("setting:tool:toolbox.classify", "helper:llm")
 async def test_classify_is_deterministic_against_the_stub(core_stack: TaiStack, llm_stub: LlmStub) -> None:
     call_args = {
         "state": _CLASSIFY_STATE,
@@ -177,6 +185,7 @@ async def test_classify_is_deterministic_against_the_stub(core_stack: TaiStack, 
     not HarnessSettings().is_real("classifier"),
     reason="the real classify leg needs TYPESAFE_API_KEY (TAI_E2E_REAL=classifier); creds host only",
 )
+@pytest.mark.needs("setting:tool:toolbox.classify", "setting:real-credentials")
 async def test_classify_against_the_real_vendor(core_stack: TaiStack) -> None:
     call_args = {"state": _CLASSIFY_STATE, "questions": _CLASSIFY_QUESTIONS}
     async with core_stack.mcp(port=core_stack.port_a) as mcp:

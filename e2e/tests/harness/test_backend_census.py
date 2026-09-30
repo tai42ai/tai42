@@ -16,6 +16,8 @@ from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import BusWorker
 from tai42_e2e.waiting import WaitTimeoutError
 
+pytestmark = pytest.mark.needs("no-stack")
+
 
 def _worker(name: str, generation: int, *, state: str = "ready", kind: str = "backend", pid: int = 1) -> BusWorker:
     return BusWorker(name=name, kind=kind, pid=pid, generation=generation, joined_at="t", beat_at="t", state=state)

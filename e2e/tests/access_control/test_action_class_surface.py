@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity")
 
 _VALID_ACTIONS = {"read", "write", "fenced", "secret"}
 

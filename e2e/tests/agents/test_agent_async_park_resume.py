@@ -56,6 +56,14 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs(
+        "probe-tools",
+        "helper:llm",
+        "store:redis",
+        "topology:replicas",
+        "setting:agent:tools_agent",
+        "setting:checkpoint:redis",
+    ),
 ]
 
 _TOOL_NAMES = ["e2e_agent_async_ask", "e2e_record_identity"]
@@ -166,6 +174,7 @@ async def test_agent_park_answer_resumes_across_workers(
     await _await_resume_drive_finished(llm_stub, 3)
 
 
+@pytest.mark.needs("setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1")
 async def test_agent_park_expiry_resumes(
     agent_async_park_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:

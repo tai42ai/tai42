@@ -29,7 +29,11 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("mutable", "setting:TAI_URL_GUARD_ALLOW_CIDRS=loopback", "setting:exclusive-mcp-section")
 
 _POINTER = "mcp/0/config/headers/Authorization"
 _MARKER_PREFIX = "!ENV ${"

@@ -34,10 +34,19 @@ from ._bridge_support import (
 # module steps aside; the real legs run on the dedicated e2e creds host, not in CI.
 # Inert in the default mock run — both is_real checks are False, so collection is byte-for-byte
 # today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
-    reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
+        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
+    ),
+]
 
 
 async def _fire(bridge: BridgeHarness, identity: str, client: str, text: str) -> None:
@@ -47,6 +56,7 @@ async def _fire(bridge: BridgeHarness, identity: str, client: str, text: str) ->
     assert resp.status_code == 204, resp.text
 
 
+@pytest.mark.needs("helper:llm", "helper:twilio")
 async def test_headline_automatic_revocation(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     identity = default_twilio_identity()
     client = BRIDGE_TWILIO_CLIENT

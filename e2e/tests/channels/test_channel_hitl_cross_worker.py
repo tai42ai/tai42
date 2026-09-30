@@ -34,7 +34,21 @@ from ._support import (
     post_inbound,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:channels:telegram",
+        "kind:channels:slack",
+        "kind:channels:twilio",
+        "topology:replicas",
+        "store:redis",
+        "helper:channel-fake:telegram",
+        "helper:channel-fake:slack",
+        "helper:channel-fake:twilio",
+        "setting:channel-inbound-secrets",
+        "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    ),
+]
 
 
 async def _wait_one_send(case: ChannelCase, text: str) -> dict:

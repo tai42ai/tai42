@@ -16,6 +16,7 @@ names no engine.
 
 from __future__ import annotations
 
+import pytest
 from tai42_contract.sandbox import SandboxSessionSpec
 from tai42_kit.sandbox import SandboxConformanceConfig, run_sandbox_conformance
 
@@ -23,6 +24,7 @@ from ._support import TEST_IMAGE, open_sandbox, requires_engine
 
 
 @requires_engine
+@pytest.mark.needs("no-stack", "helper:docker-engine")
 async def test_docker_sandbox_conformance() -> None:
     # The provider-appropriate reject spec: a `vm` isolation floor is above the container
     # boundary this provider can give, so it must be refused loudly at create — the

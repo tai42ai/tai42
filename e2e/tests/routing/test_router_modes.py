@@ -51,6 +51,7 @@ async def _status(stack: TaiStack, method: str, path: str, json: dict | None = N
     return await wait_for_async(settled, deadline=15.0, message=f"{method} {path} never left the reload gate")
 
 
+@pytest.mark.needs("setting:default-routers-api")
 async def test_api_mode_serves_defaults_but_no_spa(api_router_stack: TaiStack) -> None:
     """``default_routers="api"``: the default API surface answers (a core route AND a
     default router the minimal stack omits are both non-404), but the SPA catch-all is
@@ -76,6 +77,7 @@ async def test_api_mode_serves_defaults_but_no_spa(api_router_stack: TaiStack) -
     assert unknown_api.status_code == 404, f"unknown /api path should 404 cleanly; got {unknown_api.status_code}"
 
 
+@pytest.mark.needs("setting:default-routers-none")
 async def test_none_mode_mounts_only_the_explicit_list(minimal_stack: TaiStack) -> None:
     """``default_routers="none"``: exactly the listed routers mount, nothing more. The
     minimal stack lists health/metrics/tools/config, so those answer non-404, while a

@@ -30,6 +30,8 @@ from mcp.types import Tool
 from tai42_e2e.manifests import build_projection_stack
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("setting:api_tools")
+
 # A destructive projected op (POST /api/config/reload → soft-restart) and a read
 # op (GET /api/tools) — both project by default; only the first is destructive.
 _DESTRUCTIVE_OP = "reload_config"
@@ -79,6 +81,7 @@ async def test_tier2_auth_op_default_excluded(projection_stack: TaiStack) -> Non
     assert _READ_OP in names, f"projection surface is unexpectedly empty (no {_READ_OP!r}): {names}"
 
 
+@pytest.mark.needs("process")
 async def test_expose_destructive_false_drops_destructive_ops(fresh_stack: Callable[..., TaiStack]) -> None:
     """``expose_destructive=false`` makes the destructive ops DISAPPEAR from the
     surface; the reads stay."""
@@ -91,6 +94,7 @@ async def test_expose_destructive_false_drops_destructive_ops(fresh_stack: Calla
     assert _READ_OP in names, f"the read op {_READ_OP!r} must survive expose_destructive=false: {names}"
 
 
+@pytest.mark.needs("process")
 async def test_bad_include_fails_boot_loudly(fresh_stack: Callable[..., TaiStack]) -> None:
     """An ``api_tools.include`` naming an unregistered op aborts startup with a loud
     error naming the offending op — never a silent boot with a missing tool."""
@@ -98,6 +102,7 @@ async def test_bad_include_fails_boot_loudly(fresh_stack: Callable[..., TaiStack
         fresh_stack(partial(build_projection_stack, api_tools={"enabled": True, "include": ["totally_unknown_op"]}))
 
 
+@pytest.mark.needs("process")
 async def test_tier2_op_includable(fresh_stack: Callable[..., TaiStack]) -> None:
     """A tier-2 ``/api/auth/*`` op returns to the surface once named in
     ``api_tools.include``."""
@@ -107,6 +112,7 @@ async def test_tier2_op_includable(fresh_stack: Callable[..., TaiStack]) -> None
     assert _TIER2_OP in names, f"tier-2 op {_TIER2_OP!r} must project when explicitly included: {names}"
 
 
+@pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 async def test_authz_denies_underscoped_key_over_mcp(
     projection_authz_stack: tuple[TaiStack, str, str],
 ) -> None:

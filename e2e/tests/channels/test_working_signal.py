@@ -22,8 +22,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "probe-tools",
+    "store:redis",
+    "setting:conversations:redis",
+    "setting:seeded-access-control",
+    "setting:tai42_e2e_fixtures.stub_channel",
+)
 
 # An https callback with no server behind it — an api route needs a callback URL; the api-door leg
 # never asserts delivery, only that no working signal fires, so the callback need not connect.
@@ -204,6 +215,7 @@ async def test_working_signal_refreshes_over_a_long_turn_then_stops_at_the_first
     assert {record["provider_message_id"] for record in records} == {provider_message_id}, records
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS=1.2")
 async def test_a_low_ceiling_caps_the_working_signal_count(
     working_signal_capped_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:

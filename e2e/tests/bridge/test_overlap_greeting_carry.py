@@ -63,6 +63,12 @@ def _out_texts(frames: list[tuple[str, dict]]) -> list[str]:
     return [data["text"] for event, data in frames if event == "chat.message" and data.get("direction") == "out"]
 
 
+pytestmark = pytest.mark.needs(
+    "kind:identity", "probe-tools", "mutable", "setting:conversations", "setting:seeded-access-control", "store:redis"
+)
+
+
+@pytest.mark.needs("kind:channels:web")
 async def test_greeting_rides_the_successor_when_a_first_contact_turn_is_cancelled_on_the_channel_door(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -114,6 +120,7 @@ async def test_greeting_rides_the_successor_when_a_first_contact_turn_is_cancell
     assert r2["answer"] is None
 
 
+@pytest.mark.needs("kind:channels:web")
 async def test_greeting_rides_the_successor_when_a_first_contact_turn_yields_on_the_channel_door(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -229,6 +236,7 @@ async def test_greeting_rides_the_successor_on_the_api_door_when_the_first_conta
     HarnessSettings().is_real("twilio"),
     reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
 )
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_greeting_rides_the_successor_on_the_bridge_door_when_the_first_contact_turn_is_cancelled(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

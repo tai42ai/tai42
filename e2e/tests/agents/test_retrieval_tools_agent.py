@@ -32,6 +32,7 @@ pytestmark = [
         HarnessSettings().is_real("llm") or HarnessSettings().is_real("embeddings"),
         reason="scripted-stub llm+embeddings determinism is the mock leg; real legs on the creds host",
     ),
+    pytest.mark.needs("probe-tools", "helper:llm", "setting:agent:retrieval_tools_agent"),
 ]
 
 

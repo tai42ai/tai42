@@ -6,8 +6,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:tool_runs", "probe-tools", "topology:replicas")
 
 
 async def test_tool_run_started_on_a_polls_terminal_on_b(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:

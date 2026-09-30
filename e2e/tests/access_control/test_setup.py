@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import _SETUP_TOKEN, build_setup_stack
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "process", "setting:uninitialized-deployment")
 
 # The setup throttle arms a backoff once wrong-token attempts pass the threshold; the
 # skeleton's ``setup_throttle_threshold`` default is 5, so the 6th wrong attempt from one IP
@@ -34,6 +38,7 @@ def _setup_body(owner_id: str, *, token: str = _SETUP_TOKEN) -> dict:
     return {"setup_token": token, "owner_user_id": owner_id, "owner_display_name": f"{owner_id} display"}
 
 
+@pytest.mark.needs("setting:ACCESS_CONTROL_AUTH_PROVIDERS=identity-only")
 async def test_fresh_deployment_reports_needs_setup(fresh_setup_stack: TaiStack) -> None:
     stack = fresh_setup_stack
     public = _public(stack)
@@ -50,6 +55,7 @@ async def test_fresh_deployment_reports_needs_setup(fresh_setup_stack: TaiStack)
     assert methods["setup_login"] is None, methods
 
 
+@pytest.mark.needs("mutable", "setting:setup-token", "setting:ACCESS_CONTROL_SETUP_THROTTLE_THRESHOLD=5")
 async def test_wrong_token_throttles_before_the_compare(fresh_setup_stack: TaiStack) -> None:
     stack = fresh_setup_stack
     public = _public(stack)
@@ -67,6 +73,7 @@ async def test_wrong_token_throttles_before_the_compare(fresh_setup_stack: TaiSt
     assert throttled.status_code == 403, f"a throttled correct token must 403: {throttled.status_code} {throttled.text}"
 
 
+@pytest.mark.needs("mutable", "setting:setup-token", "setting:ACCESS_CONTROL_AUTH_PROVIDERS=identity-only")
 async def test_setup_initializes_once_and_is_idempotent(fresh_setup_stack: TaiStack) -> None:
     stack = fresh_setup_stack
     public = _public(stack)
@@ -118,6 +125,7 @@ async def test_setup_initializes_once_and_is_idempotent(fresh_setup_stack: TaiSt
     assert methods_after["needs_setup"] is False, methods_after
 
 
+@pytest.mark.needs("mutable", "setting:TAI_SETUP_OPEN=true", "files")
 async def test_setup_open_accepts_any_token_and_warns(fresh_stack) -> None:
     # TAI_SETUP_OPEN ungates the door for local/dev: any token initializes, and every boot
     # warns loudly so an open door never ships silently.

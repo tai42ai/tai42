@@ -68,7 +68,16 @@ from tai42_e2e.waiting import wait_for_async
 
 from ._market_support import cli_env, installed_refs, ok_json, persisted_manifest, run_cli, tai_bin
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "kind:connectors",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+    ),
+]
 
 # The install-time client credentials for iota (the fixture values the install stores). The
 # secret is auto-masked from the live connector's client_secret_env even with no --secret.
@@ -128,6 +137,7 @@ def iota_seeded(
     return oauth_idp.base_url
 
 
+@pytest.mark.needs("mutable", "helper:idp", "files")
 async def test_install_iota_with_env_only_masks_secret_and_attributes_spec(
     iota_seeded: str,
     marketplace_connectors_stack: TaiStack,
@@ -194,6 +204,7 @@ async def test_install_iota_with_env_only_masks_secret_and_attributes_spec(
     assert IOTA_CLIENT_SECRET_ENV in after["secret_keys"], after
 
 
+@pytest.mark.needs("mutable", "helper:idp", "files", "cli")
 async def test_manifest_validate_names_the_unset_connector_secret(
     iota_seeded: str,
     marketplace_connectors_stack: TaiStack,
@@ -261,6 +272,7 @@ def clean_connectors_stack(
     )
 
 
+@pytest.mark.needs("helper:idp", "files", "process")
 async def test_install_without_env_is_4xx_naming_both_vars_and_leaves_manifest(
     iota_seeded: str, clean_connectors_stack: TaiStack
 ) -> None:
@@ -286,6 +298,7 @@ async def test_install_without_env_is_4xx_naming_both_vars_and_leaves_manifest(
     assert IOTA_REF not in await installed_refs(stack)
 
 
+@pytest.mark.needs("mutable", "helper:idp")
 async def test_update_iota_surfaces_the_new_scope(
     iota_seeded: str, marketplace_connectors_stack: TaiStack, descriptor_cleanup: list[str]
 ) -> None:
@@ -307,6 +320,7 @@ async def test_update_iota_surfaces_the_new_scope(
     assert IOTA_SCOPE_V2_ADDED in updated["sub_services"][0]["scopes"], updated
 
 
+@pytest.mark.needs("mutable", "helper:idp", "files", "cli")
 async def test_cli_install_and_dry_run(
     iota_seeded: str, marketplace_connectors_stack: TaiStack, descriptor_cleanup: list[str], tmp_path: Path
 ) -> None:
@@ -354,6 +368,7 @@ def kappa_seeded(marketplace_service: MarketplaceService, package_index: Fixture
     asyncio.run(seed_kappa_listing(marketplace_service, package_index, sys.executable))
 
 
+@pytest.mark.needs("mutable", "setting:shared-venv", "helper:fixture-stdio-mcp-server")
 async def test_kappa_installs_with_no_env_and_connects_with_config(
     kappa_seeded: None, marketplace_connectors_stack: TaiStack, descriptor_cleanup: list[str]
 ) -> None:

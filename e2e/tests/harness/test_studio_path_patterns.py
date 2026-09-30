@@ -22,7 +22,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 from tai42_skeleton.app.route_registry import CORE_OWNER, RouteAction, RouteRegistry
 
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("no-stack")]
 
 # A well-formed served-media reference: the fixed route prefix + a 43-char urlsafe id.
 _MEDIA_PATH = "/api/interactions/media/" + "a" * 43

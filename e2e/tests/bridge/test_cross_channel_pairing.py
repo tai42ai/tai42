@@ -43,10 +43,23 @@ from ._bridge_support import (
 # The whole leg is the mock leg for both channel seams: it drives FakeTwilio and FakeWhatsApp
 # signed inbound and reads their in-process sends. No LLM turn runs (a tool target dispatches
 # directly, and the pairing turns never reach a target), so the 'llm' seam is not exercised.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:channels:whatsapp",
+        "kind:identity",
+        "probe-tools",
+        "mutable",
+        "helper:twilio",
+        "helper:whatsapp",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
+        reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
+    ),
+]
 
 _TOOL = "e2e_echo"
 

@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("setting:tai42_e2e_fixtures.seams")
 
 
 def _data(result: Any) -> dict:
@@ -30,6 +34,7 @@ async def test_seam_populated_over_mcp_edge_and_none_outside(seams_stack: TaiSta
     assert data["outside"] is None, data
 
 
+@pytest.mark.needs("probe-tools")
 async def test_seam_populated_over_run_tool_path(seams_stack: TaiStack) -> None:
     async with seams_stack.mcp() as mcp:
         result = await mcp.call_tool(
@@ -44,6 +49,7 @@ async def test_seam_populated_over_run_tool_path(seams_stack: TaiStack) -> None:
     assert data["outside"] is None, data
 
 
+@pytest.mark.needs("kind:backend", "probe-tools", "setting:extension:sync_task")
 async def test_seam_populated_over_backend_dispatch(seams_stack: TaiStack) -> None:
     async with seams_stack.mcp() as mcp:
         result = await mcp.call_tool(

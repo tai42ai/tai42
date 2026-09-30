@@ -33,6 +33,16 @@ from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import _SETUP_TOKEN
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "mutable",
+    "store:redis",
+    "cli",
+    "files",
+    "setting:setup-token",
+    "setting:uninitialized-deployment",
+)
+
 # The Redis identity provider's record key prefixes — the ONLY keys the partial-restore
 # flush removes. ``ac:key:<hash>`` is the key-hash -> identity record; ``ac:management:key:<user_id>``
 # is the user_id -> hash reverse lookup. Every other store (policy version, context cache,

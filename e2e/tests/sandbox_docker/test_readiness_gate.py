@@ -24,13 +24,15 @@ names no engine.
 
 from __future__ import annotations
 
+import pytest
+
 from ._support import (
     egress_spec,
     open_sandbox,
     requires_engine,
 )
 
-pytestmark = requires_engine
+pytestmark = [requires_engine, pytest.mark.needs("no-stack", "helper:docker-engine")]
 
 
 async def test_create_succeeds_with_readiness_probe_enabled() -> None:

@@ -8,11 +8,15 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import SCOPE, mint_owned, provision_owner
+
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 
 # The single uniform exchange-miss message the handler answers for EVERY miss
 # (unknown / used / revoked-key / expired). Asserting the body carries it — not
@@ -26,6 +30,7 @@ def _no_auth(stack: TaiStack) -> ApiClient:
     return ApiClient(f"http://{stack.host}:{stack.port_a}")
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_claim_link_exchanges_once_and_returns_a_working_key(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -55,6 +60,7 @@ async def test_claim_link_exchanges_once_and_returns_a_working_key(
     assert second.status_code == 404
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_exchange_misses_are_byte_identical(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)
     _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
@@ -116,6 +122,7 @@ async def test_public_exchange_is_reachable_unauthenticated(
     assert response.json() == {"error": _CLAIM_MISS_MESSAGE}
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_claim_link_creation_rules(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)
     _owner_a_id, session_a = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
@@ -160,6 +167,7 @@ async def test_claim_link_creation_rules(owned_keys_stack: TaiStack, uniq: Calla
     assert session_target.status_code == 403, session_target.text
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_revoked_key_claim_link_is_dead(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)
     _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
@@ -175,6 +183,7 @@ async def test_revoked_key_claim_link_is_dead(owned_keys_stack: TaiStack, uniq: 
     assert response.status_code == 404
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_claim_link_expires(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)
     _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])

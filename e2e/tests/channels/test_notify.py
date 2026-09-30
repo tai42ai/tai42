@@ -31,6 +31,18 @@ from ._support import (
 pytestmark = pytest.mark.backendless
 
 
+@pytest.mark.needs(
+    "kind:channels:telegram",
+    "kind:channels:slack",
+    "kind:channels:twilio",
+    "topology:replicas",
+    "store:redis",
+    "helper:channel-fake:telegram",
+    "helper:channel-fake:slack",
+    "helper:channel-fake:twilio",
+    "setting:channel-allowed-recipients",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+)
 async def test_notify_external_is_plain_and_stateless(channel_case: ChannelCase, uniq: Callable[[str], str]) -> None:
     case = channel_case
     stack = case.stack
@@ -80,6 +92,13 @@ async def test_notify_external_is_plain_and_stateless(channel_case: ChannelCase,
     assert count_correlation_keys(stack, case.correlation_prefix) == keys_before
 
 
+@pytest.mark.needs(
+    "topology:replicas",
+    "helper:channel-fake:telegram",
+    "helper:channel-fake:slack",
+    "helper:channel-fake:twilio",
+    "setting:notifications-router",
+)
 async def test_notify_default_sink_lands_internally(
     channel_stack: TaiStack,
     fake_telegram: FakeTelegram,
@@ -106,6 +125,15 @@ async def test_notify_default_sink_lands_internally(
         assert stub.sends_matching(message) == []
 
 
+@pytest.mark.needs(
+    "kind:channels:telegram",
+    "kind:channels:slack",
+    "kind:channels:twilio",
+    "helper:channel-fake:telegram",
+    "helper:channel-fake:slack",
+    "helper:channel-fake:twilio",
+    "setting:channel-allowed-recipients",
+)
 async def test_notify_unlisted_recipient_fails_closed(channel_case: ChannelCase, uniq: Callable[[str], str]) -> None:
     case = channel_case
     message = uniq(f"{case.name}_notify")

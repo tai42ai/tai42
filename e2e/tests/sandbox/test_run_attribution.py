@@ -29,7 +29,17 @@ from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_claude_agent_stack
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "probe-tools",
+        "process",
+        "store:redis",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+        "setting:tai42_e2e_fixtures.monitor_backend",
+        "setting:SANDBOX_FAKE_RUNNER",
+    ),
+]
 
 # The scripted runner whose terminal ``result`` frame carries SDK usage/cost — so the adapter
 # opens its generation span (the reachable in-scope span opener).

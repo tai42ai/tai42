@@ -43,6 +43,13 @@ pytestmark = [
 ]
 
 
+@pytest.mark.needs(
+    "process",
+    "setting:agent:claude_code",
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:TAI_TURN_TIMEOUT_SECONDS=3",
+)
 async def test_stalling_turn_errs_at_the_turn_budget_over_sse(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -55,6 +62,12 @@ async def test_stalling_turn_errs_at_the_turn_budget_over_sse(
     assert "turn timeout" in errors[0]["message"], errors
 
 
+@pytest.mark.needs(
+    "process",
+    "setting:agent:claude_code",
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+)
 async def test_async_ask_on_an_ephemeral_run_does_not_park(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -65,6 +78,7 @@ async def test_async_ask_on_an_ephemeral_run_does_not_park(
     assert frames[-1] == {"type": "stream.end"}, frames
 
 
+@pytest.mark.needs("probe-tools", "process")
 async def test_async_ask_over_the_mcp_edge_is_refused(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     # The premise behind the adapter-side ask design: a platform async ask on the MCP edge has
     # no resuming driver and raises loudly, so an agent must not lean on the edge to park.
@@ -81,6 +95,7 @@ async def test_async_ask_over_the_mcp_edge_is_refused(fresh_stack: Callable[...,
     assert "async ask requires a resuming driver" in text, text
 
 
+@pytest.mark.needs("no-stack")
 @pytest.mark.skip(
     reason="the adapter-answered sync ask, the async park + cross-door resume, and the first-turn "
     "park require the identity-bound conversation-bridge door (a trusted in-process thread_id + a "

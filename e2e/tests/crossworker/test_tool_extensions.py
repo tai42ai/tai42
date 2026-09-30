@@ -7,8 +7,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "mutable",
+    "topology:replicas",
+    "setting:extension:batch",
+    "setting:extension:sync_task",
+)
 
 
 async def test_tool_extension_apply_visible_on_sibling(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:

@@ -28,12 +28,22 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
 
 from ._support import AGENT, DETERMINISTIC_MARKS
 
-pytestmark = DETERMINISTIC_MARKS
+pytestmark = [
+    *DETERMINISTIC_MARKS,
+    pytest.mark.needs(
+        "helper:llm",
+        "setting:agent:langchain_deep_agent",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+        "setting:TAI_AGENTS_LANGCHAIN_DEEP_SESSION_IMAGE",
+    ),
+]
 
 _FILE = "/scratch.txt"
 

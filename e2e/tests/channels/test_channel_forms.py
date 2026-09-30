@@ -89,6 +89,13 @@ def _form_open_value(blocks: list[dict] | None) -> str:
     raise AssertionError(f"no {_SLACK_FORM_OPEN_ACTION!r} button in the slack message blocks: {blocks!r}")
 
 
+@pytest.mark.needs(
+    "kind:channels:telegram",
+    "topology:replicas",
+    "helper:channel-fake:telegram",
+    "setting:CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+)
 async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
     channel_stack: TaiStack, fake_telegram: FakeTelegram, uniq: Callable[[str], str]
 ) -> None:
@@ -142,6 +149,13 @@ async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
     assert len(fake_telegram.sends_matching(question)) == 1
 
 
+@pytest.mark.needs(
+    "kind:channels:slack",
+    "topology:replicas",
+    "helper:channel-fake:slack",
+    "setting:CHANNEL_SLACK_SIGNING_SECRET",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+)
 async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
 ) -> None:
@@ -221,6 +235,13 @@ _SLACK_DATE_TIME_SCHEMA = {
 }
 
 
+@pytest.mark.needs(
+    "kind:channels:slack",
+    "topology:replicas",
+    "helper:channel-fake:slack",
+    "setting:CHANNEL_SLACK_SIGNING_SECRET",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+)
 async def test_form_over_slack_renders_native_date_and_time_pickers(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
 ) -> None:
@@ -288,6 +309,7 @@ async def test_form_over_slack_renders_native_date_and_time_pickers(
     assert not await is_pending(stack, stack.port_b, question)
 
 
+@pytest.mark.needs("kind:channels:twilio", "topology:replicas", "helper:channel-fake:twilio")
 async def test_form_to_a_non_advertising_channel_is_refused_and_persists_nothing(
     channel_stack: TaiStack, fake_twilio: FakeTwilio, uniq: Callable[[str], str]
 ) -> None:
@@ -329,6 +351,7 @@ async def _notify(stack: TaiStack, arguments: dict) -> CallToolResult:
         return await mcp.call_tool("notify_user", arguments, raise_on_error=False, retry_on_reloading=True)
 
 
+@pytest.mark.needs("store:redis", "setting:tai42_e2e_fixtures.stub_form_channel")
 async def test_notify_form_over_a_channel_carries_the_prefilled_values_and_pages(
     channel_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -365,6 +388,7 @@ async def test_notify_form_over_a_channel_carries_the_prefilled_values_and_pages
     assert form["schema"] == _NOTIFY_FORM_SCHEMA, form
 
 
+@pytest.mark.needs("store:redis", "setting:tai42_e2e_fixtures.stub_form_channel")
 async def test_notify_form_bad_prefill_and_bad_page_are_refused_and_nothing_sent(
     channel_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -403,6 +427,7 @@ async def test_notify_form_bad_prefill_and_bad_page_are_refused_and_nothing_sent
     assert stack.records(f"notify_form:{bad_page_rcpt}") == []
 
 
+@pytest.mark.needs("no-stack", "setting:real-credentials")
 async def test_notify_form_over_whatsapp_live_leg_skips_without_creds(uniq: Callable[[str], str]) -> None:
     import os
 

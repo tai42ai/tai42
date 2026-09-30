@@ -38,12 +38,20 @@ from ._bridge_support import (
 # the live provider). Any of those selections real breaks the stub scripting, so the module
 # steps aside; the real legs run on the dedicated e2e creds host, not in CI. Inert
 # in the default mock run — every is_real check is False, so collection is byte-for-byte today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp") or HarnessSettings().is_real("llm"),
-    reason="channel stubs + scripted-LLM are the 'twilio'/'whatsapp'/'llm' mock leg; real on creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity", "helper:llm", "setting:agent", "setting:conversations", "setting:seeded-access-control"
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio")
+        or HarnessSettings().is_real("whatsapp")
+        or HarnessSettings().is_real("llm"),
+        reason="channel stubs + scripted-LLM are the 'twilio'/'whatsapp'/'llm' mock leg; real on creds host",
+    ),
+]
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_twilio_failed_status_flips_the_record(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     identity = BRIDGE_TWILIO_FROM
     client = BRIDGE_TWILIO_CLIENT
@@ -72,6 +80,7 @@ async def test_twilio_failed_status_flips_the_record(bridge: BridgeHarness, uniq
     assert item["channel"] == "twilio"
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:whatsapp")
 async def test_whatsapp_failed_status_flips_the_record(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     identity = BRIDGE_WHATSAPP_PHONE_ID
     client = BRIDGE_WHATSAPP_CLIENT

@@ -38,9 +38,11 @@ pytestmark = [
         HarnessSettings().is_real("claude_agent"),
         reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
+    pytest.mark.needs("process", "setting:agent:claude_code"),
 ]
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_API_KEY", "setting:TAI_AGENTS_CLAUDE_SESSION_IMAGE")
 async def test_tool_names_on_identity_less_tool_face_is_refused(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -56,6 +58,7 @@ async def test_tool_names_on_identity_less_tool_face_is_refused(
     assert "no bound execution identity" in error_text(result), error_text(result)
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_API_KEY", "setting:TAI_AGENTS_CLAUDE_SESSION_IMAGE")
 async def test_tool_names_on_identity_less_sse_route_is_refused(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -66,6 +69,11 @@ async def test_tool_names_on_identity_less_sse_route_is_refused(
     assert "no bound execution identity" in errors[0]["message"], errors
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:SANDBOX_FAKE_RUNNER=malformed",
+)
 async def test_malformed_frame_is_a_loud_protocol_error(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -76,6 +84,11 @@ async def test_malformed_frame_is_a_loud_protocol_error(
     assert "protocol version" in errors[0]["message"], errors
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:SANDBOX_FAKE_RUNNER=fatal",
+)
 async def test_runner_fatal_frame_raises_loudly(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "fatal")
     frames = await run_sse(stack, {"user_message": {"content": "hi"}})

@@ -18,8 +18,11 @@
  * full-default-surface regression. A curated manifest that omits a router is what
  * leaves the corresponding page dark — the failure class this guards.
  */
-import { expect, test, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { seedCredential } from './helpers';
+import { needs, test } from './needs';
+
+needs('setting:default-routers-all');
 
 /**
  * Every primary-nav page: its nav link's accessible name (the label rendered in

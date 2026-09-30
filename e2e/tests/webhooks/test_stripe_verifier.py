@@ -15,7 +15,14 @@ import hmac
 import time
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:webhook_verifiers:stripe",
+    "setting:E2E_STRIPE_WEBHOOK_SECRET=known-to-test",
+)
 
 
 def _sign(secret: bytes, body: bytes, *, timestamp: int) -> str:

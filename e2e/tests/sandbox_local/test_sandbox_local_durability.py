@@ -20,7 +20,15 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.mcp import McpClient
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:sandbox:local",
+        "probe-tools",
+        "topology:workers=1",
+        "setting:TAI_MCP_SANDBOX_ISOLATION=none",
+    ),
+]
 
 
 async def _probe(mcp: McpClient, op: str, **kwargs) -> dict:

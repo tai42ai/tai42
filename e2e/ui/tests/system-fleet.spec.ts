@@ -11,8 +11,11 @@
  * button is not rendered (a read-only note stands in its place) — yet the viewer still
  * reads the unfenced census. Two sessions prove both sides of the gate.
  */
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, type APIRequestContext } from '@playwright/test';
 import { apiHeaders, awaitMutation, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity', 'kind:accounts', 'mutable', 'topology:multiworker');
 
 /** A password comfortably over the accounts provider's minimum length. */
 const VIEWER_PASSWORD = 'e2e-viewer-password-000';

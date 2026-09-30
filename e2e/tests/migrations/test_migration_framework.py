@@ -33,6 +33,8 @@ from tai42_kit.db import ChecksumMismatchError, MigrationEntry, apply_migrations
 from tai42_e2e.pg import _TEMPLATE_DB, PostgresAdmin, product_migration_entries
 from tai42_e2e.settings import HarnessSettings
 
+pytestmark = pytest.mark.needs("no-stack", "store:postgres")
+
 _UPGRADE_COMPONENT = "e2e-upgrade-probe"
 _TAMPER_COMPONENT = "e2e-tamper-probe"
 

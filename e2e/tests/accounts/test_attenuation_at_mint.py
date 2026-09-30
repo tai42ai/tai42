@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.accounts_flow import invite_accept_login
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres", "mutable", "setting:seeded-access-control")
 
 # The one non-public scope the accounts stack maps every /api route onto (see the
 # seeded route table): a real, mintable scope a limited-scope key can carry.

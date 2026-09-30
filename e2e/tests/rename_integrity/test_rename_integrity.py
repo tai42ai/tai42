@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 from ._support import (
@@ -24,7 +26,10 @@ from ._support import (
     unschedule,
 )
 
+pytestmark = pytest.mark.needs("kind:versioning", "probe-tools")
 
+
+@pytest.mark.needs("kind:backend")
 async def test_schedule_reference_blocks_rename(seams_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     name = uniq("sched")
     schedule_name = uniq("schedule")
@@ -44,6 +49,7 @@ async def test_schedule_reference_blocks_rename(seams_stack: TaiStack, uniq: Cal
     assert proceeded.status_code == 200, proceeded.text
 
 
+@pytest.mark.needs("setting:ACCESS_CONTROL_ENABLE=false")
 async def test_hook_reference_blocks_rename(seams_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     name = uniq("hooked")
     await create_preset(seams_stack, name)
@@ -57,6 +63,7 @@ async def test_hook_reference_blocks_rename(seams_stack: TaiStack, uniq: Callabl
         await delete_hook(seams_stack, hook_name)
 
 
+@pytest.mark.needs("setting:fixture-seams")
 async def test_fixture_referee_blocks_rename_with_holder_text(
     seams_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -71,6 +78,7 @@ async def test_fixture_referee_blocks_rename_with_holder_text(
     assert any(name in holder for holder in await referees(seams_stack, name))
 
 
+@pytest.mark.needs("setting:fixture-seams")
 async def test_fixture_referee_raise_fails_rename_loudly(seams_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     # A RAISE-marker name makes the fixture referee raise; a referee exception fails the
     # rename LOUDLY (a 500), never a silent bypass that strands the reference.
@@ -83,6 +91,7 @@ async def test_fixture_referee_raise_fails_rename_loudly(seams_stack: TaiStack, 
     assert row["name"] == name
 
 
+@pytest.mark.needs("kind:tool_meta")
 async def test_unreferenced_rename_proceeds_and_tool_meta_moves(
     seams_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -105,6 +114,7 @@ async def test_unreferenced_rename_proceeds_and_tool_meta_moves(
     assert meta[new_name]["display_name"] == "Before"
 
 
+@pytest.mark.needs("kind:backend", "setting:fixture-seams")
 async def test_referees_door_returns_union(seams_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     # One preset held by THREE distinct referee sources at once: the fixture plugin referee
     # (HOLD marker), a live schedule, and a hook. The door returns their UNION and the

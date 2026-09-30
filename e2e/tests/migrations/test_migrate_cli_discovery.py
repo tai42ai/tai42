@@ -39,6 +39,8 @@ from tai42_e2e.binaries import tai_bin
 from tai42_e2e.pg import PostgresAdmin
 from tai42_e2e.settings import HarnessSettings
 
+pytestmark = pytest.mark.needs("no-stack", "cli", "store:postgres")
+
 _ACCOUNTS_DISTRIBUTION = "tai42-accounts-postgres"
 _ACCOUNTS_IMPORT_PACKAGE = "tai42_accounts_postgres"
 
@@ -160,6 +162,7 @@ def test_fresh_database_migrates_without_traceback(
     assert "marketplace_installs" in _public_tables(harness_settings, scratch_db)
 
 
+@pytest.mark.needs("files")
 def test_prefix_preinstalled_plugin_chain_applies_with_skeleton(
     harness_settings: HarnessSettings, scratch_db: str, tmp_path: Path
 ) -> None:

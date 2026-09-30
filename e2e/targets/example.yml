@@ -1,0 +1,12 @@
+# One running stack the e2e can target. Copy this file, name it after the stack, and
+# select it with TAI_E2E_TARGET=<name> (a bare origin works too: TAI_E2E_TARGET=https://host).
+url: https://stack.example.com
+
+# The NAME of the environment variable (a CI secret) holding the login key — never the key.
+key_env: TAI_E2E_KEY
+
+# Facts this stack cannot report about itself. Which kinds and plugins it has on is read
+# from its GET /api/system/kinds and is never repeated here.
+provides:
+  - probe-tools # the e2e probe tools are loaded
+  - mutable # tests may change stack-wide state

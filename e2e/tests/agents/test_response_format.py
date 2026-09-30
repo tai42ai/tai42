@@ -38,6 +38,7 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs("helper:llm", "setting:agent:tools_agent"),
 ]
 
 
@@ -128,6 +129,7 @@ async def test_structured_output_stream_suppresses_synthetic_tool_frames(
     assert len(llm_stub.requests) == 1, f"expected 1 LLM round-trip, saw {len(llm_stub.requests)}"
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP=3")
 async def test_structured_output_reprompt_cap_yields_the_typed_outcome(
     agents_stack: TaiStack, llm_stub: LlmStub
 ) -> None:

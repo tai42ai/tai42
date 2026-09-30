@@ -23,9 +23,12 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
+import pytest
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:interactions", "topology:replicas")
 
 _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"

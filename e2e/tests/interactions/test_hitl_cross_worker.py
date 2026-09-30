@@ -13,10 +13,13 @@ import json
 from collections.abc import Callable
 
 import httpx
+import pytest
 import redis as redis_lib
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:interactions", "topology:replicas")
 
 
 async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
@@ -79,6 +82,7 @@ async def test_ask_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: C
     assert "yes-from-b" in json.dumps(view["result"])
 
 
+@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
 async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
 

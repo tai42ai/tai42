@@ -44,6 +44,7 @@ def _sandbox_exec_no_provider(res, variants):
 # ---- it runs in the sandbox ----------------------------------------------
 
 
+@pytest.mark.needs("setting:tai42_e2e_fixtures.sandbox_provider", "setting:tool:sandbox_exec")
 async def test_sandbox_exec_runs_argv_in_a_session(sandbox_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     token = uniq("exec")
     async with sandbox_stack.mcp() as mcp:
@@ -52,6 +53,7 @@ async def test_sandbox_exec_runs_argv_in_a_session(sandbox_stack: TaiStack, uniq
     assert token in result.data.stdout, result.data
 
 
+@pytest.mark.needs("process", "setting:tool:sandbox_exec", "setting:sandbox_module=unset")
 async def test_sandbox_exec_is_loud_without_a_provider(fresh_stack) -> None:
     stack: TaiStack = fresh_stack(_sandbox_exec_no_provider)
     async with stack.mcp() as mcp:
@@ -66,6 +68,7 @@ async def test_sandbox_exec_is_loud_without_a_provider(fresh_stack) -> None:
 # ---- typed per-tool input schema -----------------------------------------
 
 
+@pytest.mark.needs("kind:versioning", "setting:tai42_e2e_fixtures.sandbox_provider", "setting:tool:sandbox_exec")
 async def test_input_schema_preset_validates_the_caller_and_routes_payload(
     sandbox_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -103,6 +106,7 @@ async def test_input_schema_preset_validates_the_caller_and_routes_payload(
         assert extra.is_error, extra
 
 
+@pytest.mark.needs("probe-tools")
 async def test_input_schema_over_an_unsupported_base_is_a_loud_authoring_error(
     sandbox_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -126,6 +130,11 @@ async def test_input_schema_over_an_unsupported_base_is_a_loud_authoring_error(
 # ---- the admin fence bites only where the platform fences ----------------
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tool:sandbox_exec",
+    "setting:ACCESS_CONTROL_ENABLE=false",
+)
 async def test_invocation_fence_is_a_no_op_with_access_control_off(
     sandbox_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -160,5 +169,6 @@ async def test_invocation_fence_is_a_no_op_with_access_control_off(
     "write action-class gate it rides is proven generically in "
     "tests/access_control/test_editable_role_levels.py."
 )
+@pytest.mark.needs("no-stack")
 async def test_authoring_a_sandbox_exec_preset_is_admin_fenced() -> None:  # pragma: no cover - documented gap
     ...

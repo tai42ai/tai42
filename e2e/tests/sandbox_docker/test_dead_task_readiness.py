@@ -13,8 +13,12 @@ healthy fleet.
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e import readiness
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs()
 
 
 async def test_ready_names_no_dead_task_while_perpetual_tasks_run(sandbox_stack: TaiStack) -> None:

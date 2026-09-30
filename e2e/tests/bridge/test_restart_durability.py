@@ -32,16 +32,22 @@ from ._bridge_support import (
 # module steps aside; the real legs run on the dedicated e2e creds host, not in CI.
 # Inert in the default mock run — both is_real checks are False, so collection is byte-for-byte
 # today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
-    reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity", "helper:llm", "setting:agent", "setting:conversations", "setting:seeded-access-control"
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
+        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
+    ),
+]
 
 # An https callback URL with no server behind it — the delivery POST connection-refuses, so
 # the record exhausts its (shortened) attempts and lands terminal ``failed``.
 _UNREACHABLE_CALLBACK = "https://127.0.0.1:9/callback"
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_provider_replay_starts_no_second_turn(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     identity = default_twilio_identity()
     client = BRIDGE_TWILIO_CLIENT
@@ -76,6 +82,7 @@ async def test_provider_replay_starts_no_second_turn(bridge: BridgeHarness, uniq
     assert len(bridge.llm_stub.requests) == 2
 
 
+@pytest.mark.needs("mutable", "process", "setting:CONVERSATIONS_DELIVERY_MAX_ATTEMPTS=2", "topology:replicas")
 async def test_terminal_record_survives_a_serve_restart_and_is_not_re_driven(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

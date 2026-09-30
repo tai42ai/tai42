@@ -161,7 +161,8 @@ tai42_e2e_fixtures = ["py.typed"]
 # every member's ``tests`` tree never collides on shared basenames. Intra-suite
 # helper imports are relative (``from .conftest``), resolving the same under the
 # scoped rootdir here and the repo-root rootdir of a whole-repo run.
-addopts = ["--import-mode=importlib"]
+# Every run writes a JUnit report next to where pytest is invoked.
+addopts = ["--import-mode=importlib", "--junitxml=junit.xml"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]

@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -321,6 +321,17 @@ class HarnessSettings(BaseSettings):
     # the operator/domain-facing knob shared with the credential template). Unset
     # by default; an inbound real selection that lacks it fails loudly.
     public_base_url: str | None = Field(default=None, validation_alias=AliasChoices("E2E_PUBLIC_BASE_URL"))
+
+    # The e2e target (``TAI_E2E_TARGET``): a running stack to drive instead of building
+    # one — a bare origin or the name of a target file (see :mod:`tai42_e2e.target`).
+    # Unset or empty, each stack is built by the run.
+    target: str | None = None
+
+    @field_validator("target")
+    @classmethod
+    def _blank_target_is_unset(cls, value: str | None) -> str | None:
+        """An undefined CI variable expands to ``""``; that is an unset target."""
+        return value.strip() or None if value is not None else None
 
     @property
     def real_services(self) -> frozenset[str]:

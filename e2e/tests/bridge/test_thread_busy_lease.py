@@ -38,10 +38,23 @@ from ._bridge_support import (
 )
 
 # The scripted LLM turns are the 'llm' mock leg; the twilio signed inbound the 'twilio' one.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
-    reason="scripted-LLM + twilio stub are the 'llm'/'twilio' mock leg; real on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "helper:llm",
+        "helper:twilio",
+        "setting:CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS=2",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "topology:replicas",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
+        reason="scripted-LLM + twilio stub are the 'llm'/'twilio' mock leg; real on the creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 

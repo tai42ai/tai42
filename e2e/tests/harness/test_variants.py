@@ -22,6 +22,8 @@ from tai42_e2e.variants import (
     short_presence_ttl_env,
 )
 
+pytestmark = pytest.mark.needs("no-stack")
+
 _RES = StackResources(
     redis_idx=1,
     redis_url="redis://127.0.0.1:6379/1",

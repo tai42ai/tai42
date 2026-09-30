@@ -28,6 +28,82 @@ is already 5-8 OS processes). A missing Redis/Postgres fails loudly at session
 start with the `docker compose up -d` hint. The shared Redis needs no modules —
 access control stores its records as plain hashes and counters.
 
+### The target: build a stack, or drive a running one
+
+`TAI_E2E_TARGET` is the one switch, for the pytest suite and the browser suite in `ui/`:
+
+- **Unset** — the run builds its own stacks and drives them: each pytest stack spawns
+  its `tai` processes on allocated loopback ports, and Playwright boots the studio stack
+  through its `webServer`.
+- **Set** — the run builds nothing and drives that running stack. The value is either a
+  bare origin (`https://stack.example.com`) or the name of a target file
+  (`staging` reads `targets/staging.yml`).
+
+```bash
+TAI_E2E_TARGET=https://stack.example.com TAI_E2E_KEY=sk-... uv run --no-sync pytest
+cd ui && TAI_E2E_TARGET=staging pnpm exec playwright test
+```
+
+A target file is small (see `targets/example.yml`):
+
+```yaml
+url: https://stack.example.com
+key_env: TAI_E2E_KEY   # the NAME of the variable holding the login key, never the key
+provides:              # facts the stack cannot report about itself
+  - probe-tools
+  - mutable
+```
+
+Which kinds and plugins the stack has on is not written in the file: the run reads it
+once from the stack's `GET /api/system/kinds`, so a target has to serve that route (a run
+against one that does not stops at once, saying so). A bare origin is a target with no
+declared facts and the key in `TAI_E2E_KEY`. Against a target the run touches no Redis and no
+Postgres.
+
+### What a test needs
+
+Every test declares what it needs from the stack, in one vocabulary shared by pytest and
+Playwright:
+
+| Need | Met by | Examples |
+|------|--------|----------|
+| `kind:<kind>`, `kind:<kind>:<name>` | the stack reports that kind on (and names `<name>`) | `kind:storage`, `kind:channels:web` |
+| `probe-tools`, `mutable` | the target file lists it under `provides` | the probe tools are loaded; the test changes stack-wide state |
+| `process`, `store`, `files`, `helper`, `setting`, `topology`, `cli`, `metrics`, `second-stack`, `fixture-page`, `no-stack` | only a stack the run builds | `helper:llm`, `store:redis`, `setting:ACCESS_CONTROL_ENABLE=false` |
+
+```python
+pytestmark = pytest.mark.needs("kind:storage", "mutable")   # a module
+
+@pytest.mark.needs("process")                               # one test, added to the module's
+async def test_restart_keeps_the_record(...): ...
+```
+
+```ts
+import { needs, test } from './needs';
+
+needs('kind:identity');   // the file, or a test.describe group
+```
+
+When the run builds its own stack, declarations change nothing. Against a target each
+test either fits the target's facts and runs, or is skipped with the unmet need as the
+reason — `target reports kind sandbox off`, `needs process (...): only a stack this run
+builds has it`. A test that declares nothing is built-stack only and is skipped too
+(a spec file that declares nothing is left out of the browser run). A test that needs
+nothing beyond the API and the key declares no facts: a bare `@pytest.mark.needs`, or
+`needs()` in a spec. An unknown need word fails collection.
+
+In CI the e2e jobs read the target from the `e2e_target` input of a manual run, else from
+the `TAI_E2E_TARGET` repository variable, and the key from the `TAI_E2E_KEY` secret; with
+a target set they skip their service containers and every stack-building step.
+
+### The JUnit report
+
+Every run writes a JUnit XML report: pytest writes `junit.xml` where it is invoked
+(`addopts` in `pyproject.toml`; a second invocation in the same directory passes its
+own `--junitxml`), and Playwright writes `ui/junit.xml`. A skipped test carries its
+reason. CI uploads the reports of each e2e job as an artifact and renders them into the
+job summary.
+
 ### Variant legs
 
 Every stack is rendered through a plugin VARIANT triple, selected per pytest
@@ -103,7 +179,7 @@ docker compose --profile agents-redis up -d
   (`monitor_backend.py`). The fixture connector descriptors themselves ride the
   manifest `connectors` field (built in `tai42_e2e.manifests`).
 - `tests/` — the suites by bug class, plus `tests/harness/` self-tests.
-- `docs/adding-a-test.md` — the 6-step recipe for a new feature's e2e test.
+- `docs/adding-a-test.md` — the 7-step recipe for a new feature's e2e test.
 
 ## Metrics-dir isolation (the hard rule)
 

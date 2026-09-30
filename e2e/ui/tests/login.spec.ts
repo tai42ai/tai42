@@ -19,9 +19,12 @@
  * Every string and role/label matches the login page as built: the setup copy lives in the
  * page's `SETUP_COPY`, the sign-in form is the accounts provider's `Sign in` method.
  */
-import { expect, test, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 import { SETUP_TOKEN, SETUP_URL } from './helpers';
+import { needs, test } from './needs';
+
+needs('second-stack');
 
 // Drive the unseeded setup stack, not the seeded one the other specs share.
 test.use({ baseURL: SETUP_URL });

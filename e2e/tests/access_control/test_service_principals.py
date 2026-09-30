@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 
 # The catch-all scope the auth seed makes mintable (a catch-all route resolves every
 # non-public path to it, and the owner's ``*`` policy satisfies it).

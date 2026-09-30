@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:storage")
 
 
 async def test_stored_resource_reads_back_and_unknown_is_404(

@@ -39,10 +39,20 @@ from ._bridge_support import MEDIA_REF_RE, BridgeHarness, wait_probe_record
 
 # The web-media stack boots twilio + whatsapp on their in-process stubs and scripts no LLM; a real
 # selection breaks the stubs, so the module steps aside on the creds host.
-pytestmark = pytest.mark.skipif(
-    any(HarnessSettings().is_real(seam) for seam in ("twilio", "whatsapp", "llm")),
-    reason="the web-media stubs are the mock leg; real legs run on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "probe-tools",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        any(HarnessSettings().is_real(seam) for seam in ("twilio", "whatsapp", "llm")),
+        reason="the web-media stubs are the mock leg; real legs run on the creds host",
+    ),
+]
 
 # The tool payload the bridged turn dispatches, recorded as one JSON string: the turn text, the
 # parity ``media_*`` params, and the typed attachment's url/kind/filename — the whole ingest result
@@ -116,6 +126,7 @@ def _expiry_score(web_media: BridgeHarness, media_id: str) -> float | None:
     return score
 
 
+@pytest.mark.needs("kind:storage")
 async def test_upload_returns_pending_served_ref_that_404s_before_the_send_binds_it(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -139,6 +150,7 @@ async def test_upload_returns_pending_served_ref_that_404s_before_the_send_binds
     assert pending.status_code == 404, pending.text
 
 
+@pytest.mark.needs("kind:storage")
 async def test_blank_text_send_binds_the_attachment_and_renders_media_only(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -183,6 +195,7 @@ async def test_blank_text_send_binds_the_attachment_and_renders_media_only(
     assert served.headers.get("content-disposition") is None, served.headers
 
 
+@pytest.mark.needs("kind:storage")
 async def test_captioned_send_carries_the_caption_as_the_turn_text(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -208,6 +221,7 @@ async def test_captioned_send_carries_the_caption_as_the_turn_text(
     assert seen["i"] == media_id, seen
 
 
+@pytest.mark.needs("kind:storage")
 async def test_document_send_serves_as_a_download_attachment(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -237,6 +251,7 @@ async def test_document_send_serves_as_a_download_attachment(
     assert "document.pdf" in disposition, disposition
 
 
+@pytest.mark.needs("setting:MEDIA_INGEST_MAX_IMAGE_BYTES=8192")
 async def test_a_body_over_the_route_bound_is_refused_by_the_body_limit(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -255,6 +270,7 @@ async def test_a_body_over_the_route_bound_is_refused_by_the_body_limit(
     assert "code" not in body, body
 
 
+@pytest.mark.needs("kind:storage", "setting:MEDIA_INGEST_MAX_IMAGE_BYTES=8192")
 async def test_an_over_image_cap_png_under_the_route_bound_is_refused_by_the_seam(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -270,6 +286,7 @@ async def test_an_over_image_cap_png_under_the_route_bound_is_refused_by_the_sea
     assert refused.json()["code"] == "media_too_large", refused.text
 
 
+@pytest.mark.needs("kind:storage")
 async def test_an_html_body_declared_as_an_image_is_refused_as_a_disallowed_type(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -281,6 +298,7 @@ async def test_an_html_body_declared_as_an_image_is_refused_as_a_disallowed_type
     assert refused.json()["code"] == "media_type_not_allowed", refused.text
 
 
+@pytest.mark.needs("setting:storage-absent")
 async def test_upload_is_unavailable_without_a_blob_provider(
     web_media_no_store: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -305,6 +323,7 @@ async def test_an_unknown_attachment_id_refuses_the_send_as_unbindable(
     assert refused.json()["code"] == "media_unbindable", refused.text
 
 
+@pytest.mark.needs("kind:storage")
 async def test_the_same_attachment_in_a_second_message_is_already_bound(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -321,6 +340,7 @@ async def test_the_same_attachment_in_a_second_message_is_already_bound(
     assert second.json()["code"] == "media_already_bound", second.text
 
 
+@pytest.mark.needs("kind:storage")
 async def test_a_retry_with_the_same_client_message_id_binds_idempotently_into_one_turn(
     web_media: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -349,6 +369,9 @@ async def test_a_retry_with_the_same_client_message_id_binds_idempotently_into_o
     assert inbound_ids == {turn_id}, inbound_ids
 
 
+@pytest.mark.needs(
+    "kind:storage", "setting:MEDIA_INGEST_PENDING_TTL_SECONDS=3", "setting:MEDIA_INGEST_REAPER_INTERVAL_SECONDS=1"
+)
 async def test_an_unreferenced_upload_expires_after_the_pending_ttl(
     web_media_expiry: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

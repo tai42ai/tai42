@@ -18,6 +18,7 @@ import re
 from collections.abc import Callable
 
 import httpx
+import pytest
 
 from tai42_e2e.webchat import WebChatClient
 
@@ -32,6 +33,16 @@ _MEDIA_REF_RE = re.compile(r"/api/interactions/media/[A-Za-z0-9_-]{43}")
 
 def _base_url(bridge: BridgeHarness) -> str:
     return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_web_notify_data_image_stored_by_reference_and_served(

@@ -21,7 +21,10 @@ import pytest
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("kind:tool_runs", "kind:interactions", "probe-tools", "topology:replicas"),
+]
 
 
 def _subject(key: str) -> dict[str, str]:
@@ -101,6 +104,7 @@ async def _await_status(api: Any, run_id: str, status: str, *, deadline: float =
     return await wait_for_async(_reached, deadline=deadline, message=f"run {run_id} never reached {status}")
 
 
+@pytest.mark.needs("setting:INTERACTIONS_MAX_CONCURRENT_CALLER=1")
 async def test_caller_asks_carry_a_separate_concurrency_cap_from_user_asks(
     caller_cap_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

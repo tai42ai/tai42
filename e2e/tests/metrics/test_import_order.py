@@ -5,7 +5,11 @@ regression, caught by name."""
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:backend", "probe-tools", "files", "topology:multiworker")
 
 
 def _payload(result: object) -> dict:

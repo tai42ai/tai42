@@ -15,7 +15,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:interactions", "probe-tools")
 
 _PARK_EXPIRY_SECONDS = 3600.0
 

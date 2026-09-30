@@ -29,6 +29,11 @@ pytestmark = [
         not HarnessSettings().is_real("claude_agent"),
         reason="the real langchain_deep_agent smoke needs the .env ANTHROPIC_API_KEY (claude_agent real seam)",
     ),
+    pytest.mark.needs(
+        "setting:real-credentials",
+        "setting:agent:langchain_deep_agent",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+    ),
 ]
 
 

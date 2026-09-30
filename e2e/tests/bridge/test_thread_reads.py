@@ -44,10 +44,13 @@ from ._bridge_support import (
 # Every leg scripts the LLM stub and asserts the scripted answer back, so the whole module
 # is the 'llm' mock leg; the twilio-driven ones additionally need FakeTwilio's signed
 # inbound. The real legs run on the dedicated creds host, not in CI.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs("kind:identity", "setting:conversations", "setting:seeded-access-control"),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+    ),
+]
 MOCK_TWILIO_ONLY = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
     reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs on the creds host",
@@ -119,6 +122,7 @@ async def _two_exchanges(bridge: BridgeHarness, uniq: Callable[[str], str], iden
 
 
 @MOCK_TWILIO_ONLY
+@pytest.mark.needs("kind:channels:twilio", "helper:llm", "helper:twilio", "setting:agent")
 async def test_threads_and_transcript_read_back_a_bridge_conversation(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -172,6 +176,7 @@ async def test_threads_and_transcript_read_back_a_bridge_conversation(
 
 
 @MOCK_TWILIO_ONLY
+@pytest.mark.needs("kind:channels:twilio")
 async def test_unknown_route_and_thread_are_uniform_404s(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     route_name, _identity = await _channel_route(bridge, uniq)
     missing_route = uniq("l13-nosuch").replace("_", "-")
@@ -192,6 +197,7 @@ async def test_unknown_route_and_thread_are_uniform_404s(bridge: BridgeHarness, 
 
 
 @MOCK_TWILIO_ONLY
+@pytest.mark.needs("kind:channels:twilio", "helper:llm", "helper:twilio", "setting:agent")
 async def test_channel_listing_is_admin_only_and_transcript_reads_for_a_grant_holder(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -217,6 +223,7 @@ async def test_channel_listing_is_admin_only_and_transcript_reads_for_a_grant_ho
     assert (await bridge.api().get(_transcript_path(route_name, thread_id)))["total"] == 2
 
 
+@pytest.mark.needs("helper:llm", "setting:agent")
 async def test_api_door_caller_reads_their_own_transcript(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     """A NON-admin grant-holder reads back an api-door thread through the transcript door.
 

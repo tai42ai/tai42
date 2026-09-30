@@ -40,10 +40,14 @@ from ._bridge_support import (
 _UNREACHABLE_CALLBACK = "https://127.0.0.1:9/callback"
 
 
+pytestmark = pytest.mark.needs("kind:identity", "probe-tools", "setting:conversations", "setting:seeded-access-control")
+
+
 @pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
     reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
 )
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio", "store:redis")
 async def test_tool_target_echoes_a_reply_and_maps_null_to_silence(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -155,6 +159,7 @@ async def test_api_tool_target_null_reply_answers_silent_inline(
     assert record["delivery_status"] == "delivered"
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_DELIVERY_MAX_ATTEMPTS=2")
 async def test_api_tool_target_null_reply_delivers_silent_marker_async(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

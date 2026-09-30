@@ -47,10 +47,15 @@ from ._bridge_support import (
     wait_probe_record,
 )
 
-pytestmark = pytest.mark.skipif(
-    any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
-    reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity", "probe-tools", "setting:conversations", "setting:seeded-access-control", "store:redis"
+    ),
+    pytest.mark.skipif(
+        any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
+        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+    ),
+]
 
 # The one fixed participant notice per rejection reason (mirrors the skeleton chokepoint's copy).
 _NOTICES = {
@@ -121,6 +126,7 @@ async def _assert_rejected(
     assert reasons == [reason], f"expected one {reason} event, saw {reasons!r}"
 
 
+@pytest.mark.needs("kind:channels:telegram", "helper:telegram", "setting:MEDIA_INGEST_MAX_IMAGE_BYTES=8192")
 async def test_telegram_oversize_image_rejected_too_large(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -143,6 +149,7 @@ async def test_telegram_oversize_image_rejected_too_large(
     )
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:whatsapp")
 async def test_whatsapp_html_under_image_rejected_unsupported_type(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -169,6 +176,7 @@ async def test_whatsapp_html_under_image_rejected_unsupported_type(
     )
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_twilio_permanent_miss_rejected_could_not_receive(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -193,6 +201,7 @@ async def test_twilio_permanent_miss_rejected_could_not_receive(
     )
 
 
+@pytest.mark.needs("kind:channels:telegram", "helper:telegram", "setting:storage-absent")
 async def test_telegram_store_unavailable_rejected_could_not_receive(
     media_bridge_no_store: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -214,6 +223,7 @@ async def test_telegram_store_unavailable_rejected_could_not_receive(
     )
 
 
+@pytest.mark.needs("kind:channels:telegram", "kind:storage", "helper:telegram")
 async def test_telegram_transient_5xx_redelivers_then_dedupes(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

@@ -7,12 +7,15 @@ stub_channel, and a bare profile omits the key entirely."""
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from tai42_e2e import StackResources
 from tai42_e2e.channel_stubs import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.manifests import build_auth_stack, build_bare_stack, build_channel_stack
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.variants import resolve_variants
+
+pytestmark = pytest.mark.needs("no-stack")
 
 
 async def test_fake_telegram_records_mints_and_fails_loud() -> None:

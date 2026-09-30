@@ -9,8 +9,11 @@
  * reaches `Succeeded` with the baked result, and the same-origin API agrees. The
  * loud negative launches `e2e_fail`, whose run surfaces its error verbatim.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:tool_runs', 'probe-tools');
 
 test('launch a background e2e_echo run; UI detail terminal + API record agree', async ({
   page,

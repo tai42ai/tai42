@@ -29,6 +29,14 @@ from tai42_e2e.webchat import WebChatClient
 from ._bridge_support import BridgeHarness
 
 pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "probe-tools",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
@@ -85,6 +93,7 @@ async def _open_agent_door_route(bridge: BridgeHarness, uniq: Callable[[str], st
     return web
 
 
+@pytest.mark.needs("helper:llm", "setting:agent", "setting:checkpoint:redis", "setting:door_agent")
 async def test_agent_caller_ask_surfaces_through_reply_expr_and_resumes_through_resume_expr(
     agent_route_bridge: BridgeHarness, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:

@@ -20,6 +20,8 @@ from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for
 
+pytestmark = pytest.mark.needs("kind:identity", "store:redis", "store:postgres", "process")
+
 
 def _write_ownerless_record(stack: TaiStack, raw: str, user_id: str) -> None:
     """Write an identity record with NO owner claim plus a policy row for ``user_id`` — the

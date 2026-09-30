@@ -15,9 +15,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.accounts_flow import invite_accept_login
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "kind:accounts:postgres",
+    "mutable",
+    "store:redis",
+    "topology:replicas",
+    "setting:dual-role-manifest",
+)
 
 _PASSWORD = "correct-horse-battery-staple"
 

@@ -19,9 +19,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 from ._rbac_support import create_role, create_user_with_role
+
+pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres")
 
 
 async def test_reserved_admin_role_and_assigned_role_guards(
@@ -76,6 +80,7 @@ async def test_reserved_admin_role_and_assigned_role_guards(
     )
 
 
+@pytest.mark.needs("mutable", "setting:no-preexisting-accounts-admin")
 async def test_multiple_admins_and_last_admin_guard(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """Two accounts admins may coexist and either may be removed; the LAST enabled admin
     cannot be demoted, disabled, or deleted. A freshly created user is enabled, so the

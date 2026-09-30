@@ -18,9 +18,12 @@
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 
 import { apiHeaders, resolveWebVisitorId, uniq, WEB_SESSION_COOKIE } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:channels:web', 'kind:interactions', 'store:redis');
 
 /** Where the widget shots land: `TAI_E2E_SHOTS_DIR` when set, else a per-suite output
  * dir beside the tests (untracked). */

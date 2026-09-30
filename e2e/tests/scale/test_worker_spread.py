@@ -28,6 +28,8 @@ import json
 from collections.abc import Callable
 from dataclasses import replace
 
+import pytest
+
 from tai42_e2e import StackConfig, StackResources, wait_for_async
 from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.stack import TaiStack
@@ -68,6 +70,7 @@ def _worker_pids(stack: TaiStack, key: str) -> set[int]:
     return {int(json.loads(record)["pid"]) for record in stack.records(key)}
 
 
+@pytest.mark.needs("probe-tools", "process", "store:redis", "topology:workers=4")
 async def test_burst_spreads_across_four_workers_with_zero_failures(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -89,6 +92,7 @@ async def test_burst_spreads_across_four_workers_with_zero_failures(
     )
 
 
+@pytest.mark.needs("probe-tools", "process", "store:redis", "topology:workers=1")
 async def test_sub_mcp_registered_at_runtime_serves_over_the_mcp_surface(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:

@@ -32,10 +32,21 @@ from ._bridge_support import (
 # module steps aside; the real legs run on the dedicated e2e creds host, not in CI.
 # Inert in the default mock run — both is_real checks are False, so collection is byte-for-byte
 # today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
-    reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "helper:llm",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
+        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
+    ),
+]
 
 
 async def test_two_numbers_each_reply_from_their_own_identity(

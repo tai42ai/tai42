@@ -40,6 +40,12 @@ pytestmark = [
 ]
 
 
+@pytest.mark.needs(
+    "process",
+    "setting:agent:claude_code",
+    "setting:TAI_AGENTS_CLAUDE_API_KEY",
+    "setting:TAI_AGENTS_CLAUDE_SESSION_IMAGE",
+)
 async def test_the_tool_proxy_is_identity_gated_on_both_doors(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -63,6 +69,7 @@ async def test_the_tool_proxy_is_identity_gated_on_both_doors(
     assert "no bound execution identity" in errors[0]["message"], errors
 
 
+@pytest.mark.needs("no-stack")
 @pytest.mark.skip(
     reason="the positive adapter-proxy round-trip (a tool_call proxied to run_tool under the "
     "turn's identity, the is_error round-trip, two concurrent tool_calls routed by call_id, and "

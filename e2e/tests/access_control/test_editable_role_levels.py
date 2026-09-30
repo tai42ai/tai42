@@ -20,11 +20,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
 from ._rbac_support import create_role, create_user_with_role, hook_body, mint_owned_key, update_role_grants
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "kind:accounts:postgres",
+    "probe-tools",
+    "topology:replicas",
+    "setting:seeded-access-control",
+)
 
 
 async def _assert_reach_under_reviewer(

@@ -17,11 +17,12 @@ from typing import Any
 import pytest
 
 from tai42_e2e import diagnostics
-from tai42_e2e.booting import allocate_and_build
+from tai42_e2e.booting import allocate_and_build, target_stack
 from tai42_e2e.harness import InfraUnavailableError, connect_infra
 from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.target import Target, TargetError, check_needs, fetch_kinds, load_target
 from tai42_e2e.tcprelay import TcpRelay
 from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
@@ -73,30 +74,82 @@ def assert_real_selection_ready(settings: HarnessSettings, environ: Mapping[str,
         )
 
 
+# The e2e target this pytest process drives, resolved once in ``pytest_configure``.
+_target: Target | None = None
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Enforce the REAL/MOCK switch at session start (published to every repo that
     installs the plugin). With ``TAI_E2E_REAL`` empty this is a no-op, so the mock
     suite is byte-for-byte today's behavior; a real selection missing creds or the
-    public base URL aborts here, before any stack boots, naming the gap."""
+    public base URL aborts here, before any stack boots, naming the gap.
+
+    Registers the ``needs`` marker and resolves the e2e target (``TAI_E2E_TARGET``):
+    a named target is loaded and asked for its kinds once, here."""
+    config.addinivalue_line(
+        "markers",
+        "needs(*facts): what the test needs from the stack it drives (see tai42_e2e.target); "
+        "against an e2e target a test whose needs the target does not meet is skipped",
+    )
+    settings = HarnessSettings()
+    assert_real_selection_ready(settings, os.environ)
+    target: Target | None = None
+    if settings.target is not None:
+        try:
+            target = fetch_kinds(load_target(settings.target, config.rootpath / "targets"))
+        except TargetError as exc:
+            pytest.exit(str(exc), returncode=1)
+    global _target  # one target per pytest process, resolved here
+    _target = target
+
+
+def declared_needs(item: pytest.Item) -> list[str] | None:
+    """The union of every ``needs`` marker applying to ``item``, or ``None`` when it
+    carries none."""
+    markers = list(item.iter_markers("needs"))
+    if not markers:
+        return None
+    return [str(need) for marker in markers for need in marker.args]
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Check every declared need against the vocabulary, and against an e2e target
+    skip each test the target cannot serve, with the unmet need as the reason."""
     del config
-    assert_real_selection_ready(HarnessSettings(), os.environ)
+    target = _target
+    for item in items:
+        needs = declared_needs(item)
+        try:
+            check_needs(needs or [])
+        except TargetError as exc:
+            raise pytest.UsageError(f"{item.nodeid}: {exc}") from exc
+        if target is not None:
+            reason = target.unmet(needs)
+            if reason is not None:
+                item.add_marker(pytest.mark.skip(reason=reason))
 
 
-def pytest_report_header() -> str:
-    """Stamp the variant triple this process runs under into the run header so a
-    console log or CI artifact is self-identifying."""
+def pytest_report_header() -> list[str]:
+    """Stamp the variant triple this process runs under, and the e2e target when the
+    run drives one, into the run header so a console log or CI artifact is
+    self-identifying."""
     s = HarnessSettings()
-    return f"tai42-e2e variants: backend={s.backend} identity={s.identity} storage={s.storage}"
+    lines = [f"tai42-e2e variants: backend={s.backend} identity={s.identity} storage={s.storage}"]
+    if _target is not None:
+        lines.append(f"tai42-e2e target: {_target.url}")
+    return lines
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _stamp_variant_properties(record_testsuite_property: Callable[[str, object], None]) -> None:
-    """Record the variant triple as junit testsuite properties so a CI xml
-    artifact carries which backend/identity/storage leg produced it."""
+    """Record the variant triple — and the e2e target when the run drives one — as
+    junit testsuite properties so a CI xml artifact carries what produced it."""
     s = HarnessSettings()
     record_testsuite_property("tai42_e2e_backend", s.backend)
     record_testsuite_property("tai42_e2e_identity", s.identity)
     record_testsuite_property("tai42_e2e_storage", s.storage)
+    if _target is not None:
+        record_testsuite_property("tai42_e2e_target", _target.url)
 
 
 @pytest.fixture(scope="session")
@@ -107,9 +160,10 @@ def harness_settings() -> HarnessSettings:
 @pytest.fixture(scope="session")
 def infra(harness_settings: HarnessSettings) -> Iterator[Infra]:
     """Verify Redis + Postgres reachability (loudly, with the compose hint on
-    failure), create the DDL-applied template DB, and expose the admin clients."""
+    failure), create the DDL-applied template DB, and expose the admin clients.
+    Against an e2e target no store is connected."""
     try:
-        infra = connect_infra(harness_settings)
+        infra = connect_infra(harness_settings, _target)
     except InfraUnavailableError as exc:
         pytest.exit(str(exc), returncode=1)
     try:
@@ -136,6 +190,10 @@ def fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Itera
         relays: Sequence[TcpRelay] | None = None,
         allocate_checkpoint_db: bool = False,
     ) -> TaiStack:
+        if infra.target is not None:
+            stack = target_stack(infra)
+            stack.boot()
+            return stack
         root = tmp_path_factory.mktemp("fresh")
         # Relays the caller started to front this stack's stores: the stack adopts
         # them so teardown stops and leak-checks them, and an allocation/build

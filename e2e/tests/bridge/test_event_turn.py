@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.webchat import WebChatClient
 
 from ._bridge_support import BridgeHarness
@@ -103,6 +105,10 @@ async def _listed_thread(bridge: BridgeHarness, route_name: str, expect_address:
     return thread["thread_id"]
 
 
+pytestmark = pytest.mark.needs("kind:channels:web", "kind:identity", "probe-tools", "setting:conversations")
+
+
+@pytest.mark.needs("setting:seeded-access-control", "store:redis")
 async def test_event_runs_as_a_turn_and_surfaces_its_inbound_id_on_the_participant_thread(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -175,6 +181,7 @@ async def test_event_runs_as_a_turn_and_surfaces_its_inbound_id_on_the_participa
     assert by_thread_reply["turn_id"] == by_thread["message_id"]
 
 
+@pytest.mark.needs("setting:agent")
 async def test_event_door_refuses_an_unknown_thread_and_an_agent_target(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

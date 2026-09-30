@@ -42,7 +42,20 @@ from ._market_support import (
     wait_tool_live,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "mutable",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+        "setting:PIP_INDEX_URL",
+        "setting:shared-venv",
+        "setting:fixture-plugin:alpha",
+        "setting:fixture-plugin:zeta",
+    ),
+]
 
 _ALPHA_TOOL = "e2e_market_probe"
 _ZETA_TOOL = "e2e_zeta_probe"
@@ -121,6 +134,7 @@ async def test_upgrade_all_upgrades_compatible_and_reports_per_ref(
     await _uninstall_both(stack)
 
 
+@pytest.mark.needs("cli")
 async def test_cli_upgrade_all_drives_the_same_path(
     marketplace_service: MarketplaceService,
     marketplace_stack: TaiStack,

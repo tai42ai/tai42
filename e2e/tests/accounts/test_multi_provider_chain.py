@@ -9,9 +9,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "kind:accounts:postgres",
+    "topology:replicas",
+    "setting:ACCESS_CONTROL_AUTH_PROVIDERS=accounts-postgres+redis",
+)
 
 _PASSWORD = "chain-user-password-1"
 

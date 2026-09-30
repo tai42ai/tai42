@@ -9,8 +9,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "kind:accounts:postgres",
+    "probe-tools",
+    "topology:replicas",
+    "setting:seeded-access-control",
+)
 
 _SCOPE = "e2e-all"
 

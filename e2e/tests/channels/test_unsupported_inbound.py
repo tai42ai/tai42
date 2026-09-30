@@ -31,10 +31,20 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
-pytestmark = pytest.mark.skipif(
-    any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp")),
-    reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp")),
+        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+    ),
+    pytest.mark.needs(
+        "kind:identity",
+        "probe-tools",
+        "store:redis",
+        "setting:conversations:redis",
+        "setting:hooks",
+        "setting:seeded-access-control",
+    ),
+]
 
 # The one fixed participant notice the skeleton sends for an UNSUPPORTED_TYPE rejection.
 _NOTICE = "This content type is not supported here."
@@ -126,6 +136,7 @@ async def _assert_rejects_once(
     assert [json.loads(raw)["value"] for raw in stack.records(probe)] == ["unsupported_type"]
 
 
+@pytest.mark.needs("kind:channels:slack", "helper:channel-fake:slack", "setting:CHANNEL_SLACK_SIGNING_SECRET")
 async def test_slack_nameless_file_is_rejected_once(
     media_bridge_stack: tuple[TaiStack, str], fake_slack: Any, uniq: Callable[[str], str]
 ) -> None:
@@ -159,6 +170,7 @@ async def test_slack_nameless_file_is_rejected_once(
     )
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:channel-fake:whatsapp", "setting:CHANNEL_WHATSAPP_APP_SECRET")
 async def test_whatsapp_unsupported_type_notice_is_rejected_once(
     media_bridge_stack: tuple[TaiStack, str], fake_whatsapp: Any, uniq: Callable[[str], str]
 ) -> None:
@@ -195,6 +207,7 @@ async def test_whatsapp_unsupported_type_notice_is_rejected_once(
     )
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:channel-fake:whatsapp", "setting:CHANNEL_WHATSAPP_APP_SECRET")
 async def test_whatsapp_non_content_notice_sends_no_reply(
     media_bridge_stack: tuple[TaiStack, str], fake_whatsapp: Any
 ) -> None:
@@ -217,6 +230,7 @@ async def test_whatsapp_non_content_notice_sends_no_reply(
     assert _notices_to(fake_whatsapp, wa_id, "to") == [], "a non-content notice must send no participant reply"
 
 
+@pytest.mark.needs("kind:channels:telegram", "helper:channel-fake:telegram", "setting:CHANNEL_TELEGRAM_WEBHOOK_SECRET")
 async def test_telegram_poll_is_rejected_and_acked(
     media_bridge_stack: tuple[TaiStack, str], fake_telegram: Any, uniq: Callable[[str], str]
 ) -> None:

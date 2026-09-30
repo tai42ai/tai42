@@ -12,8 +12,11 @@
  * comes back with an OAuth error, the UI surfaces the failed sign-in, and no
  * connection is created.
  */
-import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { apiHeaders, awaitMutation, IDP_CONTROL_URL, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:connectors', 'mutable', 'helper:idp', 'setting:fixture-connector');
 
 const PROVIDER = 'E2E Stub IdP';
 

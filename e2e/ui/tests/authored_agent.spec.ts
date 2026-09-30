@@ -7,8 +7,11 @@
  * exists, and the stub recorded exactly 2 completion requests — the whole
  * LLM → tool → LLM loop crossed the browser, the server, and the stub socket.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, LLM_CONTROL_URL, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:versioning', 'probe-tools', 'mutable', 'setting:agent:tools_agent', 'helper:llm');
 
 test('author an agent, run it over the scripted stub, and assert both sides', async ({ page, request }) => {
   const name = uniq('agent');

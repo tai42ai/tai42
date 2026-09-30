@@ -31,10 +31,19 @@ from tai42_e2e.stack import TaiStack
 
 # Auth-on bridge stack + scripted-LLM + channel stubs are the mock leg; step aside on any real
 # seam that would break the scripting/stubs.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("claude_agent"),
-    reason="the scripted-LLM bridge stack is the mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm") or HarnessSettings().is_real("claude_agent"),
+        reason="the scripted-LLM bridge stack is the mock leg; the real leg runs on the creds host",
+    ),
+    pytest.mark.needs(
+        "kind:identity",
+        "setting:agent:langchain_deep_agent",
+        "setting:conversations:redis",
+        "setting:no-sandbox-provider",
+        "setting:seeded-access-control",
+    ),
+]
 
 _AGENT = "langchain_deep_agent"
 

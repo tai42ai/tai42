@@ -9,8 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:identity", "kind:accounts:postgres", "setting:TAI_ACCOUNTS_LOGIN_BACKOFF_THRESHOLD=5"
+)
 
 _PASSWORD = "rate-limit-user-password-1"
 

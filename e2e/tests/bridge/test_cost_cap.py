@@ -37,12 +37,24 @@ from ._bridge_support import (
 # module steps aside; the real legs run on the dedicated e2e creds host, not in CI.
 # Inert in the default mock run — both is_real checks are False, so collection is byte-for-byte
 # today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
-    reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "helper:llm",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
+        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
+    ),
+]
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR=5")
 async def test_over_cap_address_is_shed_with_one_slow_down_reply(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -78,6 +90,7 @@ async def test_over_cap_address_is_shed_with_one_slow_down_reply(
     assert len(bridge.llm_stub.requests) == cap
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_MAX_CONCURRENT_TURNS=4")
 async def test_global_ceiling_bounds_concurrent_turns(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     identity = BRIDGE_TWILIO_FROM_B
     exec_key = uniq("l10b-exec")

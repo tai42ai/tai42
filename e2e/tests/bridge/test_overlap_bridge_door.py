@@ -32,10 +32,21 @@ from tai42_e2e.settings import HarnessSettings
 from ._bridge_support import TWILIO_INBOUND_PATH, BridgeHarness, post_inbound, wait_probe_record, wait_send_to
 from ._overlap_support import probe_start_expr
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "probe-tools",
+        "helper:twilio",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio"),
+        reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
+    ),
+]
 
 _HOLD_SECONDS = 4.0
 

@@ -10,8 +10,11 @@
  * POST /api/config/env MERGES: a key posted with value '' is deleted — the path
  * the restore below drives.
  */
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, type APIRequestContext } from '@playwright/test';
 import { apiHeaders, awaitMutation, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('mutable');
 
 /** The stored env map GET /api/config/env exposes under `data.env`. */
 async function storedEnv(request: APIRequestContext): Promise<Record<string, string>> {

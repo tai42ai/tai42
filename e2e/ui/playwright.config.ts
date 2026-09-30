@@ -11,6 +11,7 @@ import {
   SETUP_PORT,
   UI_PORT,
 } from "./tests/helpers";
+import { TARGET, undeclaredSpecs } from "./tests/target";
 
 /**
  * The live browser-e2e harness. The Studio is SERVED BY THE SKELETON (never
@@ -20,7 +21,9 @@ import {
  * seam. `webServer` runs the console script that boots the `studio_stack`
  * profile (multi-worker skeleton + backend + metrics, access control ON, the
  * built dist served) on a KNOWN port; Playwright polls it, then owns its
- * lifecycle.
+ * lifecycle. With `TAI_E2E_TARGET` set there is no `webServer`: the run builds no
+ * stack and drives that running stack instead, and the global setup reads which
+ * kinds it has on so each spec's declared needs are matched against it.
  *
  * The stack boot needs loopback Redis + Postgres from `docker compose up -d`
  * (repo root) and the built Studio dist. The port/key/llm-port defaults here
@@ -29,10 +32,15 @@ import {
  */
 // The pinned ports/key/token are defined once in ./tests/helpers.ts (the specs
 // read the same constants), so config, runner, and specs agree on one origin.
-const baseURL = `http://127.0.0.1:${String(UI_PORT)}`;
+// The target (TAI_E2E_TARGET) when the run drives one — no stack is built — else the
+// stack this run boots.
+const baseURL = TARGET?.url ?? `http://127.0.0.1:${String(UI_PORT)}`;
+// A spec that declares no needs is built-stack only: a run against a target leaves it out.
+const undeclared = TARGET ? undeclaredSpecs() : [];
 
 export default defineConfig({
   testDir: "./tests",
+  testIgnore: undeclared,
   // CI stamps the resolved tai-studio commit into the HTML report as provenance;
   // a local run without the env var records an empty string, never `undefined`.
   metadata: { "tai-studio-sha": process.env.TAI_STUDIO_SHA ?? "" },
@@ -51,7 +59,9 @@ export default defineConfig({
   // just later). Local single-worker runs finish these in a fraction of the budget.
   timeout: 120_000,
   expect: { timeout: 10_000 },
-  reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
+  reporter: process.env.CI
+    ? [["github"], ["html", { open: "never" }], ["junit", { outputFile: "junit.xml" }]]
+    : [["list"], ["junit", { outputFile: "junit.xml" }]],
   use: {
     baseURL,
     trace: "retain-on-failure",
@@ -86,7 +96,7 @@ export default defineConfig({
     },
     {
       name: "firefox",
-      testIgnore: /(viewport-sweep|a11y-audit)\.spec\.ts$/,
+      testIgnore: [/(viewport-sweep|a11y-audit)\.spec\.ts$/, ...undeclared],
       use: {
         ...devices["Desktop Firefox"],
         viewport: { width: 1280, height: 1600 },
@@ -94,7 +104,7 @@ export default defineConfig({
     },
     {
       name: "webkit",
-      testIgnore: /(viewport-sweep|a11y-audit)\.spec\.ts$/,
+      testIgnore: [/(viewport-sweep|a11y-audit)\.spec\.ts$/, ...undeclared],
       use: {
         ...devices["Desktop Safari"],
         viewport: { width: 1280, height: 1600 },
@@ -109,52 +119,55 @@ export default defineConfig({
   // process: the harness's Redis-DB allocator tracks its in-use set in memory, so two runner
   // processes would collide on the shared server. The runner brings the setup stack up before
   // the seeded one, so both are ready by the time Playwright sees this `url` respond.
-  webServer: {
-    // Invoke the console script DIRECTLY from the project venv rather than through
-    // `uv run`: `uv run` is a supervisor that exits as soon as it forwards the
-    // shutdown signal, so Playwright then sees its tracked webServer process gone
-    // and SIGKILLs the whole tree — cutting the runner's teardown short and
-    // orphaning the stack (a leaked `tai serve` holding the fixed port, which a
-    // reused-server rerun then serves in a degraded state). With the runner as
-    // Playwright's direct child, the SIGTERM below reaches its own handler and its
-    // grace window covers the full leak-checked teardown. `uv sync` (CI) / a local
-    // `uv run` first materializes this venv.
-    command: "../.venv/bin/tai42-e2e-studio-stack",
-    // cwd is the tai42-e2e project (`e2e/`, one level up); the uv workspace venv
-    // holding the console script lives at the monorepo root, one level above that.
-    cwd: "..",
-    url: baseURL,
-    reuseExistingServer: !process.env.CI,
-    // The runner spawns each stack process as its OWN session leader (for
-    // leak-checked teardown), so they are NOT in the webServer's process group —
-    // only the runner's own SIGTERM handler reaps them. Give it a real SIGTERM +
-    // grace window so it can run that teardown before Playwright SIGKILLs it;
-    // without this the stack orphans and a reused-server rerun serves a degraded
-    // stack (e.g. a dead LLM stub).
-    gracefulShutdown: { signal: "SIGTERM", timeout: 30_000 },
-    // The runner brings up a multi-process stack against Docker services; give
-    // it room on a cold boot.
-    timeout: 300_000,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      // The per-run handoff the specs read next to this file (helpers.ts).
-      TAI_E2E_STACK_HANDOFF: fileURLToPath(
-        new URL("./.stack-handoff.json", import.meta.url),
-      ),
-      TAI_E2E_UI_PORT: String(UI_PORT),
-      TAI_E2E_UI_LLM_PORT: String(LLM_PORT),
-      TAI_E2E_UI_IDP_PORT: String(IDP_PORT),
-      TAI_E2E_UI_API_KEY: API_KEY,
-      // The opt-in marketplace gate + its pinned coordinates. When unset the
-      // runner boots nothing marketplace-flavored and the specs skip; the pnpm
-      // site build (only under the gate) lands inside the timeout above.
-      TAI_E2E_MARKETPLACE: process.env.TAI_E2E_MARKETPLACE ?? "0",
-      TAI_E2E_UI_MP_PORT: String(MP_PORT),
-      TAI_E2E_UI_MP_WEB_PORT: String(MP_WEB_PORT),
-      TAI_E2E_UI_MP_ADMIN_TOKEN: MP_ADMIN_TOKEN,
-      // The login spec's unseeded setup stack rides on this second port in the same runner.
-      TAI_E2E_UI_SETUP_PORT: String(SETUP_PORT),
-    },
-  },
+  globalSetup: TARGET ? "./tests/global-setup.ts" : undefined,
+  webServer: TARGET
+    ? undefined
+    : {
+        // Invoke the console script DIRECTLY from the project venv rather than through
+        // `uv run`: `uv run` is a supervisor that exits as soon as it forwards the
+        // shutdown signal, so Playwright then sees its tracked webServer process gone
+        // and SIGKILLs the whole tree — cutting the runner's teardown short and
+        // orphaning the stack (a leaked `tai serve` holding the fixed port, which a
+        // reused-server rerun then serves in a degraded state). With the runner as
+        // Playwright's direct child, the SIGTERM below reaches its own handler and its
+        // grace window covers the full leak-checked teardown. `uv sync` (CI) / a local
+        // `uv run` first materializes this venv.
+        command: "../.venv/bin/tai42-e2e-studio-stack",
+        // cwd is the tai42-e2e project (`e2e/`, one level up); the uv workspace venv
+        // holding the console script lives at the monorepo root, one level above that.
+        cwd: "..",
+        url: baseURL,
+        reuseExistingServer: !process.env.CI,
+        // The runner spawns each stack process as its OWN session leader (for
+        // leak-checked teardown), so they are NOT in the webServer's process group —
+        // only the runner's own SIGTERM handler reaps them. Give it a real SIGTERM +
+        // grace window so it can run that teardown before Playwright SIGKILLs it;
+        // without this the stack orphans and a reused-server rerun serves a degraded
+        // stack (e.g. a dead LLM stub).
+        gracefulShutdown: { signal: "SIGTERM", timeout: 30_000 },
+        // The runner brings up a multi-process stack against Docker services; give
+        // it room on a cold boot.
+        timeout: 300_000,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          // The per-run handoff the specs read next to this file (helpers.ts).
+          TAI_E2E_STACK_HANDOFF: fileURLToPath(
+            new URL("./.stack-handoff.json", import.meta.url),
+          ),
+          TAI_E2E_UI_PORT: String(UI_PORT),
+          TAI_E2E_UI_LLM_PORT: String(LLM_PORT),
+          TAI_E2E_UI_IDP_PORT: String(IDP_PORT),
+          TAI_E2E_UI_API_KEY: API_KEY,
+          // The opt-in marketplace gate + its pinned coordinates. When unset the
+          // runner boots nothing marketplace-flavored and the specs skip; the pnpm
+          // site build (only under the gate) lands inside the timeout above.
+          TAI_E2E_MARKETPLACE: process.env.TAI_E2E_MARKETPLACE ?? "0",
+          TAI_E2E_UI_MP_PORT: String(MP_PORT),
+          TAI_E2E_UI_MP_WEB_PORT: String(MP_WEB_PORT),
+          TAI_E2E_UI_MP_ADMIN_TOKEN: MP_ADMIN_TOKEN,
+          // The login spec's unseeded setup stack rides on this second port in the same runner.
+          TAI_E2E_UI_SETUP_PORT: String(SETUP_PORT),
+        },
+      },
 });

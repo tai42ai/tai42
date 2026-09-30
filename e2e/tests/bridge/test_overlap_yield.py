@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from ._bridge_support import BridgeHarness, wait_probe_entries, wait_probe_record, wait_record_status
 from ._overlap_support import (
     create_web_tool_route,
@@ -25,6 +27,16 @@ from ._overlap_support import (
 )
 
 _WAIT_SECONDS = 5.0
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_a_tool_that_yields_hands_its_turn_to_the_newer_message(

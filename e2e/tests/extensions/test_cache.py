@@ -15,9 +15,10 @@ import pytest
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("probe-tools", "store:redis", "setting:extension:cache")]
 
 
+@pytest.mark.needs("setting:single-worker")
 async def test_second_identical_call_is_served_from_cache(
     extensions_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

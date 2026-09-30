@@ -30,6 +30,10 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs(
+    "probe-tools", "mutable", "store:redis", "topology:replicas", "setting:one-worker-per-address"
+)
+
 # The representative hot field: kit ``LoggingSettings.log_level`` reads this var, is
 # ``hot``, and validates to a real logging level — so flipping between two valid levels
 # is a benign, guaranteed-present hot change on every leg.

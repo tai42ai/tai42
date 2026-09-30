@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from ._bridge_support import BridgeHarness, wait_probe_entries
 from ._overlap_support import (
     create_web_tool_route,
@@ -22,6 +24,16 @@ from ._overlap_support import (
 )
 
 _SETTLE_SECONDS = 2
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_a_settle_window_rides_a_burst_into_one_turn(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

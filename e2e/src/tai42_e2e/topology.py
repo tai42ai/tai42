@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from tai42_e2e.pg import PostgresAdmin
     from tai42_e2e.redisx import RedisAdmin
     from tai42_e2e.settings import HarnessSettings
+    from tai42_e2e.target import Target
     from tai42_e2e.variants import BrokerLease, Variants
 
 
@@ -54,6 +55,9 @@ class Infra:
     # checkpoint/store agents leg allocates its own logical DB here; ``None`` means
     # that leg's stacks skip.
     checkpoint_redis: RedisAdmin | None = None
+    # The running stack this process drives instead of building stacks, or ``None``.
+    # With a target the admin clients above are never connected.
+    target: Target | None = None
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,13 @@ import pytest
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "setting:extension:sync_task",
+    "setting:harness-backend-variant",
+)
+
 # The follow-up's deterministic error text — the marker the failed-task row must carry.
 _FAILURE_MARKER = "e2e-chained-callback-boom"
 

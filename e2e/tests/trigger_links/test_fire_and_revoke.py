@@ -12,12 +12,17 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
 from ._trigger_support import MISS_MESSAGE, mint_link, no_auth, record_values, register_record_hook, wait_records
 
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 
+
+@pytest.mark.needs("probe-tools", "store:redis", "topology:replicas")
 async def test_fire_is_multi_use_across_replicas_and_hides_its_topic(
     trigger_stack: TaiStack, uniq: Callable[[str], str], exec_key: str
 ) -> None:
@@ -61,6 +66,7 @@ async def test_fire_is_multi_use_across_replicas_and_hides_its_topic(
     assert "token" not in row, "a listed link must never expose a raw token"
 
 
+@pytest.mark.needs("probe-tools", "store:redis")
 async def test_revoke_is_immediate_and_gone_from_list(
     trigger_stack: TaiStack, uniq: Callable[[str], str], exec_key: str
 ) -> None:
@@ -95,6 +101,7 @@ async def test_revoke_is_immediate_and_gone_from_list(
     assert record_values(stack, rkey) == ["live"]
 
 
+@pytest.mark.needs("setting:webhook-verifier:github")
 async def test_all_misses_are_byte_identical(
     trigger_stack: TaiStack, uniq: Callable[[str], str], exec_key: str
 ) -> None:

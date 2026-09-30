@@ -25,7 +25,10 @@ from tai42_e2e.stack import TaiStack
 
 from ._fleet import manifest_file
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("process", "files", "setting:TAI_BUS_REDIS_URL=unset"),
+]
 
 _BUS_VAR = "TAI_BUS_REDIS_URL"
 # A backend module string for the mutation. It is never imported: the invariant fires
@@ -54,6 +57,7 @@ async def test_write_adding_backend_without_bus_is_rejected(fresh_stack: Callabl
     assert (await api.get("/api/backend"))["present"] is False
 
 
+@pytest.mark.needs("mutable")
 async def test_out_of_band_backend_edit_fails_the_reload(fresh_stack: Callable[..., TaiStack]) -> None:
     """Reload twin: an out-of-band manifest edit adding a backend, then ``POST
     /api/fleet/reload-config``, fails LOUDLY; the reload-time re-check runs BEFORE the

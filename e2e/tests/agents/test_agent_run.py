@@ -26,6 +26,7 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs("helper:llm", "setting:agent:tools_agent"),
 ]
 
 
@@ -53,6 +54,7 @@ _ENGINE_AGENT_HOLDER_PER_CALL_KWARGS: dict[str, object] = {
 }
 
 
+@pytest.mark.needs("probe-tools")
 async def test_tools_agent_llm_tool_llm_loop_over_http(
     agents_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -141,6 +143,7 @@ async def test_agent_preset_baking_a_system_message_runs_on_both_doors(
     assert final in json.dumps(mcp_result.data), f"MCP edge did not return the scripted final: {mcp_result.data}"
 
 
+@pytest.mark.needs("probe-tools")
 async def test_agent_preset_over_agent_receives_the_engine_holder_per_call_kwargs_on_both_doors(
     agents_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:

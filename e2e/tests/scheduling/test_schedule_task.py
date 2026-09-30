@@ -21,8 +21,21 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "mutable",
+    "store:redis",
+    "topology:replicas",
+    "setting:extension:schedule_task",
+    "setting:extension:sync_task",
+    "setting:backend-scheduler-process",
+)
 
 # A whole-second interval: rq-scheduler re-arms on integer seconds, so a
 # fractional period cannot be represented there.

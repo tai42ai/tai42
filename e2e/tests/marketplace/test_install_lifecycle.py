@@ -25,7 +25,19 @@ from ._market_support import (
     wait_tool_live,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "mutable",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+        "setting:PIP_INDEX_URL",
+        "setting:shared-venv",
+        "setting:fixture-plugin:alpha",
+    ),
+]
 
 _TOOL = "e2e_market_probe"
 
@@ -70,6 +82,7 @@ async def test_install_go_live_and_uninstall(
     await uninstall_and_assert_clean(stack, ALPHA_REF, package=ALPHA_PACKAGE, tool_name=_TOOL)
 
 
+@pytest.mark.needs("process", "files", "setting:TAI_PLUGINS_PREFIX")
 async def test_prefix_install_survives_a_serve_restart(marketplace_prefix_stack: TaiStack) -> None:
     stack = marketplace_prefix_stack
 

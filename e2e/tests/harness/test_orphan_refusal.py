@@ -17,6 +17,8 @@ import pytest
 
 from tai42_e2e import ports, redisx
 
+pytestmark = pytest.mark.needs("no-stack")
+
 
 class _FakeRedis:
     """A stand-in Redis client whose scan/get replay a preset presence keyspace,

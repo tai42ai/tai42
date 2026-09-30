@@ -19,6 +19,8 @@ import pytest
 from tai42_e2e.pytest_plugin import RealSelectionError, assert_real_selection_ready
 from tai42_e2e.settings import REAL_SERVICES, HarnessSettings
 
+pytestmark = pytest.mark.needs("no-stack")
+
 
 def _settings(real: str, *, public_base_url: str | None = None) -> HarnessSettings:
     # Construct off explicit values, bypassing the ambient env so the assertion is

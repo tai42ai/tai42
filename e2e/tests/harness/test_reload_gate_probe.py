@@ -19,6 +19,8 @@ import pytest
 from tai42_e2e.binaries import _probe_tolerating_reloading
 from tai42_e2e.httpapi import _is_reloading
 
+pytestmark = pytest.mark.needs("no-stack")
+
 _URL = "http://127.0.0.1:1/mcp"
 
 

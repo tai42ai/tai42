@@ -15,9 +15,22 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import psycopg
+import pytest
 
 from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:connectors",
+    "mutable",
+    "helper:idp",
+    "store:postgres",
+    "topology:replicas",
+    "setting:manifest:connectors=e2e_idp",
+    "setting:E2E_IDP_CLIENT_ID=e2e-client",
+    "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origins",
+    "setting:managed-mcp-server",
+)
 
 
 async def _authorize(authorize_url: str) -> tuple[str, str]:
@@ -76,6 +89,7 @@ async def test_oauth_connect_started_on_a_completed_on_b(
         assert token.encode() not in blob, "the IdP access token is stored in plaintext (not encrypted at rest)"
 
 
+@pytest.mark.needs("probe-tools")
 async def test_concurrent_refresh_takes_lock_once(
     connectors_stack: TaiStack, oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
@@ -122,6 +136,7 @@ async def test_concurrent_refresh_takes_lock_once(
     )
 
 
+@pytest.mark.needs("probe-tools", "process", "files", "setting:CONNECTORS_KEK")
 async def test_kek_rotation_serves_via_ring_and_converges(
     connectors_stack: TaiStack, oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:

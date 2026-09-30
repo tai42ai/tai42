@@ -7,10 +7,15 @@ so it is authed and never public."""
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("kind:identity")
 
+
+@pytest.mark.needs("kind:accounts:postgres", "setting:ACCESS_CONTROL_AUTH_PROVIDERS=accounts-postgres+redis")
 async def test_kind_status_authed_and_reflects_providers(accounts_stack: TaiStack) -> None:
     stack = accounts_stack
 
@@ -32,6 +37,7 @@ async def test_kind_status_authed_and_reflects_providers(accounts_stack: TaiStac
     assert unauth.status_code == 401, f"/api/system/kinds must be authed, got {unauth.status_code}"
 
 
+@pytest.mark.needs("kind:connectors")
 async def test_connectors_live_via_store_resolution(accounts_stack: TaiStack) -> None:
     # Connectors gates on its store config like every other DB feature. This stack sets
     # no connectors-specific binding, yet the ``default`` database's configured password

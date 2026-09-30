@@ -28,6 +28,8 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for
 
+pytestmark = pytest.mark.needs("kind:backend")
+
 # A recycle-class field on the loaded backend (env ``BACKEND_MANIFEST_KEY``), not in the
 # harness shape's refused set — so a diff on it rolls a recycle rather than being refused.
 _RECYCLE_VAR = "BACKEND_MANIFEST_KEY"
@@ -49,6 +51,14 @@ async def _profile_from_stored(stack: TaiStack, changes: dict[str, str], name: s
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs(
+    "mutable",
+    "store:redis",
+    "process",
+    "topology:supervised",
+    "setting:TAI_SUPERVISED=harness",
+    "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+)
 async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     recycle_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -128,6 +138,15 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "store:redis",
+    "process",
+    "topology:supervised",
+    "setting:TAI_SUPERVISED=harness",
+    "setting:extension:sync_task",
+)
 async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """The in-flight backend job is DRAINED, not lost: a job started before the recycle and
     still executing when the recycle self-exit fires completes on the OLD process during its
@@ -172,6 +191,7 @@ async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uni
     assert started_pid in done_pids, f"'done' came from a different pid than started ({started_pid} vs {done_pids})"
 
 
+@pytest.mark.needs("setting:TAI_SUPERVISED=unset")
 async def test_bare_shape_refuses_recycle_class_apply(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """On a BARE (unsupervised) shape a recycle-class diff is refused UPFRONT at the API,
     naming the key — no supervisor exists to respawn a recycled worker."""

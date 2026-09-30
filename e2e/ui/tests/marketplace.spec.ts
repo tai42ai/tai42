@@ -12,8 +12,11 @@
  * sibling that misses the apply window is reported, not raised, so every API-side
  * proof still polls to convergence rather than reading once.
  */
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiHeaders, awaitMutation, MP_URL, mpAdminHeaders, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:marketplace_store', 'mutable', 'helper:registry', 'helper:package-index');
 
 test.skip(
   process.env.TAI_E2E_MARKETPLACE !== '1',

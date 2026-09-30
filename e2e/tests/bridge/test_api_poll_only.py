@@ -22,10 +22,13 @@ from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import BridgeHarness, script_reply, wait_record_status
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs("kind:identity", "setting:conversations"),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host",
+    ),
+]
 
 # A plain-http callback url — refused at create even now that the callback is optional.
 _HTTP_CALLBACK = "http://127.0.0.1:9/callback"
@@ -52,6 +55,7 @@ async def _poll_only_route(bridge: BridgeHarness, uniq: Callable[[str], str]) ->
     return route_name
 
 
+@pytest.mark.needs("helper:llm", "setting:agent", "setting:seeded-access-control")
 async def test_poll_only_answer_read_at_message_door(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     route_name = await _poll_only_route(bridge, uniq)
     answer = uniq("l28-poll")

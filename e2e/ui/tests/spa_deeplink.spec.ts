@@ -14,7 +14,10 @@
  * The SPA-shell fallback is landed in the skeleton the studio stack boots, so this runs
  * un-skipped. If it ever regresses, the deep link would 403 here rather than serve the 200 shell.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { needs, test } from './needs';
+
+needs('kind:identity');
 
 test('deep-link /agents with no session serves the 200 SPA shell; /health + /api/* stay gated', async ({
   page,

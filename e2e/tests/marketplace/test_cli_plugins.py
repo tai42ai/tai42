@@ -42,11 +42,28 @@ from ._market_support import (
     wait_tool_live,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "mutable",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+        "setting:PIP_INDEX_URL",
+        "setting:shared-venv",
+        "cli",
+    ),
+]
 
 _TOOL = "e2e_market_probe"
 
 
+@pytest.mark.needs(
+    "setting:MARKETPLACE_ADVISORIES_POLL=true",
+    "setting:MARKETPLACE_ADVISORIES_INTERVAL_S=1",
+    "setting:fixture-plugin:alpha",
+)
 async def test_cli_plugins_parity(
     marketplace_service: MarketplaceService,
     marketplace_stack: TaiStack,
@@ -153,6 +170,7 @@ def _run_cli_plain(env: dict[str, str], *args: str) -> subprocess.CompletedProce
     )
 
 
+@pytest.mark.needs("setting:fixture-plugin:epsilon")
 async def test_cli_plugins_route_mounting(
     marketplace_service: MarketplaceService,
     marketplace_stack: TaiStack,
@@ -229,6 +247,7 @@ async def test_cli_plugins_route_mounting(
     await wait_for_async(gone, deadline=30.0, message=f"{EPSILON_REF} never fully uninstalled via the CLI")
 
 
+@pytest.mark.needs("setting:fixture-plugin:epsilon")
 async def test_cli_plugins_dry_run_collision(
     marketplace_service: MarketplaceService,
     marketplace_stack: TaiStack,

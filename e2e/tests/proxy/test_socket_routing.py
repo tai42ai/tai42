@@ -6,9 +6,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.recording_proxy import RecordingConnectProxy, TargetServer
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("probe-tools", "helper:target-server", "helper:proxy")
 
 
 async def test_proxy_branch_tunnels_and_plain_does_not(
@@ -75,6 +79,7 @@ async def test_no_cross_task_socket_bleed_under_interleaving(
             assert info.data["socket_class"].endswith(".RoutingSocket"), f"proxy dispatcher not installed: {info.data}"
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_no_cross_replica_bleed(
     replicas_stack: TaiStack, target_server: TargetServer, connect_proxy: RecordingConnectProxy
 ) -> None:

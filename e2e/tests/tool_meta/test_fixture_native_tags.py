@@ -13,7 +13,7 @@ from tai42_e2e.stack import TaiStack
 
 # The tag reads identically under every backend variant, so the non-default backend
 # legs buy nothing by re-running it.
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("probe-tools")]
 
 # The probe tools registered by ``tai42_e2e_fixtures.tools`` — every one carries the
 # native ``e2e`` tag (mirroring how the shipped fleet is tagged).

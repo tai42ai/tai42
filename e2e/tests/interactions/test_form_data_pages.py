@@ -24,11 +24,14 @@ import json
 from collections.abc import Callable
 
 import httpx
+import pytest
 import redis as redis_lib
 from fastmcp.client.client import CallToolResult
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:interactions", "setting:tai42_e2e_fixtures.stub_channel", "topology:replicas")
 
 _SCHEMA = {
     "type": "object",
@@ -78,6 +81,7 @@ def _resolve_ticket(stack: TaiStack, interaction_id: str) -> str:
     raise AssertionError(f"no callback ticket in Redis for interaction {interaction_id}")
 
 
+@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
 async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_every_field(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

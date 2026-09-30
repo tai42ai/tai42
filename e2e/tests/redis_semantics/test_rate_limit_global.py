@@ -6,8 +6,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import align_to_window
+
+pytestmark = pytest.mark.needs("kind:rate_limit", "topology:replicas", "setting:rate-limit-webhook-burst=10")
 
 
 async def test_rate_limit_is_global_not_per_worker(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:

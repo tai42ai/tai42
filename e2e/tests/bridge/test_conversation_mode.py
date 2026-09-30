@@ -41,10 +41,20 @@ from ._bridge_support import (
 
 # The scripted-LLM turns are the 'llm' mock leg; a real LLM breaks the scripting. The web
 # channel itself has no vendor and so no real/mock split — it is always real.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted-LLM turns are the 'llm' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted-LLM turns are the 'llm' mock leg; the real leg runs on the creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 
@@ -116,6 +126,7 @@ async def _replay_directions(web: WebChatClient) -> list[tuple[str, str]]:
     return [(data["direction"], data["text"]) for event, data in replayed if event == "chat.message"]
 
 
+@pytest.mark.needs("helper:llm")
 async def test_the_full_mode_loop_over_the_web_visitor_surface(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -237,6 +248,7 @@ async def test_a_manual_from_the_start_route_is_silent_on_the_first_message(
     assert mode == {"mode": "manual", "source": "route"}
 
 
+@pytest.mark.needs("helper:llm")
 async def test_operator_send_guards(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     route_name, identity = await _web_route(bridge, uniq, "l24g")
     other_route, _other_identity = await _web_route(bridge, uniq, "l24g2")

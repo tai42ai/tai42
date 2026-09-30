@@ -8,8 +8,11 @@
  * pytest twin (`tests/owned_keys/test_claim_links.py`); this pins the failure UX the
  * browser owns.
  */
-import { expect, test, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { createClaimLink, mintKey, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity');
 
 /** The login screen's own reaction to a failed one-time exchange: a loud inline
  * error, the key-paste fallback expanded, no navigation off `/login`, and no trace

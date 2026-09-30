@@ -42,10 +42,24 @@ from tai42_e2e.waiting import wait_for_async
 # Stripe's servers; that real leg is exercised on the dedicated e2e creds host, not
 # in CI, so the stub-bound module steps aside for it. Inert in the default mock run —
 # is_real("stripe") is False, so collection is byte-for-byte today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("stripe"),
-    reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        HarnessSettings().is_real("stripe"),
+        reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs on the creds host",
+    ),
+    pytest.mark.needs(
+        "kind:identity",
+        "kind:interactions",
+        "kind:webhook_verifiers",
+        "helper:stripe",
+        "setting:seeded-access-control",
+        "setting:STRIPE_API_BASE",
+        "setting:E2E_STRIPE_WEBHOOK_SECRET",
+        "setting:INTERACTIONS_PUBLIC_BASE_URL",
+        "setting:TAI_BRIDGE_CALLBACK_SECRET",
+        "setting:stripe-tools",
+    ),
+]
 
 
 async def _until(fn: Callable[[], Any], *, deadline: float, interval: float = 0.1, message: str) -> Any:
@@ -283,6 +297,7 @@ def _log_has(stack: TaiStack, needle: str) -> str:
 
 
 @pytest.mark.backendless
+@pytest.mark.needs("process", "files")
 async def test_stripe_payment_webhook_loop(
     stripe_stack: tuple[TaiStack, str], fake_stripe: FakeStripe, uniq: Callable[[str], str]
 ) -> None:

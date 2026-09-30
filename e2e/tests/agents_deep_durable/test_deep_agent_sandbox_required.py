@@ -15,12 +15,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
 
 from ._support import AGENT, DETERMINISTIC_MARKS, build_deep_durable_no_sandbox_stack
 
-pytestmark = DETERMINISTIC_MARKS
+pytestmark = [
+    *DETERMINISTIC_MARKS,
+    pytest.mark.needs("helper:llm", "process", "setting:agent:langchain_deep_agent", "setting:no-sandbox-provider"),
+]
 
 
 async def test_run_without_a_sandbox_provider_raises_loudly(

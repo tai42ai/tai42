@@ -50,7 +50,19 @@ from ._market_support import (
     skip_unless_registry_supports_declared_routes,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "mutable",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+        "setting:PIP_INDEX_URL",
+        "setting:shared-venv",
+        "setting:fixture-plugin:epsilon",
+    ),
+]
 
 _ROUTER_MODULE = "tai_e2e_market_epsilon.router"
 _EPSILON_ITEM = "e2e_epsilon_router"
@@ -143,6 +155,7 @@ async def _uninstall_clean(stack: TaiStack, ref: str, package: str) -> None:
 # ---- 1. remap + persistence across restart ------------------------------
 
 
+@pytest.mark.needs("setting:router-spa-catch-all-last", "process", "files")
 async def test_remap_serves_at_new_base_and_survives_restart(
     route_fixtures_seeded: None,
     router_merge_stack: TaiStack,
@@ -199,6 +212,7 @@ async def test_remap_serves_at_new_base_and_survives_restart(
 # ---- 1b. plugin routes survive an in-process config reload --------------
 
 
+@pytest.mark.needs("setting:router-spa-catch-all-last")
 async def test_plugin_routes_survive_in_process_config_reload(
     route_fixtures_seeded: None,
     router_merge_stack: TaiStack,
@@ -236,6 +250,7 @@ async def test_plugin_routes_survive_in_process_config_reload(
 # ---- 2. collision, then remap remedy ------------------------------------
 
 
+@pytest.mark.needs("setting:router-spa-catch-all-last", "setting:fixture-plugin:theta")
 async def test_route_collision_then_remap_installs_both(
     route_fixtures_seeded: None,
     router_merge_stack: TaiStack,
@@ -297,6 +312,7 @@ async def test_route_collision_then_remap_installs_both(
 # ---- 3. public acceptance + the per-method pin ----------------------
 
 
+@pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 async def test_public_acceptance_and_per_method_pin(
     route_fixtures_seeded: None,
     marketplace_authz_stack: TaiStack,
@@ -348,6 +364,7 @@ async def test_public_acceptance_and_per_method_pin(
 # ---- 4. update adding a new public route --------------------------------
 
 
+@pytest.mark.needs("setting:router-spa-catch-all-last")
 async def test_update_adding_public_route_requires_acceptance_of_only_the_new_row(
     route_fixtures_seeded: None,
     router_merge_stack: TaiStack,

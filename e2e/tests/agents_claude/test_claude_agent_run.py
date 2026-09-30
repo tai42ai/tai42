@@ -44,9 +44,15 @@ pytestmark = [
         HarnessSettings().is_real("claude_agent"),
         reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
+    pytest.mark.needs("process", "setting:agent:claude_code"),
 ]
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:SANDBOX_FAKE_RUNNER=answer",
+)
 async def test_answer_drains_to_message_final_over_both_doors(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -67,6 +73,11 @@ async def test_answer_drains_to_message_final_over_both_doors(
     assert frames[-1] == {"type": "stream.end"}, frames
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:SANDBOX_FAKE_RUNNER=structured",
+)
 async def test_structured_result_carries_top_level_title(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -88,6 +99,11 @@ async def test_structured_result_carries_top_level_title(
     assert structured[0]["data"] == {"title": "stub result", "body": "structured"}, structured
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:SANDBOX_FAKE_RUNNER=reasoning",
+)
 async def test_thinking_maps_to_reasoning_step(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "reasoning")
 
@@ -121,6 +137,7 @@ async def test_unhonored_params_are_refused_loudly(
     assert field in str(excinfo.value), excinfo.value
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_API_KEY", "setting:TAI_AGENTS_CLAUDE_OAUTH_TOKEN")
 async def test_model_auth_requires_exactly_one_mode(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     # Neither credential set -> loud config error at run start (the stack pins the api-key by
     # default; unset it and set no oauth token).
@@ -142,6 +159,7 @@ async def test_model_auth_requires_exactly_one_mode(fresh_stack: Callable[..., T
     assert "EXACTLY ONE model credential" in error_text(result), error_text(result)
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_API_KEY", "setting:TAI_AGENTS_CLAUDE_OAUTH_TOKEN")
 async def test_each_auth_mode_is_accepted_alone(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub) -> None:
     # The default stack runs api-key mode; prove it drives a clean turn.
     api_key = claude_stack(fresh_stack, llm_stub, "answer")
@@ -158,6 +176,7 @@ async def test_each_auth_mode_is_accepted_alone(fresh_stack: Callable[..., TaiSt
     assert result.data == "hello from the stub", result.data
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_SESSION_IMAGE")
 async def test_bare_tag_session_image_is_refused_loudly(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:

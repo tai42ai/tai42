@@ -49,7 +49,18 @@ from ._market_support import (
     outcomes_by_ref,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "store:postgres",
+        "files",
+        "helper:registry",
+        "helper:package-index",
+        "setting:fixture-plugin:zeta",
+        "setting:TAI_PLUGINS_PREFIX",
+        "setting:shared-venv",
+    ),
+]
 
 
 def _install_wheel_into_prefix(prefix: str, wheel: BuiltWheel) -> None:
@@ -177,6 +188,7 @@ def stranded_prefix_stack(
         yield stack
 
 
+@pytest.mark.needs("process")
 async def test_incompatible_installed_manifest_plugin_aborts_boot(quarantine_boot_stack: TaiStack) -> None:
     # The manifest names zeta's tool module, whose declared contract range excludes the
     # running contract, so boot cannot load it and aborts — the process exits early and the
@@ -189,6 +201,7 @@ async def test_incompatible_installed_manifest_plugin_aborts_boot(quarantine_boo
     assert "incompatible" in message, message
 
 
+@pytest.mark.needs("kind:marketplace_store", "setting:MARKETPLACE_URL")
 async def test_upgrade_all_reports_no_compatible_version(stranded_prefix_stack: TaiStack) -> None:
     # zeta is installed and attributed but not manifest-wired, so the stack boots with the
     # row stranded: the inventory shows it incompatible, and the upgrade sweep cannot fix it

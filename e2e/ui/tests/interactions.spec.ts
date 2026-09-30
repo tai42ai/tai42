@@ -8,8 +8,11 @@
  * are asserted: the UI card flips to Answered and the blocked run returns the
  * answered value. The loud negative answers a nonexistent interaction (404).
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, armInboxResynced, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:interactions', 'setting:tool:ask');
 
 test('ask blocks a run, is answered in the browser, and the run unblocks', async ({
   page,

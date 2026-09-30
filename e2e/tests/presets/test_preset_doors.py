@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 
@@ -30,6 +32,7 @@ async def _create_echo_preset(stack: TaiStack, name: str, payload: str) -> dict:
     )
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_create_reports_healthy_conflicted_shape(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     name = uniq("preset")
     created = await _create_echo_preset(agents_stack, name, uniq("payload"))
@@ -41,6 +44,7 @@ async def test_create_reports_healthy_conflicted_shape(agents_stack: TaiStack, u
     assert row["conflicted_reason"] is None
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools", "setting:tools_agent")
 async def test_referees_lists_composing_presets(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     base = uniq("base")
@@ -70,11 +74,13 @@ async def test_referees_lists_composing_presets(agents_stack: TaiStack, uniq: Ca
     assert composer in blocked.json()["error"]
 
 
+@pytest.mark.needs
 async def test_referees_unknown_preset_404(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     resp = await agents_stack.api().request_raw("GET", f"/api/presets/{uniq('ghost')}/referees")
     assert resp.status_code == 404, resp.text
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_validate_create_mode(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
 
@@ -107,6 +113,7 @@ async def test_validate_create_mode(agents_stack: TaiStack, uniq: Callable[[str]
     assert "output_schema must be an object schema" in non_object_schema["error"]
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_validate_version_mode(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     name = uniq("preset")
@@ -121,6 +128,7 @@ async def test_validate_version_mode(agents_stack: TaiStack, uniq: Callable[[str
     assert invalid["error"]
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_version_tags_door(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     name = uniq("preset")

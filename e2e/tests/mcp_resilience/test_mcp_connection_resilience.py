@@ -51,6 +51,8 @@ from tai42_e2e.manifests import (
 from tai42_e2e.ports import allocate_port
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("process", "helper:managed-mcp-server", "topology:single-worker")
+
 # The connector-error envelope prefix the dispatch seam frames an unavailable-upstream
 # result with (``ConnectorAdapterSettings.error_prefix``); the JSON payload follows it.
 _CONNECTOR_ERROR_PREFIX = "tai-hub-err:"

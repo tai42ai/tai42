@@ -5,8 +5,11 @@
  * stat dialog, a real browser download whose bytes match, and a confirmed delete.
  */
 import { readFileSync } from 'node:fs';
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:storage:local');
 
 test('storage: provider card, upload, stat, download, delete', async ({ page }) => {
   const id = `${uniq('note')}.txt`;

@@ -88,7 +88,17 @@ is "exactly N" and "NOT visible", never just "visible". Order events with an
 assert-presence sentinel before asserting absence ("B serves X" before "A
 stopped serving Y").
 
-## 6. File it
+## 6. Declare what it needs
+
+Give the test (or its module) a `needs` marker naming what it needs from the stack — the
+vocabulary is in the README, "What a test needs". A run that builds its own stack ignores
+it; a run against a target (`TAI_E2E_TARGET`) uses it to decide whether the test can run
+there. A test that restarts a process, reads the stack's Redis or Postgres, scripts a
+helper, or depends on a profile's settings says so (`process`, `store:redis`,
+`helper:llm`, `setting:...`) and only ever runs on a built stack. A test left without a
+marker is treated the same way.
+
+## 7. File it
 
 Put the test under the matching `tests/<class>/` dir. If the underlying fix has
 not shipped, mark it `@pytest.mark.xfail(strict=True, reason=...)` describing the

@@ -12,11 +12,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import mint_admin_key
+
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 
 
 async def _register_scope(root: ApiClient, scope_id: str) -> None:

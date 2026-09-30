@@ -9,10 +9,13 @@ import asyncio
 from collections.abc import Callable
 from typing import cast
 
+import pytest
 import redis as redis_lib
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control", "topology:replicas")
 
 # The scope seeded by the auth bootstrap (conftest ``_seed_bootstrap_key``): a
 # catch-all route resolves every non-public path to it, and the root ``*``
@@ -58,6 +61,7 @@ async def test_api_key_provisioned_on_a_authorizes_on_b_and_revocation_propagate
     await wait_for_async(rejected_on_a, deadline=5.0, message="revocation on B never propagated to A")
 
 
+@pytest.mark.needs("store:redis")
 async def test_concurrent_policy_updates_are_atomic(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     user = uniq("user")
     api_a = auth_stack.api(port=auth_stack.port_a)

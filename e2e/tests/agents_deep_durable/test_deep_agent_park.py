@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
 from tai42_contract.interactions import SuspendedInteraction
 
 from tai42_e2e import wait_for_async
@@ -35,7 +36,10 @@ from tai42_e2e.stack import TaiStack
 
 from ._support import AGENT, DETERMINISTIC_MARKS, STORED_PARK_IDENTITY
 
-pytestmark = DETERMINISTIC_MARKS
+pytestmark = [
+    *DETERMINISTIC_MARKS,
+    pytest.mark.needs("helper:llm", "setting:agent:langchain_deep_agent", "setting:checkpoint:redis"),
+]
 
 _TOOL_NAMES = ["e2e_agent_async_ask", "e2e_record_identity"]
 
@@ -70,6 +74,7 @@ async def _park(stack: TaiStack, thread_id: str, question: str, expiry_seconds: 
     return {"receipt": result.data}
 
 
+@pytest.mark.needs("probe-tools", "setting:tai42_e2e_fixtures.sandbox_provider")
 async def test_park_deadline_beyond_workspace_retention_is_refused(
     deep_agent_durable_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -111,6 +116,7 @@ async def test_resume_checkpoint_id_is_unhonored(
     assert "resume_checkpoint_id" in text, f"the rejection did not name resume_checkpoint_id: {text}"
 
 
+@pytest.mark.needs("probe-tools", "store:redis", "topology:replicas", "setting:tai42_e2e_fixtures.sandbox_provider")
 async def test_park_answer_resumes_across_workers(
     deep_agent_durable_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:

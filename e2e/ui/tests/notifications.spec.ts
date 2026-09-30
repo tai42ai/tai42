@@ -13,8 +13,11 @@
  * the sink feed has no delete door, so state is NOT restored — a `uniq()` message
  * keeps the recorded row from colliding with any sibling spec on the shared stack.
  */
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, type APIRequestContext } from '@playwright/test';
 import { apiHeaders, runTool, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity', 'kind:interactions', 'setting:tool:notify_user');
 
 /** One record the sink feed `GET /api/notifications` exposes under `data.notifications`. */
 interface Notification {

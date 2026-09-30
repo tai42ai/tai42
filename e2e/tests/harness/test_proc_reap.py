@@ -19,6 +19,8 @@ import pytest
 
 from tai42_e2e import procs
 
+pytestmark = pytest.mark.needs("no-stack")
+
 _SID = 55555
 _WORKER = 12345
 

@@ -6,9 +6,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("probe-tools", "metrics", "process")
 
 _FAMILY = "tai_tool_call_count_total"
 _LABELS = {"name": "e2e_echo", "runtime": "main", "title": PROBE_TOOLS_TITLE}
@@ -38,6 +42,7 @@ async def test_metrics_server_restart_loses_nothing(fresh_stack: Callable[..., T
     await _await_sample(stack, 5)
 
 
+@pytest.mark.needs("kind:backend")
 async def test_full_restart_resets_cleanly(fresh_stack: Callable[..., TaiStack]) -> None:
     stack = fresh_stack()
     await _drive(stack, 3)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
 from _rbac_support import (  # pyright: ignore[reportMissingImports]  (resolved via the conftest path insertion)
     create_role,
     create_user_with_role,
@@ -20,6 +21,8 @@ from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 from ._trigger_support import MISS_MESSAGE, mint_link, no_auth
+
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 
 # A verifier config naming an env var that is only dereferenced at signature-VERIFY
 # time; the BIND validates the verifier NAME against the registry, so no secret is
@@ -71,6 +74,7 @@ async def test_create_validation_rules(trigger_stack: TaiStack, uniq: Callable[[
     assert dup.status_code == 409, dup.text
 
 
+@pytest.mark.needs("setting:webhook-verifier:github")
 async def test_verifier_bound_topic_refuses_links_both_ends(
     trigger_stack: TaiStack, uniq: Callable[[str], str], exec_key: str
 ) -> None:
@@ -149,6 +153,7 @@ async def _assert_none_reach(client: ApiClient, uniq: Callable[[str], str]) -> N
     assert deleted.status_code == 403, f"hooks-none must be denied delete: {deleted.status_code} {deleted.text}"
 
 
+@pytest.mark.needs("kind:accounts", "topology:replicas")
 async def test_per_tag_grant_matrix(trigger_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """The CRUD is grantable under the ``hooks`` tag: a hooks-write role manages
     links, a hooks-read role lists them, a hooks-none role reaches none. Each role is
