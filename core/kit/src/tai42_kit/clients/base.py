@@ -21,15 +21,18 @@ class _ClientEntry:
     ``leases`` counts the ``current()`` bodies holding this client right now. A
     client belonging to a retired epoch closes on its last lease release;
     ``closing`` marks the entry as being (or already) torn down so no path closes
-    it twice.
+    it twice. ``build_options`` are the non-identity build kwargs the client was
+    created with; a later request for the same identity carrying different build
+    options is a configuration conflict.
     """
 
-    __slots__ = ("client", "closing", "leases")
+    __slots__ = ("build_options", "client", "closing", "leases")
 
-    def __init__(self, client: object) -> None:
+    def __init__(self, client: object, build_options: dict) -> None:
         self.client = client
         self.leases = 0
         self.closing = False
+        self.build_options = build_options
 
 
 # Clients are cached per event loop (async pools are bound to the loop that
@@ -68,6 +71,12 @@ _client_epoch = 0
 # retired epoch's leases to reach zero.
 _DRAIN_POLL_SECONDS = 0.01
 
+# Connection kwargs that name the owning namespace or the missing env var but
+# neither select the connection nor configure the pool build. They never make two
+# requests for one identity a conflict, so they are excluded from the build
+# options compared on a cache hit.
+_PASSENGER_KWARGS = frozenset({"env_prefix"})
+
 # RuntimeError messages asyncio emits when a loop-bound resource is used after
 # its event loop closed or from a different loop. Driver stacks that surface a
 # dead session as a plain RuntimeError (curl_cffi, anyio) produce one of these;
@@ -87,11 +96,12 @@ def is_loop_bound_runtime_error(exc: BaseException) -> bool:
 def reject_unknown_connection_kwargs(client_label: str, kwargs: dict[str, object], allowed: frozenset[str]) -> None:
     """Reject connection kwargs a client does not understand, raising ``ValueError``.
 
-    A pooled client keys its per-loop pool on the full kwargs dict, so an
-    unrecognized kwarg (typically a typo) would otherwise split the pool key and
-    silently create a second, mis-configured client rather than the caller's
-    intended one. The shared validation convention across the concrete impls:
-    fail loudly, naming the offending keys and the allowed set.
+    A pooled client keys its per-loop pool on its connection identity and reads the
+    remaining kwargs as build options when the client is created. An unrecognized
+    kwarg (typically a typo) is neither, so it would otherwise change the build
+    silently — a mis-configured client the caller never asked for. The shared
+    validation convention across the concrete impls: fail loudly, naming the
+    offending keys and the allowed set.
     """
     unknown = sorted(set(kwargs) - allowed)
     if unknown:
@@ -125,9 +135,64 @@ class PooledClient[T]:
     through :meth:`current`, which rebuilds it after a classified disconnection.
     """
 
-    @staticmethod
-    def _key(**kwargs) -> str:
-        return json.dumps(kwargs, sort_keys=True)
+    def _identity(self, **kwargs) -> dict:
+        """The connection target this client pools on.
+
+        Defaults to every kwarg except the message-only passengers — for a client
+        whose whole configuration is the connection (no separate driver target), the
+        configuration IS the identity, so a passenger like ``env_prefix`` (which only
+        names the owning component) must never split its pool. A client with a distinct
+        driver target and build-only options (a DSN with pool sizes) overrides this to
+        the kwargs that select the connection, so those options stay out of the key and
+        two callers that disagree on them share one pool rather than forking it.
+        """
+        return {key: value for key, value in kwargs.items() if key not in _PASSENGER_KWARGS}
+
+    def _key(self, **kwargs) -> str:
+        return json.dumps(self._identity(**kwargs), sort_keys=True)
+
+    def _default_build_options(self) -> dict:
+        """The effective build options a caller who omits them ends up with.
+
+        Merged UNDER the caller's own options in :meth:`_build_options`, so a caller
+        that omits an option and a caller that passes that option's effective default
+        resolve to the same build and share one pool. Defaults to none — a client
+        whose omitted build options carry a meaningful default overrides this to
+        declare them.
+        """
+        return {}
+
+    def _build_options(self, **kwargs) -> dict:
+        """The build kwargs that must agree across every caller of one identity.
+
+        The client's effective defaults, overlaid with every caller-supplied kwarg
+        that is neither identity nor a message-only passenger. Comparing the
+        EFFECTIVE build — defaults filled in — means an omitted option and its
+        default value are the same request; a cache hit whose effective build differs
+        from a new request is a configuration conflict, raised loudly rather than
+        served a second pool.
+        """
+        identity = self._identity(**kwargs)
+        provided = {key: value for key, value in kwargs.items() if key not in identity and key not in _PASSENGER_KWARGS}
+        return {**self._default_build_options(), **provided}
+
+    def _describe_identity(self, **kwargs) -> str:
+        """Human-readable identity for a conflict message.
+
+        Defaults to the identity dict; a client whose identity carries a credential
+        overrides this to mask it.
+        """
+        return str(self._identity(**kwargs))
+
+    def _ensure_build_options_match(self, entry: "_ClientEntry", kwargs: dict) -> None:
+        """Raise if a cache hit was built with different build options than requested."""
+        requested = self._build_options(**kwargs)
+        if entry.build_options != requested:
+            raise ValueError(
+                f"{type(self).__name__} already pools {self._describe_identity(**kwargs)} with build options "
+                f"{entry.build_options}, but this request asks for {requested}; one connection identity is one "
+                f"pool, so its build options must match across every caller"
+            )
 
     def _clients_for_loop(self, loop: AbstractEventLoop, epoch: int) -> dict[str, _ClientEntry]:
         with _registry_lock:
@@ -153,7 +218,9 @@ class PooledClient[T]:
                 per_loop[(epoch, self.__class__, key)] = lock
             return lock
 
-    def _register(self, loop: AbstractEventLoop, epoch: int, key: str, created: T) -> _ClientEntry | None:
+    def _register(
+        self, loop: AbstractEventLoop, epoch: int, key: str, created: T, build_options: dict
+    ) -> _ClientEntry | None:
         """Register a freshly created client under ``epoch``, or refuse if retired.
 
         Returns the new entry, or ``None`` when the epoch advanced during
@@ -178,7 +245,7 @@ class PooledClient[T]:
             if clients is None:
                 clients = {}
                 per_epoch[self.__class__] = clients
-            entry = _ClientEntry(created)
+            entry = _ClientEntry(created, build_options)
             clients[key] = entry
             return entry
 
@@ -190,11 +257,13 @@ class PooledClient[T]:
         orphaned in N+1. Creation is double-checked under a per-(epoch, class, key)
         lock so two concurrent first-use callers build exactly one client.
         """
+        build_options = self._build_options(**kwargs)
         while True:
             epoch = current_client_epoch()
             clients = self._clients_for_loop(loop, epoch)
             entry = clients.get(key)
             if entry is not None:
+                self._ensure_build_options_match(entry, kwargs)
                 return entry, epoch
             async with self._create_lock(loop, epoch, key):
                 # The captured epoch may have retired while we waited for the lock;
@@ -211,6 +280,7 @@ class PooledClient[T]:
                 clients = self._clients_for_loop(loop, epoch)
                 entry = clients.get(key)
                 if entry is not None:
+                    self._ensure_build_options_match(entry, kwargs)
                     return entry, epoch
                 created = await self._create(**kwargs)
                 # ``_create`` awaited, so the epoch may have advanced and a
@@ -218,7 +288,7 @@ class PooledClient[T]:
                 # both atomically: it lands the client in the LIVE current-epoch
                 # dict, or refuses (epoch retired) so we close and retry rather
                 # than orphan it in a dict nothing drains.
-                registered = self._register(loop, epoch, key, created)
+                registered = self._register(loop, epoch, key, created, build_options)
                 if registered is not None:
                     return registered, epoch
             await self._close(created)

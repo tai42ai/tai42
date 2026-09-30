@@ -1,7 +1,17 @@
-"""Pooled Redis clients (async and sync) and typed seams over the redis-py async hash commands."""
+"""Pooled Redis clients (async and sync) and typed seams over the redis-py async hash commands.
+
+Identity model: one pooled client per full connection configuration per event loop —
+the URL, the decode mode, ``max_connections``, the socket timeouts and the retry
+options together. For redis-py these connection options ARE the client's contract: a
+blocking stream reader and a command client on one URL are different clients, so a
+configuration that differs in any of these values gets its own pooled client by
+design rather than being forced to share one. ``env_prefix`` is a message-only
+passenger — it names the owning component's env var when the URL is unset and never
+splits a pool (the base pool keeps it out of the identity). A Redis client carries no
+build options, so the pool's build-option conflict guard never fires for it.
+"""
 
 import asyncio
-import json
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from typing import Any, cast
 
@@ -11,11 +21,13 @@ from redis.asyncio import Redis as AsyncRedis
 from tai42_kit.clients.base import PooledClient, reject_unknown_connection_kwargs
 from tai42_kit.settings import not_configured_message
 
-# Connection kwargs a Redis client accepts — the JSON-serializable identity
-# produced by ``RedisConnectionSettings.client_kwargs``. ``env_prefix`` rides
-# along only to name the missing env var when the URL is unset; it is dropped
-# before ``from_url`` and excluded from the pool key. Anything else is a typo or
-# a stray value and is rejected so it can't silently split the pool key.
+# Connection kwargs a Redis client accepts — the JSON-serializable kwargs produced by
+# ``RedisConnectionSettings.client_kwargs``. Every one but ``env_prefix`` is part of the
+# pool identity: the URL, the decode mode, ``max_connections``, the socket timeouts and
+# the retry options together select the pooled client. ``env_prefix`` rides along only to
+# name the missing env var when the URL is unset (a passenger the base pool keeps out of
+# the identity; dropped before ``from_url``). Anything else is a typo or a stray value and
+# is rejected so it can't silently change the connection.
 _ALLOWED_KWARGS = frozenset(
     {
         "url",
@@ -28,18 +40,6 @@ _ALLOWED_KWARGS = frozenset(
         "env_prefix",
     }
 )
-
-
-def _pool_key(**kwargs: Any) -> str:
-    """The pool key for a Redis client — connection identity only.
-
-    ``env_prefix`` travels in the connection kwargs so an unresolved URL can name
-    the env var that would set it, but it is not connection identity; dropping it
-    here keeps two settings classes that resolve to the same URL on one shared
-    pool rather than splitting it per namespace.
-    """
-    identity = {key: value for key, value in kwargs.items() if key != "env_prefix"}
-    return json.dumps(identity, sort_keys=True)
 
 
 def _validate_kwargs(kwargs: dict[str, Any]) -> None:
@@ -61,11 +61,12 @@ def _validate_url(kwargs: dict[str, Any]) -> None:
 
 
 class RedisClient(PooledClient[AsyncRedis]):
-    """A pooled async Redis client keyed on its connection settings."""
+    """A pooled async Redis client keyed on its full connection configuration.
 
-    @staticmethod
-    def _key(**kwargs: Any) -> str:
-        return _pool_key(**kwargs)
+    One client per configuration per event loop — URL, decode mode, ``max_connections``,
+    socket timeouts and retry options; ``env_prefix`` is a passenger that never splits a
+    pool.
+    """
 
     async def _create(self, **kwargs) -> AsyncRedis:
         _validate_kwargs(kwargs)
@@ -82,11 +83,12 @@ class RedisClient(PooledClient[AsyncRedis]):
 
 
 class SyncRedisClient(PooledClient[SyncRedis]):
-    """A pooled sync Redis client keyed on its connection settings."""
+    """A pooled sync Redis client keyed on its full connection configuration.
 
-    @staticmethod
-    def _key(**kwargs: Any) -> str:
-        return _pool_key(**kwargs)
+    One client per configuration per event loop — URL, decode mode, ``max_connections``,
+    socket timeouts and retry options; ``env_prefix`` is a passenger that never splits a
+    pool.
+    """
 
     async def _create(self, **kwargs) -> SyncRedis:
         _validate_kwargs(kwargs)
@@ -105,15 +107,16 @@ class SyncRedisClient(PooledClient[SyncRedis]):
 
 
 def _with_retry(kwargs: dict[str, Any], *, sync: bool = False) -> dict[str, Any]:
-    """Turn the serializable ``retry_attempts`` int into a redis ``Retry`` object.
+    """Drop the ``env_prefix`` passenger and turn ``retry_attempts`` into a redis ``Retry`` object.
 
-    ``retry_attempts`` is part of the pool key (a stable int) but is not a valid
-    ``Redis.from_url`` argument, so it is consumed here and, when positive,
-    materialized into an exponential-backoff ``Retry`` on connection/timeout
-    errors — built per client because a ``Retry`` instance is not serializable.
-    The sync and async clients import ``Retry`` from their own subpackage.
+    Both are part of the pool identity but neither is a valid ``Redis.from_url``
+    argument. ``env_prefix`` names the owning component's env var when the URL is unset
+    and is a message-only passenger, so it is dropped here. ``retry_attempts`` travels
+    as a serializable int and, when positive, is materialized into an exponential-backoff
+    ``Retry`` on connection/timeout errors — built per client because a ``Retry`` instance
+    is not serializable. The sync and async clients import ``Retry`` from their own
+    subpackage.
     """
-    # ``env_prefix`` is a message-only passenger, not a ``from_url`` argument.
     kwargs.pop("env_prefix", None)
     retry_attempts = kwargs.pop("retry_attempts", 0)
     if retry_attempts > 0:

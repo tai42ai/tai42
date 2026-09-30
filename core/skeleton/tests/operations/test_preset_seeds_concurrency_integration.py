@@ -33,7 +33,7 @@ from typing import LiteralString, NamedTuple
 import pytest
 from tai42_contract.presets import PresetSeed, PresetSeedToolMeta
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, pinned_connection
 from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
@@ -85,7 +85,7 @@ async def real_seed(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[PresetSeed
         )
     monkeypatch.setattr(versioning_store, "client_ctx", client_ctx)
     monkeypatch.setattr(tool_meta_store, "client_ctx", client_ctx)
-    monkeypatch.setattr(db_locks, "client_ctx", client_ctx)
+    monkeypatch.setattr(db_locks, "pinned_connection", pinned_connection)
     # Rebuild the cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read.
     reset_all_settings()
     await apply_migrations([skeleton_entry()])

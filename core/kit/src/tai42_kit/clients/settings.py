@@ -65,16 +65,19 @@ class RedisConnectionSettings(ClientSettings):
     retry_attempts: int = 0  # >0 attaches an exponential-backoff Retry on ConnectionError/TimeoutError
 
     def client_kwargs(self) -> dict[str, Any]:
-        """Connection identity for the pooled client — JSON-serializable only.
+        """Connection kwargs for the pooled client — JSON-serializable only.
 
-        The facade keys its per-loop connection pool on these kwargs, so every
-        value must be JSON-serializable. ``retry_attempts`` travels as an int;
-        the redis client turns it into a ``Retry`` object at construction time —
-        a ``Retry`` instance is not serializable and would break the pool key.
+        Every option in these kwargs is part of the pool identity: the URL, the decode
+        mode, ``max_connections``, the socket timeouts and the retry options together
+        select one pooled client per loop. For redis-py the connection options are the
+        client's contract, so two components resolving to the same URL with different
+        options get two clients by design — never a conflict. Every value must be
+        JSON-serializable: ``retry_attempts`` travels as an int and the redis client
+        turns it into a ``Retry`` object at construction time.
 
-        ``env_prefix`` rides along so the client can name this store's own env var
-        when ``redis_url`` is unset; it is not connection identity, so the redis
-        client drops it from the pool key.
+        ``env_prefix`` names this store's component (so the client can name its own env
+        var when ``redis_url`` is unset) and is a passenger, not identity — it never
+        splits a pool.
         """
         kwargs: dict[str, Any] = {
             "url": self.redis_url,
@@ -163,15 +166,19 @@ class PostgresConnectionSettings(ClientSettings):
         return f"postgresql://{user}:{password}@{host}:{self.pg_port}/{db}?{query}"
 
     def client_kwargs(self) -> dict[str, Any]:
-        """Connection identity for the pooled client — JSON-serializable only.
+        """Connection kwargs for the pooled client — JSON-serializable only.
 
-        Pools are keyed by DSN + min/max size; callers that disagree on pool
-        bounds get separate pools.
+        One pool per DSN per loop. ``min_size``/``max_size`` are this database's
+        deployment settings, read when the pool is built; a second settings prefix
+        resolving to the same DSN with different sizes raises rather than forking a
+        second pool. ``env_prefix`` rides along (not identity) so the client can
+        derive the owning component for the pool name.
         """
         return {
             "dsn": self.pg_dsn,
             "min_size": self.pg_min_connections,
             "max_size": self.pg_max_connections,
+            "env_prefix": self.model_config.get("env_prefix") or "",
         }
 
 

@@ -25,8 +25,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import pinned_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -53,12 +52,12 @@ MARKETPLACE_LOCK_KEY = 0x7461695F6D6B7470  # "tai42_mktp"
 async def fleet_lock() -> AsyncIterator[None]:
     """Hold the fleet-wide marketplace advisory lock for the context body.
 
-    Opens a DEDICATED one-shot ``PostgresClient`` (``fresh=True``, pool bounds
-    pinned to 1) rather than a shared-pool checkout: the kit's fresh path closes
-    the dedicated pool and its connection on ANY exit — normal return, exception,
-    or a ``CancelledError`` from a client disconnect during the minutes-long pip
-    run — so the session-scoped lock releases deterministically with the
-    connection. A shared checkout would only RETURN the connection on exit (never
+    Opens a DEDICATED one-connection pool through the kit's ``pinned_connection``
+    seam rather than a shared-pool checkout: the seam closes the dedicated pool and
+    its connection on ANY exit — normal return, exception, or a ``CancelledError``
+    from a client disconnect during the minutes-long pip run — so the session-scoped
+    lock releases deterministically with the connection. A shared checkout would only
+    RETURN the connection on exit (never
     close it), and a cancellation skipping the explicit unlock would put a
     still-locked session back in the shared pool, wedging the fleet with 503s
     until restart.
@@ -85,13 +84,7 @@ async def fleet_lock() -> AsyncIterator[None]:
     inside the body stays on this client and cannot evict the SHARED pool through
     the kit's disconnection rewrap.
     """
-    kwargs = component_store_settings(SKELETON_COMPONENT).client_kwargs()
-    kwargs["min_size"] = 1
-    kwargs["max_size"] = 1
-    async with (
-        client_ctx(PostgresClient, fresh=True, **kwargs) as pool,
-        pool.connection() as conn,
-    ):
+    async with pinned_connection(component_store_settings(SKELETON_COMPONENT)) as conn:
         await conn.set_autocommit(True)
         async with conn.cursor() as cur:
             await cur.execute("SELECT pg_try_advisory_lock(%s)", (MARKETPLACE_LOCK_KEY,))

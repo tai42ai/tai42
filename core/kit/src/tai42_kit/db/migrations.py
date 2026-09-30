@@ -22,9 +22,9 @@ Concurrency and identity invariants:
   and its own lock, so a component pointed at a different Postgres (via its own
   ``*_PG_*`` override) is migrated there, not on the default database.
 
-A per-file transaction is the stated v1 limitation: statements that cannot run
-inside a transaction (``CREATE INDEX CONCURRENTLY``, some ``ALTER TYPE … ADD
-VALUE``) are unsupported.
+Each file runs inside its own transaction, so statements that cannot run inside a
+transaction (``CREATE INDEX CONCURRENTLY``, some ``ALTER TYPE … ADD VALUE``) are
+unsupported.
 """
 
 from __future__ import annotations
@@ -32,8 +32,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources.abc import Traversable
 from itertools import pairwise
@@ -42,8 +41,7 @@ from typing import LiteralString, cast
 from psycopg import AsyncConnection
 from psycopg.errors import UndefinedTable
 
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import pinned_connection
 from tai42_kit.clients.settings import PostgresConnectionSettings
 
 logger = logging.getLogger(__name__)
@@ -232,24 +230,6 @@ def _reconcile(
     return pending, tuple(mismatches)
 
 
-@asynccontextmanager
-async def _pinned_connection(settings: PostgresConnectionSettings) -> AsyncIterator[AsyncConnection]:
-    """Yield a single dedicated connection held for a whole run.
-
-    A fresh one-connection pool outside the shared pool: the run holds exactly one
-    connection so the session-scoped advisory lock covers every per-file
-    transaction, and a driver error here cannot evict the shared pool.
-    """
-    kwargs = settings.client_kwargs()
-    kwargs["min_size"] = 1
-    kwargs["max_size"] = 1
-    async with (
-        client_ctx(PostgresClient, fresh=True, **kwargs) as pool,
-        pool.connection() as conn,
-    ):
-        yield conn
-
-
 async def _read_history(conn: AsyncConnection, component: str) -> dict[int, tuple[str, str]]:
     try:
         cur = await conn.execute(
@@ -347,7 +327,7 @@ async def apply_migrations(entries: Sequence[MigrationEntry]) -> list[AppliedMig
     """
     results: list[AppliedMigration] = []
     for group in _group_by_dsn(entries):
-        async with _pinned_connection(group[0].settings) as conn:
+        async with pinned_connection(group[0].settings) as conn:
             await conn.set_autocommit(True)
             await _acquire_lock(conn)
             try:
@@ -382,7 +362,7 @@ async def migration_status(entries: Sequence[MigrationEntry]) -> list[ComponentS
 
     statuses: dict[int, ComponentStatus] = {}
     for indices in by_dsn.values():
-        async with _pinned_connection(entries[indices[0]].settings) as conn:
+        async with pinned_connection(entries[indices[0]].settings) as conn:
             await conn.set_autocommit(True)
             for index in indices:
                 entry = entries[index]

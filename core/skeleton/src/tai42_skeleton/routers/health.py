@@ -13,7 +13,6 @@ module-constant timeout budget.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from pydantic import BaseModel
@@ -214,8 +213,8 @@ async def readiness_check(request: Request) -> JSONResponse:
     """Readiness probe: ping every backing store this deployment has wired.
 
     Pings exactly the Redis/Postgres connections the gated-in subsystems use,
-    deduped by connection identity so a shared connection is pinged ONCE, and each
-    distinct connection concurrently under a 5s budget. All pass -> 200
+    deduped by pool identity so subsystems sharing one pool are pinged ONCE, and
+    each distinct pool concurrently under a 5s budget. All pass -> 200
     ``{"status": "ready", "checks": {name: "ok"}}``; any fail -> 503
     ``{"status": "not_ready", ...}`` whose failing checks carry only the exception
     TYPE name — never the message, which would leak internal hosts/ports (full
@@ -230,13 +229,16 @@ async def readiness_check(request: Request) -> JSONResponse:
     """
     conns = _wired_connections()
 
-    # Dedupe by (client class, connection identity): subsystems that share one
-    # connection via an explicit TAI_DEFAULT_REDIS_URL resolve to the same identity, so
-    # that connection is pinged once and every subsystem on it reports that one result.
+    # Dedupe by (client class, pool identity): the client's own pool-identity key is
+    # what decides whether two settings share one pool, so subsystems that resolve to
+    # the same pool are pinged once and every subsystem on it reports that one result.
+    # Two Redis subsystems on an explicit TAI_DEFAULT_REDIS_URL, or two Postgres
+    # subsystems whose settings prefixes differ but resolve to one DSN, dedupe to a
+    # single ping; two distinct DSNs (or URLs) stay two pings.
     distinct: dict[tuple[type, str], tuple[type, ClientSettings]] = {}
     subsystem_keys: dict[str, list[tuple[type, str]]] = {}
     for name, client_cls, settings in conns:
-        key = (client_cls, json.dumps(settings.client_kwargs(), sort_keys=True))
+        key = (client_cls, client_cls()._key(**settings.client_kwargs()))
         distinct.setdefault(key, (client_cls, settings))
         subsystem_keys.setdefault(name, []).append(key)
 

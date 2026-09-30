@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import cast
 
 from pydantic import SecretStr
+from pydantic_settings import SettingsConfigDict
 from starlette.requests import Request
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider, ReadinessTarget
@@ -158,6 +159,54 @@ async def test_ready_dedupes_shared_connection(monkeypatch) -> None:
     assert len(calls) == 1
     body = json.loads(bytes(resp.body))
     assert body["checks"] == {"tool_runs": "ok", "interactions": "ok"}
+
+
+async def test_ready_dedupes_two_pg_prefixes_on_one_dsn(monkeypatch) -> None:
+    # Two Postgres subsystems whose settings carry different env prefixes but resolve
+    # to the SAME DSN share one pool (the pool identity is the DSN), so /ready pings
+    # that database ONCE — the dedup keys on the pool's own identity, not the raw
+    # client kwargs, which still carry the differing prefix.
+    calls: list = []
+    monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
+
+    class _StoreA(PostgresConnectionSettings):
+        model_config = SettingsConfigDict(env_prefix="TAI_DATABASE_ALPHA_")
+
+    class _StoreB(PostgresConnectionSettings):
+        model_config = SettingsConfigDict(env_prefix="TAI_DATABASE_BETA_")
+
+    wired = [
+        ("marketplace", PostgresClient, _StoreA(pg_host="db", pg_password=SecretStr("pw"))),
+        ("tool_meta", PostgresClient, _StoreB(pg_host="db", pg_password=SecretStr("pw"))),
+    ]
+    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+
+    resp = await health.readiness_check(_request())
+
+    assert resp.status_code == 200
+    # One DSN -> one pool -> one ping, though two prefixed subsystems ride it.
+    assert len(calls) == 1
+    body = json.loads(bytes(resp.body))
+    assert body["checks"] == {"marketplace": "ok", "tool_meta": "ok"}
+
+
+async def test_ready_two_distinct_dsns_ping_twice(monkeypatch) -> None:
+    # Two Postgres subsystems on DIFFERENT DSNs are two distinct pools, so each is
+    # pinged on its own.
+    calls: list = []
+    monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
+    wired = [
+        ("versioning", PostgresClient, PostgresConnectionSettings(pg_host="db-one", pg_password=SecretStr("pw"))),
+        ("marketplace", PostgresClient, PostgresConnectionSettings(pg_host="db-two", pg_password=SecretStr("pw"))),
+    ]
+    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+
+    resp = await health.readiness_check(_request())
+
+    assert resp.status_code == 200
+    assert len(calls) == 2
+    body = json.loads(bytes(resp.body))
+    assert body["checks"] == {"versioning": "ok", "marketplace": "ok"}
 
 
 async def test_wired_connections_gates_out_pg_and_inmemory_hooks(monkeypatch) -> None:

@@ -2,13 +2,17 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
 from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
 from tai42_kit.settings import not_configured_message
+
+if TYPE_CHECKING:
+    from psycopg import AsyncConnection
+    from psycopg.rows import DictRow
 
 logger = logging.getLogger(__name__)
 
@@ -55,28 +59,45 @@ async def _create_sqlite_store(conn_string: str | None, store_kwargs: dict[str, 
 async def _create_postgres_store(conn_string: str | None, store_kwargs: dict[str, Any]) -> tuple[Resource, CleanupFn]:
     if conn_string is None:
         # An unset conn string means the base Postgres namespace; the DSN
-        # builder raises a named error if that identity is also unset.
-        conn_string = PostgresConnectionSettings().pg_dsn
+        # builder raises a named error if that identity is also unset, and its
+        # deployment sizes size this pool.
+        settings = PostgresConnectionSettings()
+        conn_string = settings.pg_dsn
+        min_size = settings.pg_min_connections
+        max_size = settings.pg_max_connections
+    else:
+        # An explicit conn string targets a database other than the base
+        # namespace, so its sizes are the langgraph pool's own defaults, not the
+        # base settings'.
+        min_size = 1
+        max_size = 20
 
     from langgraph.store.postgres import AsyncPostgresStore  # pyright: ignore[reportMissingImports]
     from psycopg.rows import dict_row
-    from psycopg_pool import AsyncConnectionPool
 
-    pool = AsyncConnectionPool(
+    from tai42_kit.clients.impl.postgres import _open_named_pool, _pool_owner, postgres_pool_name
+
+    # The shared build path: probe the first connection, then a named pool whose fill
+    # is awaited here (bounded by the DSN's connect_timeout) with a checkout-time
+    # liveness check. AsyncPostgresStore needs connections that autocommit, skip
+    # prepared statements, and yield dict rows, so those ride as the pool's per-
+    # connection kwargs.
+    pool = await _open_named_pool(
         conn_string,
-        open=False,
-        min_size=1,
-        max_size=20,
-        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        min_size=min_size,
+        max_size=max_size,
+        name=postgres_pool_name(conn_string, _pool_owner(None), "langgraph-store"),
+        connection_kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
     )
     try:
-        await pool.open()
-        # Temp connection for setup
+        # Temp connection for setup. The pool's per-connection kwargs set
+        # row_factory=dict_row, so every checkout yields dict rows; the shared pool
+        # type is row-agnostic, so narrow it to the dict-row connection the store needs.
         async with pool.connection() as conn:
-            temp_store = AsyncPostgresStore(conn, **store_kwargs)
+            temp_store = AsyncPostgresStore(cast("AsyncConnection[DictRow]", conn), **store_kwargs)
             await temp_store.setup()
     except BaseException:
-        # open/setup failed: close the pool so its connections are not
+        # setup failed: close the pool so its connections are not
         # leaked (no cleanup fn is returned on this path).
         await pool.close()
         raise

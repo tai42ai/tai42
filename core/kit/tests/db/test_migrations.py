@@ -2,9 +2,9 @@
 apply loop, per-file transactions, the session-scoped advisory lock, checksum
 integrity, and multi-DSN grouping.
 
-No real Postgres is opened. ``_pinned_connection`` is the injection seam: a fake
-in-process cluster maps each resolved DSN to a fake database (its own history
-rows and one shared advisory lock across connections, so concurrent runners
+No real Postgres is opened. The kit's ``pinned_connection`` seam is the injection
+point: a fake in-process cluster maps each resolved DSN to a fake database (its own
+history rows and one shared advisory lock across connections, so concurrent runners
 serialise exactly as two sessions would). The live-Postgres replay of real chains
 is the e2e harness's job.
 """
@@ -138,7 +138,7 @@ class _FakeCluster:
         async def fake_pinned(settings: PostgresConnectionSettings):
             yield _FakeConnection(cluster.db_for(settings))
 
-        monkeypatch.setattr(migrations, "_pinned_connection", fake_pinned)
+        monkeypatch.setattr(migrations, "pinned_connection", fake_pinned)
 
 
 # --------------------------------------------------------------------------- #
@@ -494,38 +494,24 @@ async def test_unlock_failure_is_logged_not_masked(
 # --------------------------------------------------------------------------- #
 # Pinned connection wiring                                                     #
 # --------------------------------------------------------------------------- #
-async def test_pinned_connection_holds_one_fresh_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-    sentinel_conn = object()
-
-    class _FakePool:
-        def connection(self):
-            @asynccontextmanager
-            async def _cm():
-                yield sentinel_conn
-
-            return _cm()
+async def test_apply_migrations_opens_one_pinned_connection_per_dsn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The runner opens its per-DSN connection through the kit's pinned seam, so the
+    # whole run holds one dedicated connection for the session-scoped advisory lock.
+    seen: list[PostgresConnectionSettings] = []
 
     @asynccontextmanager
-    async def fake_client_ctx(client_cls, *, fresh, **kwargs):
-        captured["client_cls"] = client_cls
-        captured["fresh"] = fresh
-        captured["kwargs"] = kwargs
-        yield _FakePool()
+    async def fake_pinned(settings: PostgresConnectionSettings):
+        seen.append(settings)
+        yield _FakeConnection(_FakeDb())
 
-    monkeypatch.setattr(migrations, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(migrations, "pinned_connection", fake_pinned)
 
-    async with migrations._pinned_connection(_settings()) as conn:
-        assert conn is sentinel_conn
-
-    assert captured["client_cls"] is migrations.PostgresClient
-    assert captured["fresh"] is True
-    kwargs = captured["kwargs"]
-    assert isinstance(kwargs, dict)
-    # A dedicated single connection so the session-scoped lock covers the whole run.
-    assert kwargs["min_size"] == 1
-    assert kwargs["max_size"] == 1
-    assert "dsn" in kwargs
+    root = _write_chain(tmp_path / "comp", {"0001_a.sql": "CREATE TABLE t (x int);"})
+    await apply_migrations([MigrationEntry("comp", root, _settings())])
+    # One DSN group -> one pinned connection.
+    assert len(seen) == 1
 
 
 def test_history_ddl_defines_table_and_grants_public() -> None:

@@ -183,7 +183,7 @@ def _offline_advisory_locks(monkeypatch: pytest.MonkeyPatch) -> FakeAdvisoryLock
     """A preset create claims its name under the fleet-wide advisory lock, which opens a
     Postgres of its OWN (a dedicated one-shot pool, not the store's), so an offline test
     that drives a create with the database configured would reach a real Postgres it never
-    provided. Point the lock's ``client_ctx`` seam at in-process locks with the same
+    provided. Point the lock's ``pinned_connection`` seam at in-process locks with the same
     per-key exclusion; a suite that asserts contention re-patches this seam with its own
     fresh fake, and the real-Postgres suites restore the genuine one.
 
@@ -193,7 +193,7 @@ def _offline_advisory_locks(monkeypatch: pytest.MonkeyPatch) -> FakeAdvisoryLock
     if not os.environ.get("TAI_DATABASE_DEFAULT_PG_HOST"):
         monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "offline.invalid")
     locks = FakeAdvisoryLocks()
-    monkeypatch.setattr(db_locks, "client_ctx", locks.client_ctx)
+    monkeypatch.setattr(db_locks, "pinned_connection", locks.pinned_connection)
     return locks
 
 
