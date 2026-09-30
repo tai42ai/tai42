@@ -15,7 +15,10 @@ import pytest
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("probe-tools", "store:redis", "setting:extension:monitor", "setting:monitor-backend"),
+]
 
 
 async def test_monitor_emits_a_tool_span_for_a_standalone_call(

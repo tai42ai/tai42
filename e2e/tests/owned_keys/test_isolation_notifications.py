@@ -10,11 +10,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import create_service_owner, mint_key_for, provision_operator, two_service_identities
 
+pytestmark = pytest.mark.needs("kind:identity", "kind:interactions", "setting:seeded-access-control")
 
+
+@pytest.mark.needs("kind:accounts", "setting:INTERACTIONS_NOTIFICATIONS_FEED_MAX=5")
 async def test_notification_audience_isolation_and_completeness(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

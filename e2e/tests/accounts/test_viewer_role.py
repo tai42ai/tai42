@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres", "topology:replicas")
 
 _PASSWORD = "viewer-user-password-1"
 

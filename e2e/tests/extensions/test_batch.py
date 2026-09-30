@@ -13,7 +13,7 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("probe-tools", "setting:extension:batch")]
 
 
 async def test_batch_runs_each_entry_in_input_order(extensions_stack: TaiStack) -> None:

@@ -84,6 +84,7 @@ def _busless_env(
     return env
 
 
+@pytest.mark.needs("no-stack", "process", "cli", "files", "setting:TAI_BUS_REDIS_URL=unset")
 def test_multiworker_serve_without_bus_refuses(tmp_path: Path) -> None:
     """A1: ``tai serve -w 4`` with no bus refuses nonzero, naming the setting.
 
@@ -117,6 +118,7 @@ def test_multiworker_serve_without_bus_refuses(tmp_path: Path) -> None:
         pytest.param(["backend", "worker"], id="backend"),
     ],
 )
+@pytest.mark.needs("no-stack", "process", "cli", "files", "setting:TAI_BUS_REDIS_URL=unset")
 def test_backend_manifest_without_bus_refuses(tmp_path: Path, argv_tail: list[str]) -> None:
     """A2: a manifest that registers a backend with no bus refuses nonzero and names
     the setting — for both ``tai serve`` (the ``app_context`` seam) and ``tai
@@ -131,6 +133,9 @@ def test_backend_manifest_without_bus_refuses(tmp_path: Path, argv_tail: list[st
     assert _UNREACHED_BACKEND in stderr, stderr
 
 
+@pytest.mark.needs(
+    "no-stack", "process", "cli", "files", "setting:TAI_BUS_REDIS_URL=unset", "setting:TAI_CONFIG_MODE=external"
+)
 def test_shared_config_mode_without_bus_refuses_naming_the_setting(tmp_path: Path) -> None:
     """A3: a non-file ``TAI_CONFIG_MODE`` (external provider) boot with no bus refuses
     naming the setting. The check runs BEFORE the config manager is constructed, so the
@@ -157,6 +162,9 @@ def test_shared_config_mode_without_bus_refuses_naming_the_setting(tmp_path: Pat
     assert "external" in stderr, stderr
 
 
+@pytest.mark.needs(
+    "no-stack", "process", "files", "setting:TAI_BUS_REDIS_URL=unset", "setting:uvicorn-factory-entrypoint"
+)
 def test_factory_string_backend_without_bus_refuses(tmp_path: Path) -> None:
     """A5: the second enforcement seam — a factory-string ``uvicorn`` on
     ``tai42_skeleton.cli.mcp_app:create_app`` (bypassing the CLI) with a
@@ -185,6 +193,7 @@ def test_factory_string_backend_without_bus_refuses(tmp_path: Path) -> None:
     assert "task backend" in stderr, stderr
 
 
+@pytest.mark.needs("process", "store:redis", "setting:TAI_BUS_REDIS_URL=unset")
 async def test_single_worker_filemode_no_backend_boots(bare_stack: TaiStack) -> None:
     """A4 (positive control): a single-worker, file-mode, no-backend server has no
     bus configured and BOOTS and serves — the one supported busless shape, reached

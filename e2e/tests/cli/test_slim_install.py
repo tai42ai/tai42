@@ -23,6 +23,8 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("cli", "setting:slim-venv")
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -81,18 +83,21 @@ def _run(tai: Path, stack: TaiStack, *args: str, json_flag: bool = True) -> subp
     return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
 
 
+@pytest.mark.needs("kind:identity", "setting:seeded-access-control", "setting:tool:generate_uuid")
 def test_slim_client_reads_remote(slim_tai: Path, cli_stack: TaiStack) -> None:
     tools = _run(slim_tai, cli_stack, "tools", "list", json_flag=False)
     assert tools.returncode == 0, tools.stderr
     assert "generate_uuid" in tools.stdout, tools.stdout
 
 
+@pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 def test_slim_client_auth_whoami_answers(slim_tai: Path, cli_stack: TaiStack) -> None:
     whoami = _run(slim_tai, cli_stack, "auth", "whoami")
     assert whoami.returncode == 0, whoami.stderr
     assert whoami.stdout.strip(), whoami.stdout
 
 
+@pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 def test_slim_client_pure_remote_config_works(slim_tai: Path, cli_stack: TaiStack) -> None:
     # A pure-remote config command works against the stack (contrast with the absent
     # offline ``config lint`` below).
@@ -100,6 +105,7 @@ def test_slim_client_pure_remote_config_works(slim_tai: Path, cli_stack: TaiStac
     assert env_get.returncode == 0, env_get.stderr
 
 
+@pytest.mark.needs("no-stack")
 def test_slim_version_lists_cli_not_skeleton(slim_tai: Path, cli_stack: TaiStack) -> None:
     result = _run(slim_tai, cli_stack, "version")
     assert result.returncode == 0, result.stderr
@@ -108,12 +114,14 @@ def test_slim_version_lists_cli_not_skeleton(slim_tai: Path, cli_stack: TaiStack
     assert "tai42-skeleton" not in packages
 
 
+@pytest.mark.needs("no-stack")
 def test_slim_client_lacks_server_command(slim_tai: Path, cli_stack: TaiStack) -> None:
     serve = _run(slim_tai, cli_stack, "serve", "--help")
     assert serve.returncode != 0
     assert "No such command" in serve.stderr
 
 
+@pytest.mark.needs("no-stack")
 def test_slim_client_lacks_offline_config_lint(slim_tai: Path, cli_stack: TaiStack) -> None:
     lint = _run(slim_tai, cli_stack, "config", "lint", "--help")
     assert lint.returncode != 0

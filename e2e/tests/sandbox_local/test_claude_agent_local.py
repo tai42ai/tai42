@@ -33,6 +33,12 @@ pytestmark = [
         not HarnessSettings().is_real("claude_agent"),
         reason="direct-mode claude_code needs a host claude-agent-sdk runtime + ANTHROPIC_API_KEY",
     ),
+    pytest.mark.needs(
+        "kind:sandbox:local",
+        "setting:agent:claude_code",
+        "setting:real-credentials",
+        "setting:host-claude-agent-sdk",
+    ),
 ]
 
 

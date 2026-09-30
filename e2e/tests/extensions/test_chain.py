@@ -16,7 +16,7 @@ import pytest
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("probe-tools", "store:redis", "setting:extension:chain")]
 
 
 async def test_chain_transforms_output_into_next_tool_input(

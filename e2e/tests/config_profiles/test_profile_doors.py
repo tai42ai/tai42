@@ -20,6 +20,8 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs()
+
 # A boot-identity X-band key no profile may carry (``config.boundary.X_BAND_EXTRA``).
 _X_BAND_KEY = "TAI_RUN_MODE"
 
@@ -28,6 +30,7 @@ async def _put(stack: TaiStack, name: str, body: dict[str, Any]) -> Any:
     return await stack.api().put(f"/api/config/profiles/{name}", json=body, retry_on_reloading=True)
 
 
+@pytest.mark.needs("kind:versioning")
 async def test_crud_reveals_body_and_list_masks(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     name = uniq("profile")
@@ -68,6 +71,7 @@ async def test_reserved_name_refused(agents_stack: TaiStack) -> None:
     assert "@nope" in resp.json()["error"]
 
 
+@pytest.mark.needs("kind:versioning")
 async def test_versions_and_rollback(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     name = uniq("profile")
@@ -98,6 +102,7 @@ async def test_versions_and_rollback(agents_stack: TaiStack, uniq: Callable[[str
     assert missing.status_code == 404, missing.text
 
 
+@pytest.mark.needs("kind:versioning", "mutable")
 async def test_diff_buckets(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     # Seed known stored-env keys (merge), then a profile that adds/removes/changes against
@@ -129,6 +134,7 @@ async def test_diff_buckets(agents_stack: TaiStack, uniq: Callable[[str], str]) 
     assert isinstance(diff["refused_keys"], list), diff
 
 
+@pytest.mark.needs("kind:versioning")
 async def test_x_band_key_refused(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     name = uniq("profile")
     resp = await agents_stack.api().request_raw(
@@ -140,6 +146,7 @@ async def test_x_band_key_refused(agents_stack: TaiStack, uniq: Callable[[str], 
     assert (await agents_stack.api().request_raw("GET", f"/api/config/profiles/{name}")).status_code == 404
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_key_material_key_refused(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """A profile that CHANGES a ``key_material`` field is refused DISTINCTLY from the X-band
     rule — a key_material field may be ``hot`` (not X-band) yet its VALUE must never be
@@ -196,6 +203,7 @@ async def test_manifest_preserved_posture(agents_stack: TaiStack) -> None:
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs("kind:versioning", "mutable")
 async def test_previous_revert_round_trip(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """Applying a profile snapshots the pre-apply stored env into the reserved ``@previous``;
     applying ``@previous`` reverts the whole band — the rollback anchor."""

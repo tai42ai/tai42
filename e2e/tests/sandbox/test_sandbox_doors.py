@@ -50,6 +50,7 @@ def _sandbox_stack_with_kind_status(res, variants):
 # ---- identity + policy, present regardless of provider -------------------
 
 
+@pytest.mark.needs("setting:sandbox_module=unset")
 async def test_identity_door_absent_is_honest_and_carries_policy(bare_stack: TaiStack) -> None:
     # No provider registered: the door reports the absence truthfully (never errors, never
     # a 501) — and the resolved policy block is present ALONGSIDE ``present: false``.
@@ -61,6 +62,7 @@ async def test_identity_door_absent_is_honest_and_carries_policy(bare_stack: Tai
     assert info["policy"].keys() >= _POLICY_FIELDS, info
 
 
+@pytest.mark.needs("setting:tai42_e2e_fixtures.sandbox_provider")
 async def test_identity_door_present_names_the_provider_and_carries_policy(sandbox_stack: TaiStack) -> None:
     # A provider is registered: the door names it and still carries the SAME resolved
     # policy block (the operator's security-as-config, independent of the provider).
@@ -74,6 +76,7 @@ async def test_identity_door_present_names_the_provider_and_carries_policy(sandb
 # ---- kind-status row, both states ----------------------------------------
 
 
+@pytest.mark.needs("setting:sandbox_module=unset", "setting:router:system_kinds")
 async def test_kind_status_row_is_off_without_a_provider(off_stack: TaiStack) -> None:
     rows = await off_stack.api().get("/api/system/kinds")
     row = next((r for r in rows if r["kind"] == "sandbox"), None)
@@ -83,6 +86,7 @@ async def test_kind_status_row_is_off_without_a_provider(off_stack: TaiStack) ->
     assert row["detail"] == "no sandbox provider installed", row
 
 
+@pytest.mark.needs("process", "setting:tai42_e2e_fixtures.sandbox_provider", "setting:router:system_kinds")
 async def test_kind_status_row_is_active_with_a_provider(fresh_stack) -> None:
     stack: TaiStack = fresh_stack(_sandbox_stack_with_kind_status)
     rows = await stack.api().get("/api/system/kinds")
@@ -97,6 +101,7 @@ async def test_kind_status_row_is_active_with_a_provider(fresh_stack) -> None:
 # ---- authed read: 401 without a token ------------------------------------
 
 
+@pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 async def test_identity_door_is_authed(projection_authz_stack) -> None:
     # The identity door is an AUTHED read: on an access-control stack an unauthenticated
     # GET is refused 401 — the door answers regardless of whether a provider is registered
@@ -111,6 +116,7 @@ async def test_identity_door_is_authed(projection_authz_stack) -> None:
 # ---- consumer acquisition error path -------------------------------------
 
 
+@pytest.mark.needs("probe-tools", "setting:sandbox_module=unset")
 async def test_consumer_acquisition_raises_loudly_without_a_provider(bare_stack: TaiStack) -> None:
     # A consumer acquiring a session on a provider-less stack surfaces the typed loud
     # ``SandboxUnavailableError`` through the probe tool's OWN error path — never a 501

@@ -9,7 +9,11 @@ submitted VALUES stripped: a rejected ``config_values`` secret must never ride t
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:connectors")
 
 # Not a UUID — the store rejects it before any lookup, so it is indistinguishable from a
 # genuine miss (both 404).

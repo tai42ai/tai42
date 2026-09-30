@@ -46,6 +46,8 @@ from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import BusWorker
 
+pytestmark = pytest.mark.needs("kind:backend", "mutable", "store:redis", "topology:multiworker")
+
 if TYPE_CHECKING:
     from tai42_e2e.variants import Variants
 
@@ -182,6 +184,7 @@ async def _normalize(stack: TaiStack) -> None:
 # ---- delivery under load ------------------------------------------------
 
 
+@pytest.mark.needs("probe-tools", "setting:extension:sync_task", "setting:TAI_BUS_APPLY_TIMEOUT=20")
 async def test_fleet_op_reaches_backend_worker_under_load(
     fleet_mcp_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -238,6 +241,7 @@ async def test_fleet_op_reaches_backend_worker_under_load(
 # ---- narrowing among SERVE workers --------------------------------------
 
 
+@pytest.mark.needs("probe-tools", "setting:managed-mcp-server", "setting:manifest:mcp-fleetmcp")
 async def test_targeted_deregister_narrows_to_one_serve_worker(fleet_mcp_stack: TaiStack) -> None:
     """A TARGETED ``deregister_mcp`` of ONE serve worker moves ONLY that worker's
     digest; every other serve digest is byte-identical.
@@ -280,6 +284,9 @@ async def test_targeted_deregister_narrows_to_one_serve_worker(fleet_mcp_stack: 
 # ---- delivery TO a backend worker ---------------------------------------
 
 
+@pytest.mark.needs(
+    "probe-tools", "setting:extension:sync_task", "setting:managed-mcp-server", "setting:manifest:mcp-fleetmcp"
+)
 async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: TaiStack, infra: Infra) -> None:
     """A TARGETED ``deregister_mcp`` of the BACKEND worker removes the detached tool
     from the backend worker's live registry, read back through a REAL task the backend
@@ -337,6 +344,7 @@ async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: T
 # ---- unknown-target rejection -------------------------------------------
 
 
+@pytest.mark.needs("setting:managed-mcp-server", "setting:manifest:mcp-fleetmcp")
 async def test_publish_naming_unknown_target_is_a_named_error(fleet_mcp_stack: TaiStack) -> None:
     """A publish naming a NONEXISTENT target is rejected as a client error whose body
     NAMES the unknown target — the ``validate_targets`` raise, fired BEFORE any local

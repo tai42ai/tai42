@@ -69,14 +69,16 @@ jobs:
     # install-flow specs run well past the ~8-minute studio leg.
     timeout-minutes: 45
     services:
+      # The services back the stack this job boots; with the e2e target set no stack
+      # is built, so their images are empty and they do not start.
       redis:
-        image: redis:7-alpine
+        image: ${{ vars.TAI_E2E_TARGET == '' && 'redis:7-alpine' || '' }}
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s
           --health-timeout 3s --health-retries 20
       postgres:
-        image: postgres:16-alpine
+        image: ${{ vars.TAI_E2E_TARGET == '' && 'postgres:16-alpine' || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -90,6 +92,10 @@ jobs:
       TAI_E2E_PG_HOST: localhost
       TAI_E2E_PG_PASSWORD: postgres
       TAI_E2E_KEEP_STACKS: "1"
+      # The e2e target: a running stack to drive instead of building one — an origin
+      # or the name of a file in e2e/targets, from the repository variable. TAI_E2E_KEY is its login key.
+      TAI_E2E_TARGET: ${{ vars.TAI_E2E_TARGET }}
+      TAI_E2E_KEY: ${{ secrets.TAI_E2E_KEY }}
     steps:
       - name: Check out the tai42 ref the dispatch declares (default main)
         # A paired change names the tai42 ref to test the source sha against with
@@ -100,10 +106,12 @@ jobs:
         with:
           ref: ${{ github.event.client_payload.tai42_ref || 'main' }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        if: env.TAI_E2E_TARGET == ''
         with:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
+        if: env.TAI_E2E_TARGET == ''
       - name: Resolve the source repo and marketplace gate
         # The marketplace repo runs the marketplace-gated legs
         # (TAI_E2E_MARKETPLACE=1); tai-studio runs the plain studio browser suite.
@@ -129,7 +137,7 @@ jobs:
             *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
           esac
       - name: Configure git auth for the private tai42-marketplace sources
-        if: steps.src.outputs.marketplace == 'true'
+        if: env.TAI_E2E_TARGET == '' && steps.src.outputs.marketplace == 'true'
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
@@ -145,8 +153,10 @@ jobs:
         # predates the symbols the SOURCE skeleton imports (e.g.
         # component_binding_declared, added in kit 3.7.0), which then crashes the
         # Playwright webServer at import.
+        if: env.TAI_E2E_TARGET == ''
         run: uv sync --locked --package tai42-e2e
       - name: Clone tai-studio (dispatched sha when studio-dispatched, else main)
+        if: env.TAI_E2E_TARGET == ''
         env:
           SRC_REPO: ${{ github.event.client_payload.repo }}
           SRC_REF: ${{ github.event.client_payload.ref }}
@@ -168,6 +178,7 @@ jobs:
         # and (b) the environment as TAI_STUDIO_SHA — the Playwright run below inherits
         # it (job env), so playwright.config.ts can surface it as report metadata via
         # `metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA }`.
+        if: env.TAI_E2E_TARGET == ''
         run: |
           set -euo pipefail
           studio_sha=$(git -C tai-studio rev-parse HEAD)
@@ -178,7 +189,7 @@ jobs:
             echo "Browser suite ran against tai-studio @ \`$studio_sha\`."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Clone tai-marketplace (dispatched sha when marketplace-dispatched, else main)
-        if: steps.src.outputs.marketplace == 'true'
+        if: env.TAI_E2E_TARGET == '' && steps.src.outputs.marketplace == 'true'
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           SRC_REPO: ${{ github.event.client_payload.repo }}
@@ -194,6 +205,8 @@ jobs:
           fi
       - name: Build the Studio SPA
         uses: ./.github/actions/studio-spa
+        with:
+          build: ${{ env.TAI_E2E_TARGET == '' }}
       - name: Install the ui/ workspace
         working-directory: e2e/ui
         run: pnpm install --frozen-lockfile
@@ -203,6 +216,18 @@ jobs:
       - name: Run the browser suite
         working-directory: e2e/ui
         run: pnpm exec playwright test --project=chromium
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-e2e-junit
+          path: e2e/ui/junit.xml
+          if-no-files-found: error
+      - name: Summarize the JUnit report
+        if: ${{ !cancelled() }}
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
+        with:
+          paths: e2e/ui/junit.xml
 
   status:
     needs: [pending, suite]

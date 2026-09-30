@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import pytest
 from tai42_contract.secrets import SECRET_PLACEHOLDER
 
 from tai42_e2e import wait_for_async
@@ -36,6 +37,13 @@ from tai42_e2e.topology import StackConfig, StackResources
 
 if TYPE_CHECKING:
     from tai42_e2e.variants import Variants
+
+pytestmark = pytest.mark.needs(
+    "kind:versioning",
+    "process",
+    "setting:secret-ref-probe",
+    "setting:E2E_PRESET_SECRET_REF=resolved-stub-credential",
+)
 
 _SECRET_ENV = "E2E_PRESET_SECRET_REF"
 _SECRET_VALUE = "resolved-stub-credential"
@@ -74,6 +82,7 @@ async def _create(stack: TaiStack, name: str, marker: str) -> dict:
     )
 
 
+@pytest.mark.needs("kind:tool_runs", "setting:backup-router")
 async def test_secret_reference_round_trips_every_door(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:

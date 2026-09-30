@@ -49,6 +49,7 @@ _LOSE_NOTHING_ROUNDS = 3
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs("mutable", "topology:replicas", "setting:config-provider:file")
 async def test_concurrent_env_writes_lose_nothing(replicas_stack: TaiStack) -> None:
     """Concurrent disjoint env writes against both replicas all survive: the flock'd
     read-modify-write of ``FileConfigManager.write_env`` serialises cross-process writers,
@@ -79,6 +80,7 @@ async def test_concurrent_env_writes_lose_nothing(replicas_stack: TaiStack) -> N
 # apply adds over ``write_env`` is exactly that delete-on-omission, asserted here on the same
 # flock'd file manager.
 @pytest.mark.timeout(300)
+@pytest.mark.needs("mutable", "setting:config-provider:file", "setting:exclusive-env-store")
 async def test_replace_env_is_whole_map_and_deletes_omitted_keys(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

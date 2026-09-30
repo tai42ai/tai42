@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
 from tai42_contract.secrets import SECRET_PLACEHOLDER
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("probe-tools")
 
 _TOOL = "e2e_secret_value"
 
@@ -28,6 +31,7 @@ async def test_sync_run_tool_door_reveals_the_real_value(core_stack: TaiStack, u
     assert result == {"credential": secret}, result
 
 
+@pytest.mark.needs("kind:tool_runs")
 async def test_background_run_records_the_masked_placeholder(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     secret = uniq("credential")
     api = core_stack.api()

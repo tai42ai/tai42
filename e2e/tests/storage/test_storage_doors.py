@@ -12,9 +12,12 @@ import base64
 import secrets
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 
+@pytest.mark.needs("kind:storage", "setting:storage-variant")
 async def test_storage_identity_and_text_round_trip(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     storage = core_stack.infra.variants.storage
@@ -46,6 +49,7 @@ async def test_storage_identity_and_text_round_trip(core_stack: TaiStack, uniq: 
     assert resource_id not in listing_after["resources"]
 
 
+@pytest.mark.needs("kind:storage")
 async def test_storage_base64_binary_round_trip(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     resource_id = f"{uniq('blob')}.bin"
@@ -64,6 +68,7 @@ async def test_storage_base64_binary_round_trip(core_stack: TaiStack, uniq: Call
     await api.delete(f"/api/storage/resources/{resource_id}")
 
 
+@pytest.mark.needs("kind:storage")
 async def test_storage_delete_dir_removes_nested_set(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     directory = uniq("reports")
@@ -81,6 +86,7 @@ async def test_storage_delete_dir_removes_nested_set(core_stack: TaiStack, uniq:
     assert all(resource_id not in listing_after["resources"] for resource_id in ids)
 
 
+@pytest.mark.needs("kind:storage")
 async def test_storage_upload_one_of_is_enforced(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     resource_id = f"{uniq('bad')}.txt"
@@ -98,6 +104,7 @@ async def test_storage_upload_one_of_is_enforced(core_stack: TaiStack, uniq: Cal
     assert "exactly one" in neither.json()["error"]
 
 
+@pytest.mark.needs("kind:storage")
 async def test_storage_rejects_dotdot_on_read_and_upload_body(core_stack: TaiStack) -> None:
     api = core_stack.api()
 
@@ -114,6 +121,7 @@ async def test_storage_rejects_dotdot_on_read_and_upload_body(core_stack: TaiSta
     assert "relative path" in read.json()["error"]
 
 
+@pytest.mark.needs("setting:storage_module=absent")
 async def test_storage_absent_provider_is_honest(bare_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = bare_stack.api()
 

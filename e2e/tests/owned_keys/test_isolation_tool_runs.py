@@ -10,15 +10,20 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import create_service_owner, mint_key_for, provision_operator, two_service_identities
+
+pytestmark = pytest.mark.needs("kind:identity", "kind:tool_runs", "probe-tools", "setting:seeded-access-control")
 
 
 def _ids(entries: list[dict[str, Any]]) -> list[str]:
     return [entry["run_id"] for entry in entries]
 
 
+@pytest.mark.needs("kind:accounts", "setting:TAI_TOOL_RUNS_RECENT_RUNS_LIMIT=3")
 async def test_tool_run_isolation_and_completeness(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     _owned_a, owned_a_raw, _owned_b, owned_b_raw = await two_service_identities(owned_keys_stack, uniq)
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)

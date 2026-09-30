@@ -34,8 +34,20 @@ import os
 import signal
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import Infra, wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "process",
+    "store:redis",
+    "setting:extension:sync_task",
+    "setting:TASK_TIMEOUT=12",
+    "setting:same-host-pids",
+)
 
 
 def _pid_alive(pid: int) -> bool:

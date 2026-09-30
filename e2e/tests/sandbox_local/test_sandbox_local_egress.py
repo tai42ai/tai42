@@ -17,7 +17,10 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("kind:sandbox:local", "probe-tools", "setting:TAI_MCP_SANDBOX_EGRESS=egress"),
+]
 
 
 async def test_egress_network_is_accepted_by_the_direct_provider(

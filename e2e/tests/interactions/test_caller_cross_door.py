@@ -19,7 +19,10 @@ from tai42_e2e.stack import TaiStack
 
 from ._caller_support import await_result, await_status, await_terminal, caller_ask_id, subject, submit
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("kind:tool_runs", "kind:interactions", "probe-tools"),
+]
 
 # resume_expr yields one ``{id, payload}`` per parked caller ask, so the hook fire resumes the
 # subject's ask with this answer over the door contract's ``$parked`` binding.
@@ -58,6 +61,7 @@ async def _take_when_ready(stack: TaiStack, subj: dict[str, str], *, deadline: f
     return await wait_for_async(_try, deadline=deadline, message="the hook-resumed outcome never became takeable")
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_a_caller_ask_parked_by_the_subject_door_is_resumed_by_a_hook(
     caller_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -104,6 +108,7 @@ async def test_the_parked_record_carries_the_caller_ask_entries(
     assert entry["question"]
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_a_caller_ask_parked_by_the_subject_door_is_resumed_by_a_direct_run(
     caller_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

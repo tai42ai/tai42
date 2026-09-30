@@ -14,19 +14,25 @@ from pathlib import Path
 from tai42_e2e.pg import PostgresAdmin
 from tai42_e2e.redisx import RedisAdmin
 from tai42_e2e.settings import HarnessSettings
+from tai42_e2e.target import Target
 from tai42_e2e.topology import Infra, InfraUnavailableError, StackResources
 from tai42_e2e.variants import resolve_variants
 
 
-def connect_infra(settings: HarnessSettings) -> Infra:
+def connect_infra(settings: HarnessSettings, target: Target | None = None) -> Infra:
     """Resolve the variant set, connect the Redis + Postgres admin clients,
     verify everything the selected variants need is reachable (loudly, with the
     compose hint on failure), apply the DDL template, and return the
-    :class:`Infra` bundle. The caller owns closing ``infra.redis``."""
+    :class:`Infra` bundle. The caller owns closing ``infra.redis``.
+
+    With a ``target`` the run builds no stack and owns no stores: the bundle carries
+    the target and its admin clients are never connected."""
     variants = resolve_variants(settings)
     host, port = settings.redis_host_port
     redis_admin = RedisAdmin(host, port)
     pg_admin = PostgresAdmin(settings)
+    if target is not None:
+        return Infra(settings=settings, redis=redis_admin, pg=pg_admin, variants=variants, target=target)
     try:
         redis_admin.check_reachable()
     except Exception as exc:

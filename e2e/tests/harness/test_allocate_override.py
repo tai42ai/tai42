@@ -15,7 +15,7 @@ from tai42_e2e.manifests import build_core_stack
 
 # Pure harness self-test: it renders env, boots nothing, and exercises no backend
 # seam, so running it under every backend leg buys nothing.
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("store:redis", "store:postgres")]
 
 
 def test_override_endpoints_reach_the_rendered_env(infra: Infra, tmp_path: Path) -> None:

@@ -30,6 +30,9 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs(
+        "kind:storage", "helper:llm", "setting:agent:vqa_agent", "setting:TAI_URL_GUARD_ALLOW_CIDRS=loopback"
+    ),
 ]
 
 

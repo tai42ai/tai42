@@ -11,11 +11,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import SCOPE, create_service_owner, mint_key_for, mint_owned, provision_owner
+
+pytestmark = pytest.mark.needs("kind:identity", "kind:accounts", "setting:seeded-access-control")
 
 # The seed provisions the admin owner principal (``e2e-owner``) and its root key
 # (``e2e-root``, ``*``), so the root key is itself owned by that admin principal.

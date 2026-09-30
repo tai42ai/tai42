@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.waiting import wait_for_async
 
 from ._bridge_support import BridgeHarness, wait_probe_record, wait_record_status
@@ -46,6 +48,11 @@ async def _api_tool_route(
         overlap=overlap,
     )
     return route_name
+
+
+pytestmark = pytest.mark.needs(
+    "kind:identity", "probe-tools", "setting:conversations", "setting:seeded-access-control", "store:redis"
+)
 
 
 async def test_the_api_door_sync_wait_and_poll_see_a_superseded_marker(
@@ -100,6 +107,7 @@ async def test_the_api_door_sync_wait_and_poll_see_a_superseded_marker(
     assert record["successor_id"] == data2["message_id"]
 
 
+@pytest.mark.needs("setting:CONVERSATIONS_DELIVERY_MAX_ATTEMPTS=2")
 async def test_the_api_door_poll_sees_a_merged_marker(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     marker = uniq("ov-api-mrg")
     route_name = await _api_tool_route(

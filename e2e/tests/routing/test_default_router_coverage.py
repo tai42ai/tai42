@@ -114,6 +114,7 @@ async def _status(stack: TaiStack, method: str, path: str, json: dict | None) ->
     return await wait_for_async(settled, deadline=15.0, message=f"{method} {path} never left the reload gate")
 
 
+@pytest.mark.needs("no-stack")
 def test_anchor_set_matches_default_routers() -> None:
     """SECONDARY completeness cross-check: the hand-pinned anchor set covers exactly
     ``DEFAULT_API_ROUTERS`` — no default router without an anchor (would go untested),
@@ -128,6 +129,7 @@ def test_anchor_set_matches_default_routers() -> None:
     assert not extra, f"coverage anchors for non-default routers: {sorted(extra)}"
 
 
+@pytest.mark.needs("setting:default-routers-all")
 @pytest.mark.parametrize(
     ("router", "method", "path", "json"),
     [(router, method, path, json) for router, (method, path, json) in STUDIO_ROUTE_ANCHORS.items()],
@@ -145,6 +147,7 @@ async def test_default_manifest_mounts_studio_route(
     )
 
 
+@pytest.mark.needs("setting:default-routers-all")
 async def test_catch_all_does_not_shadow_the_api(default_router_stack: TaiStack) -> None:
     """The SPA catch-all is mounted LAST and guards ``/api`` paths, so an unknown API
     path is still a genuine 404 (the catch-all did not swallow it) and the SPA root

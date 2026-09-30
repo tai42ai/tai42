@@ -40,7 +40,7 @@ def _minimal_with_origin_allowlist(res: StackResources, variants: Variants) -> S
 
 # The minimal stack runs one worker and no backend, so these exercise no backend seam and
 # run once on the backendless leg.
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("process")]
 
 
 class _ForeignListener:
@@ -129,6 +129,7 @@ def test_boot_reallocates_off_a_foreign_listener(
         seize.close()
 
 
+@pytest.mark.needs("files")
 def test_heal_refreshes_the_origin_allowlist_to_the_new_port(
     fresh_stack: Callable[..., TaiStack], monkeypatch: pytest.MonkeyPatch
 ) -> None:

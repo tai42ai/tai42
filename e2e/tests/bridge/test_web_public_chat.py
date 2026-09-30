@@ -33,10 +33,20 @@ from ._bridge_support import BridgeHarness, cancel_and_join, request_mentions, s
 
 # The scripted-LLM turns are the 'llm' mock leg; a real LLM breaks the scripting. The web
 # channel itself has no vendor and so no real/mock split — it is always real.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted-LLM turns are the 'llm' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted-LLM turns are the 'llm' mock leg; the real leg runs on the creds host",
+    ),
+]
 
 # Room for the JSON envelope around a message text, so a body sized off the byte cap
 # below still arrives under it and is refused on the TEXT rule rather than the byte one.
@@ -95,6 +105,7 @@ async def _open_web_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag
     return web
 
 
+@pytest.mark.needs("helper:llm", "setting:checkpoint:memory")
 async def test_web_visitor_message_round_trips_and_the_stream_replays_it(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -139,6 +150,7 @@ async def test_web_visitor_message_round_trips_and_the_stream_replays_it(
     assert answer2 in exchange[3][1]
 
 
+@pytest.mark.needs("setting:tool:ask", "topology:replicas")
 async def test_ask_lands_in_the_live_web_conversation(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     web = await _open_web_route(bridge, uniq, "l12ask")
     # A SECOND registered visitor on the same route — a real session owning another
@@ -193,6 +205,7 @@ async def test_ask_lands_in_the_live_web_conversation(bridge: BridgeHarness, uni
     assert any(event == "chat.answered" and data["answer"] == ask_answer for event, data in replayed)
 
 
+@pytest.mark.needs("helper:llm")
 async def test_an_invented_cookie_cannot_open_a_conversation(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     """The spend fence: only the chat page mints AND registers a session.
 
@@ -236,6 +249,7 @@ async def test_an_invented_cookie_cannot_open_a_conversation(bridge: BridgeHarne
     assert transcript_keys(store_url, identity) == {visitor.transcript_key}
 
 
+@pytest.mark.needs("setting:CHANNEL_WEB_MAX_BODY_BYTES=65536")
 async def test_message_door_refuses_an_over_cap_body_and_an_unusable_body(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

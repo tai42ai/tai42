@@ -42,10 +42,21 @@ from ._bridge_support import (
 # selection real breaks the stub scripting, so the module steps aside. The reproduction leans on
 # the twilio stub's mid-send barrier: without a controllable hold on the send the sub-millisecond
 # pending_delivery window cannot be hit deterministically.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
-    reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "helper:llm",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
+        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
+    ),
+]
 
 # Long enough to split into more than one twilio SMS chunk (max_message_chars['twilio'] == 1600),
 # with the marker in every chunk so a send count matches on any chunk and the transcript answer

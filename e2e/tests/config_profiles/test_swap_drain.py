@@ -34,6 +34,8 @@ from tai42_e2e.mcp import McpClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for
 
+pytestmark = pytest.mark.needs("probe-tools", "setting:one-worker-per-address")
+
 
 async def _read_until(lines: AsyncIterator[str], marker: str, *, deadline: float) -> None:
     """Read SSE lines until one contains ``marker``, bounded by ``deadline``. A stream that
@@ -156,6 +158,7 @@ async def test_failed_epoch_build_keeps_old_surface_and_stored_env(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs("mutable")
 async def test_hot_apply_breaks_and_reinitializes_stateful_mcp_session(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -194,6 +197,7 @@ async def test_hot_apply_breaks_and_reinitializes_stateful_mcp_session(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs("mutable")
 async def test_sse_stream_survives_a_hot_apply(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """An SSE stream opened on the old epoch SURVIVES a hot apply. The interactions stream is
     a plain Starlette response (NOT the MCP session manager the swap ``aclose``s), so the
@@ -225,6 +229,7 @@ async def test_sse_stream_survives_a_hot_apply(replicas_stack: TaiStack, uniq: C
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs("kind:backend", "mutable", "store:redis", "setting:extension:sync_task")
 async def test_hot_apply_does_not_lose_in_flight_backend_work(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

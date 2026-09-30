@@ -12,8 +12,11 @@ this CASE-A path never fires there and a regression would be invisible; the
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "store:postgres", "store:redis", "setting:seeded-access-control")
 
 # The route the admin-bypass seed deliberately leaves with NO route row: a real, mounted,
 # authenticated GET route (routers.tools, a pure in-process read) that is NOT an

@@ -29,6 +29,7 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs("helper:llm", "setting:agent:voting_agent"),
 ]
 
 

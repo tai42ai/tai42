@@ -14,7 +14,21 @@ import pytest
 
 from ._support import ChannelCase, await_true, cancel_and_join, find_add, is_pending, post_inbound, tool_content_text
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:channels:telegram",
+        "kind:channels:slack",
+        "kind:channels:twilio",
+        "topology:replicas",
+        "helper:channel-fake:telegram",
+        "helper:channel-fake:slack",
+        "helper:channel-fake:twilio",
+        "setting:channel-inbound-secrets",
+        "setting:channel-allowed-recipients",
+        "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    ),
+]
 
 
 async def test_allowlisted_recipient_is_delivered_to(channel_case: ChannelCase, uniq: Callable[[str], str]) -> None:

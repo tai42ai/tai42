@@ -41,10 +41,24 @@ from ._bridge_support import (
     wait_send_to,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:channels:whatsapp",
+        "kind:identity",
+        "probe-tools",
+        "mutable",
+        "helper:twilio",
+        "helper:whatsapp",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
+        reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
+    ),
+]
 
 _TOOL = "e2e_record"
 # The person the turn ran as keys the probe list; the message is its value, so a per-fire

@@ -13,8 +13,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.manifests import build_seams_seed_off_stack, build_seams_seed_stack
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("process", "setting:fixture-seams")
 
 _SEED = "e2e_seed_probe"
 
@@ -35,6 +39,7 @@ async def _reload_env(stack: TaiStack, env: dict[str, str]) -> None:
         await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_seed_is_live_callable_in_first_boot_epoch(
     fresh_stack: Callable[..., TaiStack],
 ) -> None:
@@ -58,6 +63,7 @@ async def test_seed_is_live_callable_in_first_boot_epoch(
     assert len(await _versions(stack)) == 1
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_content_change_leaves_present_preset_untouched(fresh_stack: Callable[..., TaiStack]) -> None:
     stack = fresh_stack(build_seams_seed_stack)
     assert (await _active_body(stack))["fixed_kwargs"]["payload"] == "seeded-base"
@@ -71,6 +77,7 @@ async def test_content_change_leaves_present_preset_untouched(fresh_stack: Calla
     assert (await _active_body(stack))["fixed_kwargs"]["payload"] == "seeded-base"
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_operator_edit_survives_reboot(fresh_stack: Callable[..., TaiStack]) -> None:
     stack = fresh_stack(build_seams_seed_stack)
     # An operator saves a new version.

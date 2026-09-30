@@ -59,6 +59,7 @@ pytestmark = [
         HarnessSettings().is_real("marketplace-github"),
         reason="FixturePackageIndex github ingest is the marketplace-github mock leg; real on creds host",
     ),
+    pytest.mark.needs("helper:registry", "helper:package-index", "helper:github", "no-stack"),
 ]
 
 _REPO_FULL_NAME = "tai42ai/tai-e2e-market-delta"

@@ -10,8 +10,11 @@
  * The plain registered agent is driven (not an authored one) so the run creates
  * no preset/authored-agent residue on the shared stack.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { LLM_CONTROL_URL, seedCredential } from './helpers';
+import { needs, test } from './needs';
+
+needs('setting:agent:tools_agent', 'helper:llm');
 
 test('a registered agent whose model turn errors surfaces a loud failed state', async ({
   page,

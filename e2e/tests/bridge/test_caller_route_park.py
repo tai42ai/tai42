@@ -24,10 +24,21 @@ from tai42_e2e.webchat import WebChatClient
 
 from ._bridge_support import BridgeHarness, wait_probe_record
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "probe-tools",
+        "mutable",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host",
+    ),
+]
 
 # resume_expr resumes each pending caller ask on the turn's subject; a de-duplicated ``$parked``
 # yields exactly one resume item for the one parked ask.
@@ -96,6 +107,7 @@ async def test_a_route_parked_caller_ask_is_listed_once_and_resumed_by_the_door(
     assert len(replies) == 1, f"the deduplicated caller ask must resume to exactly one reply, saw {out_texts!r}"
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_a_route_parked_caller_ask_resumes_from_a_direct_run_on_its_subject(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -137,6 +149,7 @@ async def test_a_route_parked_caller_ask_resumes_from_a_direct_run_on_its_subjec
     assert outcome["result"]["answer"] == "direct-answer"
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_a_route_parked_caller_ask_resumes_from_a_hook_on_its_subject(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

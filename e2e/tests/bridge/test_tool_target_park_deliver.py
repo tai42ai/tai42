@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.webchat import WebChatClient
 
 from ._bridge_support import ERROR_ANSWER_TEXT, BridgeHarness, wait_probe_record
@@ -87,6 +89,17 @@ async def _park_a_message(bridge: BridgeHarness, web: WebChatClient, marker: str
     assert [direction for direction, _text in exchange] == ["in"], f"a parked turn must post no reply, saw {exchange!r}"
     assert marker in exchange[0][1]
     return interaction_id
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+    "topology:replicas",
+)
 
 
 async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversation(

@@ -35,10 +35,20 @@ from ._bridge_support import TWILIO_INBOUND_PATH, BridgeHarness, post_inbound
 
 # The web channel has no vendor (always real); the twilio leg is the 'twilio' mock leg. No
 # scripted-LLM turn runs — a tool target dispatches directly — so the 'llm' seam is unused.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity",
+        "setting:conversations",
+        "setting:router:presets",
+        "setting:router:states",
+        "setting:seeded-access-control",
+        "setting:tool:state_merge",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio"),
+        reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
+    ),
+]
 
 _MERGE_TOOL = "state_merge"
 # The inbound text maps to the ``patch`` the preset's ``state_merge`` writes; the preset
@@ -86,6 +96,7 @@ def _record_path(state: str, subject: dict[str, Any]) -> str:
     )
 
 
+@pytest.mark.needs("kind:channels:web", "store:redis")
 async def test_web_participant_turn_keys_state_on_thread_and_ledgers_the_conversation_door(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -156,6 +167,7 @@ async def test_web_participant_turn_keys_state_on_thread_and_ledgers_the_convers
     assert len(keys) == 2, f"the second participant did not get its own thread record: {two!r}"
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_multichannel_target_turn_keys_state_on_person(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     api = bridge.api()
     state = uniq("person_status")

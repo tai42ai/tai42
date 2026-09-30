@@ -5,8 +5,11 @@
  * (the same idiom `login.spec.ts` proves for a bad key at sign-in). A DISPOSABLE
  * key is used so the shared stack's root key is never revoked.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, loginViaUi, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity');
 
 test('a revoked session bounces to /login?redirect on the next navigation', async ({
   page,

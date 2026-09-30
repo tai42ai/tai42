@@ -21,9 +21,13 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs("probe-tools")
 
 _PARK_EXPIRY_SECONDS = 3600.0
 
@@ -60,6 +64,7 @@ async def _parked(api: ApiClient, subject: dict[str, str]) -> list[dict[str, Any
     return await _run_tool(api, "list_parked", {}, subject)
 
 
+@pytest.mark.needs("store:redis")
 async def test_hook_start_and_extras_expr_drive_the_fire(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = replicas_stack.api(port=replicas_stack.port_a)
     topic = uniq("hook-topic").replace("_", "-")
@@ -85,6 +90,7 @@ async def test_hook_start_and_extras_expr_drive_the_fire(replicas_stack: TaiStac
     assert record["extras"] == {"tag": tag}, record
 
 
+@pytest.mark.needs("kind:interactions", "setting:ACCESS_CONTROL_ENABLE=false")
 async def test_hook_resume_of_a_caller_ask_waits_on_the_subject_and_a_later_run_takes_it(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -146,6 +152,7 @@ async def test_hook_resume_of_a_caller_ask_waits_on_the_subject_and_a_later_run_
     assert outcome_id not in [e["id"] for e in await _parked(api, subject)]
 
 
+@pytest.mark.needs("kind:interactions", "setting:ACCESS_CONTROL_ENABLE=false")
 async def test_hook_cancel_expr_cancels_a_parked_interaction(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

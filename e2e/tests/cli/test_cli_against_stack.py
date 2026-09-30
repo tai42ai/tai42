@@ -16,11 +16,16 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 from ._cli_support import cli_json, run_cli  # pyright: ignore[reportMissingImports]
 
+pytestmark = pytest.mark.needs("cli", "kind:identity", "setting:seeded-access-control")
 
+
+@pytest.mark.needs("kind:storage", "setting:tool:generate_uuid", "setting:TAI_CONFIG_MODE=file")
 def test_reads_across_groups(cli_stack: TaiStack, tmp_path: Path) -> None:
     """At least one READ per group answers with its expected contract."""
     # tools: the loaded toolbox tool is listed.
@@ -62,6 +67,7 @@ def test_reads_across_groups(cli_stack: TaiStack, tmp_path: Path) -> None:
     assert isinstance(cli_json(run_cli(cli_stack, tmp_path, "storage", "info")), dict)
 
 
+@pytest.mark.needs("setting:tool:generate_uuid")
 def test_presets_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]) -> None:
     name = uniq("cli-preset")
     created = run_cli(
@@ -83,6 +89,7 @@ def test_presets_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[s
         run_cli(cli_stack, tmp_path, "presets", "delete", name)
 
 
+@pytest.mark.needs("kind:storage", "setting:router:resources")
 def test_storage_and_resources_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]) -> None:
     resource_id = f"cli/{uniq('note')}.txt"
     body = f"cli-body-{uniq('marker')}"
@@ -99,6 +106,7 @@ def test_storage_and_resources_mutation(cli_stack: TaiStack, tmp_path: Path, uni
         run_cli(cli_stack, tmp_path, "storage", "delete", resource_id)
 
 
+@pytest.mark.needs("mutable", "setting:tool:generate_uuid")
 def test_tool_meta_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]) -> None:
     label = f"CLI {uniq('label')}"
     patched = run_cli(cli_stack, tmp_path, "tool-meta", "set", "generate_uuid", "--display-name", label)
@@ -107,6 +115,7 @@ def test_tool_meta_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[
     assert label in listing.stdout, listing.stdout
 
 
+@pytest.mark.needs("kind:backend", "probe-tools", "setting:extension:schedule_task", "setting:tool:generate_uuid")
 def test_schedules_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]) -> None:
     schedule_name = uniq("cli-schedule")
     added = run_cli(

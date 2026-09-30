@@ -17,11 +17,20 @@ from tai42_e2e.stack import TaiStack
 
 from ._market_support import api_tool_names, distribution_absent, installed_refs
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+    ),
+]
 
 _TOOL = "e2e_market_gamma_probe"
 
 
+@pytest.mark.needs("setting:shared-venv")
 async def test_killed_version_refuses_install(
     marketplace_service: MarketplaceService, marketplace_stack: TaiStack
 ) -> None:

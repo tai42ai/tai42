@@ -23,6 +23,8 @@ from tai42_e2e.marketplace import (
     declared_routes_dispatch_failure,
 )
 
+pytestmark = pytest.mark.needs("no-stack")
+
 _A_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 

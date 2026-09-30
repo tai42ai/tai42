@@ -5,9 +5,13 @@ root."""
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("probe-tools", "metrics")
 
 _FAMILY = "tai_tool_call_count_total"
 _LABELS = {"name": "e2e_echo", "runtime": "main", "title": PROBE_TOOLS_TITLE}

@@ -174,6 +174,17 @@ def _whatsapp_schema_sidecar_key(schema_hash: str) -> str:
     return f"channel:whatsapp:flow-schema:{BRIDGE_WHATSAPP_WABA_ID}:{schema_hash}"
 
 
+pytestmark = pytest.mark.needs("kind:identity")
+
+
+@pytest.mark.needs(
+    "kind:channels:web",
+    "probe-tools",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validation(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -254,6 +265,9 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
     assert violating_turn["form"] == violating
 
 
+@pytest.mark.needs(
+    "kind:channels:web", "probe-tools", "setting:conversations", "setting:seeded-access-control", "store:redis"
+)
 async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     # A flow's reply part IS a form: a tool route replies with a form AnswerPart carrying
     # per-send ``data`` (prefill values + option lists) and ``pages``, and the whole seam —
@@ -304,6 +318,15 @@ async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarnes
 
 
 @_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coerced_form(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -352,6 +375,16 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
 
 
 @_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "store:redis",
+    "topology:replicas",
+)
 async def test_whatsapp_notify_form_reply_never_touches_a_pending_ask_on_the_same_pair(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -411,6 +444,15 @@ async def test_whatsapp_notify_form_reply_never_touches_a_pending_ask_on_the_sam
 
 
 @_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 async def test_whatsapp_notify_form_schema_sidecar_miss_degrades_reply_to_raw_values(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -447,6 +489,7 @@ async def test_whatsapp_notify_form_schema_sidecar_miss_degrades_reply_to_raw_va
     assert turn["message"] == f"topic: {marker}\namount: 7"
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio", "setting:router:notifications")
 async def test_form_notify_to_a_channel_without_the_capability_is_501_and_leaves_no_feed_entry(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

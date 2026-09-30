@@ -38,6 +38,17 @@ def _stub_kwargs(telegram: FakeTelegram, slack: FakeSlack, twilio: FakeTwilio) -
 
 
 @pytest.mark.parametrize("channel", ["telegram", "slack", "twilio"])
+@pytest.mark.needs(
+    "kind:channels:telegram",
+    "kind:channels:slack",
+    "kind:channels:twilio",
+    "topology:replicas",
+    "process",
+    "helper:channel-fake:telegram",
+    "helper:channel-fake:slack",
+    "helper:channel-fake:twilio",
+    "setting:channel-empty-default-recipient",
+)
 async def test_missing_default_recipient_is_a_delivery_error(
     channel: str,
     fresh_stack: Callable[..., TaiStack],
@@ -82,6 +93,7 @@ async def test_missing_default_recipient_is_a_delivery_error(
     assert case.sends_matching(message) == []
 
 
+@pytest.mark.needs("no-stack", "process", "kind:channels:telegram", "setting:CHANNEL_TELEGRAM_BOT_TOKEN")
 async def test_missing_bot_token_aborts_boot(
     fresh_stack: Callable[..., TaiStack],
     fake_telegram: FakeTelegram,

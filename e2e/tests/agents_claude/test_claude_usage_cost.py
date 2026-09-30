@@ -32,6 +32,15 @@ pytestmark = [
         HarnessSettings().is_real("claude_agent"),
         reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
+    pytest.mark.needs(
+        "process",
+        "store:redis",
+        "setting:agent:claude_code",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+        "setting:tai42_e2e_fixtures.claude_runner_stub",
+        "setting:tai42_e2e_fixtures.monitor_backend",
+        "setting:E2E_MONITOR_ACTIVE_TRACE=1",
+    ),
 ]
 
 

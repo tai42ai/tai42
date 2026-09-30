@@ -29,6 +29,8 @@ from tai42_e2e.manifests import ATLASSIAN_CLIENT_ID, GITHUB_CLIENT_ID, GOOGLE_CL
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("kind:connectors", "setting:shipped-connector-descriptors")
+
 # The eight Google Workspace products the google descriptor's sub-services cover.
 _GOOGLE_SUB_SERVICES = {"gmail", "calendar", "drive", "docs", "sheets", "slides", "chat", "people"}
 # GitHub's per-toolset sub-services.
@@ -81,6 +83,7 @@ async def test_shipped_connector_descriptors_are_registered(shipped_connectors_s
     HarnessSettings().is_real("connector-google"),
     reason="fixture client_id is the connector-google mock leg; the real leg on the creds host",
 )
+@pytest.mark.needs("setting:CONNECTORS_GOOGLE_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
     origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
@@ -110,6 +113,7 @@ async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> No
     HarnessSettings().is_real("connector-atlassian"),
     reason="fixture client_id is the connector-atlassian mock leg; the real leg on the creds host",
 )
+@pytest.mark.needs("setting:CONNECTORS_ATLASSIAN_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
     origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
@@ -134,6 +138,7 @@ async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) ->
 
 # Slack has no real leg in this suite (no ``TAI_E2E_REAL`` seam), so its client_id is always
 # the fixture ``SLACK_CLIENT_ID`` and this leg always runs.
+@pytest.mark.needs("setting:CONNECTORS_SLACK_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
     origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
@@ -158,6 +163,7 @@ async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> Non
 
 # GitHub has no real leg in this suite either, so its client_id is always the fixture
 # ``GITHUB_CLIENT_ID`` and this leg always runs.
+@pytest.mark.needs("setting:CONNECTORS_GITHUB_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_github_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
     origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"

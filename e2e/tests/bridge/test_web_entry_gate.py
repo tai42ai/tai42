@@ -112,6 +112,17 @@ async def _wait_record(bridge: BridgeHarness, key: str, *, deadline: float = 20.
     return await wait_for_async(probe, deadline=deadline, message=f"no record under {key!r}")
 
 
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "mutable",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+
+
 async def test_an_ungated_route_is_unchanged(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     """A route with no gate serves and round-trips normally — the gate is additive."""
     probe = uniq("l23a")
@@ -311,6 +322,7 @@ async def test_rotate_gates_a_new_session_the_same_way(bridge: BridgeHarness, un
     assert refused.json()["code"] == "entry_refused"
 
 
+@pytest.mark.needs("setting:CHANNEL_WEB_ENTRY_ATTEMPTS_PER_WINDOW=10")
 async def test_throttle_refuses_uniformly_and_a_clear_bucket_still_admits(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:

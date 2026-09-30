@@ -5,8 +5,11 @@
  * preset is quarantined. Every effect is driven through the live Studio and the
  * real skeleton doors it calls.
  */
-import { expect, test, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { apiHeaders, fillFixedKwargs, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:versioning', 'probe-tools', 'mutable', 'setting:no-quarantined-presets');
 
 /** Create a preset over `e2e_echo` baking `payload`, landing on its detail view. */
 async function createEchoPreset(page: Page, name: string, payload: string): Promise<void> {

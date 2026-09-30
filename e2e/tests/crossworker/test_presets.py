@@ -8,10 +8,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
 from fastmcp.exceptions import ToolError
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("probe-tools", "mutable", "topology:replicas")
 
 
 def _tool_text(result: Any) -> str:
@@ -76,6 +79,7 @@ async def test_preset_create_always_persists(replicas_stack: TaiStack, uniq: Cal
     assert name in [p["name"] for p in await api_a.get("/api/presets")]
 
 
+@pytest.mark.needs("kind:backend", "setting:extension:sync_task")
 async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

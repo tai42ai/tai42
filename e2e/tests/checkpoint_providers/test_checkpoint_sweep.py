@@ -20,12 +20,15 @@ import contextlib
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver, empty_checkpoint
 
 from tai42_e2e.stack import TaiStack
 
 from ._checkpoint_support import checkpoint_conn_string  # pyright: ignore[reportMissingImports]
+
+pytestmark = pytest.mark.needs("store:postgres", "files", "setting:LLM_PROVIDER_CHECKPOINT")
 
 
 @contextlib.asynccontextmanager

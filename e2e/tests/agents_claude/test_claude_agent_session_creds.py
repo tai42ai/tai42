@@ -40,6 +40,7 @@ pytestmark = [
         HarnessSettings().is_real("claude_agent"),
         reason="scripted runner stub is the 'claude_agent' mock leg; the real turn is the real-vendor smoke",
     ),
+    pytest.mark.needs("process", "setting:agent:claude_code"),
 ]
 
 # The known constant the static cred carries; the runner reads it off ``E2E_SVC_TOKEN`` and
@@ -67,6 +68,11 @@ def _connection_creds() -> str:
     return json.dumps([_CONNECTION_CRED])
 
 
+@pytest.mark.needs(
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tai42_e2e_fixtures.claude_runner_stub",
+    "setting:TAI_AGENTS_CLAUDE_CREDS",
+)
 async def test_static_cred_reaches_the_clean_session_env(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -77,6 +83,7 @@ async def test_static_cred_reaches_the_clean_session_env(
     assert result.data == _KNOWN_TOKEN, result.data
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_CREDS")
 async def test_connection_cred_on_identity_less_tool_face_fails_closed(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
@@ -89,6 +96,7 @@ async def test_connection_cred_on_identity_less_tool_face_fails_closed(
     assert "no execution identity bound" in error_text(result), error_text(result)
 
 
+@pytest.mark.needs("setting:TAI_AGENTS_CLAUDE_CREDS")
 async def test_connection_cred_on_identity_less_sse_route_fails_closed(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:

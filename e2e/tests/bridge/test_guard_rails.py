@@ -40,10 +40,27 @@ from ._bridge_support import (
     wait_send_to,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:channels:whatsapp",
+        "kind:identity",
+        "probe-tools",
+        "mutable",
+        "helper:llm",
+        "helper:twilio",
+        "helper:whatsapp",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm")
+        or HarnessSettings().is_real("twilio")
+        or HarnessSettings().is_real("whatsapp"),
+        reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
+    ),
+]
 
 _OFF_TOOL = "e2e_echo"
 _ON_AGENT = "tools_agent"

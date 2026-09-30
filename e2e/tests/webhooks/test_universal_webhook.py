@@ -8,10 +8,15 @@ import hashlib
 import hmac
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("probe-tools", "store:redis")
 
+
+@pytest.mark.needs("topology:replicas")
 async def test_hook_bound_on_a_fires_tool_from_webhook_on_b(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -39,6 +44,7 @@ async def test_hook_bound_on_a_fires_tool_from_webhook_on_b(
     )
 
 
+@pytest.mark.needs("setting:webhook-verifier:github", "setting:E2E_GH_WEBHOOK_SECRET=known-to-test")
 async def test_github_verifier_locks_topic(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     topic = uniq("topic").replace("_", "-")
     rkey = uniq("rec")
@@ -91,6 +97,7 @@ async def test_github_verifier_locks_topic(replicas_stack: TaiStack, uniq: Calla
     assert len(replicas_stack.records(rkey)) == baseline, "a rejected delivery still fired the tool"
 
 
+@pytest.mark.needs("setting:webhook-verifier:shared_secret", "setting:E2E_GH_WEBHOOK_SECRET=known-to-test")
 async def test_shared_secret_verifier_locks_topic(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     topic = uniq("topic").replace("_", "-")
     rkey = uniq("rec")

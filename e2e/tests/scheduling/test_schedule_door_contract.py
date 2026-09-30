@@ -23,8 +23,16 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "setting:extension:schedule_task",
+)
 
 # A whole-second cadence — the rq scheduler re-arms on integer seconds.
 _INTERVAL_SECONDS = 2
@@ -34,6 +42,7 @@ _INTERVAL_SECONDS = 2
 _PARK_EXPIRY_SECONDS = 3600.0
 
 
+@pytest.mark.needs("store:redis", "setting:backend-scheduler-process")
 async def test_schedule_door_contract_parks_from_the_worker(
     schedule_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

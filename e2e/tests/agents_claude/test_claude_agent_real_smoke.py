@@ -19,10 +19,17 @@ import pytest
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.skipif(
-    not HarnessSettings().is_real("claude_agent"),
-    reason="the real claude-agent-sdk smoke needs ANTHROPIC_API_KEY (TAI_E2E_REAL=claude_agent); creds host only",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not HarnessSettings().is_real("claude_agent"),
+        reason="the real claude-agent-sdk smoke needs ANTHROPIC_API_KEY (TAI_E2E_REAL=claude_agent); creds host only",
+    ),
+    pytest.mark.needs(
+        "setting:real-credentials",
+        "setting:agent:claude_code",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+    ),
+]
 
 
 async def test_real_claude_turn_lands_a_message_final(claude_agent_stack: TaiStack) -> None:

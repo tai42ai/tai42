@@ -41,6 +41,13 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs(
+        "helper:llm",
+        "process",
+        "setting:agent:langchain_deep_agent",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+        "setting:TAI_AGENTS_LANGCHAIN_DEEP_SESSION_IMAGE",
+    ),
 ]
 
 # The deterministic in-process sandbox provider fixture (the same module the sandbox-kind

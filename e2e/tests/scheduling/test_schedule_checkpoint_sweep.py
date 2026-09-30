@@ -14,7 +14,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "setting:extension:schedule_task",
+    "setting:router:checkpoints",
+)
 
 
 async def test_checkpoint_sweep_is_schedulable(schedule_stack: TaiStack, uniq: Callable[[str], str]) -> None:

@@ -3,6 +3,13 @@ description: >-
   Set up pnpm + Node and build the Studio SPA (and the @tai42/studio-sdk the
   browser legs link against). Shared by the browser build legs.
 
+inputs:
+  build:
+    description: >-
+      Whether to build the SPA. A run against a running stack (TAI_E2E_TARGET set)
+      builds no stack and passes "false": only the toolchain is set up.
+    default: "true"
+
 runs:
   using: composite
   steps:
@@ -17,6 +24,7 @@ runs:
         node-version: "22"
 
     - name: Build the Studio SPA
+      if: inputs.build == 'true'
       shell: bash
       working-directory: tai-studio
       run: |

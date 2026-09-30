@@ -20,6 +20,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 import httpx
+import pytest
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
@@ -36,6 +37,7 @@ def _record_path(state: str, target_kind: str, target_name: str, kind: str, key:
     return "/api/states/{}/records/{}/{}/{}/{}".format(*parts)
 
 
+@pytest.mark.needs("kind:states")
 async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     state = uniq("status")
@@ -159,6 +161,7 @@ async def test_core_stack_composed_state_store_path(core_stack: TaiStack, uniq: 
     assert folded["canonical_subject"]["key"] == "t2"
 
 
+@pytest.mark.needs("kind:states")
 async def test_core_stack_mount_check_reads_effective_parameters(
     core_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -212,6 +215,7 @@ async def test_core_stack_mount_check_reads_effective_parameters(
     assert [m["template"] for m in served["attachments"]] == [template]
 
 
+@pytest.mark.needs("kind:states")
 async def test_core_stack_template_jq_input_and_update(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """The ``template_jq`` record sub-actions, end to end over the API door: a template
     declares input programs (named reads) and update programs (record operations) on a
@@ -301,6 +305,7 @@ async def test_core_stack_template_jq_input_and_update(core_stack: TaiStack, uni
     assert resp.status_code == 404, resp.text
 
 
+@pytest.mark.needs("kind:states")
 async def test_core_stack_record_key_with_slash_round_trips_by_url(
     core_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -360,6 +365,7 @@ async def test_core_stack_record_key_with_slash_round_trips_by_url(
     assert await api.get(record) is None
 
 
+@pytest.mark.needs("kind:identity", "kind:states", "setting:seeded-access-control")
 async def test_auth_stack_slashed_key_record_door_is_gated_for_a_non_admin_key(
     auth_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -422,6 +428,7 @@ async def _assert_states_off(off_stack: TaiStack, method: str, path: str, *, jso
     assert body["error"], resp.text
 
 
+@pytest.mark.needs("setting:states=off")
 async def test_off_stack_state_doors_refuse_501(off_stack: TaiStack) -> None:
     # A read door — no empty-degrade for the record store; it refuses loudly.
     await _assert_states_off(off_stack, "GET", "/api/states")

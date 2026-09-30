@@ -24,7 +24,7 @@ from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.webchat import SESSION_COOKIE as _WEB_SESSION_COOKIE
 
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("setting:all-features-off")]
 
 # The DB-backed features and the machine-readable code each stamps into its 501
 # mutation refusal (verified against the skeleton's operations layer).
@@ -237,6 +237,7 @@ async def test_sse_stream_refuses_501_before_body(off_stack: TaiStack) -> None:
     assert body.get("code") == _INTERACTIONS_CODE, resp.text
 
 
+@pytest.mark.needs("kind:channels:web")
 async def test_web_chat_doors_refuse_501_when_the_transcript_store_is_off(off_stack: TaiStack) -> None:
     # The web channel plugin carries its own store, and without one there is nowhere to
     # register a visitor session — so every door refuses up front with the code the page
@@ -328,6 +329,7 @@ async def test_system_kinds_carry_off_rows_for_every_gated_feature(off_stack: Ta
 # ---- boot log: the OFF state named exactly once --------------------------
 
 
+@pytest.mark.needs("process")
 async def test_boot_log_names_the_off_state(off_stack: TaiStack) -> None:
     log = off_stack.process("serve").log_path.read_text(encoding="utf-8", errors="replace")
 

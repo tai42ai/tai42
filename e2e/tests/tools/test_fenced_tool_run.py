@@ -14,7 +14,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:identity", "probe-tools", "setting:seeded-access-control")
 
 _FENCED = "e2e_fenced_probe"
 _UNFENCED = "e2e_echo"

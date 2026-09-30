@@ -4,8 +4,11 @@
  * the UI, that the API list carries it, and that it is a LIVE tool on the real
  * stack (running it returns the baked payload) — not just a stored row.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, fillFixedKwargs, runTool, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:versioning', 'probe-tools');
 
 test('create a preset over e2e_echo; UI row + API list + live tool', async ({ page, request }) => {
   const name = uniq('preset');

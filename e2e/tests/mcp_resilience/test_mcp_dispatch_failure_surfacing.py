@@ -27,6 +27,8 @@ from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import build_misbehaving_mcp_stack, misbehaving_mcp_tool_name
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("setting:manifest-mcp-misbehaving")
+
 # The connector-error envelope prefix every dispatch-seam tool-error result is framed with
 # (``ConnectorAdapterSettings.error_prefix``); the JSON payload follows it.
 _CONNECTOR_ERROR_PREFIX = "tai-hub-err:"
@@ -115,6 +117,7 @@ async def test_plain_text_is_not_a_failure(misbehaving_mcp_stack: TaiStack) -> N
     assert _CONNECTOR_ERROR_PREFIX not in resp.text, f"a healthy text result carried an error envelope: {resp.text}"
 
 
+@pytest.mark.needs("setting:TAI_MCP_CALL_TIMEOUT_SECONDS=2")
 @pytest.mark.parametrize("tool", [_BAD_SCHEMA_TOOL, _HANG_TOOL])
 async def test_dispatch_failure_typed_on_http_door(misbehaving_mcp_stack: TaiStack, tool: str) -> None:
     # The sync run-tool HTTP door: a dispatch failure is a 200 carrying the structured tool-error
@@ -124,6 +127,7 @@ async def test_dispatch_failure_typed_on_http_door(misbehaving_mcp_stack: TaiSta
     _assert_dispatch_failed(_framed_payload(_collect_strings(resp.json())), tool)
 
 
+@pytest.mark.needs("setting:TAI_MCP_CALL_TIMEOUT_SECONDS=2")
 @pytest.mark.parametrize("tool", [_BAD_SCHEMA_TOOL, _HANG_TOOL])
 async def test_dispatch_failure_typed_on_mcp_edge(misbehaving_mcp_stack: TaiStack, tool: str) -> None:
     # The MCP tools/call edge: the same structured tool-error result surfaces through the app's

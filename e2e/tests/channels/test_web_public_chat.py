@@ -39,7 +39,17 @@ from ._support import (
     tool_content_text,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:channels:web",
+        "topology:replicas",
+        "store:redis",
+        "setting:CHANNEL_WEB=e2e-web-site",
+        "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+        "setting:channel-web-rate-limits",
+    ),
+]
 
 # A minimal form answer schema: a text field and an integer field, both required — the
 # smallest shape that exercises the page widget, the by-id answer door, and the callback
@@ -392,6 +402,7 @@ async def test_notify_list_over_web_carries_tappable_options_on_the_card(
     )
 
 
+@pytest.mark.needs("setting:CHANNEL_WEB_MAX_STREAMS_PER_VISITOR=4")
 async def test_stream_door_refuses_over_the_per_visitor_cap(web_case: WebChannelCase) -> None:
     case = web_case
     cap = _stream_cap(case.stack)

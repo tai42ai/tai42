@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from ._bridge_support import BridgeHarness, wait_probe_entries, wait_probe_record
 from ._overlap_support import (
     create_web_tool_route,
@@ -27,6 +29,16 @@ from ._overlap_support import (
 # directly under the route's execution key (no scripted LLM), so no 'llm' leg is involved either.
 
 _HOLD_SECONDS = 3.0
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_continue_all_carries_the_burst_into_one_later_turn(

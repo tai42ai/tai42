@@ -20,8 +20,12 @@ the generated ``select`` tool dispatched over the product's own ``/mcp``.
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e.manifests import POSTGRES_MCP_PROBE_ROW_NAME, POSTGRES_MCP_TITLE, postgres_mcp_tool_name
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("store:postgres", "setting:manifest-mcp-postgres")
 
 
 async def test_postgres_mcp_tools_are_mounted(postgres_mcp_stack: TaiStack) -> None:

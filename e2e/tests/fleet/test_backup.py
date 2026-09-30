@@ -32,7 +32,7 @@ from ._fleet import (
     manifest_file,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("setting:router:backup")]
 
 # The env key the source writes and the second stack's manifest references via ``!ENV``.
 _KEY = "E2E_FLEET_B4"
@@ -44,6 +44,16 @@ async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
     return [entry["title"] for entry in manifest["mcp"]]
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "files",
+    "topology:multiworker",
+    "setting:PYTHONHASHSEED=0",
+    "setting:two-stacks",
+    "setting:manifest:mcp-env-probe",
+)
 async def test_backup_import_applies_manifest_and_env_fleet_wide(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -85,6 +95,7 @@ async def test_backup_import_applies_manifest_and_env_fleet_wide(
     assert mcp_title in await _manifest_mcp_titles(target)  # the imported entry is live fleet-wide
 
 
+@pytest.mark.needs("probe-tools", "process")
 async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -168,6 +179,12 @@ def backup_populated_stack(
     )
 
 
+@pytest.mark.needs(
+    "kind:identity",
+    "setting:seeded-access-control",
+    "setting:conversations:redis",
+    "setting:agent:tools_agent",
+)
 async def test_skip_import_preserves_conversation_secret_and_token(
     backup_populated_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -256,6 +273,7 @@ async def test_skip_import_preserves_conversation_secret_and_token(
     assert ac["errors"] == [], ac
 
 
+@pytest.mark.needs("process")
 async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[..., TaiStack]) -> None:
     """A crafted backup whose env section carries a deployment X-band key (``TAI_SUPERVISED``)
     is REFUSED loudly: backup env restore rides ``apply_env_change`` (``backup/sections.py``),
@@ -287,6 +305,7 @@ async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[...
     assert after.get("E2E_BACKUP_OK") != "harmless", f"a refused section still wrote a sibling key: {after}"
 
 
+@pytest.mark.needs("process", "files")
 async def test_corrupted_manifest_import_reports_error_and_persists_nothing(
     fresh_stack: Callable[..., TaiStack],
 ) -> None:

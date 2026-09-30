@@ -53,6 +53,7 @@ _ALL_BUILDERS: list[Callable[[StackResources, Variants], StackConfig]] = [
 
 
 @pytest.mark.backendless
+@pytest.mark.needs("process")
 async def test_stack_boots_and_tears_down_leak_free(fresh_stack: Callable[..., TaiStack]) -> None:
     # The minimal stack this boots runs no backend worker, so it exercises no
     # backend seam and buys nothing on the non-default legs.
@@ -66,6 +67,7 @@ async def test_stack_boots_and_tears_down_leak_free(fresh_stack: Callable[..., T
     assert not any(handle.is_running() for handle in stack._procs.values())
 
 
+@pytest.mark.needs("no-stack")
 def test_harness_never_sets_multiproc_env() -> None:
     # A sentinel carrying EVERY coordinate any profile needs — including the ones
     # only some backends/profiles read (a broker URL for celery, the checkpoint

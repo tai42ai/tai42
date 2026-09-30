@@ -48,7 +48,7 @@ from ._support import (
     tcp_dials,
 )
 
-pytestmark = requires_engine
+pytestmark = [requires_engine, pytest.mark.needs("no-stack", "helper:docker-engine")]
 
 # The cloud-metadata endpoint is a universal constant (link-local), so its block is
 # asserted unconditionally. The reachable egress peer and the RFC1918 control-plane

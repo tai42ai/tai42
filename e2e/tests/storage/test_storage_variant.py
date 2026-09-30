@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:storage", "topology:replicas", "files")
 
 
 async def test_resource_stored_on_a_loads_on_b_through_real_storage(

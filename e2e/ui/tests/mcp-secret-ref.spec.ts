@@ -25,7 +25,7 @@
  *    masked key-reference chip. The honest observable of a paste is the generated key
  *    (asserted through the API) and the masked chip.
  */
-import { expect, test, type APIRequestContext, type Page, type Request } from '@playwright/test';
+import { expect, type APIRequestContext, type Page, type Request } from '@playwright/test';
 import {
   apiHeaders,
   awaitMutation,
@@ -34,6 +34,9 @@ import {
   uniq,
   waitForReloadSettle,
 } from './helpers';
+import { needs, test } from './needs';
+
+needs('mutable', 'setting:mcp-host-command');
 
 /** The env-map key on the seeded MCP entry whose value is the secret reference. */
 const ENV_ENTRY = 'REFVAL';

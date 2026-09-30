@@ -13,8 +13,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:tool_meta")
 
 
 async def _create_folder(api: ApiClient, name: str, parent_id: str | None = None) -> dict:
@@ -113,6 +117,7 @@ async def test_folder_sibling_name_collision_and_unknown(core_stack: TaiStack, u
     await api.delete(f"/api/tool-meta/folders/{first['id']}")
 
 
+@pytest.mark.needs("probe-tools", "mutable")
 async def test_overlay_merge_patch(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     folder = await _create_folder(api, uniq("home"))
@@ -161,6 +166,7 @@ async def test_overlay_merge_patch(core_stack: TaiStack, uniq: Callable[[str], s
     await api.delete(f"/api/tool-meta/folders/{folder['id']}")
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_preset_delete_cascades_overlay_row(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     name = uniq("preset")
@@ -177,6 +183,7 @@ async def test_preset_delete_cascades_overlay_row(core_stack: TaiStack, uniq: Ca
     assert name not in meta_after
 
 
+@pytest.mark.needs("kind:versioning", "probe-tools")
 async def test_preset_rename_rekeys_overlay_row(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     name = uniq("preset")

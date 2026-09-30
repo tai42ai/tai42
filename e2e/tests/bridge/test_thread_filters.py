@@ -30,10 +30,21 @@ from ._bridge_support import (
     wait_twilio_send,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
-    reason="scripted-LLM + FakeTwilio are the 'llm'/'twilio' mock leg; real on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "helper:llm",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
+        reason="scripted-LLM + FakeTwilio are the 'llm'/'twilio' mock leg; real on the creds host",
+    ),
+]
 
 
 def _transcript_path(route_name: str, thread_id: str, **query: object) -> str:

@@ -23,8 +23,11 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { MP_WEB_URL } from './helpers';
+import { needs, test } from './needs';
+
+needs('helper:marketplace-site');
 
 // The suites run against the pinned marketplace revision (`_MARKETPLACE_PIN`).
 // That pin and the marketplace-web frontend are the same revision, so the browse

@@ -16,7 +16,10 @@ import pytest
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("kind:tool_runs", "kind:interactions", "probe-tools", "topology:replicas"),
+]
 
 
 def _subject(key: str) -> dict[str, str]:

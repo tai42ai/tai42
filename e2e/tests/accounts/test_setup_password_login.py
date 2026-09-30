@@ -10,10 +10,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.accounts_flow import invite_accept_login
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import _SETUP_TOKEN
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "kind:accounts:postgres",
+    "mutable",
+    "setting:setup-token",
+    "setting:uninitialized-deployment",
+)
 
 _PASSWORD = "correct-horse-battery-staple"
 

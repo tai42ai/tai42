@@ -24,7 +24,7 @@
  * (same as `system-fleet.spec.ts`); the observable is the dedicated apply report
  * (`data-testid=apply-report`) with its Hot-swapped section, not a fleet alert.
  */
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import {
   apiHeaders,
   awaitMutation,
@@ -33,6 +33,9 @@ import {
   uniq,
   waitForReloadSettle,
 } from './helpers';
+import { needs, test } from './needs';
+
+needs('mutable', 'setting:bare-shape');
 
 /** The client-side mask ProfilesTab renders for a masked value (6 bullets). */
 const MASK = '••••••';

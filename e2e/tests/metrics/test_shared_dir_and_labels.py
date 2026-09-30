@@ -7,13 +7,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs("kind:backend", "probe-tools", "metrics")
+
 _FAMILY = "tai_tool_call_count_total"
 
 
+@pytest.mark.needs("process")
 async def test_three_processes_share_one_dir_across_cwds(fresh_stack: Callable[..., TaiStack], tmp_path: Path) -> None:
     cwds = {}
     for name in ("serve", "backend", "metrics"):

@@ -75,6 +75,7 @@ async def _fire_self_exit(stack: TaiStack, name: str, arguments: dict[str, Any],
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs("probe-tools", "mutable", "process", "store:redis", "topology:supervised")
 @pytest.mark.parametrize("task_name", [_TASK, _MEDIA_TASK])
 async def test_dead_serve_perpetual_task_readies_503_then_graceful_exit_respawns(
     recycle_stack: TaiStack,
@@ -120,6 +121,15 @@ async def test_dead_serve_perpetual_task_readies_503_then_graceful_exit_respawns
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.needs(
+    "kind:backend",
+    "probe-tools",
+    "mutable",
+    "process",
+    "store:redis",
+    "topology:supervised",
+    "setting:extension:sync_task",
+)
 async def test_dead_backend_perpetual_task_graceful_exits_and_respawns(
     recycle_stack: TaiStack,
 ) -> None:

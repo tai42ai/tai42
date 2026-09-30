@@ -18,6 +18,8 @@ from tai42_e2e import Infra, wait_for_async
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 
+pytestmark = pytest.mark.needs("process")
+
 
 @pytest.fixture
 def relayed_core_stack(infra: Infra, fresh_stack: Callable[..., TaiStack]) -> tuple[TaiStack, TcpRelay, TcpRelay]:
@@ -51,6 +53,7 @@ def relayed_core_stack(infra: Infra, fresh_stack: Callable[..., TaiStack]) -> tu
     return stack, redis_relay, pg_relay
 
 
+@pytest.mark.needs("probe-tools", "store:redis")
 async def test_redis_outage_fails_loudly_then_recovers(
     relayed_core_stack: tuple[TaiStack, TcpRelay, TcpRelay],
 ) -> None:
@@ -83,6 +86,7 @@ async def test_redis_outage_fails_loudly_then_recovers(
     await wait_for_async(submits, deadline=20.0, message="stack never recovered after redis was restored")
 
 
+@pytest.mark.needs("store:postgres")
 async def test_postgres_outage_fails_loudly_then_recovers(
     relayed_core_stack: tuple[TaiStack, TcpRelay, TcpRelay],
 ) -> None:

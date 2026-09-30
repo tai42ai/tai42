@@ -17,7 +17,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("kind:storage", "topology:replicas")
 
 
 def _assert_fleet_fanout(response: dict) -> None:

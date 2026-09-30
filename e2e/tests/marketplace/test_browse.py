@@ -28,7 +28,10 @@ from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 
 # The marketplace stack runs no backend worker; skip on non-default backend legs.
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("helper:registry", "helper:package-index"),
+]
 
 # iota is never connected in a browse leg, so its endpoints resolve to a fixed inert https
 # base (a valid URL the model accepts; the ingest never fetches it).
@@ -45,12 +48,14 @@ def _refs(payload: dict[str, Any]) -> set[str]:
     return {row["ref"] for row in _listings(payload)}
 
 
+@pytest.mark.needs("no-stack")
 async def test_seeded_catalog_is_browsable(marketplace_service: MarketplaceService) -> None:
     api = marketplace_service.api
     payload = await api.get("/api/v1/search")
     assert _refs(payload) == {ALPHA_REF, BETA_REF, GAMMA_REF}
 
 
+@pytest.mark.needs("no-stack")
 async def test_full_text_query_matches_probes(marketplace_service: MarketplaceService) -> None:
     payload = await marketplace_service.api.get("/api/v1/search?q=probe")
     refs = _refs(payload)
@@ -58,6 +63,7 @@ async def test_full_text_query_matches_probes(marketplace_service: MarketplaceSe
     assert BETA_REF in refs
 
 
+@pytest.mark.needs("no-stack")
 async def test_kind_facet(marketplace_service: MarketplaceService) -> None:
     api = marketplace_service.api
 
@@ -83,6 +89,7 @@ async def test_kind_facet(marketplace_service: MarketplaceService) -> None:
     assert by_ref[BETA_REF]["groups"] == [{"name": "probe-suite", "count": 2}]
 
 
+@pytest.mark.needs("no-stack")
 async def test_kinds_aggregation_over_latest_version(marketplace_service: MarketplaceService) -> None:
     # Each row summarizes the listing's latest published version two ways: kinds
     # counts only its UNGROUPED items, each with its item names ASC, ordered
@@ -99,17 +106,20 @@ async def test_kinds_aggregation_over_latest_version(marketplace_service: Market
     assert listings[GAMMA_REF]["groups"] == []
 
 
+@pytest.mark.needs("no-stack")
 async def test_tags_facet(marketplace_service: MarketplaceService) -> None:
     payload = await marketplace_service.api.get("/api/v1/search?tags=alpha")
     assert _refs(payload) == {ALPHA_REF}
 
 
+@pytest.mark.needs("no-stack")
 async def test_category_facet(marketplace_service: MarketplaceService) -> None:
     # alpha's category is 'utilities', distinct from every other seeded listing.
     payload = await marketplace_service.api.get("/api/v1/search?category=utilities")
     assert _refs(payload) == {ALPHA_REF}
 
 
+@pytest.mark.needs("no-stack")
 async def test_sort_name_orders_by_listing_name(marketplace_service: MarketplaceService) -> None:
     # sort=name orders rows by listing name ASC. The seeded listing names
     # (e2e-alpha, e2e-beta, e2e-gamma) sort to the alpha, beta, gamma order.
@@ -117,6 +127,7 @@ async def test_sort_name_orders_by_listing_name(marketplace_service: Marketplace
     assert [row["ref"] for row in listings] == [ALPHA_REF, BETA_REF, GAMMA_REF]
 
 
+@pytest.mark.needs("no-stack")
 async def test_sort_downloads_returns_complete_set(marketplace_service: MarketplaceService) -> None:
     # Order is registry-internal policy; only completeness is asserted here.
     payload = await marketplace_service.api.get("/api/v1/search?sort=downloads")
@@ -124,6 +135,7 @@ async def test_sort_downloads_returns_complete_set(marketplace_service: Marketpl
     assert payload["total"] == len(_listings(payload))
 
 
+@pytest.mark.needs("no-stack")
 async def test_contract_facet(marketplace_service: MarketplaceService) -> None:
     api = marketplace_service.api
     # The forge stamps every fixture's contract range to the workspace band, so the
@@ -137,6 +149,7 @@ async def test_contract_facet(marketplace_service: MarketplaceService) -> None:
     assert outside == []
 
 
+@pytest.mark.needs("no-stack")
 async def test_listing_detail_and_versions(marketplace_service: MarketplaceService) -> None:
     api = marketplace_service.api
     detail = await api.get(f"/api/v1/plugins/{ALPHA_REF}")
@@ -155,17 +168,20 @@ async def test_listing_detail_and_versions(marketplace_service: MarketplaceServi
     assert by_version == {"0.1.0": "published", "0.2.0": "published"}
 
 
+@pytest.mark.needs("no-stack")
 async def test_categories_vocabulary(marketplace_service: MarketplaceService) -> None:
     categories = (await marketplace_service.api.get("/api/v1/categories"))["categories"]
     for expected in ("utilities", "productivity", "execution", "webhooks"):
         assert expected in categories
 
 
+@pytest.mark.needs("no-stack")
 async def test_unknown_ref_is_404_naming_the_ref(marketplace_service: MarketplaceService) -> None:
     body = await marketplace_service.api.get("/api/v1/plugins/tai42/nope", expect=404)
     assert "tai42/nope" in body["error"]
 
 
+@pytest.mark.needs("setting:MARKETPLACE_URL")
 async def test_skeleton_proxy_parity(marketplace_service: MarketplaceService, marketplace_stack: TaiStack) -> None:
     direct = _refs(await marketplace_service.api.get("/api/v1/search?q=probe"))
     proxied = _refs(await marketplace_stack.api().get("/api/marketplace/search?q=probe"))
@@ -176,6 +192,7 @@ async def test_skeleton_proxy_parity(marketplace_service: MarketplaceService, ma
 # against the pristine alpha/beta/gamma catalog. The spec-source (``source='spec'``) ingest
 # — package-optional PluginSpec + connector kind — rides the ``_MARKETPLACE_PIN`` registry
 # (marketplace.py), so the descriptor listing publishes and browses here.
+@pytest.mark.needs("no-stack")
 async def test_descriptor_listing_browses_as_spec_connector(
     marketplace_service: MarketplaceService, package_index: FixturePackageIndex
 ) -> None:

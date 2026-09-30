@@ -43,10 +43,23 @@ from ._bridge_support import (
 
 # Every leg scripts the LLM stub and asserts the scripted answer back, so the whole module is
 # the 'llm' mock leg; the twilio-driven inbound additionally needs FakeTwilio's signed inbound.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "probe-tools",
+        "helper:llm",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+    ),
+]
 MOCK_TWILIO_ONLY = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
     reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs on the creds host",

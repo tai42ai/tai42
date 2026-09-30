@@ -71,6 +71,7 @@ async def _manifest_mcp_titles(stack: TaiStack, port: int | None = None) -> list
 # ---- census -------------------------------------------------------------
 
 
+@pytest.mark.needs("process", "store:redis", "topology:multiworker")
 async def test_fleet_workers_lists_every_worker(fresh_stack: Callable[..., TaiStack]) -> None:
     """``GET /api/fleet/workers`` lists every worker by name — the census door's
     view is exactly the bus presence census the harness scans, one ``serve`` slot
@@ -88,6 +89,9 @@ async def test_fleet_workers_lists_every_worker(fresh_stack: Callable[..., TaiSt
 # ---- tool-extensions ----------------------------------------------------
 
 
+@pytest.mark.needs(
+    "probe-tools", "mutable", "process", "topology:multiworker", "setting:PYTHONHASHSEED=0", "setting:extension:batch"
+)
 async def test_tool_extensions_apply_converges(fresh_stack: Callable[..., TaiStack]) -> None:
     """A tool-extensions apply on one worker binds the branch on EVERY worker; the
     response carries the mode-wrapped ApplyResult fleet report.
@@ -120,6 +124,7 @@ async def test_tool_extensions_apply_converges(fresh_stack: Callable[..., TaiSta
 # ---- mcp-config add server ----------------------------------------------
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_mcp_config_add_server_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -143,6 +148,7 @@ async def test_mcp_config_add_server_converges(
 # ---- split-brain: update_manifest persists ------------------------------
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "files", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_update_manifest_persists_across_fleet_reload(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -173,6 +179,7 @@ async def test_update_manifest_persists_across_fleet_reload(
 # ---- fleet-route local apply of an out-of-band edit ---------------------
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "files", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_fleet_reload_applies_out_of_band_edit(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -202,6 +209,14 @@ async def test_fleet_reload_applies_out_of_band_edit(
 # ---- env write ----------------------------------------------------------
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "topology:multiworker",
+    "setting:PYTHONHASHSEED=0",
+    "setting:manifest:mcp-env-probe",
+)
 async def test_env_write_moves_resolved_view(fresh_stack: Callable[..., TaiStack]) -> None:
     """An env write is observed by every worker. The seeded manifest references the
     written key via ``!ENV``, so the digest — which hashes the RESOLVED live view —
@@ -256,6 +271,7 @@ def _section_titles(manifest: dict, section: str) -> list[str]:
 # ---- A: mcp entries ------------------------------------------------------
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_mcp_entries_add_converges(fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]) -> None:
     """Seed one entry through the whole-list ``POST /api/mcp-config``, then append a
     SECOND through the granular ``POST /api/mcp-config/entries``: both titles live in the
@@ -277,6 +293,7 @@ async def test_mcp_entries_add_converges(fresh_stack: Callable[..., TaiStack], u
     assert added in titles, titles
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_mcp_entries_add_duplicate_refused(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -298,6 +315,7 @@ async def test_mcp_entries_add_duplicate_refused(
     assert await _manifest_mcp_titles(stack) == [title]
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_mcp_entries_add_replace_in_place(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -324,6 +342,7 @@ async def test_mcp_entries_add_replace_in_place(
     assert entries[1]["config"]["url"] == _UNREACHABLE_MCP["config"]["url"], entries[1]
 
 
+@pytest.mark.needs("probe-tools", "mutable", "process", "topology:multiworker", "setting:PYTHONHASHSEED=0")
 async def test_mcp_entry_remove_converges_and_persists(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -352,6 +371,7 @@ async def test_mcp_entry_remove_converges_and_persists(
     assert keep in persisted, persisted
 
 
+@pytest.mark.needs
 async def test_mcp_entry_remove_unknown_404(fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]) -> None:
     """Removing a title that is not in the mcp section is a loud 404 naming it."""
     stack = fresh_stack(build_fleet_stack)
@@ -375,6 +395,15 @@ _AGENTS_MODULE = "tai42_agents.tools_agent"
 _AGENTS_INCLUDE = ["tools_agent"]
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "topology:multiworker",
+    "setting:PYTHONHASHSEED=0",
+    "setting:tool:generate_uuid",
+    "setting:router:backup",
+)
 async def test_tools_entries_add_remove_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -400,6 +429,15 @@ async def test_tools_entries_add_remove_converges(
     assert title not in _section_titles(await _exported_manifest(stack), "tools")
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "topology:multiworker",
+    "setting:PYTHONHASHSEED=0",
+    "setting:agent:tools_agent",
+    "setting:router:backup",
+)
 async def test_agents_entries_add_remove_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -427,6 +465,14 @@ async def test_agents_entries_add_remove_converges(
 # ---- C: api_tools include/exclude lists ----------------------------------
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "topology:multiworker",
+    "setting:PYTHONHASHSEED=0",
+    "setting:router:backup",
+)
 async def test_api_tools_lists_update_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:

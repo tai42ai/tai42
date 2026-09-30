@@ -23,7 +23,14 @@ from tai42_e2e.stack import TaiStack
 # reaches the admin routes.
 _SCOPE = "e2e-all"
 
-pytestmark = pytest.mark.usefixtures("auth_stack")
+pytestmark = [
+    pytest.mark.usefixtures("auth_stack"),
+    pytest.mark.needs(
+        "kind:identity",
+        "setting:tai42_e2e_fixtures.identity_provider",
+        "setting:seeded-access-control",
+    ),
+]
 
 
 def _skip_unless_fixture(stack: TaiStack) -> None:
@@ -56,6 +63,7 @@ def _pg_identity_user_ids(stack: TaiStack) -> list[str]:
         return sorted(row[0] for row in cur.fetchall())
 
 
+@pytest.mark.needs("store:postgres", "store:redis")
 async def test_identity_records_live_in_pg_not_redis(auth_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     _skip_unless_fixture(auth_stack)
     user = uniq("user")
@@ -76,6 +84,7 @@ async def test_identity_records_live_in_pg_not_redis(auth_stack: TaiStack, uniq:
     assert _redis_identity_keys(auth_stack) == [], "fixture-identity leg wrote ac:key:* records into Redis"
 
 
+@pytest.mark.needs("store:redis")
 async def test_absent_key_is_rejected(auth_stack: TaiStack) -> None:
     _skip_unless_fixture(auth_stack)
     # A token the provider has no record for is rejected at the public surface — the

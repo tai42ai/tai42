@@ -21,9 +21,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs("kind:states", "setting:tool:state_apply")
 
 _TARGET_KIND = "agent"
 _TARGET_NAME = "a-42"

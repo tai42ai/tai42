@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import SCOPE, create_service_owner, mint_key_for, mint_owned, provision_owner
 
+pytestmark = pytest.mark.needs("kind:identity", "setting:seeded-access-control")
 
+
+@pytest.mark.needs("kind:accounts")
 async def test_mint_beyond_owner_scopes_is_rejected_naming_the_excess(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -34,6 +39,7 @@ async def test_mint_beyond_owner_scopes_is_rejected_naming_the_excess(
     assert excess_scope in response.text
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_owned_key_may_mint_nothing(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)
     _owner_id, session = await provision_owner(owned_keys_stack, root, uniq)
@@ -51,6 +57,7 @@ async def test_owned_key_may_mint_nothing(owned_keys_stack: TaiStack, uniq: Call
     assert "an owned API key may not mint API keys" in response.text
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_principal_mints_only_self_owned_keys(owned_keys_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     root = owned_keys_stack.api(port=owned_keys_stack.port_a)
     _owner_id, session = await provision_owner(owned_keys_stack, root, uniq, scopes=[SCOPE])
@@ -73,6 +80,7 @@ async def test_principal_mints_only_self_owned_keys(owned_keys_stack: TaiStack, 
     assert "may only create keys owned by itself" in response.text
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_owner_scope_shrink_attenuates_owned_key_cross_worker(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -99,6 +107,7 @@ async def test_owner_scope_shrink_attenuates_owned_key_cross_worker(
     await wait_for_async(denied_on_b, deadline=5.0, message="owner scope shrink never attenuated the owned key on B")
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_owner_disable_denies_owned_key_cross_worker(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -126,6 +135,7 @@ async def test_owner_disable_denies_owned_key_cross_worker(
         await wait_for_async(disabled, deadline=5.0, message=f"owner disable never denied the owned key on {label}")
 
 
+@pytest.mark.needs("topology:replicas")
 async def test_owner_delete_revokes_owned_key_on_both_workers(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

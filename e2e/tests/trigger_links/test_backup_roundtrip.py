@@ -15,10 +15,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 from ._trigger_support import MISS_MESSAGE, mint_link, no_auth, register_record_hook, wait_records
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "probe-tools",
+    "mutable",
+    "store:redis",
+    "setting:router:backup",
+    "setting:seeded-access-control",
+)
 
 
 async def _export(admin: ApiClient) -> dict[str, Any]:
@@ -146,6 +157,7 @@ async def test_noop_reimport_does_not_self_tombstone(
     assert wait_records(stack, rkey, count=1) == ["still-fires"]
 
 
+@pytest.mark.needs("setting:webhook-verifier:github")
 async def test_restore_skips_the_create_time_verifier_check(
     trigger_stack: TaiStack, uniq: Callable[[str], str], exec_key: str, wipe_trigger_state: Callable[[], None]
 ) -> None:

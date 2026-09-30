@@ -71,6 +71,17 @@ _UNREACHABLE = {"url": "http://127.0.0.1:1/mcp"}
 # ---- two concurrent writers both persist ---------------------------------
 
 
+@pytest.mark.needs(
+    "kind:connectors",
+    "probe-tools",
+    "mutable",
+    "process",
+    "files",
+    "topology:multiworker",
+    "setting:PYTHONHASHSEED=0",
+    "setting:managed-mcp-server",
+    "setting:manifest:connectors-fixtures",
+)
 async def test_concurrent_connects_both_persist(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
@@ -136,6 +147,7 @@ def build_d2_stack(res: StackResources, variants: Variants) -> StackConfig:
     return replace(cfg, name="d2-comments", raw_manifest=_D2_SEED, run_backend=False, run_metrics=False)
 
 
+@pytest.mark.needs("mutable", "process", "files", "setting:raw-manifest")
 async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]) -> None:
     """A UI-path config edit (``POST /api/mcp-config`` — the comment-preserving
     mutate seam) replaces the mcp section; every UNEDITED line stays byte-identical.
@@ -207,6 +219,16 @@ def _real_bus_url(infra: Infra, stack: TaiStack) -> str:
     return f"redis://{host}:{port}/{stack.resources.redis_idx}"
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "process",
+    "store:redis",
+    "topology:multiworker",
+    "helper:tcp-relay",
+    "setting:PYTHONHASHSEED=0",
+    "setting:TAI_BUS_HEARTBEAT_TTL=3",
+    "setting:TAI_BUS_REDIS_URL=relay",
+)
 async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     relayed_bus_fleet: tuple[TaiStack, TcpRelay], infra: Infra
 ) -> None:
@@ -240,6 +262,18 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     await wait_for_async(keys_expired, deadline=20.0, message="bus presence keys never expired during the outage")
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "files",
+    "store:redis",
+    "topology:multiworker",
+    "helper:tcp-relay",
+    "setting:PYTHONHASHSEED=0",
+    "setting:TAI_BUS_HEARTBEAT_TTL=3",
+    "setting:TAI_BUS_REDIS_URL=relay",
+)
 async def test_mutation_during_outage_reports_and_fleet_recovers(
     relayed_bus_fleet: tuple[TaiStack, TcpRelay], infra: Infra, uniq: Callable[[str], str]
 ) -> None:
@@ -360,6 +394,18 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     return await wait_for_async(attempt, deadline=deadline, message=f"the two replicas never reached: {goal}")
 
 
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "files",
+    "store:redis",
+    "topology:replicas",
+    "setting:PYTHONHASHSEED=0",
+    "setting:TAI_BUS_ACK_TIMEOUT=2",
+    "setting:TAI_BUS_APPLY_TIMEOUT=3",
+    "setting:TAI_BUS_HEARTBEAT_TTL=60",
+)
 async def test_silent_worker_reports_missing_then_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
@@ -445,6 +491,18 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
 
 
 @pytest.mark.timeout(120)
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "process",
+    "files",
+    "store:redis",
+    "topology:replicas",
+    "setting:PYTHONHASHSEED=0",
+    "setting:TAI_BUS_ACK_TIMEOUT=2",
+    "setting:TAI_BUS_APPLY_TIMEOUT=3",
+    "setting:TAI_BUS_HEARTBEAT_TTL=30",
+)
 async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:

@@ -55,7 +55,10 @@ from tai42_e2e.webchat import WebChatClient
 
 from ._caller_support import await_result, await_status, caller_ask_id, subject, submit
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("probe-tools", "topology:replicas"),
+]
 
 # The client-safe text a killed run's door FAILED delivers back into the transcript (mirrors the
 # turn engine's own constant); a route-door kill leg matches the delivered notice against it.
@@ -86,6 +89,7 @@ async def _await_subject_cleared(stack: TaiStack, subj: dict[str, str], *, deadl
     await wait_for_async(_cleared, deadline=deadline, message="the killed caller ask never left the subject")
 
 
+@pytest.mark.needs("kind:tool_runs", "kind:interactions", "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1")
 async def test_expiry_kills_the_whole_chain(caller_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api_a = caller_stack.api(port=caller_stack.port_a)
     subj = subject(uniq("subject"))
@@ -100,6 +104,9 @@ async def test_expiry_kills_the_whole_chain(caller_stack: TaiStack, uniq: Callab
     await _await_subject_cleared(caller_stack, subj)
 
 
+@pytest.mark.needs(
+    "kind:tool_runs", "kind:interactions", "store:redis", "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1"
+)
 async def test_on_expiry_resume_fires_the_continuation_instead_of_killing(
     caller_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -128,6 +135,7 @@ async def test_on_expiry_resume_fires_the_continuation_instead_of_killing(
     assert record["chain"] == ["held_run"]
 
 
+@pytest.mark.needs("kind:tool_runs", "kind:interactions")
 async def test_cancel_tears_down_the_chain(caller_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api_a = caller_stack.api(port=caller_stack.port_a)
     api_b = caller_stack.api(port=caller_stack.port_b)
@@ -254,6 +262,16 @@ async def _assert_door_failed_once(web: WebChatClient, *, deadline: float = 40.0
     assert len(notices) == 1, f"the door FAILED must be delivered exactly once, saw {notices!r}"
 
 
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+)
 async def test_thread_delete_tears_down_a_route_parked_caller_ask(
     agent_route_park_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:
@@ -271,6 +289,16 @@ async def test_thread_delete_tears_down_a_route_parked_caller_ask(
     await _assert_door_failed_once(web)
 
 
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+)
 async def test_route_delete_tears_down_a_route_parked_caller_ask(
     agent_route_park_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:
@@ -285,6 +313,17 @@ async def test_route_delete_tears_down_a_route_parked_caller_ask(
     await _assert_door_failed_once(web)
 
 
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "mutable",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+)
 async def test_person_erase_tears_down_a_route_parked_caller_ask(
     agent_route_park_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:
@@ -366,6 +405,20 @@ async def _await_route_thread(api: ApiClient, route_name: str, *, deadline: floa
 
 
 @pytest.mark.skipif(_REAL_LLM, reason="the agent turn runs on the scripted llm_stub; the real leg is on the creds host")
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "helper:llm",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+    "setting:TAI_AGENTS_REDIS_URL",
+    "setting:agent:tools_agent",
+    "setting:tai42_e2e_fixtures.door_agent",
+)
 async def test_thread_delete_leaves_no_agents_driver_state(
     agent_route_park_stack: tuple[TaiStack, str], llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -406,6 +459,20 @@ async def test_thread_delete_leaves_no_agents_driver_state(
 
 
 @pytest.mark.skipif(_REAL_LLM, reason="the agent turn runs on the scripted llm_stub; the real leg is on the creds host")
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "helper:llm",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+    "setting:TAI_AGENTS_REDIS_URL",
+    "setting:agent:tools_agent",
+    "setting:tai42_e2e_fixtures.door_agent",
+)
 async def test_a_kill_at_a_nested_caller_ask_delivers_one_door_failed_keyed_by_completion(
     agent_route_park_stack: tuple[TaiStack, str], llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -443,6 +510,17 @@ async def test_a_kill_at_a_nested_caller_ask_delivers_one_door_failed_keyed_by_c
     await _assert_door_failed_once(web)
 
 
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+    "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1",
+)
 async def test_a_route_started_user_ask_killed_by_expiry_delivers_one_door_failed(
     agent_route_park_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:
@@ -488,6 +566,21 @@ async def test_a_route_started_user_ask_killed_by_expiry_delivers_one_door_faile
 
 
 @pytest.mark.skipif(_REAL_LLM, reason="the agent turn runs on the scripted llm_stub; the real leg is on the creds host")
+@pytest.mark.needs(
+    "kind:tool_runs",
+    "kind:interactions",
+    "kind:identity",
+    "kind:channels:web",
+    "helper:llm",
+    "store:redis",
+    "setting:seeded-access-control",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+    "setting:TAI_AGENTS_REDIS_URL",
+    "setting:agent:tools_agent",
+    "setting:tai42_e2e_fixtures.park_agent",
+    "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1",
+)
 async def test_an_agent_route_started_user_ask_killed_by_expiry_delivers_one_door_failed(
     agent_route_park_stack: tuple[TaiStack, str], llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:

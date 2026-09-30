@@ -20,6 +20,11 @@ from tai42_e2e.stack import TaiStack
 pytestmark = pytest.mark.backendless
 
 
+@pytest.mark.needs(
+    "kind:sandbox:local",
+    "setting:TAI_MCP_SANDBOX_ISOLATION=none",
+    "setting:TAI_MCP_SANDBOX_EGRESS=egress",
+)
 async def test_sandbox_door_reports_local_provider_and_resolved_policy(sandbox_local_stack: TaiStack) -> None:
     info = await sandbox_local_stack.api().get("/api/sandbox")
 
@@ -38,6 +43,12 @@ async def test_sandbox_door_reports_local_provider_and_resolved_policy(sandbox_l
     }, f"unexpected resolved policy: {info['policy']}"
 
 
+@pytest.mark.needs(
+    "kind:sandbox:local",
+    "probe-tools",
+    "topology:workers=1",
+    "setting:TAI_MCP_SANDBOX_ISOLATION=none",
+)
 async def test_sandbox_probe_drives_real_host_subprocess_lifecycle(
     sandbox_local_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

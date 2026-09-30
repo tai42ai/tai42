@@ -5,8 +5,11 @@
  * and renders its content, and that the plugin nav entry still renders — a
  * regression guard on the shell's host-state nav path.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { loginViaUi } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity', 'kind:studio_plugins:reference_plugin');
 
 test('the reference plugin contributes a Settings tab (after core tabs) and a nav entry', async ({
   page,

@@ -9,7 +9,16 @@ route, POST a message with no ``Authorization`` header, and read the accepted tu
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "setting:ACCESS_CONTROL_ENABLE=false",
+    "setting:conversations:redis",
+    "setting:tool:generate_uuid",
+    "setting:fixed-route-name",
+)
 
 # An https callback with no receiver: the async delivery connection-refuses, which never
 # touches the door's ``202`` admission the spec asserts.

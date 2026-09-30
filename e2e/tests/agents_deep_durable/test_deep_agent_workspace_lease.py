@@ -38,15 +38,18 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason=(
-        "the workspace-lease busy path has no reachable e2e door on the foundation stacks: the lease "
-        "is taken only for a trusted-thread (bridge) drive, the one bridge-door stack registering "
-        "langchain_deep_agent installs no sandbox provider, and the conversation FIFO / park "
-        "drive-lease serialize before the workspace lease — it is a defense-in-depth seam proven at "
-        "the plugin unit level (test_leased_loser_creates_no_session_and_writes_no_creds)"
-    )
-)
+pytestmark = [
+    pytest.mark.needs("no-stack"),
+    pytest.mark.skip(
+        reason=(
+            "the workspace-lease busy path has no reachable e2e door on the foundation stacks: the lease "
+            "is taken only for a trusted-thread (bridge) drive, the one bridge-door stack registering "
+            "langchain_deep_agent installs no sandbox provider, and the conversation FIFO / park "
+            "drive-lease serialize before the workspace lease — it is a defense-in-depth seam proven at "
+            "the plugin unit level (test_leased_loser_creates_no_session_and_writes_no_creds)"
+        )
+    ),
+]
 
 
 def test_workspace_lease_busy_path_is_unit_covered() -> None:

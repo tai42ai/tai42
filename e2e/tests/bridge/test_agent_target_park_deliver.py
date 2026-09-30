@@ -54,6 +54,19 @@ from ._bridge_support import BridgeHarness
 # is backendless: under a non-default backend variant it would re-run identical work. The scripted
 # llm_stub is the LLM MOCK leg — the real-provider leg runs on the e2e creds host.
 pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "probe-tools",
+        "helper:llm",
+        "setting:agent",
+        "setting:checkpoint:redis",
+        "setting:conversations",
+        "setting:park_agent",
+        "setting:seeded-access-control",
+        "store:redis",
+        "topology:replicas",
+    ),
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),

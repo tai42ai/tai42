@@ -15,9 +15,17 @@ from tai42_e2e.stack import TaiStack
 
 # The monitoring stack runs no backend worker; skip this module on non-default
 # backend legs (they exercise no backend seam).
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:monitoring:langfuse",
+        "helper:langfuse-server",
+        "setting:LANGFUSE_HOST=http://127.0.0.1:3000",
+    ),
+]
 
 
+@pytest.mark.needs("probe-tools")
 async def test_tool_run_spans_reach_langfuse_and_serve_back(
     monitoring_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -64,6 +72,7 @@ async def test_tool_run_spans_reach_langfuse_and_serve_back(
     assert "spans" in detail
 
 
+@pytest.mark.needs("setting:tools_agent", "helper:llm")
 async def test_agent_run_trace_reaches_langfuse_and_serves_back(
     monitoring_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -117,6 +126,7 @@ def _runs_row(page: object, preset: str) -> dict | None:
     return None
 
 
+@pytest.mark.needs("probe-tools")
 async def test_direct_run_tool_of_a_preset_opens_a_trace_root_and_populates_the_runs_deep_link(
     monitoring_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -164,6 +174,7 @@ async def test_direct_run_tool_of_a_preset_opens_a_trace_root_and_populates_the_
     )
 
 
+@pytest.mark.needs("probe-tools")
 async def test_mcp_call_of_a_preset_registers_a_runs_index_row(
     monitoring_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

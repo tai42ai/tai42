@@ -31,15 +31,18 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="claude crash-resume needs the trigger door + a detached recorded run (a backend "
-    "worker + run recorder) + a bound execution identity + the liveness->lost reconciler + the "
-    "recycle seam; build_claude_agent_stack wires none of them (one worker, no backend, no "
-    "triggers, no identity provider). Crash-resume has no e2e coverage on either durable-session "
-    "agent (the deep suite composes no crash-resume leg either); it is covered UNIT-only, in "
-    "plugins/agents/tests/test_crash_resume_meta.py (the crash_resume registration meta) and "
-    "core/skeleton/tests/operations/test_crash_resume.py (the liveness->lost re-dispatch branch)."
-)
+pytestmark = [
+    pytest.mark.needs("no-stack"),
+    pytest.mark.skip(
+        reason="claude crash-resume needs the trigger door + a detached recorded run (a backend "
+        "worker + run recorder) + a bound execution identity + the liveness->lost reconciler + the "
+        "recycle seam; build_claude_agent_stack wires none of them (one worker, no backend, no "
+        "triggers, no identity provider). Crash-resume has no e2e coverage on either durable-session "
+        "agent (the deep suite composes no crash-resume leg either); it is covered UNIT-only, in "
+        "plugins/agents/tests/test_crash_resume_meta.py (the crash_resume registration meta) and "
+        "core/skeleton/tests/operations/test_crash_resume.py (the liveness->lost re-dispatch branch)."
+    ),
+]
 
 
 def test_claude_crash_resume_re_dispatches_a_recycled_detached_run() -> None:  # pragma: no cover - documented gap

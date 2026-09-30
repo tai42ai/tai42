@@ -18,8 +18,11 @@
  * is DB-backed and this stack is shared/serial, so each test cleans up the rows and
  * folders it created.
  */
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:tool_meta', 'probe-tools', 'mutable', 'setting:tool:generate_uuid');
 
 /** The tools whose overlay a test may touch; reset before and after so a shared,
  *  serial stack never leaks organizational state between specs. */

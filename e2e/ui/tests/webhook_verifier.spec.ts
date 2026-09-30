@@ -5,8 +5,11 @@
  * (`data.topic_verifiers`), with the sharp negative: an UNSIGNED delivery to the
  * bound topic is now rejected, while an unbound topic stays open by design.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:webhook_verifiers:github', 'mutable', 'setting:webhook-secret');
 
 // Topic paths route through `/universal_webhook/{topic}`; keep them path-safe.
 function topicName(): string {

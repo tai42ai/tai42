@@ -38,10 +38,23 @@ from ._bridge_support import (
     wait_send_to,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:channels:web",
+        "kind:identity",
+        "mutable",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio"),
+        reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 

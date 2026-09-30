@@ -36,6 +36,21 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs(
+        "kind:identity",
+        "kind:channels:web",
+        "helper:llm",
+        "helper:checkpoint-redis",
+        "store:postgres",
+        "store:redis",
+        "topology:replicas",
+        "setting:seeded-access-control",
+        "setting:conversations:redis",
+        "setting:checkpoint:redis",
+        "setting:agent:tools_agent",
+        "setting:door-agent",
+        "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
+    ),
 ]
 
 _EXTRAS_AGENT = "e2e_extras_agent"

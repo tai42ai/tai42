@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
 from fastmcp.client.client import CallToolResult
 
 from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("setting:tool:file_loader")
 
 
 def _result_text(result: CallToolResult) -> str:
@@ -24,6 +27,7 @@ def _result_text(result: CallToolResult) -> str:
     return "".join(getattr(block, "text", "") for block in (result.content or []))
 
 
+@pytest.mark.needs("kind:storage")
 async def test_file_loader_reads_storage_resource(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     resource_id = f"{uniq('doc')}.txt"
@@ -39,6 +43,7 @@ async def test_file_loader_reads_storage_resource(core_stack: TaiStack, uniq: Ca
     assert content in text, f"file_loader did not return the seeded text: {text!r}"
 
 
+@pytest.mark.needs("helper:target-server", "setting:TAI_URL_GUARD_ALLOW_CIDRS=loopback")
 async def test_file_loader_fetches_loopback_url(
     core_stack: TaiStack, target_server: TargetServer, uniq: Callable[[str], str]
 ) -> None:

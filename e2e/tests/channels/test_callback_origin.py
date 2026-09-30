@@ -18,7 +18,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from types import SimpleNamespace
 
+import pytest
+
 from ._support import TwilioCase  # pyright: ignore[reportMissingImports]
+
+pytestmark = pytest.mark.needs("no-stack")
 
 
 def _case(*, public_base_url: str | None, real: Iterable[str] = ()) -> TwilioCase:

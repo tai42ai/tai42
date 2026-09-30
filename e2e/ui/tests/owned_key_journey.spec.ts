@@ -19,7 +19,7 @@
  * owned key does not hold, so deny-wins AND-across-tiers keeps it out of reach (the
  * `access_control_mapper` enforcement shape). The admin root still reaches it via `*`.
  */
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 import {
   apiHeaders,
   armInboxResynced,
@@ -32,6 +32,9 @@ import {
   submitToolRun,
   uniq,
 } from './helpers';
+import { needs, test } from './needs';
+
+needs('kind:identity', 'kind:accounts', 'kind:interactions', 'probe-tools', 'mutable', 'setting:tool:ask');
 
 /** The sessionStorage key `useAuth` persists a REMEMBERED credential under; a claim
  * login is `remember=false`, so it must stay empty (the token lives in memory only). */

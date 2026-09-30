@@ -41,14 +41,27 @@ from ._bridge_support import (
     wait_send_to,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "mutable",
+        "helper:twilio",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm")
+        or HarnessSettings().is_real("twilio")
+        or HarnessSettings().is_real("whatsapp"),
+        reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:llm", "helper:whatsapp", "setting:agent")
 async def test_greeting_leads_once_and_its_pairing_code_is_redeemable(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -126,6 +139,7 @@ async def test_greeting_leads_once_and_its_pairing_code_is_redeemable(
     assert wa_linked["body"] == LINKED_TEXT, wa_linked["body"]
 
 
+@pytest.mark.needs("probe-tools")
 async def test_greeting_leads_once_on_a_tool_target(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     """The greeting path is target-agnostic: a greeting-configured TOOL target delivers the
     greeting as its OWN leading message on first contact, then the tool reply as the next

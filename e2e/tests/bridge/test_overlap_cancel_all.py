@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from ._bridge_support import BridgeHarness, wait_probe_entries, wait_probe_record, wait_record_status
 from ._overlap_support import (
     create_web_tool_route,
@@ -28,6 +30,16 @@ from ._overlap_support import (
 
 _HOLD_SECONDS = 3.0
 _SETTLE_SECONDS = 2
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_cancel_all_carries_the_cancelled_message_in_superseded(

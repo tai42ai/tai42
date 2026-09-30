@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import Infra, wait_for_async
 from tai42_e2e.manifests import build_replicas_stack
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import short_presence_ttl_env
 
+pytestmark = pytest.mark.needs("store:redis", "setting:api_tools")
 
+
+@pytest.mark.needs("topology:replicas")
 async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     marker = uniq("E2E_MARKER").upper()
     api_a = replicas_stack.api(port=replicas_stack.port_a)
@@ -45,6 +50,7 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     await wait_for_async(b_has_marker, deadline=5.0, message="B never observed the reloaded config marker")
 
 
+@pytest.mark.needs("process", "kind:backend", "probe-tools")
 async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], infra: Infra) -> None:
     # Presence and its TTL live on the app-owned bus, so the dead-worker window is tunable
     # for every backend. Two knobs are pinned here:

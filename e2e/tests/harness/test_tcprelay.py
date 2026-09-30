@@ -15,7 +15,7 @@ from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 
 # Pure harness self-test: it boots no stack and exercises no backend seam, so
 # running it under every backend leg buys nothing.
-pytestmark = pytest.mark.backendless
+pytestmark = [pytest.mark.backendless, pytest.mark.needs("no-stack")]
 
 
 class _EchoServer:

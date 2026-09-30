@@ -28,9 +28,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 
 from ._rbac_support import create_role, create_user_with_role, hook_body
+
+pytestmark = pytest.mark.needs("kind:identity")
 
 # The grantable feature tags the broadest role holds WRITE on — every product family the
 # accounts profile mounts a fenced route under, so a fenced-route denial is provably the
@@ -58,6 +62,7 @@ _FENCED_MUTATIONS = [
 ]
 
 
+@pytest.mark.needs("kind:accounts:postgres", "topology:replicas", "setting:seeded-access-control")
 async def test_broadest_grant_still_denied_every_fence_but_reaches_grantable_reads(
     accounts_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -122,6 +127,7 @@ async def test_save_rejects_a_grant_on_an_ungrantable_tag(accounts_stack: TaiSta
     )
 
 
+@pytest.mark.needs("kind:accounts:postgres", "topology:replicas", "setting:seeded-access-control")
 async def test_viewer_base_ceiling_caps_a_write_grant(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """A role on the ``viewer`` base tier granted ``write`` on a tag is STILL denied that
     tag's writes — the viewer read-only jq ceiling denies the write even though the

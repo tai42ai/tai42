@@ -26,7 +26,15 @@ from tai42_e2e.manifests import build_sandbox_stack
 from tai42_e2e.mcp import McpClient
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "probe-tools",
+        "process",
+        "setting:tai42_e2e_fixtures.sandbox_provider",
+        "setting:tool:sandbox_exec",
+    ),
+]
 
 _IMAGE = "img@sha256:" + "0" * 64
 

@@ -34,10 +34,22 @@ from ._bridge_support import (
     wait_twilio_send,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
-    reason="scripted-LLM + FakeTwilio are the 'llm'/'twilio' mock leg; real on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:identity",
+        "mutable",
+        "helper:llm",
+        "helper:twilio",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
+        reason="scripted-LLM + FakeTwilio are the 'llm'/'twilio' mock leg; real on the creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 # The bridge thread namespaces: a route-keyed thread is ``bridge:{route}:{address}``; a

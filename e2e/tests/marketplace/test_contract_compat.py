@@ -34,7 +34,10 @@ from ._market_support import resolve_path
 
 # The marketplace registry specs boot no skeleton stack and no backend worker;
 # skip on non-default backend legs.
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("helper:registry", "helper:package-index", "setting:shared-venv", "no-stack"),
+]
 
 
 async def test_resolve_pins_newest_contract_compatible_version(

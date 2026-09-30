@@ -13,6 +13,8 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
+pytestmark = pytest.mark.needs()
+
 
 @pytest.mark.parametrize(
     ("field", "value"),

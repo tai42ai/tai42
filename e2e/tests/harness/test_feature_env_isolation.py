@@ -15,8 +15,12 @@ from __future__ import annotations
 
 from dataclasses import fields, replace
 
+import pytest
+
 from tai42_e2e import StackResources
 from tai42_e2e.manifests import _redis_feature_env
+
+pytestmark = pytest.mark.needs("no-stack")
 
 
 def _resources(*, bus_namespace: str, broker_url: str | None = None) -> StackResources:

@@ -32,7 +32,7 @@ import yaml
 
 from tai42_e2e import child_env, ports, readiness, spawning
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.mcp import McpClient, mcp_url
+from tai42_e2e.mcp import McpClient
 from tai42_e2e.metrics import Scrape, scrape
 from tai42_e2e.topology import Infra, StackConfig, StackResources, Topology, _ProcSpec
 from tai42_e2e.waiting import wait_for
@@ -416,11 +416,15 @@ class TaiStack:
             raise RuntimeError("port_b is only defined for a REPLICAS stack")
         return self.app_ports[1]
 
+    def origin(self, port: int | None = None) -> str:
+        """The origin of an app port (default: the primary one)."""
+        return f"http://{self.host}:{port or self.port_a}"
+
     def mcp(self, port: int | None = None, path: str = "/mcp", *, auth: str | None = None) -> McpClient:
-        return McpClient(mcp_url(self.host, port or self.port_a, path), auth=auth)
+        return McpClient(f"{self.origin(port)}{path}", auth=auth)
 
     def api(self, port: int | None = None) -> ApiClient:
-        return ApiClient(f"http://{self.host}:{port or self.port_a}", auth_token=self.auth_token)
+        return ApiClient(self.origin(port), auth_token=self.auth_token)
 
     def scrape(self) -> Scrape:
         """Scrape the standalone metrics server (the multiproc reader)."""
@@ -429,7 +433,7 @@ class TaiStack:
 
     def app_scrape(self, port: int | None = None) -> Scrape:
         """Scrape a serve worker's in-app ``/metrics`` route."""
-        return scrape(f"http://{self.host}:{port or self.port_a}/metrics")
+        return scrape(f"{self.origin(port)}/metrics")
 
     def census(self) -> list[BusWorker]:
         """The live fleet currently on the app-owned worker bus — every subscribed

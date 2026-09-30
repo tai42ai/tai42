@@ -18,7 +18,10 @@ import pytest
 
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("probe-tools", "setting:extension:output_schema", "setting:manifest-bound-extension-config"),
+]
 
 
 async def test_branch_advertises_the_configured_output_schema(extensions_stack: TaiStack) -> None:

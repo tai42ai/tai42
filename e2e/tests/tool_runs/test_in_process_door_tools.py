@@ -27,9 +27,19 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs(
+    "kind:identity",
+    "probe-tools",
+    "setting:seeded-access-control",
+    "setting:conversations:redis",
+    "setting:tool:builtin-doors",
+)
 
 # The seeded bridge root's key id — the identity a run-tool dispatch runs under, and so the
 # accountable principal the door records (distinct from any route execution key a spec mints).
@@ -70,6 +80,7 @@ async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any]) -
     )
 
 
+@pytest.mark.needs("setting:seeded-key-id=bridge-root")
 async def test_message_door_posts_under_the_run_identity_and_answers_by_the_route_own_delivery(
     bridge_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:
@@ -105,6 +116,7 @@ async def test_message_door_posts_under_the_run_identity_and_answers_by_the_rout
     assert record["caller_principal"] != route_key, record
 
 
+@pytest.mark.needs("store:redis")
 async def test_event_door_delivers_onto_an_existing_thread_and_the_turn_runs(
     bridge_stack: tuple[TaiStack, str], uniq: Callable[[str], str]
 ) -> None:
@@ -199,12 +211,18 @@ async def _drive_keyless_door_refusal(stack: TaiStack, uniq: Callable[[str], str
         await api.delete(f"/api/schedules/{schedule_name}", retry_on_reloading=True)
 
 
+@pytest.mark.needs(
+    "kind:backend", "store:redis", "setting:extension:schedule_task", "setting:backend-scheduler-process"
+)
 async def test_message_door_refuses_a_keyless_schedule_fire(
     door_schedule_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
     await _drive_keyless_door_refusal(door_schedule_stack, uniq, "message")
 
 
+@pytest.mark.needs(
+    "kind:backend", "store:redis", "setting:extension:schedule_task", "setting:backend-scheduler-process"
+)
 async def test_event_door_refuses_a_keyless_schedule_fire(
     door_schedule_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

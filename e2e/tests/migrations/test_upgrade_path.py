@@ -35,6 +35,8 @@ from ._upgrade_path_support import (
     require_cli,
 )
 
+pytestmark = pytest.mark.needs("no-stack", "cli", "setting:tai-distribution-checkout")
+
 
 def _schema_init_container(job: dict) -> dict:
     """The schema-init container of a rendered Job, by name — never positional, so

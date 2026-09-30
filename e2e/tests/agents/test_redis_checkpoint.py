@@ -58,9 +58,11 @@ pytestmark = [
         HarnessSettings().is_real("llm"),
         reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
+    pytest.mark.needs("helper:llm"),
 ]
 
 
+@pytest.mark.needs("store:redis", "topology:replicas", "setting:agent:tools_agent", "setting:checkpoint:redis")
 async def test_redis_checkpoint_resumes_across_replicas(
     agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -112,6 +114,7 @@ async def test_redis_checkpoint_resumes_across_replicas(
     assert keys, "no checkpoint keys landed in the checkpoint Redis; the redis provider was not exercised"
 
 
+@pytest.mark.needs("topology:replicas", "setting:agent:tools_agent", "setting:checkpoint:redis")
 async def test_redis_checkpoint_resumes_across_replicas_over_sse_run_door(
     agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -156,6 +159,7 @@ async def test_redis_checkpoint_resumes_across_replicas_over_sse_run_door(
     )
 
 
+@pytest.mark.needs("topology:replicas", "setting:agent:tools_agent", "setting:checkpoint:redis")
 async def test_system_prompt_is_per_run_never_checkpointed_across_replicas(
     agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
@@ -232,6 +236,7 @@ async def test_system_prompt_is_per_run_never_checkpointed_across_replicas(
     assert name_token in json.dumps(second), "the checkpointed conversation did not cross workers"
 
 
+@pytest.mark.needs("probe-tools", "store:redis", "setting:agent:retrieval_tools_agent", "setting:langgraph-store:redis")
 async def test_redis_store_round_trip_through_stack(
     agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:

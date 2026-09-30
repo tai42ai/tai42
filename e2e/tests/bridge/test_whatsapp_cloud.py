@@ -53,10 +53,13 @@ from ._bridge_support import (
 # Either selection real breaks the stub scripting, so the module steps aside; the real legs run
 # on the dedicated e2e creds host, not in CI. Inert in the default mock run — both
 # is_real checks are False, so collection is byte-for-byte today's.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("whatsapp") or HarnessSettings().is_real("llm"),
-    reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs("kind:identity"),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("whatsapp") or HarnessSettings().is_real("llm"),
+        reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs on the creds host",
+    ),
+]
 
 
 # The smallest form answer schema: a text field, an integer field, and a date field, all
@@ -119,6 +122,7 @@ def _fresh_phone_id() -> str:
     return f"9{uuid.uuid4().int % 10**14:014d}"
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "setting:seeded-access-control")
 async def test_verify_handshake(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     challenge = uniq("challenge")
     good = bridge.fake_whatsapp.verify_params(verify_token=bridge.whatsapp_verify_token, challenge=challenge)
@@ -132,6 +136,14 @@ async def test_verify_handshake(bridge: BridgeHarness, uniq: Callable[[str], str
     assert bad_resp.status_code == 403
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:llm",
+    "helper:whatsapp",
+    "setting:agent",
+    "setting:conversations",
+    "setting:seeded-access-control",
+)
 async def test_signed_inbound_runs_turn_and_bad_signature_is_denied(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -166,6 +178,14 @@ async def test_signed_inbound_runs_turn_and_bad_signature_is_denied(
     assert send["to"] == BRIDGE_WHATSAPP_CLIENT
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:llm",
+    "helper:whatsapp",
+    "setting:agent",
+    "setting:conversations",
+    "setting:seeded-access-control",
+)
 async def test_two_phone_number_ids_two_agents(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     exec_a = uniq("l7-exec-a")
     exec_b = uniq("l7-exec-b")
@@ -206,6 +226,13 @@ async def test_two_phone_number_ids_two_agents(bridge: BridgeHarness, uniq: Call
     assert send_b["phone_number_id"] == BRIDGE_WHATSAPP_PHONE_ID_B
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_ask_round_trip_over_whatsapp(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     question = uniq("l7-ask-q")
     ask_answer = uniq("l7-ask-a")
@@ -256,6 +283,13 @@ async def _ask_select(bridge: BridgeHarness, *, question: str, recipient: str, o
     return asyncio.create_task(ask())
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_select_renders_buttons_and_tap_answers_option_text(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -292,6 +326,13 @@ async def test_select_renders_buttons_and_tap_answers_option_text(
     assert resolved == options[1]
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_select_renders_list_and_pick_answers_option_text(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -326,6 +367,13 @@ async def test_select_renders_list_and_pick_answers_option_text(
     assert resolved == options[3]
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_over_cap_select_falls_back_to_numbered_text_answered_by_typed_reply(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -350,6 +398,14 @@ async def test_over_cap_select_falls_back_to_numbered_text_answered_by_typed_rep
     assert resolved == options[4]
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:llm",
+    "helper:whatsapp",
+    "setting:agent",
+    "setting:conversations",
+    "setting:seeded-access-control",
+)
 async def test_button_reply_without_pending_bridges_the_title(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -386,6 +442,14 @@ async def test_button_reply_without_pending_bridges_the_title(
     assert any(request_mentions(bridge.llm_stub, index, title) for index in range(len(bridge.llm_stub.requests)))
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 async def test_button_tap_carries_reply_id_onto_the_tool_payload_params(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -429,6 +493,14 @@ async def test_button_tap_carries_reply_id_onto_the_tool_payload_params(
     assert [entry["value"] for entry in recorded] == [reply_id]
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:llm",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_stale_button_tap_restores_pending_ask(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     question = uniq("l7-stale-q")
     options = ["Yes", "No"]  # 2 short options -> reply buttons
@@ -470,6 +542,13 @@ async def test_stale_button_tap_restores_pending_ask(bridge: BridgeHarness, uniq
     assert resolved == options[1]
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -530,6 +609,13 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     assert resolved == good_answer
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
 async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_answers_under_original_key(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -595,6 +681,9 @@ async def test_form_with_odd_property_names_maps_to_identifier_safe_flow_and_ans
     assert resolved == good_answer
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp", "helper:whatsapp", "setting:router:notifications", "setting:tool:notify_user"
+)
 async def test_notify_media_sends_body_then_one_image_per_item(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -627,6 +716,9 @@ async def test_notify_media_sends_body_then_one_image_per_item(
     assert all(record["wamid"] for record in sends)
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp", "helper:whatsapp", "setting:router:notifications", "setting:tool:notify_user"
+)
 async def test_notify_interactive_options_render_native_with_header_and_footer(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -675,6 +767,9 @@ async def test_notify_interactive_options_render_native_with_header_and_footer(
     assert interactive["footer"] == {"text": "powered by tai42"}
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp", "helper:whatsapp", "setting:router:notifications", "setting:tool:notify_user"
+)
 async def test_notify_template_sends_template_payload_to_allowlisted_recipient(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -704,6 +799,7 @@ async def test_notify_template_sends_template_payload_to_allowlisted_recipient(
     ]
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio", "setting:router:notifications", "setting:tool:notify_user")
 async def test_notify_rich_content_capability_and_channel_guards(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -754,6 +850,9 @@ async def test_notify_rich_content_capability_and_channel_guards(
     assert twilio_sends[0]["media_urls"] == [media[0]["url"]]
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp", "helper:whatsapp", "setting:router:notifications", "setting:tool:notify_user"
+)
 async def test_freeform_notify_reaches_an_unlisted_recipient(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     # WhatsApp diverges from telegram/slack/twilio by design: a freeform send is unfenced
     # (Meta's own 24-hour window is the fence), so an unlisted recipient succeeds.
@@ -769,6 +868,9 @@ async def test_freeform_notify_reaches_an_unlisted_recipient(bridge: BridgeHarne
     assert sends[0]["type"] == "text"
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp", "helper:whatsapp", "setting:router:notifications", "setting:tool:notify_user"
+)
 async def test_template_to_cold_unlisted_recipient_is_refused(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -790,6 +892,15 @@ async def test_template_to_cold_unlisted_recipient_is_refused(
     assert bridge.fake_whatsapp.payloads_matching(marker) == []
 
 
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:llm",
+    "helper:whatsapp",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "setting:tool:notify_user",
+    "topology:replicas",
+)
 async def test_template_to_known_contact_recipient_succeeds(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     marker = uniq("l7-known")
     wa_id = _fresh_wa_id()  # unlisted, but about to open Meta's window

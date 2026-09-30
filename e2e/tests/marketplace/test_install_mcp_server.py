@@ -41,7 +41,15 @@ from ._market_support import (
     uninstall_and_assert_clean,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+    ),
+]
 
 
 async def _mcp_status_bound(stack: TaiStack) -> dict[str, list[str]]:
@@ -80,6 +88,7 @@ def _bound_tools(bound: dict[str, list[str]]) -> set[str]:
     return set(bound.get(ETA_MCP_TITLE) or [])
 
 
+@pytest.mark.needs("mutable", "setting:PIP_INDEX_URL", "setting:shared-venv", "setting:fixture-plugin:eta", "files")
 async def test_install_go_live_and_uninstall_mcp_server(
     marketplace_service: MarketplaceService,
     package_index: FixturePackageIndex,

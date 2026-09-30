@@ -11,9 +11,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("topology:embed", "setting:embed-host")
 
 # The tool-call counter the ``prometheus_metrics`` extension increments, and the
 # label set the embed app's own worker stamps (``runtime="main"``).
@@ -34,6 +38,7 @@ async def test_boot_and_host_route_coexist(embed_stack: TaiStack) -> None:
     assert ping.json() == {"host": "ok"}
 
 
+@pytest.mark.needs("probe-tools", "setting:extension:prometheus_metrics")
 async def test_mcp_tool_round_trip(embed_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """A real MCP tool call reaches the mounted app and returns its result."""
     payload = uniq("echo")
@@ -43,6 +48,7 @@ async def test_mcp_tool_round_trip(embed_stack: TaiStack, uniq: Callable[[str], 
     assert result.data == payload, f"echo round-trip returned {result.data!r}, expected {payload!r}"
 
 
+@pytest.mark.needs("probe-tools", "setting:extension:prometheus_metrics", "setting:PROMETHEUS_MULTIPROC_DIR=unset")
 async def test_in_process_metrics_render_the_tool_counter(embed_stack: TaiStack) -> None:
     """The embed app's own ``/metrics`` renders the in-process registry: a tool
     call increments the counter and the scrape shows it — with no
@@ -61,6 +67,7 @@ async def test_in_process_metrics_render_the_tool_counter(embed_stack: TaiStack)
     )
 
 
+@pytest.mark.needs("kind:backend", "mutable", "store:redis")
 async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """Fleet config-reload fan-out works from an embedded worker: the config-reload
     door broadcasts on the worker bus, and the confirmed-worker set covers the bus

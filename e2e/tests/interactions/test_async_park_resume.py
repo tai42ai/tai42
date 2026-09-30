@@ -45,7 +45,10 @@ from tai42_e2e.stack import TaiStack
 # The stack runs no backend, so the module is ``backendless`` — the async park
 # mechanism touches no backend seam, so it runs on the default backend leg only
 # instead of being re-run under rq and celery.
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs("kind:tool_runs", "kind:interactions", "probe-tools", "topology:replicas", "store:redis"),
+]
 
 
 async def _resume_record(stack: TaiStack, interaction_id: str) -> dict | None:
@@ -85,6 +88,7 @@ async def _multipark_completion(stack: TaiStack, super_step_id: str) -> dict | N
     return json.loads(records[0])
 
 
+@pytest.mark.needs("setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1")
 async def test_async_multipark_super_step_resolves_once(async_park_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     # The barrier here is a PROBE STAND-IN for the consumer role; the engine's real
     # super-step barrier is a separate component. This asserts the park/resume seam, not it.
@@ -172,6 +176,7 @@ async def test_async_park_answer_resumes_across_workers(async_park_stack: TaiSta
     assert record["identity"] == stored_identity
 
 
+@pytest.mark.needs("setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1")
 async def test_async_park_expiry_resumes(async_park_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
     # Park with a short deadline under ``on_expiry="resume"`` and never answer: the expiry

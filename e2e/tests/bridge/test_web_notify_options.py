@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import WebChatClient
 
@@ -42,6 +44,17 @@ async def _web_record_route(bridge: BridgeHarness, uniq: Callable[[str], str], t
         reply_expr="null",
     )
     return identity
+
+
+pytestmark = pytest.mark.needs(
+    "kind:channels:web",
+    "kind:identity",
+    "probe-tools",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
 
 
 async def test_web_notify_options_card_and_a_tapped_option_lands_as_a_message(

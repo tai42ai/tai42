@@ -32,10 +32,23 @@ from ._bridge_support import (
     wait_probe_entries,
 )
 
-pytestmark = pytest.mark.skipif(
-    any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
-    reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:telegram",
+        "kind:identity",
+        "kind:storage",
+        "probe-tools",
+        "helper:telegram",
+        "setting:MEDIA_INGEST_REAPER_INTERVAL_SECONDS=1",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
+        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+    ),
+]
 
 
 def _expire_media(bridge: BridgeHarness, media_id: str) -> None:

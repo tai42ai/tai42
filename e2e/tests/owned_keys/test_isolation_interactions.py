@@ -15,12 +15,15 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+import pytest
 import redis as redis_lib
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
 from ._owned_support import create_service_owner, mint_key_for, provision_operator, two_service_identities
+
+pytestmark = pytest.mark.needs("kind:identity", "kind:interactions", "setting:seeded-access-control")
 
 _ADD_EVENT = "interaction.add"
 _ANSWERED_EVENT = "interaction.answered"
@@ -243,6 +246,7 @@ async def test_key_own_not_owner_interactions_two_siblings_under_one_owner(
             ask_task.cancel()
 
 
+@pytest.mark.needs("kind:accounts")
 async def test_unrestricted_operator_can_answer_addressed_interaction(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -272,6 +276,7 @@ async def test_unrestricted_operator_can_answer_addressed_interaction(
             ask_task.cancel()
 
 
+@pytest.mark.needs("store:redis", "setting:stub-channel")
 async def test_stream_add_frame_omits_ticket_though_one_exists(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

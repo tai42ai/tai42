@@ -41,10 +41,23 @@ from ._bridge_support import (
     wait_send_to,
 )
 
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:twilio",
+        "kind:channels:whatsapp",
+        "kind:identity",
+        "mutable",
+        "helper:twilio",
+        "helper:whatsapp",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "setting:tool:get_pairing_code",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
+        reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
+    ),
+]
 
 _TOOL = "get_pairing_code"
 # The inbound payload the tool turn exposes ({message, sender, our_identity, channel}) mapped

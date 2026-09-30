@@ -17,7 +17,19 @@ from tai42_e2e.waiting import wait_for_async
 
 from ._market_support import installed_refs, uninstall_and_assert_clean, wait_tool_live
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "mutable",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+        "setting:PIP_INDEX_URL",
+        "setting:shared-venv",
+        "setting:fixture-plugin:alpha",
+    ),
+]
 
 _TOOL = "e2e_market_probe"
 

@@ -48,6 +48,7 @@ def container_floor_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory
     yield from boot_stack(infra, root, _container_floor_stack)
 
 
+@pytest.mark.needs("kind:sandbox:local", "probe-tools", "setting:TAI_MCP_SANDBOX_ISOLATION=none")
 async def test_isolation_none_is_accepted_by_the_direct_provider(
     sandbox_local_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -59,6 +60,7 @@ async def test_isolation_none_is_accepted_by_the_direct_provider(
         await mcp.call_tool("e2e_sandbox_probe", {"op": "destroy", "session_id": created["session_id"]})
 
 
+@pytest.mark.needs("kind:sandbox:local", "probe-tools", "setting:TAI_MCP_SANDBOX_ISOLATION=container")
 async def test_container_isolation_floor_is_rejected_loudly(
     container_floor_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

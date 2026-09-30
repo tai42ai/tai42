@@ -8,8 +8,11 @@
  * a `withdrawn` badge). The advisory summary is uniq'd and the withdrawn
  * rendering is asserted, so this stays order-independent from the Studio spec.
  */
-import { expect, test, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { MP_URL, MP_WEB_URL, mpAdminHeaders, uniq } from './helpers';
+import { needs, test } from './needs';
+
+needs('helper:marketplace-site');
 
 // Publish-circular: the marketplace-web frontend renders against the published
 // marketplace backend's browse contract (kind facet / nullable updated_at /

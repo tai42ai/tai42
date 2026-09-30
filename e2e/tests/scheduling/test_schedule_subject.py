@@ -19,9 +19,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs(
+    "kind:backend",
+    "kind:states",
+    "setting:extension:schedule_task",
+)
 
 # A whole-second interval — the rq scheduler re-arms on integer seconds, so a fractional
 # period cannot be represented there (mirrors the schedule_task leg).
@@ -49,6 +57,7 @@ async def _declare_state(api: ApiClient, name: str) -> None:
     )
 
 
+@pytest.mark.needs("setting:backend-scheduler-process")
 async def test_scheduled_job_with_subject_writes_record_via_the_schedule_door(
     schedule_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

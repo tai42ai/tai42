@@ -17,6 +17,7 @@ from tai42_e2e import diagnostics
 from tai42_e2e.harness import allocate_resources, release_resources
 from tai42_e2e.seeding import seed_bootstrap_key
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.target import TargetStack
 from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
 
@@ -42,6 +43,13 @@ def allocate_and_build(
         raise
 
 
+def target_stack(infra: Infra) -> TargetStack:
+    """The stack handle for the target this run drives."""
+    if infra.target is None:
+        raise RuntimeError("this run has no e2e target")
+    return TargetStack(infra.target, boot_timeout=infra.settings.boot_timeout)
+
+
 def boot_stack(
     infra: Infra,
     root: Path,
@@ -52,7 +60,12 @@ def boot_stack(
     allocate_checkpoint_db: bool = False,
 ) -> Iterator[TaiStack]:
     """Allocate, build, boot, and yield a stack; tear it down at scope end. A
-    generator so a fixture ``yield from`` s it."""
+    generator so a fixture ``yield from`` s it. Against a target nothing is allocated
+    or built: the stack yielded addresses the target."""
+    if infra.target is not None:
+        with target_stack(infra) as stack:
+            yield stack
+        return
     resources, config = allocate_and_build(infra, root, builder, resource_kwargs, allocate_checkpoint_db)
     # Seed the auth bootstrap (Redis identity/context + PG policy/route rows)
     # BEFORE the stack boots: readiness probes /health and /metrics, which are

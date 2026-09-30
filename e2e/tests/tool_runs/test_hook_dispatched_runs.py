@@ -7,8 +7,17 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+import pytest
+
 from tai42_e2e import wait_for, wait_for_async
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs(
+    "kind:tool_runs",
+    "probe-tools",
+    "store:redis",
+    "topology:replicas",
+)
 
 
 async def test_hook_fired_run_is_recorded_and_listable(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:

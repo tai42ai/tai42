@@ -19,10 +19,21 @@ from ._bridge_support import BridgeHarness, request_mentions, script_reply
 from ._overlap_support import joined, open_visitor, reply_matching, send_web
 
 # The scripted-LLM turn is the 'llm' mock leg; the real leg runs on the creds host.
-pytestmark = pytest.mark.skipif(
-    HarnessSettings().is_real("llm"),
-    reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:channels:web",
+        "kind:identity",
+        "helper:llm",
+        "setting:agent",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        HarnessSettings().is_real("llm"),
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+    ),
+]
 
 _AGENT = "tools_agent"
 _SETTLE_SECONDS = 2

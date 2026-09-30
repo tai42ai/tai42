@@ -18,8 +18,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+pytestmark = pytest.mark.needs("kind:interactions", "probe-tools")
 
 # Far enough out that the park stays ``asking`` for the whole run — no expiry reaper races the
 # subject read (the async ask only resolves on an answer or its deadline, neither of which the
@@ -73,6 +77,7 @@ async def test_sync_run_tool_door_carries_subject(replicas_stack: TaiStack, uniq
     assert interaction_id not in await _parked_ids(api, other)
 
 
+@pytest.mark.needs("kind:tool_runs")
 async def test_background_submit_door_carries_subject(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = replicas_stack.api(port=replicas_stack.port_a)
     subject = _subject(uniq("subj"))

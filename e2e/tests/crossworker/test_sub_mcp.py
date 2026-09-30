@@ -6,9 +6,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+pytestmark = pytest.mark.needs("probe-tools", "mutable", "topology:replicas", "setting:SUB_MCP_REDIS_URL")
 
 
 async def _serves(stack: TaiStack, port: int, slug: str) -> bool:

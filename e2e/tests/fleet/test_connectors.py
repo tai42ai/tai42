@@ -36,7 +36,19 @@ from ._fleet import (
     wait_present,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:connectors",
+        "probe-tools",
+        "mutable",
+        "process",
+        "topology:multiworker",
+        "setting:PYTHONHASHSEED=0",
+        "setting:managed-mcp-server",
+        "setting:manifest:connectors-fixtures",
+    ),
+]
 
 
 async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
@@ -186,6 +198,7 @@ async def test_sub_service_toggle_converges(
     assert await _serves(stack, alpha_tool), f"managed tool {alpha_tool} not served after toggle-on"
 
 
+@pytest.mark.needs("helper:idp")
 async def test_oauth_complete_and_reconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:

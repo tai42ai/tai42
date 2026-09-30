@@ -51,10 +51,20 @@ from ._bridge_support import (
     wait_probe_record,
 )
 
-pytestmark = pytest.mark.skipif(
-    any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
-    reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
-)
+pytestmark = [
+    pytest.mark.needs(
+        "kind:identity",
+        "kind:storage",
+        "probe-tools",
+        "setting:conversations",
+        "setting:seeded-access-control",
+        "store:redis",
+    ),
+    pytest.mark.skipif(
+        any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
+        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+    ),
+]
 
 # The tool payload the bridged turn dispatches: the text, the parity ``media_*`` params, and the
 # typed attachment's url/kind/filename — the whole ingest result the tool saw, as one JSON string.
@@ -148,6 +158,7 @@ async def _ingest_and_serve(
         assert disposition is None, disposition
 
 
+@pytest.mark.needs("kind:channels:telegram", "helper:telegram")
 async def test_telegram_photo_ingests_to_served_image(media_bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     chat_id = "930001"
     file_id = uniq("tg-ing")
@@ -171,6 +182,7 @@ async def test_telegram_photo_ingests_to_served_image(media_bridge: BridgeHarnes
     )
 
 
+@pytest.mark.needs("kind:channels:slack", "helper:slack")
 async def test_slack_file_share_ingests_to_served_image(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -203,6 +215,7 @@ async def test_slack_file_share_ingests_to_served_image(
     )
 
 
+@pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_twilio_mms_document_ingests_to_served_attachment(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
@@ -234,6 +247,7 @@ async def test_twilio_mms_document_ingests_to_served_attachment(
     assert media_bridge.fake_twilio.cdn_authorizations == [None], media_bridge.fake_twilio.cdn_authorizations
 
 
+@pytest.mark.needs("kind:channels:whatsapp", "helper:whatsapp")
 async def test_whatsapp_image_ingests_to_served_image(media_bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     media_id = uniq("wa-ing")
     caption = uniq("wa-cap")

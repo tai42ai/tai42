@@ -39,7 +39,22 @@ from ._market_support import (
     skip_unless_registry_supports_declared_routes,
 )
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    pytest.mark.needs(
+        "kind:marketplace_store",
+        "mutable",
+        "helper:registry",
+        "helper:package-index",
+        "setting:MARKETPLACE_URL",
+        "setting:PIP_INDEX_URL",
+        "setting:shared-venv",
+        "setting:fixture-plugin:epsilon",
+        "setting:router-spa-catch-all-last",
+        "process",
+        "files",
+    ),
+]
 
 _ROUTER_MODULE = "tai_e2e_market_epsilon.router"
 _MIDDLEWARE_MODULE = "tai_e2e_market_epsilon.mw"
