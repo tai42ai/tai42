@@ -234,11 +234,11 @@ def test_redis_pool_key_from_settings_is_serializable():
     json.dumps(kw)  # must be JSON-serializable for the pool key
 
 
-def test_redis_pool_key_excludes_env_prefix():
-    # env_prefix rides in client_kwargs only to name a missing URL; it is not
-    # connection identity. Two settings classes with different namespaces that
-    # resolve to the same URL must share ONE pool (equal pool key); a different
-    # URL still keys to a different pool.
+def test_redis_pool_identity_is_the_full_connection_configuration():
+    # The pool identity is the whole connection configuration: URL, decode mode,
+    # max_connections, the socket timeouts and the retry options. A caller that differs
+    # in any of these keys a different pool; an identical configuration shares one. This
+    # holds for both the async and the sync client.
     redis_mod = _redis_mod()
 
     class StoreA(RedisConnectionSettings):
@@ -247,13 +247,117 @@ def test_redis_pool_key_excludes_env_prefix():
     class StoreB(RedisConnectionSettings):
         model_config = SettingsConfigDict(env_prefix="STORE_B_")
 
-    a = StoreA(redis_url="redis://h:6379/0").client_kwargs()
-    b = StoreB(redis_url="redis://h:6379/0").client_kwargs()
+    small = StoreA(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
+    large = StoreB(redis_url="redis://h:6379/0", redis_max_connections=50).client_kwargs()
+    assert small["max_connections"] != large["max_connections"]  # a connection option really differs
+    for client_cls in (redis_mod.RedisClient, redis_mod.SyncRedisClient):
+        client = client_cls()
+        # A differing max_connections is a different client.
+        assert client._key(**small) != client._key(**large)
+        # An identical configuration shares one pooled client.
+        same = StoreB(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
+        assert client._key(**small) == client._key(**same)
+        # A differing socket timeout is a different client.
+        blocking = StoreA(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
+        blocking["socket_timeout"] = 5.0
+        assert client._key(**small) != client._key(**blocking)
+        # A different URL or decode mode still keys to a different pool.
+        other = StoreA(redis_url="redis://other:6379/0", redis_max_connections=5).client_kwargs()
+        assert client._key(**small) != client._key(**other)
+        decoded_off = StoreA(
+            redis_url="redis://h:6379/0", redis_max_connections=5, decode_responses=False
+        ).client_kwargs()
+        assert client._key(**small) != client._key(**decoded_off)
+
+
+def test_redis_env_prefix_alone_never_splits_a_pool():
+    # env_prefix is a message-only passenger: two components with different namespaces but
+    # the same connection configuration share ONE pooled client (equal key). A Redis
+    # client carries no build options, so the pool's conflict guard can never fire for it.
+    # This holds for both the async and the sync client.
+    redis_mod = _redis_mod()
+
+    class StoreA(RedisConnectionSettings):
+        model_config = SettingsConfigDict(env_prefix="STORE_A_")
+
+    class StoreB(RedisConnectionSettings):
+        model_config = SettingsConfigDict(env_prefix="STORE_B_")
+
+    a = StoreA(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
+    b = StoreB(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
     assert a["env_prefix"] != b["env_prefix"]  # the namespaces really differ
     for client_cls in (redis_mod.RedisClient, redis_mod.SyncRedisClient):
-        assert client_cls._key(**a) == client_cls._key(**b)
-    other = StoreA(redis_url="redis://other:6379/0").client_kwargs()
-    assert redis_mod.RedisClient._key(**a) != redis_mod.RedisClient._key(**other)
+        client = client_cls()
+        assert client._key(**a) == client._key(**b)  # same pool despite the differing prefix
+        assert client._build_options(**a) == {}  # no build options -> nothing for the guard to compare
+        assert client._build_options(**b) == {}
+
+
+async def test_redis_async_distinct_configurations_get_distinct_pooled_clients(monkeypatch):
+    # End to end through current(): two callers on one URL with different max_connections
+    # (or socket timeouts) each get their own pooled client; an identical configuration
+    # shares one; env_prefix alone never splits a pool.
+    redis_mod = _redis_mod()
+    from tai42_kit.clients import shutdown_all_clients
+
+    class _FakeAsyncRedis:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+
+        async def initialize(self):
+            return self
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(redis_mod.AsyncRedis, "from_url", staticmethod(lambda **kw: _FakeAsyncRedis(kw)))
+    url = "redis://h:6379/0"
+    client = redis_mod.RedisClient()
+    try:
+        async with (
+            client.current(url=url, max_connections=5) as small,
+            client.current(url=url, max_connections=50) as large,
+            client.current(url=url, max_connections=5, socket_timeout=5.0) as blocking,
+            client.current(url=url, max_connections=5, env_prefix="STORE_A_") as prefixed_a,
+            client.current(url=url, max_connections=5, env_prefix="STORE_B_") as prefixed_b,
+        ):
+            assert small is not large  # a different max_connections is a distinct pool
+            assert small is not blocking  # a socket timeout is a distinct pool
+            assert prefixed_a is prefixed_b  # env_prefix alone shares one pool
+            assert small is prefixed_a  # the identical configuration is the same pooled client
+    finally:
+        await shutdown_all_clients()
+
+
+async def test_redis_sync_distinct_configurations_get_distinct_pooled_clients(monkeypatch):
+    # The sync client pools by the same full-configuration identity as its async peer.
+    redis_mod = _redis_mod()
+    from tai42_kit.clients import shutdown_all_clients
+
+    class _FakeSyncRedis:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(redis_mod.SyncRedis, "from_url", staticmethod(lambda **kw: _FakeSyncRedis(kw)))
+    url = "redis://h:6379/0"
+    client = redis_mod.SyncRedisClient()
+    try:
+        async with (
+            client.current(url=url, max_connections=5) as small,
+            client.current(url=url, max_connections=50) as large,
+            client.current(url=url, max_connections=5, socket_timeout=5.0) as blocking,
+            client.current(url=url, max_connections=5, env_prefix="STORE_A_") as prefixed_a,
+            client.current(url=url, max_connections=5, env_prefix="STORE_B_") as prefixed_b,
+        ):
+            assert small is not large  # a different max_connections is a distinct pool
+            assert small is not blocking  # a socket timeout is a distinct pool
+            assert prefixed_a is prefixed_b  # env_prefix alone shares one pool
+            assert small is prefixed_a  # the identical configuration is the same pooled client
+    finally:
+        await shutdown_all_clients()
 
 
 # ---------------------------------------------------------------------------
@@ -638,4 +742,5 @@ def test_pg_pool_key_from_settings():
         "dsn": "postgresql://u:p@h:5433/d?connect_timeout=10&options=-c%20statement_timeout%3D60000",
         "min_size": 2,
         "max_size": 10,
+        "env_prefix": "",
     }

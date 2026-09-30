@@ -16,7 +16,7 @@ pytest.importorskip("langgraph")
 from tai42_kit.llm.store import store as st
 from tai42_kit.llm.store.store_registry import StoreRegistry
 
-from .conftest import client_target, install_spy_client
+from .conftest import client_target, install_fake_named_pool, install_spy_client
 
 
 # --------------------------------------------------------------------------- #
@@ -110,27 +110,7 @@ async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypa
     # against the identity from the base ``PG_*`` namespace.
     monkeypatch.setenv("PG_HOST", "shared-db")
     monkeypatch.setenv("PG_PASSWORD", "shared-secret")
-    captured: dict[str, Any] = {}
-
-    class _FakeConnCtx:
-        async def __aenter__(self):
-            return object()
-
-        async def __aexit__(self, *a):
-            return False
-
-    class _FakePool:
-        def __init__(self, conn_string, **kwargs):
-            captured["conn_string"] = conn_string
-
-        async def open(self):
-            pass
-
-        def connection(self):
-            return _FakeConnCtx()
-
-        async def close(self):
-            pass
+    captured, _closed = install_fake_named_pool(monkeypatch)
 
     class _FakeStore:
         def __init__(self, conn, **kwargs):
@@ -139,19 +119,23 @@ async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypa
         async def setup(self):
             pass
 
-    pool_mod: Any = types.ModuleType("psycopg_pool")
-    pool_mod.AsyncConnectionPool = _FakePool
     store_mod: Any = types.ModuleType("langgraph.store.postgres")
     store_mod.AsyncPostgresStore = _FakeStore
     rows_mod: Any = types.ModuleType("psycopg.rows")
     rows_mod.dict_row = object()
-    monkeypatch.setitem(sys.modules, "psycopg_pool", pool_mod)
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
     monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
     _resource, closer = await st.create_store_resource("postgres", None)
-    assert captured["conn_string"].startswith("postgresql://")
-    assert "shared-db" in captured["conn_string"]
+    assert captured["conninfo"].startswith("postgresql://")
+    assert "shared-db" in captured["conninfo"]
+    # The base-namespace pool is named for the postgres owner and the langgraph
+    # store role, sized from the base Postgres deployment settings, and its fill is
+    # awaited here through the shared seam.
+    assert captured["name"] == "postgres@shared-db/postgres:langgraph-store"
+    assert captured["min_size"] == 2
+    assert captured["max_size"] == 10
+    assert captured["open_wait"] is True
     await closer()
 
 
@@ -394,27 +378,7 @@ async def test_sqlite_resource_builds_and_closes(monkeypatch):
 
 
 async def test_postgres_resource_builds_and_closes(monkeypatch):
-    closed = []
-
-    class _FakeConnCtx:
-        async def __aenter__(self):
-            return object()
-
-        async def __aexit__(self, *a):
-            return False
-
-    class _FakePool:
-        def __init__(self, conn_string, **kwargs):
-            self.conn_string = conn_string
-
-        async def open(self):
-            pass
-
-        def connection(self):
-            return _FakeConnCtx()
-
-        async def close(self):
-            closed.append(True)
+    captured, closed = install_fake_named_pool(monkeypatch)
 
     class _FakeStore:
         def __init__(self, conn, **kwargs):
@@ -423,18 +387,26 @@ async def test_postgres_resource_builds_and_closes(monkeypatch):
         async def setup(self):
             pass
 
-    pool_mod: Any = types.ModuleType("psycopg_pool")
-    pool_mod.AsyncConnectionPool = _FakePool
     store_mod: Any = types.ModuleType("langgraph.store.postgres")
     store_mod.AsyncPostgresStore = _FakeStore
     rows_mod: Any = types.ModuleType("psycopg.rows")
     rows_mod.dict_row = object()
-    monkeypatch.setitem(sys.modules, "psycopg_pool", pool_mod)
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
     monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
-    resource, closer = await st.create_store_resource("postgres", "postgresql://u@h/db")
-    assert isinstance(resource, _FakePool)
+    _resource, closer = await st.create_store_resource("postgres", "postgresql://u@h/db")
+    # An explicit conn string is named for the langgraph store role, keeps the
+    # langgraph pool's own bounds, carries the store's required per-connection kwargs,
+    # and its fill is awaited here.
+    assert captured["name"] == "postgres@h/db:langgraph-store"
+    assert captured["min_size"] == 1
+    assert captured["max_size"] == 20
+    assert captured["kwargs"] == {
+        "autocommit": True,
+        "prepare_threshold": 0,
+        "row_factory": rows_mod.dict_row,
+    }
+    assert captured["open_wait"] is True
     await closer()
     assert closed == [True]
 
@@ -472,29 +444,9 @@ async def test_sqlite_resource_closes_conn_on_setup_failure(monkeypatch):
 
 
 async def test_postgres_resource_closes_pool_on_setup_failure(monkeypatch):
-    # open()+setup() failing must not leak the opened pool: no cleanup fn is
-    # returned on this path, so the branch closes the pool itself.
-    closed = []
-
-    class _FakeConnCtx:
-        async def __aenter__(self):
-            return object()
-
-        async def __aexit__(self, *a):
-            return False
-
-    class _FakePool:
-        def __init__(self, conn_string, **kwargs):
-            pass
-
-        async def open(self):
-            pass
-
-        def connection(self):
-            return _FakeConnCtx()
-
-        async def close(self):
-            closed.append(True)
+    # setup() failing must not leak the opened pool: no cleanup fn is returned on this
+    # path, so the branch closes the pool itself.
+    _captured, closed = install_fake_named_pool(monkeypatch)
 
     class _FakeStore:
         def __init__(self, conn, **kwargs):
@@ -503,13 +455,10 @@ async def test_postgres_resource_closes_pool_on_setup_failure(monkeypatch):
         async def setup(self):
             raise RuntimeError("setup boom")
 
-    pool_mod: Any = types.ModuleType("psycopg_pool")
-    pool_mod.AsyncConnectionPool = _FakePool
     store_mod: Any = types.ModuleType("langgraph.store.postgres")
     store_mod.AsyncPostgresStore = _FakeStore
     rows_mod: Any = types.ModuleType("psycopg.rows")
     rows_mod.dict_row = object()
-    monkeypatch.setitem(sys.modules, "psycopg_pool", pool_mod)
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
     monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 

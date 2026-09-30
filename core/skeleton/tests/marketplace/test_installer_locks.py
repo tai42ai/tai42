@@ -83,28 +83,15 @@ class _RecordingConn:
         return _RecordingCursor(self._log)
 
 
-class _RecordingPool:
-    def __init__(self, log: list[str], closed: list[bool]) -> None:
-        self._log = log
-        self._closed = closed
-
-    @asynccontextmanager
-    async def connection(self):
-        yield _RecordingConn(self._log)
-
-
 def _patch_fleet_client(monkeypatch: pytest.MonkeyPatch, log: list[str], closed: list[bool]):
     @asynccontextmanager
-    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
-        assert fresh is True  # the one-shot dedicated client
-        assert kwargs.get("min_size") == 1
-        assert kwargs.get("max_size") == 1
+    async def fake_pinned(settings=None):
         try:
-            yield _RecordingPool(log, closed)
+            yield _RecordingConn(log)
         finally:
-            closed.append(True)  # the fresh path closes on ANY exit
+            closed.append(True)  # the pinned seam closes on ANY exit
 
-    monkeypatch.setattr(locks, "client_ctx", fake_ctx)
+    monkeypatch.setattr(locks, "pinned_connection", fake_pinned)
 
     class _Settings:
         def client_kwargs(self):
@@ -155,22 +142,17 @@ async def test_fleet_lock_refuses_when_lock_held_elsewhere(monkeypatch: pytest.M
             return (False,)  # pg_try_advisory_lock returned false
 
     @asynccontextmanager
-    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+    async def fake_pinned(settings=None):
         class _Conn(_RecordingConn):
             def cursor(self):
                 return _FalseCursor(log)
 
-        class _Pool:
-            @asynccontextmanager
-            async def connection(self):
-                yield _Conn(log)
-
         try:
-            yield _Pool()
+            yield _Conn(log)
         finally:
             closed.append(True)
 
-    monkeypatch.setattr(locks, "client_ctx", fake_ctx)
+    monkeypatch.setattr(locks, "pinned_connection", fake_pinned)
 
     class _Settings:
         def client_kwargs(self):

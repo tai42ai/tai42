@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from tai42_kit.clients import ClientSettings, PooledClient, client_ctx, shutdown_all_clients
 
 
@@ -99,4 +101,76 @@ async def test_shutdown_all_clients_closes_live_pools():
     async with cls().current(url="b"):
         pass
     await shutdown_all_clients()
+    assert cls.closed == 2
+
+
+def _make_identity_client_cls():
+    """A subclass whose identity is ``url`` alone, with ``size`` a build option."""
+
+    class _Conn:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+            self.closed = False
+
+    class _IdentityClient(PooledClient):
+        created = 0
+        closed = 0
+
+        def _identity(self, **kwargs):
+            return {"url": kwargs["url"]}
+
+        async def _create(self, **kwargs):
+            type(self).created += 1
+            return _Conn(kwargs)
+
+        async def _close(self, client):
+            type(self).closed += 1
+            client.closed = True
+
+    return _IdentityClient
+
+
+async def test_default_identity_is_all_kwargs():
+    # The base identity is every non-passenger kwarg, so a differing kwarg keys a different pool.
+    cls = _make_client_cls()
+    base = cls()
+    assert base._identity(url="a", size=1) == {"url": "a", "size": 1}
+    async with cls().current(url="a", size=1) as c1, cls().current(url="a", size=2) as c2:
+        assert c1 is not c2  # size is identity for the base -> a separate pool
+
+
+async def test_identity_shares_pool_across_build_options():
+    # Same identity, same build options: one pooled client, reused (identical
+    # re-request shares the entry).
+    cls = _make_identity_client_cls()
+    async with cls().current(url="a", size=1) as c1, cls().current(url="a", size=1) as c2:
+        assert c1 is c2
+    assert cls.created == 1
+
+
+async def test_conflicting_build_options_for_one_identity_raise_naming_both():
+    # Same identity, different build options: a configuration conflict raised loudly,
+    # naming both the recorded and the requested option sets — never a second pool.
+    cls = _make_identity_client_cls()
+    async with cls().current(url="a", size=1):
+        with pytest.raises(ValueError, match="build options") as excinfo:
+            async with cls().current(url="a", size=2):
+                pass
+    message = str(excinfo.value)
+    assert "size" in message
+    assert "1" in message
+    assert "2" in message
+    assert cls.created == 1  # the conflicting request never built a second client
+
+
+async def test_fresh_bypasses_the_conflict_guard():
+    # The fresh path builds outside the cache, so two fresh clients with the same
+    # identity and different build options each build independently — no conflict.
+    cls = _make_identity_client_cls()
+    async with (
+        client_ctx(cls, fresh=True, url="a", size=1) as c1,
+        client_ctx(cls, fresh=True, url="a", size=2) as c2,
+    ):
+        assert c1 is not c2
+    assert cls.created == 2
     assert cls.closed == 2

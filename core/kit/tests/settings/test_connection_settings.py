@@ -167,6 +167,8 @@ class TestPostgresConnectionSettings:
             "dsn": "postgresql://postgres:@localhost:5432/postgres?connect_timeout=10&options=-c%20statement_timeout%3D60000",
             "min_size": 1,
             "max_size": 4,
+            # A passenger for the pool name, not identity; the unprefixed base carries none.
+            "env_prefix": "",
         }
         json.dumps(kwargs)
 

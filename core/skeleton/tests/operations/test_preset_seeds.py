@@ -84,7 +84,7 @@ def seed_locks(monkeypatch) -> FakeAdvisoryLocks:
     so the host env is set too; the fake never connects to it."""
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "offline.invalid")
     locks = FakeAdvisoryLocks()
-    monkeypatch.setattr(locks_module, "client_ctx", locks.client_ctx)
+    monkeypatch.setattr(locks_module, "pinned_connection", locks.pinned_connection)
     return locks
 
 

@@ -24,8 +24,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import pinned_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db.discovery import SKELETON_COMPONENT
@@ -60,12 +59,8 @@ async def advisory_name_lock(namespace: int, name: str) -> AsyncIterator[None]:
     the lock connection is what a configured store means, and an unconfigured one
     fails loudly here rather than being silently skipped.
     """
-    kwargs = component_store_settings(SKELETON_COMPONENT).client_kwargs()
-    kwargs["min_size"] = 1
-    kwargs["max_size"] = 1
     async with (
-        client_ctx(PostgresClient, fresh=True, **kwargs) as pool,
-        pool.connection() as conn,
+        pinned_connection(component_store_settings(SKELETON_COMPONENT)) as conn,
         conn.transaction(),
     ):
         await conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (namespace, _name_lock_key(name)))

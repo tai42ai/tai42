@@ -1,7 +1,7 @@
 """An in-process stand-in for PostgreSQL transaction-scoped advisory locks.
 
 One :class:`asyncio.Lock` per key, acquired by the ``pg_advisory_xact_lock`` statement
-and released when the holder's connection context exits — the scope the real
+and released when the holder's pinned connection context exits — the scope the real
 transaction-scoped lock has. ``contended`` is set the moment an acquire has to WAIT,
 which is how a test observes that a second caller is serialized behind the first rather
 than running through the same window.
@@ -12,8 +12,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-from tai42_kit.clients.impl.postgres import PostgresClient
-
 
 class FakeAdvisoryLocks:
     def __init__(self) -> None:
@@ -21,10 +19,12 @@ class FakeAdvisoryLocks:
         self.contended = asyncio.Event()
 
     @asynccontextmanager
-    async def client_ctx(self, client_cls, settings=None, **kwargs):
-        if client_cls is not PostgresClient:
-            raise AssertionError(f"unexpected client_cls in fake: {client_cls!r}")
-        yield _FakeLockPool(self)
+    async def pinned_connection(self, settings=None):
+        conn = _FakeLockConn(self)
+        try:
+            yield conn
+        finally:
+            conn.release_all()
 
     async def acquire(self, key: tuple[int, int]) -> asyncio.Lock:
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -32,19 +32,6 @@ class FakeAdvisoryLocks:
             self.contended.set()
         await lock.acquire()
         return lock
-
-
-class _FakeLockPool:
-    def __init__(self, locks: FakeAdvisoryLocks) -> None:
-        self._locks = locks
-
-    @asynccontextmanager
-    async def connection(self):
-        conn = _FakeLockConn(self._locks)
-        try:
-            yield conn
-        finally:
-            conn.release_all()
 
 
 class _FakeLockConn:
