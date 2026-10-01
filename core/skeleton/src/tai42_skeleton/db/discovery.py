@@ -331,17 +331,81 @@ def _manifest_loaded_modules(manifest: Manifest) -> list[str]:
     ]
 
 
+def _distributions_for_top_level(top_level: str) -> list[str]:
+    """The distribution names a top-level import package maps to, de-duplicated.
+
+    From ``importlib.metadata.packages_distributions()`` — a metadata read that NEVER
+    imports the package. A namespace package shared by several distributions lists each;
+    an editable or repeated install can list the same distribution twice, so the result
+    is de-duplicated on the normalized name while keeping first-seen order.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for dist_name in importlib.metadata.packages_distributions().get(top_level, []):
+        normalized = _normalize_dist(dist_name)
+        if normalized not in seen:
+            seen.add(normalized)
+            ordered.append(dist_name)
+    return ordered
+
+
+def _distribution_spec_file(dist_name: str, top_level: str) -> importlib.metadata.PackagePath | None:
+    """The ``<top_level>/tai-plugin.yml`` file a distribution packages, or ``None``.
+
+    Located among the distribution's recorded files (``Distribution.files``) — never by
+    importing it. Returns the ``PackagePath``, which the caller reads off the recorded
+    install location; a distribution that ships no such file (a dependency, or a
+    distribution whose namespace package lives elsewhere) yields ``None``.
+    """
+    for file in importlib.metadata.distribution(dist_name).files or []:
+        if file.name == PLUGIN_SPEC_FILENAME and file.parts[:-1] == (top_level,):
+            return file
+    return None
+
+
+def _manifest_module_spec(module: str) -> PluginSpec | None:
+    """The ``PluginSpec`` a manifest-loaded module's distribution ships, resolved import-free.
+
+    Resolved from installed metadata WITHOUT importing the module or its package.
+    The module's top-level import name is mapped to its distribution(s) via
+    ``importlib.metadata.packages_distributions()`` (a metadata read, never an import);
+    the first mapped distribution that packages ``<top_level>/tai-plugin.yml`` has that
+    file read straight off its recorded files. ``None`` when the top-level maps to no
+    distribution, or no mapped distribution ships the spec (an operator-authored
+    module) — the same quiet no-spec outcome the manifest source relies on. A spec that
+    EXISTS but is malformed, or whose recorded file cannot be read, is a loud
+    :class:`~tai42_kit.db.MigrationDiscoveryError` naming the distribution.
+    """
+    top_level = module.partition(".")[0]
+    for dist_name in _distributions_for_top_level(top_level):
+        spec_file = _distribution_spec_file(dist_name, top_level)
+        if spec_file is None:
+            continue
+        try:
+            return parse_plugin_spec(spec_file.read_binary(), source=f"{top_level}/{PLUGIN_SPEC_FILENAME}")
+        except (OSError, PluginSpecLoadError, ValidationError) as exc:
+            raise MigrationDiscoveryError(
+                f"invalid plugin spec packaged in distribution {dist_name!r} at "
+                f"{top_level}/{PLUGIN_SPEC_FILENAME}: {exc}"
+            ) from exc
+    return None
+
+
 def _collect_manifest_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
     """The chains the effective manifest LOADS, as source slots keyed ``manifest:{dist}``.
 
     The effective manifest is resolved exactly as boot resolves it —
     ``Manifest.model_validate(config_manager.read_manifest())`` — so the runner enumerates
     the same modules the booted deployment imports and gates on. Each loaded module is
-    mapped to the ``tai-plugin.yml`` packaged beside its top-level import package; a module
-    that ships no spec (an operator-authored deployment module) yields nothing. The chain
-    resolves from installed metadata, so the slot carries NO package root (the manifest
-    module is importable in this process, unlike a prefix-only install). One slot per
-    distribution: several modules of one plugin collapse onto its distribution key.
+    mapped to the ``tai-plugin.yml`` packaged beside its top-level import package WITHOUT
+    importing the module: its top-level import name is resolved to a distribution through
+    installed metadata and the packaged spec is read off that distribution's recorded files
+    (:func:`_manifest_module_spec`). Importing a consumer's package runs its module-level
+    code (which may touch the unbound app), so the CLI must never import it to discover its
+    chain. A module that ships no spec (an operator-authored deployment module) yields
+    nothing. The chain resolves from installed metadata, so the slot carries NO package root
+    (the manifest module is installed in this process, unlike a prefix-only install). One
+    slot per distribution: several modules of one plugin collapse onto its distribution key.
 
     ``tai db migrate``/``status``/``doctor`` are manifest-OPTIONAL: when no manifest file
     exists, ``read_manifest`` raises :class:`FileNotFoundError` and this source contributes
@@ -359,7 +423,6 @@ def _collect_manifest_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
     """
     import yaml
 
-    from tai42_skeleton.app.mount_map import _packaged_spec_for_module
     from tai42_skeleton.config import ConfigManagerFactory
     from tai42_skeleton.manifest import Manifest
 
@@ -378,7 +441,7 @@ def _collect_manifest_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
         raise MigrationDiscoveryError(f"{target} is not a valid manifest: {exc}") from exc
     sources: dict[str, tuple[PluginSpec, Path | None]] = {}
     for module in _manifest_loaded_modules(manifest):
-        spec = _packaged_spec_for_module(module)
+        spec = _manifest_module_spec(module)
         if spec is None or spec.package is None:
             continue
         sources[f"manifest:{_normalize_dist(spec.package)}"] = (spec, None)

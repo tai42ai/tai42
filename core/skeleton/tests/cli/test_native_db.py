@@ -458,9 +458,9 @@ def _wire_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) -> None:
     lets the migrator identity resolve without a connection; the store is faked empty and
     only each test's PG-touching runner (``migration_status`` / ``apply_migrations``) is
     stubbed."""
-    from tai42_skeleton.app import mount_map
     from tai42_skeleton.config import ConfigManagerFactory
     from tai42_skeleton.db import discover_all_migration_chains, discover_plugin_chains
+    from tai42_skeleton.db import discovery as db_discovery
     from tai42_skeleton.marketplace import prefix as mp_prefix
     from tai42_skeleton.marketplace import store as mp_store
 
@@ -480,8 +480,8 @@ def _wire_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda: SimpleNamespace(read_manifest=lambda: {"lifecycle_modules": ["tai42_widget.lifecycle"]}),
     )
     monkeypatch.setattr(
-        mount_map,
-        "_packaged_spec_for_module",
+        db_discovery,
+        "_manifest_module_spec",
         lambda name: _widget_spec() if name == "tai42_widget.lifecycle" else None,
     )
 
