@@ -421,6 +421,43 @@ def test_read_mode_missing_file_fails_loudly(tmp_path: Path):
         api_gate._read_mode(tmp_path / "api-gate.yml")
 
 
+# --------------------------------------------------------------- voided tags read
+
+
+def test_read_voided_tags_absent_is_empty(tmp_path: Path):
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: label-honesty\n")
+    assert api_gate._read_voided_tags(config) == {}
+
+
+def test_read_voided_tags_maps_tag_to_reason(tmp_path: Path):
+    config = tmp_path / "api-gate.yml"
+    config.write_text(
+        "mode: label-honesty\nvoided_tags:\n  - tag: widget-v2.1.0\n    reason: release job failed before publishing\n"
+    )
+    assert api_gate._read_voided_tags(config) == {"widget-v2.1.0": "release job failed before publishing"}
+
+
+def test_read_voided_tags_missing_file_fails_loudly(tmp_path: Path):
+    with pytest.raises(SystemExit):
+        api_gate._read_voided_tags(tmp_path / "api-gate.yml")
+
+
+def test_read_voided_tags_malformed_entry_fails_loudly(tmp_path: Path):
+    # An entry missing 'reason' is not a complete {tag, reason} mapping.
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: label-honesty\nvoided_tags:\n  - tag: widget-v2.1.0\n")
+    with pytest.raises(SystemExit):
+        api_gate._read_voided_tags(config)
+
+
+def test_read_voided_tags_non_list_fails_loudly(tmp_path: Path):
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: label-honesty\nvoided_tags: widget-v2.1.0\n")
+    with pytest.raises(SystemExit):
+        api_gate._read_voided_tags(config)
+
+
 # --------------------------------------------------------------- module discovery
 
 
@@ -482,6 +519,93 @@ def test_previous_tag(tmp_path: Path):
     assert api_gate._previous_tag("widget", "1.1.0", tmp_path) == "widget-v1.0.0"
     assert api_gate._previous_tag("widget", "0.2.0", tmp_path) == "widget-v0.1.0"
     assert api_gate._previous_tag("widget", "0.1.0", tmp_path) is None
+
+
+def test_previous_tag_skips_voided(tmp_path: Path):
+    # A voided tag is skipped when picking the baseline: the next-lower real tag wins,
+    # so a fix-forward above a dead tag diffs against the last published release. The
+    # voided set is sourced from the gate config at the seam, not passed by the caller.
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    for v in ("2.0.6", "2.1.0"):
+        _git(tmp_path, "tag", f"widget-v{v}")
+    assert api_gate._previous_tag("widget", "2.1.1", tmp_path) == "widget-v2.1.0"
+    config = tmp_path / "api-gate.yml"
+    config.write_text(
+        "mode: label-honesty\nvoided_tags:\n  - tag: widget-v2.1.0\n    reason: release job failed before publishing\n"
+    )
+    assert api_gate._previous_tag("widget", "2.1.1", tmp_path, config_path=config) == "widget-v2.0.6"
+
+
+def test_previous_tag_reads_voids_from_default_config(tmp_path: Path):
+    # With no config_path given, the default <repo_root>/.github/api-gate.yml is read,
+    # so the boot-gate callers that pass only (package, version, repo_root) are covered.
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    for v in ("2.0.6", "2.1.0"):
+        _git(tmp_path, "tag", f"widget-v{v}")
+    gh = tmp_path / ".github"
+    gh.mkdir()
+    (gh / "api-gate.yml").write_text(
+        "mode: label-honesty\nvoided_tags:\n  - tag: widget-v2.1.0\n    reason: release job failed before publishing\n"
+    )
+    assert api_gate._previous_tag("widget", "2.1.1", tmp_path) == "widget-v2.0.6"
+
+
+def test_previous_tag_absent_config_means_no_voids(tmp_path: Path):
+    # The boot-gate callers run against trees that carry no api-gate config; an absent
+    # config means "no voids" and must never crash the lookup.
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    for v in ("2.0.6", "2.1.0"):
+        _git(tmp_path, "tag", f"widget-v{v}")
+    missing = tmp_path / "nope.yml"
+    assert not missing.exists()
+    assert api_gate._previous_tag("widget", "2.1.1", tmp_path, config_path=missing) == "widget-v2.1.0"
+
+
+def test_previous_tag_malformed_config_fails_loudly(tmp_path: Path):
+    # A present but malformed config still raises through the seam — a bad voided record
+    # is never swallowed on the way to a baseline.
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    _git(tmp_path, "tag", "widget-v2.1.0")
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: label-honesty\nvoided_tags:\n  - tag: widget-v2.1.0\n")
+    with pytest.raises(SystemExit):
+        api_gate._previous_tag("widget", "2.1.1", tmp_path, config_path=config)
+
+
+def test_voided_tags_existing_tag_ok(tmp_path: Path):
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    _git(tmp_path, "tag", "widget-v2.1.0")
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: label-honesty\nvoided_tags:\n  - tag: widget-v2.1.0\n    reason: dead tag\n")
+    assert api_gate._voided_tags(config, tmp_path) == {"widget-v2.1.0": "dead tag"}
+
+
+def test_voided_tags_missing_tag_fails_loudly(tmp_path: Path):
+    # A voided entry naming a tag that does not exist in the repo is a stale/typo'd
+    # record and must fail the gate loudly rather than be silently ignored.
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("1")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    config = tmp_path / "api-gate.yml"
+    config.write_text("mode: label-honesty\nvoided_tags:\n  - tag: widget-v9.9.9\n    reason: never existed\n")
+    with pytest.raises(SystemExit):
+        api_gate._voided_tags(config, tmp_path)
 
 
 # ---------------------------------------------------------- griffe end-to-end run

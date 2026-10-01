@@ -367,16 +367,17 @@ def _set_manifest(monkeypatch: pytest.MonkeyPatch, document: dict) -> None:
 def _map_module_to_skeleton_chain(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
     """Resolve ``module``'s packaged spec to the installed ``tai42-skeleton`` chain.
 
-    The real packaged-spec resolver is exercised by the mount-map tests; here the manifest
-    source's fold is exercised against a spec that resolves to a real installed
-    distribution (``tai42-skeleton``'s own ``sql/migrations``), so no live plugin install
-    is needed. A module other than ``module`` ships no spec (an operator-authored module).
+    The import-free metadata resolver is exercised end to end by the fake-distribution test;
+    here the manifest source's fold is exercised against a spec that resolves to a real
+    installed distribution (``tai42-skeleton``'s own ``sql/migrations``), so no live plugin
+    install is needed. A module other than ``module`` ships no spec (an operator-authored
+    module).
     """
-    from tai42_skeleton.app import mount_map
+    from tai42_skeleton.db import discovery
 
     monkeypatch.setattr(
-        mount_map,
-        "_packaged_spec_for_module",
+        discovery,
+        "_manifest_module_spec",
         lambda name: _spec(package="tai42-skeleton", migrations="sql/migrations") if name == module else None,
     )
 
@@ -475,12 +476,12 @@ async def test_prefix_wins_over_manifest_for_same_distribution(monkeypatch: pyte
     _configure_prefix(monkeypatch, tmp_path)
     _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
     # The manifest maps the module to the SAME distribution the prefix carries.
-    from tai42_skeleton.app import mount_map
+    from tai42_skeleton.db import discovery
 
     def _resolver(name: str):
         return _spec(package="tai42-widget", migrations="migrations") if name == "tai42_widget.lifecycle" else None
 
-    monkeypatch.setattr(mount_map, "_packaged_spec_for_module", _resolver)
+    monkeypatch.setattr(discovery, "_manifest_module_spec", _resolver)
 
     entries = await installed_plugin_entries()
 
@@ -537,6 +538,153 @@ async def test_malformed_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(MigrationDiscoveryError, match="not a valid manifest"):
         await discover_plugin_chains()
+
+
+# --- manifest spec resolution is import-free ------------------------------
+
+
+_BOOM_SPEC_YAML = """\
+spec_version: 1
+namespace: tai42
+name: boom
+package: tai42-boom
+version: 1.0.0
+description: A manifest-loaded test plugin whose package raises on import
+license: Apache-2.0
+contract: ">=0.1,<1.0"
+categories: [dev]
+provides:
+  - kind: tool
+    name: b
+    module: tai42_boom.tools
+    description: d
+migrations: migrations
+"""
+
+
+def _install_dist_on_syspath(
+    monkeypatch: pytest.MonkeyPatch,
+    site: Path,
+    *,
+    dist_name: str,
+    top_level: str,
+    spec_yaml: str,
+    init_body: str,
+) -> None:
+    """Lay a wheel-shaped distribution into ``site`` and put ``site`` on ``sys.path``.
+
+    The distribution packages ``<top_level>/tai-plugin.yml`` and a chain directory and
+    records them in its ``.dist-info`` RECORD, so ``packages_distributions()`` maps the
+    top-level to the distribution and ``Distribution.files`` lists the spec — the import-free
+    metadata path discovery resolves specs through. ``init_body`` is the package
+    ``__init__.py``: set it to raise so any import of the package is a loud test failure.
+    """
+    import importlib
+
+    site.mkdir(parents=True, exist_ok=True)
+    pkg = site / top_level
+    (pkg / "migrations").mkdir(parents=True)
+    (pkg / "__init__.py").write_text(init_body)
+    (pkg / "tai-plugin.yml").write_text(spec_yaml)
+    (pkg / "migrations" / "0001_baseline.sql").write_text("CREATE TABLE boom_items (id integer PRIMARY KEY);\n")
+    _write_dist_info(
+        site,
+        dist_name,
+        "1.0.0",
+        [pkg / "__init__.py", pkg / "tai-plugin.yml", pkg / "migrations" / "0001_baseline.sql"],
+    )
+    monkeypatch.syspath_prepend(str(site))
+    importlib.invalidate_caches()
+
+
+def test_manifest_source_resolves_spec_from_metadata_without_importing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The regression: discovery must map a manifest-loaded module to its packaged
+    # tai-plugin.yml from installed METADATA, never by importing the module's package —
+    # importing a real consumer runs module-level code that touches the unbound app and
+    # raises. The fake distribution's __init__ raises on import; the spec is still resolved
+    # off the recorded files and the package is proven not imported.
+    import sys
+
+    from tai42_skeleton.db.discovery import _collect_manifest_sources
+
+    _install_dist_on_syspath(
+        monkeypatch,
+        tmp_path / "site",
+        dist_name="tai42-boom",
+        top_level="tai42_boom",
+        spec_yaml=_BOOM_SPEC_YAML,
+        init_body="raise RuntimeError('a manifest module must never be imported by discovery')\n",
+    )
+    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_boom.lifecycle"]})
+
+    sources = _collect_manifest_sources()
+
+    assert set(sources) == {"manifest:tai42-boom"}
+    spec, root = sources["manifest:tai42-boom"]
+    assert spec.package == "tai42-boom"
+    assert spec.migrations == "migrations"
+    # The slot carries NO package root: the chain resolves from installed metadata.
+    assert root is None
+    # The proof: the package was never imported while its spec was resolved.
+    assert "tai42_boom" not in sys.modules
+
+
+def test_manifest_module_spec_unmapped_top_level_yields_none() -> None:
+    # A manifest module whose top-level import name maps to no installed distribution
+    # contributes nothing — the same quiet no-spec outcome as an operator-authored module.
+    from tai42_skeleton.db.discovery import _manifest_module_spec
+
+    assert _manifest_module_spec("tai42_no_such_top_level_xyz.mod") is None
+
+
+def test_manifest_module_spec_multi_dist_picks_the_one_shipping_the_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A top-level import name mapping to several distributions (a namespace package) resolves
+    # the distribution that actually ships <top_level>/tai-plugin.yml; the others are skipped.
+    import importlib.metadata as md
+    from types import SimpleNamespace
+
+    from tai42_skeleton.db.discovery import _manifest_module_spec
+
+    class _RecordedFile:
+        def __init__(self, parts: tuple[str, ...], data: bytes) -> None:
+            self.parts = parts
+            self.name = parts[-1]
+            self._data = data
+
+        def read_binary(self) -> bytes:
+            return self._data
+
+    files_by_dist = {
+        "ns-helper": [_RecordedFile(("tai42_ns", "helper.py"), b"")],
+        "ns-plugin": [_RecordedFile(("tai42_ns", "tai-plugin.yml"), _WIDGET_SPEC_YAML.encode())],
+    }
+    monkeypatch.setattr(md, "packages_distributions", lambda: {"tai42_ns": ["ns-helper", "ns-plugin"]})
+    monkeypatch.setattr(md, "distribution", lambda name: SimpleNamespace(files=files_by_dist[name]))
+
+    spec = _manifest_module_spec("tai42_ns.channel")
+
+    assert spec is not None
+    assert spec.package == "tai42-widget"
+
+
+def test_manifest_module_spec_malformed_packaged_spec_is_loud(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A distribution that DOES ship a tai-plugin.yml but a schema-invalid one is a loud
+    # MigrationDiscoveryError naming the distribution — never a silent skip, never a traceback.
+    from tai42_skeleton.db.discovery import _manifest_module_spec
+
+    _install_dist_on_syspath(
+        monkeypatch,
+        tmp_path / "site",
+        dist_name="tai42-badspec",
+        top_level="tai42_badspec",
+        spec_yaml="spec_version: 1\nname: badspec\n",
+        init_body="raise RuntimeError('must not import')\n",
+    )
+
+    with pytest.raises(MigrationDiscoveryError, match="tai42-badspec"):
+        _manifest_module_spec("tai42_badspec.lifecycle")
 
 
 @pytest.mark.usefixtures("_empty_store")

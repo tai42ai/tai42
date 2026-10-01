@@ -6,3 +6,11 @@
 #   strict:        only a major may carry a breaking change, for every version
 #                  (a 0.x package must reach 1.0.0 to break).
 mode: label-honesty  # strict at first public release
+
+# Tags whose release job failed before it published anything: the gate must not
+# baseline a later release against them, because nothing shipped at that version.
+# Each entry is a permanent, reviewable record of a tag that exists in git but was
+# never published; the gate skips it when picking a baseline. A voided entry that
+# names a tag not present in the repo is a stale/typo'd record and fails the gate
+# loudly. Each entry is a {tag, reason} mapping.
+voided_tags: []
