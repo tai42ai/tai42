@@ -194,9 +194,9 @@ def test_delivery_timeout_must_be_tz_aware():
 def test_channel_delivery_shape():
     from tai42_contract.channels import ChannelDelivery
 
-    # The ask delivery path carries the form ``schema``, its per-send ``data`` and
-    # ``pages``, and the question's display ``media`` (full parity with the inbox), but
-    # never a ``template`` — a template is an out-of-window notification send, not a
+    # The ask delivery path carries the form ``schema``, its per-send ``data``, ``pages``
+    # and ``reactions``, and the question's display ``media`` (full parity with the inbox),
+    # but never a ``template`` — a template is an out-of-window notification send, not a
     # question delivery.
     assert set(ChannelDelivery.model_fields) == {
         "interaction_id",
@@ -206,6 +206,7 @@ def test_channel_delivery_shape():
         "schema",
         "data",
         "pages",
+        "reactions",
         "options",
         "media",
         "on_mismatch",
@@ -238,6 +239,44 @@ def test_channel_delivery_carries_form_data_and_pages():
     assert delivery.data.options["color"][0].label == "Red"
     assert delivery.pages is not None
     assert delivery.pages[0].fields == ["color"]
+
+
+def test_channel_delivery_carries_reactions_on_form():
+    from datetime import UTC, datetime
+
+    from tai42_contract.channels import ChannelDelivery
+    from tai42_contract.interactions import FormReactions
+
+    schema = {"type": "object", "properties": {"color": {"type": "string"}}}
+    delivery = ChannelDelivery(
+        interaction_id="i1",
+        question="Pick",
+        answer_format="form",
+        schema=schema,
+        reactions=FormReactions(field_changed=["color"], submitted=True),
+        callback_url="https://x/api/interactions/callback/t",
+        timeout_at=datetime.now(UTC),
+    )
+    assert delivery.reactions is not None
+    assert delivery.reactions.field_changed == ["color"]
+    assert delivery.reactions.submitted is True
+
+
+def test_channel_delivery_rejects_reactions_on_non_form():
+    from datetime import UTC, datetime
+
+    from tai42_contract.channels import ChannelDelivery
+    from tai42_contract.interactions import FormReactions
+
+    with pytest.raises(ValueError, match="carries no form reactions"):
+        ChannelDelivery(
+            interaction_id="i1",
+            question="Hi",
+            answer_format="text",
+            reactions=FormReactions(submitted=True),
+            callback_url="https://x/cb",
+            timeout_at=datetime.now(UTC),
+        )
 
 
 def test_channel_delivery_rejects_form_extras_on_non_form():

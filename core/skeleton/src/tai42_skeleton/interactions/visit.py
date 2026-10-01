@@ -132,7 +132,7 @@ async def visit(
     for iid in (*cancel, *(item.id for item in resume)):
         if iid not in parked:
             raise ParkedEntryGoneError(f"interaction {iid!r} is not parked on this run's subject")
-    _check_resumes(resumes, parked)
+    effective_answers = _check_resumes(resumes, parked)
     _check_takes(takes, parked)
     if extras:
         await _assert_extras_declared(target_name, extras)
@@ -142,7 +142,9 @@ async def visit(
 
     # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
     if resumes:
-        result = await _drive_resumes(store, settings, ctx, candidates, resumes, parked, receives_outcome)
+        result = await _drive_resumes(
+            store, settings, ctx, candidates, resumes, parked, receives_outcome, effective_answers
+        )
         kind, value, asks, suspended = await _normalise(store, settings, candidates, result)
         return VisitOutcome(
             action="resumed", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
@@ -162,15 +164,21 @@ async def visit(
 # --- the pre-check ---------------------------------------------------------------------
 
 
-def _check_resumes(resumes: list[ResumeItem], parked: dict[str, dict[str, Any]]) -> None:
+def _check_resumes(resumes: list[ResumeItem], parked: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Raise for any resume item that is not a live ``to="caller"``, ``asking`` ask of ONE held step.
 
     Every entry exists (the id guard already ran). A ``to="user"`` id, a payload on a
     ``finished``/``failed`` entry, resume items spanning two steps/runs, or a payload the ask's
     declared answer format rejects each raise here BEFORE anything is cancelled or resumed.
+
+    Returns the EFFECTIVE answer per resume id — what ``check_answer`` returns for the ask's
+    format (identical to the raw payload for every format but FORM, whose conditionally-hidden
+    fields are dropped here once). The resume drive records and delivers this value, so every
+    answer door records the same effective answer.
     """
+    effective_answers: dict[str, Any] = {}
     if not resumes:
-        return
+        return effective_answers
     steps: set[tuple[str | None, tuple[str, ...] | None]] = set()
     for item in resumes:
         entry = parked[item.id]
@@ -187,7 +195,7 @@ def _check_resumes(resumes: list[ResumeItem], parked: dict[str, dict[str, Any]])
             raise ParkedEntryGoneError(f"interaction {item.id!r} is no longer asking (status {status!r})")
         asked_by = tuple(entry["asked_by"]) if entry.get("asked_by") is not None else None
         steps.add((entry.get("group_id"), asked_by))
-        check_answer(
+        effective_answers[item.id] = check_answer(
             QuestionFormat(
                 answer_format=AnswerFormat(entry["answer_format"]), format_payload=entry.get("format_payload")
             ),
@@ -197,6 +205,7 @@ def _check_resumes(resumes: list[ResumeItem], parked: dict[str, dict[str, Any]])
         raise VisitRequestError(
             "multi_run", "resume items must belong to ONE step of ONE held run (same group_id and asked_by)"
         )
+    return effective_answers
 
 
 def _check_takes(takes: list[TakeItem], parked: dict[str, dict[str, Any]]) -> None:
@@ -259,18 +268,20 @@ async def _drive_resumes(
     resumes: list[ResumeItem],
     parked: dict[str, dict[str, Any]],
     receives_outcome: bool,
+    effective_answers: dict[str, Any],
 ) -> Any:
     """Claim each sibling answer and drive it inline through the ONE chokepoint; return the LAST outcome.
 
     The parallel siblings of one step buffer until the last resolves: each drive but the last returns
     a ``ResumeBuffered``; the last returns the step's terminal (or a re-park). The last drive's return
-    is what the visit normalises.
+    is what the visit normalises. ``effective_answers`` maps each resume id to the answer
+    ``check_answer`` returned (a FORM's hidden fields dropped), which each drive records and delivers.
     """
     if store is None:
         raise ParkedEntryGoneError("no interactions store is configured")
     result: Any = None
     for item in resumes:
-        result = await _resume_one(store, settings, ctx, candidates, item, receives_outcome)
+        result = await _resume_one(store, settings, ctx, candidates, item, receives_outcome, effective_answers[item.id])
         # The answer was claimed and its continuation driven: record this id on the
         # ambient run record's resumed-interaction list. A pre-check refusal raises
         # before ever reaching here, so nothing is recorded for a refused visit.
@@ -285,6 +296,7 @@ async def _resume_one(
     candidates: SubjectCandidates | None,
     item: ResumeItem,
     receives_outcome: bool,
+    answer: Any,
 ) -> Any:
     """Atomically claim ``item``'s answer and drive its continuation inline through the chokepoint.
 
@@ -293,7 +305,9 @@ async def _resume_one(
     :class:`ParkedEntryGoneError`. The continuation then runs INLINE, awaited, through
     :func:`drive_and_deliver`, which binds ``resume_origin`` unconditionally and settles delivery by
     ``receives_outcome``. The deposited state context is MIXED — the resumer's door/turn/actor with
-    the PARK's subject candidates.
+    the PARK's subject candidates. ``answer`` is the EFFECTIVE answer ``check_answer`` returned (a
+    FORM's hidden fields dropped) — recorded and delivered, so a resumed run receives the same
+    effective answer every other answer door records.
     """
     async with client_ctx(RedisClient, settings.redis) as r:
         state = await store.get_state(r, item.id)
@@ -302,7 +316,7 @@ async def _resume_one(
         request = state.request
         response = InteractionResponse(
             interaction_id=item.id,
-            answer=item.payload,
+            answer=answer,
             answered_by=_RESUMED_BY_CALLER,
             answered_at=_now(),
         )
@@ -328,7 +342,7 @@ async def _resume_one(
         fingerprint=fingerprint,
         tool=request.continuation_tool or "",
         interaction_id=item.id,
-        answer=item.payload,
+        answer=answer,
         park_context=_mixed_context(ctx, park_candidates, request),
         park_asked_by=request.asked_by,
         delivery=request.delivery,

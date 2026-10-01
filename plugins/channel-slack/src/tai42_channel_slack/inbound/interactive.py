@@ -23,12 +23,14 @@ from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
-from tai42_channel_slack.channel import open_modal_view
+from tai42_channel_slack.channel import open_modal_view, update_modal_view
 from tai42_channel_slack.correlation import get_form_record, slack_form_correlation_store
 from tai42_channel_slack.forms import (
+    FIELD_ACTION_ID,
     FORM_OPEN_ACTION_ID,
     FORM_SUBMIT_CALLBACK_ID,
     build_modal_view,
+    decode_private_metadata,
     extract_answer,
     first_field_name,
     is_declared_field,
@@ -48,6 +50,11 @@ _MODAL_RETRY_TEXT = "That answer wasn't accepted. Please check your entries and 
 # Shown in the modal when the question's form record is gone (TTL lapsed between
 # the message and the submission, or the door reports the ticket terminally gone).
 _FORM_EXPIRED_TEXT = "This question is no longer available; it has expired."
+
+# Shown in the modal (as a banner on a re-render, or an inline error on submit) when a form
+# reaction cannot be computed — the participant's surface, paired with a loud operator log.
+# Never a stale or silent value.
+_REACTION_FAILURE_TEXT = "Sorry, this form could not be updated right now. Please try again."
 
 
 @tai42_app.http.custom_route(
@@ -151,6 +158,8 @@ async def _handle_block_actions(payload: dict[str, Any]) -> Response:
     action_id = action.get("action_id")
     if action_id == FORM_OPEN_ACTION_ID:
         return await _open_form_modal(payload, action)
+    if action_id == FIELD_ACTION_ID:
+        return await _handle_form_field_action(payload, action)
     if isinstance(action_id, str) and is_option_tap(action_id):
         return await _resolve_option_tap(payload, action)
     return JSONResponse({"status": "ignored"})
@@ -220,8 +229,8 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
     trigger_id = payload.get("trigger_id")
     if not isinstance(trigger_id, str) or not trigger_id:
         raise ValueError("block_actions payload carried no trigger_id")
-    # The per-send prefill/choices and step layout reserved at delivery are what this
-    # modal renders; absent (a plain ask) render the plain modal.
+    # The per-send prefill/choices, step layout (display/review) and reaction triggers reserved
+    # at delivery are what this modal renders; absent (a plain ask) render the plain modal.
     data = record.get("data") or {}
     view = build_modal_view(
         interaction_id,
@@ -230,9 +239,153 @@ async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> R
         data.get("values"),
         data.get("options"),
         record.get("pages"),
+        reactions=record.get("reactions"),
     )
     await open_modal_view(trigger_id, view)
     return JSONResponse({"status": "opened"})
+
+
+def _normalize_options(option_list: list[Any]) -> list[dict[str, Any]]:
+    """A reaction's replaced choice list as the ``{value, label?}`` shape the modal renders from."""
+    normalized: list[dict[str, Any]] = []
+    for option in option_list:
+        value = option["value"]
+        normalized.append({"value": value, **({"label": option["label"]} if option.get("label") else {})})
+    return normalized
+
+
+async def _run_field_reaction(
+    interaction_id: str,
+    field: str,
+    entered: dict[str, Any],
+    merged_options: dict[str, Any],
+    meta_options: dict[str, Any],
+    merged_display: dict[str, Any],
+    meta_display: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Run the consumer's reaction for a changed field through the ONE reaction chokepoint.
+
+    Calls ``tai42_app.interactions.react`` with the values filled so far and folds its validated
+    update into the re-render: set ``values`` are returned to overlay the render values; replaced
+    option lists and filled display slots accumulate into both the render maps and the metadata
+    carriers (so they survive the next re-render); per-field ``errors`` come back to render as
+    context lines. A handler failure surfaces LOUDLY — a logged exception plus a banner notice —
+    never a stale or silent value. Returns ``(values_update, field_errors, banner)``. ``entered``
+    (the values passed to the handler) is never mutated.
+    """
+    event = {"kind": "field_changed", "field": field}
+    try:
+        update = await tai42_app.interactions.react(interaction_id, event, entered)
+    except Exception:
+        logger.exception("slack interactive: reaction for form %s field %r failed", interaction_id, field)
+        return {}, {}, _REACTION_FAILURE_TEXT
+    update = update or {}
+    for name, option_list in (update.get("options") or {}).items():
+        normalized = _normalize_options(option_list)
+        merged_options[name] = normalized
+        meta_options[name] = normalized
+    for slot, value in (update.get("display") or {}).items():
+        merged_display[slot] = value
+        meta_display[slot] = value
+    return update.get("values") or {}, update.get("errors") or {}, None
+
+
+async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, Any]) -> Response:
+    """Re-render an open form modal on a reacting/conditional field change via ``views.update``.
+
+    The changed field's block carried ``dispatch_action`` because it is a reaction trigger
+    and/or a field another property's ``visibleWhen`` depends on.
+    The current entries ride the payload's ``view.state.values``; the reserved record carries the
+    schema/pages/options/reactions, and the accumulated reaction state rides ``private_metadata``.
+    When the field triggers a consumer reaction, its update is folded in (values/options/errors/
+    display); the conditional show/hide is re-evaluated here (platform logic, never a consumer
+    call) because the rebuilt blocks hide the fields their predicate hides for the new values.
+    A view the plugin did not stamp, or whose record lapsed, is acked without a re-render.
+    """
+    view = payload.get("view")
+    if not isinstance(view, dict):
+        return JSONResponse({"status": "ignored"})
+    try:
+        interaction_id, meta_options, meta_display = decode_private_metadata(view.get("private_metadata"))
+    except ValueError:
+        # A field dispatch from a view this plugin did not stamp: nothing to re-render.
+        return JSONResponse({"status": "ignored"})
+    record = await get_form_record(interaction_id)
+    if record is None:
+        logger.info("slack interactive: form record %s missing or expired; no re-render", interaction_id)
+        return JSONResponse({"status": "ignored"})
+    view_id = view.get("id")
+    if not isinstance(view_id, str) or not view_id:
+        raise ValueError("block_actions view carried no id")
+    view_hash = view.get("hash")
+    schema = record["schema"]
+    entered = extract_answer(schema, _state_values(view))
+    base_options = (record.get("data") or {}).get("options") or {}
+    reactions = record.get("reactions")
+    merged_options: dict[str, Any] = {**base_options, **meta_options}
+    merged_display: dict[str, Any] = dict(meta_display)
+    field_errors: dict[str, Any] = {}
+    banner: str | None = None
+    values_update: dict[str, Any] = {}
+    changed = action.get("block_id")
+    if reactions and isinstance(changed, str) and changed in (reactions.get("field_changed") or []):
+        values_update, field_errors, banner = await _run_field_reaction(
+            interaction_id, changed, entered, merged_options, meta_options, merged_display, meta_display
+        )
+    render_values = {**entered, **values_update}
+    view_out = build_modal_view(
+        interaction_id,
+        record["question"],
+        schema,
+        render_values,
+        merged_options,
+        record.get("pages"),
+        reactions=reactions,
+        display_values=merged_display,
+        field_errors=field_errors,
+        metadata_options=meta_options or None,
+        metadata_display=meta_display or None,
+    )
+    if banner is not None:
+        view_out["blocks"].insert(1, {"type": "section", "text": {"type": "mrkdwn", "text": banner}})
+    await update_modal_view(view_id, view_hash if isinstance(view_hash, str) else None, view_out)
+    return JSONResponse({"status": "updated"})
+
+
+def _submitted_errors_response(schema: dict[str, Any], errors: dict[str, Any], first_block: str) -> JSONResponse:
+    """A ``view_submission`` errors response pinning each reaction error under its field's block.
+
+    A declared field pins under its own block_id; an error naming an unknown field falls back to
+    the first field (as a door-side rejection does), so no reaction error is ever silently dropped.
+    """
+    pinned: dict[str, str] = {}
+    for field, message in errors.items():
+        block = field if is_declared_field(schema, field) else first_block
+        pinned[block] = str(message)
+    return JSONResponse({"response_action": "errors", "errors": pinned})
+
+
+async def _run_submitted_reaction(
+    interaction_id: str, answer: dict[str, Any], schema: dict[str, Any], first_block: str
+) -> JSONResponse | None:
+    """Run the consumer's ``submitted`` check through the ONE reaction chokepoint.
+
+    Returns a ``response_action: "errors"`` response (keeping the modal open) when the check
+    reports per-field errors or itself fails — a handler failure surfaces LOUDLY as an inline
+    error plus a logged exception, never a silently accepted answer. Returns ``None`` when the
+    check passes, having folded any finalized values into ``answer`` for the forward.
+    """
+    try:
+        update = await tai42_app.interactions.react(interaction_id, {"kind": "submitted"}, answer)
+    except Exception:
+        logger.exception("slack interactive: submitted reaction for form %s failed", interaction_id)
+        return _errors_response(first_block, _REACTION_FAILURE_TEXT)
+    update = update or {}
+    errors = update.get("errors") or {}
+    if errors:
+        return _submitted_errors_response(schema, errors, first_block)
+    answer.update(update.get("values") or {})
+    return None
 
 
 async def _handle_view_submission(payload: dict[str, Any]) -> Response:
@@ -255,9 +408,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     view = payload.get("view")
     if not isinstance(view, dict) or view.get("callback_id") != FORM_SUBMIT_CALLBACK_ID:
         return JSONResponse({"status": "ignored"})
-    interaction_id = view.get("private_metadata")
-    if not isinstance(interaction_id, str) or not interaction_id:
-        raise ValueError("tai42_form_submit view carried no private_metadata")
+    interaction_id, _, _ = decode_private_metadata(view.get("private_metadata"))
     state_values = _state_values(view)
     record = await get_form_record(interaction_id)
     if record is None:
@@ -266,6 +417,15 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     schema = record["schema"]
     answer = extract_answer(schema, state_values)
     first_block = first_field_name(schema)
+
+    reactions = record.get("reactions")
+    if reactions and reactions.get("submitted"):
+        # The consumer's final check runs on submit (it owns membership for any reaction-fed
+        # choice list). Its per-field errors keep the modal open as inline errors; a clean
+        # check may finalize values before the answer is forwarded.
+        submitted = await _run_submitted_reaction(interaction_id, answer, schema, first_block)
+        if submitted is not None:
+            return submitted
 
     user = payload.get("user")
     user_id = user.get("id") if isinstance(user, dict) and isinstance(user.get("id"), str) else None

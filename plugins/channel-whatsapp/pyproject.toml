@@ -37,6 +37,9 @@ dependencies = [
     # SecretStr for the credentials and the settings base/config.
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
+    # AES-128-GCM + RSA-2048 OAEP-SHA256 for the reacting-form Flow data endpoint's
+    # request/response encryption (the vendor's transport requirement).
+    "cryptography>=44",
 ]
 
 [project.urls]

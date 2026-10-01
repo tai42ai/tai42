@@ -134,9 +134,15 @@ async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send
     }
     data = FormData(values={"note": "hi"}, options={"tier": [FormOption(value="g", label="Gold")]})
     pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
-    # The publish key carries the option-bearing set — here ``{"tier"}`` from the ask's data.
+    # The publish key carries the option-bearing set — here ``{"tier"}`` from the ask's data —
+    # and the pages exactly as the channel renders them (each with its input kind + empty display).
     _, ask_hash = build_form_flow(
-        schema, [{"title": "Plan", "fields": ["tier"]}, {"title": "Say", "fields": ["note"]}], {"tier"}
+        schema,
+        [
+            {"title": "Plan", "fields": ["tier"], "kind": "input", "display": []},
+            {"title": "Say", "fields": ["note"], "kind": "input", "display": []},
+        ],
+        {"tier"},
     )
 
     # First send: cache miss → create + publish + send. Second send: cache hit → send only.
@@ -526,7 +532,12 @@ async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redi
     data = FormData(values={"note": "hi"}, options={"tier": [FormOption(value="g", label="Gold")]})
     pages = [FormPage(title="Plan", fields=["tier"]), FormPage(title="Say", fields=["note"])]
     _, schema_hash = build_form_flow(
-        schema, [{"title": "Plan", "fields": ["tier"]}, {"title": "Say", "fields": ["note"]}], {"tier"}
+        schema,
+        [
+            {"title": "Plan", "fields": ["tier"], "kind": "input", "display": []},
+            {"title": "Say", "fields": ["note"], "kind": "input", "display": []},
+        ],
+        {"tier"},
     )
     fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-prefill"
     fake_httpx.responses.append(_accepted("wamid.FLOW"))
@@ -546,3 +557,108 @@ async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redi
 
 async def test_channel_advertises_form_notification_capability():
     assert WhatsAppChannel.supports_form_notifications is True
+
+
+# --- Reacting form delivery (endpoint-driven Flow + key provisioning gate) ---------
+
+_REACT_SCHEMA = {
+    "type": "object",
+    "properties": {"tier": {"type": "string", "enum": ["g", "s"]}, "note": {"type": "string"}},
+    "required": ["tier"],
+}
+_FLOW_PRIVATE_PEM = None
+
+
+def _private_pem() -> str:
+    global _FLOW_PRIVATE_PEM
+    if _FLOW_PRIVATE_PEM is None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        _FLOW_PRIVATE_PEM = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+    return _FLOW_PRIVATE_PEM
+
+
+@pytest.fixture
+def reacting_env(waba_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY", _private_pem())
+    monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI", "https://app.example/api/channels/whatsapp/flow-data")
+    reset_all_settings()
+
+
+def _reacting_delivery(**overrides):
+    from tai42_contract.interactions.models import FormReactions
+
+    reactions = FormReactions(field_changed=["tier"], submitted=True, choices=["tier"])
+    fields = {
+        "answer_format": "form",
+        "schema": _REACT_SCHEMA,
+        "question": "Pick a tier.",
+        "reactions": reactions,
+    }
+    fields.update(overrides)
+    return make_delivery(**fields)
+
+
+async def test_reacting_form_publishes_endpoint_driven_and_caches_its_sidecar(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    reactions = {"field_changed": ["tier"], "page_advanced": [], "submitted": True, "choices": ["tier"]}
+    flow_json, _hash = build_form_flow(_REACT_SCHEMA, None, {"tier"}, reactions)
+    assert flow_json["data_api_version"] == "3.0"
+
+    fake_httpx.responses.append(_flow_created("flow-react"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.R"))
+
+    await WhatsAppChannel().deliver(_reacting_delivery())
+
+    # The Flow is created endpoint-driven: the create carries the configured endpoint URI.
+    create = fake_httpx.calls[0]["json"]
+    assert create["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
+    assert json.loads(create["flow_json"])["data_api_version"] == "3.0"
+    # The reacting form's schema + inputs are cached under the interaction id for the endpoint.
+    sidecar = json.loads(fake_redis.store["channel:whatsapp:reaction-form:int-1"])
+    assert sidecar["schema"] == _REACT_SCHEMA
+    # The pending record carries the reaction triggers so a re-send reproduces the same Flow.
+    pending = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert pending["form_reactions"] == reactions
+
+
+async def test_reacting_form_without_private_key_refuses_loudly(
+    waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI", "https://app.example/api/channels/whatsapp/flow-data")
+    monkeypatch.delenv("CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY", raising=False)
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY"):
+        await WhatsAppChannel().deliver(_reacting_delivery())
+    # Refused before any network work and before any reservation.
+    assert fake_httpx.calls == []
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+
+
+async def test_reacting_form_without_endpoint_uri_refuses_loudly(
+    waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY", _private_pem())
+    monkeypatch.delenv("CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI", raising=False)
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI"):
+        await WhatsAppChannel().deliver(_reacting_delivery())
+    assert fake_httpx.calls == []

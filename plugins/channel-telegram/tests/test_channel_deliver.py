@@ -44,6 +44,7 @@ def _delivery(
     schema: dict | None = None,
     data: Any = None,
     pages: Any = None,
+    reactions: Any = None,
 ) -> ChannelDelivery:
     return ChannelDelivery(
         interaction_id="int-1",
@@ -53,6 +54,7 @@ def _delivery(
         schema=schema,
         data=data,
         pages=pages,
+        reactions=reactions,
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=timeout_in),
         recipient=recipient,
@@ -192,6 +194,33 @@ async def test_tier1_sends_url_button_and_skips_correlation(http_recorder, fake_
 def test_channel_advertises_form_delivery():
     # The capability flag the ask helper reads before handing a form ticket here.
     assert TelegramChannel.supports_form_delivery is True
+
+
+def test_channel_advertises_form_reaction():
+    # A reacting form is honored ONLY because the server-rendered callback page (which the
+    # webview opens) now posts its on-change reaction round-trip to the ticket react door —
+    # the ticket in the page's address IS the capability. The ask helper reads this flag
+    # before admitting a reacting form; absent it, a reacting form to Telegram is refused.
+    assert TelegramChannel.supports_form_reaction is True
+
+
+async def test_reacting_form_webview_opens_the_ticket_page(http_recorder, fake_redis):
+    # A reacting form is delivered exactly as any form: a web_app button opening the ticket
+    # callback page. That page routes the reaction (via its /react sibling), so Telegram
+    # needs no reaction wiring of its own — the webview just opens the page.
+    from tai42_contract.interactions.models import FormReactions
+
+    delivery = _delivery(
+        answer_format="form",
+        schema=_FORM_SCHEMA,
+        reactions=FormReactions(field_changed=list(_FORM_SCHEMA["properties"])),
+    )
+    await TelegramChannel().deliver(delivery)
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Fill form", "web_app": {"url": _CALLBACK}}]]}
+    # Still a private-chat web_app button, still no correlation/inbound leg.
+    assert fake_redis.data == {}
 
 
 async def test_form_sends_web_app_button_and_skips_correlation(http_recorder, fake_redis):

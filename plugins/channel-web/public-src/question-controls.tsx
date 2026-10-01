@@ -9,7 +9,7 @@ import { Button, ExternalLinkButton, Spinner, TextInput } from '@tai42/studio-sd
 import type { ReactElement } from 'react';
 
 import { MalformedNotice, SchemaFormAnswer } from '@/schema-form-answer';
-import type { ChatItem, FormPage, FormPrefill } from '@/transcript-model';
+import type { ChatItem, FormPage, FormPrefill, FormReactions } from '@/transcript-model';
 
 /** The transcript item this card renders. */
 export type QuestionItem = Extract<ChatItem, { kind: 'question' }>;
@@ -45,6 +45,8 @@ export function QuestionControls(props: ControlsProps): ReactElement {
           schema={question.schema}
           formData={question.formData}
           pages={question.pages}
+          reactions={question.reactions}
+          interactionId={question.interactionId}
           idPrefix={question.interactionId}
         />
       );
@@ -135,11 +137,15 @@ function FormAnswer({
   schema,
   formData,
   pages,
+  reactions,
+  interactionId,
   idPrefix,
 }: ControlsProps & {
   readonly schema: unknown;
   readonly formData: FormPrefill | null;
   readonly pages: readonly FormPage[] | null;
+  readonly reactions: FormReactions | null;
+  readonly interactionId: string;
   readonly idPrefix: string;
 }): ReactElement {
   if (!isSchemaObject(schema)) {
@@ -150,6 +156,8 @@ function FormAnswer({
       schema={schema}
       formData={formData}
       pages={pages}
+      reactions={reactions}
+      interactionId={interactionId}
       sending={sending}
       onSubmit={onSubmit}
       idPrefix={idPrefix}

@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel
-from tai42_contract.interactions import AnswerFormat, FormData, FormPage
+from tai42_contract.interactions import AnswerFormat, FormData, FormPage, FormReactions
 
 _CALLBACK_PLACEHOLDER = "{callback_url}"
 
@@ -24,6 +24,31 @@ def normalize_schema(schema: type[BaseModel] | dict[str, Any]) -> dict:
     raise ValueError("schema must be a pydantic model or a JSON-schema dict")
 
 
+def _build_form_payload(
+    schema: type[BaseModel] | dict[str, Any] | None,
+    data: FormData | dict[str, Any] | None,
+    pages: list[FormPage] | list[dict[str, Any]] | None,
+    reactions: FormReactions | dict[str, Any] | None,
+) -> dict[str, Any]:
+    # The FORM payload: the normalized schema plus the per-send prefill/options, stepped pages
+    # and reaction triggers as their canonical dumps. The InteractionRequest validator
+    # cross-checks them against the schema once (the one seam every ask door flows through).
+    if schema is None:
+        raise ValueError("answer_format 'form' requires a schema")
+    form_payload: dict[str, Any] = {"schema": normalize_schema(schema)}
+    if data is not None:
+        form_payload["data"] = (data if isinstance(data, FormData) else FormData.model_validate(data)).model_dump()
+    if pages is not None:
+        form_payload["pages"] = [
+            (page if isinstance(page, FormPage) else FormPage.model_validate(page)).model_dump() for page in pages
+        ]
+    if reactions is not None:
+        form_payload["reactions"] = (
+            reactions if isinstance(reactions, FormReactions) else FormReactions.model_validate(reactions)
+        ).model_dump()
+    return form_payload
+
+
 def build_payload(
     answer_format: AnswerFormat,
     options: list[str] | None,
@@ -32,6 +57,7 @@ def build_payload(
     verifier: dict[str, Any] | None = None,
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
+    reactions: FormReactions | dict[str, Any] | None = None,
 ) -> dict | None:
     """Build the stored ``format_payload`` for ``answer_format``, or ``None`` when it carries none."""
     if answer_format is AnswerFormat.SELECT:
@@ -39,19 +65,7 @@ def build_payload(
             raise ValueError("answer_format 'select' requires options")
         return {"options": options}
     if answer_format is AnswerFormat.FORM:
-        if schema is None:
-            raise ValueError("answer_format 'form' requires a schema")
-        form_payload: dict[str, Any] = {"schema": normalize_schema(schema)}
-        # Per-send prefill/options and stepped pages ride the FORM payload as their
-        # canonical dumps; the InteractionRequest validator cross-checks them against
-        # the schema once (the one seam every ask door flows through).
-        if data is not None:
-            form_payload["data"] = (data if isinstance(data, FormData) else FormData.model_validate(data)).model_dump()
-        if pages is not None:
-            form_payload["pages"] = [
-                (page if isinstance(page, FormPage) else FormPage.model_validate(page)).model_dump() for page in pages
-            ]
-        return form_payload
+        return _build_form_payload(schema, data, pages, reactions)
     if answer_format is AnswerFormat.EXTERNAL:
         # The URL exists only after the link is resolved, so this branch is called
         # after that step; schema (optional here) validates the callback payload.

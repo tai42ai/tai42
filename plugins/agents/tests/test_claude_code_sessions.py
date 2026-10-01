@@ -34,6 +34,7 @@ from tests._claude_app import LocalApp, build_local_app
 from tests._claude_stubs import (
     ASYNC_ASK,
     CRED_ECHO,
+    FORM_ASYNC_REACTING_ASK,
     MESSAGE,
     MESSAGE_SESSION_OTHER,
     REDACT_TRANSCRIPT,
@@ -372,6 +373,40 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
     # A park-suspend exit does NOT scrub the bearer file — it survives for the expiry resume.
     session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     assert asyncio.run(session.get_file(_CREDS_PATH))  # present, no SandboxError
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_async_reacting_form_ask_forwards_schema_data_pages_and_reaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A threaded async ask for a REACTING form forwards the schema/data/pages AND the
+    reaction_tool/reactions to ``ask``, and parks — the agent can emit a reacting form."""
+    _settings(monkeypatch, creds=[_bearer_cred()])
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(FORM_ASYNC_REACTING_ASK))
+    captured: dict[str, Any] = {}
+
+    async def ask(question: str, *, expiry_at: datetime | None = None, **kwargs: Any) -> Any:
+        captured["question"] = question
+        captured.update(kwargs)
+        return SuspendedInteraction(
+            interaction_id="int-form",
+            expiry_at=expiry_at or datetime.now(UTC),
+            resume_owner=get_resume_continuation_tool(),
+        )
+
+    app = build_local_app(ask=ask, resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1")))
+    token = set_request_user_id("user-1")
+    try:
+        events = _run(app, user_message=TemplatedText(content="deploy it"), thread_id="t1")
+    finally:
+        reset_request_user_id(token)
+    assert captured["answer_format"] == "form"
+    assert captured["schema"] == {"type": "object", "properties": {"color": {"type": "string"}}}
+    assert captured["data"] == {"values": {}}
+    assert captured["pages"] == [{"title": "p1", "fields": ["color"]}]
+    assert captured["reaction_tool"] == "recolor"
+    assert captured["reactions"] == {"field_changed": ["color"], "submitted": True}
+    suspended = [e for e in events if isinstance(e, SuspendedFinal)]
+    assert len(suspended) == 1
+    assert suspended[0].interaction_ids == ["int-form"]
 
 
 @pytest.mark.usefixtures("fake_redis")

@@ -55,6 +55,8 @@ def validate_ask_arguments(
     expiry_at: datetime | None,
     to: Literal["user", "caller"],
     payload: dict[str, Any] | None,
+    reaction_tool: str | None = None,
+    reactions: Any = None,
 ) -> AskValidation:
     """Reject every bad argument/combo before any state; resolve the derived values.
 
@@ -62,7 +64,9 @@ def validate_ask_arguments(
     ``schema``.
     """
     check_addressing(to=to, mode=mode, question=question, payload=payload, answer_format=answer_format)
-    fmt = _validate_timing_and_format(mode, timeout, expiry_at, answer_format, options, data, pages)
+    fmt = _validate_timing_and_format(
+        mode, timeout, expiry_at, answer_format, options, data, pages, reaction_tool, reactions
+    )
     is_external = fmt is AnswerFormat.EXTERNAL
     # ``audience`` (the addressed identity) is validated loud and up front — a
     # blank/whitespace value can never address a real identity — mirroring the
@@ -71,7 +75,9 @@ def validate_ask_arguments(
         raise ValueError("audience must be a non-empty identity")
     # Write-side isolation clamp: a restricted caller may address only its own slice.
     audience = clamp_write_audience(audience)
-    channel_obj, schema = _validate_channel_args(channel, link, verifier, fmt, schema, question, recipient)
+    channel_obj, schema = _validate_channel_args(
+        channel, link, verifier, fmt, schema, question, recipient, reaction_tool
+    )
     _validate_external_args(is_external, link, channel, schema, verifier)
     return AskValidation(fmt=fmt, is_external=is_external, channel_obj=channel_obj, audience=audience, schema=schema)
 
@@ -84,11 +90,13 @@ def _validate_timing_and_format(
     options: Any,
     data: Any,
     pages: Any,
+    reaction_tool: str | None,
+    reactions: Any,
 ) -> AnswerFormat:
     """Validate the timing (sync ``timeout`` vs async ``expiry_at``) and the format's argument shape.
 
-    ``options`` only on select/text, ``data``/``pages`` only on form. Returns the parsed
-    :class:`AnswerFormat`.
+    ``options`` only on select/text, ``data``/``pages``/``reactions``/``reaction_tool`` only on
+    form. Returns the parsed :class:`AnswerFormat`.
     """
     check_ask_timing(timeout=timeout, expiry_at=expiry_at)
     if mode != "async" and expiry_at is not None:
@@ -106,10 +114,13 @@ def _validate_timing_and_format(
     # set of suggested replies; every other format carries none — refuse loudly here.
     if options is not None and fmt not in (AnswerFormat.SELECT, AnswerFormat.TEXT):
         raise ValueError(f"options are not valid with answer_format {fmt.value!r}")
-    # ``data``/``pages`` enrich a FORM ask only — refuse them loudly on every other
-    # format before any state is written.
+    # ``data``/``pages`` enrich a FORM ask only, and a reacting form's ``reaction_tool`` +
+    # ``reactions`` triggers are FORM-only too — refuse them loudly on every other format
+    # before any state is written.
     if (data is not None or pages is not None) and fmt is not AnswerFormat.FORM:
         raise ValueError(f"data and pages are not valid with answer_format {fmt.value!r}")
+    if (reaction_tool is not None or reactions is not None) and fmt is not AnswerFormat.FORM:
+        raise ValueError(f"reaction_tool and reactions are not valid with answer_format {fmt.value!r}")
     return fmt
 
 
@@ -121,18 +132,23 @@ def _validate_channel_args(
     schema: type[BaseModel] | dict[str, Any] | None,
     question: str,
     recipient: str | None,
+    reaction_tool: str | None,
 ) -> tuple[Channel | None, type[BaseModel] | dict[str, Any] | None]:
     """Resolve and validate a set ``channel`` (loud, up front).
 
     The channel owns delivery so ``link``/``verifier`` are forbidden, a form is deliverable only
-    over a form-capable channel with a renderable schema, and a ``recipient`` needs a channel.
-    Returns the resolved channel object (or ``None``) and the possibly-normalized schema.
+    over a form-capable channel with a renderable schema, a reacting form only over a channel
+    that advertises ``supports_form_reaction``, and a ``recipient`` needs a channel. Returns the
+    resolved channel object (or ``None``) and the possibly-normalized schema.
     """
     if channel is None:
         if recipient is not None:
             # An address is meaningless without a channel to send on; the named
             # channel is what carries (and allowlist-validates) the recipient.
             raise ValueError("recipient requires a channel (an address is meaningless without one)")
+        # A reacting form with no channel is served by the in-app reaction door (the
+        # authenticated sibling of the answer door), so it is allowed here — no transport
+        # gate, the inbox IS the transport.
         return None, schema
     channel_obj = validate_channel(channel)
     if link is not None:
@@ -143,7 +159,7 @@ def _validate_channel_args(
         # would 401 every reply — the question could never be answered.
         raise ValueError("verifier is forbidden when a channel is set (the channel forward is unsigned)")
     if fmt is AnswerFormat.FORM:
-        schema = _validate_channel_form(channel, channel_obj, schema, question)
+        schema = _validate_channel_form(channel, channel_obj, schema, question, reaction_tool)
     if recipient is not None and (not isinstance(recipient, str) or not recipient.strip()):
         # Rejected up-front as a clean ValueError — never a post-persist pydantic
         # error from the delivery frame's own recipient validator.
@@ -152,18 +168,28 @@ def _validate_channel_args(
 
 
 def _validate_channel_form(
-    channel: str, channel_obj: Channel, schema: type[BaseModel] | dict[str, Any] | None, question: str
+    channel: str,
+    channel_obj: Channel,
+    schema: type[BaseModel] | dict[str, Any] | None,
+    question: str,
+    reaction_tool: str | None,
 ) -> type[BaseModel] | dict[str, Any] | None:
     """Validate a channel-delivered form.
 
     The channel must advertise ``supports_form_delivery`` and (when a schema is given) the
     schema must fall in the channel-renderable subset plus the channel's own optional
-    ``validate_form_schema`` limits. Returns the normalized schema.
+    ``validate_form_schema`` limits. A REACTING form (one naming a ``reaction_tool``) must ALSO
+    advertise ``supports_form_reaction`` — a medium that cannot route a reaction's triggers back
+    is refused loudly here, never left to render the form inert. Returns the normalized schema.
     """
     if not getattr(channel_obj, "supports_form_delivery", False):
         # A form is delivered only over a channel that advertises the capability; a
         # channel without it can never surface a multi-field form.
         raise ValueError(f"channel {channel!r} does not deliver form questions")
+    if reaction_tool is not None and not getattr(channel_obj, "supports_form_reaction", False):
+        # A reacting form needs a medium that can route its mid-form triggers back to the
+        # reaction door; a channel without the flag is refused up front (never inert).
+        raise ValueError(f"channel {channel!r} does not support reacting forms (supports_form_reaction)")
     if schema is not None:
         # A channel form is answered on the server-rendered callback page, so its
         # schema must fall in the renderable subset. Normalize once (pydantic model ->

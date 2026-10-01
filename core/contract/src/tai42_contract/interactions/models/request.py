@@ -12,7 +12,14 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
-from tai42_contract.interactions.models.forms import FormData, FormPage, check_form_data, check_form_pages
+from tai42_contract.interactions.models.forms import (
+    FormData,
+    FormPage,
+    FormReactions,
+    check_form_data,
+    check_form_pages,
+    check_form_reactions,
+)
 from tai42_contract.interactions.models.media import MediaItem, check_media_list
 from tai42_contract.states import StateContext
 
@@ -43,18 +50,21 @@ def _check_form_payload(payload: dict[str, Any]) -> None:
     schema = payload.get("schema")
     if not schema:
         raise ValueError("form answer_format requires a schema")
-    # Per-send prefill/options and stepped pages are validated ONCE here, the
-    # single seam every ask door flows through, against the form's own schema.
+    # Per-send prefill/options, stepped pages and reaction triggers are validated ONCE
+    # here, the single seam every ask door flows through, against the form's own schema.
     data = payload.get("data")
     pages = payload.get("pages")
-    if (data is not None or pages is not None) and not isinstance(schema, dict):
-        raise ValueError("form data/pages require an object schema")
+    reactions = payload.get("reactions")
+    if (data is not None or pages is not None or reactions is not None) and not isinstance(schema, dict):
+        raise ValueError("form data/pages/reactions require an object schema")
+    schema_obj = cast("dict[str, Any]", schema)
+    page_models = [FormPage.model_validate(page) for page in cast("list[Any]", pages)] if pages is not None else None
     if data is not None:
-        check_form_data(cast("dict[str, Any]", schema), FormData.model_validate(data))
-    if pages is not None:
-        check_form_pages(
-            cast("dict[str, Any]", schema), [FormPage.model_validate(page) for page in cast("list[Any]", pages)]
-        )
+        check_form_data(schema_obj, FormData.model_validate(data))
+    if page_models is not None:
+        check_form_pages(schema_obj, page_models)
+    if reactions is not None:
+        check_form_reactions(schema_obj, page_models, FormReactions.model_validate(reactions))
 
 
 def _check_external_payload(payload: dict[str, Any]) -> None:
@@ -214,6 +224,15 @@ class InteractionRequest(BaseModel):
     # same door — one generic snapshot (a later resume attribution joins the same
     # field). None when the park ran under no state context.
     continuation_state_context: StateContext | None = None
+    # async + FORM only: the registered tool NAME run via ``run_tool`` when the open form
+    # reacts — a field named in ``format_payload["reactions"]`` changes, a named page
+    # advances, or the form is submitted. It runs under ``continuation_identity`` /
+    # ``continuation_state_context`` (the same rebound identity and state context the
+    # continuation uses), so a reacting form MUST be ``mode="async"`` with ``answer_format``
+    # FORM — the model validator raises loudly otherwise. The skeleton wires the run; the
+    # request only carries the name. None is a static (non-reacting) form, exactly today's
+    # behavior. A set value is a non-blank string.
+    reaction_tool: str | None = None
     # The ambient tool/agent call chain at ask time, outermost first, WITHOUT the
     # ask-performing frame itself — the parking run's own chain. A continuation
     # runner restores it on the one dispatch that resumes the parked run (passed as
@@ -268,6 +287,14 @@ class InteractionRequest(BaseModel):
             check_media_list(value)
         return value
 
+    @field_validator("reaction_tool")
+    @classmethod
+    def _check_reaction_tool(cls, value: str | None) -> str | None:
+        # None is a static form; a named reaction handler is a non-blank tool name.
+        if value is not None and not value.strip():
+            raise ValueError("reaction_tool must be non-blank when set")
+        return value
+
     @field_validator("created_at", "timeout_at")
     @classmethod
     def _ensure_tz_aware(cls, value: datetime) -> datetime:
@@ -318,6 +345,45 @@ class InteractionRequest(BaseModel):
             payload=self.payload,
             answer_format=self.answer_format,
         )
+        return self
+
+    @model_validator(mode="after")
+    def _check_reaction(self) -> InteractionRequest:
+        # A reacting form runs its handler through ``run_tool`` under the continuation's
+        # rebound identity and state context, which exist only for an async park, and the
+        # reaction is a form update — so a named ``reaction_tool`` is valid only on an
+        # async FORM ask. The handler + its triggers are two halves of ONE declaration:
+        # a handler with no trigger could never fire, and triggers with no handler have
+        # nothing to run — so neither is valid without the other. A reaction-fed CHOICE
+        # field (``reactions.choices``) escapes the static membership check at submission,
+        # so the submission MUST itself be checked by the reaction (``submitted``) — else
+        # an unvetted value would pass unchecked. Each violated rule raises loudly rather
+        # than persist an unrunnable or unsafe reaction. The reaction shape itself (named
+        # fields/pages/choices) is validated by ``_check_form_payload`` above; this parses
+        # the already-validated block only to cross-check it against ``reaction_tool``.
+        is_form = self.answer_format is AnswerFormat.FORM
+        reactions_raw = (self.format_payload or {}).get("reactions") if is_form else None
+        reactions = FormReactions.model_validate(reactions_raw) if reactions_raw is not None else None
+        if self.reaction_tool is not None:
+            if self.answer_format is not AnswerFormat.FORM:
+                raise ValueError("reaction_tool requires answer_format FORM")
+            if self.mode != "async":
+                raise ValueError(
+                    "reaction_tool requires mode='async' "
+                    "(it reuses the continuation's rebound identity and state context)"
+                )
+            if reactions is None or not reactions.has_trigger():
+                raise ValueError(
+                    "reaction_tool requires format_payload['reactions'] with at least one trigger "
+                    "(a non-empty field_changed/page_advanced or submitted=True)"
+                )
+        elif reactions is not None:
+            raise ValueError("format_payload['reactions'] requires a reaction_tool to run the reaction")
+        if reactions is not None and reactions.choices and not reactions.submitted:
+            raise ValueError(
+                "reactions.choices requires reactions.submitted=True "
+                "(a reaction-fed choice is type-checked only, so the consumer must check the submission)"
+            )
         return self
 
     @model_validator(mode="after")

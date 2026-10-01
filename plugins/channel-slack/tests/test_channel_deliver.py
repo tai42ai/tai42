@@ -367,7 +367,12 @@ async def test_deliver_form_stores_the_per_send_data_and_pages_on_the_record(htt
 
     record = json.loads(fake_redis.store[_FORM_KEY])
     assert record["data"] == {"values": {"note": "hi"}, "options": {"colour": [{"value": "r", "label": "Red"}]}}
-    assert record["pages"] == [{"title": "Pick", "fields": ["colour"]}, {"title": "Say", "fields": ["note"]}]
+    assert record["pages"] == [
+        {"title": "Pick", "fields": ["colour"], "kind": "input", "display": []},
+        {"title": "Say", "fields": ["note"], "kind": "input", "display": []},
+    ]
+    # A static form carries no reaction triggers on the record.
+    assert "reactions" not in record
 
 
 async def test_deliver_form_unmappable_per_send_option_raises_before_any_io(http_script, fake_redis):
@@ -414,7 +419,8 @@ async def test_deliver_form_releases_record_on_send_failure(http_script, fake_re
 
 
 async def test_deliver_form_unmappable_schema_raises_before_any_io(http_script, fake_redis):
-    bad = {"type": "object", "properties": {"blob": {"type": "array"}}}
+    # A nested object has no control on any channel surface — refused before any IO.
+    bad = {"type": "object", "properties": {"blob": {"type": "object"}}}
 
     with pytest.raises(ChannelInputError, match=r"blob.*unsupported type"):
         await SlackChannel().deliver(make_delivery(answer_format="form", schema=bad))
@@ -457,10 +463,10 @@ async def test_validate_form_schema_hook_mirrors_delivery_refusal(http_script, f
     schema = {"type": "object", "properties": {"pick": {"type": "string", "enum": [str(i) for i in range(150)]}}}
     channel = SlackChannel()
 
-    with pytest.raises(ValueError, match="enum exceeds 100 options"):
+    with pytest.raises(ValueError, match="options exceed 100"):
         channel.validate_form_schema(schema, "q")
 
-    with pytest.raises(ChannelInputError, match="enum exceeds 100 options"):
+    with pytest.raises(ChannelInputError, match="options exceed 100"):
         await channel.deliver(make_delivery(answer_format="form", schema=schema))
 
     assert http_script.requests == []

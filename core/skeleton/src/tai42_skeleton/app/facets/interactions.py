@@ -16,16 +16,31 @@ if TYPE_CHECKING:
 class InteractionsFacet(_Facet):
     """``app.interactions`` — the ``ask`` facade and the shared ``check_answer`` (``AppInteractions``)."""
 
-    def check_answer(self, question: QuestionFormat, answer: Any) -> None:
+    def check_answer(self, question: QuestionFormat, answer: Any) -> Any:
         """Validate ``answer`` against ``question`` — the ONE answer check every door reaches.
 
-        Delegates to :func:`tai42_skeleton.interactions.answer_check.check_answer`: returns
-        ``None`` when the answer conforms, raises ``AnswerMismatchError`` (carrying the failing
-        field's dotted path when located) otherwise.
+        Delegates to :func:`tai42_skeleton.interactions.answer_check.check_answer`: RETURNS
+        the answer the consumer receives when it conforms (identical to the input but for a
+        FORM, whose conditionally-hidden fields are dropped), raises ``AnswerMismatchError``
+        (carrying the failing field's dotted path when located) otherwise.
         """
         from tai42_skeleton.interactions.answer_check import check_answer
 
-        check_answer(question, answer)
+        return check_answer(question, answer)
+
+    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+        """Run an OPEN reacting form's handler for ``event`` with the values filled so far — the ONE reaction seam.
+
+        Delegates to :func:`tai42_skeleton.interactions.reaction.react`: asserts the interaction
+        is an open reacting form, type-validates ``partial_values``, runs the asker's
+        ``reaction_tool`` under its stored identity with a deadline, validates the returned form
+        update, and returns it. STATELESS — nothing durable is recorded or resolved. Raises a
+        :class:`~tai42_skeleton.interactions.reaction.FormReactionError` subclass on a closed
+        interaction, a malformed request, or a handler failure.
+        """
+        from tai42_skeleton.interactions.reaction import react
+
+        return await react(interaction_id, event, partial_values)
 
     async def assert_resume_authorized(self, interaction_id: str) -> None:
         """Authorise the caller to resume/deliver-for ``interaction_id``'s run — or raise.

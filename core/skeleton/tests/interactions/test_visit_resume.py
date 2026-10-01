@@ -51,6 +51,7 @@ def _caller_park(
     gid: str = "g1",
     to: str = "caller",
     fmt: AnswerFormat = AnswerFormat.FREE,
+    format_payload: dict | None = None,
     run_delivery_id: str | None = None,
 ) -> InteractionRequest:
     now = datetime.now(UTC)
@@ -60,6 +61,7 @@ def _caller_park(
         group_id=gid,
         question="proceed?",
         answer_format=fmt,
+        format_payload=format_payload,
         reply_to=store.reply_key(iid),
         created_at=now,
         timeout_at=expiry,
@@ -276,6 +278,42 @@ async def test_resume_continuation_runs_without_the_door_binding(store, fake_red
         )
     # The continuation dispatch carried NO door state binding (the binding is a START-only deposit).
     assert outcome.result["door_binding_present"] is False
+
+
+# --- the effective (hidden-field-dropped) FORM answer ----------------------------------
+
+
+async def test_form_resume_records_and_delivers_the_effective_answer(store, fake_redis):
+    # A conditional FORM resumed via visit drops a field hidden by its ``visibleWhen`` predicate
+    # (evaluated on the submitted values): the resumed run RECEIVES, and the store RECORDS, the
+    # EFFECTIVE answer with the hidden field removed — exactly like the authenticated answer door.
+    schema = {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["a", "b"]},
+            "detail": {"type": "string", "visibleWhen": {"field": "mode", "equals": "a"}},
+        },
+    }
+    await store.add(
+        fake_redis,
+        _caller_park(store, "i1", fmt=AnswerFormat.FORM, format_payload={"schema": schema}),
+        idle_ttl=86400,
+        to="caller",
+    )
+    async with _app():
+        outcome = await visit_module.visit(
+            target_name="t",
+            cancel=[],
+            resume=[ResumeItem(id="i1", payload={"mode": "b", "detail": "leftover"})],
+            start=None,
+            extras={},
+        )
+    # Delivered: the continuation received the effective answer (``detail`` hidden by mode="b" dropped).
+    assert outcome.result["answer_received"] == {"mode": "b"}
+    # Recorded: the stored answered-response carries the same effective answer, not the raw payload.
+    delivered = await store.wait_for_reply(fake_redis, store.reply_key("i1"), timeout_seconds=1, grace_seconds=5)
+    assert delivered is not None
+    assert delivered.answer == {"mode": "b"}
 
 
 # --- the resumed-interaction record note -----------------------------------------------

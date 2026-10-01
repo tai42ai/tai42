@@ -414,6 +414,13 @@ class TelegramChannel:
     # A ``form`` ticket is delivered as a web_app button opening the
     # schema-rendered callback page in an in-chat webview (see ``deliver``).
     supports_form_delivery: ClassVar[bool] = True
+    # A reacting form is honored because that server-rendered callback page posts its
+    # on-change reaction round-trip to the ticket react door (the ticket in the page's
+    # address IS the capability). The ask helper reads this (on top of
+    # ``supports_form_delivery``) before admitting a reacting form; the webview opens the
+    # same page, which routes the reaction. Absent it, a reacting form to Telegram is
+    # refused loudly at the ask door.
+    supports_form_reaction: ClassVar[bool] = True
     # A Bot API chat action lasts about 5 s before Telegram clears it
     # (https://core.telegram.org/bots/api#sendchataction), so the working-on-it
     # refresh loop re-sends the typing action under this lifetime.

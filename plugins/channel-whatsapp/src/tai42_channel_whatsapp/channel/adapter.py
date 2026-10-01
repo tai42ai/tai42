@@ -44,6 +44,11 @@ class WhatsAppChannel:
     # This channel renders a form ask as a WhatsApp Flow; the ask helper reads
     # this before handing a form delivery over.
     supports_form_delivery: ClassVar[bool] = True
+    # This channel routes a reacting form's triggers back through its encrypted Flow data
+    # endpoint; the ask helper reads this (on top of supports_form_delivery) before admitting a
+    # REACTING form — one whose ask names a reaction_tool and carries reactions triggers — so a
+    # reacting form is never delivered to a medium that cannot route its reactions.
+    supports_form_reaction: ClassVar[bool] = True
     # Meta dismisses the typing indicator after 25 s (or on the reply); the skeleton's
     # refresh loop re-asserts it under this lifetime until the answer is sent.
     # https://developers.facebook.com/docs/whatsapp/cloud-api/guides/mark-messages-as-read#typing-indicators

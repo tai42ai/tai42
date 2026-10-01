@@ -31,6 +31,8 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("POST", "/api/connectors/oauth/complete"),  # browser OAuth callback
     ("GET", "/api/interactions/callback/{ticket}"),  # unauthenticated external answer door
     ("POST", "/api/interactions/callback/{ticket}"),  # unauthenticated external answer door
+    ("POST", "/api/interactions/callback/{ticket}/react"),  # unauthenticated channel mid-form reaction door
+    ("POST", "/api/interactions/{interaction_id}/react"),  # in-app Studio mid-form reaction door (browser)
     ("GET", "/api/interactions/media/{media_id}"),  # unauthenticated served-media capability url (browser/vendor)
     ("HEAD", "/api/interactions/media/{media_id}"),  # same capability url, headers-only probe (browser/vendor)
     ("POST", "/api/conversations/{route_name}/messages"),  # authed client/adapter door, not an operator function

@@ -477,6 +477,68 @@
   outline-offset: 1px;
 }
 
+/* -- Display blocks + review step ------------------------------------------- */
+
+/* A step's ordered display-only blocks (headings, body text, images), stacked above
+   its input fields. */
+.tcw-form-display {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-2);
+}
+
+.tcw-form-display-heading {
+  margin: 0;
+  color: var(--tai-color-heading);
+  font-size: var(--tai-text-md);
+  font-weight: 600;
+}
+
+.tcw-form-display-body {
+  margin: 0;
+  color: var(--tai-color-text);
+  font-size: var(--tai-text-sm);
+}
+
+.tcw-form-display-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--tai-radius-lg);
+}
+
+/* A review step's readback: each entered field's label above its value. */
+.tcw-form-review {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-2);
+}
+
+.tcw-form-review-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-1);
+}
+
+.tcw-form-review-term {
+  color: var(--tai-color-heading);
+  font-size: var(--tai-text-sm);
+  font-weight: 600;
+}
+
+.tcw-form-review-value {
+  margin: 0;
+  color: var(--tai-color-text);
+  font-size: var(--tai-text-sm);
+}
+
+/* A LOUD banner for a failed reaction round-trip — never a silent or stale value. */
+.tcw-form-reaction-error {
+  margin: 0;
+  color: var(--tai-color-err-text);
+  font-size: var(--tai-text-sm);
+}
+
 /* -- Media cards ----------------------------------------------------------- */
 
 .tcw-media {

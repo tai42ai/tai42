@@ -13,11 +13,14 @@ from __future__ import annotations
 
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
+    DisplayBlock,
     FormData,
     FormOption,
     FormPage,
+    FormReactions,
     check_form_data,
     check_form_pages,
+    check_form_reactions,
 )
 from tai42_contract.interactions.models.location import (
     LOCATION_ADDRESS_MAX_CHARS,
@@ -71,9 +74,11 @@ __all__ = [
     "QUESTION_MAX_CHARS",
     "AnswerFormat",
     "AnswerMismatchPolicy",
+    "DisplayBlock",
     "FormData",
     "FormOption",
     "FormPage",
+    "FormReactions",
     "IngestedMedia",
     "InteractionRequest",
     "InteractionResponse",
@@ -87,6 +92,7 @@ __all__ = [
     "check_addressing",
     "check_form_data",
     "check_form_pages",
+    "check_form_reactions",
     "check_media_list",
     "served_media_id",
     "validate_action_url",

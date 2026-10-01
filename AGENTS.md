@@ -58,6 +58,11 @@ per-kind duplicate test.
   swallowed exceptions, no compatibility shims.
 - The workflows under `.github/workflows/` are the source of truth for commands;
   keep this file in step with them.
+- `.github/actions/first-party-npm-majors` gates first-party scoped npm pins
+  (default `@tai42`): a front-end dependency a full major behind its latest
+  published release fails CI; minors and patches stay quiet for the update bot.
+  Scope and registry are action inputs; it self-skips when no matching
+  dependency is present.
 - The workspace makes every package physically importable from every other, so
   the per-package ruff `banned-api` walls (e.g. plugins ban `tai42_skeleton`) are
   the only guard against illegal cross-package imports — never delete them.

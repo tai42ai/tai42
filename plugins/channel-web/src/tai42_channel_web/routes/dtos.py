@@ -256,6 +256,22 @@ class AnswerResultResponse(BaseModel):
     status: Literal["answered"]
 
 
+class ReactionResultResponse(BaseModel):
+    """The validated form update a reaction returned — the inner ``data`` payload the door acks with.
+
+    A reaction records no answer and leaves the question open; the body carries only the
+    update the form applies. Each key is present only when the reaction supplied it:
+    ``values`` sets fields, ``options`` replaces the choice list of an option-bearing field,
+    ``errors`` carries per-field messages, and ``display`` fills declared display slots. The
+    ticket react door validated it against the form's own schema before it reached here.
+    """
+
+    values: dict[str, Any] | None = None
+    options: dict[str, Any] | None = None
+    errors: dict[str, str] | None = None
+    display: dict[str, Any] | None = None
+
+
 class SessionRotatedResponse(BaseModel):
     """Ack of a session rotation.
 
@@ -354,3 +370,26 @@ def _answer_refusal(answer: Any) -> str | None:
     if isinstance(answer, str) and len(answer) > _MAX_ANSWER_CHARS:
         return f"answer must be at most {_MAX_ANSWER_CHARS} characters"
     return None
+
+
+def _reaction_refusal(event: Any, values: Any) -> str | None:
+    """The refusal for a mid-form reaction body this door will not forward, or ``None``.
+
+    The reaction forwards ``{"event": {...}, "values": {...}}`` to the interaction's ticket
+    react door, which stays authoritative on the event's declared triggers and on the
+    values' fit against the form's schema. This bounds only the transport SHAPE: ``event``
+    a JSON object carrying a non-blank string ``kind``, and ``values`` a JSON object within
+    the SAME serialized-size bound a form answer rides (both size-capped so an over-large
+    object is a precise 422 rather than an opaque 413).
+    """
+    if not isinstance(event, dict):
+        return "event must be a JSON object"
+    kind = event.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        return "event must carry a non-blank 'kind'"
+    bad_event = _object_refusal(event, "event object")
+    if bad_event is not None:
+        return bad_event
+    if not isinstance(values, dict):
+        return "values must be a JSON object"
+    return _object_refusal(values, "values object")

@@ -31,6 +31,7 @@ from tai42_contract.interactions import (
     AnswerMismatchPolicy,
     FormData,
     FormPage,
+    FormReactions,
     MediaItem,
     SuspendedInteraction,
 )
@@ -155,6 +156,8 @@ async def ask(
     schema: type[BaseModel] | dict[str, Any] | None = None,
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
+    reaction_tool: str | None = None,
+    reactions: FormReactions | dict[str, Any] | None = None,
     group_id: str | None = None,
     timeout: float | None = None,
     link: str | Callable[[str], Awaitable[str]] | None = None,
@@ -303,6 +306,18 @@ async def ask(
     written) and, on a ``channel`` ask, ride the delivery so the channel renders the
     prefill, the per-send choices and the steps; the answer is the union of all fields.
 
+    ``reaction_tool`` and ``reactions`` make a FORM ask REACT while it is open (forbidden on
+    every other format). ``reaction_tool`` names a registered tool run — under the park's
+    rebound identity and state context — whenever a declared trigger fires; ``reactions``
+    (a ``FormReactions`` or its dict) declares those triggers (``field_changed``,
+    ``page_advanced``, ``submitted``) and the ``choices`` fields a reaction may re-supply.
+    The two are halves of one declaration: each requires the other, a reacting form must be
+    ``mode="async"``, and any ``choices`` field requires the ``submitted`` trigger (the request
+    model enforces all three loudly). A reacting form over a ``channel`` requires that channel
+    to advertise ``supports_form_reaction`` (refused loudly otherwise); a ``channel=None``
+    reacting form is served by the in-app reaction door. Absent both is a static form, exactly
+    today's behavior.
+
     ``mode`` selects the wait discipline. ``"sync"`` (the default) blocks and
     returns the typed answer as described above. ``"async"`` PARKS the caller: it
     persists (and optionally delivers) the question exactly as sync does but
@@ -345,6 +360,8 @@ async def ask(
         expiry_at=expiry_at,
         to=to,
         payload=payload,
+        reaction_tool=reaction_tool,
+        reactions=reactions,
     )
     fmt = validation.fmt
     schema = validation.schema
@@ -396,7 +413,9 @@ async def ask(
             final_url = await payload_shaping.resolve_link(link, callback.callback_url)  # type: ignore[arg-type]
         format_payload = payload_shaping.build_payload(fmt, options, schema, url=final_url, verifier=verifier)
     else:
-        format_payload = payload_shaping.build_payload(fmt, options, schema, data=data, pages=pages)
+        format_payload = payload_shaping.build_payload(
+            fmt, options, schema, data=data, pages=pages, reactions=reactions
+        )
 
     stored_media = await persist.persist_question(
         store,
@@ -409,6 +428,7 @@ async def ask(
         question=question,
         fmt=fmt,
         format_payload=format_payload,
+        reaction_tool=reaction_tool,
         on_mismatch=on_mismatch,
         mismatch_notice=mismatch_notice,
         reply_to=reply_to,

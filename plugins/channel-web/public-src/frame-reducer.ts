@@ -210,6 +210,7 @@ function applyQuestionFrame(
     schema,
     payload.data,
     payload.pages,
+    payload.reactions,
     answer_format as AnswerFormat,
   );
   if (facet === undefined) return malformed(event);

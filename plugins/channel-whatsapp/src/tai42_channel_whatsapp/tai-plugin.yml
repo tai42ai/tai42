@@ -38,3 +38,7 @@ provides:
             - GET
             - POST
           public: true
+        - path: /flow-data
+          methods:
+            - POST
+          public: true

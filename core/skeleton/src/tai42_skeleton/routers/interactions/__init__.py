@@ -24,9 +24,18 @@ Doors:
   409, a gone/expired one a 404), fires NO continuation (a parked flow never
   resumes), and emits the removed event tagged ``reason="cancelled"``. Same
   audience gate as the answer door.
+* ``POST /api/interactions/{interaction_id}/react`` — the AUTHENTICATED in-app
+  mid-form reaction door (the ``channel=None`` surface): a sibling of the answer
+  door under the same correlation + audience gate. It runs the one reaction
+  chokepoint and returns the validated form update. STATELESS — nothing durable
+  is recorded.
 * ``POST /api/interactions/callback/{ticket}`` — the UNAUTHENTICATED data door
   for external-format answers (the server-to-server / confirm-form claim path).
   Sensitive data rides the JSON body here.
+* ``POST /api/interactions/callback/{ticket}/react`` — the UNAUTHENTICATED
+  mid-form reaction door, a sibling of the callback answer door under the same
+  ticket capability and size caps. It runs the one reaction chokepoint and
+  returns the validated form update. STATELESS.
 * ``GET /api/interactions/callback/{ticket}`` — the UNAUTHENTICATED redirect
   door. GET never mutates state (link scanners prefetch these URLs). It serves a
   page by the question's answer format: for confirm/external the byte-constant
@@ -48,12 +57,12 @@ from tai42_kit.clients import client_ctx
 
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 
-from .answer import answer, cancel
+from .answer import answer, cancel, react
 
 # The callback internals a callback-door test drives directly through the package alias.
 from .callback import _POST_ONLY_EMPTY_BODY_DENY as _POST_ONLY_EMPTY_BODY_DENY
 from .callback import _record_callback_answer as _record_callback_answer
-from .callback import callback
+from .callback import callback, callback_react
 from .listing import list_interactions, list_pending_interactions
 from .media import media
 
@@ -72,6 +81,7 @@ _KEEPALIVE_SECONDS = 15
 __all__ = [
     "answer",
     "callback",
+    "callback_react",
     "cancel",
     "client_ctx",
     "interactions_settings",
@@ -79,5 +89,6 @@ __all__ = [
     "list_interactions",
     "list_pending_interactions",
     "media",
+    "react",
     "stream",
 ]

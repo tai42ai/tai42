@@ -112,8 +112,8 @@ describe('SchemaFormAnswer', () => {
       properties: { first: { type: 'string' }, second: { type: 'string' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Your name', fields: ['first'] },
-      { title: 'Your note', fields: ['second'] },
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input' },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input' },
     ];
     const { onAnswer, onAnswered } = renderCard(formQuestion(schema, null, pages));
 
@@ -139,8 +139,8 @@ describe('SchemaFormAnswer', () => {
       properties: { first: { type: 'string' }, second: { type: 'string' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Your name', fields: ['first'] },
-      { title: 'Your note', fields: ['second'] },
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input' },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input' },
     ];
     renderCard(formQuestion(schema, null, pages));
 

@@ -43,6 +43,44 @@ def test_parse_ask_defaults_to_sync() -> None:
     assert ask.mode == "sync"
 
 
+def test_parse_ask_without_form_fields_defaults_to_none() -> None:
+    ask = parse_up_frame(json.dumps({"v": 1, "type": "ask", "ask_id": "a", "question": "q"}))
+    assert isinstance(ask, AskFrame)
+    assert ask.answer_format == "text"
+    assert ask.form_schema is None
+    assert ask.data is None
+    assert ask.pages is None
+    assert ask.reaction_tool is None
+    assert ask.reactions is None
+
+
+def test_parse_ask_carries_the_form_fields() -> None:
+    ask = parse_up_frame(
+        json.dumps(
+            {
+                "v": 1,
+                "type": "ask",
+                "ask_id": "a",
+                "question": "pick",
+                "mode": "async",
+                "answer_format": "form",
+                "schema": {"type": "object", "properties": {"color": {"type": "string"}}},
+                "data": {"values": {"color": "blue"}},
+                "pages": [{"title": "p1", "fields": ["color"]}],
+                "reaction_tool": "recolor",
+                "reactions": {"field_changed": ["color"], "submitted": True},
+            }
+        )
+    )
+    assert isinstance(ask, AskFrame)
+    # The wire key ``schema`` populates ``form_schema`` (no BaseModel.schema shadow).
+    assert ask.form_schema == {"type": "object", "properties": {"color": {"type": "string"}}}
+    assert ask.data == {"values": {"color": "blue"}}
+    assert ask.pages == [{"title": "p1", "fields": ["color"]}]
+    assert ask.reaction_tool == "recolor"
+    assert ask.reactions == {"field_changed": ["color"], "submitted": True}
+
+
 def test_parse_tool_call() -> None:
     frame = parse_up_frame(
         json.dumps({"v": 1, "type": "tool_call", "call_id": "c", "tool_name": "t", "arguments": {"a": 1}})

@@ -20,9 +20,10 @@ conversation bridge instead. An ``nfm_reply`` whose flow token rides the
 reservation and enters the bridge as a structured participant message, routed by its
 token prefix before any pending-question lookup.
 
-Importing this package registers the webhook route as a side-effect (via
-``.webhook``); the modules below hold the door authentication, payload traversal,
-message routing, and reply/status handling.
+Importing this package registers the webhook route AND the Flow data endpoint as
+side-effects (via ``.webhook`` and ``.flow_data``); the modules below hold the door
+authentication, payload traversal, message routing, reply/status handling, and the
+reacting-form data endpoint.
 """
 
-from tai42_channel_whatsapp.inbound import webhook  # noqa: F401  (route registration side-effect)
+from tai42_channel_whatsapp.inbound import flow_data, webhook  # noqa: F401  (route registration side-effects)

@@ -213,6 +213,45 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 """
 
 
+# A SYNC form ask carrying a schema, prefill data, and pages: the adapter forwards each to
+# ``ask`` and echoes the returned validated answer back as text, then terminates.
+FORM_SYNC_ASK = (
+    _PREAMBLE
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
+emit({"type": "ask", "ask_id": "a1", "question": "pick", "mode": "sync",
+      "answer_format": "form",
+      "schema": {"type": "object", "properties": {"color": {"type": "string"}}},
+      "data": {"values": {"color": "blue"}},
+      "pages": [{"title": "p1", "fields": ["color"]}]})
+ans = readline()
+emit({"type": "event", "event": {"kind": "text", "text": "answer=" + str(ans.get("answer"))}})
+emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
+      "usage": None, "result": "answer=" + str(ans.get("answer")), "is_structured": False})
+"""
+)
+
+# An ASYNC reacting form ask: a schema/data/pages form that names a reaction tool and declares
+# its triggers. Parks on a threaded run (read a stop and exit) exactly like ``ASYNC_ASK``.
+FORM_ASYNC_REACTING_ASK = (
+    _PREAMBLE
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
+emit({"type": "ask", "ask_id": "a1", "question": "pick", "mode": "async",
+      "answer_format": "form",
+      "schema": {"type": "object", "properties": {"color": {"type": "string"}}},
+      "data": {"values": {}},
+      "pages": [{"title": "p1", "fields": ["color"]}],
+      "reaction_tool": "recolor",
+      "reactions": {"field_changed": ["color"], "submitted": True}})
+frame = readline()
+if frame.get("type") == "stop":
+    sys.exit(0)
+emit({"type": "event", "event": {"kind": "text", "text": "refused=" + str(frame.get("is_error"))}})
+emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
+      "usage": None, "result": "x", "is_structured": False})
+"""
+)
+
+
 def payload_for(script: str) -> object:
     """A ``runner_payload_files`` replacement that ships exactly this stub as ``tai_runner.py``."""
 

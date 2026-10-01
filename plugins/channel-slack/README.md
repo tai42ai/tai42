@@ -135,12 +135,12 @@ All links: https://docs.slack.dev
 4. **`form` questions.** The button click reaches the interactivity door
    `POST /api/channels/slack/interactive` as a `block_actions` payload; the door
    verifies the signature, peeks the form record, and opens a Block Kit modal
-   (`views.open`) built from the schema — one input per property (`string` →
-   text/select, `boolean` → yes/no, `integer`/`number` → number). On submit, a
-   `view_submission` payload arrives; the door coerces the state to the schema's
-   JSON types and forwards `{"answer": {...}}` to the stored callback URL. A door
-   `2xx` closes the modal and drops the record; a `400` shows the door's message
-   on the form (record kept); a `404` shows an expired notice (record dropped).
+   (`views.open`) built from the schema — one input per property (see **Form
+   capabilities** below). On submit, a `view_submission` payload arrives; the door
+   coerces the state to the schema's JSON types and forwards `{"answer": {...}}` to
+   the stored callback URL. A door `2xx` closes the modal and drops the record; a
+   `400` shows the door's message on the form (record kept); a `404` shows an
+   expired notice (record dropped).
 5. The human replies in the thread. The Slack Events API POSTs the event to
    `POST /api/channels/slack/inbound`, which reads a bounded body, verifies
    the `X-Slack-Signature` v0 HMAC over the raw bytes (constant-time,
@@ -149,6 +149,58 @@ All links: https://docs.slack.dev
    `{"answer": "<typed text>"}` to the stored callback URL.
 6. The public callback door validates the answer against the question's stored
    format and records it; the blocked `ask` returns it.
+
+## Form capabilities
+
+A `form` question renders as one Block Kit modal. Each schema property maps to a
+control, and the per-send layout (`pages`, `data`, `reactions`) drives display
+elements, a review step, conditional show/hide and mid-form reactions.
+
+**Field controls.** `string` → a plain text input; `string` with an `enum` (or a
+per-send `options` list) → a **radio group** of five choices or fewer, a
+**select** above that; `string`+`format: date` → a date picker; `string`+
+`format: time` → a time picker; `string`+`format: date-time` → text (Slack's
+date-time picker returns a Unix timestamp, not an RFC 3339 string); an **array of
+strings** → a **checkbox group** of five choices or fewer, a **multi-select** above
+that, or a multiline text box (one entry per line) when the array declares no
+choices; `boolean` → a Yes/No radio; `integer`/`number` → a number input.
+
+**Dates (the Slack degrade).** Slack's date picker draws **no** minimum,
+maximum or disabled dates, and Slack has **no** range picker. So a declared date
+bound, an unavailable-days rule, or a range (two date fields — an end field naming
+its start field, with a day-span bound) renders as plain date pickers with nothing
+drawn to prevent an out-of-range pick. The constraint is **enforced on submit**:
+the platform's one answer check rejects an out-of-range date, an unavailable day,
+or a range that is out of order or out of span, and the door shows that rejection as
+an inline error on the offending field (the modal stays open to correct it).
+
+**Display elements and the review step.** A page's ordered display blocks render
+as a `header` (heading), a `section` (body), or an `image` block (an image with no
+drawable source degrades to its alt text). A **review** page renders a generic
+readback `section` of the values entered so far before the submit button. Slack
+modals are a single surface with no native multi-step, so pages render as titled
+groups and the review step is **a final titled group in the one modal** (not a
+pushed confirmation view).
+
+**Conditional fields.** A property's `visibleWhen` predicate is evaluated **by the
+platform** (never a call to the form's consumer): the controlling field dispatches a
+`block_actions` on change and the modal is re-rendered via `views.update` to show or
+hide the dependent field. The predicate is also enforced on submit — a field hidden
+by it is dropped from the answer, so a value left behind for a now-hidden field is
+never submitted.
+
+**Reacting forms.** When a form's ask names a reaction handler and declares
+`reactions` triggers, a reacting field dispatches a `block_actions` on change; the
+door runs the handler through the platform's one reaction seam and applies the
+returned update by `views.update` — setting values, replacing a field's choice list,
+showing a per-field error (as a context line), and filling a display slot (a
+computed total shows as a `section`). The accumulated reaction state rides the view's
+`private_metadata`, so it survives each re-render. The `submitted` trigger runs the
+handler on `view_submission` as the consumer's final check: its per-field errors keep
+the modal open as inline errors; a clean check lets the answer through. A handler
+failure surfaces loudly — a notice to the person plus a logged error — never a stale
+or silent value. A `page_advanced` trigger has no Slack event (the single-surface
+modal has no page-advance step), so only `field_changed` and `submitted` fire here.
 
 Operational notes: answers must be typed in-thread; non-answer traffic (edits,
 bot echoes, other channels, top-level messages, threads with no pending

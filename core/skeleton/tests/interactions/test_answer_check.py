@@ -166,3 +166,98 @@ def test_schema_mismatch_field_paths():
     assert field_path is None
     assert "at " not in message
     assert message.startswith("answer does not match schema: ")
+
+
+# === date bounds / range enforced at the one facet ==========================
+
+
+def _form(schema: dict, **payload_extra) -> QuestionFormat:
+    return _qf(AnswerFormat.FORM, {"schema": schema, **payload_extra})
+
+
+def test_form_date_bound_raises_naming_the_field():
+    schema = {
+        "type": "object",
+        "properties": {"d": {"type": "string", "format": "date", "minDate": "2024-01-01", "maxDate": "2024-12-31"}},
+    }
+    check_answer(_form(schema), {"d": "2024-06-01"})
+    with pytest.raises(AnswerMismatchError) as exc:
+        check_answer(_form(schema), {"d": "2023-01-01"})
+    assert exc.value.field == "d"
+
+
+def test_form_unavailable_day_raises():
+    schema = {
+        "type": "object",
+        "properties": {"d": {"type": "string", "format": "date", "unavailableDates": ["sunday"]}},
+    }
+    with pytest.raises(AnswerMismatchError) as exc:
+        check_answer(_form(schema), {"d": "2024-07-07"})  # a Sunday
+    assert exc.value.field == "d"
+
+
+def test_form_range_order_and_span_enforced():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 2, "maxDays": 3},
+        },
+    }
+    check_answer(_form(schema), {"start": "2024-01-01", "end": "2024-01-02"})
+    with pytest.raises(AnswerMismatchError) as exc:
+        check_answer(_form(schema), {"start": "2024-01-05", "end": "2024-01-01"})
+    assert exc.value.field == "end"
+
+
+# === conditional hidden-field removal =======================================
+
+
+def _conditional_schema(required: list[str] | None = None) -> dict:
+    schema = {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["a", "b"]},
+            "detail": {"type": "string", "visibleWhen": {"field": "mode", "equals": "a"}},
+        },
+    }
+    if required is not None:
+        schema["required"] = required
+    return schema
+
+
+def test_hidden_field_value_is_dropped_not_faulted():
+    # ``detail`` is hidden when mode != "a"; a value submitted for it is DROPPED from the
+    # answer the consumer receives, never an error (the degraded show-all path).
+    result = check_answer(_form(_conditional_schema()), {"mode": "b", "detail": "leftover"})
+    assert result == {"mode": "b"}
+
+
+def test_visible_field_is_kept():
+    result = check_answer(_form(_conditional_schema()), {"mode": "a", "detail": "kept"})
+    assert result == {"mode": "a", "detail": "kept"}
+
+
+def test_hidden_required_field_is_not_demanded():
+    # ``detail`` is required but hidden by its predicate — it must not be demanded.
+    result = check_answer(_form(_conditional_schema(required=["detail"])), {"mode": "b"})
+    assert result == {"mode": "b"}
+
+
+# === reaction-fed choice: type-only at submit ===============================
+
+
+def _reacting_choice_form(schema: dict) -> QuestionFormat:
+    return _qf(AnswerFormat.FORM, {"schema": schema, "reactions": {"choices": ["slot"], "submitted": True}})
+
+
+def test_reaction_fed_choice_accepts_a_value_outside_the_send_enum():
+    schema = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am", "10am"]}}}
+    # A value NOT in the send-time enum passes — membership is the consumer's at submit.
+    check_answer(_reacting_choice_form(schema), {"slot": "11am"})
+
+
+def test_reaction_fed_choice_still_type_checks():
+    schema = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am"]}}}
+    with pytest.raises(AnswerMismatchError):
+        check_answer(_reacting_choice_form(schema), {"slot": 5})

@@ -20,8 +20,9 @@ class QuestionFormat(BaseModel):
     """The shape an answer is checked against: the answer format and its format payload.
 
     ``format_payload`` is the same per-format payload the durable question carries (a
-    SELECT's ``options``, a FORM's ``schema``/``data``/``pages``, an EXTERNAL's or FREE's
-    optional ``schema``); ``None`` when the format carries none. Deliberately NOT the whole
+    SELECT's ``options``, a FORM's ``schema``/``data``/``pages``/``reactions``, an
+    EXTERNAL's or FREE's optional ``schema``); ``None`` when the format carries none.
+    Deliberately NOT the whole
     stored request — a caller with only a declared node format can build one directly.
     """
 

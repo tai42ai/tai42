@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 # The single protocol version both sides stamp/require. A frame carrying any other ``v`` is a
 # loud protocol error.
@@ -112,7 +112,19 @@ class AskFrame(BaseModel):
     """The runner's in-process ``ask`` tool blocked on a question.
 
     ``mode`` selects the sync/async wait discipline (the model chose it, default sync).
+
+    The form fields enrich an ``answer_format="form"`` ask and each default to absent (the
+    plain-question ask the adapter forwards today). The wire key ``schema`` carries the form's
+    JSON-Schema (its attribute is ``form_schema`` so the field does not shadow
+    ``BaseModel.schema``); ``data`` the prefill/per-send options (a :class:`FormData` dict);
+    ``pages`` the ordered steps (a list of :class:`FormPage` dicts). ``reaction_tool`` names the
+    registered tool a reacting form runs, and ``reactions`` declares its triggers (a
+    :class:`FormReactions` dict); the adapter forwards each to ``tai42_app.interactions.ask`` by
+    the same name, so the contract enforces their combination (both-or-neither, form-only,
+    reacting forms async).
     """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     v: int = PROTOCOL_VERSION
     type: Literal["ask"] = "ask"
@@ -121,6 +133,11 @@ class AskFrame(BaseModel):
     mode: Literal["sync", "async"] = "sync"
     answer_format: str = "text"
     options: list[str] | None = None
+    form_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    data: dict[str, Any] | None = None
+    pages: list[dict[str, Any]] | None = None
+    reaction_tool: str | None = None
+    reactions: dict[str, Any] | None = None
 
 
 class ToolCallFrame(BaseModel):

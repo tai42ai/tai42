@@ -20,9 +20,11 @@ from tai42_contract.channels import (
     ReplyOption,
 )
 from tai42_contract.interactions.models import (
+    DisplayBlock,
     FormData,
     FormOption,
     FormPage,
+    FormReactions,
     LocationElement,
     MediaItem,
     MediaKind,
@@ -149,6 +151,79 @@ async def test_deliver_omits_form_data_and_pages_when_absent(fake_redis: FakeRed
     payload = _only_entry(fake_redis)
     assert "data" not in payload
     assert "pages" not in payload
+
+
+async def test_deliver_ships_the_reactions_to_the_widget(fake_redis: FakeRedis):
+    # A reacting form's triggers ride the same chat.question frame the widget reads, so it
+    # knows which on-change / page-advance / submit events to round-trip to the reaction door.
+    schema = {"type": "object", "properties": {"colour": {"type": "string", "enum": ["r", "g"]}}}
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="form",
+            options=None,
+            schema=schema,
+            reactions=FormReactions(field_changed=["colour"], submitted=True, choices=["colour"]),
+        )
+    )
+    payload = _only_entry(fake_redis)
+    assert payload["reactions"] == {
+        "field_changed": ["colour"],
+        "page_advanced": [],
+        "submitted": True,
+        "choices": ["colour"],
+    }
+
+
+async def test_deliver_omits_reactions_for_a_static_form(fake_redis: FakeRedis):
+    # A static form (no reactions declared) carries no reactions key — today's behavior.
+    await WebChannel().deliver(make_delivery(answer_format="form", options=None, schema=_FORM_SCHEMA))
+    assert "reactions" not in _only_entry(fake_redis)
+
+
+async def test_deliver_ships_page_display_blocks_and_review_kind(fake_redis: FakeRedis):
+    # A page's ordered display blocks and its review kind ride the pages frame unchanged
+    # (an input page omits the default kind, like every other default/absent frame key).
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="form",
+            options=None,
+            schema=schema,
+            pages=[
+                FormPage(
+                    title="Pick",
+                    fields=["colour"],
+                    display=[
+                        DisplayBlock(kind="heading", text="Choose"),
+                        DisplayBlock(kind="image", slot="preview"),
+                    ],
+                ),
+                FormPage(title="Review", fields=[], kind="review"),
+            ],
+        )
+    )
+    assert _only_entry(fake_redis)["pages"] == [
+        {
+            "title": "Pick",
+            "fields": ["colour"],
+            "display": [{"kind": "heading", "text": "Choose"}, {"kind": "image", "slot": "preview"}],
+        },
+        {"title": "Review", "fields": [], "kind": "review"},
+    ]
+
+
+async def test_deliver_carries_on_property_date_and_visibility_keys_unchanged(fake_redis: FakeRedis):
+    # Date bounds and the visibleWhen predicate live ON the schema property; the frame
+    # carries the schema verbatim, so they reach the widget unchanged (no re-shaping).
+    schema = {
+        "type": "object",
+        "properties": {
+            "when": {"type": "string", "format": "date", "minDate": "2026-01-01", "maxDate": "2026-12-31"},
+            "note": {"type": "string", "visibleWhen": {"field": "when", "notEmpty": True}},
+        },
+    }
+    await WebChannel().deliver(make_delivery(answer_format="form", options=None, schema=schema))
+    assert _only_entry(fake_redis)["schema"] == schema
 
 
 @pytest.mark.parametrize("answer_format", ["text", "confirm", "select", "external"])
@@ -674,6 +749,29 @@ async def test_notify_schema_appends_form_card_and_writes_token_record(fake_redi
         "message": "Fill this in",
     }
     assert fake_redis.ttls[f"channel:web:form:{token}"] == 30 * 86400
+
+
+async def test_notify_ask_less_form_card_is_unbroken_by_the_new_optional_fields(fake_redis: FakeRedis):
+    # An ask-less form is async-only's opposite — a notification, never a reacting form — so
+    # its card never carries reactions. The new optional page fields (display blocks, review
+    # kind) ride its pages frame unchanged, and the card is otherwise exactly as before.
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    await WebChannel().notify(
+        make_notification(
+            message="Pick one",
+            schema=schema,
+            pages=[
+                FormPage(title="Pick", fields=["colour"], display=[DisplayBlock(kind="body", text="Choose a colour")]),
+                FormPage(title="Review", fields=[], kind="review"),
+            ],
+        )
+    )
+    payload = _only_form_entry(fake_redis)
+    assert "reactions" not in payload
+    assert payload["pages"] == [
+        {"title": "Pick", "fields": ["colour"], "display": [{"kind": "body", "text": "Choose a colour"}]},
+        {"title": "Review", "fields": [], "kind": "review"},
+    ]
 
 
 async def test_notify_schema_writes_the_record_before_the_frame(fake_redis: FakeRedis):

@@ -61,7 +61,7 @@ def test_form_payload_carries_data_and_pages():
     assert payload is not None
     assert payload["schema"] == schema
     assert payload["data"] == {"values": {"c": "x"}, "options": {"c": [{"value": "x", "label": "X"}]}}
-    assert payload["pages"] == [{"title": "A", "fields": ["c"]}]
+    assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input"}]
 
 
 def test_form_payload_accepts_dict_data_and_pages():
@@ -75,7 +75,7 @@ def test_form_payload_accepts_dict_data_and_pages():
     )
     assert payload is not None
     assert payload["data"] == {"values": {"c": "x"}, "options": {}}
-    assert payload["pages"] == [{"title": "A", "fields": ["c"]}]
+    assert payload["pages"] == [{"title": "A", "fields": ["c"], "display": [], "kind": "input"}]
 
 
 def test_form_payload_omits_absent_data_and_pages():
@@ -93,3 +93,43 @@ async def test_ask_rejects_data_on_non_form():
 async def test_ask_rejects_unknown_format():
     with pytest.raises(ValueError, match="unknown answer_format"):
         await ask("q", answer_format="telepathy")
+
+
+def test_form_payload_carries_reactions():
+    schema = {"type": "object", "properties": {"c": {"type": "string", "enum": ["x", "y"]}}}
+    payload = build_payload(
+        AnswerFormat.FORM, None, schema, reactions={"field_changed": ["c"], "choices": ["c"], "submitted": True}
+    )
+    assert payload is not None
+    assert payload["reactions"] == {
+        "field_changed": ["c"],
+        "page_advanced": [],
+        "submitted": True,
+        "choices": ["c"],
+    }
+
+
+def test_delivery_frame_carries_reactions():
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_contract.interactions import AnswerMismatchPolicy, FormReactions
+
+    from tai42_skeleton.interactions.ask.delivery import build_delivery_frame
+
+    schema = {"type": "object", "properties": {"c": {"type": "string"}}}
+    payload = build_payload(AnswerFormat.FORM, None, schema, reactions={"field_changed": ["c"]})
+
+    frame = build_delivery_frame(
+        interaction_id="i1",
+        recipient=None,
+        question="?",
+        fmt=AnswerFormat.FORM,
+        options=None,
+        format_payload=payload,
+        stored_media=None,
+        on_mismatch=AnswerMismatchPolicy.RETRY,
+        mismatch_notice=None,
+        callback_url="https://cb.example/x",
+        timeout_at=datetime.now(UTC) + timedelta(seconds=60),
+    )
+    assert frame.reactions == FormReactions(field_changed=["c"])

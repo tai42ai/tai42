@@ -73,6 +73,67 @@ describe('applyFrame: chat.question', () => {
     expect(model.items[0]).toMatchObject({ answerFormat: 'form', formData: null, pages: null });
   });
 
+  it('carries reactions, page display blocks and a review page on a form question', () => {
+    const schema = { type: 'object', properties: { note: { type: 'string' } } };
+    const reactions = {
+      field_changed: ['note'],
+      page_advanced: ['Say'],
+      submitted: true,
+      choices: ['note'],
+    };
+    const pages = [
+      {
+        title: 'Say',
+        fields: ['note'],
+        display: [
+          { kind: 'heading', text: 'Heads up' },
+          { kind: 'image', src: 'https://example.com/a.png', alt: 'A shot' },
+          { kind: 'body', slot: 'total' },
+        ],
+      },
+      { title: 'Review', fields: [], kind: 'review' },
+    ];
+    const model = fold(EMPTY_MODEL, questionFrame('form', { schema, reactions, pages }));
+
+    expect(model.items[0]).toMatchObject({
+      answerFormat: 'form',
+      reactions: {
+        fieldChanged: ['note'],
+        pageAdvanced: ['Say'],
+        submitted: true,
+        choices: ['note'],
+      },
+      pages: [
+        {
+          title: 'Say',
+          fields: ['note'],
+          kind: 'input',
+          display: [
+            { kind: 'heading', text: 'Heads up', src: null, alt: null, slot: null },
+            {
+              kind: 'image',
+              src: 'https://example.com/a.png',
+              alt: 'A shot',
+              text: null,
+              slot: null,
+            },
+            { kind: 'body', slot: 'total', text: null, src: null, alt: null },
+          ],
+        },
+        { title: 'Review', fields: [], kind: 'review', display: [] },
+      ],
+    });
+  });
+
+  it('defaults a form question with no reactions to a null reactions', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      questionFrame('form', { schema: { type: 'object', properties: {} } }),
+    );
+
+    expect(model.items[0]).toMatchObject({ answerFormat: 'form', reactions: null });
+  });
+
   it('carries display media on a question, in order, with its captions', () => {
     const model = fold(
       EMPTY_MODEL,
@@ -203,6 +264,63 @@ describe('applyFrame: chat.question', () => {
     [
       'a form page with no fields',
       questionFrame('form', { schema: { type: 'object' }, pages: [{ title: 'x', fields: [] }] }),
+    ],
+    [
+      'a form page with an unknown kind',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        pages: [{ title: 'x', fields: ['a'], kind: 'wizard' }],
+      }),
+    ],
+    [
+      'a form page whose display is not a list',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        pages: [{ title: 'x', fields: ['a'], display: 'nope' }],
+      }),
+    ],
+    [
+      'a form page display block with an unknown kind',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        pages: [{ title: 'x', fields: ['a'], display: [{ kind: 'banner' }] }],
+      }),
+    ],
+    [
+      'a form page display block whose text is not a string',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        pages: [{ title: 'x', fields: ['a'], display: [{ kind: 'heading', text: 5 }] }],
+      }),
+    ],
+    [
+      'a form page display image with an off-scheme source',
+      questionFrame('form', {
+        schema: { type: 'object' },
+        pages: [
+          { title: 'x', fields: ['a'], display: [{ kind: 'image', src: 'http://e.test/a.png' }] },
+        ],
+      }),
+    ],
+    [
+      'reactions on a text question, whose format carries none',
+      questionFrame('text', { reactions: { submitted: true } }),
+    ],
+    [
+      'a form whose reactions is not an object',
+      questionFrame('form', { schema: { type: 'object' }, reactions: 'yes' }),
+    ],
+    [
+      'a form whose reactions.submitted is not a boolean',
+      questionFrame('form', { schema: { type: 'object' }, reactions: { submitted: 'yes' } }),
+    ],
+    [
+      'a form whose reactions.field_changed is not a list',
+      questionFrame('form', { schema: { type: 'object' }, reactions: { field_changed: 'note' } }),
+    ],
+    [
+      'a form whose reactions.field_changed carries a blank name',
+      questionFrame('form', { schema: { type: 'object' }, reactions: { field_changed: [' '] } }),
     ],
     ['an answered frame with no interaction id', frame('chat.answered', { id: 'a' })],
     [

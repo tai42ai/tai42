@@ -94,6 +94,8 @@ async def test_ask_forwards_arguments_and_returns_answer(monkeypatch: pytest.Mon
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "reaction_tool": None,
+                "reactions": None,
                 "group_id": "g1",
                 "timeout": 30.0,
                 "link": None,
@@ -129,6 +131,8 @@ async def test_ask_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "reaction_tool": None,
+                "reactions": None,
                 "group_id": None,
                 "timeout": None,
                 "link": None,
@@ -232,6 +236,38 @@ async def test_ask_forwards_mode_and_expiry(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert helper.calls[0][1]["mode"] == "async"
     assert helper.calls[0][1]["expiry_at"] == expiry
+
+
+async def test_ask_forwards_reaction_tool_and_reactions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A reacting-form ask through the TOOL door forwards both reaction halves to the ask
+    # seam verbatim, so a form sent via run_tool/agent/MCP can react.
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
+
+    reactions = {"field_changed": True, "submitted": True, "choices": ["city"]}
+    result = await builtin_interactions.ask(
+        "Pick?",
+        answer_format="form",
+        mode="async",
+        reaction_tool="recalc",
+        reactions=reactions,
+    )
+
+    assert result == "ok"
+    assert helper.calls[0][1]["reaction_tool"] == "recalc"
+    assert helper.calls[0][1]["reactions"] == reactions
+
+
+async def test_ask_forwards_reaction_fields_as_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A plain ask forwards both reaction halves as None, so a static form is unchanged.
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask", helper)
+
+    result = await builtin_interactions.ask("Anything?")
+
+    assert result == "ok"
+    assert helper.calls[0][1]["reaction_tool"] is None
+    assert helper.calls[0][1]["reactions"] is None
 
 
 async def test_ask_propagates_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

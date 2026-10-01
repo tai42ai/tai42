@@ -42,6 +42,12 @@ from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
+from tai42_skeleton.interactions.reaction import (
+    FormReactionClosedError,
+    FormReactionHandlerError,
+    FormReactionRequestError,
+    react,
+)
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations.interactions import (
@@ -299,7 +305,11 @@ async def _claim_channel_typed(
         return parsed
     value, answer_params = parsed
     try:
-        check_answer(
+        # The returned value is the answer the consumer receives — identical but for a
+        # FORM, whose conditionally-hidden fields are dropped at the one facet, so the
+        # channel-forwarded answer is recorded with the same effective shape the
+        # authenticated door records.
+        value = check_answer(
             QuestionFormat(answer_format=state.request.answer_format, format_payload=state.request.format_payload),
             value,
         )
@@ -441,6 +451,93 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
     # plugin forwards as a POST body — never a bare confirm tap, so no page
     # with an action that would be rejected.
     return HTMLResponse(_REPLY_PAGE, headers=_HTML_HEADERS)
+
+
+def _parse_react_body(raw: bytes) -> Response | tuple[Any, Any]:
+    """Parse a mid-form reaction body into ``(event, values)``, or a 400 ``Response``.
+
+    The reacting channel forwards ``{"event": {...}, "values": {...}}`` — the triggering
+    event and the values filled so far. A malformed or incomplete body is a 400.
+    """
+    if not raw:
+        return _callback_json({"error": "body must contain 'event' and 'values'"}, 400)
+    try:
+        parsed = json.loads(raw)
+    except JSON_PARSE_ERRORS:
+        return _callback_json({"error": "body must be a JSON object"}, 400)
+    if not isinstance(parsed, dict) or "event" not in parsed or "values" not in parsed:
+        return _callback_json({"error": "body must contain 'event' and 'values'"}, 400)
+    return parsed["event"], parsed["values"]
+
+
+async def _callback_react(
+    request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings
+) -> Response:
+    """The mid-form reaction claim for a ticketed channel-delivered reacting form.
+
+    A SIBLING of the answer callback door under the SAME ticket (the ticket is the
+    capability, exactly as for the answer claim) and the SAME size caps: resolve the ticket,
+    parse the event + partial values, and run the ONE ``react`` chokepoint. STATELESS — no
+    answer is recorded and the durable record is untouched. A handler failure/deadline is a
+    loud 502 (never a stale/silent value).
+    """
+    ticket = request.path_params["ticket"]
+    oversized = await _callback_post_size_guard(request, settings)
+    if oversized is not None:
+        return oversized
+    raw = await read_bounded_body(request, settings.callback_max_body_bytes)
+    interaction_id = await store.resolve_ticket(r, ticket)
+    if interaction_id is None:
+        return _callback_json({"error": "not found"}, 404)
+    parsed = _parse_react_body(raw)
+    if isinstance(parsed, Response):
+        return parsed
+    event, values = parsed
+    try:
+        update = await react(interaction_id, event, values)
+    except FormReactionClosedError as exc:
+        return _callback_json({"error": str(exc)}, 409)
+    except FormReactionRequestError as exc:
+        return _callback_json({"error": str(exc)}, 400)
+    except FormReactionHandlerError as exc:
+        logger.exception("reaction callback: handler failed for interaction %s", interaction_id)
+        return _callback_json({"error": str(exc)}, 502)
+    return _callback_json({"data": {"update": update}}, 200)
+
+
+class InteractionReactionAck(BaseModel):
+    """The reaction door's JSON body: the validated form ``update`` a reaction returned."""
+
+    update: dict[str, Any]
+
+
+@http_surface().custom_route(
+    "/api/interactions/callback/{ticket}/react",
+    methods=["POST"],
+    summary="External interaction mid-form reaction door",
+    tags=["interactions"],
+    response_model=InteractionReactionAck,
+    authed=False,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(400, 404, 409, 413, 502),
+        success_status=200,
+    ),
+)
+async def callback_react(request: Request) -> Response:
+    """Serve the unauthenticated mid-form reaction door (POST only), under the ticket capability."""
+    settings = _pkg.interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    # OFF gate — same uniform-404 (after the shared size guard) the answer callback door gives,
+    # so an unconfigured store is no oracle on this public door.
+    if not _pkg.interactions_store_configured():
+        oversized = await _callback_post_size_guard(request, settings)
+        if oversized is not None:
+            return oversized
+        return _callback_json({"error": "not found"}, 404)
+    async with _pkg.client_ctx(RedisClient, settings.redis) as r:
+        return await _callback_react(request, r, store, settings)
 
 
 class InteractionCallbackAck(BaseModel):

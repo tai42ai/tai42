@@ -282,6 +282,40 @@ async def open_modal_view(trigger_id: str, view: dict[str, Any]) -> None:
         raise ChannelDeliveryError(f"views.open failed: {_error_detail(body)}")
 
 
+async def update_modal_view(view_id: str, view_hash: str | None, view: dict[str, Any]) -> None:
+    """POST one ``views.update`` to re-render an open form modal, or raise.
+
+    Called inline from the interactivity door on a reacting/conditional field change: the
+    modal is rebuilt (show/hide, reaction values/options/errors/display) and pushed under its
+    ``view_id``. ``view_hash`` (when the payload carried one) guards against a stale update —
+    Slack rejects an outdated hash. Any failure — transport error, non-200 status, non-JSON
+    body, or ``ok`` not true — raises :class:`ChannelDeliveryError`; the door lets it surface
+    as a loud 500. Settings (bot token, api base) read fresh.
+    """
+    settings = slack_settings()
+    token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
+    payload: dict[str, Any] = {"view_id": view_id, "view": view}
+    if view_hash is not None:
+        payload["hash"] = view_hash
+    try:
+        async with slack_http() as client:
+            response = await client.post(
+                f"{settings.api_base_url}/views.update",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        raise ChannelDeliveryError(f"views.update transport failure: {exc}") from exc
+    if response.status_code != 200:
+        raise ChannelDeliveryError(f"views.update returned HTTP {response.status_code}")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ChannelDeliveryError("views.update returned a non-JSON body") from exc
+    if body.get("ok") is not True:
+        raise ChannelDeliveryError(f"views.update failed: {_error_detail(body)}")
+
+
 # Slack's Web API error object, in the vendor's documented field order.
 _ERROR_FIELDS = ("error", "warning", "needed", "provided", "response_metadata")
 
@@ -327,11 +361,38 @@ def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
 def _form_pages_list(delivery: ChannelDelivery) -> list[dict[str, Any]] | None:
     """The form's step layout as plain JSON, or ``None`` when the ask carried one page.
 
-    Each page is ``{"title", "fields"}``.
+    Each page is ``{"title", "fields", "kind", "display"}`` — the input/review kind and the
+    ordered display blocks (heading/body/image, each static or slotted) ride alongside the
+    field list, so the modal draws display elements and a review step.
     """
     if delivery.pages is None:
         return None
-    return [{"title": page.title, "fields": list(page.fields)} for page in delivery.pages]
+    return [
+        {
+            "title": page.title,
+            "fields": list(page.fields),
+            "kind": page.kind,
+            "display": [block.model_dump(exclude_none=True) for block in page.display],
+        }
+        for page in delivery.pages
+    ]
+
+
+def _form_reactions_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
+    """The form's reaction triggers as plain JSON, or ``None`` when the form does not react.
+
+    A reactions block with no trigger (no field change, page advance, or submit) is a static
+    form, so it yields ``None`` — the modal carries no reactive controls.
+    """
+    reactions = delivery.reactions
+    if reactions is None or not reactions.has_trigger():
+        return None
+    return {
+        "field_changed": list(reactions.field_changed),
+        "page_advanced": list(reactions.page_advanced),
+        "submitted": reactions.submitted,
+        "choices": list(reactions.choices),
+    }
 
 
 async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> None:
@@ -350,10 +411,12 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         # The contract guarantees a non-empty schema for a form; a gap here is a
         # delivery failure, not a silent plain-text send.
         raise ChannelDeliveryError("form answer_format requires a non-empty schema")
-    # The per-send prefill/choices and the step layout are what the modal (built AT
-    # CLICK TIME) renders, so they ride the record and the compose-and-discard below.
+    # The per-send prefill/choices, the step layout (display/review), and the reaction
+    # triggers are what the modal (built AT CLICK TIME) renders, so they ride the record and
+    # the compose-and-discard below.
     form_data = _form_data_dict(delivery)
     pages = _form_pages_list(delivery)
+    reactions = _form_reactions_dict(delivery)
     values = form_data.get("values") if form_data is not None else None
     options = form_data.get("options") if form_data is not None else None
     # Compose the exact modal the click will build, discarding it — same single
@@ -361,7 +424,7 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
     # schema, an unmappable per-send extra, or a modal past a Slack cap is a permanent
     # input refusal (:class:`FormSchemaError`, a ``ChannelInputError``), raised before
     # any store or send — never a retryable delivery failure.
-    build_modal_view(delivery.interaction_id, delivery.question, schema, values, options, pages)
+    build_modal_view(delivery.interaction_id, delivery.question, schema, values, options, pages, reactions=reactions)
     # Any display media rides above the form's section + open-modal button (a data:
     # image is refused here, before the reserve or send).
     message_blocks = [
@@ -376,6 +439,7 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         delivery.timeout_at,
         data=form_data,
         pages=pages,
+        reactions=reactions,
     )
     try:
         await _post_message(token, target, delivery.question, blocks=message_blocks)
@@ -409,6 +473,12 @@ class SlackChannel:
     supports_interactive_notifications: ClassVar[bool] = True
     supports_location_notifications: ClassVar[bool] = True
     supports_form_delivery: ClassVar[bool] = True
+    # A reacting form routes its triggers back through the interactivity door: a
+    # ``dispatch_action`` field change reaches the reaction chokepoint and the modal is
+    # re-rendered via ``views.update``; the submitted check runs on ``view_submission``. So
+    # this channel accepts a reacting form (one whose ask names a ``reaction_tool``), never
+    # refused at the ask door nor silently rendered inert.
+    supports_form_reaction: ClassVar[bool] = True
     # The Slack Web API exposes no bot typing indicator (only the RTM/Socket
     # user_typing frame, unsupported by this plugin), so this channel emits no
     # working-on-it signal.

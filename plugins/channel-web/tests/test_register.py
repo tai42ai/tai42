@@ -26,6 +26,7 @@ _ROUTE_MODULES = (
     "tai42_channel_web.routes.upload_routes",
     "tai42_channel_web.routes.stream_routes",
     "tai42_channel_web.routes.answer_routes",
+    "tai42_channel_web.routes.reaction_routes",
     "tai42_channel_web.routes.session_routes",
     "tai42_channel_web.routes.gate_routes",
 )
@@ -72,6 +73,7 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             "/uploads",
             "/stream",
             "/questions/{interaction_id}/answer",
+            "/questions/{interaction_id}/react",
             "/forms/{token}",
             "/session/rotate",
             "/gates/{identity}",
@@ -92,6 +94,7 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             "/uploads",
             "/stream",
             "/questions/{interaction_id}/answer",
+            "/questions/{interaction_id}/react",
             "/forms/{token}",
             "/session/rotate",
         }

@@ -162,7 +162,9 @@ def test_blank_or_non_string_title_falls_back_to_property_name(title: object):
     assert payload_labels(schema["properties"]) == {"note": "note"}
 
 
-def test_string_enum_maps_to_dynamic_dropdown():
+def test_short_string_enum_maps_to_radio_group():
+    # An enum at or below the radio threshold (5) renders as a RadioButtonsGroup — the short-list
+    # control — still reading a dynamic data-source so a per-send option list can replace it.
     schema = {
         "type": "object",
         "properties": {"pick": {"type": "string", "enum": ["a", "b", "c"]}},
@@ -171,14 +173,36 @@ def test_string_enum_maps_to_dynamic_dropdown():
 
     field = _controls(build_form_flow(schema)[0])[0]
     assert field == {
-        "type": "Dropdown",
+        "type": "RadioButtonsGroup",
         "name": "pick",
         "label": "pick",
         "required": True,
-        # Dynamic, so a per-send option list can replace the choices without republishing.
         "data-source": "${data.pick__ds}",
         "init-value": "${data.pick__init}",
     }
+
+
+def test_long_string_enum_maps_to_dropdown():
+    # An enum above the radio threshold stays a Dropdown.
+    schema = {
+        "type": "object",
+        "properties": {"pick": {"type": "string", "enum": ["a", "b", "c", "d", "e", "f"]}},
+        "required": ["pick"],
+    }
+
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "Dropdown"
+    assert field["data-source"] == "${data.pick__ds}"
+
+
+def test_option_bearing_string_without_enum_stays_dropdown():
+    # A string marked option-bearing by the ask (per-send options, no schema enum) has no fixed
+    # option count at publish, so it stays the dynamic Dropdown (never a radio group).
+    schema = {"type": "object", "properties": {"pick": {"type": "string"}}, "required": ["pick"]}
+
+    field = _controls(build_form_flow(schema, option_fields={"pick"})[0])[0]
+    assert field["type"] == "Dropdown"
+    assert field["data-source"] == "${data.pick__ds}"
 
 
 def test_boolean_maps_to_optin_with_init_value():
@@ -248,8 +272,9 @@ def test_string_with_format_time_or_date_time_stays_text_input(fmt: str):
     }
 
 
-def test_enum_outranks_format_date_and_still_renders_a_dropdown():
-    # An explicit choice list is a stronger instruction than a format hint.
+def test_enum_outranks_format_date_and_still_renders_a_choice():
+    # An explicit choice list is a stronger instruction than a format hint; a short enum renders
+    # as the radio short-list control rather than a date picker.
     schema = {
         "type": "object",
         "properties": {"day": {"type": "string", "format": "date", "enum": ["2026-09-27", "2026-09-28"]}},
@@ -257,7 +282,7 @@ def test_enum_outranks_format_date_and_still_renders_a_dropdown():
     }
 
     field = _controls(build_form_flow(schema)[0])[0]
-    assert field["type"] == "Dropdown"
+    assert field["type"] == "RadioButtonsGroup"
 
 
 def test_option_bearing_outranks_format_date_and_still_renders_a_dropdown():
@@ -725,3 +750,420 @@ def test_odd_named_flow_data_keys_match_the_flow_component_names():
     assert data[f"{mapping['a.b=/c/4:d']}__init"] == "3"
     assert data[f"{mapping['a.b']}__init"] == "hi"
     assert data[f"{mapping['a_b']}__init"] is True
+
+
+# -- E: multiple choice (CheckboxGroup) + radio/dropdown threshold ----------------
+
+
+def _field_by_name(flow_json: dict, name: str, index: int = 0) -> dict:
+    return next(child for child in _controls(flow_json, index) if child.get("name") == name)
+
+
+def test_array_of_strings_maps_to_checkbox_group_with_selection_bounds():
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["a", "b", "c"]},
+                "minItems": 1,
+                "maxItems": 2,
+            }
+        },
+        "required": ["tags"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field == {
+        "type": "CheckboxGroup",
+        "name": "tags",
+        "label": "tags",
+        "required": True,
+        "data-source": "${data.tags__ds}",
+        "init-value": "${data.tags__init}",
+        "min-selected-items": 1,
+        "max-selected-items": 2,
+    }
+
+
+def test_required_array_without_min_items_demands_at_least_one():
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}}},
+        "required": ["tags"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["min-selected-items"] == 1
+    assert "max-selected-items" not in field
+
+
+def test_array_of_strings_via_per_send_options_is_a_checkbox_group():
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
+    field = _controls(build_form_flow(schema, option_fields={"tags"})[0])[0]
+    assert field["type"] == "CheckboxGroup"
+
+
+def test_array_of_strings_without_any_options_is_refused():
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
+    with pytest.raises(ChannelInputError, match="CheckboxGroup"):
+        build_form_flow(schema)
+
+
+def test_array_of_non_strings_is_refused():
+    schema = {"type": "object", "properties": {"nums": {"type": "array", "items": {"type": "integer"}}}}
+    with pytest.raises(ChannelInputError, match="unsupported schema type"):
+        build_form_flow(schema)
+
+
+def test_checkbox_group_data_source_and_init_are_array_shaped():
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}}},
+    }
+    data = build_flow_data(schema, {"tags": ["a"]}, {})
+    assert data["tags__init"] == ["a"]
+    assert data["tags__ds"] == [{"id": "a", "title": "a"}, {"id": "b", "title": "b"}]
+
+
+def test_array_prefill_defaults_to_empty_list():
+    schema = {
+        "type": "object",
+        "properties": {"tags": {"type": "array", "items": {"type": "string", "enum": ["a"]}}},
+    }
+    assert build_flow_data(schema, {}, {})["tags__init"] == []
+
+
+def test_per_send_options_on_array_field_populate_the_data_source():
+    from tai42_contract.interactions.models import FormOption  # noqa: F401  (shape documented inline)
+
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
+    data = build_flow_data(schema, {}, {"tags": [{"value": "x", "label": "X"}]})
+    assert data["tags__ds"] == [{"id": "x", "title": "X"}]
+
+
+# -- C: date constraints (CalendarPicker) -----------------------------------------
+
+
+def test_constrained_date_renders_a_bounded_calendar_picker():
+    schema = {
+        "type": "object",
+        "properties": {
+            "when": {
+                "type": "string",
+                "format": "date",
+                "minDate": "2026-01-01",
+                "maxDate": "2026-12-31",
+                "unavailableDates": ["2026-07-04", "saturday", "sunday"],
+            }
+        },
+        "required": ["when"],
+    }
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "CalendarPicker"
+    assert field["mode"] == "single"
+    assert field["required"] is True
+    assert field["min-date"] == "2026-01-01"
+    assert field["max-date"] == "2026-12-31"
+    assert field["unavailable-dates"] == ["2026-07-04"]
+    # Excluded weekdays are dropped from include-days (the days that stay selectable).
+    assert field["include-days"] == ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    assert field["init-value"] == "${data.when__init}"
+
+
+def test_unconstrained_date_stays_a_bare_date_picker():
+    schema = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}, "required": ["when"]}
+    field = _controls(build_form_flow(schema)[0])[0]
+    assert field["type"] == "DatePicker"
+    assert "required" not in field
+
+
+def test_declared_range_renders_two_scalar_date_controls_each_submitting_its_own_field():
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "minDays": 1, "maxDays": 7},
+        },
+        "required": ["start", "end"],
+    }
+    flow_json, _ = build_form_flow(schema)
+    start = _field_by_name(flow_json, "start")
+    end = _field_by_name(flow_json, "end")
+    # The end field carries a range pairing, so it is a (constrained) CalendarPicker; the start
+    # is a bare DatePicker. The span is enforced at the answer facet, not drawn — so the
+    # completion submits the TWO scalar date fields, nothing recombined.
+    assert start["type"] == "DatePicker"
+    assert end["type"] == "CalendarPicker"
+    footer = _screen_children(flow_json)[-1]
+    assert set(footer["on-click-action"]["payload"]) == {"start", "end"}
+    assert footer["on-click-action"]["payload"]["start"] == "${form.start}"
+    assert footer["on-click-action"]["payload"]["end"] == "${form.end}"
+
+
+# -- D: display blocks + review screen --------------------------------------------
+
+
+def test_display_blocks_render_in_order_ahead_of_the_inputs():
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    pages = [
+        {
+            "title": "Form",
+            "fields": ["note"],
+            "kind": "input",
+            "display": [
+                {"kind": "heading", "text": "Welcome"},
+                {"kind": "body", "text": "Please answer"},
+                {"kind": "image", "src": "BASE64DATA", "alt": "a logo"},
+            ],
+        }
+    ]
+    children = _screen_children(build_form_flow(schema, pages)[0])
+    assert children[0] == {"type": "TextHeading", "text": "Welcome"}
+    assert children[1] == {"type": "TextBody", "text": "Please answer"}
+    assert children[2] == {"type": "Image", "src": "BASE64DATA", "alt-text": "a logo"}
+    # Then the input control, then the footer.
+    assert children[3]["type"] == "TextInput"
+    assert children[-1]["type"] == "Footer"
+
+
+def test_display_slot_reads_dynamic_data_and_declares_its_key():
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    pages = [{"title": "Form", "fields": ["note"], "kind": "input", "display": [{"kind": "body", "slot": "total"}]}]
+    flow_json, _ = build_form_flow(schema, pages)
+    body = _screen_children(flow_json)[0]
+    assert body == {"type": "TextBody", "text": "${data.slot_total}"}
+    assert flow_json["screens"][0]["data"]["slot_total"] == {"type": "string", "__example__": ""}
+
+
+def test_review_page_renders_a_readback_of_every_field():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+    pages = [
+        {"title": "Fill", "fields": ["a", "b"], "kind": "input", "display": []},
+        {"title": "Review", "fields": [], "kind": "review", "display": [{"kind": "heading", "text": "Please review"}]},
+    ]
+    flow_json, _ = build_form_flow(schema, pages)
+    review_children = _screen_children(flow_json, 1)
+    assert review_children[0] == {"type": "TextHeading", "text": "Please review"}
+    # A readback TextBody per field, interpolating its collected value.
+    texts = [child["text"] for child in review_children if child["type"] == "TextBody"]
+    assert "a: ${data.a__val}" in texts
+    assert "b: ${data.b__val}" in texts
+    assert review_children[-1]["on-click-action"]["name"] == "complete"
+
+
+# -- B: conditional (visibleWhen -> If) -------------------------------------------
+
+
+def test_visible_when_equals_wraps_the_control_in_an_if():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "equals": "admin"}},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    conditional = next(child for child in children if child.get("type") == "If")
+    assert conditional["condition"] == "${form.role} == 'admin'"
+    assert conditional["then"][0]["name"] == "detail"
+
+
+def test_visible_when_in_builds_an_or_condition():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    conditional = next(child for child in children if child.get("type") == "If")
+    assert conditional["condition"] == "${form.role} == 'a' || ${form.role} == 'b'"
+
+
+def test_visible_when_not_empty_condition():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "notEmpty": True}},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    conditional = next(child for child in children if child.get("type") == "If")
+    assert conditional["condition"] == "${form.role} != ''"
+
+
+# -- A: reacting (endpoint-driven) flow -------------------------------------------
+
+
+def test_reacting_field_change_publishes_endpoint_driven_with_a_data_exchange_action():
+    schema = {"type": "object", "properties": {"pick": {"type": "string", "enum": ["a", "b"]}}, "required": ["pick"]}
+    reactions = {"field_changed": ["pick"], "page_advanced": [], "submitted": False, "choices": []}
+    flow_json, _ = build_form_flow(schema, reactions=reactions)
+    assert flow_json["data_api_version"] == "3.0"
+    assert flow_json["routing_model"] == {"SCREEN_A": []}
+    field = _controls(flow_json)[0]
+    action = field["on-select-action"]
+    assert action["name"] == "data_exchange"
+    assert action["payload"]["tai42_event"] == "field_changed"
+    assert action["payload"]["tai42_field"] == "pick"
+    assert action["payload"]["pick"] == "${form.pick}"
+
+
+def test_reacting_submit_turns_the_terminal_footer_into_a_data_exchange():
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    flow_json, _ = build_form_flow(schema, reactions=reactions)
+    footer = _screen_children(flow_json)[-1]
+    assert footer["on-click-action"]["name"] == "data_exchange"
+    assert footer["on-click-action"]["payload"]["tai42_event"] == "submitted"
+    assert footer["on-click-action"]["payload"]["note"] == "${form.note}"
+
+
+def test_reacting_page_advance_turns_the_step_footer_into_a_data_exchange():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+    pages = [
+        {"title": "First", "fields": ["a"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["b"], "kind": "input", "display": []},
+    ]
+    reactions = {"field_changed": [], "page_advanced": ["First"], "submitted": False, "choices": []}
+    flow_json, _ = build_form_flow(schema, pages, reactions=reactions)
+    step_footer = _screen_children(flow_json, 0)[-1]
+    assert step_footer["on-click-action"]["name"] == "data_exchange"
+    assert step_footer["on-click-action"]["payload"]["tai42_event"] == "page_advanced"
+    assert step_footer["on-click-action"]["payload"]["tai42_page"] == "First"
+
+
+def test_field_changed_on_a_text_field_is_refused():
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    reactions = {"field_changed": ["note"], "page_advanced": [], "submitted": False, "choices": []}
+    with pytest.raises(ChannelInputError, match="selectable control"):
+        build_form_flow(schema, reactions=reactions)
+
+
+def test_reacting_form_property_colliding_with_a_reserved_marker_is_refused():
+    schema = {"type": "object", "properties": {"tai42_event": {"type": "string"}}, "required": ["tai42_event"]}
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    with pytest.raises(ChannelInputError, match="reserved reaction"):
+        build_form_flow(schema, reactions=reactions)
+
+
+def test_empty_reactions_block_stays_a_static_flow():
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": False, "choices": []}
+    flow_json, _ = build_form_flow(schema, reactions=reactions)
+    assert "data_api_version" not in flow_json
+    assert _screen_children(flow_json)[-1]["on-click-action"]["name"] == "complete"
+
+
+def test_options_on_a_non_choice_property_are_refused_in_flow_data():
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    with pytest.raises(ChannelInputError, match="choice control"):
+        build_flow_data(schema, {}, {"n": [{"value": "x"}]})
+
+
+# -- branch coverage: choice-type, slots, conditions, reaction payloads -----------
+
+from tai42_channel_whatsapp.flows import (  # noqa: E402
+    _choice_component_type,
+    slot_datanames,
+)
+
+
+def test_choice_component_type_classifies_an_array_as_checkbox():
+    assert _choice_component_type({"type": "array", "items": {"type": "string"}}) == "CheckboxGroup"
+
+
+def test_slot_datanames_disambiguate_a_sanitisation_collision():
+    pages = [{"title": "T", "fields": [], "display": [{"kind": "body", "slot": "a!"}, {"kind": "body", "slot": "a?"}]}]
+    mapping = slot_datanames(pages)
+    assert len(set(mapping.values())) == 2
+
+
+def test_visible_when_bool_and_number_literals():
+    schema = {
+        "type": "object",
+        "properties": {
+            "agree": {"type": "boolean"},
+            "n": {"type": "integer"},
+            "x": {"type": "string", "visibleWhen": {"field": "agree", "equals": True}},
+            "y": {"type": "string", "visibleWhen": {"field": "n", "equals": 3}},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    conditions = [child["condition"] for child in children if child.get("type") == "If"]
+    assert "${form.agree} == true" in conditions
+    assert "${form.n} == 3" in conditions
+
+
+def test_visible_when_on_earlier_screen_uses_the_val_carrier():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "equals": "admin"}},
+        },
+    }
+    pages = [
+        {"title": "One", "fields": ["role"], "kind": "input", "display": []},
+        {"title": "Two", "fields": ["detail"], "kind": "input", "display": []},
+    ]
+    conditional = next(c for c in _screen_children(build_form_flow(schema, pages)[0], 1) if c.get("type") == "If")
+    assert conditional["condition"] == "${data.role__val} == 'admin'"
+
+
+def test_visible_when_referencing_a_later_field_is_left_unwrapped():
+    # The controlling field is on a LATER screen, unreadable here, so no client-side If is
+    # emitted (the answer facet still enforces visibility).
+    schema = {
+        "type": "object",
+        "properties": {
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "equals": "admin"}},
+            "role": {"type": "string"},
+        },
+    }
+    pages = [
+        {"title": "One", "fields": ["detail"], "kind": "input", "display": []},
+        {"title": "Two", "fields": ["role"], "kind": "input", "display": []},
+    ]
+    children = _screen_children(build_form_flow(schema, pages)[0], 0)
+    assert all(child.get("type") != "If" for child in children)
+    assert any(child.get("name") == "detail" for child in children)
+
+
+def test_reacting_optin_field_change_uses_on_click_action():
+    schema = {"type": "object", "properties": {"agree": {"type": "boolean"}}, "required": ["agree"]}
+    reactions = {"field_changed": ["agree"], "page_advanced": [], "submitted": False, "choices": []}
+    field = _controls(build_form_flow(schema, reactions=reactions)[0])[0]
+    assert field["on-click-action"]["name"] == "data_exchange"
+
+
+def test_reacting_submit_on_multipage_includes_earlier_values_via_val_carrier():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+    pages = [
+        {"title": "One", "fields": ["a"], "kind": "input", "display": []},
+        {"title": "Two", "fields": ["b"], "kind": "input", "display": []},
+    ]
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    footer = _screen_children(build_form_flow(schema, pages, reactions=reactions)[0], 1)[-1]
+    payload = footer["on-click-action"]["payload"]
+    assert payload["a"] == "${data.a__val}"
+    assert payload["b"] == "${form.b}"
+
+
+def test_reacting_field_changed_naming_unknown_field_is_refused():
+    schema = {"type": "object", "properties": {"a": {"type": "string", "enum": ["x"]}}}
+    reactions = {"field_changed": ["missing"], "page_advanced": [], "submitted": False, "choices": []}
+    with pytest.raises(ChannelInputError, match="unknown property"):
+        build_form_flow(schema, reactions=reactions)
+
+
+def test_build_flow_data_requires_a_properties_object():
+    with pytest.raises(ChannelInputError, match="non-empty 'properties'"):
+        build_flow_data({"type": "object"}, {}, {})
+
+
+def test_build_flow_data_array_without_options_or_enum_is_refused():
+    schema = {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}}}}
+    with pytest.raises(ChannelInputError, match="data-source"):
+        build_flow_data(schema, {}, {})

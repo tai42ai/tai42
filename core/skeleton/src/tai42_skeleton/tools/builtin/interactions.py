@@ -53,6 +53,8 @@ async def ask(
     to: Literal["user", "caller"] = "user",
     payload: dict[str, Any] | None = None,
     on_expiry: Literal["kill", "resume"] = "kill",
+    reaction_tool: str | None = None,
+    reactions: dict[str, Any] | None = None,
 ) -> Any:
     """Ask a human a question mid-run.
 
@@ -154,6 +156,18 @@ async def ask(
             ``{"title": ..., "fields": [prop, ...]}`` splitting the form into ordered
             steps; every top-level property must appear on exactly one page. Omit for
             a single-page form. The submitted answer is the union of all pages' fields.
+        reaction_tool: The handler tool run whenever a declared reaction trigger fires on
+            a "form" ask, under the park's rebound identity and state context (forbidden on
+            every other format). Pairs with ``reactions`` — each requires the other — and a
+            reacting form must use ``mode="async"``. A reacting form delivered over a
+            ``channel`` requires that channel to advertise form reaction (refused loudly
+            otherwise); a ``channel``-less reacting form is served by the in-app reaction
+            door. Omit both ``reaction_tool`` and ``reactions`` for a static form.
+        reactions: The reaction declaration for a "form" ask (forbidden otherwise). An
+            object declaring the triggers — ``field_changed``, ``page_advanced``,
+            ``submitted`` — that run ``reaction_tool`` while the form is open, and the
+            ``choices`` fields a reaction may re-supply (any ``choices`` field requires the
+            ``submitted`` trigger). Pairs with ``reaction_tool`` — each requires the other.
         to: Who the question is addressed to. "user" (the default) is a human answered
             through the inbox/callback/channel surfaces. "caller" addresses another RUN:
             the ask carries NO out-of-band delivery — it parks this run and its answer is
@@ -187,6 +201,8 @@ async def ask(
         schema=schema,
         data=data,
         pages=pages,
+        reaction_tool=reaction_tool,
+        reactions=reactions,
         group_id=group_id,
         timeout=timeout,
         link=link,

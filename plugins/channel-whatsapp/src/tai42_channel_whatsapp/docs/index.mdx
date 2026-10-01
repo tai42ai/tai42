@@ -30,6 +30,10 @@ inherited connection-tuning fields) point the plugin-owned correlation store.
 | `CHANNEL_WHATSAPP_DEDUPE_TTL` | `172800` | Seconds a handled `wamid` stays remembered (replay guard). |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | `30` | Rolling "seen within N days" window for template-send recipient policy; `0` disables known-contact tracking (allowlist-only). |
 | `CHANNEL_WHATSAPP_REDIS_URL` | unset | Connection for the correlation store. |
+| `CHANNEL_WHATSAPP_WABA_ID` | unset | WhatsApp Business Account id that owns Flows; required on the `form` paths. |
+| `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` | unset | Business RSA-2048 private key (PEM) the Flow data endpoint decrypts with; required only for a **reacting** form. Secret. |
+| `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE` | unset | Passphrase for an encrypted `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` PEM. Secret. |
+| `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI` | unset | Public URL of the Flow data endpoint, configured on a reacting Flow; required only for a reacting form. |
 
 ## Point the webhook at the deployment
 
@@ -84,7 +88,18 @@ tai conversations create chat-line \
 A `form` ask (an `ask` whose answer is a small JSON object) renders as an in-chat
 **WhatsApp Flow**: the participant fills the fields and submits, and the completed
 values return as the answer. A multi-page layout renders one screen per page, and
-per-send prefill values and option lists open the form already filled in.
+per-send prefill values and option lists open the form already filled in. A short
+string `enum` renders a radio group (longer, a dropdown), an array of strings a
+checkbox group, a constrained `format: date` a bounded calendar picker; a page's
+display blocks and a review page render too, and a `visibleWhen` field is shown or
+hidden client-side.
+
+A form that **reacts while open** (its ask declares reaction triggers) publishes as
+an endpoint-driven Flow whose controls call this plugin's encrypted Flow **data
+endpoint** (`/api/channels/whatsapp/flow-data`); it needs the business key material
+(`CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` + `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI`, and the
+public key registered for the sending number) and refuses loudly without it. See the
+plugin README for the provisioning steps.
 
 Each schema property name may use any character, while a Flow component name must be
 an identifier (`[A-Za-z_][A-Za-z0-9_]*`). The channel maps each property to a unique

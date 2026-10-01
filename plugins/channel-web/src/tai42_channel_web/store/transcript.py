@@ -216,6 +216,7 @@ async def append_question(
     media: list[dict[str, Any]] | None = None,
     form_data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
+    reactions: dict[str, Any] | None = None,
 ) -> str:
     """Append one ``chat.question`` entry (the UI renders the per-format widget) and return its id.
 
@@ -234,6 +235,11 @@ async def append_question(
     ``data`` ONLY when present. ``pages`` is the form's step layout — each ``{"title",
     "fields"}`` — carried ONLY when present (absent means one page). Both ride the ``form``
     format alone, display-input material the widget renders, never part of the answer.
+
+    ``reactions`` is the ``form`` question's reaction triggers — ``{"field_changed",
+    "page_advanced", "submitted", "choices"}`` — carried ONLY when the ask declared a
+    reacting form (absent means a static form). The widget reads it to know which on-change,
+    page-advance and submit events to round-trip to the reaction door.
 
     ``media`` is the question's display items — each ``{"kind", "url", "caption"?,
     "filename"?}`` (``filename`` on a ``document`` only), the SAME frame shape a
@@ -259,6 +265,8 @@ async def append_question(
         data["data"] = form_data
     if pages is not None:
         data["pages"] = pages
+    if reactions is not None:
+        data["reactions"] = reactions
     if media:
         data["media"] = media
     await _append(identity, address, QUESTION_EVENT, data)
