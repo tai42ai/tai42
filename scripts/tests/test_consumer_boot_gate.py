@@ -55,6 +55,20 @@ def test_governing_bump_unbumped_reads_last_release_class(tagged_repo: Path):
     assert gate.governing_bump("pkg", "1.1.0", tagged_repo) == "minor"
 
 
+def test_governing_bump_honors_voided_tag_from_config(tagged_repo: Path):
+    # The boot gate shares the api-gate's tag plumbing, so a tag the repo's api-gate
+    # config voids is skipped as a baseline here too, with no call-site change: without
+    # the void, 1.1.1 diffs against pkg-v1.1.0 (patch); voiding pkg-v1.1.0 drops the
+    # baseline to pkg-v1.0.0, so the bump reads as minor.
+    assert gate.governing_bump("pkg", "1.1.1", tagged_repo) == "patch"
+    gh = tagged_repo / ".github"
+    gh.mkdir()
+    (gh / "api-gate.yml").write_text(
+        "mode: label-honesty\nvoided_tags:\n  - tag: pkg-v1.1.0\n    reason: release job failed before publishing\n"
+    )
+    assert gate.governing_bump("pkg", "1.1.1", tagged_repo) == "minor"
+
+
 @pytest.mark.parametrize(
     ("bump", "accepted"),
     [("major", True), ("minor", False), ("patch", False)],

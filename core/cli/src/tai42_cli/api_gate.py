@@ -114,6 +114,56 @@ def _read_mode(config_path: Path) -> str:
     return mode
 
 
+def _read_voided_tags(config_path: Path) -> dict[str, str]:
+    """The ``voided_tags`` record from the gate config, mapped tag -> one-line reason.
+
+    A voided tag is one whose release job failed before publishing anything, so the
+    gate never baselines against it (nothing shipped at that version). An absent key
+    yields the empty map; a non-list value or a malformed entry raises loudly.
+    """
+    if not config_path.is_file():
+        _fail(f"api-gate config not found at {config_path}")
+    raw = yaml.safe_load(config_path.read_text()).get("voided_tags", [])
+    if not isinstance(raw, list):
+        _fail("api-gate config 'voided_tags' must be a list of {tag, reason} entries")
+    voided: dict[str, str] = {}
+    for entry in raw:
+        if not isinstance(entry, dict) or set(entry) != {"tag", "reason"}:
+            _fail(f"api-gate 'voided_tags' entry {entry!r} must be a mapping with exactly 'tag' and 'reason'")
+        tag, reason = entry["tag"], entry["reason"]
+        if not isinstance(tag, str) or not tag or not isinstance(reason, str) or not reason:
+            _fail(f"api-gate 'voided_tags' entry {entry!r} must give a non-empty string tag and reason")
+        if tag in voided:
+            _fail(f"api-gate 'voided_tags' names tag {tag!r} more than once")
+        voided[tag] = reason
+    return voided
+
+
+def _all_tags(repo_root: Path) -> set[str]:
+    out = subprocess.run(
+        ["git", "tag", "--list"],  # noqa: S607 fixed, trusted executable resolved from PATH
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return set(out.split())
+
+
+def _voided_tags(config_path: Path, repo_root: Path) -> dict[str, str]:
+    """Read the voided-tag record and assert every tag it names still exists in the repo.
+
+    A voided entry pointing at a tag that is not present is a stale or typo'd record —
+    a config error — and fails the gate loudly rather than being ignored.
+    """
+    voided = _read_voided_tags(config_path)
+    if voided:
+        missing = sorted(set(voided) - _all_tags(repo_root))
+        if missing:
+            _fail(f"api-gate 'voided_tags' names tag(s) not present in the repo: {', '.join(missing)}")
+    return voided
+
+
 def _parse_version(version: str) -> tuple[int, int, int]:
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
     if not match:
@@ -133,8 +183,23 @@ def _bump_class(old: str, new: str) -> str:
     return "patch"
 
 
-def _previous_tag(package: str, new_version: str, repo_root: Path) -> str | None:
-    """Highest ``<package>-v<version>`` tag strictly below ``new_version``."""
+def _previous_tag(package: str, new_version: str, repo_root: Path, *, config_path: Path | None = None) -> str | None:
+    """Highest ``<package>-v<version>`` tag strictly below ``new_version``, skipping voided ones.
+
+    A voided tag is one whose release job failed before it published anything, so it is
+    not a baseline: comparing a later release against it would measure a surface nobody
+    ever received.
+
+    The voided set is sourced here from the api-gate config (``config_path``, default
+    ``<repo_root>/.github/api-gate.yml``) so every caller is covered without threading it
+    through: a missing config means no voids (the gate runs against trees that carry no
+    api-gate config), while a present-but-malformed one, or a void naming an absent tag,
+    raises loudly. The config is read only when it exists, and the stale-void git check
+    runs only when voids are declared, so a tree with no voids pays for no extra git call.
+    """
+    if config_path is None:
+        config_path = repo_root / ".github" / "api-gate.yml"
+    voided = frozenset(_voided_tags(config_path, repo_root)) if config_path.is_file() else frozenset()
     prefix = f"{package}-v"
     out = subprocess.run(  # noqa: S603 fixed, trusted argv; no shell and no user input
         ["git", "tag", "--list", f"{prefix}*"],  # noqa: S607 fixed, trusted executable resolved from PATH
@@ -146,6 +211,8 @@ def _previous_tag(package: str, new_version: str, repo_root: Path) -> str | None
     new_key = _parse_version(new_version)
     candidates: list[tuple[tuple[int, int, int], str]] = []
     for tag in out.split():
+        if tag in voided:
+            continue
         version = tag[len(prefix) :]
         if re.fullmatch(r"\d+\.\d+\.\d+", version) and _parse_version(version) < new_key:
             candidates.append((_parse_version(version), tag))
@@ -610,7 +677,7 @@ def main() -> None:
     src_rel = f"{args.dir}/src"
     src = repo_root / src_rel
 
-    previous = _previous_tag(args.package, args.version, repo_root)
+    previous = _previous_tag(args.package, args.version, repo_root, config_path=config_path)
     if previous is None:
         print(f"{args.package}: first release, no prior tag to diff — gate passes.")
         return
