@@ -1,0 +1,25 @@
+name: first-party npm majors
+description: >-
+  Fail when a first-party scoped npm dependency (default scope @tai42) is a full
+  major version behind its latest published release. Smaller steps stay quiet —
+  the update bot owns minors and patches. Scans the checkout's package.json
+  files and self-skips when no matching dependency is present.
+
+inputs:
+  scope:
+    description: The npm scope whose dependencies are gated (e.g. @tai42).
+    default: "@tai42"
+  registry:
+    description: The npm registry base URL queried for the latest published version.
+    default: "https://registry.npmjs.org"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node 22
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: "22"
+    - name: Gate first-party scoped npm majors
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/check.mjs" --scope "${{ inputs.scope }}" --registry "${{ inputs.registry }}"

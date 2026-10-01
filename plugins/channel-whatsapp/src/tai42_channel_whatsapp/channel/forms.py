@@ -14,18 +14,25 @@ from typing import Any
 from uuid import uuid4
 
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.interactions.models import FormReactions
 
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.client import create_flow, delete_flow, publish_flow, send_flow
 from tai42_channel_whatsapp.correlation import (
     cache_flow_form,
     cache_flow_id,
+    cache_reaction_form,
     get_cached_flow_id,
     release_pending,
     reserve_pending,
 )
 from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, build_flow_data, build_form_flow, payload_labels
-from tai42_channel_whatsapp.settings import WhatsAppSettings, require_delivery_setting, whatsapp_settings
+from tai42_channel_whatsapp.settings import (
+    WhatsAppSettings,
+    require_delivery_secret,
+    require_delivery_setting,
+    whatsapp_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +62,15 @@ def _reverse_payload_labels(schema: dict[str, Any]) -> dict[str, str]:
     return {label: key for key, label in payload_labels(schema["properties"]).items()}
 
 
-async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, Any]) -> str:
+async def _resolve_flow_id(
+    waba_id: str, schema_hash: str, flow_json: dict[str, Any], endpoint_uri: str | None = None
+) -> str:
     """The published flow id for this schema under ``waba_id``.
 
-    The cached id, else create + publish + store a new Flow. Every step is loud —
-    a create, publish, or store failure raises and never falls back to another
-    answer format.
+    The cached id, else create + publish + store a new Flow. ``endpoint_uri`` links an
+    endpoint-driven (reacting) Flow to the plugin's data endpoint at create; a static Flow
+    passes none. Every step is loud — a create, publish, or store failure raises and never
+    falls back to another answer format.
 
     Meta returns HTTP 200 for a create even when the Flow JSON is invalid: the draft
     IS created but carries ``validation_errors`` and can never publish. A non-empty
@@ -75,7 +85,9 @@ async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, 
     cached = await get_cached_flow_id(waba_id, schema_hash)
     if cached is not None:
         return cached
-    result = await create_flow(waba_id=waba_id, name=f"{_FLOW_NAME_PREFIX}{schema_hash}", flow_json=flow_json)
+    result = await create_flow(
+        waba_id=waba_id, name=f"{_FLOW_NAME_PREFIX}{schema_hash}", flow_json=flow_json, endpoint_uri=endpoint_uri
+    )
     try:
         if result.validation_errors:
             # The refusal rides the SAME except that deletes an orphaned draft, so the
@@ -98,12 +110,51 @@ async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, 
 def _form_pages_list(send: ChannelDelivery | ChannelNotification) -> list[dict[str, Any]] | None:
     """The form's step layout as plain JSON, or ``None`` when the send carried one page.
 
-    Each page is ``{"title", "fields"}``. Shared by the form ask and the ask-less
-    form notification, whose ``pages`` field is the identical shape.
+    Each page is ``{"title", "fields", "display", "kind"}`` — the display blocks (heading/body/
+    image, each static or slotted) and the input/review kind ride alongside the field list, so
+    the renderer draws display elements and a review screen. Shared by the form
+    ask and the ask-less form notification, whose ``pages`` field is the identical shape.
     """
     if send.pages is None:
         return None
-    return [{"title": page.title, "fields": list(page.fields)} for page in send.pages]
+    return [
+        {
+            "title": page.title,
+            "fields": list(page.fields),
+            "kind": page.kind,
+            "display": [block.model_dump(exclude_none=True) for block in page.display],
+        }
+        for page in send.pages
+    ]
+
+
+def _reactions_dict(reactions: FormReactions | None) -> dict[str, Any] | None:
+    """The form's reaction triggers as plain JSON, or ``None`` when the form does not react.
+
+    A reactions block with no trigger (no field change, page advance, or submit) is a static
+    form, so it yields ``None`` — the Flow stays the navigate (endpoint-less) Flow.
+    """
+    if reactions is None or not reactions.has_trigger():
+        return None
+    return {
+        "field_changed": list(reactions.field_changed),
+        "page_advanced": list(reactions.page_advanced),
+        "submitted": reactions.submitted,
+        "choices": list(reactions.choices),
+    }
+
+
+def _require_reaction_settings(settings: WhatsAppSettings) -> str:
+    """The data-endpoint URI a reacting form publishes against; raise loudly when key material is missing.
+
+    A reacting form CANNOT publish or be served without the business private key (to decrypt the
+    endpoint's requests) and the public endpoint URI (configured on the Flow so Meta routes
+    data-exchange back here). Either unset is refused loudly — never a silent fall back to a
+    non-reacting flow. The public key must also be registered for the sending number (operator
+    step; see :func:`tai42_channel_whatsapp.provisioning.provision_flow_encryption`).
+    """
+    require_delivery_secret(settings.flow_private_key, "CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY")
+    return require_delivery_setting(settings.flow_endpoint_uri, "CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI")
 
 
 def _form_values_and_options(
@@ -135,6 +186,7 @@ async def send_form_ask_flow(
     pages: list[dict[str, Any]] | None,
     values: dict[str, Any],
     options: dict[str, list[dict[str, Any]]],
+    reactions: dict[str, Any] | None = None,
 ) -> str:
     """Build, resolve and send a form ask's Flow; return its ``wamid``.
 
@@ -142,12 +194,17 @@ async def send_form_ask_flow(
     re-send call it with the same inputs the pending record holds, so the re-send
     resolves the SAME published Flow through the same cache key — re-creating it if
     the cache was lost, never raising a stale-lookup miss — and navigates to the entry
-    screen with the same prefill and option lists the first send carried.
+    screen with the same prefill and option lists the first send carried. ``reactions``
+    (present for a reacting form) publishes the Flow as ENDPOINT-DRIVEN against the
+    configured data endpoint; the reacting flow folds into the cache key, so its published
+    Flow is distinct from the static one.
     """
-    flow_json, schema_hash = build_form_flow(schema, pages, set(options))
+    flow_json, schema_hash = build_form_flow(schema, pages, set(options), reactions)
     flow_data = build_flow_data(schema, values, options)
-    waba_id = require_delivery_setting(whatsapp_settings().waba_id, "CHANNEL_WHATSAPP_WABA_ID")
-    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
+    settings = whatsapp_settings()
+    waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+    endpoint_uri = _require_reaction_settings(settings) if reactions is not None else None
+    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
     return await send_flow(
         phone_number_id=phone_number_id,
         to=to,
@@ -176,19 +233,27 @@ async def _deliver_form(
     triple and the emitted shape (the option-bearing fields decide which string
     properties render as dropdowns) and REUSED across sends; the prefilled values and
     per-send option lists ride the send's ``flow_action_payload.data`` (a dynamic
-    data-source), never a new Flow. The send goes through the one sender
-    :func:`send_form_ask_flow`; a failure resolving the Flow or sending releases the
-    reservation and raises — never a fallback format.
+    data-source), never a new Flow. A REACTING form (one carrying ``reactions`` triggers)
+    publishes the Flow endpoint-driven and refuses loudly, before any reservation, when the
+    data-endpoint key material is missing (:func:`_require_reaction_settings`); its schema +
+    per-send inputs are cached under the ``interaction_id`` so the data endpoint can serve its
+    reactions. The send goes through the one sender :func:`send_form_ask_flow`; a failure
+    resolving the Flow or sending releases the reservation and raises — never a fallback format.
     """
     if delivery.schema is None:
         raise ChannelDeliveryError(f"form delivery {delivery.interaction_id} is missing its schema")
     pages = _form_pages_list(delivery)
     values, options = _form_values_and_options(delivery)
+    reactions = _reactions_dict(delivery.reactions)
     # Build + validate before any reservation (raises on an unsupported schema, an
-    # unmappable per-send option, or an unknown page field).
-    build_form_flow(delivery.schema, pages, set(options))
+    # unmappable per-send option, an unknown page field, or an unrenderable reaction trigger).
+    build_form_flow(delivery.schema, pages, set(options), reactions)
     build_flow_data(delivery.schema, values, options)
     require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+    # A reacting form cannot publish or be served without its data-endpoint key material —
+    # refuse loudly up front (never a silent fall back to a non-reacting flow).
+    if reactions is not None:
+        _require_reaction_settings(settings)
 
     await reserve_pending(
         phone_number_id=phone_number_id,
@@ -202,7 +267,12 @@ async def _deliver_form(
         form_values=values,
         form_options=options,
         form_names=_reverse_payload_labels(delivery.schema),
+        form_reactions=reactions,
     )
+    # A reacting form's data endpoint recovers its schema + inputs from this sidecar by the
+    # flow token (the interaction id); it expires with the ask's own deadline.
+    if reactions is not None:
+        await cache_reaction_form(delivery.interaction_id, delivery.schema, pages, values, options, delivery.timeout_at)
     try:
         await send_form_ask_flow(
             phone_number_id=phone_number_id,
@@ -213,6 +283,7 @@ async def _deliver_form(
             pages=pages,
             values=values,
             options=options,
+            reactions=reactions,
         )
     except Exception:
         # Any create/publish/store/send failure frees the pair instead of holding

@@ -21,9 +21,10 @@ from tai42_channel_slack.forms import (
     FORM_OPEN_ACTION_ID,
     FORM_SUBMIT_CALLBACK_ID,
     build_modal_view,
+    decode_private_metadata,
 )
 from tai42_channel_slack.inbound.interactive import _MODAL_RETRY_TEXT as _RETRY_TEXT
-from tai42_channel_slack.inbound.interactive import slack_interactive
+from tai42_channel_slack.inbound.interactive import _REACTION_FAILURE_TEXT, slack_interactive
 
 from .conftest import (
     TEST_BOT_TOKEN,
@@ -80,7 +81,7 @@ def _default_state() -> dict[str, Any]:
 def _view_submission(state: dict[str, Any] | None = None, **view_overrides: Any) -> dict[str, Any]:
     view: dict[str, Any] = {
         "callback_id": FORM_SUBMIT_CALLBACK_ID,
-        "private_metadata": _INTERACTION_ID,
+        "private_metadata": json.dumps({"id": _INTERACTION_ID}),
         "state": {"values": state if state is not None else _default_state()},
     }
     view.update(view_overrides)
@@ -564,3 +565,235 @@ async def test_view_submission_wrong_callback_id_is_ignored(fake_redis, http_scr
 async def test_view_submission_without_private_metadata_raises(fake_redis):
     with pytest.raises(ValueError, match="private_metadata"):
         await slack_interactive(_signed(_view_submission(private_metadata="")))
+
+
+# -- B/A: a field change re-renders the modal (conditional) or runs a reaction ----------------
+
+
+_FUTURE = datetime.now(UTC) + timedelta(minutes=10)
+
+
+def _field_action(block_id: str, state: dict[str, Any], private_metadata: str | None = None) -> dict[str, Any]:
+    """A ``block_actions`` from a modal field change: the changed block, the view's state/id/hash."""
+    return {
+        "type": "block_actions",
+        "actions": [{"action_id": FIELD_ACTION_ID, "block_id": block_id}],
+        "view": {
+            "id": "V1",
+            "hash": "h1",
+            "private_metadata": private_metadata
+            if private_metadata is not None
+            else json.dumps({"id": _INTERACTION_ID}),
+            "state": {"values": state},
+        },
+    }
+
+
+_COND_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["a", "b"]},
+        "detail": {"type": "string", "visibleWhen": {"field": "kind", "equals": "a"}},
+    },
+}
+
+
+async def test_field_change_re_renders_conditional_without_a_consumer_call(fake_redis, http_script, interactions):
+    # Conditional visibility on Slack: the platform re-evaluates visibleWhen HERE and views.update the
+    # modal to hide the field — never a call to the consumer's reaction handler.
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _COND_SCHEMA, _QUESTION, _FUTURE)
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"kind": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "b"}}}}
+
+    response = await slack_interactive(_signed(_field_action("kind", state)))
+
+    assert body_json(response) == {"status": "updated"}
+    assert interactions.react_calls == []  # platform-evaluated, no consumer reaction
+    (req,) = http_script.requests
+    assert str(req.url) == "https://slack.com/api/views.update"
+    payload = json.loads(req.content)
+    assert payload["view_id"] == "V1"
+    assert payload["hash"] == "h1"
+    ids = [b.get("block_id") for b in payload["view"]["blocks"] if b["type"] == "input"]
+    assert "detail" not in ids  # hidden: kind == "b"
+    assert "kind" in ids
+
+
+async def test_field_change_failed_views_update_surfaces_loudly(fake_redis, http_script, interactions):
+    from tai42_contract.channels import ChannelDeliveryError
+
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _COND_SCHEMA, _QUESTION, _FUTURE)
+    http_script.results.append(httpx.Response(200, json={"ok": False, "error": "not_found"}))
+    state = {"kind": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "b"}}}}
+
+    with pytest.raises(ChannelDeliveryError, match="not_found"):
+        await slack_interactive(_signed(_field_action("kind", state)))
+
+
+async def test_field_change_runs_reaction_and_applies_the_update(fake_redis, http_script, interactions):
+    # A field_changed reaction runs through the ONE chokepoint and its update is
+    # applied by views.update — values set, option lists replaced, display slots filled, errors shown.
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer"}, "plan": {"type": "string", "enum": ["basic"]}},
+    }
+    pages = [
+        {"title": "Details", "fields": ["qty", "plan"], "kind": "input", "display": [{"kind": "body", "slot": "total"}]}
+    ]
+    reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": ["plan"]}
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE, pages=pages, reactions=reactions)
+    interactions.react_result = {
+        "values": {"qty": 2},
+        "options": {"plan": [{"value": "basic", "label": "Basic"}, {"value": "pro", "label": "Pro"}]},
+        "errors": {"qty": "check qty"},
+        "display": {"total": "Total: 20"},
+    }
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+
+    response = await slack_interactive(_signed(_field_action("qty", state)))
+
+    assert body_json(response) == {"status": "updated"}
+    (call,) = interactions.react_calls
+    assert call.interaction_id == _INTERACTION_ID
+    assert call.event == {"kind": "field_changed", "field": "qty"}
+    assert call.partial_values == {"qty": 1}  # the values filled so far, before the update
+    view = json.loads(http_script.requests[0].content)["view"]
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert by_id["qty"]["element"]["initial_value"] == "2"  # reaction set value
+    assert [o["value"] for o in by_id["plan"]["element"]["options"]] == ["basic", "pro"]  # list replaced
+    assert any(b["type"] == "section" and b.get("text", {}).get("text") == "Total: 20" for b in view["blocks"])
+    assert any(b["type"] == "context" and "check qty" in b["elements"][0]["text"] for b in view["blocks"])
+    # The accumulated reaction state rides private_metadata, surviving the next re-render.
+    _id, opts, disp = decode_private_metadata(view["private_metadata"])
+    assert opts["plan"] == [{"value": "basic", "label": "Basic"}, {"value": "pro", "label": "Pro"}]
+    assert disp == {"total": "Total: 20"}
+
+
+async def test_field_change_reaction_failure_shows_a_banner(fake_redis, http_script, interactions):
+    # A handler failure surfaces LOUDLY — a banner notice on the re-rendered modal — never a
+    # stale or silent value.
+    schema = {"type": "object", "properties": {"qty": {"type": "integer"}}}
+    reactions = {"field_changed": ["qty"], "page_advanced": [], "submitted": False, "choices": []}
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE, reactions=reactions)
+    interactions.react_error = RuntimeError("boom")
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+
+    response = await slack_interactive(_signed(_field_action("qty", state)))
+
+    assert body_json(response) == {"status": "updated"}
+    assert len(interactions.react_calls) == 1
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["blocks"][1]["type"] == "section"  # banner right after the question section
+    assert "could not be updated" in view["blocks"][1]["text"]["text"]
+
+
+async def test_field_change_with_no_record_is_ignored(fake_redis, http_script, interactions):
+    # The modal outlived its question: nothing to re-render, no reaction run, no update sent.
+    state = {"kind": {FIELD_ACTION_ID: {"type": "plain_text_input", "value": "x"}}}
+    response = await slack_interactive(_signed(_field_action("kind", state)))
+
+    assert body_json(response) == {"status": "ignored"}
+    assert http_script.requests == []
+    assert interactions.react_calls == []
+
+
+async def test_field_change_on_unstamped_view_is_ignored(fake_redis, http_script, interactions):
+    await _seed_form(fake_redis)
+    state = {"full_name": {FIELD_ACTION_ID: {"type": "plain_text_input", "value": "x"}}}
+    response = await slack_interactive(_signed(_field_action("full_name", state, private_metadata="not-json")))
+
+    assert body_json(response) == {"status": "ignored"}
+    assert http_script.requests == []
+
+
+# -- A: the submitted reaction is the consumer's final check on view_submission ---------------
+
+
+async def _seed_reacting_submit(fake_redis) -> None:
+    reactions = {"field_changed": [], "page_advanced": [], "submitted": True, "choices": []}
+    await store_form_record(_INTERACTION_ID, _CALLBACK, _SCHEMA, _QUESTION, _FUTURE, reactions=reactions)
+
+
+async def test_view_submission_date_bound_violation_degrades_to_an_inline_error(fake_redis, channels):
+    # Date-bound degrade on Slack: the date picker draws no bound, so an out-of-range date
+    # reaches submit, the one answer check rejects it (AnswerMismatchError field="on"), and the
+    # ladder's RETRY_KEPT carries that field — the door pins it as a response_action:errors on
+    # the date field's own block_id (the modal stays open to correct it).
+    schema = {
+        "type": "object",
+        "properties": {"on": {"type": "string", "format": "date", "minDate": "2026-01-01", "maxDate": "2026-12-31"}},
+    }
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _FUTURE)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "answer does not match schema at on: date before minDate"
+    channels.inbound_retry_field = "on"
+    state = {"on": {FIELD_ACTION_ID: {"type": "datepicker", "selected_date": "2025-06-01"}}}
+
+    response = await slack_interactive(_signed(_view_submission(state=state)))
+
+    assert body_json(response) == {
+        "response_action": "errors",
+        "errors": {"on": "answer does not match schema at on: date before minDate"},
+    }
+    assert fake_redis.store[_FORM_KEY]  # kept: the human corrects the out-of-range date and resubmits
+
+
+async def test_view_submission_submitted_reaction_errors_keep_the_modal_open(fake_redis, channels, interactions):
+    await _seed_reacting_submit(fake_redis)
+    interactions.react_result = {"errors": {"full_name": "not allowed"}}
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "not allowed"}}
+    (call,) = interactions.react_calls
+    assert call.event == {"kind": "submitted"}
+    assert channels.inbound_calls == []  # the answer was NOT forwarded — the consumer refused it
+
+
+async def test_view_submission_submitted_reaction_clean_forwards_the_answer(fake_redis, channels, interactions):
+    await _seed_reacting_submit(fake_redis)
+    interactions.react_result = {}  # the consumer accepts
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {}  # forwarded closes the modal
+    (call,) = interactions.react_calls
+    assert call.event == {"kind": "submitted"}
+    assert call.partial_values == {"full_name": "Alice", "count": 3}
+    (forwarded,) = channels.inbound_calls
+    assert forwarded.answer == {"full_name": "Alice", "count": 3}
+
+
+async def test_view_submission_submitted_reaction_finalizes_values(fake_redis, channels, interactions):
+    await _seed_reacting_submit(fake_redis)
+    interactions.react_result = {"values": {"count": 99}}  # the check normalises a value
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {}
+    (forwarded,) = channels.inbound_calls
+    assert forwarded.answer["count"] == 99  # the finalized value is what the consumer receives
+
+
+async def test_view_submission_submitted_reaction_failure_is_a_loud_inline_error(fake_redis, channels, interactions):
+    await _seed_reacting_submit(fake_redis)
+    interactions.react_error = RuntimeError("boom")
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _REACTION_FAILURE_TEXT}}
+    assert channels.inbound_calls == []  # never silently accepted
+
+
+async def test_view_submission_without_reactions_runs_no_submitted_check(fake_redis, channels, interactions):
+    # A static form reaches the ladder directly — the reaction chokepoint is never consulted.
+    await _seed_form(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    await slack_interactive(_signed(_view_submission()))
+
+    assert interactions.react_calls == []

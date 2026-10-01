@@ -256,6 +256,24 @@ class _StubMedia:
         return self.ingest_result
 
 
+class _StubInteractions:
+    """Stands in for ``app.interactions`` — the plugin's test venv cannot import the skeleton,
+    so the one reaction chokepoint (``react``) is faked at this contract seam. A test queues an
+    update to return (``react_result``) or an exception to raise (``react_error``) and reads back
+    the recorded ``react_calls`` (``interaction_id``/``event``/``partial_values``)."""
+
+    def __init__(self) -> None:
+        self.react_calls: list[dict[str, Any]] = []
+        self.react_result: dict[str, Any] = {}
+        self.react_error: BaseException | None = None
+
+    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+        self.react_calls.append({"interaction_id": interaction_id, "event": event, "partial_values": partial_values})
+        if self.react_error is not None:
+            raise self.react_error
+        return self.react_result
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.channels = _StubChannels()
@@ -263,6 +281,7 @@ class _StubApp:
         self.http = _StubHttp()
         self.conversations = _StubConversations()
         self.media = _StubMedia()
+        self.interactions = _StubInteractions()
 
 
 _stub_app = _StubApp()
@@ -378,6 +397,7 @@ def stub_app() -> Iterator[_StubApp]:
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
     _stub_app.media = _StubMedia()
+    _stub_app.interactions = _StubInteractions()
     _reset_channels(channels)
 
 

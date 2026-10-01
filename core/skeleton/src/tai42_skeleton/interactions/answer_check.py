@@ -19,7 +19,11 @@ from typing import Any
 import jsonschema
 from tai42_contract.interactions import AnswerFormat, AnswerMismatchError, QuestionFormat
 
-from tai42_skeleton.interactions.form_schema import effective_answer_schema
+from tai42_skeleton.interactions.form_schema import (
+    date_constraint_mismatch,
+    effective_answer_schema,
+    hidden_fields,
+)
 
 # The channel-form string formats, asserted by the answer door. python-jsonschema treats
 # ``format`` as a bare annotation unless a ``FormatChecker`` carrying a checker for that format
@@ -130,58 +134,97 @@ def schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None:
     return None
 
 
-def _check_text(_question: QuestionFormat, answer: Any) -> None:
+def _without_required(schema: dict[str, Any], drop: set[str]) -> dict[str, Any]:
+    # ``schema`` with any name in ``drop`` removed from its ``required`` list, so a field
+    # hidden by its conditional predicate is not demanded. Non-mutating; unchanged when
+    # nothing is dropped.
+    required = schema.get("required")
+    if not isinstance(required, list) or not drop:
+        return schema
+    kept = [name for name in required if name not in drop]
+    if len(kept) == len(required):
+        return schema
+    return {**schema, "required": kept}
+
+
+def _check_text(_question: QuestionFormat, answer: Any) -> Any:
     """A TEXT answer must be a string."""
     if not isinstance(answer, str):
         raise AnswerMismatchError("answer must be a string")
+    return answer
 
 
-def _check_confirm(_question: QuestionFormat, answer: Any) -> None:
+def _check_confirm(_question: QuestionFormat, answer: Any) -> Any:
     """A CONFIRM answer must be a boolean."""
     if not isinstance(answer, bool):
         raise AnswerMismatchError("answer must be a boolean")
+    return answer
 
 
-def _check_select(question: QuestionFormat, answer: Any) -> None:
+def _check_select(question: QuestionFormat, answer: Any) -> Any:
     """A SELECT answer must be one of the question's offered options."""
     options = (question.format_payload or {}).get("options", [])
     if answer not in options:
         raise AnswerMismatchError(f"answer must be one of {options}")
+    return answer
 
 
-def _check_form(question: QuestionFormat, answer: Any) -> None:
-    """A FORM answer must be an object conforming to the question's stored schema."""
+def _check_form(question: QuestionFormat, answer: Any) -> Any:
+    """Validate a FORM answer against the stored schema; RETURN the answer the consumer receives.
+
+    The returned object is the submitted answer with every field HIDDEN by its
+    ``visibleWhen`` predicate (evaluated on the submitted values) REMOVED — the documented
+    meaning of a conditional field: a hidden field is not required, not validated, and a
+    value sent for it is dropped rather than faulted. A field named in ``reactions.choices``
+    is TYPE-checked only (its enum omitted), the consumer owning membership at submit. Date
+    bounds / unavailable days / a range pairing are enforced after the schema check.
+    """
     if not isinstance(answer, dict):
         raise AnswerMismatchError("answer must be an object")
     payload = question.format_payload or {}
     schema = payload.get("schema")
     if not isinstance(schema, dict):
         raise AnswerMismatchError("question schema is invalid: missing or non-object schema")
-    # Per-send option lists replace a property's enum for THIS send, so the answer is
-    # judged against the choices the human was shown (the union of all pages' fields).
-    schema = effective_answer_schema(schema, payload.get("data"))
-    mismatch = schema_mismatch(answer, schema)
+    reactions = payload.get("reactions")
+    choices = reactions.get("choices", []) if isinstance(reactions, dict) else []
+    # A field hidden by its predicate (evaluated on the SUBMITTED values) is absent from the
+    # answer the consumer receives; a value submitted for it is dropped, not an error.
+    hidden = hidden_fields(schema, answer)
+    answer = {name: value for name, value in answer.items() if name not in hidden}
+    # Per-send option lists replace a property's enum for THIS send (so the answer is judged
+    # against the choices the human was shown); a reaction-fed choice is typed-only. A hidden
+    # field is also dropped from ``required`` so it is not demanded.
+    effective = _without_required(effective_answer_schema(schema, payload.get("data"), choices), hidden)
+    mismatch = schema_mismatch(answer, effective)
     if mismatch is not None:
         message, field = mismatch
         raise AnswerMismatchError(message, field=field)
+    date_mismatch = date_constraint_mismatch(schema, answer)
+    if date_mismatch is not None:
+        message, field = date_mismatch
+        raise AnswerMismatchError(message, field=field)
+    return answer
 
 
-def _check_schema_only(question: QuestionFormat, answer: Any) -> None:
+def _check_schema_only(question: QuestionFormat, answer: Any) -> Any:
     """A FREE or EXTERNAL answer is any JSON value, checked ONLY against a given ``schema``.
 
     Verbatim when the question declared no schema; otherwise the answer must conform to it.
     """
     schema = (question.format_payload or {}).get("schema")
     if schema is None:
-        return
+        return answer
     mismatch = schema_mismatch(answer, schema)
     if mismatch is not None:
         message, field = mismatch
         raise AnswerMismatchError(message, field=field)
+    return answer
 
 
-# Per-format answer checks, keyed by ``AnswerFormat`` — one contract each.
-_ANSWER_CHECKS: dict[AnswerFormat, Callable[[QuestionFormat, Any], None]] = {
+# Per-format answer checks, keyed by ``AnswerFormat`` — one contract each. Each RETURNS the
+# answer the consumer receives (unchanged for every format but FORM, which drops the fields
+# hidden by their conditional predicate).
+_ANSWER_CHECKS: dict[AnswerFormat, Callable[[QuestionFormat, Any], Any]] = {
     AnswerFormat.TEXT: _check_text,
     AnswerFormat.CONFIRM: _check_confirm,
     AnswerFormat.SELECT: _check_select,
@@ -191,13 +234,16 @@ _ANSWER_CHECKS: dict[AnswerFormat, Callable[[QuestionFormat, Any], None]] = {
 }
 
 
-def check_answer(question: QuestionFormat, answer: Any) -> None:
+def check_answer(question: QuestionFormat, answer: Any) -> Any:
     """Validate ``answer`` against ``question``; raise ``AnswerMismatchError`` on a mismatch.
 
-    Returns ``None`` when the answer conforms. An answer format with no check registered is a
-    server bug, never a client error.
+    RETURNS the answer the consumer receives when it conforms — identical to the input for
+    every format but FORM, which returns the answer with conditionally-hidden fields removed
+    (the one place this cross-cutting rule lives, so every answer door records the same
+    effective answer). An answer format with no check registered is a server bug, never a
+    client error.
     """
     check = _ANSWER_CHECKS.get(question.answer_format)
     if check is None:
         raise RuntimeError(f"unhandled answer_format: {question.answer_format}")
-    check(question, answer)
+    return check(question, answer)

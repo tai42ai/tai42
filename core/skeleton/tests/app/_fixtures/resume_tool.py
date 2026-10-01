@@ -52,6 +52,9 @@ async def resume_tool(interaction_id: str, answer: Any) -> Any:
         "status": "success",
         "value": answer.get("value") if isinstance(answer, dict) else answer,
         "door_binding_present": door_binding_present,
+        # The exact answer the continuation received, so a test can assert the resume
+        # delivered the EFFECTIVE answer (a FORM's conditionally-hidden fields dropped).
+        "answer_received": answer,
     }
 
 

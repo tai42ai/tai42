@@ -58,6 +58,10 @@ provides:
           methods:
             - POST
           public: true
+        - path: /questions/{interaction_id}/react
+          methods:
+            - POST
+          public: true
         - path: /forms/{token}
           methods:
             - POST

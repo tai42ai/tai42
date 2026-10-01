@@ -2,7 +2,13 @@ import { act, render } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { QuestionCard, type QuestionItem } from '@/question-card';
-import type { AnswerFormat, FormPage, FormPrefill, JsonSchema } from '@/transcript-model';
+import type {
+  AnswerFormat,
+  FormPage,
+  FormPrefill,
+  FormReactions,
+  JsonSchema,
+} from '@/transcript-model';
 
 export const CALLBACK = 'https://app.example/api/interactions/callback/ticket-1';
 
@@ -57,6 +63,7 @@ export function question(
       schema: FORM_SCHEMA,
       formData: null,
       pages: null,
+      reactions: null,
     };
   return {
     ...base,
@@ -68,11 +75,13 @@ export function question(
   };
 }
 
-/** A `form` question carrying an explicit schema plus the per-send prefill/steps. */
+/** A `form` question carrying an explicit schema plus the per-send prefill/steps and,
+ * for a reacting form, its reaction triggers (`null` = a static form). */
 export function formQuestion(
   schema: JsonSchema,
   formData: FormPrefill | null,
   pages: readonly FormPage[] | null,
+  reactions: FormReactions | null = null,
 ): QuestionItem {
   return {
     kind: 'question',
@@ -88,6 +97,7 @@ export function formQuestion(
     schema,
     formData,
     pages,
+    reactions,
   };
 }
 

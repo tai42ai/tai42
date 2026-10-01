@@ -78,6 +78,9 @@ Settings are read from the `CHANNEL_WHATSAPP_` environment group (see
 | `CHANNEL_WHATSAPP_VERIFY_TOKEN` | yes | Shared token (`SecretStr`) echoed during Meta's GET webhook verification handshake |
 | `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | for ask | The `phone_number_id` messages are sent FROM when no sender identity is routed |
 | `CHANNEL_WHATSAPP_WABA_ID` | for forms | The WhatsApp Business Account id that owns Flows — a `form` ask and an ask-less form notification are rendered as a WhatsApp Flow created and published under this WABA, and the notify-form schema cache is keyed under it. Required only on the form paths |
+| `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` | for reacting forms | The business RSA-2048 **private** key (PEM, `SecretStr`) — the Flow data endpoint decrypts each reacting-form request's AES key with it. Required only to publish/serve a form that reacts while open; a static form never touches it |
+| `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE` | no | Passphrase protecting `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` when the PEM is encrypted (`SecretStr`) |
+| `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI` | for reacting forms | The public HTTPS URL of this plugin's Flow data endpoint (`{public base URL}/api/channels/whatsapp/flow-data`), configured on a reacting Flow at create time so Meta routes its data-exchange requests back here |
 | `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | for cold templates | Whitelist of `wa_id`s a **template** send may reach when the recipient is not a known contact — comma-separated or a JSON list. Freeform sends are not fenced by it |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | no (30) | Rolling "seen within N days" window admitting a template send to a `wa_id` the inbound webhook has messaged from; `0` disables known-contact tracking (allowlist-only templates) |
 | `CHANNEL_WHATSAPP_API_BASE_URL` | no | Graph API origin + pinned version (default `https://graph.facebook.com/v23.0`) |
@@ -120,9 +123,20 @@ interactive **list**, and past those platform caps it falls back to a numbered
 plaintext list. A tap answers by a question-bound id that maps back to the exact
 option text; the human may always **type** an option instead. A `form` question
 renders as an in-chat **WhatsApp Flow** — one screen of typed fields the human
-fills and submits: a `string` becomes a text field, a `string` with an `enum`
-a dropdown, a `boolean` an opt-in toggle, and an `integer`/`number` a numeric
-text field. The Flow is created and published once per distinct answer schema
+fills and submits: a `string` becomes a text field, a `string` with a short
+`enum` a **radio group** (a longer enum, or a per-send option list, a dropdown),
+an **array of strings** a **checkbox group** (multiple choice), a `boolean` an
+opt-in toggle, and an `integer`/`number` a numeric text field. A `string` with
+`format: date` that carries platform date constraints (`minDate`/`maxDate`,
+`unavailableDates`, or a two-field range pairing) renders a bounded
+**CalendarPicker** (an unconstrained date stays a plain date picker); a declared
+date range is drawn as **two scalar date fields** and its ordering/span is
+enforced at the single answer facet, so the submitted answer is always the two
+date values, never a combined object. A page's **display blocks** (heading/body/
+image, each static or a reaction-filled slot) render ahead of its inputs, a
+**review** page shows a generic readback of the entered values, and a field with
+a `visibleWhen` predicate is shown/hidden by a client-side `If`. The Flow is
+created and published once per distinct answer schema
 (cached by a schema hash under `CHANNEL_WHATSAPP_WABA_ID`) and reused; the
 completed form returns as an `nfm_reply`, its values coerced to the schema's
 types before the answer object is forwarded. When the callback door **rejects**
@@ -135,12 +149,48 @@ rejections the channel stops re-sending, tells the participant once the form cou
 be processed, and lets the ask time out on its own deadline. The platform
 validates the answer schema against this subset when the question is asked —
 before the question is stored — so an out-of-subset schema (nested objects,
-arrays, unions, unknown types) never reaches this send; the Flow mapping rejects
-one defensively too.
+arrays of non-strings, unions, unknown types) never reaches this send; the Flow
+mapping rejects one defensively too.
 Correlation is fully out-of-band: any reply (typed, tapped, or
 a submitted form) from the recipient resolves the `(phone_number_id, wa_id)`
 pair's pending question, so one question can be pending per pair at a time; a
 second concurrent one is rejected loudly.
+
+### Forms that react while open
+
+A form whose ask names a reaction handler and declares reaction triggers (a
+field change, a page advance, or the submission) publishes as an
+**endpoint-driven Flow**: its reacting controls fire encrypted `data_exchange`
+requests to this plugin's Flow **data endpoint**
+(`{public base URL}/api/channels/whatsapp/flow-data`), which decrypts them,
+calls the platform's one reaction chokepoint, and returns the resulting form
+update (set values, replaced choice lists, per-field errors, or a computed
+display slot) back to the open Flow — the plugin only translates the vendor wire
+to and from that chokepoint and holds no logic of its own. A reaction that
+fails or times out surfaces as a generic error on the Flow and a loud server log,
+never a stale value. A **reacting form cannot publish or be served without its
+key material**, so the delivery refuses loudly (it never silently falls back to a
+non-reacting flow) when it is missing.
+
+The vendor's data endpoint needs a business key pair provisioned once per
+sending number (the plugin never mutates Meta configuration at startup):
+
+1. Generate an RSA-2048 key pair (PKCS#8 PEM).
+2. Set the private key as the secret `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY` (and, if
+   the PEM is encrypted, `CHANNEL_WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE`). It
+   never leaves the environment; a fork configures its own.
+3. Set `CHANNEL_WHATSAPP_FLOW_ENDPOINT_URI` to the public URL of the
+   `/api/channels/whatsapp/flow-data` route.
+4. Register the **public** key for the sending number — run
+   `tai42_channel_whatsapp.provisioning.provision_flow_encryption()`, which
+   derives the public key from the configured private key and registers it via
+   the Graph API (re-run after a key rotation).
+5. Ensure the endpoint is publicly reachable and healthy (Meta `ping`s it).
+
+The data endpoint authenticates each request with `X-Hub-Signature-256` over the
+raw body (the same app secret as the webhook; a mismatch is HTTP 432), decrypts
+the AES-128-GCM payload with the private key (an undecryptable body is 421), and
+answers an unknown/expired flow token with 427.
 
 An agent notification (`notify_user`) advertises the full capability set —
 `supports_media_notifications`, `supports_location_notifications`,
@@ -308,7 +358,7 @@ status is acknowledged, never retried.
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel |
+| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, an **array of strings** (a multiple-choice field), `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays of non-strings, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel. A **reacting** form additionally reserves the property names `tai42_event`, `tai42_field`, and `tai42_page` (its data-exchange event markers) |
 | Template audio header unsupported | A `ChannelTemplate` maps `header_media` (image/video/document), `body_parameters`, and quick-reply/url `buttons` onto the template-message components. An **audio** `header_media` has no Cloud API template representation and is refused loudly (`ChannelInputError`); an audio interactive **header** on a notification is instead sent as its own message ahead of the interactive |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |
 

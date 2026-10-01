@@ -343,3 +343,47 @@ async def test_missing_redis_url_raises_on_every_store_function(fake_redis: Fake
     ):
         with pytest.raises(ValueError, match="CHANNEL_WHATSAPP_REDIS_URL"):
             await call
+
+
+# --- Reacting-form sidecar (schema + inputs keyed by interaction id) ----------------
+
+
+async def test_reaction_form_sidecar_round_trips(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import cache_reaction_form, get_reaction_form
+
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    pages = [{"title": "T", "fields": ["a"], "kind": "input", "display": []}]
+    await cache_reaction_form("int-9", schema, pages, {"a": "x"}, {}, datetime.now(UTC) + timedelta(minutes=5))
+
+    assert await get_reaction_form("int-9") == (schema, pages, {"a": "x"}, {})
+    # The TTL is the remaining answer budget.
+    assert fake_redis.ttls["channel:whatsapp:reaction-form:int-9"] > 0
+
+
+async def test_reaction_form_sidecar_miss_returns_none(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import get_reaction_form
+
+    assert await get_reaction_form("nope") is None
+
+
+async def test_reaction_form_sidecar_not_written_past_deadline(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import cache_reaction_form, get_reaction_form
+
+    await cache_reaction_form("int-past", {"type": "object"}, None, {}, {}, datetime.now(UTC) - timedelta(minutes=1))
+    assert await get_reaction_form("int-past") is None
+
+
+async def test_reaction_form_sidecar_bad_json_is_a_miss(fake_redis: FakeRedis):
+    from tai42_channel_whatsapp.correlation import get_reaction_form
+
+    fake_redis.store["channel:whatsapp:reaction-form:int-bad"] = "{not json"
+    assert await get_reaction_form("int-bad") is None
+
+
+async def test_reaction_form_sidecar_without_schema_is_a_miss(fake_redis: FakeRedis):
+    import json
+
+    from tai42_channel_whatsapp.correlation import get_reaction_form
+
+    fake_redis.store["channel:whatsapp:reaction-form:int-noschema"] = json.dumps({"pages": None})
+    assert await get_reaction_form("int-noschema") is None

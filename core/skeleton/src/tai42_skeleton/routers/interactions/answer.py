@@ -17,6 +17,7 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations.interactions import answer_interaction as _answer_interaction_op
 from tai42_skeleton.operations.interactions import cancel_interaction as _cancel_interaction_op
+from tai42_skeleton.operations.interactions import react_interaction as _react_interaction_op
 
 from .parse import JSON_PARSE_ERRORS
 
@@ -56,6 +57,37 @@ answer = register_operation_route(
     path="/api/interactions/{interaction_id}/answer",
     method="POST",
     context_extractor=_extract_answer,
+    action="write",
+)
+
+
+async def _extract_react(request: Request) -> dict:
+    """Read + bound the mid-form reaction body into the operation's ``event``/``values`` arguments.
+
+    The SAME byte cap (413), invalid JSON (400), and missing-key (400) rejections the answer
+    door applies — the in-app reaction door inherits the answer door's caps, adding nothing.
+    """
+    settings = _pkg.interactions_settings()
+    try:
+        raw = await read_bounded_body(request, settings.callback_max_body_bytes)
+    except RequestBodyTooLargeError as exc:
+        raise PayloadTooLargeError("payload too large") from exc
+    request._body = raw
+    try:
+        body = json.loads(raw)
+    except JSON_PARSE_ERRORS as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    if not isinstance(body, dict) or "event" not in body or "values" not in body:
+        raise BadRequestError("body must contain 'event' and 'values'")
+    return {"event": body["event"], "values": body["values"]}
+
+
+react = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_react_interaction_op),
+    path="/api/interactions/{interaction_id}/react",
+    method="POST",
+    context_extractor=_extract_react,
     action="write",
 )
 

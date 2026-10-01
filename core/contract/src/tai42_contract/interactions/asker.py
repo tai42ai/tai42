@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
-    from tai42_contract.interactions.models import FormData, FormPage, MediaItem
+    from tai42_contract.interactions.models import FormData, FormPage, FormReactions, MediaItem
 
 
 def check_ask_timing(*, timeout: float | None, expiry_at: datetime | None) -> None:
@@ -49,6 +49,8 @@ class Ask(Protocol):
         schema: type[BaseModel] | dict[str, Any] | None = None,
         data: FormData | dict[str, Any] | None = None,
         pages: list[FormPage] | list[dict[str, Any]] | None = None,
+        reaction_tool: str | None = None,
+        reactions: FormReactions | dict[str, Any] | None = None,
         group_id: str | None = None,
         timeout: float | None = None,
         link: str | Callable[[str], Awaitable[str]] | None = None,
@@ -94,6 +96,17 @@ class Ask(Protocol):
         once and absent ``pages`` means one page. Both are validated against the
         form's schema before any state is written; the answer is the union of all
         fields regardless of paging.
+
+        ``reaction_tool`` and ``reactions`` make a ``form`` ask REACT while it is
+        open (forbidden on every other format). ``reaction_tool`` names a registered
+        tool run — under the park's rebound identity and state context — whenever a
+        declared trigger fires; ``reactions`` (a :class:`FormReactions` or its dict)
+        declares those triggers (``field_changed``, ``page_advanced``, ``submitted``)
+        and the ``choices`` fields a reaction may re-supply. Each requires the other, a
+        reacting form must be ``mode="async"``, and any ``choices`` field requires the
+        ``submitted`` trigger. A reacting form over a ``channel`` needs that channel to
+        advertise ``supports_form_reaction``; a ``channel=None`` reacting form is served
+        by the in-app reaction door. Absent both is a static form.
 
         ``verifier`` (``{"name", "config"}``) binds a registered webhook verifier
         to the external callback so the signed server-to-server answer is

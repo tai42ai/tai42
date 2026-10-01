@@ -103,6 +103,8 @@ export function FormCard({ item, onSubmitForm, locked }: FormCardProps): ReactEl
             schema={item.schema}
             formData={item.formData}
             pages={item.pages}
+            reactions={null}
+            interactionId={null}
             sending={sending}
             onSubmit={submit}
             idPrefix={item.id}

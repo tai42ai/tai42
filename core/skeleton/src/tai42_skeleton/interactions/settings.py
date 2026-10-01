@@ -135,6 +135,13 @@ class InteractionsSettings(TaiBaseSettings):
     # fires. Must be positive.
     expiry_reaper_interval_seconds: float = Field(default=30, gt=0)
 
+    # Deadline (seconds) for a mid-form reaction handler. A reacting form runs the
+    # asker's ``reaction_tool`` while the form is open; this bounds that one handler
+    # call at the single reaction chokepoint. A handler that exceeds it surfaces
+    # LOUDLY as a reaction failure (the person sees the vendor's error, the server
+    # logs it) — never a stale or silently dropped update. Must be positive.
+    reaction_deadline_seconds: float = Field(default=10, gt=0)
+
     @field_validator("public_base_url")
     @classmethod
     def _require_tls(cls, value: str | None) -> str | None:

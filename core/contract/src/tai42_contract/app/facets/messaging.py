@@ -26,15 +26,33 @@ from tai42_contract.webhooks import WebhookVerifier
 class AppInteractions(Protocol):
     """The interactions namespace (``app.interactions``) — the ``ask`` facade and answer check."""
 
-    def check_answer(self, question: QuestionFormat, answer: Any) -> None:
+    def check_answer(self, question: QuestionFormat, answer: Any) -> Any:
         """Validate ``answer`` against ``question`` — the ONE answer check every door reaches.
 
         ``question`` is a :class:`~tai42_contract.interactions.QuestionFormat` (the answer
-        format plus its payload — no stored request needed). Returns ``None`` when the answer
-        conforms; raises :class:`~tai42_contract.interactions.AnswerMismatchError` (carrying the
-        failing field's dotted path when the fault locates to one) otherwise. The answer door,
-        the callback door, a resumed run's ``visit`` and plugins all validate through this one
-        callable so every surface applies identical rules per format.
+        format plus its payload — no stored request needed). RETURNS the answer the consumer
+        receives when it conforms — identical to the input for every format but FORM, whose
+        fields hidden by their ``visibleWhen`` conditional (evaluated on the submitted values)
+        are removed, so every answer door records the same effective answer. Raises
+        :class:`~tai42_contract.interactions.AnswerMismatchError` (carrying the failing field's
+        dotted path when the fault locates to one) otherwise. The answer door, the callback
+        door, a resumed run's ``visit`` and plugins all validate through this one callable so
+        every surface applies identical rules per format.
+        """
+        ...
+
+    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+        """Run an OPEN reacting form's handler for ``event`` with the partial values — the ONE reaction seam.
+
+        A reacting form names a ``reaction_tool`` and declares its triggers in
+        ``format_payload["reactions"]``. Every reaction transport (a channel callback, the in-app
+        door) routes one event and the values filled so far here: it asserts the interaction is an
+        open reacting form, type-validates ``partial_values`` against the stored schema, runs the
+        asker's handler through ``run_tool`` under the stored rebound identity with a deadline,
+        validates the returned FORM UPDATE (``values``/``errors`` for declared fields,
+        ``options`` for option-bearing fields, ``display`` for declared slots), and returns it.
+        STATELESS: it never records an answer, resolves the interaction, or rewrites the request.
+        A handler that raises or misses the deadline surfaces LOUDLY, never a stale/silent value.
         """
         ...
 

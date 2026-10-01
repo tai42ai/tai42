@@ -61,6 +61,13 @@ def test_date_value_passes_the_decode_unchanged():
     assert isinstance(_coerce_value("2026-09-27", prop), str)
 
 
+def test_checkbox_array_value_decodes_as_a_list():
+    # A CheckboxGroup (array-of-strings field) returns the list of selected option values;
+    # the decode passes it through as the list answer.
+    prop = {"type": "array", "items": {"type": "string"}}
+    assert _coerce_value(["a", "b"], prop) == ["a", "b"]
+
+
 def _flow_cache_key() -> str:
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
     return f"channel:whatsapp:flow:{_WABA_ID}:{schema_hash}"

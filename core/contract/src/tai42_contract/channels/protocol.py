@@ -19,11 +19,12 @@ class Channel(Protocol):
     minted. A channel never reaches the interactions store directly: the
     human's reply travels back through the delivery's public ``callback_url``.
 
-    A channel MAY advertise richer support with six OPTIONAL, class-level
+    A channel MAY advertise richer support with seven OPTIONAL, class-level
     capability flags — ``supports_media_notifications``,
     ``supports_template_notifications``, ``supports_interactive_notifications``,
     ``supports_location_notifications``, ``supports_form_notifications`` (all
-    five for ``notify``) and ``supports_form_delivery`` (for ``deliver``) — set
+    five for ``notify``), ``supports_form_delivery`` and
+    ``supports_form_reaction`` (both for ``deliver``) — set
     as plain class
     attributes. They are a documented convention, NOT Protocol members: a
     channel that supports the richer form sets the matching attribute to
@@ -40,6 +41,14 @@ class Channel(Protocol):
     A channel that does not advertise ``supports_form_delivery`` never receives
     a ``form`` delivery, and one that does not advertise
     ``supports_form_notifications`` never receives a ``schema`` notification.
+    ``supports_form_reaction`` is the delivery-side flag for a REACTING form (one
+    whose ask names a ``reaction_tool`` and carries ``reactions`` triggers): the
+    ``ask`` helper, having already confirmed ``supports_form_delivery``, refuses a
+    reacting form to a channel that does not ALSO advertise
+    ``supports_form_reaction`` — so a form that reacts while open is never
+    delivered to a medium that cannot route its triggers back (it is refused
+    loudly at the ask door, never silently rendered inert). A non-reacting form
+    needs only ``supports_form_delivery``.
 
     A form channel MAY also declare one OPTIONAL method, ``validate_form_schema``,
     following the same convention as the capability flags — a documented member,

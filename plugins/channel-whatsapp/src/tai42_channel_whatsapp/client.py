@@ -471,23 +471,40 @@ class FlowCreateResult(NamedTuple):
     validation_errors: list[dict[str, Any]]
 
 
-async def create_flow(waba_id: str, name: str, flow_json: dict[str, Any]) -> FlowCreateResult:
+async def create_flow(
+    waba_id: str, name: str, flow_json: dict[str, Any], endpoint_uri: str | None = None
+) -> FlowCreateResult:
     """Create a Flow under ``waba_id`` from ``flow_json``; return its create result.
 
     POSTs ``{name, categories: ["OTHER"], flow_json: <json string>}`` to
-    ``{api}/{waba_id}/flows``. A 2xx that carries no ``id`` raises loudly (mirrors
-    the no-message-id guard on the send path). A pure Graph wrapper: it returns
-    both handles Meta returned (the draft id and any ``validation_errors``); the
-    lifecycle owner acts on them.
+    ``{api}/{waba_id}/flows``. An ``endpoint_uri`` is included for an ENDPOINT-DRIVEN
+    (reacting) Flow, linking the published Flow to the plugin's data endpoint; a static Flow
+    passes none. A 2xx that carries no ``id`` raises loudly (mirrors the no-message-id guard on
+    the send path). A pure Graph wrapper: it returns both handles Meta returned (the draft id
+    and any ``validation_errors``); the lifecycle owner acts on them.
     """
     url = f"{whatsapp_settings().api_base_url}/{waba_id}/flows"
-    payload = {"name": name, "categories": ["OTHER"], "flow_json": json.dumps(flow_json)}
+    payload: dict[str, object] = {"name": name, "categories": ["OTHER"], "flow_json": json.dumps(flow_json)}
+    if endpoint_uri is not None:
+        payload["endpoint_uri"] = endpoint_uri
     response = await _send(url, payload)
     body = response.json()
     flow_id = body.get("id")
     if not flow_id:
         raise ChannelDeliveryError("WhatsApp accepted the flow create but returned no flow id")
     return FlowCreateResult(flow_id=flow_id, validation_errors=body.get("validation_errors") or [])
+
+
+async def set_business_public_key(phone_number_id: str, public_key_pem: str) -> None:
+    """Register the business PUBLIC key for ``phone_number_id`` so Meta can encrypt data-endpoint payloads.
+
+    POSTs ``{business_public_key: <PEM>}`` to ``{api}/{phone_number_id}/whatsapp_business_encryption``
+    (the key the data endpoint's private key decrypts). Idempotent operator provisioning — run
+    once per sending number, or after a key rotation. Raises ``ChannelDeliveryError`` on the
+    ``_send`` failure modes.
+    """
+    url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/whatsapp_business_encryption"
+    await _send(url, {"business_public_key": public_key_pem})
 
 
 async def publish_flow(flow_id: str) -> None:

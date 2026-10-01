@@ -42,7 +42,15 @@ from tai42_contract.channels import (
     OptionSection,
     ReplyOption,
 )
-from tai42_contract.interactions.models import FormData, FormOption, FormPage, LocationElement, MediaItem
+from tai42_contract.interactions.models import (
+    DisplayBlock,
+    FormData,
+    FormOption,
+    FormPage,
+    FormReactions,
+    LocationElement,
+    MediaItem,
+)
 
 from tai42_channel_web.store.forms import FormRecord, store_form_record
 from tai42_channel_web.store.questions import QuestionRecord, release_question, reserve_question
@@ -153,12 +161,58 @@ def _form_data_frame(data: FormData) -> dict[str, object]:
     }
 
 
-def _form_pages_frame(pages: list[FormPage]) -> list[dict[str, object]]:
-    """A form question's step layout as its transcript-frame shape: each page as ``{"title", "fields"}`` in order.
+def _display_block_frame(block: DisplayBlock) -> dict[str, str]:
+    """One ordered display block as its transcript-frame shape: ``{"kind", "text"?|"src"?/"alt"?, "slot"?}``.
 
-    The widget renders one step per page.
+    Each optional key is omitted when absent (a text block carries no ``src``/``alt``, an
+    image no ``text``, a static block no ``slot``), so there is no empty-value key. A
+    slotted block's content is the value a reaction fills while the form is open.
     """
-    return [{"title": page.title, "fields": list(page.fields)} for page in pages]
+    entry: dict[str, str] = {"kind": block.kind}
+    if block.text is not None:
+        entry["text"] = block.text
+    if block.src is not None:
+        entry["src"] = block.src
+    if block.alt is not None:
+        entry["alt"] = block.alt
+    if block.slot is not None:
+        entry["slot"] = block.slot
+    return entry
+
+
+def _form_pages_frame(pages: list[FormPage]) -> list[dict[str, object]]:
+    """A form question's step layout as its transcript-frame shape: each page in order.
+
+    Each page is ``{"title", "fields"}`` plus its ordered ``display`` blocks when it carries
+    any and its ``kind`` when it is a ``review`` page (the default ``input`` kind is omitted,
+    like every other default/absent frame key). The widget renders one step per page, draws
+    the display blocks in order, and shows a review page as a terminal readback step.
+    """
+    frames: list[dict[str, object]] = []
+    for page in pages:
+        frame: dict[str, object] = {"title": page.title, "fields": list(page.fields)}
+        if page.display:
+            frame["display"] = [_display_block_frame(block) for block in page.display]
+        if page.kind != "input":
+            frame["kind"] = page.kind
+        frames.append(frame)
+    return frames
+
+
+def _form_reactions_frame(reactions: FormReactions) -> dict[str, object]:
+    """A form's reaction triggers as its transcript-frame shape.
+
+    ``{"field_changed", "page_advanced", "submitted", "choices"}`` — the fields whose change
+    fires a reaction, the pages whose advance fires one, whether submission is checked by one,
+    and the fields whose choice list a reaction may replace. The widget reads these to know
+    which on-change/advance/submit events to round-trip to the reaction door.
+    """
+    return {
+        "field_changed": list(reactions.field_changed),
+        "page_advanced": list(reactions.page_advanced),
+        "submitted": reactions.submitted,
+        "choices": list(reactions.choices),
+    }
 
 
 def _location_frame_item(location: LocationElement) -> dict[str, object]:
@@ -246,6 +300,13 @@ class WebChannel:
     # The page renders a schema-driven form widget, so the ask helper may route
     # a ``form`` delivery here; absent this flag it never would.
     supports_form_delivery: ClassVar[bool] = True
+    # A reacting form is answered in the web chat, and the widget routes each on-change /
+    # page-advance / submit event through this plugin's OWN session door (the react sibling
+    # of the answer door), which forwards it server-side to the interaction's ticket react
+    # door with the ticket kept off the browser. The ask helper reads this (on top of
+    # ``supports_form_delivery``) before admitting a reacting form here; absent it, a
+    # reacting form to this channel is refused loudly at the ask door.
+    supports_form_reaction: ClassVar[bool] = True
     # notify carries a media card and a tappable option list (reply chips + link
     # actions, flat or sectioned); the central notify_user / conversations-delivery
     # capability guards read these before dispatching. Templates stay unsupported.
@@ -309,6 +370,10 @@ class WebChannel:
                     # pages. Present only for ``form`` (the contract couples them to it).
                     form_data=(_form_data_frame(delivery.data) if delivery.data is not None else None),
                     pages=(_form_pages_frame(delivery.pages) if delivery.pages is not None else None),
+                    # A reacting form's triggers ride the same frame so the widget knows which
+                    # on-change/advance/submit events to round-trip to the reaction door;
+                    # present only when the ask declared reactions (a static form carries none).
+                    reactions=(_form_reactions_frame(delivery.reactions) if delivery.reactions is not None else None),
                     # Display media rides the question frame in order, in the same
                     # shape the media-card renders — an ``image`` inline, a ``link``
                     # as a safe anchor; display-only, never part of the answer.

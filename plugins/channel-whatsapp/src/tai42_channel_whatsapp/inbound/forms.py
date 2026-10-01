@@ -84,9 +84,15 @@ def _coerce_value(value: Any, prop: Any) -> Any:
     """One form value coerced to its schema type.
 
     Flow number inputs arrive as strings, so ``integer``/``number``/``boolean`` are coerced ONLY
-    when the value is a string (an OptIn may already deliver a bool). A value that fails coercion is
-    returned raw — the door's 400 path then restores the pending ask.
+    when the value is a string (an OptIn may already deliver a bool). A CheckboxGroup (an array
+    field) returns a list of selected strings — delivered as a JSON list, so it passes through
+    unchanged. A value that fails coercion is returned raw — the door's 400 path then restores
+    the pending ask.
     """
+    if isinstance(prop, dict) and prop.get("type") == "array":
+        # A CheckboxGroup delivers a JSON list of the selected option values; pass it through
+        # as the list answer (a non-list arrival is returned raw so the door 400s and restores).
+        return value
     if not isinstance(prop, dict) or not isinstance(value, str):
         return value
     prop_type = prop.get("type")
@@ -295,6 +301,7 @@ async def _recover_form_rejection(
         pages=pending.form_pages,
         values=pending.form_values or {},
         options=pending.form_options or {},
+        reactions=pending.form_reactions,
     )
     await bump_rejections(phone_number_id, wa_id, pending)
     await mark_seen(wamid)

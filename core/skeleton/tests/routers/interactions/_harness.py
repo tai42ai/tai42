@@ -82,6 +82,35 @@ async def _seed_form(w, *, schema, ticket="TKT", iid="i1", gid="g1", budget=60) 
     return iid
 
 
+async def _seed_reacting_form(
+    w, *, schema, reactions, pages=None, reaction_tool="react_tool", ticket="TKT", iid="i1", gid="g1", budget=60
+) -> str:
+    # A reacting form is async-only and names a reaction_tool (the request model enforces
+    # both), so it carries the continuation fields the reaction reuses.
+    now = datetime.now(UTC)
+    future = now + timedelta(seconds=budget)
+    payload: dict = {"schema": schema, "reactions": reactions}
+    if pages is not None:
+        payload["pages"] = pages
+    request = InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="Fill?",
+        answer_format=AnswerFormat.FORM,
+        format_payload=payload,
+        reply_to=w.store.reply_key(iid),
+        created_at=now,
+        timeout_at=future,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=future,
+        reaction_tool=reaction_tool,
+    )
+    await w.store.add(w.fake, request, idle_ttl=86400, ticket=ticket, ticket_ttl=budget)
+    return iid
+
+
 def _json(resp) -> dict:
     return json.loads(bytes(resp.body))
 

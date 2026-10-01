@@ -74,6 +74,12 @@ def test_slack_channel_advertises_form_delivery():
     assert SlackChannel.supports_form_delivery is True
 
 
+def test_slack_channel_advertises_form_reaction():
+    # A reacting form routes its triggers back through the interactivity door, so the channel
+    # advertises the capability and the ask door never refuses a reacting form to it.
+    assert SlackChannel.supports_form_reaction is True
+
+
 def test_duplicate_registration_raises(stub_app):
     _import_register_module(stub_app)
 

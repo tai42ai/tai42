@@ -123,8 +123,8 @@ describe('FormCard', () => {
       properties: { first: { type: 'string' }, second: { type: 'string' } },
     };
     const pages: readonly FormPage[] = [
-      { title: 'Your name', fields: ['first'] },
-      { title: 'Your note', fields: ['second'] },
+      { title: 'Your name', fields: ['first'], display: [], kind: 'input' },
+      { title: 'Your note', fields: ['second'], display: [], kind: 'input' },
     ];
     const { onSubmitForm } = renderCard(enrichedItem(schema, null, pages));
 

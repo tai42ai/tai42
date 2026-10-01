@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
-from tai42_contract.interactions import AnswerFormat, FormData, FormPage, MediaItem
+from tai42_contract.interactions import AnswerFormat, FormData, FormPage, FormReactions, MediaItem
 
 from tai42_skeleton.channels.send_span import send_span
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -127,6 +127,14 @@ def build_delivery_frame(
         pages=(
             [FormPage.model_validate(page) for page in payload["pages"]]
             if is_form and payload.get("pages") is not None
+            else None
+        ),
+        # A reacting form's triggers ride the delivery too, re-parsed from the payload the
+        # request already validated, so the channel renders the reactive controls and routes
+        # each trigger back through the reaction door. None for a static form / non-form.
+        reactions=(
+            FormReactions.model_validate(payload["reactions"])
+            if is_form and payload.get("reactions") is not None
             else None
         ),
         # The question's display media rides the delivery too — the SAME stored items,

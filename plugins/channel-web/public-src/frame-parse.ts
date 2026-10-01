@@ -7,9 +7,13 @@
 import type {
   AnswerFormat,
   CardOption,
+  DisplayBlock,
+  DisplayBlockKind,
   FormOptionData,
   FormPage,
   FormPrefill,
+  FormReactions,
+  FormUpdate,
   LocationPoint,
   MediaItem,
   MediaKind,
@@ -277,17 +281,15 @@ function formOptionOf(raw: unknown): FormOptionData | undefined {
   return { value, label };
 }
 
-/** A form question's per-send enrichment: absent (`null`), or a `{values, options}`
- * record whose `values` is an object and whose `options` maps each property to a
- * NON-EMPTY list of valid options. One off-shape entry taints the whole frame:
- * `undefined` says malformed. */
-export function formPrefillOf(raw: unknown): FormPrefill | null | undefined {
-  if (raw === null || raw === undefined) return null;
+/** A map of property name → its NON-EMPTY per-send choice list (the shape carried by
+ * `formData.options` and by a reaction update's `options`): absent → `{}`; an object whose
+ * every value is a non-empty list of valid options → the parsed map; `undefined` (malformed)
+ * on anything off-shape (an empty list is a control with no controls). */
+function optionsMapOf(raw: unknown): Record<string, readonly FormOptionData[]> | undefined {
+  if (raw === undefined) return {};
   if (!isRecord(raw)) return undefined;
-  const { values, options } = raw;
-  if (!isRecord(values) || !isRecord(options)) return undefined;
   const parsed: Record<string, readonly FormOptionData[]> = {};
-  for (const [name, list] of Object.entries(options)) {
+  for (const [name, list] of Object.entries(raw)) {
     if (!Array.isArray(list) || list.length === 0) return undefined;
     const choices: FormOptionData[] = [];
     for (const one of list) {
@@ -297,22 +299,158 @@ export function formPrefillOf(raw: unknown): FormPrefill | null | undefined {
     }
     parsed[name] = choices;
   }
+  return parsed;
+}
+
+/** A map of field name → a string message (a reaction update's `errors`): absent → `{}`;
+ * an object whose every value is a string → the parsed map; `undefined` (malformed) on
+ * anything off-shape. */
+function stringMapOf(raw: unknown): Record<string, string> | undefined {
+  if (raw === undefined) return {};
+  if (!isRecord(raw)) return undefined;
+  const parsed: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'string') return undefined;
+    parsed[name] = value;
+  }
+  return parsed;
+}
+
+/** A form question's per-send enrichment: absent (`null`), or a `{values, options}`
+ * record whose `values` is an object and whose `options` maps each property to a
+ * NON-EMPTY list of valid options. One off-shape entry taints the whole frame:
+ * `undefined` says malformed. */
+export function formPrefillOf(raw: unknown): FormPrefill | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) return undefined;
+  const { values, options } = raw;
+  if (!isRecord(values)) return undefined;
+  const parsed = optionsMapOf(options);
+  if (parsed === undefined) return undefined;
   return { values, options: parsed };
 }
 
-/** One form page: a non-blank `title` and a NON-EMPTY list of non-blank field names.
- * `undefined` on anything off-shape. */
+/** The validated form update a reaction door returned (its `{data}` payload): `values`
+ * sets fields, `options` replaces option-bearing fields' choice lists, `errors` carries
+ * per-field messages, `display` fills display slots. Each is absent → empty. `undefined`
+ * (malformed) on anything off-shape — the caller then raises LOUDLY rather than applying a
+ * half-understood change. */
+export function formUpdateOf(raw: unknown): FormUpdate | undefined {
+  if (!isRecord(raw)) return undefined;
+  const values = raw.values === undefined ? {} : raw.values;
+  if (!isRecord(values)) return undefined;
+  const options = optionsMapOf(raw.options);
+  if (options === undefined) return undefined;
+  const errors = stringMapOf(raw.errors);
+  if (errors === undefined) return undefined;
+  const display = raw.display === undefined ? {} : raw.display;
+  if (!isRecord(display)) return undefined;
+  return { values, options, errors, display };
+}
+
+/** The display-block kinds a page may carry. */
+const DISPLAY_BLOCK_KINDS: ReadonlySet<string> = new Set<DisplayBlockKind>([
+  'heading',
+  'body',
+  'image',
+]);
+
+/** One optional display-block string field (`text`/`src`/`alt`/`slot`): absent or an
+ * explicit `null` → `null`; a string → the string; anything else → `undefined` (malformed). */
+function displayStringOf(raw: unknown): string | null | undefined {
+  if (raw === undefined || raw === null) return null;
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+/** One display-only block: a known `kind` plus its optional `text`/`src`/`alt`/`slot`
+ * strings. An image block's `src`, when present, is vetted exactly as a media item's — an
+ * absolute `https` URL or the same-origin served-media reference — so an off-scheme source
+ * taints the frame rather than reaching an `<img>`. `undefined` on anything off-shape. */
+function displayBlockOf(raw: unknown): DisplayBlock | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { kind } = raw;
+  if (typeof kind !== 'string' || !DISPLAY_BLOCK_KINDS.has(kind)) return undefined;
+  const text = displayStringOf(raw.text);
+  if (text === undefined) return undefined;
+  const src = displayStringOf(raw.src);
+  if (src === undefined) return undefined;
+  if (kind === 'image' && src !== null && !isAbsoluteUrl(src, ['https:']) && !isServedMediaRef(src))
+    return undefined;
+  const alt = displayStringOf(raw.alt);
+  if (alt === undefined) return undefined;
+  const slot = displayStringOf(raw.slot);
+  if (slot === undefined) return undefined;
+  return { kind: kind as DisplayBlockKind, text, src, alt, slot };
+}
+
+/** A page's ordered display blocks: absent → `[]`; a list whose every block validates →
+ * the parsed list; `undefined` (malformed) on anything off-shape. */
+function displayBlocksOf(raw: unknown): readonly DisplayBlock[] | undefined {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return undefined;
+  const blocks: DisplayBlock[] = [];
+  for (const one of raw) {
+    const block = displayBlockOf(one);
+    if (block === undefined) return undefined;
+    blocks.push(block);
+  }
+  return blocks;
+}
+
+/** One form page: a non-blank `title`, an ordered list of non-blank field names (NON-EMPTY
+ * for an `input` page; empty for a `review` page, which carries no input fields), its
+ * ordered display blocks (absent → `[]`), and its `kind` (absent → `input`). `undefined` on
+ * anything off-shape. */
 function formPageOf(raw: unknown): FormPage | undefined {
   if (!isRecord(raw)) return undefined;
   const { title, fields } = raw;
   if (typeof title !== 'string' || title.trim() === '') return undefined;
-  if (!Array.isArray(fields) || fields.length === 0) return undefined;
+  if (!Array.isArray(fields)) return undefined;
   const names: string[] = [];
   for (const field of fields) {
     if (typeof field !== 'string' || field.trim() === '') return undefined;
     names.push(field);
   }
-  return { title, fields: names };
+  const rawKind = raw.kind;
+  let kind: 'input' | 'review';
+  if (rawKind === undefined) kind = 'input';
+  else if (rawKind === 'input' || rawKind === 'review') kind = rawKind;
+  else return undefined;
+  // An input page with no fields is a dead step (no controls); a review page carries none.
+  if (kind === 'input' && names.length === 0) return undefined;
+  const display = displayBlocksOf(raw.display);
+  if (display === undefined) return undefined;
+  return { title, fields: names, display, kind };
+}
+
+/** A form's reaction triggers (`reactions` on a form question's frame): absent (`null`),
+ * or a record carrying the trigger lists and the `submitted` flag. `undefined` says
+ * malformed. */
+export function formReactionsOf(raw: unknown): FormReactions | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) return undefined;
+  const fieldChanged = reactionFieldsOf(raw.field_changed);
+  if (fieldChanged === undefined) return undefined;
+  const pageAdvanced = reactionFieldsOf(raw.page_advanced);
+  if (pageAdvanced === undefined) return undefined;
+  const choices = reactionFieldsOf(raw.choices);
+  if (choices === undefined) return undefined;
+  const submitted = raw.submitted === undefined ? false : raw.submitted;
+  if (typeof submitted !== 'boolean') return undefined;
+  return { fieldChanged, pageAdvanced, submitted, choices };
+}
+
+/** A reactions trigger list (field/page names): absent → `[]`; a list of non-blank
+ * strings → the list; `undefined` (malformed) otherwise. */
+function reactionFieldsOf(raw: unknown): readonly string[] | undefined {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return undefined;
+  const names: string[] = [];
+  for (const name of raw) {
+    if (typeof name !== 'string' || name.trim() === '') return undefined;
+    names.push(name);
+  }
+  return names;
 }
 
 /** A form question's step layout: absent (`null`), or a NON-EMPTY list whose every
@@ -332,20 +470,40 @@ export function formPagesOf(raw: unknown): readonly FormPage[] | null | undefine
 /** The format-dependent extras, validated together by the format that decides
  * whether the wire carries each: `external` carries a string callback ticket and no
  * schema; `form` carries an object schema, no ticket, and optional per-send
- * `data`/`pages`; the scalar formats carry none. Any other spelling — a
- * missing/non-string ticket, a missing/non-object schema, malformed `data`/`pages`,
- * or any of these extras on a format that carries none — is a frame this page will
- * not render: `undefined` says malformed. */
+ * `data`/`pages`/`reactions`; the scalar formats carry none. Any other spelling — a
+ * missing/non-string ticket, a missing/non-object schema, malformed
+ * `data`/`pages`/`reactions`, or any of these extras on a format that carries none — is a
+ * frame this page will not render: `undefined` says malformed. */
+/** The `form` facet: an object schema, no ticket, and optional per-send
+ * `data`/`pages`/`reactions`. `undefined` when any of those is off-shape. */
+function formFacetOf(
+  callbackRaw: unknown,
+  schemaRaw: unknown,
+  dataRaw: unknown,
+  pagesRaw: unknown,
+  reactionsRaw: unknown,
+): QuestionFacet | undefined {
+  if (callbackRaw !== undefined || !isRecord(schemaRaw)) return undefined;
+  const formData = formPrefillOf(dataRaw);
+  if (formData === undefined) return undefined;
+  const pages = formPagesOf(pagesRaw);
+  if (pages === undefined) return undefined;
+  const reactions = formReactionsOf(reactionsRaw);
+  if (reactions === undefined) return undefined;
+  return { answerFormat: 'form', callbackUrl: null, schema: schemaRaw, formData, pages, reactions };
+}
+
 export function facetOf(
   callbackRaw: unknown,
   schemaRaw: unknown,
   dataRaw: unknown,
   pagesRaw: unknown,
+  reactionsRaw: unknown,
   format: AnswerFormat,
 ): QuestionFacet | undefined {
+  const noExtras = dataRaw === undefined && pagesRaw === undefined && reactionsRaw === undefined;
   if (format === 'external') {
-    if (typeof callbackRaw !== 'string' || schemaRaw !== undefined) return undefined;
-    if (dataRaw !== undefined || pagesRaw !== undefined) return undefined;
+    if (typeof callbackRaw !== 'string' || schemaRaw !== undefined || !noExtras) return undefined;
     return {
       answerFormat: format,
       callbackUrl: callbackRaw,
@@ -355,14 +513,8 @@ export function facetOf(
     };
   }
   if (format === 'form') {
-    if (callbackRaw !== undefined || !isRecord(schemaRaw)) return undefined;
-    const formData = formPrefillOf(dataRaw);
-    if (formData === undefined) return undefined;
-    const pages = formPagesOf(pagesRaw);
-    if (pages === undefined) return undefined;
-    return { answerFormat: format, callbackUrl: null, schema: schemaRaw, formData, pages };
+    return formFacetOf(callbackRaw, schemaRaw, dataRaw, pagesRaw, reactionsRaw);
   }
-  if (callbackRaw !== undefined || schemaRaw !== undefined) return undefined;
-  if (dataRaw !== undefined || pagesRaw !== undefined) return undefined;
+  if (callbackRaw !== undefined || schemaRaw !== undefined || !noExtras) return undefined;
   return { answerFormat: format, callbackUrl: null, schema: null, formData: null, pages: null };
 }

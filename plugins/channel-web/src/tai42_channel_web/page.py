@@ -205,6 +205,19 @@ def _asset_url(mount_base: str, name: str) -> str:
     return f"{mount_base}/assets/{name}"
 
 
+def _reaction_endpoint(mount_base: str) -> str:
+    """The reaction-door URL template the bundled form widget posts a reacting form's on-change round-trip to.
+
+    The per-interaction react sibling of this plugin's answer door, under this deployment's
+    mount: the widget fills the ``{interaction_id}`` placeholder with the open question's id.
+    This OVERRIDES the widget's default (the in-app authenticated react door) so a form in the
+    web chat reacts through this plugin's OWN session door — and the ticket never rides this
+    URL: the door holds it server-side and forwards the reaction to the interaction's ticket
+    react door.
+    """
+    return f"{mount_base}/questions/{{interaction_id}}/react"
+
+
 def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) -> str:
     """The chat page shell around the built bundle.
 
@@ -218,7 +231,11 @@ def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) 
     assumed. ``data-max-attachments`` carries the operator's
     ``max_attachments_per_message`` so the bundle refuses an over-cap selection in the
     compose tray before it is sent; the messages door's 422 stays the authoritative
-    backstop. Every interpolated value is HTML-escaped — the identity is a URL segment
+    backstop. ``data-reaction-endpoint`` carries the reaction-door URL template the form
+    widget posts a reacting form's on-change round-trip to (its ``{interaction_id}``
+    placeholder filled with the open question's id), overriding the widget's default in-app
+    door so a web-chat form reacts through this plugin's own session door. Every
+    interpolated value is HTML-escaped — the identity is a URL segment
     and the title is operator config, neither of which may break out of its attribute
     or element.
     """
@@ -238,7 +255,8 @@ def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) 
     ]
     body = [
         f'<div id="root" data-identity="{escape(identity)}" data-api-base="{escape(mount_base)}" '
-        f'data-max-attachments="{escape(str(max_attachments))}"></div>',
+        f'data-max-attachments="{escape(str(max_attachments))}" '
+        f'data-reaction-endpoint="{escape(_reaction_endpoint(mount_base))}"></div>',
         f'<script type="module" src="{escape(_asset_url(mount_base, build.entry))}" '
         f'integrity="{escape(build.integrity[build.entry])}"></script>',
     ]

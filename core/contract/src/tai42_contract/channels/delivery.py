@@ -14,6 +14,7 @@ from tai42_contract.interactions.models import (
     AnswerMismatchPolicy,
     FormData,
     FormPage,
+    FormReactions,
     MediaItem,
     check_media_list,
 )
@@ -67,7 +68,15 @@ with warnings.catch_warnings():
         # top-level properties one step collects. None means one page (the whole form). A
         # channel with native steps renders one step per page; a channel without them may
         # render the pages as titled groups on one surface; the completed answer is the union.
+        # Each :class:`FormPage` also carries its ordered display blocks and its input/review
+        # kind, so the display layout rides this field unchanged.
         pages: list[FormPage] | None = None
+        # The form's reaction triggers, present only for ``form``: which fields' change,
+        # which pages' advance, and whether submission fires the form's reaction handler
+        # while it is open. None means a static (non-reacting) form. Validated against the
+        # schema/pages at the ask door; a channel renders the reactive controls and routes
+        # each trigger back through the reaction door.
+        reactions: FormReactions | None = None
         media: list[MediaItem] | None = None  # display media rendered WITH the question; None -> none
         # The ask's digression policy for a rejected reply; the channel carries it onto the
         # ``Correlation`` it parks so the shared answer ladder reads it at the 400 decision.
@@ -160,12 +169,14 @@ with warnings.catch_warnings():
 
         @model_validator(mode="after")
         def _check_form_extras(self) -> ChannelDelivery:
-            # ``data``/``pages`` ride ONLY a form delivery — they enrich the form's answer
-            # schema, which no other format carries. Present on any other format is a caller
-            # bug, refused loudly rather than silently ignored.
+            # ``data``/``pages``/``reactions`` ride ONLY a form delivery — they enrich the
+            # form's answer schema, which no other format carries. Present on any other
+            # format is a caller bug, refused loudly rather than silently ignored.
             if self.answer_format != AnswerFormat.FORM:
                 if self.data is not None:
                     raise ValueError(f"{self.answer_format} answer_format carries no form data")
                 if self.pages is not None:
                     raise ValueError(f"{self.answer_format} answer_format carries no form pages")
+                if self.reactions is not None:
+                    raise ValueError(f"{self.answer_format} answer_format carries no form reactions")
             return self

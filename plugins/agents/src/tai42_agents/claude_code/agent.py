@@ -642,7 +642,15 @@ class ClaudeCodeAgent(Agent):
     ) -> AsyncIterator[tuple[StreamEvent, bool]]:
         if frame.mode == "sync":
             answer = await tai42_app.interactions.ask(
-                frame.question, answer_format=frame.answer_format, options=frame.options, mode="sync"
+                frame.question,
+                answer_format=frame.answer_format,
+                options=frame.options,
+                schema=frame.form_schema,
+                data=frame.data,
+                pages=frame.pages,
+                reaction_tool=frame.reaction_tool,
+                reactions=frame.reactions,
+                mode="sync",
             )
             await handle.write_stdin(dump_frame(AnswerFrame(ask_id=frame.ask_id, answer=answer)))
             return
@@ -693,6 +701,11 @@ class ClaudeCodeAgent(Agent):
             frame.question,
             answer_format=frame.answer_format,
             options=frame.options,
+            schema=frame.form_schema,
+            data=frame.data,
+            pages=frame.pages,
+            reaction_tool=frame.reaction_tool,
+            reactions=frame.reactions,
             mode="async",
             expiry_at=horizon,
         )

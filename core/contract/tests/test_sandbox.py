@@ -293,6 +293,7 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
     assert protocol_members(AppInteractions) == {
         "ask",
         "check_answer",
+        "react",
         "visit",
         "park_answer",
         "normalise_started",
@@ -356,8 +357,13 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
         def ask(self) -> Ask:
             return self._ask
 
-        def check_answer(self, question: object, answer: object) -> None:
-            return None
+        def check_answer(self, question: object, answer: object) -> object:
+            return answer
+
+        async def react(
+            self, interaction_id: str, event: dict[str, object], partial_values: dict[str, object]
+        ) -> dict[str, object]:
+            return {}
 
         @property
         def visit(self) -> object:

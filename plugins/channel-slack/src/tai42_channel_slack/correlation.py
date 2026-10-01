@@ -169,14 +169,16 @@ async def store_form_record(
     timeout_at: datetime,
     data: dict[str, Any] | None = None,
     pages: list[dict[str, Any]] | None = None,
+    reactions: dict[str, Any] | None = None,
 ) -> None:
     """Reserve the form's rich state before its message is sent, TTL = budget.
 
-    ``data`` (``{values, options}``) and ``pages`` are the per-send enrichment the modal
-    is built from AT CLICK TIME (a modal opens on the button tap, not at delivery), so they
-    ride the record; ``None``/absent renders the plain modal. Raises
-    :class:`ChannelDeliveryError` when the budget is already spent — never a
-    non-positive-TTL write.
+    ``data`` (``{values, options}``), ``pages`` (layout + display + review) and ``reactions``
+    (the reaction triggers) are the per-send enrichment the modal is built from AT CLICK TIME
+    (a modal opens on the button tap, not at delivery) and read again on each reacting /
+    conditional re-render and the submitted check, so they ride the record; ``None``/absent
+    renders the plain modal. Raises :class:`ChannelDeliveryError` when the budget is already
+    spent — never a non-positive-TTL write.
     """
     ttl = remaining_seconds(timeout_at)
     if ttl <= 0:
@@ -191,6 +193,8 @@ async def store_form_record(
         payload["data"] = data
     if pages is not None:
         payload["pages"] = pages
+    if reactions is not None:
+        payload["reactions"] = reactions
     record = json.dumps(payload)
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.set(_FORM_KEY.format(key=interaction_id), record, ex=ttl)
@@ -199,8 +203,9 @@ async def store_form_record(
 async def get_form_record(interaction_id: str) -> dict[str, Any] | None:
     """The pending form's record, or ``None`` when unknown/expired (the button outlived its question).
 
-    The record is ``{callback_url, schema, question, timeout_at, data?, pages?}``. The adapter-private rich
-    read the modal open + submission decode use, distinct from the port's projection.
+    The record is ``{callback_url, schema, question, timeout_at, data?, pages?, reactions?}``. The
+    adapter-private rich read the modal open, re-render and submission decode use, distinct from the
+    port's projection.
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = cast("str | None", await redis.get(_FORM_KEY.format(key=interaction_id)))

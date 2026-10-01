@@ -499,7 +499,11 @@ class _OptForm(BaseModel):
     ("schema", "match"),
     [
         (_OptForm, "property 'name' has type None"),
-        ({"type": "object", "properties": {"tags": {"type": "array"}}}, "property 'tags' has type 'array'"),
+        ({"type": "object", "properties": {"tags": {"type": "array"}}}, "array but declares no object 'items'"),
+        (
+            {"type": "object", "properties": {"nums": {"type": "array", "items": {"type": "integer"}}}},
+            "array whose items are not strings",
+        ),
         (
             {"type": "object", "properties": {"n": {"type": "integer", "enum": [1, 2]}}},
             "property 'n' has an enum but is not a 'string'",

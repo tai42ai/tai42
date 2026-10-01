@@ -94,9 +94,19 @@ def test_render_page_links_every_asset_with_its_integrity(public_build: Path):
         f'<link rel="stylesheet" href="/api/channels/web/assets/{STYLE_ASSET}" integrity="sha384-{STYLE_ASSET}">'
     ) in html
     assert (
-        '<div id="root" data-identity="site-alpha" data-api-base="/api/channels/web" data-max-attachments="10"></div>'
+        '<div id="root" data-identity="site-alpha" data-api-base="/api/channels/web" data-max-attachments="10" '
+        'data-reaction-endpoint="/api/channels/web/questions/{interaction_id}/react"></div>'
     ) in html
     assert 'name="theme-color"' in html
+
+
+def test_render_page_carries_the_reaction_endpoint_on_root_for_the_bundle(public_build: Path):
+    # The reacting-form widget reads #root's data-reaction-endpoint to override its default
+    # in-app door with this plugin's own session react door — per-interaction, under the
+    # serving mount, with the ticket never in the URL (the door holds it server-side).
+    html = render_page(IDENTITY, "Chat", load_build(), "/api/channels/relay")
+    assert 'data-reaction-endpoint="/api/channels/relay/questions/{interaction_id}/react"' in html
+    assert "/api/channels/web/questions/" not in html
 
 
 def test_render_page_carries_the_attachment_cap_on_root_for_the_bundle(

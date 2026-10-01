@@ -32,14 +32,15 @@ def test_importing_register_registers_channel_and_route(stub_app):
 
     assert list(stub_app.channels.registered) == ["whatsapp"]
     assert isinstance(stub_app.channels.registered["whatsapp"], WhatsAppChannel)
-    paths = {route.path for route in stub_app.http.routes}
-    assert paths == {"/inbound"}
-    assert len(stub_app.http.routes) == 1
-    route = stub_app.http.routes[0]
-    assert route.methods == ["GET", "POST"]
-    # The route is declared relative and passes no explicit ``authed``: the mount
-    # base and the public flag come from ``tai-plugin.yml``, resolved by the runtime.
-    assert route.authed is None
+    routes = {route.path: route for route in stub_app.http.routes}
+    # The webhook (GET verification + POST events) and the reacting-form Flow data endpoint.
+    assert set(routes) == {"/inbound", "/flow-data"}
+    assert routes["/inbound"].methods == ["GET", "POST"]
+    assert routes["/flow-data"].methods == ["POST"]
+    # Both routes are declared relative and pass no explicit ``authed``: the mount base and the
+    # public flag come from ``tai-plugin.yml``, resolved by the runtime.
+    assert routes["/inbound"].authed is None
+    assert routes["/flow-data"].authed is None
 
 
 def test_bare_package_import_does_not_register():

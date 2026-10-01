@@ -38,6 +38,12 @@ from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.kill import kill_park
+from tai42_skeleton.interactions.reaction import (
+    FormReactionClosedError,
+    FormReactionHandlerError,
+    FormReactionRequestError,
+    react,
+)
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import KILL_ACT_ON_PENDING, InteractionStore
 from tai42_skeleton.operations import (
@@ -46,6 +52,7 @@ from tai42_skeleton.operations import (
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
+    UpstreamError,
     operation,
 )
 from tai42_skeleton.operations.response_models_group_c import (
@@ -68,6 +75,25 @@ class InteractionAnswer(BaseModel):
     """
 
     answer: Any
+
+
+class InteractionReact(BaseModel):
+    """A mid-form reaction to an OPEN reacting form.
+
+    ``event`` is the triggering event (``{"kind", "field"?|"page"?}``) and ``values`` the
+    partial values filled so far; both are validated at runtime against the stored reacting
+    form (its declared triggers and schema).
+    """
+
+    event: dict[str, Any]
+    values: dict[str, Any]
+
+
+class InteractionReactionResult(BaseModel):
+    """The in-app reaction door's result: the ``interaction_id`` and the validated form ``update``."""
+
+    interaction_id: str
+    update: dict[str, Any]
 
 
 def _reply_ttl(request: InteractionRequest) -> int:
@@ -186,7 +212,10 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         state = await _load_answerable_state(store, r, interaction_id)
         _authorize_answerer(state, restricted)
         try:
-            check_answer(
+            # ``check_answer`` returns the answer the consumer receives — identical to the
+            # input but for a FORM, whose conditionally-hidden fields are dropped here once
+            # (the single facet), so every answer door records the same effective answer.
+            answer = check_answer(
                 QuestionFormat(answer_format=state.request.answer_format, format_payload=state.request.format_payload),
                 answer,
             )
@@ -225,6 +254,51 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         await fire_continuation_after_claim(r, store, state.request, answer)
 
     return {"interaction_id": interaction_id, "status": "answered"}
+
+
+@operation(
+    name="react_interaction",
+    summary="React to an open form interaction",
+    tags=["interactions"],
+    destructive=False,
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, UpstreamError],
+    request_model=InteractionReact,
+    response_model=InteractionReactionResult,
+)
+async def react_interaction(interaction_id: str, event: dict, values: dict) -> dict:
+    """React to an OPEN reacting form through the AUTHENTICATED in-app door — the ``channel=None`` surface.
+
+    The SIBLING of the authenticated answer door, under the SAME authenticated correlation:
+    the same existence/format/status guards and the SAME audience gate (a restricted caller
+    may react only to a form addressed to its identity). It then runs the ONE ``react``
+    chokepoint, which asserts the form is open, type-validates the partial values, runs the
+    asker's handler under its stored identity with a deadline, validates the returned update,
+    and returns it. STATELESS: no answer is recorded, the interaction is never resolved, the
+    stored request is never rewritten. A closed form is a ``409``, a malformed request a
+    ``400``, and a handler that raises or times out a loud ``502`` (never a stale value).
+    """
+    # OFF gate: with no store configured no interaction can exist — a 404 byte-identical to
+    # the genuine miss, mirroring the answer door.
+    if not interactions_store_configured():
+        raise NotFoundError("Interaction not found")
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    _user_id, restricted = request_identity()
+
+    async with client_ctx(RedisClient, settings.redis) as r:
+        # The answer door's exact correlation — existence/format/status + the audience gate —
+        # applied before the reaction runs, inheriting it, adding nothing.
+        state = await _load_answerable_state(store, r, interaction_id)
+        _authorize_answerer(state, restricted)
+    try:
+        update = await react(interaction_id, event, values)
+    except FormReactionClosedError as exc:
+        raise ConflictError(str(exc)) from exc
+    except FormReactionRequestError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except FormReactionHandlerError as exc:
+        raise UpstreamError(str(exc)) from exc
+    return {"interaction_id": interaction_id, "update": update}
 
 
 @operation(

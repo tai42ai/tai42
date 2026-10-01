@@ -33,6 +33,13 @@ platform api key and declare an explicit action-class.
   The forwarded answer is one scalar (text/confirm/select) or a JSON object (form);
   this door bounds only its shape and size — the callback door stays authoritative on
   whether it matches the question's stored schema.
+* ``POST /api/channels/web/questions/{interaction_id}/react`` — react to a pending form
+  question mid-fill: a SIBLING of the answer door for a reacting form, with the SAME
+  ownership (the record must belong to the caller's own conversation) and cross-origin
+  checks. The event and the values filled so far are forwarded SERVER-SIDE to the
+  interaction's ticket react door; the ticket is held in the stored record and never
+  reaches the browser, and the validated form update is returned. The record is read,
+  never claimed — a reaction records no answer and leaves the question open.
 * ``POST /api/channels/web/forms/{token}`` — submit an ask-less form card. The token
   names a ``chat.form`` card's stored record, which must belong to the caller's own
   conversation (a foreign or expired token answers ONE uniform 404 — no oracle). The
@@ -94,6 +101,7 @@ from tai42_channel_web.routes import (  # noqa: F401  (route registration side-e
     gate_routes,
     message_routes,
     page_routes,
+    reaction_routes,
     session_routes,
     stream_routes,
     upload_routes,

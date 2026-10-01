@@ -33,6 +33,7 @@ from tests._claude_stubs import (
     ENV_CRED_ECHO,
     EVENTS_RICH,
     FATAL,
+    FORM_SYNC_ASK,
     MESSAGE,
     STRUCTURED,
     SYNC_ASK,
@@ -109,6 +110,51 @@ def test_sync_ask_is_answered_adapter_side(monkeypatch: pytest.MonkeyPatch) -> N
     events = _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
     assert asked == ["color?"]
     assert any(isinstance(e, MessageFinal) and "answer=blue" in e.text for e in events)
+
+
+def test_plain_sync_ask_forwards_the_form_fields_as_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain (non-form) ask forwards every new form field as ``None`` — the adapter's behavior
+    is byte-for-byte today's plain question when the runner sets none of the form fields."""
+    _settings(monkeypatch)
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(SYNC_ASK))
+    captured: dict[str, Any] = {}
+
+    async def ask(question: str, **kwargs: Any) -> Any:
+        captured["question"] = question
+        captured.update(kwargs)
+        return "blue"
+
+    _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
+    assert captured["answer_format"] == "text"
+    assert captured["schema"] is None
+    assert captured["data"] is None
+    assert captured["pages"] is None
+    assert captured["reaction_tool"] is None
+    assert captured["reactions"] is None
+
+
+def test_sync_form_ask_forwards_schema_data_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sync form ask carrying a schema/data/pages forwards each to ``ask`` and returns the
+    validated form answer — the agent can emit a rich form, not only a plain question."""
+    _settings(monkeypatch)
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(FORM_SYNC_ASK))
+    captured: dict[str, Any] = {}
+
+    async def ask(question: str, **kwargs: Any) -> Any:
+        captured["question"] = question
+        captured.update(kwargs)
+        return {"color": "blue"}
+
+    events = _run(build_local_app(ask=ask), user_message=TemplatedText(content="hi"))
+    assert captured["question"] == "pick"
+    assert captured["answer_format"] == "form"
+    assert captured["schema"] == {"type": "object", "properties": {"color": {"type": "string"}}}
+    assert captured["data"] == {"values": {"color": "blue"}}
+    assert captured["pages"] == [{"title": "p1", "fields": ["color"]}]
+    # A plain (non-reacting) form leaves the reaction fields unset.
+    assert captured["reaction_tool"] is None
+    assert captured["reactions"] is None
+    assert any(isinstance(e, MessageFinal) and "answer={'color': 'blue'}" in e.text for e in events)
 
 
 def test_proxied_tool_call_runs_under_run_tool(monkeypatch: pytest.MonkeyPatch) -> None:

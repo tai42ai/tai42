@@ -15,7 +15,9 @@
  * logged verbatim so a raw diagnostic stays reachable without ever reaching the
  * transcript.
  */
+import { formUpdateOf } from '@/frame-parse';
 import { sseOpenToken } from '@/sse';
+import type { FormUpdate, ReactionEvent } from '@/transcript-model';
 
 /**
  * This deployment's absolute mount prefix for the web channel, read at runtime from
@@ -108,6 +110,7 @@ const MESSAGE_DOOR: Door = { what: 'sending a message', subject: 'That message' 
 const UPLOAD_DOOR: Door = { what: 'uploading a file', subject: 'That file' };
 const QUESTION_DOOR: Door = { what: 'answering a question', subject: 'That answer' };
 const FORM_DOOR: Door = { what: 'submitting a form', subject: 'That form' };
+const REACTION_DOOR: Door = { what: 'updating a form', subject: 'That form' };
 const ROTATE_DOOR: Door = { what: 'starting a new conversation', subject: 'That request' };
 const STREAM_DOOR: Door = { what: 'opening the chat stream', subject: 'That request' };
 
@@ -325,6 +328,51 @@ export async function uploadAttachment(
     filename: typeof data.filename === 'string' ? data.filename : null,
     url: uploadString(data, 'url'),
   };
+}
+
+/**
+ * This deployment's reaction-door URL for one interaction, derived from the
+ * `{interaction_id}` template the page door writes onto `#root` as
+ * `data-reaction-endpoint`. That is the per-interaction react sibling of this plugin's own
+ * answer door, so a web-chat form reacts through this plugin's session door (the door holds
+ * the ticket server-side and forwards the reaction on). A missing template is a loud throw —
+ * never a silent fall back to a guessed path.
+ */
+function reactionEndpoint(interactionId: string): string {
+  const template = document.getElementById('root')?.dataset.reactionEndpoint;
+  if (template === undefined || template.trim() === '') {
+    throw new Error(
+      'the chat page shell carries no data-reaction-endpoint — a form reaction has nowhere to go',
+    );
+  }
+  return template.replace('{interaction_id}', encodeURIComponent(interactionId));
+}
+
+/**
+ * Round-trip one mid-form reaction and resolve with the validated form update to apply.
+ * `{event, values}` is POSTed same-origin to this plugin's own reaction door (the
+ * `tai_web_session` cookie rides it on its own, exactly as every other call here); the door
+ * forwards it server-side to the interaction's ticket react door and returns the update.
+ *
+ * A non-2xx becomes a {@link ChatApiError}; a 2xx whose body is not a well-formed update
+ * throws LOUDLY. The caller surfaces either as a visible notice and never applies a stale
+ * value — a failed reaction holds the form open rather than accepting an unvetted change.
+ */
+export async function reactToForm(
+  interactionId: string,
+  event: ReactionEvent,
+  values: Record<string, unknown>,
+): Promise<FormUpdate> {
+  const response = await fetch(reactionEndpoint(interactionId), {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify({ event, values }),
+  });
+  if (!response.ok) throw await failure(response, REACTION_DOOR);
+  const data = await readData<unknown>(response, 'updating a form');
+  const update = formUpdateOf(data);
+  if (update === undefined) throw new Error('the reaction door returned a malformed form update');
+  return update;
 }
 
 /** Answer one pending question. The door verifies the record belongs to this

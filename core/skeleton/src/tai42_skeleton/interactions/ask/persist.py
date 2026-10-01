@@ -29,6 +29,7 @@ def build_request(
     question: str,
     fmt: AnswerFormat,
     format_payload: dict[str, Any] | None,
+    reaction_tool: str | None = None,
     on_mismatch: Any,
     mismatch_notice: str | None,
     reply_to: str,
@@ -58,6 +59,10 @@ def build_request(
         question=question,
         answer_format=fmt,
         format_payload=format_payload,
+        # The reacting form's handler tool NAME (None for a static form); the skeleton
+        # wires the run, the request only carries the name. The model's own validator
+        # enforces reaction-iff-async-FORM and the handler<->triggers pairing.
+        reaction_tool=reaction_tool,
         to=to,
         payload=payload,
         on_expiry=on_expiry,
@@ -107,6 +112,7 @@ async def persist_question(
     question: str,
     fmt: AnswerFormat,
     format_payload: dict[str, Any] | None,
+    reaction_tool: str | None = None,
     on_mismatch: Any,
     mismatch_notice: str | None,
     reply_to: str,
@@ -155,6 +161,7 @@ async def persist_question(
             question=question,
             fmt=fmt,
             format_payload=format_payload,
+            reaction_tool=reaction_tool,
             on_mismatch=on_mismatch,
             mismatch_notice=mismatch_notice,
             reply_to=reply_to,

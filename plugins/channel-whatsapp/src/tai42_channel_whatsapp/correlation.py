@@ -95,6 +95,10 @@ class PendingQuestion:
     # so the inbound nfm_reply decode (keyed by those payload keys, as Meta relays them) maps
     # every answer key back to the schema key before coercion; all None for a non-form ask.
     form_names: dict[str, str] | None = None
+    # A REACTING form ask carries its reaction triggers (field_changed/page_advanced/submitted/
+    # choices) so a door-rejection re-send reproduces the SAME endpoint-driven Flow (the reacting
+    # shape folds into the published-Flow cache key); None for a static form or non-form ask.
+    form_reactions: dict[str, Any] | None = None
 
 
 def correlation_key(phone_number_id: str, wa_id: str) -> str:
@@ -115,6 +119,10 @@ def _flow_key(waba_id: str, schema_hash: str) -> str:
 
 def _flow_schema_key(waba_id: str, schema_hash: str) -> str:
     return f"channel:whatsapp:flow-schema:{waba_id}:{schema_hash}"
+
+
+def _reaction_form_key(interaction_id: str) -> str:
+    return f"channel:whatsapp:reaction-form:{interaction_id}"
 
 
 def _seen_key(wamid: str) -> str:
@@ -138,6 +146,7 @@ def _encode_pending(question: PendingQuestion) -> str:
             "form_values": question.form_values,
             "form_options": question.form_options,
             "form_names": question.form_names,
+            "form_reactions": question.form_reactions,
             "rejections": question.rejections,
         }
     )
@@ -172,6 +181,7 @@ async def reserve_pending(
     form_values: dict[str, Any] | None = None,
     form_options: dict[str, list[dict[str, Any]]] | None = None,
     form_names: dict[str, str] | None = None,
+    form_reactions: dict[str, Any] | None = None,
 ) -> None:
     """Atomically reserve the pair for one question, or raise ``PendingQuestionExistsError``."""
     value = _encode_pending(
@@ -186,6 +196,7 @@ async def reserve_pending(
             form_values=form_values,
             form_options=form_options,
             form_names=form_names,
+            form_reactions=form_reactions,
         )
     )
     ttl = _remaining_seconds(timeout_at)
@@ -217,6 +228,7 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
         form_values=data.get("form_values"),
         form_options=data.get("form_options"),
         form_names=data.get("form_names"),
+        form_reactions=data.get("form_reactions"),
         rejections=data["rejections"],
     )
 
@@ -372,6 +384,54 @@ async def get_cached_flow_form(waba_id: str, schema_hash: str) -> tuple[dict[str
         logger.warning("cached flow form under %s lacks its schema or name map; treating as a miss", schema_hash)
         return None
     return schema, names
+
+
+async def cache_reaction_form(
+    interaction_id: str,
+    schema: dict[str, Any],
+    pages: list[dict[str, Any]] | None,
+    values: dict[str, Any],
+    options: dict[str, list[dict[str, Any]]],
+    timeout_at: datetime,
+) -> None:
+    """Store a REACTING form's schema + per-send inputs under its ``interaction_id``, with the answer budget as TTL.
+
+    A reacting Flow's data-endpoint request carries only the ``flow_token`` (the interaction id),
+    never the schema, so this sidecar is the only place the endpoint can recover the schema (to
+    coerce the partial values the react facet type-checks), the pages (to rebuild the next screen
+    on a page advance), and the per-send values/options (to repopulate a rebuilt screen). The
+    entry expires with the ask's own deadline, so a stale token resolves to a clean miss. A
+    record for a form past its deadline is not written (nothing left to react to).
+    """
+    remaining = math.ceil((timeout_at - datetime.now(UTC)).total_seconds())
+    if remaining <= 0:
+        return
+    value = json.dumps({"schema": schema, "pages": pages, "values": values, "options": options})
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await redis.set(_reaction_form_key(interaction_id), value, ex=remaining)
+
+
+async def get_reaction_form(
+    interaction_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]] | None, dict[str, Any], dict[str, list[dict[str, Any]]]] | None:
+    """Return the ``(schema, pages, values, options)`` cached for a reacting form, or ``None`` on a miss.
+
+    A miss means the reacting form's token is unknown or its budget has expired — the data
+    endpoint treats it as a no-longer-valid flow token (never a crash on the endpoint path).
+    """
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        raw = await redis.get(_reaction_form_key(interaction_id))
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        logger.warning("cached reaction form for %s is not valid JSON; treating as a miss", interaction_id)
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("schema"), dict):
+        logger.warning("cached reaction form for %s lacks its schema; treating as a miss", interaction_id)
+        return None
+    return parsed["schema"], parsed.get("pages"), parsed.get("values") or {}, parsed.get("options") or {}
 
 
 async def already_seen(wamid: str) -> bool:

@@ -128,6 +128,33 @@ class _StubChannels:
         )
 
 
+class _StubInteractions:
+    """Stands in for the skeleton's ``app.interactions`` reaction chokepoint.
+
+    The plugin's test venv cannot import the skeleton that hosts the real ``react`` facet, so
+    it is faked at this contract seam. A test sets ``react_result`` (a form update) or
+    ``react_error`` (raised, standing in for a closed/malformed/handler failure) and reads back
+    the recorded ``react`` calls."""
+
+    def __init__(self) -> None:
+        self.react_calls: list[SimpleNamespace] = []
+        self.react_result: dict[str, Any] = {}
+        self.react_error: BaseException | None = None
+
+    def reset(self) -> None:
+        self.react_calls.clear()
+        self.react_result = {}
+        self.react_error = None
+
+    async def react(self, interaction_id: str, event: dict[str, Any], partial_values: dict[str, Any]) -> dict[str, Any]:
+        self.react_calls.append(
+            SimpleNamespace(interaction_id=interaction_id, event=event, partial_values=partial_values)
+        )
+        if self.react_error is not None:
+            raise self.react_error
+        return self.react_result
+
+
 class _StubHttp:
     """Records every route registered through ``tai42_app.http.custom_route``."""
 
@@ -309,6 +336,7 @@ class _StubApp:
         self.conversations = _StubConversations()
         self.media = _StubMedia()
         self.lifecycle = _StubLifecycle()
+        self.interactions = _StubInteractions()
 
 
 _stub_app = _StubApp()
@@ -395,6 +423,18 @@ def channels() -> Iterator[_StubChannels]:
     """The inbound-answer-ladder stub on ``app.channels``, state reset around each
     test so outcome/call assertions never leak."""
     stub = _stub_app.channels
+    stub.reset()
+    try:
+        yield stub
+    finally:
+        stub.reset()
+
+
+@pytest.fixture
+def interactions() -> Iterator[_StubInteractions]:
+    """The reaction-chokepoint stub on ``app.interactions``, state reset around each
+    test so react-call/result assertions never leak."""
+    stub = _stub_app.interactions
     stub.reset()
     try:
         yield stub

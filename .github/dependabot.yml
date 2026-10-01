@@ -12,3 +12,27 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: npm
+    directory: /plugins/channel-web
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: /plugins/accounts-postgres
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: /e2e/ui
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns:
+          - "*"

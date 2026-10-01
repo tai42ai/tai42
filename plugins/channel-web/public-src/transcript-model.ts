@@ -44,12 +44,70 @@ export interface FormPrefill {
   readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
 }
 
+/** The kind of an ordered display-only block a form page may carry alongside its
+ * input fields: a `heading` or `body` text block, or an `image`. */
+export type DisplayBlockKind = 'heading' | 'body' | 'image';
+
+/** One ordered, display-only block on a form page (never an input): `text` carries a
+ * heading/body's words; `src`/`alt` carry an image's source and alt text; an optional
+ * `slot` names a data key whose current value the block shows in place of static `text`
+ * (filled from the per-send data and/or a reaction's `display` update — a computed total
+ * among them). Each optional field is `null` when the wire omitted it. */
+export interface DisplayBlock {
+  readonly kind: DisplayBlockKind;
+  readonly text: string | null;
+  readonly src: string | null;
+  readonly alt: string | null;
+  readonly slot: string | null;
+}
+
 /** One step of a stepped form: `title` heads the step and `fields` names the
  * top-level properties shown on it, in order. Across a form's pages every property
- * appears exactly once; absent pages means one page. */
+ * appears exactly once; absent pages means one page. `display` is the step's ordered
+ * display-only blocks (empty when it carries none); `kind` marks a terminal `review`
+ * step — a generic readback of entered values and the confirm footer, carrying no new
+ * input fields — or an ordinary `input` step. */
 export interface FormPage {
   readonly title: string;
   readonly fields: readonly string[];
+  readonly display: readonly DisplayBlock[];
+  readonly kind: 'input' | 'review';
+}
+
+/** When a form reacts while it is open: the plain, renderer-readable description of
+ * WHEN the form rounds-trips to its reaction door. `fieldChanged` names the fields whose
+ * change fires a reaction; `pageAdvanced` names the pages (by title) whose advance fires
+ * one; `submitted` is true when the submission is checked by a reaction before it is
+ * accepted; `choices` names the fields whose choice list a reaction may replace while the
+ * form is open. `null` on a static (non-reacting) form. */
+export interface FormReactions {
+  readonly fieldChanged: readonly string[];
+  readonly pageAdvanced: readonly string[];
+  readonly submitted: boolean;
+  readonly choices: readonly string[];
+}
+
+/** The form update a reaction door returns: `values` sets field values; `options`
+ * replaces the per-send choice list of option-bearing fields; `errors` shows per-field
+ * messages (keyed by field name); `display` fills display slots (keyed by slot name) — a
+ * computed total among them. Each is empty when the reaction supplied none. */
+export interface FormUpdate {
+  readonly values: Readonly<Record<string, unknown>>;
+  readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
+  readonly errors: Readonly<Record<string, string>>;
+  readonly display: Readonly<Record<string, unknown>>;
+}
+
+/** Which of the three declared events a reaction round-trip reports. */
+export type ReactionEventKind = 'field_changed' | 'page_advanced' | 'submitted';
+
+/** The event a reaction round-trip reports to the door: `kind` is which event fired,
+ * `field` names the changed field for a `field_changed`, `page` names the advanced-from
+ * page (by title) for a `page_advanced`; a `submitted` carries neither. */
+export interface ReactionEvent {
+  readonly kind: ReactionEventKind;
+  readonly field?: string;
+  readonly page?: string;
 }
 
 /** The format-dependent extras a question row carries, keyed by the format that
@@ -75,6 +133,10 @@ export type QuestionFacet =
       readonly formData: FormPrefill | null;
       /** The form's steps, or `null` for one page. */
       readonly pages: readonly FormPage[] | null;
+      /** The form's reaction triggers when it reacts while open, or `null` for a
+       * static form. The widget reads these to know which on-change / page-advance /
+       * submit events to round-trip to the reaction door. */
+      readonly reactions: FormReactions | null;
     }
   | {
       readonly answerFormat: 'text' | 'confirm' | 'select';

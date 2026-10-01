@@ -85,6 +85,31 @@ Slack shows no bot typing indicator: the Web API exposes none for a bot user (on
 the RTM/Socket `user_typing` frame this plugin does not use), so this channel emits
 no working-on-it signal while a turn runs. The answer posts back when it is ready.
 
+## Form questions
+
+An `ask` with `answer_format: form` posts a **Fill form** button that opens a Block
+Kit modal. Schema properties map to controls — a short `enum` to a radio group and a
+longer one to a select, an array of strings to a checkbox group or multi-select, a
+date to a date picker, a boolean to Yes/No, a number to a number input — and the
+per-send layout drives display blocks, a review step, conditional fields and mid-form
+reactions.
+
+Slack-specific behaviour (the documented degrades):
+
+- **Dates** carry no drawable bounds — Slack's date picker has no min/max/disabled
+  dates and no range control — so a date bound, an unavailable-days rule or a range
+  (two date fields) is **enforced on submit** and shown as an inline error on the
+  field, not prevented in the picker.
+- **Display and review.** A page's heading/body/image blocks render as
+  `header`/`section`/`image`; a review page is a final titled readback group in the
+  single modal (Slack has no native multi-step, so no pushed confirmation view).
+- **Conditional fields** show/hide by the platform re-rendering the modal
+  (`views.update`) on the controlling field's change — platform logic, never a call
+  to the form's consumer; the predicate is also enforced on submit.
+- **Reacting forms** route a reacting field's change (and the submit check) through
+  the platform's reaction seam and apply the result with `views.update`. A
+  page-advance trigger has no event on Slack's single-surface modal.
+
 ## See also
 
 - [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.
