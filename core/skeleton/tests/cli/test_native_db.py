@@ -421,3 +421,229 @@ def test_status_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     data = json.loads(result.output)
     assert data["status"][0]["component"] == "skeleton"
     assert data["skipped_chains"] == []
+
+
+# --- manifest-loaded chains -----------------------------------------------
+
+
+def _widget_spec():
+    """A chain-declaring spec whose package is the installed ``tai42-skeleton`` distribution.
+
+    So the manifest source resolves its chain against a real installed package (the
+    distribution's own ``sql/migrations``) with no live plugin install."""
+    from tai42_contract.plugins import PluginSpec
+
+    return PluginSpec.model_validate(
+        {
+            "spec_version": 1,
+            "namespace": "tai42",
+            "name": "widget",
+            "package": "tai42-skeleton",
+            "version": "1.0.0",
+            "description": "A test plugin",
+            "license": "Apache-2.0",
+            "contract": ">=0.1,<1.0",
+            "categories": ["dev"],
+            "provides": [{"kind": "tool", "name": "w", "module": "w.m", "description": "d"}],
+            "migrations": "sql/migrations",
+        }
+    )
+
+
+def _wire_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real chain discovery against a manifest that LOADS one chain-declaring plugin.
+
+    No store row and no prefix (a plugin baked into the environment, loaded only via the
+    manifest). The password-only database config
+    lets the migrator identity resolve without a connection; the store is faked empty and
+    only each test's PG-touching runner (``migration_status`` / ``apply_migrations``) is
+    stubbed."""
+    from tai42_skeleton.app import mount_map
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_all_migration_chains, discover_plugin_chains
+    from tai42_skeleton.marketplace import prefix as mp_prefix
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+    monkeypatch.setattr(db, "discover_plugin_chains", discover_plugin_chains)
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+    monkeypatch.setattr(
+        ConfigManagerFactory,
+        "create",
+        lambda: SimpleNamespace(read_manifest=lambda: {"lifecycle_modules": ["tai42_widget.lifecycle"]}),
+    )
+    monkeypatch.setattr(
+        mount_map,
+        "_packaged_spec_for_module",
+        lambda name: _widget_spec() if name == "tai42_widget.lifecycle" else None,
+    )
+
+
+def test_migrate_applies_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A chain-declaring plugin the manifest LOADS (no store row, no prefix) is discovered
+    # and applied by migrate — the runner migrates exactly what boot will gate on.
+    _wire_manifest_loaded_chain(monkeypatch)
+    applied: list[str] = []
+
+    async def _apply(entries: object) -> list[AppliedMigration]:
+        applied.extend(entry.component for entry in cast("list", entries))
+        return []
+
+    monkeypatch.setattr(db, "apply_migrations", _apply)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
+
+    assert result.exit_code == 0, result.output
+    assert "tai42-skeleton" in applied
+
+
+def test_status_gate_nonzero_for_manifest_loaded_pending_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The gate contract: a manifest-loaded chain that is pending makes ``tai db status``
+    # exit non-zero (and names the component), so a deployment that would boot-gate the
+    # chain can never pass the pre-deploy gate green.
+    _wire_manifest_loaded_chain(monkeypatch)
+
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [
+            _status(
+                entry.component,
+                applied=() if entry.component == "tai42-skeleton" else (1,),
+                pending=(_script(1, "baseline"),) if entry.component == "tai42-skeleton" else (),
+            )
+            for entry in cast("list", entries)
+        ]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 1, result.output
+    assert "tai42-skeleton" in result.output
+
+
+def test_status_json_lists_manifest_loaded_component(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    _wire_manifest_loaded_chain(monkeypatch)
+
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status(entry.component, applied=(1,)) for entry in cast("list", entries)]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["--json", "db", "status"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "tai42-skeleton" in [row["component"] for row in data["status"]]
+
+
+def test_status_absent_manifest_proceeds_on_store_and_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # migrate/status are manifest-OPTIONAL: an absent manifest contributes no manifest-loaded
+    # chains and status proceeds on the skeleton/store/prefix chains — exit 0, no error, and
+    # never a "Manifest not found" failure.
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_all_migration_chains
+    from tai42_skeleton.marketplace import prefix as mp_prefix
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+
+    def _absent() -> dict:
+        raise FileNotFoundError("Manifest not found: /app/config/manifest.yml")
+
+    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: SimpleNamespace(read_manifest=_absent))
+
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status(entry.component, applied=(1,)) for entry in cast("list", entries)]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Manifest not found" not in result.output
+    # The skeleton-owned chains are reported (discovery fell through to them).
+    assert "skeleton" in result.output
+
+
+def test_status_malformed_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest that EXISTS but is schema-invalid is a real error, never swallowed:
+    # discovery wraps the ValidationError as a MigrationDiscoveryError, which the CLI seam
+    # maps to a clean, credential-free non-zero — never a false zero-pending green and never a
+    # raw traceback.
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_all_migration_chains
+    from tai42_skeleton.marketplace import prefix as mp_prefix
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+    monkeypatch.setattr(
+        ConfigManagerFactory,
+        "create",
+        lambda: SimpleNamespace(read_manifest=lambda: {"lifecycle_modules": "not-a-list"}),
+    )
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert "not a valid manifest" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_status_broken_yaml_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest that EXISTS but is unparseable YAML surfaces as a clean, credential-free
+    # non-zero: discovery wraps the YAMLError (NOT a ValueError, so unwrapped it would escape
+    # the CLI seam as a raw traceback) as a MigrationDiscoveryError, which the seam maps.
+    import yaml
+
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_all_migration_chains
+    from tai42_skeleton.marketplace import prefix as mp_prefix
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+
+    def _broken_yaml() -> dict:
+        raise yaml.YAMLError("mapping values are not allowed here")
+
+    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: SimpleNamespace(read_manifest=_broken_yaml))
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert "could not be parsed as YAML" in result.output
+    assert "Traceback" not in result.output

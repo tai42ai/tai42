@@ -91,9 +91,15 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     bound to an unconfigured named database (a kit
     :class:`~tai42_kit.db.DatabaseNotConfiguredError`, which names the env var) or one
     with a half-set admin identity (a kit
-    :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars)
-    is caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other
-    error propagates so a broken probe is never mistaken for a clean schema.
+    :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars) is
+    caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other error
+    propagates so a broken probe is never mistaken for a clean schema. Discovery is
+    manifest-optional: an absent manifest contributes no manifest-loaded chains and the probe
+    proceeds on the store and prefix chains (NOT a FAIL — nothing is loaded via a manifest
+    that does not exist), while a manifest that exists but cannot be read, parsed, or validated
+    surfaces from discovery as a :class:`~tai42_kit.db.MigrationDiscoveryError` and is caught
+    by the :class:`~tai42_kit.db.MigrationError` branch above — rendered as a schema FAIL
+    naming the cause rather than mistaken for a clean schema.
     """
     import psycopg
 

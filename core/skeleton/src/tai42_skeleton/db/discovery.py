@@ -3,11 +3,14 @@
 The skeleton's own chain lives at a fixed packaged path and is registered
 directly. A table-owning plugin declares its chain OPT-IN via the contract's
 ``migrations`` field (a package-relative directory); its component identity is its
-pip distribution name. Installed plugins are discovered from BOTH install sources:
-the marketplace install-attribution store, and the plugins prefix scanned for
-distributions shipping a packaged ``tai-plugin.yml`` (a plugin pre-installed into
-the prefix by pip has no store row but its declared chain must still run). This
-module turns those declarations into :class:`~tai42_kit.db.MigrationEntry` values
+pip distribution name. Installed plugins are discovered from THREE sources: the
+marketplace install-attribution store; the plugins prefix scanned for distributions
+shipping a packaged ``tai-plugin.yml`` (a plugin pre-installed into the prefix by pip
+has no store row but its declared chain must still run); and the effective manifest's
+loaded modules (a plugin baked into the environment and named by the manifest has
+neither a store row nor a prefix, yet the deployment imports it at boot and gates its
+schema — so the runner must see it too, or the app boot-gates a chain the migrator
+never ran). This module turns those declarations into :class:`~tai42_kit.db.MigrationEntry` values
 the runner consumes — resolving a plugin's packaged directory through
 ``importlib.resources`` (or directly against its prefix install) and failing loudly
 when a declared directory is absent from the installed package.
@@ -26,6 +29,7 @@ import re
 from dataclasses import dataclass
 from importlib.resources.abc import Traversable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from tai42_contract.plugins import PluginSpec
@@ -36,6 +40,9 @@ from tai42_kit.db import (
     component_migrator_settings,
 )
 from tai42_kit.plugins import PLUGIN_SPEC_FILENAME, PluginSpecLoadError, parse_plugin_spec
+
+if TYPE_CHECKING:
+    from tai42_contract.manifest import Manifest
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +299,120 @@ def _merge_prefix_sources(
     return sources
 
 
+def _manifest_loaded_modules(manifest: Manifest) -> list[str]:
+    """Every module the component importer loads at boot, in the same set it imports.
+
+    Mirrors the imports :class:`~tai42_skeleton.app.lifecycle.component_import.ComponentImportMixin`
+    runs in ``_initialize_components``: the additive roles (lifecycle, webhook-verifier,
+    channel, the effective router set, middleware), the four scalar slots
+    (backend/sandbox/storage/monitoring), the extension modules, the tool modules, and
+    each agent's module. ``connectors`` (pure data, no import path), ``mcp`` servers, and
+    ``api_tools`` are not module imports and are not included. So the distributions this
+    source resolves are exactly the ones the booted deployment imports and boot-gates.
+    """
+    from tai42_skeleton.app.route_defaults import effective_router_modules
+
+    scalar_slots = (
+        manifest.backend_module,
+        manifest.sandbox_module,
+        manifest.storage_module,
+        manifest.monitoring_module,
+    )
+    return [
+        *(manifest.lifecycle_modules or []),
+        *(manifest.webhook_verifier_modules or []),
+        *(manifest.channel_modules or []),
+        *effective_router_modules(manifest),
+        *(manifest.middlewares_modules or []),
+        *(module for module in scalar_slots if module),
+        *(manifest.extensions_modules or []),
+        *(cfg.module for cfg in manifest.tools),
+        *(cfg.module for cfg in manifest.agents),
+    ]
+
+
+def _collect_manifest_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
+    """The chains the effective manifest LOADS, as source slots keyed ``manifest:{dist}``.
+
+    The effective manifest is resolved exactly as boot resolves it —
+    ``Manifest.model_validate(config_manager.read_manifest())`` — so the runner enumerates
+    the same modules the booted deployment imports and gates on. Each loaded module is
+    mapped to the ``tai-plugin.yml`` packaged beside its top-level import package; a module
+    that ships no spec (an operator-authored deployment module) yields nothing. The chain
+    resolves from installed metadata, so the slot carries NO package root (the manifest
+    module is importable in this process, unlike a prefix-only install). One slot per
+    distribution: several modules of one plugin collapse onto its distribution key.
+
+    ``tai db migrate``/``status``/``doctor`` are manifest-OPTIONAL: when no manifest file
+    exists, ``read_manifest`` raises :class:`FileNotFoundError` and this source contributes
+    NOTHING -- a plugin can be "loaded via the manifest" only when a manifest exists, so with
+    no manifest there is simply no manifest-loaded chain to gate on, and discovery falls
+    through to the store and prefix sources. This is the absence of a source, not a degrade:
+    the ONLY swallowed case is the file being absent. A manifest that EXISTS but cannot be
+    read as a valid manifest -- unparseable YAML (``read_manifest`` raises
+    :class:`yaml.YAMLError`) or a document ``Manifest.model_validate`` rejects
+    (:class:`pydantic.ValidationError`) -- is a real error, wrapped as a loud
+    :class:`~tai42_kit.db.MigrationDiscoveryError` naming the manifest so the CLI seam maps it
+    to a clean credential-free failure rather than a raw traceback (a ``YAMLError`` is not a
+    ``ValueError``, so unwrapped it would escape that seam). Any other failure propagates
+    unwrapped so a genuinely unexpected fault is never masked.
+    """
+    import yaml
+
+    from tai42_skeleton.app.mount_map import _packaged_spec_for_module
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.manifest import Manifest
+
+    config_manager = ConfigManagerFactory.create()
+    manifest_path = getattr(config_manager, "_manifest_path", None)
+    target = f"the configured manifest at {manifest_path}" if manifest_path else "the configured manifest"
+    try:
+        document = config_manager.read_manifest()
+    except FileNotFoundError:
+        return {}
+    except yaml.YAMLError as exc:
+        raise MigrationDiscoveryError(f"{target} could not be parsed as YAML: {exc}") from exc
+    try:
+        manifest = Manifest.model_validate(document)
+    except ValidationError as exc:
+        raise MigrationDiscoveryError(f"{target} is not a valid manifest: {exc}") from exc
+    sources: dict[str, tuple[PluginSpec, Path | None]] = {}
+    for module in _manifest_loaded_modules(manifest):
+        spec = _packaged_spec_for_module(module)
+        if spec is None or spec.package is None:
+            continue
+        sources[f"manifest:{_normalize_dist(spec.package)}"] = (spec, None)
+    return sources
+
+
+def _merge_manifest_sources(
+    sources: dict[str, tuple[PluginSpec, Path | None]],
+) -> dict[str, tuple[PluginSpec, Path | None]]:
+    """Fold every chain the effective manifest LOADS into ``sources`` as a ``manifest:{dist}`` slot.
+
+    A distribution a root-carrying source (the prefix scan) already covers keeps that
+    source — it resolves the chain from the prefix filesystem, which a CLI process cannot
+    reach through ``sys.path``. A distribution covered only by a rootless ``store:`` slot is
+    the SAME installed artifact: the store slot is dropped so the distribution yields one
+    entry, resolved from the manifest-loaded package's installed metadata. Returns the
+    combined map.
+    """
+    rooted_dists = {
+        _normalize_dist(spec.package)
+        for spec, root in sources.values()
+        if root is not None and spec.package is not None
+    }
+    for key, slot in _collect_manifest_sources().items():
+        dist_name = key.split(":", 1)[1]
+        if dist_name in rooted_dists:
+            continue
+        for existing_key, (stored, _) in list(sources.items()):
+            if stored.package is not None and _normalize_dist(stored.package) == dist_name:
+                del sources[existing_key]
+        sources[key] = slot
+    return sources
+
+
 def _resolve_chain_discovery(sources: dict[str, tuple[PluginSpec, Path | None]]) -> MigrationChainDiscovery:
     """Map each source's ``_plugin_chain`` outcome to a discovery result.
 
@@ -320,21 +441,26 @@ def _resolve_chain_entries(sources: dict[str, tuple[PluginSpec, Path | None]]) -
 async def discover_plugin_chains() -> MigrationChainDiscovery:
     """Discovery result for every installed plugin that declares a chain.
 
-    From BOTH install sources, one entry per distribution:
+    From THREE sources, one entry per distribution:
 
     - the marketplace install-attribution store (the local record of every
       marketplace-installed plugin and the exact ``PluginSpec`` it shipped);
     - the plugins prefix, scanned for installed distributions shipping a packaged
       ``tai-plugin.yml`` — a plugin pre-installed into the prefix by pip has no
-      store row, but its declared chain must still run.
+      store row, but its declared chain must still run;
+    - the effective manifest's loaded modules — a plugin baked into the environment
+      and named by the manifest has neither a store row nor a prefix, yet the
+      deployment imports it at boot and gates its schema, so the runner must see it
+      too (resolved exactly as boot resolves the manifest).
 
-    A plugin present in both sources (a marketplace install into a configured
-    prefix) is the same installed artifact and yields ONE entry; the prefix copy
-    resolves the chain directly from the prefix filesystem, which needs no
-    ``sys.path`` activation in a CLI process. Empty when the skeleton database
-    is not configured — with no database there is nowhere to migrate. A declared
-    chain whose override binding is unset is carried in ``skipped``, never silently
-    dropped. Each plugin chain runs under its own component's bound migrator identity.
+    A plugin present in several sources (a marketplace install into a configured
+    prefix, a manifest module that is also installed) is the same installed artifact
+    and yields ONE entry; a source carrying a package root (the prefix copy, which
+    needs no ``sys.path`` activation in a CLI process) is preferred. Empty when the
+    skeleton database is not configured — with no database there is nowhere to
+    migrate. A declared chain whose override binding is unset is carried in
+    ``skipped``, never silently dropped. Each plugin chain runs under its own
+    component's bound migrator identity.
     """
     from tai42_kit.db import component_store_configured
 
@@ -342,6 +468,7 @@ async def discover_plugin_chains() -> MigrationChainDiscovery:
         return MigrationChainDiscovery(entries=[], skipped=[])
     sources = await _collect_store_sources()
     sources = _merge_prefix_sources(sources)
+    sources = _merge_manifest_sources(sources)
     return _resolve_chain_discovery(sources)
 
 
