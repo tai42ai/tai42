@@ -1,9 +1,11 @@
 """``tai db`` — apply and inspect database migrations.
 
 ``migrate`` applies every pending migration across every discovered component (the
-skeleton chain plus every installed plugin that declares one) through the kit
-migration runner; ``--plan`` prints what WOULD be applied without touching the
-database. ``status`` reports each component's applied / pending / checksum verdict.
+skeleton chains plus every plugin that declares one — the plugins the deployment
+LOADS via the manifest, and the marketplace-installed and prefix-installed plugins)
+through the kit migration runner; ``--plan`` prints what WOULD be applied without
+touching the database. ``status`` reports each component's applied / pending /
+checksum verdict.
 
 Each component connects through its bound database's migrator (DDL-privileged)
 identity, resolved through the central registry — distinct from the app's runtime
@@ -112,7 +114,9 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
     A connection error names the credential-free target; the registry's not-configured
     and half-set-admin-identity errors and the chain-integrity errors surface their own
-    actionable messages; all exit non-zero without a traceback.
+    actionable messages; an absent manifest (discovery resolves the deployment's loaded
+    chains from it, so a missing one would silently under-report) names the manifest path;
+    all exit non-zero without a traceback.
     """
     import psycopg
 
@@ -121,7 +125,13 @@ def _run(coro):  # type: ignore[no-untyped-def]
     except psycopg.OperationalError as exc:
         typer.echo(f"Error: could not connect to Postgres {_target()}: {exc}", err=True)
         raise typer.Exit(1) from exc
-    except (DatabaseNotConfiguredError, AdminIdentityIncompleteError, ValueError, MigrationError) as exc:
+    except (
+        DatabaseNotConfiguredError,
+        AdminIdentityIncompleteError,
+        ValueError,
+        MigrationError,
+        FileNotFoundError,
+    ) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
@@ -177,11 +187,13 @@ def migrate_command(
 ) -> None:
     """Apply every pending migration across all discovered components.
 
-    ``--plan`` lists what would be applied and changes nothing. Idempotent: with
-    nothing pending it reports so and exits 0. Exits non-zero, after reporting what
-    ran, when a declared migration chain was skipped (its override binding is unset).
-    Loud on a connection failure, an unconfigured connection, or a rewritten
-    (checksum-mismatched) chain.
+    Discovery covers the skeleton chains plus every plugin that declares one: the plugins
+    the deployment LOADS via the manifest, and the marketplace-installed and
+    prefix-installed plugins. ``--plan`` lists what would be applied and changes nothing.
+    Idempotent: with nothing pending it reports so and exits 0. Exits non-zero, after
+    reporting what ran, when a declared migration chain was skipped (its override binding
+    is unset). Loud on a connection failure, an unconfigured connection, a rewritten
+    (checksum-mismatched) chain, or an absent manifest.
     """
     json_output = app_context(ctx).json_output
     if plan:
@@ -194,10 +206,12 @@ def migrate_command(
 def status_command(ctx: typer.Context) -> None:
     """Report each component's applied / pending / checksum verdict.
 
-    Exits non-zero when any component has pending migrations or a checksum
-    mismatch, or when a declared migration chain was skipped (its override binding
-    is unset), so it doubles as a CI / pre-deploy gate. Loud on a connection failure
-    or an unconfigured connection.
+    Reports every discovered component: the skeleton chains plus every plugin that declares
+    one — the plugins the deployment LOADS via the manifest, and the marketplace-installed
+    and prefix-installed plugins. Exits non-zero when any component has pending migrations
+    or a checksum mismatch, or when a declared migration chain was skipped (its override
+    binding is unset), so it doubles as a CI / pre-deploy gate. Loud on a connection
+    failure, an unconfigured connection, or an absent manifest.
     """
     statuses, skips = _run(_status())
     _emit_status(statuses, skips, json_output=app_context(ctx).json_output)

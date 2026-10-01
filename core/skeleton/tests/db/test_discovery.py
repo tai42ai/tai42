@@ -343,3 +343,169 @@ async def test_prefix_unset_or_empty_is_no_entries(monkeypatch: pytest.MonkeyPat
     # A configured prefix whose site dirs do not exist (never installed into).
     _configure_prefix(monkeypatch, tmp_path / "never-created")
     assert await installed_plugin_entries() == []
+
+
+# --- manifest source ------------------------------------------------------
+
+
+class _FakeConfigManager:
+    """A config-manager stand-in whose ``read_manifest`` returns a fixed document."""
+
+    def __init__(self, document: dict) -> None:
+        self._document = document
+
+    def read_manifest(self) -> dict:
+        return self._document
+
+
+def _set_manifest(monkeypatch: pytest.MonkeyPatch, document: dict) -> None:
+    from tai42_skeleton.config import ConfigManagerFactory
+
+    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _FakeConfigManager(document))
+
+
+def _map_module_to_skeleton_chain(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
+    """Resolve ``module``'s packaged spec to the installed ``tai42-skeleton`` chain.
+
+    The real packaged-spec resolver is exercised by the mount-map tests; here the manifest
+    source's fold is exercised against a spec that resolves to a real installed
+    distribution (``tai42-skeleton``'s own ``sql/migrations``), so no live plugin install
+    is needed. A module other than ``module`` ships no spec (an operator-authored module).
+    """
+    from tai42_skeleton.app import mount_map
+
+    monkeypatch.setattr(
+        mount_map,
+        "_packaged_spec_for_module",
+        lambda name: _spec(package="tai42-skeleton", migrations="sql/migrations") if name == module else None,
+    )
+
+
+@pytest.mark.usefixtures("_empty_store")
+async def test_manifest_loaded_plugin_discovered_without_store_or_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A chain-declaring plugin the manifest LOADS, with no store row and no prefix, is
+    # discovered so the runner migrates exactly what boot will gate on.
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
+    _map_module_to_skeleton_chain(monkeypatch, "tai42_widget.lifecycle")
+
+    entries = await installed_plugin_entries()
+
+    assert [entry.component for entry in entries] == ["tai42-skeleton"]
+    assert entries[0].migrations_dir.is_dir()
+
+
+@pytest.mark.usefixtures("_empty_store")
+async def test_manifest_loaded_from_every_role_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A chain-declaring plugin reaches discovery whichever role list the manifest loads it
+    # under — the source mirrors the component importer's full set, not just one field.
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    for field, value, module in (
+        ("webhook_verifier_modules", ["tai42_widget.verify"], "tai42_widget.verify"),
+        ("channel_modules", ["tai42_widget.channel"], "tai42_widget.channel"),
+        ("routers_modules", ["tai42_widget.routes"], "tai42_widget.routes"),
+        ("middlewares_modules", ["tai42_widget.mw"], "tai42_widget.mw"),
+        ("extensions_modules", ["tai42_widget.ext"], "tai42_widget.ext"),
+        ("backend_module", "tai42_widget.backend", "tai42_widget.backend"),
+        ("tools", [{"module": "tai42_widget.tools", "title": "Widget"}], "tai42_widget.tools"),
+        ("agents", [{"module": "tai42_widget.agent", "title": "Widget"}], "tai42_widget.agent"),
+    ):
+        _set_manifest(monkeypatch, {field: value})
+        _map_module_to_skeleton_chain(monkeypatch, module)
+        entries = await installed_plugin_entries()
+        assert [entry.component for entry in entries] == ["tai42-skeleton"], field
+
+
+def test_manifest_source_skips_module_without_packaged_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest module whose top-level package ships no tai-plugin.yml (an
+    # operator-authored module) yields no slot — never a guess, never a crash.
+    from tai42_skeleton.db.discovery import _collect_manifest_sources
+
+    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_skeleton.app.instance"]})
+
+    assert _collect_manifest_sources() == {}
+
+
+def test_manifest_source_excludes_skeleton_routers_and_never_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The effective router set is composed of skeleton-owned modules that ship no
+    # tai-plugin.yml, so the manifest source yields nothing for them; and because it maps
+    # NAMED modules to their packaged spec (never scanning a site dir), it cannot trip the
+    # prefix scan's several-tai-plugin.yml guard on tai42-cli's template specs.
+    from tai42_skeleton.db.discovery import _collect_manifest_sources
+
+    _set_manifest(monkeypatch, {"default_routers": "all"})
+
+    assert _collect_manifest_sources() == {}
+
+
+async def test_manifest_and_store_same_distribution_yield_one_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same installed distribution named by BOTH the manifest and the store is one
+    # artifact: discovery yields a single entry, never a duplicate.
+    from types import SimpleNamespace
+
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    store_spec = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
+
+    class _FakeStore:
+        async def list_installed(self):
+            return [SimpleNamespace(spec=store_spec)]
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
+    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
+    _map_module_to_skeleton_chain(monkeypatch, "tai42_widget.lifecycle")
+
+    entries = await installed_plugin_entries()
+
+    assert [entry.component for entry in entries] == ["tai42-skeleton"]
+
+
+async def test_prefix_wins_over_manifest_for_same_distribution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A distribution the prefix carries (with a package root) AND the manifest loads is one
+    # entry, resolved from the prefix filesystem — the root-carrying source is preferred.
+    from tai42_skeleton.marketplace import store as mp_store
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    pkg = _install_widget_into_prefix(tmp_path)
+    _configure_prefix(monkeypatch, tmp_path)
+    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
+    # The manifest maps the module to the SAME distribution the prefix carries.
+    from tai42_skeleton.app import mount_map
+
+    def _resolver(name: str):
+        return _spec(package="tai42-widget", migrations="migrations") if name == "tai42_widget.lifecycle" else None
+
+    monkeypatch.setattr(mount_map, "_packaged_spec_for_module", _resolver)
+
+    entries = await installed_plugin_entries()
+
+    assert [entry.component for entry in entries] == ["tai42-widget"]
+    # Resolved from the prefix filesystem, not installed metadata.
+    assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
+
+
+@pytest.mark.usefixtures("_empty_store")
+async def test_absent_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A deployment that boots always has a manifest (boot reads it with no fallback), so a
+    # missing one on the discovery path is corrupt configuration — a loud FileNotFoundError,
+    # never a false zero-pending that reports green while the app refuses to boot.
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_plugin_chains
+
+    def _absent() -> dict:
+        raise FileNotFoundError("Manifest not found: /app/config/manifest.yml")
+
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+
+    class _AbsentManager:
+        read_manifest = staticmethod(_absent)
+
+    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _AbsentManager())
+
+    with pytest.raises(FileNotFoundError, match="Manifest not found"):
+        await discover_plugin_chains()

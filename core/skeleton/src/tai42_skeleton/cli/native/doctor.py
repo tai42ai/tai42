@@ -91,9 +91,11 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     bound to an unconfigured named database (a kit
     :class:`~tai42_kit.db.DatabaseNotConfiguredError`, which names the env var) or one
     with a half-set admin identity (a kit
-    :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars)
-    is caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other
-    error propagates so a broken probe is never mistaken for a clean schema.
+    :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars),
+    or an absent manifest (discovery resolves the deployment's loaded chains from it, so
+    a missing one is a misconfiguration named by its path) is caught and rendered as a
+    FAIL so the diagnostic stays a diagnostic; every other error propagates so a broken
+    probe is never mistaken for a clean schema.
     """
     import psycopg
 
@@ -104,7 +106,7 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
         return Check("schema", _FAIL, f"cannot inspect schema at {_pg_target(settings)}: {exc}")
     except MigrationError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema (run 'tai db migrate'): {exc}")
-    except (DatabaseNotConfiguredError, AdminIdentityIncompleteError) as exc:
+    except (DatabaseNotConfiguredError, AdminIdentityIncompleteError, FileNotFoundError) as exc:
         return Check("schema", _FAIL, str(exc))
     if discovery.skipped:
         detail = "; ".join(chain_skip_message(skip) for skip in discovery.skipped)
