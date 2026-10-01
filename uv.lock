@@ -5526,7 +5526,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "12.3.1"
+version = "12.3.2"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -6107,7 +6107,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "21.4.1"
+version = "21.4.2"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
