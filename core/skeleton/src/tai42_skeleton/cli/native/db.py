@@ -114,9 +114,15 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
     A connection error names the credential-free target; the registry's not-configured
     and half-set-admin-identity errors and the chain-integrity errors surface their own
-    actionable messages; an absent manifest (discovery resolves the deployment's loaded
-    chains from it, so a missing one would silently under-report) names the manifest path;
-    all exit non-zero without a traceback.
+    actionable messages; all exit non-zero without a traceback. A manifest that EXISTS but
+    cannot be read, parsed, or validated is wrapped by discovery as a
+    :class:`~tai42_kit.db.MigrationDiscoveryError` (a :class:`~tai42_kit.db.MigrationError`,
+    caught below) naming the manifest, so it maps here to the same clean credential-free
+    non-zero. An ABSENT manifest is NOT mapped here: discovery treats migrate/status as
+    manifest-optional and contributes no manifest chains when the file does not exist, so no
+    ``FileNotFoundError`` reaches this seam for that case — leaving ``FileNotFoundError``
+    unmapped keeps a genuinely different missing-file fault loud rather than masked as a
+    clean exit.
     """
     import psycopg
 
@@ -130,7 +136,6 @@ def _run(coro):  # type: ignore[no-untyped-def]
         AdminIdentityIncompleteError,
         ValueError,
         MigrationError,
-        FileNotFoundError,
     ) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -192,8 +197,10 @@ def migrate_command(
     prefix-installed plugins. ``--plan`` lists what would be applied and changes nothing.
     Idempotent: with nothing pending it reports so and exits 0. Exits non-zero, after
     reporting what ran, when a declared migration chain was skipped (its override binding
-    is unset). Loud on a connection failure, an unconfigured connection, a rewritten
-    (checksum-mismatched) chain, or an absent manifest.
+    is unset). Manifest-optional: an absent manifest contributes no manifest-loaded chains
+    and migrate proceeds on the skeleton, store, and prefix chains. Loud on a connection
+    failure, an unconfigured connection, a rewritten (checksum-mismatched) chain, or a
+    manifest that exists but is malformed or invalid.
     """
     json_output = app_context(ctx).json_output
     if plan:
@@ -210,8 +217,10 @@ def status_command(ctx: typer.Context) -> None:
     one — the plugins the deployment LOADS via the manifest, and the marketplace-installed
     and prefix-installed plugins. Exits non-zero when any component has pending migrations
     or a checksum mismatch, or when a declared migration chain was skipped (its override
-    binding is unset), so it doubles as a CI / pre-deploy gate. Loud on a connection
-    failure, an unconfigured connection, or an absent manifest.
+    binding is unset), so it doubles as a CI / pre-deploy gate. Manifest-optional: an absent
+    manifest contributes no manifest-loaded chains and status reports the skeleton, store,
+    and prefix chains. Loud on a connection failure, an unconfigured connection, or a
+    manifest that exists but is malformed or invalid.
     """
     statuses, skips = _run(_status())
     _emit_status(statuses, skips, json_output=app_context(ctx).json_output)

@@ -489,23 +489,76 @@ async def test_prefix_wins_over_manifest_for_same_distribution(monkeypatch: pyte
     assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
 
 
-@pytest.mark.usefixtures("_empty_store")
-async def test_absent_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A deployment that boots always has a manifest (boot reads it with no fallback), so a
-    # missing one on the discovery path is corrupt configuration — a loud FileNotFoundError,
-    # never a false zero-pending that reports green while the app refuses to boot.
+async def test_absent_manifest_contributes_no_sources_fall_through_stands(monkeypatch: pytest.MonkeyPatch) -> None:
+    # migrate/status/doctor are manifest-OPTIONAL: when no manifest file exists,
+    # read_manifest raises FileNotFoundError, the manifest source contributes NOTHING, and
+    # discovery falls through to the store + prefix sources — NOT an error, NOT a false green.
+    from types import SimpleNamespace
+
     from tai42_skeleton.config import ConfigManagerFactory
     from tai42_skeleton.db import discover_plugin_chains
+    from tai42_skeleton.marketplace import store as mp_store
+
+    # A store-attributed chain plugin stands in for the fall-through sources.
+    store_spec = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
+
+    class _FakeStore:
+        async def list_installed(self):
+            return [SimpleNamespace(spec=store_spec)]
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
 
     def _absent() -> dict:
         raise FileNotFoundError("Manifest not found: /app/config/manifest.yml")
-
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
 
     class _AbsentManager:
         read_manifest = staticmethod(_absent)
 
     monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _AbsentManager())
 
-    with pytest.raises(FileNotFoundError, match="Manifest not found"):
+    discovery = await discover_plugin_chains()
+
+    # No error, and the store source stands — no manifest:* slot contributed anything.
+    assert [entry.component for entry in discovery.entries] == ["tai42-skeleton"]
+    assert discovery.skipped == []
+
+
+@pytest.mark.usefixtures("_empty_store")
+async def test_malformed_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest that EXISTS but is schema-invalid is a real error, never swallowed:
+    # read_manifest returns the document, Manifest.model_validate rejects it, and the
+    # ValidationError is wrapped as a loud MigrationDiscoveryError (only the ABSENT case is
+    # caught and falls through to the store/prefix sources).
+    from tai42_skeleton.db import discover_plugin_chains
+
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    _set_manifest(monkeypatch, {"lifecycle_modules": "not-a-list"})
+
+    with pytest.raises(MigrationDiscoveryError, match="not a valid manifest"):
+        await discover_plugin_chains()
+
+
+@pytest.mark.usefixtures("_empty_store")
+async def test_broken_yaml_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest that EXISTS but is unparseable YAML is a real error, never swallowed:
+    # read_manifest raises a YAMLError (which is NOT a ValueError, so unwrapped it would
+    # escape the CLI seam as a raw traceback), and discovery wraps it as a loud
+    # MigrationDiscoveryError.
+    import yaml
+
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_plugin_chains
+
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+
+    def _broken_yaml() -> dict:
+        raise yaml.YAMLError("mapping values are not allowed here")
+
+    class _BrokenYamlManager:
+        read_manifest = staticmethod(_broken_yaml)
+
+    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _BrokenYamlManager())
+
+    with pytest.raises(MigrationDiscoveryError, match="could not be parsed as YAML"):
         await discover_plugin_chains()

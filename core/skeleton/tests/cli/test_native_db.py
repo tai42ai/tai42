@@ -545,10 +545,10 @@ def test_status_json_lists_manifest_loaded_component(monkeypatch: pytest.MonkeyP
     assert "tai42-skeleton" in [row["component"] for row in data["status"]]
 
 
-def test_status_absent_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A deployment that boots always has a manifest, so a missing one on the gate path is
-    # corrupt configuration: a clean, credential-free non-zero naming the manifest path —
-    # never a false zero-pending green and never a raw traceback.
+def test_status_absent_manifest_proceeds_on_store_and_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # migrate/status are manifest-OPTIONAL: an absent manifest contributes no manifest-loaded
+    # chains and status proceeds on the skeleton/store/prefix chains — exit 0, no error, and
+    # never a "Manifest not found" failure.
     from tai42_skeleton.config import ConfigManagerFactory
     from tai42_skeleton.db import discover_all_migration_chains
     from tai42_skeleton.marketplace import prefix as mp_prefix
@@ -569,8 +569,81 @@ def test_status_absent_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(ConfigManagerFactory, "create", lambda: SimpleNamespace(read_manifest=_absent))
 
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status(entry.component, applied=(1,)) for entry in cast("list", entries)]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Manifest not found" not in result.output
+    # The skeleton-owned chains are reported (discovery fell through to them).
+    assert "skeleton" in result.output
+
+
+def test_status_malformed_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest that EXISTS but is schema-invalid is a real error, never swallowed:
+    # discovery wraps the ValidationError as a MigrationDiscoveryError, which the CLI seam
+    # maps to a clean, credential-free non-zero — never a false zero-pending green and never a
+    # raw traceback.
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_all_migration_chains
+    from tai42_skeleton.marketplace import prefix as mp_prefix
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+    monkeypatch.setattr(
+        ConfigManagerFactory,
+        "create",
+        lambda: SimpleNamespace(read_manifest=lambda: {"lifecycle_modules": "not-a-list"}),
+    )
+
     result = CliRunner().invoke(app_module.app, ["db", "status"])
 
     assert result.exit_code == 1, result.output
-    assert "Manifest not found" in result.output
+    assert "Error:" in result.output
+    assert "not a valid manifest" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_status_broken_yaml_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A manifest that EXISTS but is unparseable YAML surfaces as a clean, credential-free
+    # non-zero: discovery wraps the YAMLError (NOT a ValueError, so unwrapped it would escape
+    # the CLI seam as a raw traceback) as a MigrationDiscoveryError, which the seam maps.
+    import yaml
+
+    from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.db import discover_all_migration_chains
+    from tai42_skeleton.marketplace import prefix as mp_prefix
+    from tai42_skeleton.marketplace import store as mp_store
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+
+    class _EmptyStore:
+        async def list_installed(self):
+            return []
+
+    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
+    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+
+    def _broken_yaml() -> dict:
+        raise yaml.YAMLError("mapping values are not allowed here")
+
+    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: SimpleNamespace(read_manifest=_broken_yaml))
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert "could not be parsed as YAML" in result.output
     assert "Traceback" not in result.output

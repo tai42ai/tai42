@@ -343,16 +343,39 @@ def _collect_manifest_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
     module is importable in this process, unlike a prefix-only install). One slot per
     distribution: several modules of one plugin collapse onto its distribution key.
 
-    A deployment that boots always has a manifest — ``boot_manifest`` reads it with no
-    fallback — so a missing manifest on the migrate/status path is corrupt configuration:
-    ``read_manifest``'s :class:`FileNotFoundError` propagates loudly rather than reporting
-    a false zero-pending.
+    ``tai db migrate``/``status``/``doctor`` are manifest-OPTIONAL: when no manifest file
+    exists, ``read_manifest`` raises :class:`FileNotFoundError` and this source contributes
+    NOTHING -- a plugin can be "loaded via the manifest" only when a manifest exists, so with
+    no manifest there is simply no manifest-loaded chain to gate on, and discovery falls
+    through to the store and prefix sources. This is the absence of a source, not a degrade:
+    the ONLY swallowed case is the file being absent. A manifest that EXISTS but cannot be
+    read as a valid manifest -- unparseable YAML (``read_manifest`` raises
+    :class:`yaml.YAMLError`) or a document ``Manifest.model_validate`` rejects
+    (:class:`pydantic.ValidationError`) -- is a real error, wrapped as a loud
+    :class:`~tai42_kit.db.MigrationDiscoveryError` naming the manifest so the CLI seam maps it
+    to a clean credential-free failure rather than a raw traceback (a ``YAMLError`` is not a
+    ``ValueError``, so unwrapped it would escape that seam). Any other failure propagates
+    unwrapped so a genuinely unexpected fault is never masked.
     """
+    import yaml
+
     from tai42_skeleton.app.mount_map import _packaged_spec_for_module
     from tai42_skeleton.config import ConfigManagerFactory
     from tai42_skeleton.manifest import Manifest
 
-    manifest = Manifest.model_validate(ConfigManagerFactory.create().read_manifest())
+    config_manager = ConfigManagerFactory.create()
+    manifest_path = getattr(config_manager, "_manifest_path", None)
+    target = f"the configured manifest at {manifest_path}" if manifest_path else "the configured manifest"
+    try:
+        document = config_manager.read_manifest()
+    except FileNotFoundError:
+        return {}
+    except yaml.YAMLError as exc:
+        raise MigrationDiscoveryError(f"{target} could not be parsed as YAML: {exc}") from exc
+    try:
+        manifest = Manifest.model_validate(document)
+    except ValidationError as exc:
+        raise MigrationDiscoveryError(f"{target} is not a valid manifest: {exc}") from exc
     sources: dict[str, tuple[PluginSpec, Path | None]] = {}
     for module in _manifest_loaded_modules(manifest):
         spec = _packaged_spec_for_module(module)
