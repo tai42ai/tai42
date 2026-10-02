@@ -16,6 +16,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
+from tai42_contract.access_control import reset_request_secret_capability, set_request_secret_capability
 from tai42_contract.app import tai42_app
 from tai42_contract.states import StateContext
 
@@ -146,10 +147,18 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     logger.info("crash-resume: re-dispatching lost run %s (%s) from scratch", run_id, tool_name)
     context_scope = state_context(context) if context is not None else nullcontext()
     token = set_execution_identity(identity)
+    # Bind the secret-read capability of the ORIGINAL run key, NEVER the reader's: the reconcile
+    # runs on a read path under the reader's ambient context, so an unbound capability would leave
+    # the re-drive acting on the reader's ``action=secret`` fence. It is the admin status of the
+    # rebuilt identity (``resolve_execution_key_secret_capability``, carried on ``is_admin``), and
+    # fail-closed ``False`` when the key no longer carries authority — mirroring
+    # ``bind_execution_identity``.
+    secret_token = set_request_secret_capability(identity.is_admin if identity is not None else False)
     try:
         with context_scope:
             await supervisor.run_recorded(tool_name, arguments, extras=extras)
     finally:
+        reset_request_secret_capability(secret_token)
         reset_execution_identity(token)
 
 
