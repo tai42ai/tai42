@@ -44,31 +44,51 @@ class MonitoringLevel(StrEnum):
 DEFAULT_LEVEL = MonitoringLevel.DEFAULT
 
 
-class MetricsView(StrEnum):
-    """Which records a metrics query aggregates over."""
+class Measure(StrEnum):
+    """A neutral quantity a metrics query aggregates.
 
-    TRACES = "traces"
-    OBSERVATIONS = "observations"
+    ``COUNT`` is the number of records in the aggregation scope — runs for an
+    ungrouped query, per-group records when grouped (e.g. per-model calls).
+    ``COST`` / ``TOKENS`` / ``LATENCY`` are the cost, token and latency aggregates.
+    A backend maps each onto its own metric names and declares the set it serves
+    through :class:`MetricsCapability`; a query for a measure it does not serve
+    raises ``MonitoringReadNotSupportedError``.
+    """
+
+    COUNT = "count"
+    COST = "cost"
+    TOKENS = "tokens"
+    LATENCY = "latency"
 
 
-class ProjectConfig(BaseModel):
-    """Credentials for one trace destination ("project").
+class Dimension(StrEnum):
+    """A neutral attribute a metrics query groups by.
 
-    Selectable at write time via ``MonitoringWriter.scope(public_key)``. Registered on a
-    multi-project backend through ``Monitoring.add_project``
-    so an in-process component can emit to its own project while sharing the one
-    backend. ``source`` stamps every write with an environment marker so several
-    callers sharing a project can each read back only their own data. A backend
-    with no multi-project notion ignores the extra fields.
+    ``MODEL`` groups the aggregates per model. A backend maps it onto its own
+    per-generation model attribute and declares whether it serves it through
+    :class:`MetricsCapability`; a query that groups by a dimension the backend does
+    not serve raises ``MonitoringReadNotSupportedError`` rather than silently
+    returning one ungrouped total.
+    """
+
+    MODEL = "model"
+
+
+class MetricsCapability(BaseModel):
+    """What a monitoring backend's metrics query can serve.
+
+    A backend declares the neutral :class:`Measure` set it can aggregate and the
+    :class:`Dimension` set it can group by. A query that requests a measure or
+    dimension outside this set raises ``MonitoringReadNotSupportedError`` — never a
+    silent zero, never a silently dropped group. A reader consults this before a
+    query so an unserved panel is reported as declared-absent, not as a swallowed
+    failure.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    public_key: str
-    secret_key: str
-    host: str
-    timeout_seconds: int = 30
-    source: str = "tai"
+    measures: frozenset[Measure]
+    dimensions: frozenset[Dimension]
 
 
 @runtime_checkable
@@ -119,7 +139,7 @@ class Span(Protocol):
 class TraceContext(BaseModel):
     """Propagation context for a trace/span lineage.
 
-    Built by the caller from the langgraph ``configurable`` (trace_id /
+    Built by the caller from the downstream run config (trace_id /
     parent_span_id) and carried downstream by ``inject_context`` /
     ``get_monitoring_callbacks``. ``tags`` drive the run/tag filtering on the
     totals screen; ``metadata`` carries attribution.
@@ -134,9 +154,9 @@ class TraceContext(BaseModel):
 
 
 class SpanWindowItem(BaseModel):
-    """One tool/node execution returned by ``list_spans_in_window``.
+    """One tool execution returned by ``list_spans_in_window``.
 
-    The "smallest span" unit (one tool/node run). ``tags`` come from the
+    The "smallest span" unit (one tool run). ``tags`` come from the
     parent trace. ``input`` / ``output`` / ``metadata`` are nullable.
     ``tags_available`` is ``False`` when the parent trace's tags could not be
     fetched — distinct from an empty ``tags`` meaning the span is genuinely
@@ -157,34 +177,41 @@ class SpanWindowItem(BaseModel):
     end: datetime | None = None
 
 
-class MetricsFilter(BaseModel):
-    """A totals/analytics query, mapped to the backend metrics API.
+class MetricsQuery(BaseModel):
+    """A totals/analytics aggregation request in neutral vocabulary.
 
-    ``metrics`` is required; ``from_timestamp`` / ``to_timestamp`` are always
-    required (the query is time-bound). The "run" axis has no native
-    dimension — the implementation maps it to the trace identity (trace
-    ``name`` or a run-id carried as a tag) and documents which it uses.
+    ``measures`` are the quantities to aggregate (at least one). ``from_timestamp``
+    / ``to_timestamp`` bound the half-open window ``[from, to)`` and are always
+    required (the query is time-bound). ``dimensions`` group the result — an empty
+    list is one ungrouped total. ``granularity`` buckets the result by time
+    (``hour`` / ``day`` / ``week``); ``None`` is no time bucketing. Every member is
+    neutral: a backend maps each onto its own metrics API and declares the measures
+    and dimensions it serves through :class:`MetricsCapability`. A measure or
+    dimension the backend does not serve raises ``MonitoringReadNotSupportedError``
+    rather than returning a silent zero.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    view: MetricsView = MetricsView.TRACES
-    metrics: list[str]
+    measures: list[Measure]
     from_timestamp: datetime
     to_timestamp: datetime
-    dimensions: list[str] = Field(default_factory=list)
-    filters: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
+    dimensions: list[Dimension] = Field(default_factory=list[Dimension])
     granularity: str | None = None
-    order_by: list[dict[str, Any]] | None = None
 
 
 class MetricsRow(BaseModel):
-    """One grouped result row: its dimension values + the metric values."""
+    """One grouped result row: the group's dimension values and its aggregated measures.
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    ``dimensions`` maps each requested :class:`Dimension` to that group's value (the
+    model name; ``None`` when the group has no value for it). ``measures`` maps each
+    requested :class:`Measure` to its aggregated value, ``None`` when the group has
+    no data for that measure — never coerced to zero. ``bucket`` is the row's
+    time-bucket label when the query set a granularity, ``None`` otherwise; the
+    backend sets it explicitly so the reader never hunts a date out of the values.
+    """
 
-    dimensions: dict[str, Any] = Field(default_factory=dict)
-    metrics: dict[str, Any] = Field(default_factory=dict)
+    dimensions: dict[Dimension, str | None] = Field(default_factory=dict[Dimension, "str | None"])
+    measures: dict[Measure, float | None] = Field(default_factory=dict[Measure, "float | None"])
+    bucket: str | None = None
 
 
 class MonitoringObservation(BaseModel):
@@ -355,17 +382,9 @@ class MonitoringTraceSummary(BaseModel):
 
 
 class MetricsResult(BaseModel):
-    """The result of a metrics query.
-
-    ``rows`` are the dimensioned groups. ``derived`` holds reader-computed
-    scalars that are not native backend metrics — e.g. the distinct-tag count
-    (the number of returned tag-groups).
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    """The result of a metrics query: the dimensioned/bucketed groups as typed rows."""
 
     rows: list[MetricsRow] = Field(default_factory=list[MetricsRow])
-    derived: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrderBy(BaseModel):
@@ -401,8 +420,8 @@ class RunAttribution(BaseModel):
     """The generic identity a run's trace is tagged with at the shared chokepoint.
 
     A pure key/value attribution envelope — every field is generic and optional
-    where a door legitimately lacks it. ``tags`` are the flow kwargs the operator
-    defines per delivery, carried verbatim with no platform interpretation;
+    where a door legitimately lacks it. ``tags`` are the run kwargs the operator
+    defines per run, carried verbatim with no platform interpretation;
     ``metadata`` are attribution key/values. There is NO tenant/client/domain
     field: attribution only, never a multi-tenant qualifier.
 
@@ -439,9 +458,9 @@ class MonitoringFilter(BaseModel):
     ``name`` / ``user_id`` / ``session_id`` / ``version`` / ``model`` filter on
     backend attributes that are not all present on the neutral result models.
     ``version`` matches the run's ROOT version DIMENSION — the value a run is
-    stamped with (carried onto the backend's native version field, e.g. langfuse's
-    ``version``), so a run stamped at "flow F version V" is queryable by ``V`` even
-    though the version does not live in ``metadata``.
+    stamped with (carried onto the backend's native version field), so a run
+    stamped at "run R version V" is queryable by ``V`` even though the version does
+    not live in ``metadata``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

@@ -24,8 +24,9 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 from tai42_contract.monitoring import (
-    MetricsFilter,
-    MetricsView,
+    Dimension,
+    Measure,
+    MetricsQuery,
     MonitoringFilter,
     MonitoringReadNotSupportedError,
     OrderBy,
@@ -46,7 +47,6 @@ from tai42_skeleton.routers.observability_support import (
     RunSortKey,
     RunStatus,
     SortDirection,
-    _safe_query,
     derive_run,
     map_model_rows,
     map_trace,
@@ -54,19 +54,20 @@ from tai42_skeleton.routers.observability_support import (
     time_series_from_rows,
 )
 
-# Measures requested from the metrics API. Names are the backend's measure
-# vocabulary (the contract passes them through unchanged).
-_METRICS = ["count", "totalCost", "totalTokens", "latency"]
+# The neutral measures the dashboard always requests: run count, cost, tokens and
+# latency. A backend that does not serve all of them cannot drive the core tiles.
+_MEASURES = [Measure.COUNT, Measure.COST, Measure.TOKENS, Measure.LATENCY]
 
 # The ``code`` a monitoring read-not-supported answer carries so the UI can
 # render its dedicated 'read not supported' state (not a generic error).
 _READ_NOT_SUPPORTED_CODE = "monitoring-read-not-supported"
 
 
-class MetricsQuery(BaseModel):
+class MetricsQuerySpec(BaseModel):
     """The metrics door's optional time window and granularity.
 
-    Spec metadata only — the door parses its query at the HTTP edge.
+    Spec metadata only — the door parses its query at the HTTP edge. Distinct from
+    the contract's ``MetricsQuery`` (the neutral aggregation request the reader runs).
     """
 
     from_: str | None = Field(
@@ -151,49 +152,48 @@ class ExportRunsQuery(RunFilterQuery):
     summary="Query observability metrics",
     tags=["observability"],
     errors=[BadRequestError, NotSupportedError],
-    request_model=MetricsQuery,
+    request_model=MetricsQuerySpec,
     response_model=MetricsResult,
 )
 async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
     """Aggregate metrics over the time range via the contract's ``query_metrics``.
 
-    Three fixed queries: a summary total, a granularity series, and an OPTIONAL
-    by-model breakdown. By-model runs through ``_safe_query`` so a backend
-    rejecting the extra dimension omits that panel rather than breaking the core
-    tiles; the summary and series queries are hard (they may raise).
+    The backend DECLARES what it serves (``metrics_capability``) before any query.
+    A backend that does not serve the core measures fails loudly (501). The by-model
+    panel's availability is the backend's DECLARATION that it groups by the model
+    dimension — not a swallowed query error: when declared, the by-model query runs
+    HARD and any failure propagates; when not declared, the panel is reported absent
+    and no query is issued.
     """
     reader = get_monitoring().reader
+    capability = reader.metrics_capability()
 
-    summary_filter = MetricsFilter(view=MetricsView.TRACES, metrics=_METRICS, from_timestamp=t0, to_timestamp=t1)
-    series_filter = MetricsFilter(
-        view=MetricsView.TRACES,
-        metrics=_METRICS,
-        from_timestamp=t0,
-        to_timestamp=t1,
-        granularity=granularity,
-    )
-    model_filter = MetricsFilter(
-        view=MetricsView.OBSERVATIONS,
-        metrics=_METRICS,
-        from_timestamp=t0,
-        to_timestamp=t1,
-        dimensions=["providedModelName"],
-    )
+    missing = [m for m in _MEASURES if m not in capability.measures]
+    if missing:
+        raise NotSupportedError(
+            f"monitoring backend does not serve the metrics measures {[m.value for m in missing]}",
+            extra={"code": _READ_NOT_SUPPORTED_CODE},
+        )
+    by_model_available = Dimension.MODEL in capability.dimensions
+
+    summary_query = MetricsQuery(measures=_MEASURES, from_timestamp=t0, to_timestamp=t1)
+    series_query = MetricsQuery(measures=_MEASURES, from_timestamp=t0, to_timestamp=t1, granularity=granularity)
+    pending = [reader.query_metrics(summary_query), reader.query_metrics(series_query)]
+    if by_model_available:
+        model_query = MetricsQuery(measures=_MEASURES, from_timestamp=t0, to_timestamp=t1, dimensions=[Dimension.MODEL])
+        pending.append(reader.query_metrics(model_query))
 
     try:
-        summary_res, series_res, model_res = await asyncio.gather(
-            reader.query_metrics(summary_filter),
-            reader.query_metrics(series_filter),
-            _safe_query(reader, model_filter),
-        )
+        results = await asyncio.gather(*pending)
     except MonitoringReadNotSupportedError as exc:
         raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
 
+    model_res = results[2] if by_model_available else None
     return {
-        "summary": summary_from_rows(summary_res.rows),
-        "timeSeries": time_series_from_rows(series_res.rows),
+        "summary": summary_from_rows(results[0].rows),
+        "timeSeries": time_series_from_rows(results[1].rows),
         "byModel": map_model_rows(model_res),
-        "byModelAvailable": model_res is not None,
+        "byModelAvailable": by_model_available,
         "granularity": granularity,
     }
 

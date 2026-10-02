@@ -14,7 +14,8 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from tai42_contract.monitoring.models import (
-    MetricsFilter,
+    MetricsCapability,
+    MetricsQuery,
     MetricsResult,
     MonitoringFilter,
     MonitoringTrace,
@@ -29,11 +30,23 @@ from tai42_contract.monitoring.models import (
 class MonitoringReader(Protocol):
     """Query totals/analytics and the runtime span window."""
 
-    async def query_metrics(self, filter_: MetricsFilter) -> MetricsResult:
+    def metrics_capability(self) -> MetricsCapability:
+        """Declare which neutral measures and dimensions ``query_metrics`` serves.
+
+        A pure capability declaration (no I/O), so a caller can tell a panel the
+        backend cannot serve from one it served empty, WITHOUT issuing a query that
+        swallows the difference. ``query_metrics`` raises
+        ``MonitoringReadNotSupportedError`` for anything outside this set.
+        """
+        ...
+
+    async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
         """Totals / analytics screen — server-side aggregation.
 
-        Counts (runs, tags), total cost, total tokens, latency, grouped by the
-        requested dimensions.
+        Aggregates the requested :class:`Measure` set grouped by the requested
+        :class:`Dimension` set over the query window. A measure or dimension outside
+        :meth:`metrics_capability` raises ``MonitoringReadNotSupportedError`` — never
+        a silent zero.
         """
         ...
 
@@ -49,7 +62,7 @@ class MonitoringReader(Protocol):
     ) -> list[SpanWindowItem]:
         """The smallest spans that ran in the half-open window ``[t0, t1)``.
 
-        CONTRACT GUARANTEE: exactly one item per tool/node execution in the
+        CONTRACT GUARANTEE: exactly one item per tool execution in the
         window. Every reader performs this tool-granularity selection — it is
         not an optional filter.
 

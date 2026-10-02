@@ -65,9 +65,6 @@ class _RealMonitoring:
     def reader(self):
         return self._inner.reader
 
-    def add_project(self, project) -> None:
-        return None
-
 
 class _FakeStorage:
     """Stand-in for a registered storage provider — the collector reads only its

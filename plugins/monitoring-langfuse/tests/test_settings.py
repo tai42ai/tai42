@@ -1,4 +1,4 @@
-"""Settings: env mapping onto the contract ProjectConfig."""
+"""Settings: env mapping onto the plugin's LangfuseProject."""
 
 from __future__ import annotations
 

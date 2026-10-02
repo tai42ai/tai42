@@ -85,7 +85,7 @@ trace id is globally unique.
 ## Multi-project scoping
 
 One registered backend can hold several Langfuse projects.
-`Monitoring.add_project(ProjectConfig(...))` registers an extra project, and
+`LangfuseMonitoring.add_project(LangfuseProject(...))` registers an extra project, and
 `writer.scope(public_key)` binds it as the active project for a block — every
 emit and read inside the block targets it. Scoping to an unregistered key
 raises (a silently mis-scoped block could leak traces across projects).

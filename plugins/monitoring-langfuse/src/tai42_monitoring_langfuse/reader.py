@@ -17,7 +17,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from tai42_contract.monitoring import (
-    MetricsFilter,
+    MetricsCapability,
+    MetricsQuery,
     MetricsResult,
     MonitoringFilter,
     MonitoringTrace,
@@ -28,7 +29,7 @@ from tai42_contract.monitoring import (
 )
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
-from tai42_monitoring_langfuse.metrics_query import MetricsQuery
+from tai42_monitoring_langfuse.metrics_query import MetricsQueryRunner
 from tai42_monitoring_langfuse.span_window import SpanWindowQuery
 from tai42_monitoring_langfuse.trace_query import TraceQuery
 
@@ -38,13 +39,17 @@ class LangfuseReader:
 
     def __init__(self, manager: LangfuseClientManager) -> None:
         """Wire the reader's metrics, span-window and trace query helpers over ``manager``."""
-        self._metrics = MetricsQuery(manager)
+        self._metrics = MetricsQueryRunner(manager)
         self._spans = SpanWindowQuery(manager)
         self._traces = TraceQuery(manager)
 
-    async def query_metrics(self, filter_: MetricsFilter) -> MetricsResult:
-        """Return aggregated metrics matching ``filter_``."""
-        return await self._metrics.query_metrics(filter_)
+    def metrics_capability(self) -> MetricsCapability:
+        """Declare the neutral measures and dimensions this backend's metrics query serves."""
+        return self._metrics.metrics_capability()
+
+    async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
+        """Return aggregated metrics matching ``query``."""
+        return await self._metrics.query_metrics(query)
 
     async def list_spans_in_window(
         self,

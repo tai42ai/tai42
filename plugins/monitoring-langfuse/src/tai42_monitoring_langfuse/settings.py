@@ -1,21 +1,22 @@
 """Langfuse connection settings: the ``LANGFUSE_`` env group.
 
-``to_project_config`` maps the env group onto the contract's
-:class:`~tai42_contract.monitoring.ProjectConfig`.
+``to_project_config`` maps the env group onto the plugin's own
+:class:`~tai42_monitoring_langfuse.project.LangfuseProject`.
 """
 
 from __future__ import annotations
 
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
-from tai42_contract.monitoring import ProjectConfig
 from tai42_kit.settings import TaiBaseSettings, settings_cache
+
+from tai42_monitoring_langfuse.project import LangfuseProject
 
 
 class LangfuseSettings(TaiBaseSettings):
     """Reads ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` / ``LANGFUSE_HOST``.
 
-    ``tracing_environment`` becomes ``ProjectConfig.source``: writes are stamped
+    ``tracing_environment`` becomes ``LangfuseProject.source``: writes are stamped
     with it and reads scoped to it, so callers sharing one project see only their
     own data.
     """
@@ -29,14 +30,14 @@ class LangfuseSettings(TaiBaseSettings):
     timeout_seconds: int = 30
     tracing_environment: str = "tai"
 
-    def to_project_config(self) -> ProjectConfig:
-        """The env group as a contract ``ProjectConfig``; raises if incomplete."""
+    def to_project_config(self) -> LangfuseProject:
+        """The env group as the plugin's ``LangfuseProject``; raises if incomplete."""
         secret = self.secret_key.get_secret_value() if self.secret_key else ""
         if not (self.public_key and secret and self.host):
             raise ValueError(
                 "Langfuse is selected but LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST are not all set."
             )
-        return ProjectConfig(
+        return LangfuseProject(
             public_key=self.public_key,
             secret_key=secret,
             host=self.host,

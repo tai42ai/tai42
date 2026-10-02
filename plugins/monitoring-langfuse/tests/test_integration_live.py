@@ -13,18 +13,18 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from tai42_contract.monitoring import (
-    MetricsFilter,
-    MetricsView,
+    Measure,
+    MetricsQuery,
     MonitoringFilter,
     MonitoringLevel,
     MonitoringTrace,
     MonitoringTraceSummary,
     OrderBy,
-    ProjectConfig,
     SpanKind,
 )
 
 from tai42_monitoring_langfuse import LangfuseMonitoring
+from tai42_monitoring_langfuse.project import LangfuseProject
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +42,7 @@ def _creds() -> dict[str, str]:
 
 def _backend_with_source(source: str = "tai") -> LangfuseMonitoring:
     creds = _creds()
-    cfg = ProjectConfig(
+    cfg = LangfuseProject(
         public_key=creds["LANGFUSE_PUBLIC_KEY"],
         secret_key=creds["LANGFUSE_SECRET_KEY"],
         host=creds["LANGFUSE_HOST"],
@@ -70,9 +70,8 @@ def test_writer_emits_and_flushes(backend):
 async def test_reader_query_metrics_executes(backend):
     now = datetime.now(UTC)
     result = await backend.reader.query_metrics(
-        MetricsFilter(
-            view=MetricsView.TRACES,
-            metrics=["count"],
+        MetricsQuery(
+            measures=[Measure.COUNT],
             from_timestamp=now - timedelta(hours=1),
             to_timestamp=now + timedelta(minutes=1),
             granularity="day",

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from tai42_contract.monitoring import ProjectConfig
-
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
+from tai42_monitoring_langfuse.project import LangfuseProject
 from tai42_monitoring_langfuse.reader import LangfuseReader
 from tai42_monitoring_langfuse.writer import LangfuseWriter
 
@@ -18,7 +17,7 @@ class LangfuseMonitoring:
     def __init__(
         self,
         *,
-        projects: list[ProjectConfig],
+        projects: list[LangfuseProject],
         default_public_key: str,
     ) -> None:
         """Wire the client manager, writer, and reader over ``projects`` and ``default_public_key``."""
@@ -26,7 +25,7 @@ class LangfuseMonitoring:
         self._writer = LangfuseWriter(self._manager)
         self._reader = LangfuseReader(self._manager)
 
-    def add_project(self, project: ProjectConfig) -> None:
+    def add_project(self, project: LangfuseProject) -> None:
         """Register an additional Langfuse project, selectable via ``writer.scope()``."""
         self._manager.add_project(project)
 

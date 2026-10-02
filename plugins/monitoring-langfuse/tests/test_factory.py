@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from tai42_contract.monitoring import Monitoring, ProjectConfig
+from tai42_contract.monitoring import Monitoring
 
 from tai42_monitoring_langfuse import LangfuseMonitoring, build_langfuse_backend
+from tai42_monitoring_langfuse.project import LangfuseProject
 
 
-def _cfg(public_key: str, source: str = "tai") -> ProjectConfig:
-    return ProjectConfig(public_key=public_key, secret_key=f"sk-{public_key}", host="http://lf", source=source)
+def _cfg(public_key: str, source: str = "tai") -> LangfuseProject:
+    return LangfuseProject(public_key=public_key, secret_key=f"sk-{public_key}", host="http://lf", source=source)
 
 
 def test_langfuse_without_creds_raises(monkeypatch):

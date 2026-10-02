@@ -378,8 +378,9 @@ class MetricsResult(BaseModel):
 
     The summary tile, the granularity series, the (optional, possibly-empty)
     per-model breakdown, and the resolved ``granularity``. ``byModelAvailable``
-    is ``False`` only when the by-model sub-query faulted, so a consumer can tell
-    an empty breakdown apart from an unavailable one.
+    is ``False`` when the backend does not declare the model dimension, so no
+    by-model query is issued; a backend that declares it but cannot serve the
+    query fails loudly, never a false ``byModelAvailable``.
     """
 
     summary: MetricsSummary
@@ -421,7 +422,8 @@ class SpanView(BaseModel):
     """One span within a run trace.
 
     ``input``/``output``/``usage``/``metadata`` are the backend's free-form values
-    (open JSON); ``nodeId`` is read from the span's metadata when present.
+    (open JSON); ``metadata`` is passed through whole, the platform reading no key
+    out of it.
     """
 
     id: str
@@ -438,7 +440,6 @@ class SpanView(BaseModel):
     metadata: JsonValue = None
     input: JsonValue = None
     output: JsonValue = None
-    nodeId: str | None = None
 
 
 class RunTraceView(BaseModel):
