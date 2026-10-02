@@ -155,8 +155,9 @@ async def send_conversation_thread_message(
 
     ``media`` (a list of ``{"kind", "url", "caption"?, "filename"?}`` display items),
     ``location`` (a shared map pin ``{"latitude", "longitude", "name"?, "address"?}``),
-    ``template`` (a pre-approved ``{"name", "language", "header_media"?, "body_parameters"?,
-    "buttons"?}`` out-of-window template), ``options`` (a list of FLAT tappable option objects —
+    ``template`` (a pre-approved out-of-window template ``{"name", "language", "parameters"?}`` —
+    ``parameters`` is the channel-owned opaque runtime-argument object), ``options`` (a list of
+    FLAT tappable option objects —
     each a ``{"kind": "reply", "text"}`` reply or a ``{"kind": "link", "label", "url"}`` link
     action), ``sections`` (the SECTIONED tappable-options alternative — titled groups of reply
     rows), ``header``/``footer`` (a media header / trailing line composing an interactive

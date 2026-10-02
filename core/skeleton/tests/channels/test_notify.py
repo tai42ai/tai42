@@ -107,6 +107,22 @@ class FormHookChannel(RichChannel):
             raise ValueError("form schema property 'reserved' is a reserved name on this channel")
 
 
+class TemplateHookChannel(RichChannel):
+    """A template-capable NEUTRAL channel that declares the OPTIONAL ``validate_template`` hook,
+    recording every template the notify door hands it and refusing one whose opaque ``parameters``
+    carry a ``reject`` key — a stand-in for a medium validating its OWN template-parameter schema,
+    the proof another channel can own the opaque shape the platform only threads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.template_calls: list[ChannelTemplate] = []
+
+    def validate_template(self, template: ChannelTemplate) -> None:
+        self.template_calls.append(template)
+        if template.parameters is not None and "reject" in template.parameters:
+            raise ValueError("this channel cannot render a template whose parameters carry 'reject'")
+
+
 class FailingChannel:
     async def notify(self, notification: ChannelNotification) -> None:
         raise ChannelDeliveryError("provider unreachable")
@@ -184,7 +200,7 @@ async def test_notify_none_return_becomes_empty_id_list(register_channel):
 
 
 _IMAGE = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/photo.png", caption="a photo")
-_TEMPLATE = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
+_TEMPLATE = ChannelTemplate(name="status_update", language="en_US", parameters={"body": ["A-42"]})
 
 
 async def test_notify_threads_media_to_a_capable_channel(register_channel):
@@ -218,6 +234,28 @@ async def test_template_to_channel_without_capability_is_not_implemented(registe
 
     with pytest.raises(NotImplementedError, match="does not support template notifications"):
         await notify_user("hi", channel="plain", template=_TEMPLATE)
+    assert channel.notifications == []
+
+
+async def test_notify_calls_the_channels_validate_template_hook(register_channel):
+    # A neutral channel's OPTIONAL validate_template hook receives the template before the send, so
+    # the declaring channel validates its OWN opaque parameters — the platform never looks inside.
+    channel = register_channel("tpl", TemplateHookChannel())
+
+    await notify_user("your item is done", channel="tpl", template=_TEMPLATE)
+
+    assert channel.template_calls == [_TEMPLATE]
+    assert channel.notifications == [ChannelNotification(message="your item is done", template=_TEMPLATE)]
+
+
+async def test_validate_template_hook_refuses_unmappable_parameters_before_send(register_channel):
+    # The hook refuses a template its own parameter schema rejects (a ValueError → 400), BEFORE any
+    # send — exactly as validate_form_schema refuses an unrenderable form.
+    channel = register_channel("tpl", TemplateHookChannel())
+    bad = ChannelTemplate(name="status_update", language="en_US", parameters={"reject": True})
+
+    with pytest.raises(ValueError, match="cannot render a template whose parameters carry 'reject'"):
+        await notify_user("hi", channel="tpl", template=bad)
     assert channel.notifications == []
 
 

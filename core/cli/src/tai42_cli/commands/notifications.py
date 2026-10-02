@@ -62,10 +62,10 @@ def notify(
         typer.Option(
             "--template",
             help=(
-                "JSON object for an out-of-window template send with contract-7 components — "
-                "``name``, ``language`` and optional ``header_media`` / ``body_parameters`` / "
-                '``buttons``, e.g. \'{"name":"status_update","language":"en_US",'
-                '"body_parameters":["A-42"]}\'.'
+                "JSON object for an out-of-window template send — ``name``, ``language`` and an "
+                "optional channel-owned opaque ``parameters`` object (the declaring channel "
+                'validates its shape), e.g. \'{"name":"status_update","language":"en_US",'
+                '"parameters":{"body":["A-42"]}}\'.'
             ),
         ),
     ] = None,
@@ -160,9 +160,9 @@ def notify(
     (reply/link) for ``--options``, an ``OptionSection`` list for ``--sections``, a
     ``ChannelTemplate`` for ``--template``, a ``LocationElement`` for ``--location``, a
     ``MediaItem`` for ``--header``, a JSON object for ``--schema``, a ``FormData`` for ``--data``
-    and a ``FormPage`` list for ``--pages`` — so a mis-shaped value
-    (including an unknown template/location/header/data key, which the contract would otherwise
-    silently drop) raises loudly here; the contract's cross-field rules (caps, non-blank,
+    and a ``FormPage`` list for ``--pages`` — so a mis-shaped value (including an undeclared key,
+    which every notification-body model rejects) raises loudly here; the contract's cross-field
+    rules (caps, non-blank,
     the options-XOR-sections choice surface, header/footer requiring a choice surface,
     template exclusivity, the channel-deliverable form subset, and the form data/pages
     requiring a schema and matching its properties) are enforced by the server.

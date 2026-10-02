@@ -186,9 +186,13 @@ def _fixed_answer_agent(answer: str) -> Agent:
     return _Fixed()
 
 
-async def test_missing_channel_in_the_length_map_is_a_loud_failure(env, monkeypatch):
+async def test_channel_with_no_resolvable_split_cap_is_a_loud_failure(env, monkeypatch):
+    # A channel that declares no ``max_message_chars`` cap and has no operator override cannot be
+    # split against: the record fails loudly, never a silent unbounded or truncated send.
+    class _CaplessChannel(FakeChannel):
+        max_message_chars = None
 
-    _wire(monkeypatch, FakeManager(), FakeChannel())
+    _wire(monkeypatch, FakeManager(), _CaplessChannel())
     now = time.time()
     record = ConversationRecord(
         message_id="unmapped",
@@ -207,7 +211,7 @@ async def test_missing_channel_in_the_length_map_is_a_loud_failure(env, monkeypa
     )
     await _store().create_record(record)
 
-    with pytest.raises(RuntimeError, match="no max_message_chars entry"):
+    with pytest.raises(RuntimeError, match="declares no max_message_chars cap and none is configured"):
         await delivery_module.deliver("unmapped")
     # The record is marked failed so the misconfiguration is operationally visible,
     # not left dangling in pending_delivery.

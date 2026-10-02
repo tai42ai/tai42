@@ -782,7 +782,9 @@ async def test_notify_template_sends_template_payload_to_allowlisted_recipient(
                 "channel": "whatsapp",
                 # env-allowlisted -> the template recipient fence admits it.
                 "recipient": BRIDGE_WHATSAPP_CLIENT,
-                "template": {"name": name, "language": "en_US", "body_parameters": ["Ada", "3pm"]},
+                # ``parameters`` is the channel-owned opaque object; this channel reads its own
+                # ``body_parameters`` shape out of it.
+                "template": {"name": name, "language": "en_US", "parameters": {"body_parameters": ["Ada", "3pm"]}},
             },
         )
     assert "notification sent via 'whatsapp'" in tool_text(result)

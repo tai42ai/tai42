@@ -214,11 +214,13 @@ async def test_send_template_threads_through_as_channel_template(wired, monkeypa
         "chat",
         _ROUTE_THREAD,
         "your update is ready",
-        template={"name": "status_update", "language": "en_US", "body_parameters": ["A-42"]},
+        template={"name": "status_update", "language": "en_US", "parameters": {"body": ["A-42"]}},
     )
 
     assert result == {"message_id": "msg-1", "thread_id": _ROUTE_THREAD}
-    assert calls[0]["template"] == ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
+    assert calls[0]["template"] == ChannelTemplate(
+        name="status_update", language="en_US", parameters={"body": ["A-42"]}
+    )
     assert calls[0]["media"] is None
     assert calls[0]["options"] is None
 

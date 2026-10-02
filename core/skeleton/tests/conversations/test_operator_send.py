@@ -88,6 +88,10 @@ class FakeManager:
 
 
 class FakeChannel:
+    # A neutral fixture channel declares its OWN outbound split cap through the generic
+    # ``max_message_chars`` seam, read off the channel by the conversation-delivery machine.
+    max_message_chars = 1600
+
     def __init__(self) -> None:
         self.sends: list = []
 
@@ -347,7 +351,7 @@ async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(en
     route = _channel_route()
     _wire(monkeypatch, FakeManager(route), agent, channel)
 
-    template = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"body": ["A-42"]})
     message_id = await operator_send(
         route=route,
         thread_id="bridge:line:+15550002222",
@@ -434,7 +438,7 @@ async def test_operator_send_template_to_incapable_channel_fails_the_record(env,
     route = _channel_route(target_kind="tool")
     _wire(monkeypatch, FakeManager(route), None, channel)
 
-    template = ChannelTemplate(name="status_update", language="en_US", body_parameters=["A-42"])
+    template = ChannelTemplate(name="status_update", language="en_US", parameters={"body": ["A-42"]})
     message_id = await operator_send(
         route=route,
         thread_id="bridge:line:+15550002222",

@@ -7,11 +7,13 @@ import math
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
+from pydantic import ValidationError
 from tai42_contract.channels import (
     ChannelDelivery,
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
+    ChannelTemplate,
 )
 
 from tai42_channel_whatsapp.channel.asks import _TIER1_FORMATS, _render_link, _send_question
@@ -20,6 +22,7 @@ from tai42_channel_whatsapp.channel.interactive import _INTERACTIVE_BODY_MAX_CHA
 from tai42_channel_whatsapp.channel.media import _send_media_prelude
 from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
+from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
 from tai42_channel_whatsapp.client import mark_read_typing, send_message
 from tai42_channel_whatsapp.correlation import release_pending, reserve_pending
 from tai42_channel_whatsapp.flows import build_form_flow
@@ -53,6 +56,23 @@ class WhatsAppChannel:
     # refresh loop re-asserts it under this lifetime until the answer is sent.
     # https://developers.facebook.com/docs/whatsapp/cloud-api/guides/mark-messages-as-read#typing-indicators
     working_signal_expiry_seconds: ClassVar[float] = 25.0
+    # Meta caps a text message body at 4096 characters; the conversation-delivery machine splits a
+    # long answer against this (an operator may override it per deployment).
+    max_message_chars: ClassVar[int] = 4096
+
+    def validate_template(self, template: ChannelTemplate) -> None:
+        """Enforce this channel's template-parameter schema, before any send.
+
+        The template's opaque ``parameters`` are parsed into this channel's own
+        :class:`WhatsAppTemplateParameters` model (header media argument, body-text parameters,
+        per-button runtime arguments) and mapped the same way ``send_template`` maps them; a shape
+        this channel could never render to Meta's template components raises ``ValueError``, so an
+        unmappable template is refused up front instead of failing at delivery.
+        """
+        try:
+            parse_template_parameters(template.parameters)
+        except (ValidationError, ValueError) as exc:
+            raise ValueError(f"invalid WhatsApp template parameters: {exc}") from exc
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
         """Enforce this channel's form-schema limits at ask-time, before any state is written.

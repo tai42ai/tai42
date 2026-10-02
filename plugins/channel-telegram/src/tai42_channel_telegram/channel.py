@@ -425,6 +425,9 @@ class TelegramChannel:
     # (https://core.telegram.org/bots/api#sendchataction), so the working-on-it
     # refresh loop re-sends the typing action under this lifetime.
     working_signal_expiry_seconds: ClassVar[float] = 5.0
+    # Telegram caps a text message at 4096 characters; the conversation-delivery machine splits a
+    # long answer against this (an operator may override it per deployment).
+    max_message_chars: ClassVar[int] = 4096
     # NOTE: ``supports_template_notifications`` and ``supports_form_notifications`` are
     # deliberately ABSENT (= False): Telegram has no vendor-template concept, and an ask-less
     # form notification has no callback sink for an in-chat webview to POST to. notify_user

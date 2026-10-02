@@ -205,8 +205,8 @@ async def _channel_delivery_preconditions(
     """Gate a channel record and resolve its channel, name, width and answer.
 
     Fails the record and raises loudly on an impossible state or config error (no channel name, a
-    silent outcome on the channel door, no answer, no ``max_message_chars`` entry, or an
-    unregistered channel).
+    silent outcome on the channel door, no answer, an unregistered channel, or a channel with no
+    resolvable split cap).
     """
     from tai42_skeleton.conversations import delivery as _pkg
 
@@ -225,23 +225,28 @@ async def _channel_delivery_preconditions(
         raise RuntimeError(
             f"channel record {record.message_id!r} is {record.delivery_status.value} and carries no answer to send"
         )
-    max_chars = settings.max_message_chars.get(channel_name)
-    if max_chars is None:
-        # Config error: fail the record so the outcome is visible, then raise loudly.
-        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
-        raise RuntimeError(
-            f"channel {channel_name!r} has no max_message_chars entry; add it to CONVERSATIONS_MAX_MESSAGE_CHARS"
-        )
     try:
         channel = _pkg.tai42_app.channels.get(channel_name)
     except KeyError as exc:
-        # Same config-error treatment: fail the record so the sweep stops re-driving a
-        # send that could never complete, then raise loudly.
+        # Config error: fail the record so the sweep stops re-driving a send that could never
+        # complete, then raise loudly.
         await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
         raise RuntimeError(
             f"channel {channel_name!r} is routed but is not registered on this deployment; load its channel "
             "plugin or remove the route"
         ) from exc
+    # Split width: the operator override wins, else the channel's own declared ``max_message_chars``
+    # cap (read off the channel, the generic per-channel seam). A channel that declares neither is a
+    # loud config error — never a silent unbounded or truncated send.
+    max_chars = settings.max_message_chars.get(channel_name)
+    if max_chars is None:
+        max_chars = getattr(channel, "max_message_chars", None)
+    if max_chars is None:
+        await store.mark_failed(record.message_id, await store.bump_attempt(record.message_id), time.time(), token)
+        raise RuntimeError(
+            f"channel {channel_name!r} declares no max_message_chars cap and none is configured; declare the "
+            "channel's cap or set CONVERSATIONS_MAX_MESSAGE_CHARS"
+        )
     return channel, channel_name, max_chars, answer
 
 

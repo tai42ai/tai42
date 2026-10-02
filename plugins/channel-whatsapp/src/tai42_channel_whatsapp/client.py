@@ -26,18 +26,22 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import httpx
+from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
     ChannelTemplate,
-    QuickReplyButtonParam,
-    TemplateButtonParam,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.net import MediaFetchError, open_media_stream
 
+from tai42_channel_whatsapp.channel.template_params import (
+    QuickReplyButtonParam,
+    TemplateButtonParam,
+    parse_template_parameters,
+)
 from tai42_channel_whatsapp.settings import require_delivery_secret, whatsapp_settings
 
 if TYPE_CHECKING:
@@ -436,21 +440,27 @@ def _template_button_component(index: int, button: TemplateButtonParam) -> dict[
 async def send_template(phone_number_id: str, to: str, template: ChannelTemplate) -> str:
     """Send a pre-approved template message; return its ``wamid``.
 
-    Maps the template's NAMED components onto the Cloud API template-message ``components``
-    array: a ``header`` component for ``header_media`` (image/video/document), a ``body``
-    component whose ordered ``text`` parameters fill the body placeholders from
-    ``body_parameters``, and one ``button`` component per ``buttons`` entry (a quick-reply
-    ``payload`` or a url ``text`` suffix, positional by index). A template with no runtime
-    arguments sends with no ``components`` key.
+    The template's opaque ``parameters`` are parsed into this channel's own
+    :class:`~tai42_channel_whatsapp.channel.template_params.WhatsAppTemplateParameters` (raising
+    ``ChannelInputError`` on a shape this channel could not map) and mapped onto the Cloud API
+    template-message ``components`` array: a ``header`` component for ``header_media``
+    (image/video/document), a ``body`` component whose ordered ``text`` parameters fill the body
+    placeholders from ``body_parameters``, and one ``button`` component per ``buttons`` entry (a
+    quick-reply ``payload`` or a url ``text`` suffix, positional by index). A template with no
+    runtime arguments sends with no ``components`` key.
     """
+    try:
+        params = parse_template_parameters(template.parameters)
+    except (ValidationError, ValueError) as exc:
+        raise ChannelInputError(f"WhatsApp template parameters are not renderable: {exc}") from exc
     components: list[dict[str, Any]] = []
-    if template.header_media is not None:
-        components.append(_template_header_component(template.header_media))
-    if template.body_parameters:
+    if params.header_media is not None:
+        components.append(_template_header_component(params.header_media))
+    if params.body_parameters:
         components.append(
-            {"type": "body", "parameters": [{"type": "text", "text": value} for value in template.body_parameters]}
+            {"type": "body", "parameters": [{"type": "text", "text": value} for value in params.body_parameters]}
         )
-    components.extend(_template_button_component(index, button) for index, button in enumerate(template.buttons))
+    components.extend(_template_button_component(index, button) for index, button in enumerate(params.buttons))
     template_obj: dict[str, object] = {"name": template.name, "language": {"code": template.language}}
     if components:
         template_obj["components"] = components

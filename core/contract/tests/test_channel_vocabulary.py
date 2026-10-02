@@ -18,17 +18,12 @@ from tai42_contract.channels import (
     NOTIFICATION_OPTIONS_MAX,
     NOTIFICATION_SECTIONS_MAX,
     OPTION_ID_MAX_CHARS,
-    TEMPLATE_BUTTONS_MAX,
-    TEMPLATE_PARAM_MAX_CHARS,
     ChannelNotification,
     ChannelTemplate,
     InboundBridge,
     LinkOption,
     OptionSection,
-    QuickReplyButtonParam,
     ReplyOption,
-    TemplateButtonParam,
-    UrlButtonParam,
 )
 from tai42_contract.conversations import AnswerPart, ConversationMessage
 from tai42_contract.interactions.models import (
@@ -313,48 +308,26 @@ def test_blank_message_needs_content():
         ChannelNotification(message="")
 
 
-# -- ChannelTemplate components --------------------------------------------------------
+# -- ChannelTemplate reference + opaque parameters -------------------------------------
 
 
-def test_template_component_parameters():
+def test_template_is_a_reference_with_opaque_parameters():
+    # The contract models a template as a name/locale reference plus an opaque parameters object it
+    # never looks inside — the declaring channel owns the parameter shape.
     t = ChannelTemplate(
         name="order_update",
         language="en",
-        header_media=_image(),
-        body_parameters=["A-1", "shipped"],
-        buttons=[QuickReplyButtonParam(payload="track"), UrlButtonParam(url_parameter="A-1")],
+        parameters={"header": {"image": "https://x.example/i.png"}, "body": ["A-1", "shipped"]},
     )
-    assert t.header_media == _image()
-    assert t.body_parameters == ["A-1", "shipped"]
-    assert [b.kind for b in t.buttons] == ["quick_reply", "url"]
+    assert t.name == "order_update"
+    assert t.language == "en"
+    assert t.parameters == {"header": {"image": "https://x.example/i.png"}, "body": ["A-1", "shipped"]}
 
 
-def test_template_header_media_rejects_link():
-    link = MediaItem(kind=MediaKind.LINK, url="https://x.example/p")
-    with pytest.raises(ValidationError, match="header_media must be a display item"):
-        ChannelTemplate(name="t", language="en", header_media=link)
-
-
-def test_template_body_parameters_bounds():
-    with pytest.raises(ValidationError, match="each body parameter must be non-blank"):
-        ChannelTemplate(name="t", language="en", body_parameters=["ok", "  "])
-    with pytest.raises(ValidationError, match=f"at most {TEMPLATE_PARAM_MAX_CHARS}"):
-        ChannelTemplate(name="t", language="en", body_parameters=["x" * (TEMPLATE_PARAM_MAX_CHARS + 1)])
-
-
-def test_template_buttons_capped():
-    buttons: list[TemplateButtonParam] = [
-        QuickReplyButtonParam(payload=f"p{i}") for i in range(TEMPLATE_BUTTONS_MAX + 1)
-    ]
-    with pytest.raises(ValidationError, match=f"at most {TEMPLATE_BUTTONS_MAX}"):
-        ChannelTemplate(name="t", language="en", buttons=buttons)
-
-
-def test_template_button_param_bounds():
-    with pytest.raises(ValidationError, match="quick-reply button payload must be non-blank"):
-        QuickReplyButtonParam(payload="  ")
-    with pytest.raises(ValidationError, match="url button parameter must be non-blank"):
-        UrlButtonParam(url_parameter="  ")
+def test_template_parameters_optional_and_non_empty_when_present():
+    assert ChannelTemplate(name="ping", language="en").parameters is None
+    with pytest.raises(ValidationError, match="non-empty dict"):
+        ChannelTemplate(name="t", language="en", parameters={})
 
 
 def test_template_is_frozen():

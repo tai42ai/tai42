@@ -70,6 +70,27 @@ class Channel(Protocol):
     the notification's ``message`` as the ``question`` argument before the send, so
     one declared method covers both the ask and the notify form surfaces.
 
+    A channel that advertises ``supports_template_notifications`` MAY also declare one OPTIONAL
+    method, ``validate_template``, following the same documented-member convention (read
+    defensively with ``getattr(channel, "validate_template", None)``, NOT a Protocol method, so
+    declaring it never tightens the runtime structural check). The send helpers call
+    ``channel.validate_template(template)`` right after the capability gate, BEFORE the send: it
+    parses the template's OPAQUE ``parameters`` against the channel's OWN template-parameter schema
+    and raises ``ValueError`` on a shape the channel could never map — so a template the channel
+    could never render is refused up front instead of failing at delivery. A channel that omits the
+    hook advertises no ask-time parameter check; its ``notify`` still refuses an unmappable template
+    at send time (a permanent :class:`ChannelInputError`). The platform never looks inside
+    ``parameters`` itself; the declaring channel owns the shape end to end.
+
+    A channel MAY also declare the OPTIONAL outbound message-length cap it splits a long answer
+    against — an OPTIONAL ``ClassVar max_message_chars: int`` giving the medium's own per-message
+    character limit, read defensively with ``getattr(channel, "max_message_chars", None)`` (the
+    same documented-member convention, NOT a Protocol member). The conversation-delivery machine
+    resolves a routed channel's split width as the operator override
+    (``CONVERSATIONS_MAX_MESSAGE_CHARS``) when set, else this declared cap; a channel that declares
+    neither (and has no override) is a loud config error at send, never a silent unbounded or
+    truncated send.
+
     A channel MAY also declare one OPTIONAL method, ``deliver_ordered(notifications)``,
     for a NATIVE in-order batch (a bulk API, a transactional transcript append) — the
     same documented-member convention as ``validate_form_schema`` and the capability

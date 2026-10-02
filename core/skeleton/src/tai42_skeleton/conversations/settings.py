@@ -8,17 +8,6 @@ from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings
 
-# Outbound message-length caps a long answer is split against, per channel.
-_DEFAULT_MAX_MESSAGE_CHARS: dict[str, int] = {
-    "twilio": 1600,
-    "telegram": 4096,
-    "slack": 40000,
-    "whatsapp": 4096,
-    # The web chat page has no medium length cap; a large split bound keeps agent
-    # answers whole while max_outbound_chunks still caps a runaway fan-out.
-    "web": 8000,
-}
-
 
 def _require_key_segment(name: str, value: str) -> None:
     """Raise on a blank key segment.
@@ -154,9 +143,12 @@ class ConversationsSettings(TaiBaseSettings):
     # confirmed ``delivered`` on expiry.
     delivery_grace_seconds: int = Field(default=3600, gt=0)
 
-    # Per-channel split caps. A routed channel absent from this map is a loud config
-    # error at send, never a silent unbounded or truncated send.
-    max_message_chars: dict[str, int] = Field(default_factory=lambda: dict(_DEFAULT_MAX_MESSAGE_CHARS))
+    # OPERATOR OVERRIDE of the per-channel split cap, keyed by channel name. Empty by default:
+    # each channel declares its OWN medium cap through the ``max_message_chars`` seam (read off the
+    # channel at send). An entry here wins over the channel's declared cap for that channel; a
+    # routed channel with neither an override here nor a declared cap is a loud config error at
+    # send, never a silent unbounded or truncated send.
+    max_message_chars: dict[str, int] = Field(default_factory=dict)
 
     # Max provider messages ONE inbound answer may fan out to. An answer that splits past
     # this is refused with a client-safe error reply, never silently fanned out or truncated.
