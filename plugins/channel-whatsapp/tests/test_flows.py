@@ -1064,10 +1064,8 @@ def test_options_on_a_non_choice_property_are_refused_in_flow_data():
 
 # -- branch coverage: choice-type, slots, conditions, reaction payloads -----------
 
-from tai42_channel_whatsapp.flows import (  # noqa: E402
-    _choice_component_type,
-    slot_datanames,
-)
+from tai42_channel_whatsapp.flows import slot_datanames  # noqa: E402
+from tai42_channel_whatsapp.flows_components import _choice_component_type  # noqa: E402
 
 
 def test_choice_component_type_classifies_an_array_as_checkbox():

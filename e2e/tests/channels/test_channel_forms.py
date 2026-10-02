@@ -193,7 +193,7 @@ async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
         assert len(fake_slack.views) == 1, f"expected exactly one opened modal, saw {fake_slack.views!r}"
         view = fake_slack.views[0]
         assert view["callback_id"] == _SLACK_FORM_SUBMIT_CALLBACK
-        assert view["private_metadata"] == interaction_id
+        assert json.loads(view["private_metadata"])["id"] == interaction_id
 
         # A view_submission carrying the filled state is coerced per the schema (amount "5" ->
         # 5) and forwarded as the typed dict, resolving the ask.
@@ -201,7 +201,7 @@ async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
             "type": "view_submission",
             "view": {
                 "callback_id": _SLACK_FORM_SUBMIT_CALLBACK,
-                "private_metadata": interaction_id,
+                "private_metadata": view["private_metadata"],
                 "state": {
                     "values": {
                         "label": {_SLACK_FIELD_ACTION: {"type": "plain_text_input", "value": good_answer["label"]}},
@@ -286,7 +286,7 @@ async def test_form_over_slack_renders_native_date_and_time_pickers(
             "type": "view_submission",
             "view": {
                 "callback_id": _SLACK_FORM_SUBMIT_CALLBACK,
-                "private_metadata": interaction_id,
+                "private_metadata": view["private_metadata"],
                 "state": {
                     "values": {
                         "on": {_SLACK_FIELD_ACTION: {"type": "datepicker", "selected_date": good_answer["on"]}},

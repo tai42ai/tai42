@@ -220,7 +220,7 @@ def test_notifications_notify_data_and_pages_ride_validated_body(monkeypatch: py
             "channel": "whatsapp",
             "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
             "data": {"values": {"name": "Ada"}, "options": {}},
-            "pages": [{"title": "You", "fields": ["name"]}],
+            "pages": [{"title": "You", "fields": ["name"], "display": [], "kind": "input"}],
         }
         return data_response("notification sent via 'whatsapp'")
 
