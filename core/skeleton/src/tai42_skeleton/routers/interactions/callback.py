@@ -46,6 +46,8 @@ from tai42_skeleton.interactions.reaction import (
     FormReactionClosedError,
     FormReactionHandlerError,
     FormReactionRequestError,
+    SubmittedCheckRejectedError,
+    enforce_submitted_check,
     react,
 )
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -323,6 +325,18 @@ async def _claim_channel_typed(
         if exc.field is not None:
             body["field"] = exc.field
         return _callback_json(body, 400)
+    # The consumer's submit check runs HERE, server-side, before the record: a reacting form that
+    # declares ``submitted`` runs its handler through the one reaction chokepoint. Per-field errors
+    # refuse the answer re-answerable in place (the ask stands); a handler raise/timeout is a loud
+    # 502; a form no longer open a 409. A channel that ran the check first never lets the server skip it.
+    try:
+        await enforce_submitted_check(interaction_id, state.request.answer_format, state.request.format_payload, value)
+    except SubmittedCheckRejectedError as exc:
+        return _callback_json({"error": str(exc), "errors": exc.errors, "retry_in_place": True}, 400)
+    except FormReactionClosedError as exc:
+        return _callback_json({"error": str(exc)}, 409)
+    except FormReactionHandlerError as exc:
+        return _callback_json({"error": str(exc)}, 502)
     return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, value, params=answer_params)
 
 

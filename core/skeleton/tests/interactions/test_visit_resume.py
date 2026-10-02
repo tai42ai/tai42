@@ -20,12 +20,14 @@ from tai42_contract.interactions import (
     InteractionRequest,
     ResumeItem,
     UndeclaredExtrasKeyError,
+    VisitRequestError,
 )
 from tai42_contract.states import StateContext, SubjectCandidates
 from tai42_kit.utils.state_context import state_context
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import reaction as reaction_module
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
@@ -458,3 +460,107 @@ async def test_agent_target_declared_extras_key_is_accepted(store):
         )
     assert outcome.kind == "result"
     assert outcome.result == {"declared": 5}
+
+
+# --- the server-side submitted check on the caller-resume door --------------------------
+#
+# A caller-resume records an answer, so the resume of a reacting FORM declaring ``submitted``
+# runs that handler through ``enforce_submitted_check`` in the visit's pre-check phase, BEFORE
+# anything is cancelled or resumed. A handler returning per-field errors refuses the WHOLE
+# visit (``VisitRequestError`` rule ``submitted_rejected``) with nothing resolved; a clean
+# handler lets the resume drive to its terminal. The reaction chokepoint reads its own module
+# seams, so the test wires its store to the same fake and stubs the handler run.
+
+_SUBMITTED_SCHEMA = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am", "10am"]}}}
+_SUBMITTED_REACTIONS = {"submitted": True, "choices": ["slot"]}
+
+
+def _reacting_caller_park(store: InteractionStore, iid: str, *, reactions: dict, schema: dict) -> InteractionRequest:
+    now = datetime.now(UTC)
+    expiry = now + timedelta(minutes=60)
+    return InteractionRequest(
+        interaction_id=iid,
+        group_id="g1",
+        question="?",
+        answer_format=AnswerFormat.FORM,
+        format_payload={"schema": schema, "reactions": reactions},
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=expiry,
+        mode="async",
+        to="caller",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        continuation_state_context=_context(),
+        expiry_at=expiry,
+        reaction_tool="react_tool",
+    )
+
+
+def _wire_submitted(monkeypatch, fake_client_ctx, *, returns, captured) -> None:
+    # The reaction chokepoint reads its own module seams; its settings default to the SAME
+    # key_prefix/redis the ``store`` fixture resolves, so react's store is the same fake.
+    monkeypatch.setattr(reaction_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(reaction_module, "interactions_settings", InteractionsSettings)
+    monkeypatch.setattr(reaction_module, "interactions_store_configured", lambda: True)
+
+    async def _run(**kwargs):
+        captured.update(kwargs)
+        return returns
+
+    monkeypatch.setattr(reaction_module, "_run_reaction", _run)
+
+
+async def test_caller_resume_submitted_rejection_refuses_the_visit(store, fake_redis, fake_client_ctx, monkeypatch):
+    captured: dict = {}
+    _wire_submitted(monkeypatch, fake_client_ctx, returns={"errors": {"slot": "taken"}}, captured=captured)
+    await store.add(
+        fake_redis,
+        _reacting_caller_park(store, "i1", reactions=_SUBMITTED_REACTIONS, schema=_SUBMITTED_SCHEMA),
+        idle_ttl=86400,
+        to="caller",
+    )
+    async with _app():
+        with pytest.raises(VisitRequestError) as exc:
+            await visit_module.visit(
+                target_name="t",
+                cancel=[],
+                resume=[ResumeItem(id="i1", payload={"slot": "9am"})],
+                start=None,
+                extras={},
+            )
+    assert exc.value.rule == "submitted_rejected"
+    # The server RAN the submit check with the resume answer, on the submitted event.
+    assert captured["event"] == {"kind": "submitted"}
+    assert captured["values"] == {"slot": "9am"}
+    # Nothing resolved: the caller ask stays pending (the pre-check refused before cancel/resume).
+    # If the enforcement were removed the resume would claim and drive, resolving the ask — these
+    # assertions would fail.
+    state = await store.get_state(fake_redis, "i1")
+    assert state is not None
+    assert state.status == "pending"
+    assert state.response is None
+
+
+async def test_caller_resume_submitted_clean_resolves(store, fake_redis, fake_client_ctx, monkeypatch):
+    captured: dict = {}
+    _wire_submitted(monkeypatch, fake_client_ctx, returns={}, captured=captured)
+    await store.add(
+        fake_redis,
+        _reacting_caller_park(store, "i1", reactions=_SUBMITTED_REACTIONS, schema=_SUBMITTED_SCHEMA),
+        idle_ttl=86400,
+        to="caller",
+    )
+    async with _app():
+        outcome = await visit_module.visit(
+            target_name="t",
+            cancel=[],
+            resume=[ResumeItem(id="i1", payload={"slot": "9am"})],
+            start=None,
+            extras={},
+        )
+    assert outcome.action == "resumed"
+    assert outcome.kind == "result"
+    # The clean check let the resume drive to its terminal with the effective answer delivered.
+    assert outcome.result["answer_received"] == {"slot": "9am"}
+    assert captured["event"] == {"kind": "submitted"}  # the server RAN the submit check here too
