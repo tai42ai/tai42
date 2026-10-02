@@ -42,6 +42,8 @@ from tai42_skeleton.interactions.reaction import (
     FormReactionClosedError,
     FormReactionHandlerError,
     FormReactionRequestError,
+    SubmittedCheckRejectedError,
+    enforce_submitted_check,
     react,
 )
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
@@ -183,7 +185,7 @@ def _authorize_answerer(state: InteractionState, restricted: str | None) -> None
     summary="Answer a pending interaction",
     tags=["interactions"],
     destructive=True,
-    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError],
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, UpstreamError],
     request_model=InteractionAnswer,
     response_model=InteractionActionResult,
 )
@@ -221,6 +223,21 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
             )
         except AnswerMismatchError as exc:
             raise BadRequestError(str(exc)) from exc
+        # The consumer's submit check is enforced HERE, by the server, before anything records:
+        # a reacting form that declares ``submitted`` runs its handler through the one reaction
+        # chokepoint with the effective answer. A clean run proceeds; per-field errors refuse the
+        # answer (the form stays open); a handler raise/timeout refuses loudly. A client that ran
+        # the check first is only an early-error optimisation — the server never skips it.
+        try:
+            await enforce_submitted_check(
+                interaction_id, state.request.answer_format, state.request.format_payload, answer
+            )
+        except SubmittedCheckRejectedError as exc:
+            raise BadRequestError(str(exc)) from exc
+        except FormReactionClosedError as exc:
+            raise ConflictError(str(exc)) from exc
+        except FormReactionHandlerError as exc:
+            raise UpstreamError(str(exc)) from exc
         response = InteractionResponse(
             interaction_id=interaction_id,
             answer=answer,

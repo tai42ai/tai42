@@ -17,6 +17,7 @@ from tai42_skeleton.interactions.reaction import (
     FormReactionClosedError,
     FormReactionHandlerError,
     FormReactionRequestError,
+    SubmittedCheckRejectedError,
     _declared_slots,
     _is_option_bearing,
     _normalize_event,
@@ -26,6 +27,7 @@ from tai42_skeleton.interactions.reaction import (
     _validate_update_errors,
     _validate_update_options,
     _validate_update_values,
+    enforce_submitted_check,
     react,
 )
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -366,3 +368,62 @@ def test_validate_update_value_helpers_reject_malformed():
 def test_validate_update_accepts_errors_and_options():
     update = {"errors": {"name": "too short"}, "options": {"slot": [{"value": "11am"}]}}
     assert _validate_update(update, _SCHEMA, {}) == update
+
+
+# --- enforce_submitted_check: the server-side submit gate every answer door runs ------
+#
+# The door calls this AFTER the schema check and BEFORE the record. It runs the form's
+# ``submitted`` event through the one ``react`` chokepoint (NO prior react call) and refuses
+# the answer when the handler returns per-field errors. These pin that it (a) runs the handler
+# on a clean submit, (b) raises carrying the handler's errors on a decline, (c) is a no-op
+# that never runs the handler when the form declares no ``submitted`` trigger, and (d) lets a
+# handler raise surface loudly.
+
+
+_SUBMITTED_REACTIONS = {"submitted": True, "choices": ["slot"]}
+
+
+async def test_enforce_submitted_clean_runs_the_handler_and_passes(wired, monkeypatch):
+    captured: dict = {}
+    request = _reacting(wired.store, reactions=_SUBMITTED_REACTIONS)
+    await wired.store.add(wired.fake, request, idle_ttl=86400)
+    _stub_handler(monkeypatch, returns={}, captured=captured)
+    assert await enforce_submitted_check("r1", AnswerFormat.FORM, request.format_payload, {"slot": "9am"}) is None
+    # The handler RAN, on the submitted event, with the answer as its partial values.
+    assert captured["event"] == {"kind": "submitted"}
+    assert captured["values"] == {"slot": "9am"}
+
+
+async def test_enforce_submitted_errors_raise_rejected(wired, monkeypatch):
+    captured: dict = {}
+    request = _reacting(wired.store, reactions=_SUBMITTED_REACTIONS)
+    await wired.store.add(wired.fake, request, idle_ttl=86400)
+    _stub_handler(monkeypatch, returns={"errors": {"slot": "bad"}}, captured=captured)
+    with pytest.raises(SubmittedCheckRejectedError) as exc:
+        await enforce_submitted_check("r1", AnswerFormat.FORM, request.format_payload, {"slot": "9am"})
+    assert exc.value.errors == {"slot": "bad"}  # the per-field errors ride the raise for the door
+    assert captured["event"] == {"kind": "submitted"}  # the handler RAN and DECLINED (did not raise)
+
+
+async def test_enforce_submitted_without_the_trigger_is_a_noop(wired, monkeypatch):
+    captured: dict = {}
+    # A FORM whose reactions do NOT declare ``submitted``: the gate returns without running react.
+    request = _reacting(wired.store, reactions={"field_changed": ["name"]})
+    await wired.store.add(wired.fake, request, idle_ttl=86400)
+    _stub_handler(monkeypatch, returns={"errors": {"slot": "bad"}}, captured=captured)
+    assert await enforce_submitted_check("r1", AnswerFormat.FORM, request.format_payload, {"slot": "9am"}) is None
+    # A FORM carrying NO reactions block at all is equally a no-op.
+    assert await enforce_submitted_check("r1", AnswerFormat.FORM, {"schema": _SCHEMA}, {"slot": "9am"}) is None
+    assert captured == {}  # the handler was never reached in either case
+
+
+async def test_enforce_submitted_handler_raise_surfaces_loudly(wired, monkeypatch):
+    request = _reacting(wired.store, reactions=_SUBMITTED_REACTIONS)
+    await wired.store.add(wired.fake, request, idle_ttl=86400)
+
+    async def _boom(**kwargs):
+        raise FormReactionHandlerError("handler blew up")
+
+    monkeypatch.setattr(reaction_module, "_run_reaction", _boom)
+    with pytest.raises(FormReactionHandlerError, match="blew up"):
+        await enforce_submitted_check("r1", AnswerFormat.FORM, request.format_payload, {"slot": "9am"})

@@ -62,6 +62,11 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.continuation import continuation_due_timing, drive_and_deliver
 from tai42_skeleton.interactions.kill import kill_park
+from tai42_skeleton.interactions.reaction import (
+    FormReactionClosedError,
+    SubmittedCheckRejectedError,
+    enforce_submitted_check,
+)
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.runs.chokepoint import note_resumed_interaction
@@ -136,6 +141,11 @@ async def visit(
     _check_takes(takes, parked)
     if extras:
         await _assert_extras_declared(target_name, extras)
+    # The caller-resume path is an answer door: enforce the consumer's server-side ``submitted``
+    # check for every resumed reacting form here, in the pre-check phase, so an unvetted
+    # reaction-fed value is refused BEFORE anything is cancelled or resumed — exactly as the
+    # authenticated and callback answer doors enforce it.
+    await _enforce_resume_submitted(resumes, parked, effective_answers)
 
     # --- 2. Cancel (each id → the one whole-chain kill seam). ---
     cancelled = await _cancel_all(store, settings, cancel, parked)
@@ -206,6 +216,32 @@ def _check_resumes(resumes: list[ResumeItem], parked: dict[str, dict[str, Any]])
             "multi_run", "resume items must belong to ONE step of ONE held run (same group_id and asked_by)"
         )
     return effective_answers
+
+
+async def _enforce_resume_submitted(
+    resumes: list[ResumeItem], parked: dict[str, dict[str, Any]], effective_answers: dict[str, Any]
+) -> None:
+    """Run the server-side ``submitted`` check for every resumed reacting FORM before anything resolves.
+
+    A caller-resume records an answer, so a reaction-fed choice field (type-checked only at the schema
+    facet) must meet the consumer's submit check here too — through the one :func:`enforce_submitted_check`
+    chokepoint, the same the other answer doors use. A no-op for a plain (non-reacting) resume. A handler
+    that declines refuses the whole visit (``submitted_rejected``, nothing resolved); a form no longer open
+    is a gone entry; a handler that raises or times out surfaces loudly (nothing resolved).
+    """
+    for item in resumes:
+        entry = parked[item.id]
+        try:
+            await enforce_submitted_check(
+                item.id,
+                AnswerFormat(entry["answer_format"]),
+                entry.get("format_payload"),
+                effective_answers[item.id],
+            )
+        except SubmittedCheckRejectedError as exc:
+            raise VisitRequestError("submitted_rejected", str(exc)) from exc
+        except FormReactionClosedError as exc:
+            raise ParkedEntryGoneError(f"interaction {item.id!r} is no longer an open form: {exc}") from exc
 
 
 def _check_takes(takes: list[TakeItem], parked: dict[str, dict[str, Any]]) -> None:

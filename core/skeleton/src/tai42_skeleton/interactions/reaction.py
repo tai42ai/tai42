@@ -19,6 +19,16 @@ events, with the values filled so far, to :func:`react` — the single seam that
 Every reaction transport (the channel callback sibling door, the authenticated in-app door)
 calls this one function, so the open-check, the deadline, and the update validation all live
 once, covering every door.
+
+The consumer's ``submitted`` check is ENFORCED BY THE SERVER, not the client. :func:`react`
+stays stateless; the answer PATH records. Each answer door calls :func:`enforce_submitted_check`
+after the schema check and before its atomic record: for a form that declares ``submitted`` it
+runs the handler through this same chokepoint with the effective answer, refusing the answer on
+the handler's per-field errors (the form stays open) or loudly on a handler raise/timeout. It is
+a check, never a second recorder — the door that follows is the one recorder. A client that ran
+``submitted`` first only shows errors early; the server never trusts it and never skips the check.
+The expiry reaper records no consumer answer (it resolves an expired ask with an expiry marker,
+never a submitted value), so no submitted check applies there — nothing unvetted can be recorded.
 """
 
 from __future__ import annotations
@@ -60,6 +70,20 @@ class FormReactionRequestError(FormReactionError):
 
 class FormReactionHandlerError(FormReactionError):
     """The reaction handler raised, missed its deadline, or returned an invalid form update."""
+
+
+class SubmittedCheckRejectedError(FormReactionError):
+    """The form's ``submitted`` reaction returned per-field errors: the answer is refused and the form stays open.
+
+    Carries the handler's ``errors`` map (field name -> message) so the door can surface it. Distinct from
+    :class:`FormReactionHandlerError` (a handler that raised/timed out) — here the handler ran cleanly and
+    DECLINED the submission.
+    """
+
+    def __init__(self, errors: dict[str, Any]) -> None:
+        """Carry the handler's per-field ``errors`` (field name -> message) so the door can surface them."""
+        self.errors = errors
+        super().__init__(f"submission rejected by the form's submitted check: {errors}")
 
 
 def _types_only_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -240,6 +264,38 @@ async def _run_reaction(
     except Exception as exc:
         logger.exception("reaction handler %r for interaction %s failed", reaction_tool, interaction_id)
         raise FormReactionHandlerError(f"reaction handler {reaction_tool!r} failed") from exc
+
+
+async def enforce_submitted_check(
+    interaction_id: str,
+    answer_format: AnswerFormat,
+    format_payload: dict[str, Any] | None,
+    answer: Any,
+) -> None:
+    """Run the form's ``submitted`` reaction ON THE SERVER before the answer records; refuse if it declines.
+
+    The authoritative enforcement of the consumer's submit check: every answer door calls this after the
+    schema check (``check_answer``) and BEFORE the atomic record. A no-op unless the interaction is a FORM
+    declaring the ``submitted`` trigger (the contract couples that trigger to a ``reaction_tool``). It reuses
+    the one :func:`react` chokepoint (the same identity, deadline and update validation), so a client that
+    ran ``submitted`` first is only an optimisation for early errors, never the enforcement — the server
+    never trusts it and never skips.
+
+    Raises :class:`SubmittedCheckRejectedError` (carrying the handler's per-field ``errors``) when the handler
+    declines the submission — the door refuses the answer and the form stays open. Raises
+    :class:`FormReactionHandlerError` when the handler raises or times out, and
+    :class:`FormReactionClosedError` when the form is no longer open — both refuse loudly; nothing records.
+    Returns normally (the answer may record) only when the handler ran cleanly with no errors.
+    """
+    if answer_format is not AnswerFormat.FORM:
+        return
+    reactions_raw = (format_payload or {}).get("reactions")
+    if reactions_raw is None or not FormReactions.model_validate(reactions_raw).submitted:
+        return
+    update = await react(interaction_id, {"kind": _SUBMITTED}, answer if isinstance(answer, dict) else {})
+    errors = update.get("errors")
+    if errors:
+        raise SubmittedCheckRejectedError(errors)
 
 
 async def react(interaction_id: str, event: Any, partial_values: Any) -> dict[str, Any]:

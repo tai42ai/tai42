@@ -16,6 +16,7 @@ import pytest
 from tai42_contract.interactions import AnswerFormat, InteractionRequest, InteractionResponse
 
 from tai42_skeleton.interactions import InteractionStore
+from tai42_skeleton.interactions import reaction as reaction_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -23,6 +24,7 @@ from tai42_skeleton.operations import (
     ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
+    UpstreamError,
 )
 from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.operations.decorator import operation_metadata_of
@@ -126,6 +128,7 @@ def test_metadata_declares_destructive_and_the_full_error_set():
         ForbiddenError,
         NotFoundError,
         PayloadTooLargeError,
+        UpstreamError,
     }
 
 
@@ -281,3 +284,94 @@ async def test_answer_off_when_store_unconfigured_raises_not_found(monkeypatch):
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     with pytest.raises(NotFoundError, match="Interaction not found"):
         await ops.answer_interaction("ghost", "hi")
+
+
+# -- the server-side submitted check on the authenticated answer door ----------
+#
+# A reacting FORM that declares ``submitted`` has its handler run BY THIS DOOR, after the
+# schema check and before the record, via ``enforce_submitted_check``. The answer is posted
+# DIRECTLY to the door with NO prior reaction call; a handler returning per-field errors
+# refuses the answer (mapped to a 400 ``BadRequestError``) and the form stays pending, while a
+# clean handler lets the answer record. The reaction chokepoint reads its own module seams, so
+# the test wires the fake store there too and stubs the handler run.
+
+_REACTING_FORM_SCHEMA = {"type": "object", "properties": {"slot": {"type": "string", "enum": ["9am", "10am"]}}}
+_SUBMITTED_REACTIONS = {"submitted": True, "choices": ["slot"]}
+
+
+def _reacting_form(store, *, iid="rf", gid="rfg", reactions, schema) -> InteractionRequest:
+    now = datetime.now(UTC)
+    future = now + timedelta(hours=1)
+    return InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="Fill?",
+        answer_format=AnswerFormat.FORM,
+        format_payload={"schema": schema, "reactions": reactions},
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=future,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=future,
+        reaction_tool="react_tool",
+    )
+
+
+def _wire_submitted(wired, monkeypatch, fake_client_ctx, *, returns, captured) -> None:
+    # The answer door calls ``enforce_submitted_check`` -> ``react`` -> ``_run_reaction``, all
+    # read off the reaction module's own seams: point its store at the same fake and stub the
+    # handler run so the returned form update is this test's.
+    monkeypatch.setattr(reaction_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(reaction_module, "interactions_settings", lambda: wired.settings)
+
+    async def _run(**kwargs):
+        captured.update(kwargs)
+        return returns
+
+    monkeypatch.setattr(reaction_module, "_run_reaction", _run)
+
+
+async def test_answer_door_submitted_rejection_refuses_and_keeps_pending(wired, monkeypatch, fake_client_ctx):
+    captured: dict = {}
+    _wire_submitted(wired, monkeypatch, fake_client_ctx, returns={"errors": {"slot": "taken"}}, captured=captured)
+    await wired.store.add(
+        wired.fake,
+        _reacting_form(wired.store, reactions=_SUBMITTED_REACTIONS, schema=_REACTING_FORM_SCHEMA),
+        idle_ttl=86400,
+    )
+    with pytest.raises(BadRequestError, match="submission rejected"):
+        await ops.answer_interaction("rf", {"slot": "9am"})
+    # The server RAN the submit check with the answer, on the submitted event.
+    assert captured["event"] == {"kind": "submitted"}
+    assert captured["values"] == {"slot": "9am"}
+    # Refused: the form stays open, nothing recorded. If the enforcement were removed the
+    # answer would record and the door would return "answered" — these assertions would fail.
+    state = await wired.store.get_state(wired.fake, "rf")
+    assert state is not None
+    assert state.status == "pending"
+    assert state.response is None
+
+
+async def test_answer_door_submitted_clean_records_the_answer(wired, monkeypatch, fake_client_ctx):
+    # The clean submit check lets the answer record; the detached continuation fire a claimed
+    # async park schedules is a separate concern, stubbed to a no-op here.
+    async def _noop_fire(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(ops, "fire_continuation_after_claim", _noop_fire)
+    captured: dict = {}
+    _wire_submitted(wired, monkeypatch, fake_client_ctx, returns={}, captured=captured)
+    await wired.store.add(
+        wired.fake,
+        _reacting_form(wired.store, reactions=_SUBMITTED_REACTIONS, schema=_REACTING_FORM_SCHEMA),
+        idle_ttl=86400,
+    )
+    assert await ops.answer_interaction("rf", {"slot": "9am"}) == {"interaction_id": "rf", "status": "answered"}
+    assert captured["event"] == {"kind": "submitted"}  # the server RAN the submit check here too
+    state = await wired.store.get_state(wired.fake, "rf")
+    assert state is not None
+    assert state.status == "answered"
+    assert state.response is not None
+    assert state.response.answer == {"slot": "9am"}
