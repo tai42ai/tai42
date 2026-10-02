@@ -30,7 +30,7 @@ dependencies = [
     "tai42-contract>=15.4,<16",
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
-    "python-dotenv>=1.0",
+    "python-dotenv>=1.2.3",
     "fastmcp>=3.4.7,<4",
     # Imported directly by utils/lc/lc_util.py (not just transitively via fastmcp).
     "mcp>=1",
