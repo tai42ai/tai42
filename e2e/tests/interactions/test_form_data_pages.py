@@ -4,8 +4,9 @@ A channel-delivered ``ask(answer_format="form", data=..., pages=...)`` mints the
 callback form page; this exercises the whole seam a participant's traffic takes:
 
 * the GET renders the page with the ``values`` prefilled into their controls, the
-  per-send ``options`` as a ``<select>`` (labels shown, values posted) that REPLACES
-  the schema ``enum`` for this send, and the ``pages`` as ordered steps (one visible,
+  per-send ``options`` as a radio group (short lists) or a ``<select>`` (long lists),
+  labels shown and values posted, REPLACING the schema ``enum`` for this send, and the
+  ``pages`` as ordered steps (one visible,
   the rest hidden, with Back/Next/Submit nav);
 * the POST of the union of every step's fields resolves the ask with the typed dict —
   including a per-send option value that is NOT in the published enum;
@@ -126,17 +127,21 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
         body = page.text
         # ``label`` is prefilled into its text control.
         assert f'data-field="label" data-kind="string" type="text" value="{label}"' in body
-        # ``color`` renders the per-send options (labels shown, values posted), the prefill
-        # selected, and the published enum values do NOT appear.
-        assert '<option value="green" selected>Green</option>' in body
-        assert '<option value="amber">Amber</option>' in body
+        # ``color`` renders the per-send options as a radio group (two options, below the
+        # radio threshold), labels shown and values posted, the prefill checked, and the
+        # published enum values do NOT appear.
+        assert (
+            '<input type="radio" name="color" data-field="color" data-kind="string" value="green" checked> Green'
+            in body
+        )
+        assert '<input type="radio" name="color" data-field="color" data-kind="string" value="amber"> Amber' in body
         assert ">red<" not in body
         assert ">blue<" not in body
         # A ``format: date`` property renders the native date control, prefilled ISO value.
         assert 'data-field="when" data-kind="string" type="date" value="2024-01-15"' in body
         # The pages render as ordered steps: the first visible, the rest hidden, with nav.
-        assert '<section class="step" data-step="0">' in body
-        assert '<section class="step" data-step="1" hidden>' in body
+        assert '<section class="step" data-step="0" data-page-title="Who">' in body
+        assert '<section class="step" data-step="1" data-page-title="How many" hidden>' in body
         assert '<h2 tabindex="-1">Who</h2>' in body
         assert '<h2 tabindex="-1">How many</h2>' in body
         assert 'data-nav="back"' in body
