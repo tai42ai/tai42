@@ -146,7 +146,7 @@ dev = [
     # job's offline pass with ``-n``); pytest-cov aggregates the workers' data so
     # the combined coverage floor is unchanged.
     "pytest-xdist>=3.6",
-    "ruff>=0.6",
+    "ruff>=0.16.9",
     "pyright>=1.1.389",
     "fakeredis[lua]>=2.21",
 ]
