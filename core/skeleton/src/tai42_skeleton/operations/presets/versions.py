@@ -39,6 +39,7 @@ from tai42_skeleton.operations.presets.authoring import (
 )
 from tai42_skeleton.operations.presets.create import _NOT_CONFIGURED_CODE, _NOT_CONFIGURED_NOUN
 from tai42_skeleton.operations.presets.models import PresetRollback, PresetVersionSave, PresetVersionTags
+from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
 from tai42_skeleton.operations.presets.views import _save_version_response, _wire_snapshot
 from tai42_skeleton.operations.response_models_group_a import (
     PresetRollbackResult,
@@ -183,6 +184,10 @@ async def _save_version_core(
     await _validate_version_body(
         name, new_body, input_schema=input_schema, fixed_kwargs_provided=fixed_kwargs is not None
     )
+    # Referential integrity: a bound conversation route whose target this preset IS must still bind
+    # against the NEW version — the candidate body, judged before the write so a save that would
+    # strand a route is a 409 that commits nothing (the rename gate's stance, for the reverse edge).
+    await _assert_bound_routes_still_bind(name, new_body)
     # A NEWLY provided binding is attach-validated at SAVE, exactly as create does — its
     # named templates attach idempotently and its expressions/adapters compile, so a bad
     # edit is a 400 that persists nothing. A carried-forward binding was vetted at its
@@ -340,6 +345,10 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     write_validator_error = await _write_validator_error(target_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    # Referential integrity: a bound conversation route whose target this preset IS must still bind
+    # against the version rolled back TO — judged before the re-point so a rollback that would strand
+    # a route is a 409 that commits nothing.
+    await _assert_bound_routes_still_bind(name, target_body)
     # Registration-tier fence: the tier is the target body's base tool.
     await _enforce_registration_tier(target_body.base_tool)
     # A rollback ACTIVATES the target version's own door binding, so it is attach-validated

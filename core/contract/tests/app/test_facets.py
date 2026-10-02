@@ -546,7 +546,7 @@ def test_app_conversations_is_runtime_checkable_and_shaped():
         async def pending_messages(self, thread_id: str, *, after: str) -> list[object]:
             return []
 
-        def register_target_validator(self, target_kind: object, validator: object) -> None:
+        def register_target_validator(self, target_kind: object, target_name: object, validator: object) -> None:
             return None
 
         async def notify_inbound_rejected(

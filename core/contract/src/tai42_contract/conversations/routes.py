@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -15,19 +15,26 @@ from tai42_contract.interactions.door_contract import PARKED_VARIABLE_ANNOTATION
 from tai42_contract.locale import normalize_optional_locale
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
+if TYPE_CHECKING:
+    from tai42_contract.presets import PresetBody
+
 #: Which door a route is reached through: ``api`` delivers by signed callback,
 #: ``channel`` delivers back through the medium adapter's ``notify``.
 ConversationDoor = Literal["api", "channel"]
 
-#: A per-target-kind bind validator registered on the conversations facet: given a route's
-#: FULL create model, returns the BLOCKING message lines that forbid binding its target to
-#: the route (empty = allow). Route creation consults the registered validator for the
-#: target's kind before the route exists, so a defect the target carries against the route's
-#: own door fields — a flow reading a state no binding supplies, an asking agent with no
-#: reply/resume path — is refused at bind, not discovered at run time. Passing the whole
-#: model (not just the name) lets a validator judge the target against those door fields.
-#: Blocking only — a warning is not a bind-path concept.
-TargetBindValidator = Callable[["ConversationRouteCreate"], Awaitable[Sequence[str]]]
+#: A bind validator a plugin registers for the one tool or agent it OWNS, consulted when a
+#: conversation route's target RESOLVES to that owner (an agent is its own name; a tool walks
+#: its parent-tool chain, so a preset inherits its base tool's owner). Given the route's FULL
+#: create model and the target's CANDIDATE body — the owned tool's stored body for a preset
+#: target, or ``None`` when the target carries no such body — it returns the BLOCKING message
+#: lines that forbid binding the target to the route (empty = allow). Consulted after the
+#: target exists but before the row is written, so a defect the target carries against the
+#: route's own door fields is refused at bind, not discovered at run time. The candidate body
+#: lets the owner judge an UNSAVED version of the target (a version a write has not yet
+#: committed), not only the active one. Passing the whole create model (not just the name) lets
+#: the owner judge the target against those door fields. Blocking only — a warning is not a
+#: bind-path concept.
+TargetBindValidator = Callable[["ConversationRouteCreate", "PresetBody | None"], Awaitable[Sequence[str]]]
 
 #: A thread's conversation control mode: ``agent`` runs the target turn (an agent run or a
 #: tool dispatch); ``manual`` suppresses the target turn so an operator answers by hand,

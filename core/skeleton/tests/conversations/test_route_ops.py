@@ -958,24 +958,20 @@ async def test_delete_route_cancels_parks_before_removing_the_routing_row(
     await _assert_park_cancelled(store, fake, interaction_id="ia", thread_id=thread)
 
 
-# -- the registered target bind validator (warn-then-error at bind) --------
+# -- the owner-keyed target bind validator + the platform asking-agent rule ----
 
 
-async def test_create_consults_the_registered_target_validator_and_refuses_on_messages(wired):
-    """A plugin's bind validator for the target's kind refuses the create with its message
-    lines (a 422), and no row is written — a defect the target carries (a flow reading a
-    state no binding supplies) is caught at bind, not deferred to run time."""
+async def test_create_consults_the_owner_validator_and_refuses_on_messages(wired):
+    """The validator registered for the target's owner refuses the create with its message lines (a
+    422), and no row is written — a defect the target carries is caught at bind, not run time."""
     from tai42_skeleton.app import instance
 
-    async def _validator(create: ConversationRouteCreate) -> list[str]:
-        return [
-            f"state acct is read by n1.jq (.acct) but flow {create.target_name} binds no such state "
-            "— bind it on the flow's Bindings tab"
-        ]
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return [f"target {create.target_name} reads a state nothing binds"]
 
-    instance.app.conversations.register_target_validator("tool", _validator)
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
 
-    with pytest.raises(ValidationRejectedError, match="binds no such state"):
+    with pytest.raises(ValidationRejectedError, match="reads a state nothing binds"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
@@ -987,13 +983,13 @@ async def test_create_consults_the_registered_target_validator_and_refuses_on_me
     assert "chat" not in wired.rows
 
 
-async def test_create_passes_when_the_target_validator_returns_no_messages(wired):
+async def test_create_passes_when_the_owner_validator_returns_no_messages(wired):
     from tai42_skeleton.app import instance
 
-    async def _validator(create: ConversationRouteCreate) -> list[str]:
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
         return []
 
-    instance.app.conversations.register_target_validator("tool", _validator)
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
 
     result = await ops.create_conversation_route(
         route_name="chat",
@@ -1006,53 +1002,95 @@ async def test_create_passes_when_the_target_validator_returns_no_messages(wired
     assert result["created"] is True
 
 
-async def test_a_tool_validator_does_not_fire_for_an_agent_target(wired):
-    """The registry is keyed by target kind: a validator registered for ``tool`` never runs
-    for an ``agent`` route."""
+async def test_a_validator_for_tool_a_does_not_run_for_tool_b(wired):
+    """The registry is keyed by owner: a validator registered for one tool never runs for another."""
     from tai42_skeleton.app import instance
 
-    async def _validator(create: ConversationRouteCreate) -> list[str]:
-        raise AssertionError("the tool validator must not run for an agent target")
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        raise AssertionError("the validator for other-tool must not run for echo-tool")
 
-    instance.app.conversations.register_target_validator("tool", _validator)
+    instance.app.conversations.register_target_validator("tool", "other-tool", _validator)
 
     result = await ops.create_conversation_route(
         route_name="chat",
         door="api",
-        target_kind="agent",
-        target_name="relay",
+        target_kind="tool",
+        target_name="echo-tool",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
     assert result["created"] is True
 
 
-async def test_registering_two_validators_for_one_kind_raises(wired):
-    from tai42_skeleton.app import instance
-
-    async def _one(create: ConversationRouteCreate) -> list[str]:
-        return []
-
-    async def _two(create: ConversationRouteCreate) -> list[str]:
-        return []
-
-    instance.app.conversations.register_target_validator("tool", _one)
-    with pytest.raises(ValueError, match="already registered"):
-        instance.app.conversations.register_target_validator("tool", _two)
-
-
-async def test_registered_validator_receives_the_full_route_model(wired):
-    """The bind validator is handed the whole ``ConversationRouteCreate`` — not just the target
-    name — so it can judge the target against the route's own door fields."""
+async def test_a_preset_over_a_tool_inherits_its_base_tools_validator(wired):
+    """A preset resolves to its base tool (its ``parent_tool`` chain), so the validator registered for
+    the base runs for the preset — a second name does not bind around the owner's check."""
     from tai42_skeleton.app import instance
 
     seen: dict[str, object] = {}
 
-    async def _validator(create: ConversationRouteCreate) -> list[str]:
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        seen["name"] = create.target_name
+        return [f"owner validator ran for {create.target_name}"]
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
+
+    with pytest.raises(ValidationRejectedError, match="owner validator ran for echo-preset"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-preset",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert seen["name"] == "echo-preset"
+    assert "chat" not in wired.rows
+
+
+async def test_two_plugins_on_two_tools_both_load(wired):
+    """Each owner holds its own slot: registering a validator for each of two tools is accepted."""
+    from tai42_skeleton.app import instance
+
+    async def _one(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return []
+
+    async def _two(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return []
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _one)
+    instance.app.conversations.register_target_validator("tool", "other-tool", _two)
+    assert instance.app._target_validator_registry.get("tool", "echo-tool") is _one
+    assert instance.app._target_validator_registry.get("tool", "other-tool") is _two
+
+
+async def test_registering_the_same_owner_twice_raises(wired):
+    from tai42_skeleton.app import instance
+
+    async def _one(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return []
+
+    async def _two(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return []
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _one)
+    with pytest.raises(ValueError, match="already registered"):
+        instance.app.conversations.register_target_validator("tool", "echo-tool", _two)
+
+
+async def test_owner_validator_receives_the_full_route_model_and_candidate(wired):
+    """The owner validator is handed the whole ``ConversationRouteCreate`` and the target's candidate
+    body — not just the name — so it can judge the target against the route's own door fields."""
+    from tai42_skeleton.app import instance
+
+    seen: dict[str, object] = {}
+
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
         seen["model"] = create
+        seen["candidate"] = candidate
         return [f"reading start_expr {create.start_expr!r} on route {create.route_name!r}"]
 
-    instance.app.conversations.register_target_validator("tool", _validator)
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
 
     with pytest.raises(ValidationRejectedError, match="reading start_expr"):
         await ops.create_conversation_route(
@@ -1070,18 +1108,15 @@ async def test_registered_validator_receives_the_full_route_model(wired):
     assert model.target_name == "echo-tool"
     assert model.start_expr is not None
     assert model.start_expr.content == "{message: .message}"
+    # echo-tool is a base tool, not a preset, so its candidate body is None.
+    assert seen["candidate"] is None
     assert "chat" not in wired.rows
 
 
-async def test_platform_agent_validator_refuses_an_asking_agent_with_no_reply_resume(wired):
-    """With no consumer validator registered, the platform's own ``agent`` validator alone runs:
-    an agent whose tool_names include ``ask`` bound with neither ``reply_expr`` nor ``resume_expr``
-    is refused, and no row is written."""
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
-
-    register_platform_target_validators(instance.app._target_validator_registry)
-
+async def test_platform_rule_refuses_an_asking_agent_with_no_reply_resume(wired):
+    """The platform's own asking-agent rule runs with NO registration (it is plain bind-check code,
+    not a registry entry): an agent whose tool_names include ``ask`` bound with neither ``reply_expr``
+    nor ``resume_expr`` is refused, and no row is written."""
     with pytest.raises(ValidationRejectedError, match="no reply_expr and no resume_expr"):
         await ops.create_conversation_route(
             route_name="chat",
@@ -1094,14 +1129,9 @@ async def test_platform_agent_validator_refuses_an_asking_agent_with_no_reply_re
     assert "chat" not in wired.rows
 
 
-async def test_platform_agent_validator_refuses_when_only_one_expr_is_present(wired):
-    """The asking agent needs BOTH exprs: a route giving only ``reply_expr`` is still refused,
-    the message naming the one still missing."""
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
-
-    register_platform_target_validators(instance.app._target_validator_registry)
-
+async def test_platform_rule_refuses_when_only_one_expr_is_present(wired):
+    """The asking agent needs BOTH exprs: a route giving only ``reply_expr`` is still refused, the
+    message naming the one still missing."""
     with pytest.raises(ValidationRejectedError, match="no resume_expr"):
         await ops.create_conversation_route(
             route_name="chat",
@@ -1115,14 +1145,8 @@ async def test_platform_agent_validator_refuses_when_only_one_expr_is_present(wi
     assert "chat" not in wired.rows
 
 
-async def test_platform_agent_validator_passes_an_asking_agent_with_reply_and_resume(wired):
-    """The asking agent binds cleanly once the route carries both ``reply_expr`` and
-    ``resume_expr`` — the platform check is satisfied and the row is written."""
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
-
-    register_platform_target_validators(instance.app._target_validator_registry)
-
+async def test_platform_rule_passes_an_asking_agent_with_reply_and_resume(wired):
+    """The asking agent binds cleanly once the route carries both ``reply_expr`` and ``resume_expr``."""
     result = await ops.create_conversation_route(
         route_name="chat",
         door="api",
@@ -1136,14 +1160,9 @@ async def test_platform_agent_validator_passes_an_asking_agent_with_reply_and_re
     assert result["created"] is True
 
 
-async def test_platform_agent_validator_ignores_a_non_asking_agent(wired):
-    """The platform check only fires for an agent that can ask: a plain agent (no ``ask`` in its
+async def test_platform_rule_ignores_a_non_asking_agent(wired):
+    """The platform rule only fires for an agent that can ask: a plain agent (no ``ask`` in its
     tool_names) binds with no exprs at all."""
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.conversations.target_validators import register_platform_target_validators
-
-    register_platform_target_validators(instance.app._target_validator_registry)
-
     result = await ops.create_conversation_route(
         route_name="chat",
         door="api",
@@ -1153,3 +1172,121 @@ async def test_platform_agent_validator_ignores_a_non_asking_agent(wired):
         callback_url="https://example.com/cb",
     )
     assert result["created"] is True
+
+
+async def test_platform_rule_fires_for_an_asking_agent_reached_as_a_tool(wired):
+    """Standard 2: an agent reached through the ``tool`` kind (its run tool) resolves to the agent, so
+    the asking-agent rule fires there too — a second name is not a way around the check."""
+    with pytest.raises(ValidationRejectedError, match="no reply_expr and no resume_expr"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="asker",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert "chat" not in wired.rows
+
+
+async def test_platform_rule_reads_baked_tool_names_for_a_preset_over_an_agent(wired):
+    """Standard 2: a preset over an agent binds only as ``tool`` and BAKES the agent's tool_names; the
+    asking-agent rule reads the baked list from the candidate body. A preset baking ``ask`` with no
+    reply/resume is refused; one baking an empty list overrides the agent to not-asking and binds."""
+    from tai42_contract.presets import PresetBody
+
+    from tai42_skeleton.conversations.target_validators import target_bind_refusal_lines
+
+    route = ConversationRouteCreate(
+        route_name="chat",
+        door="api",
+        target_kind="tool",
+        target_name="asker-preset",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+
+    asking = PresetBody(base_tool="asker", description="d", fixed_kwargs={"tool_names": ["ask"]})
+    lines = await target_bind_refusal_lines(route, asking)
+    assert any("no reply_expr and no resume_expr" in line for line in lines)
+
+    quiet = PresetBody(base_tool="asker", description="d", fixed_kwargs={"tool_names": []})
+    assert await target_bind_refusal_lines(route, quiet) == []
+
+
+# -- Standard 3: a target write re-checks the routes still bound to the preset ----
+
+
+async def test_bound_route_recheck_refuses_a_save_that_would_break_it(wired, monkeypatch):
+    """A save/rollback whose candidate version would leave a bound route unable to bind is refused,
+    naming the route — the referential-integrity stance a rename takes, for the reverse edge. The
+    candidate (the UNSAVED version) is what the owner's validator judges."""
+    from tai42_contract.presets import PresetBody
+
+    import tai42_skeleton.conversations as conv_pkg
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.errors import ConflictError
+    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+
+    async def _validator(create: ConversationRouteCreate, candidate: PresetBody | None) -> list[str]:
+        if candidate is not None and candidate.fixed_kwargs.get("broken"):
+            return [f"target {create.target_name} reads a state nothing binds"]
+        return []
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
+    # A route bound to a preset over echo-tool (its target resolves to the echo-tool owner).
+    await ops.create_conversation_route(
+        route_name="r1",
+        door="api",
+        target_kind="tool",
+        target_name="echo-preset",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    # The write-chain helper reads routes through the conversations module's manager.
+    monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
+
+    good = PresetBody(base_tool="echo-tool", description="d", fixed_kwargs={})
+    await _assert_bound_routes_still_bind("echo-preset", good)  # the new version still binds → no refusal
+
+    bad = PresetBody(base_tool="echo-tool", description="d", fixed_kwargs={"broken": True})
+    with pytest.raises(ConflictError, match="would break conversation route"):
+        await _assert_bound_routes_still_bind("echo-preset", bad)
+
+
+async def test_bound_route_recheck_ignores_a_preset_no_route_binds(wired, monkeypatch):
+    """A save of a preset no route targets is never refused by the re-check."""
+    import tai42_skeleton.conversations as conv_pkg
+    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+
+    monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
+    # No routes exist at all — the re-check finds nothing to refuse.
+    await _assert_bound_routes_still_bind("echo-preset", None)
+
+
+async def test_delete_is_refused_while_a_route_is_bound(wired, monkeypatch):
+    """A preset delete is refused — naming the routes — while a conversation route still targets it."""
+    import tai42_skeleton.conversations as conv_pkg
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.errors import ConflictError
+    from tai42_skeleton.operations.presets.references import _assert_no_bound_routes
+
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return []
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
+    await ops.create_conversation_route(
+        route_name="r1",
+        door="api",
+        target_kind="tool",
+        target_name="echo-preset",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
+
+    with pytest.raises(ConflictError, match="cannot be deleted — held by: conversation route 'r1'"):
+        await _assert_no_bound_routes("echo-preset")
+
+    # A preset no route targets deletes freely (nothing held).
+    await _assert_no_bound_routes("other-preset")

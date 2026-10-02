@@ -16,7 +16,6 @@ from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.providers.registry import reset_registry
-from tai42_skeleton.conversations.target_validators import register_platform_target_validators
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
@@ -59,11 +58,10 @@ class BootMixin(LifecycleState):
 
         # Reset so a dropped conversation target validator doesn't linger across
         # update()/reload — the manifest's plugin modules re-run their
-        # register_target_validator() call each start(). Mirrors the reset above.
-        # Then re-register the platform's own validators (the ``agent`` kind), which the
-        # skeleton owns rather than a plugin module, before any plugin registers its kinds.
+        # register_target_validator() call each start(). Mirrors the reset above. The
+        # platform's own bind rules are plain code in the route bind check, not a registry
+        # entry, so there is nothing of the platform's to re-register here.
         self._target_validator_registry.reset()
-        register_platform_target_validators(self._target_validator_registry)
 
         # Reset the per-base-tool preset input-schema support + registration-tier
         # declarations alongside the write validator, for the same reload reason. The

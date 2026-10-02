@@ -7,7 +7,11 @@ key revoked since the backup was taken."""
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
+from pydantic import BaseModel
+from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError
@@ -15,6 +19,7 @@ from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.conversations import backup
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 
 
 class _DictManager(BaseConversationsManager):
@@ -351,3 +356,55 @@ async def test_import_under_overwrite_replaces_route_and_remints_secret(wired):
     new_secret = report["new_callback_secrets"][0]["callback_secret"]
     assert wired.rows["chat"].callback_secret == new_secret
     assert new_secret != "live-secret"
+
+
+class _AskerInput(BaseModel):
+    user_message: str = ""
+
+
+class _AskingAgent(Agent):
+    """An agent whose declared ``tool_names`` include ``ask`` — the platform bind rule needs a reply/resume path."""
+
+    tool_name = "asker"
+    tool_names: ClassVar[list[str]] = ["ask"]
+    ToolInput = _AskerInput
+
+    async def run(self, *, user_message=None, **kwargs):
+        return ""
+
+
+class _BindCheckApp:
+    """A minimal app exposing the agent registry and validator registry the route bind check reads."""
+
+    class _Agents:
+        def all_agents(self):
+            return {"asker": _AskingAgent()}
+
+    def __init__(self) -> None:
+        self.agents = _BindCheckApp._Agents()
+        self._target_validator_registry = TargetBindValidatorRegistry()
+
+
+async def test_import_rejects_a_row_whose_target_fails_the_bind_check(wired, monkeypatch):
+    """A restored row whose target cannot bind — an asking agent bound with no reply/resume path — is a
+    per-row rejection in the report, never written, the SAME bind check the create door runs."""
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setattr(instance, "app", _BindCheckApp(), raising=False)
+
+    row = ConversationRoute(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="asker",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+        execution_key_fingerprint="fp-1",
+    ).model_dump(mode="json")
+    del row["callback_secret"]
+
+    report = await backup.import_conversation_routes({"routes": [row]})
+    assert report["created"] == 0
+    assert report["skipped"] == 1
+    assert any("reply_expr" in err for err in report["errors"])
+    assert "chat" not in wired.rows

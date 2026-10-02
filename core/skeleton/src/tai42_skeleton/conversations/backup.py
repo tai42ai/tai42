@@ -117,6 +117,28 @@ async def _authorize_row(
     return True
 
 
+async def _bind_check_row(route: ConversationRoute, report: _SectionReport) -> bool:
+    """Whether ``route`` passes the SAME bind check the create door runs, a per-row rejection on failure.
+
+    Resolves the row's target to its owner and runs the platform's own rules plus the owner's
+    validator against the target's active body; a target with a bind-time defect against the route's
+    door fields — an asking target bound with no reply/resume path, say — is rejected per row in the
+    report rather than restored as a route that cannot run.
+    """
+    from tai42_skeleton.conversations.target_validators import (
+        active_target_candidate_body,
+        target_bind_refusal_lines,
+    )
+
+    candidate = await active_target_candidate_body(route.target_kind, route.target_name)
+    lines = await target_bind_refusal_lines(route, candidate)
+    if lines:
+        report["errors"].append(f"route {route.route_name!r}: {'; '.join(lines)}")
+        report["skipped"] += 1
+        return False
+    return True
+
+
 async def _write_row(
     route: ConversationRoute,
     manager: BaseConversationsManager,
@@ -189,6 +211,8 @@ async def import_conversation_routes(
         if route is None:
             continue
         if not await _authorize_row(route, scan, claimed, report):
+            continue
+        if not await _bind_check_row(route, report):
             continue
         await _write_row(route, manager, existing, claimed, report)
 

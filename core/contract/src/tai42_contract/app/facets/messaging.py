@@ -481,14 +481,19 @@ class AppConversations(Protocol):
         """
         ...
 
-    def register_target_validator(self, target_kind: ConversationTargetKind, validator: TargetBindValidator) -> None:
-        """Register a bind validator for routes whose target is of ``target_kind``.
+    def register_target_validator(
+        self, target_kind: ConversationTargetKind, target_name: str, validator: TargetBindValidator
+    ) -> None:
+        """Register a bind validator for the ``(target_kind, target_name)`` the plugin OWNS.
 
-        A plugin calls this through the ``tai42_app`` handle when its module loads.
-        Route creation consults every registered validator for the route's target kind
-        AFTER the target exists but BEFORE the route is written; a validator returning
-        any message lines refuses the creation with them (a 422), so a defect the target
-        carries — a flow reading a state no binding supplies — is caught at bind, never
-        deferred to run time. Registering two validators for one kind raises loudly.
+        A plugin calls this through the ``tai42_app`` handle when its module loads, naming the
+        one tool or agent it owns. A conversation route whose target RESOLVES to that owner (an
+        agent is its own name; a tool walks its parent-tool chain, so a preset inherits its base
+        tool's owner) consults the validator AFTER the target exists but BEFORE the route is
+        written; a validator returning any message lines refuses the creation with them (a 422),
+        so a defect the target carries is caught at bind, never deferred to run time. The
+        validator is passed the route's full create model and the target's candidate body.
+        Registering two validators for one ``(target_kind, target_name)`` raises loudly — a name
+        has one owner.
         """
         ...
