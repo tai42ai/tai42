@@ -687,7 +687,7 @@ jobs:
   # bot. The registry's latest can advance with no file change, so like `fleet`
   # and `stable-resolution` this runs unconditionally rather than behind a path
   # filter. The check script's own Node tests run beside it.
-  frontend-npm-majors:
+  first-party-npm-majors:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.browser_lane != 'true' }}
     runs-on: ubuntu-latest
@@ -1271,7 +1271,7 @@ jobs:
             --package tai42-skeleton --dir core/skeleton --consumer-req "$REQ"
 
   ci-ok:
-    needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, frontend-npm-majors, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
+    needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, first-party-npm-majors, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
