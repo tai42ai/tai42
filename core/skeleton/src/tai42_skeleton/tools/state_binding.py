@@ -31,6 +31,7 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import compile_check
 
+from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 if TYPE_CHECKING:
@@ -206,6 +207,11 @@ async def apply_binding_updates(
     its resolved program name (the SAME update from any door on one state is one writer); a
     CUSTOM update writes as the door's own writer (``door_id`` = the dispatched definition).
     An attach whose ``scope_expr`` predicate is ``false`` is skipped.
+
+    While a states unit of work is bound to the caller's scope the write set STAGES into it rather
+    than landing in the store — so these binding writes read back within the scope and roll back
+    with a discard, exactly as the facet's own read seam serves a bound unit; with no unit open the
+    set applies directly, as one transaction, through :meth:`app.states.apply_batch`.
     """
     items: list[StateBatchWrite] = []
     for attach in binding.states:
@@ -253,7 +259,11 @@ async def apply_binding_updates(
                         origin=WriteOrigin(consumer=f"door:{door_id}"),
                     )
                 )
-    await app.states.apply_batch(items)
+    unit = current_state_unit()
+    if unit is not None:
+        await unit.stage(items)
+    else:
+        await app.states.apply_batch(items)
 
 
 async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> None:

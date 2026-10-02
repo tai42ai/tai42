@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 if TYPE_CHECKING:
     from collections import OrderedDict
+    from collections.abc import Sequence
 
     from psycopg import AsyncConnection
     from tai42_contract.states.models import (
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
         StatesAttachValidatorRegistry,
         StatesConsumerListerRegistry,
     )
-    from .unit import _StateUnit
+    from .unit import _StagedReplace, _StateUnit
 
 
 class _StatesServiceBase:
@@ -117,6 +118,16 @@ class _StatesServiceBase:
         self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
     ) -> StateRecord | None: ...
 
+    async def replace(
+        self,
+        state: str,
+        subject: StateSubject,
+        data: dict[str, Any],
+        *,
+        origin: WriteOrigin,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> StateRecord: ...
+
     async def apply(
         self,
         state: str,
@@ -141,6 +152,8 @@ class _StatesServiceBase:
     ) -> TemplateJqApplyResult: ...
 
     async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]: ...
+
+    async def _commit_writes(self, writes: Sequence[StateBatchWrite | _StagedReplace]) -> list[ApplyResult]: ...
 
     async def _resolve_template_jq_ops(
         self,

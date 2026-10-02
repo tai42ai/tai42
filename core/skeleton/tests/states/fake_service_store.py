@@ -231,7 +231,7 @@ class FakeStatesStore:
     async def restore_aliases(self, state, rows):
         self.restored_aliases = list(rows)
 
-    async def replace(self, state, subject, data, *, origin, validate_doc):
+    async def replace(self, state, subject, data, *, origin, validate_doc, conn=None):
         decl = self.declarations.get(state)
         if decl is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
