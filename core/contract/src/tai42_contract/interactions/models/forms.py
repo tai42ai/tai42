@@ -155,7 +155,9 @@ class FormReactions(BaseModel):
     absent ``reactions`` block is a static form, today's behavior). ``field_changed``
     names the input fields whose change triggers a reaction; ``page_advanced`` names the
     pages whose advance triggers one; ``submitted`` is whether the submission is checked by
-    a reaction before it is accepted. ``choices`` names the fields whose CHOICE LIST a
+    a reaction before it is accepted — the server runs that check on every answer door before
+    it records, so a client that ran it first only shows errors early and can never bypass it.
+    ``choices`` names the fields whose CHOICE LIST a
     reaction may supply or replace while the form is open (the slots for a date just
     picked, say): for such a field the platform's static submit check validates its TYPE
     only — never membership in the send-time list, which the reaction replaced — so the
