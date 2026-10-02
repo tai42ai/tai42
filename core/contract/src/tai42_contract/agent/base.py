@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +43,7 @@ from tai42_contract.agent.events import (
     final_event_for_value,
 )
 from tai42_contract.errors import ErrorKind
+from tai42_contract.interactions.models.response import SuspendedInteraction
 from tai42_contract.template import TemplatedText
 
 if TYPE_CHECKING:
@@ -77,20 +79,28 @@ def _resolve_drain_terminal(
 ) -> Any:
     """The terminal rule of a drained event stream — the final value from the collected terminals.
 
-    A park wins first (a clean, non-error receipt), then an interrupt raises, then a typed
-    non-fatal ``outcome`` (structured-output re-prompt cap reached, or the recursion limit hit)
-    is returned as itself — it is the run's answer, so it precedes the requested-but-absent
-    ``response_format`` raise. Else the requested-but-absent ``response_format`` raises, else the
-    last structured/message payload, else ``""`` for an empty run. Never returns a partial.
+    A park wins first — returned as a :class:`~tai42_contract.interactions.SuspendedInteraction`
+    typed value (a clean, non-error outcome; a RETURN is a success or a still-parked typed value,
+    never a failure) — then an interrupt raises, then a typed non-fatal ``outcome``
+    (structured-output re-prompt cap reached, or the recursion limit hit) is returned as itself — it
+    is the run's answer, so it precedes the requested-but-absent ``response_format`` raise. Else the
+    requested-but-absent ``response_format`` raises, else the last structured/message payload, else
+    ``""`` for an empty run. Never returns a partial.
     """
     if suspended is not None:
-        return {
-            "status": "suspended",
-            "interaction_ids": suspended.interaction_ids,
-            "caller_interaction_ids": suspended.caller_interaction_ids,
-            "thread_id": suspended.thread_id,
-            "expiry_at": suspended.expiry_at,
-        }
+        # The park crosses as the shared typed sentinel, recognised by TYPE — carrying the whole
+        # super-step's two id lists so the platform's ``visit`` normalises it per ask, and the
+        # earliest deadline. It carries NO ``resume_owner``: the parked run recorded its own resume
+        # state against those interactions and is the only thing the platform resumes for them, so no
+        # caller may adopt the park as its own.
+        ids = suspended.interaction_ids
+        expiry = datetime.fromisoformat(suspended.expiry_at) if suspended.expiry_at else None
+        return SuspendedInteraction(
+            interaction_id=ids[0],
+            expiry_at=expiry,
+            interaction_ids=list(ids),
+            caller_interaction_ids=list(suspended.caller_interaction_ids),
+        )
     if interrupts:
         raise AgentInterruptedError(interrupts)
     if outcome is not None:
@@ -281,11 +291,11 @@ class Agent(ABC):
 
         Semantics:
 
-        * A :class:`SuspendedFinal` seen → return the suspended RECEIPT dict
-          ``{"status": "suspended", ...}`` (the run parked on an async ask and
-          resumes out of band; it did NOT fail, so this never raises). A park takes
-          precedence over an interrupt — the two never coexist in one pause, but the
-          receipt-before-raise order keeps a park a clean, non-error outcome.
+        * A :class:`SuspendedFinal` seen → return a
+          :class:`~tai42_contract.interactions.SuspendedInteraction` typed value (the run
+          parked on an async ask and resumes out of band; it did NOT fail, so this never
+          raises). A park takes precedence over an interrupt — the two never coexist in one
+          pause, but the park-before-raise order keeps a park a clean, non-error outcome.
         * Any :class:`InterruptFinal` seen → raise :class:`AgentInterruptedError`
           (a non-streaming caller cannot answer an interrupt).
         * A :class:`StructuredOutputUnresolvedFinal` or :class:`RecursionLimitFinal`

@@ -20,6 +20,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import SuspendedInteraction
 
 
 class EchoInput(BaseModel):
@@ -125,21 +126,39 @@ class ParkInput(BaseModel):
 
 @tai42_app.agents.agent("parking")
 class ParkingAgent(Agent):
-    """A run that parks on an async ask: its ``run`` returns the INTERNAL suspended-receipt
-    dict (the shape ``Agent._drain`` yields), so a test can observe the agent tool-face convert
-    it to the ``SuspendedInteraction`` sentinel a caller recognizes by type."""
+    """A run that parks on an async ask: its ``run`` returns a ``SuspendedInteraction`` typed
+    value (the shape ``Agent._drain`` yields), so a test can observe the agent tool-face pass the
+    park through by TYPE — a caller recognizes the park without any status inspection."""
 
     tool_name = "parking"
-    tool_description = "Park on an async ask and return the suspended receipt."
+    tool_description = "Park on an async ask and return the suspended sentinel."
     ToolInput = ParkInput
 
     async def run(self, **kwargs) -> Any:
-        return {
-            "status": "suspended",
-            "interaction_ids": ["i-parked"],
-            "thread_id": "bridge:x:y",
-            "expiry_at": None,
-        }
+        return SuspendedInteraction(
+            interaction_id="i-parked",
+            interaction_ids=["i-parked"],
+            caller_interaction_ids=[],
+        )
+
+
+class StatusAnswerInput(BaseModel):
+    text: str = ""
+
+
+@tai42_app.agents.agent("status_answer")
+class StatusAnswerAgent(Agent):
+    """A run whose own ANSWER is a plain dict that happens to carry a ``status`` key equal to
+    ``"suspended"``. The run did NOT park — the dict is its result — so the agent tool-face must
+    deliver it as a SUCCESS, recognising a park by TYPE (``SuspendedInteraction``) and never by a
+    status key in a returned value."""
+
+    tool_name = "status_answer"
+    tool_description = "Answer with a plain dict that carries a status key."
+    ToolInput = StatusAnswerInput
+
+    async def run(self, **kwargs) -> Any:
+        return {"status": "suspended", "data": "this is the real answer"}
 
 
 class NestedToolsInput(BaseModel):

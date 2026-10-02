@@ -305,8 +305,8 @@ class ToolsAgent(Agent):
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
         (answering a prior async-ask park with ``Command(resume=...)``). A run that
-        parks on an async ``ask`` returns a suspended RECEIPT
-        (``{"status": "suspended", ...}``) instead of an answer and resumes out of
+        parks on an async ``ask`` returns a :class:`SuspendedInteraction` typed value
+        (recognised by TYPE) instead of an answer and resumes out of
         band. This face captures the AMBIENT park completion (in parity with
         :meth:`astream`): when a door bound one around the dispatch (a conversation
         agent turn, a flow node chaining a continuation), the park carries that

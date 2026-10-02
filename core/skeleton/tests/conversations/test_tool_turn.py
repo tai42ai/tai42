@@ -204,23 +204,22 @@ async def test_tool_target_success_status_maps_through_reply_expr(env, monkeypat
     [
         # No status key at all — the arbitrary dict most tools return.
         {"result": {"reply": "all done"}},
-        # A status key from a tool's OWN vocabulary: not a terminal-outcome name, so it stays
-        # on the reply path — the turn diverts only on a named non-success terminal.
+        # A RETURNED value is a SUCCESS: the turn does no status inspection, so a ``status`` key of
+        # ANY value is a plain payload field that keeps mapping — a tool's own vocabulary, a status
+        # report about a run, the park-completion FIRE vocabulary, or an engine terminal name alike.
         {"status": "queued", "result": {"reply": "all done"}},
         {"status": "not_found", "result": {"reply": "all done"}},
-        # A status REPORT about a run is a successful answer, not a terminal of THIS call.
         {"status": "errored", "result": {"reply": "all done"}},
-        # The park-completion FIRE vocabulary is not a returned-envelope terminal either.
         {"status": "failed", "result": {"reply": "all done"}},
-        # Matching is case-sensitive, so a look-alike casing is a tool's own vocabulary.
-        {"status": "Aborted", "result": {"reply": "all done"}},
-        # A null/non-string status is a plain payload field, never a terminal name.
+        {"status": "aborted", "result": {"reply": "all done"}},
+        {"status": "suspended", "result": {"reply": "all done"}},
+        # A null / non-string status is a plain payload field like any other.
         {"status": None, "result": {"reply": "all done"}},
         {"status": 500, "result": {"reply": "all done"}},
         {"status": ["error"], "result": {"reply": "all done"}},
     ],
 )
-async def test_tool_target_result_without_a_terminal_status_still_maps_through_reply_expr(env, monkeypatch, result):
+async def test_a_returned_value_maps_through_reply_expr_regardless_of_any_status_key(env, monkeypatch, result):
     channel = FakeChannel()
     route = _tool_channel_route(reply_expr=".result.reply // null")
     _wire(monkeypatch, FakeManager(route), channel)

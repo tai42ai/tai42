@@ -15,6 +15,7 @@ from tai42_contract.conversations import AnswerPart, ConversationRoute, Person, 
 from tai42_contract.interactions import (
     LocationElement,
     MediaItem,
+    RunTerminalFailed,
     VisitOutcome,
     reset_park_completion,
     set_park_completion,
@@ -38,10 +39,8 @@ from tai42_skeleton.conversations.turn.outcome import (
 )
 from tai42_skeleton.conversations.turn.overlap import is_message_turn
 from tai42_skeleton.conversations.turn.tool_result import (
-    _failed_result_detail,
-    _interrupt_result_detail,
+    _failed_outcome_detail,
     _result_shape,
-    _suspended_result_note,
 )
 from tai42_skeleton.interactions.visit import list_parked, visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
@@ -202,43 +201,12 @@ async def _tool_outcome_of_result(
 ) -> _ToolOutcome:
     """Map a started tool run's final result to an outcome.
 
-    Applies the ordered suspended-note / interrupt / failure / reply-mapping disposition chain (a
-    caller park or a user park is normalised by the visit, never reaching here). A paused/suspended
-    envelope is silent, an interrupt or non-success terminal is a client-safe error, and a clean
-    result maps through ``reply_expr`` to an answer or (null/blank) a silent outcome.
+    A ``kind="result"`` run returned a value, so it is a SUCCESS: it maps through ``reply_expr`` to
+    an answer or (null/blank) a silent outcome, with NO status inspection. A failure RAISED a
+    :class:`~tai42_contract.interactions.RunTerminalFailed`, caught by the caller before it reaches
+    here; a still-parked run is a typed contract value the visit normalised to a caller-ask / re-park
+    / silent outcome, never a ``result``.
     """
-    suspended_note = _suspended_result_note(result)
-    if suspended_note is not None:
-        # The run handed back a NON-TERMINAL SUSPENDED envelope, NOT the SuspendedInteraction
-        # marker: an engine-caller async re-park (``"suspended"``) that no tool-face converted to a
-        # sentinel. Its flagged reply surface is still DOWNSTREAM of the pause, so mapping it
-        # through reply_expr would answer a not-ready reply as a produced one (faulting an authored
-        # completeness guard, or delivering a blank). A suspend is NEITHER success nor failure and
-        # HAS a delivery leg, so it takes NEITHER the reply path NOR the error path: end the turn
-        # silently exactly as the marker branch above does, and the real reply delivers out of band
-        # through the completion continuation bound around this dispatch when the resume drives past
-        # the pause. The note rides the silent record so it reads as PENDING, not lost.
-        logger.info("conversations: tool turn for route %r paused: %s", route.route_name, suspended_note)
-        return _SilentOutcome(note=suspended_note)
-    interrupt_detail = _interrupt_result_detail(result)
-    if interrupt_detail is not None:
-        # The run handed back an INTERRUPT envelope. Unlike a suspend, an interrupt pause
-        # reaching a conversation turn has NO delivery leg — the turn cannot drive the run, so the
-        # reply would never arrive. That is a permanent route misconfiguration, and silencing it
-        # would convert a noticed failure into quiet data loss. It is surfaced as the SAME failed
-        # turn a non-success terminal is — the route's client-safe error reply to the participant, the
-        # cause named in the recorded detail — so the misconfiguration is loud. Logged at WARNING,
-        # not info: this is a fault, not a routine pause.
-        logger.warning("conversations: tool turn for route %r interrupted: %s", route.route_name, interrupt_detail)
-        return _tool_error(interrupt_detail, route)
-    failure_detail = _failed_result_detail(result)
-    if failure_detail is not None:
-        # The tool RETURNED a non-success terminal instead of raising: the run was aborted,
-        # stopped early, or failed, so its result is partial by construction. The route carries
-        # only a success mapping, so mapping it would answer a half-finished run as a completed
-        # one (or fault inside jq). It is surfaced as the SAME failed turn a raising tool is.
-        logger.error("conversations: tool turn for route %r failed: %s", route.route_name, failure_detail)
-        return _tool_error(failure_detail, route)
     try:
         reply = await _tool_reply(route, result, turn=turn, asks=[], parked=parked)
     except Exception as exc:
@@ -302,12 +270,10 @@ async def _run_tool_turn(
     denied or failed dispatch, or a wrong-typed result is a client-safe ``error`` outcome
     whose detail is logged, never delivered.
 
-    A result that NAMES a non-success terminal (:func:`_failed_result_detail`) is that SAME
-    ``error`` outcome, decided BEFORE any mapping: a tool that reports its failure by returning
-    an outcome envelope rather than raising has produced a partial result, and the route's
-    ``reply_expr`` maps success only — so mapping it would answer a half-finished run as a
-    completed one. The failing status and the envelope's own failure keys ride the recorded
-    detail, so the failure stays diagnosable.
+    A failed run RAISES :class:`~tai42_contract.interactions.RunTerminalFailed`, caught here as
+    that SAME ``error`` outcome: the failure's OPAQUE payload is recorded WHOLE as the detail (no
+    key read out of it) and the route's generic client-safe error is the delivered reply. A RETURNED
+    value is a success the route's ``reply_expr`` maps with no status inspection.
 
     The generic completion continuation (:data:`DELIVER_TOOL_COMPLETION_NAME`) is bound for
     the dispatch's duration, carrying this turn's ``thread_id`` as the opaque delivery
@@ -368,6 +334,15 @@ async def _run_tool_turn(
         # ``superseded`` exactly as the cancel watcher does — no reply, no error reply, no
         # delivery. Caught BEFORE the generic arm so a yield is never mistaken for a turn error.
         return _SupersededOutcome(exc.successor_id)
+    except RunTerminalFailed as exc:
+        # The run reached a failed terminal: the failure is RAISED (never a returned status-keyed
+        # value), carrying the driver's outcome as an OPAQUE payload. Record the payload WHOLE as
+        # the turn's failure detail — no key is read out of it — and deliver the route's generic
+        # client-safe error reply. Caught BEFORE the generic arm so the payload is preserved as the
+        # detail rather than collapsed to ``str(exc)``.
+        detail = _failed_outcome_detail(exc.outcome)
+        logger.exception("conversations: tool turn for route %r failed: %s", route.route_name, detail)
+        return _tool_error(detail, route)
     except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:

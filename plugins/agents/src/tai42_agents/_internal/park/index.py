@@ -293,7 +293,7 @@ async def finalize_resolved_superstep(
     ``resolution`` is one of ``terminal`` (``value`` = the outermost run's outcome the driver
     returns), ``suspended`` (``value`` = the re-park suspended return the face re-normalises), or
     ``aborted`` (written by the kill teardown; ``value`` = the aborted outcome a redrive re-raises
-    as ``ParkResumeFailed``). ``value`` is stored as-is and must be JSON-serializable.
+    as ``RunTerminalFailed``). ``value`` is stored as-is and must be JSON-serializable.
 
     The super-step is also recorded in its run's resolution index (``superstep_id ->
     [interaction_ids]``), refreshed to the same TTL, so a whole-chain kill can reach every record +

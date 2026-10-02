@@ -28,7 +28,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import get_resume_continuation_tool, suspended_interaction_marker
+from tai42_contract.interactions import (
+    SuspendedInteraction,
+    get_resume_continuation_tool,
+    suspended_interaction_marker,
+)
 from tai42_contract.template import TemplatedText
 
 from tai42_agents._internal.park import agent_resume, finalize_drive
@@ -74,7 +78,6 @@ class ScriptedChatModel(BaseChatModel):
 # carry an ask deadline within it — a None-deadline ("wait forever") park is now correctly
 # refused because the workspace would reap first.
 _WITHIN_HORIZON = datetime.now(UTC) + timedelta(hours=1)
-_WITHIN_HORIZON_ISO = _WITHIN_HORIZON.isoformat()
 
 
 class _CountingAsk:
@@ -310,15 +313,15 @@ def test_agent_resume_on_resolved_tombstone_replays_the_stored_terminal(fake_par
 
 
 def test_agent_resume_on_aborted_tombstone_raises_park_resume_failed(fake_park_redis: Any) -> None:
-    from tai42_contract.interactions import ParkResumeFailed
+    from tai42_contract.interactions import RunTerminalFailed
 
     async def go() -> None:
         superstep_id = await _write_park(["i1"])
         aborted = {"status": "aborted", "reason": "killed"}
         await _seed_finalized("t", superstep_id, ["i1"], resolution="aborted", value=res.encode_outcome(aborted))
-        # A redrive of a killed super-step RAISES ParkResumeFailed carrying the aborted outcome, so
+        # A redrive of a killed super-step RAISES RunTerminalFailed carrying the aborted outcome, so
         # the platform delivers FAILED (deduped against the kill's own FAILED).
-        with pytest.raises(ParkResumeFailed) as exc:
+        with pytest.raises(RunTerminalFailed) as exc:
             await agent_resume("i1", "the answer")
         assert exc.value.outcome == aborted
 
@@ -457,14 +460,12 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
         receipt = await agent.run(
             tool_names=["ask"], checkpoint_provider="redis", user_message=TemplatedText(content="go"), thread_id="t-int"
         )
-        assert receipt == {
-            "status": "suspended",
-            "interaction_ids": ["i1"],
-            # A user ask (the ``ask`` stand-in stamps no caller subset), so the caller partition is empty.
-            "caller_interaction_ids": [],
-            "thread_id": "t-int",
-            "expiry_at": _WITHIN_HORIZON_ISO,
-        }
+        assert isinstance(receipt, SuspendedInteraction)
+        assert receipt.interaction_id == "i1"
+        assert receipt.interaction_ids == ["i1"]
+        # A user ask (the ``ask`` stand-in stamps no caller subset), so the caller partition is empty.
+        assert receipt.caller_interaction_ids == []
+        assert receipt.expiry_at == _WITHIN_HORIZON
         assert ask.calls == 1
         assert await idx.read_park_entry("i1") is not None
 
@@ -642,8 +643,8 @@ async def _park_two_parallel_subagents(agent: Any, subagent: Any, ask_calls: dic
         user_message=TemplatedText(content="go"),
         thread_id=thread_id,
     )
-    assert receipt["status"] == "suspended"
-    assert set(receipt["interaction_ids"]) == {"iA", "iB"}
+    assert isinstance(receipt, SuspendedInteraction)
+    assert set(receipt.interaction_ids) == {"iA", "iB"}
     # Each subagent's ask ran exactly once — two parks, one interaction apiece.
     assert ask_calls["n"] == 2
     assert await idx.read_park_entry("iA") is not None

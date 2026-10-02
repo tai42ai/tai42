@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tai42_contract.agent.events import RunUsage, StreamEvent
+from tai42_contract.interactions import SuspendedInteraction
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,8 @@ class AgentInvokeResult:
     it is ``state["structured_response"]`` validated against that format (a missing
     or non-conforming result raises in the invoke path, never surfaces as ``None``).
 
-    ``suspended`` is the async-park RECEIPT (``{"status": "suspended", ...}``) when
-    the run parked on an async ``ask`` instead of finishing; ``None`` on a
+    ``suspended`` is the typed park value (:class:`SuspendedInteraction`, recognised by
+    TYPE) when the run parked on an async ``ask`` instead of finishing; ``None`` on a
     normal terminal run. When set, ``output``/``structured`` carry no answer — the
     run resumes out of band.
 
@@ -52,7 +53,7 @@ class AgentInvokeResult:
     output: str
     usage: CallUsage
     structured: Any = None
-    suspended: dict[str, Any] | None = None
+    suspended: SuspendedInteraction | None = None
     outcome: StreamEvent | None = None
 
 

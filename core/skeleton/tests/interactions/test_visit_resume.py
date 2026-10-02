@@ -4,7 +4,7 @@ Every resume drives the registered ``resume_tool`` face through the platform's `
 one delivery chokepoint (``drive_and_deliver``), never a fake handed the object directly. Covers:
 the resume return shapes (final / re-park / ``ResumeBuffered``), the ``receives_outcome`` delivery
 split (a live receiver takes the outcome inline vs a receiver-less resume subject-tracks it), the
-two plain-raise arms, a ``ParkResumeFailed`` FAILED delivery, that a resume continuation
+two plain-raise arms, a ``RunTerminalFailed`` FAILED delivery, that a resume continuation
 runs WITHOUT the door's state binding, and the undeclared-extras pre-check.
 """
 

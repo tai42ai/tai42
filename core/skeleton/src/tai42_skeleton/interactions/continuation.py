@@ -46,8 +46,8 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     InteractionRequest,
-    ParkResumeFailed,
     ResumeBuffered,
+    RunTerminalFailed,
     SuspendedInteraction,
     register_execution_identity_accessor,
     register_execution_identity_binder,
@@ -128,21 +128,6 @@ def _is_nonterminal(result: Any) -> bool:
     new interaction carries the run's delivery forward.
     """
     return isinstance(result, (SuspendedInteraction, ResumeBuffered))
-
-
-def _terminal_status(outcome: Any) -> str:
-    """Map a driver's returned terminal to the shared completion status.
-
-    A mapping whose ``status`` is ``"success"`` — and a bare non-mapping value, or a mapping that
-    carries no status — is ``PARK_COMPLETION_SUCCEEDED``; a mapping stamped with a non-success
-    ``status`` is ``PARK_COMPLETION_FAILED``. The delivery tool reads this status back to map the
-    outcome to the caller (the success ``result`` vs the uniform failure notice).
-    """
-    if isinstance(outcome, Mapping):
-        status = outcome.get("status")
-        if status is not None and status != "success":
-            return PARK_COMPLETION_FAILED
-    return PARK_COMPLETION_SUCCEEDED
 
 
 async def _clear_due(store: InteractionStore, interaction_id: str) -> None:
@@ -282,11 +267,16 @@ async def drive_and_deliver(
     * a terminal WITH a live inline receiver is RETURNED to it, nothing is fired;
     * a terminal WITHOUT a receiver runs the ladder (``_deliver_terminal``: fire the address, else
       subject-track, else drop);
-    * a ``ParkResumeFailed`` is a TERMINAL to deliver FAILED — with a live receiver it clears the
-      due record and propagates; without one it delivers FAILED through the ladder;
+    * a ``RunTerminalFailed`` is a TERMINAL to deliver FAILED — with a live receiver it clears the
+      due record and propagates; without one it delivers FAILED through the ladder, its ``outcome``
+      the opaque payload the delivery carries whole;
     * a PLAIN raise is keyed on ``receives_outcome``: a live receiver clears the due
       record and the error propagates to the resumer; a receiver-less drive KEEPS the record and
       surfaces the error loudly (the reaper redelivers).
+
+    A non-failing RETURN is always a SUCCESS (a failure is the ``RunTerminalFailed`` raise, never a
+    returned status-keyed value), so a delivered terminal carries ``PARK_COMPLETION_SUCCEEDED``
+    without any inspection of the returned value.
 
     The due record is cleared only AFTER a terminal is delivered, so a transient delivery failure
     leaves it for the reaper. Returns the inline receiver's outcome (or the non-terminal value); a
@@ -297,7 +287,7 @@ async def drive_and_deliver(
         if receives_outcome
         else run_delivery(RunDelivery(run_delivery_id, delivery) if run_delivery_id is not None else None)
     )
-    park_failed: ParkResumeFailed | None = None
+    park_failed: RunTerminalFailed | None = None
     try:
         with run_delivery_ctx:
             result = await _run_continuation(
@@ -310,7 +300,7 @@ async def drive_and_deliver(
                 park_asked_by,
                 mark_detached=not receives_outcome,
             )
-    except ParkResumeFailed as exc:
+    except RunTerminalFailed as exc:
         if receives_outcome:
             # A live receiver owns the failure: clear the record and propagate it to the resumer.
             await _clear_due(store, interaction_id)
@@ -351,7 +341,7 @@ async def drive_and_deliver(
         store,
         interaction_id=interaction_id,
         outcome=result,
-        status=_terminal_status(result),
+        status=PARK_COMPLETION_SUCCEEDED,
         delivery=delivery,
         run_delivery_id=run_delivery_id,
         candidates=candidates,

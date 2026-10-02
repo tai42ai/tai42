@@ -2,7 +2,7 @@
 
 ``resume_tool`` is a REAL registered continuation face the visit drives through ``run_tool``: it
 branches on the resume ``answer`` to return each outcome shape a driver can produce (a terminal
-result, a re-park sentinel, a ``ResumeBuffered`` partial, a ``ParkResumeFailed`` terminal, or a
+result, a re-park sentinel, a ``ResumeBuffered`` partial, a ``RunTerminalFailed`` terminal, or a
 plain raise), and records whether an ambient door ``ToolInvocation`` binding was present when it
 ran (it must NOT be — the visit binds a door only around a START). ``extras_target`` declares one
 extras key so the undeclared-extras pre-check has a target to check against.
@@ -12,8 +12,8 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
-    ParkResumeFailed,
     ResumeBuffered,
+    RunTerminalFailed,
     SuspendedInteraction,
     get_resume_continuation_tool,
 )
@@ -45,7 +45,7 @@ async def resume_tool(interaction_id: str, answer: Any) -> Any:
     if kind == "buffered":
         return ResumeBuffered(remaining_ids=answer["remaining"])
     if kind == "park_failed":
-        raise ParkResumeFailed({"status": "failed", "reason": answer.get("reason", "aborted")})
+        raise RunTerminalFailed({"status": "failed", "reason": answer.get("reason", "aborted")})
     if kind == "boom":
         raise RuntimeError("resume drive blew up")
     return {
