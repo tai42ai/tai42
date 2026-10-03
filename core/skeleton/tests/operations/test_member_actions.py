@@ -13,7 +13,6 @@ as it is.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -99,14 +98,14 @@ class _NeutralActionsProvider(AccountsProvider):
         return [
             MemberAction(
                 id="ping",
-                label=TemplatedText(id="ping.label"),
+                label=TemplatedText(content="Ping the member"),
                 scope="page",
                 input_model=_PingInput,
                 result_model=_PingResult,
             ),
             MemberAction(
                 id="poke",
-                label=TemplatedText(id="poke.label"),
+                label=TemplatedText(content="Poke member {{ 1 + 1 }}"),
                 scope="member_row",
                 destructive=True,
                 input_model=_PokeInput,
@@ -126,13 +125,6 @@ class _NeutralActionsProvider(AccountsProvider):
 
     async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
         return False
-
-
-class _FakeResourceManager:
-    """A stand-in resource manager that renders a :class:`TemplatedText` to a known string."""
-
-    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
-        return f"rendered:{text.id or text.content}"
 
 
 def _member(id_: str, *, principal_ids: list[str] | None = None, actions: list[str] | None = None) -> MemberEntry:
@@ -163,13 +155,6 @@ def _clean_active_providers():
     finally:
         core.active_auth_providers.clear()
         core.active_auth_providers.update(saved)
-
-
-@pytest.fixture(autouse=True)
-def _fake_resource_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the catalog op's resource manager at a stand-in that renders the label by id."""
-    fake_app = SimpleNamespace(storage=SimpleNamespace(resource_manager=_FakeResourceManager()))
-    monkeypatch.setattr(member_actions_ops, "tai42_app", fake_app)
 
 
 @pytest.fixture
@@ -220,12 +205,16 @@ async def test_catalog_lists_declared_actions_with_opaque_keys_and_schemas(monke
     # Opaque keys route back to the producing provider.
     assert all(_decode_action_key(d.key)[0] == "neutral" for d in catalog.actions)
     ping = by_action["ping"]
-    assert ping.label == "rendered:ping.label"
+    # The label is the provider's inline content, resolved by the REAL resource manager — the
+    # content= path a real plugin uses (a plugin cannot seed a stored id=).
+    assert ping.label == "Ping the member"
     assert ping.scope == "page"
     assert ping.destructive is False
     assert ping.input_schema["properties"]["note"]["type"] == "string"
     assert ping.result_schema["properties"]["echo"]["type"] == "string"
     poke = by_action["poke"]
+    # Inline Jinja in the content is rendered by the real manager (proving it is not a passthrough).
+    assert poke.label == "Poke member 2"
     assert poke.scope == "member_row"
     assert poke.destructive is True
 
