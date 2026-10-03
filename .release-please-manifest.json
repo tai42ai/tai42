@@ -2,7 +2,7 @@
   "core/contract": "16.0.0",
   "core/kit": "7.5.1",
   "core/cli": "13.0.1",
-  "core/skeleton": "22.0.1",
+  "core/skeleton": "22.0.2",
   "plugins/accounts-postgres": "4.0.1",
   "plugins/agents": "8.4.1",
   "plugins/backend-arq": "4.3.1",
@@ -23,7 +23,7 @@
   "plugins/sandbox-local": "1.3.4",
   "plugins/storage-github": "1.2.6",
   "plugins/storage-local": "1.2.6",
-  "plugins/storage-s3": "1.2.6",
+  "plugins/storage-s3": "1.2.7",
   "plugins/toolbox": "4.2.5",
   "plugins/tools-github": "1.1.6",
   "plugins/tools-stripe": "1.2.6",
@@ -31,5 +31,5 @@
   "plugins/tools-whatsapp": "1.2.6",
   "plugins/webhook-verifier-github": "1.3.3",
   "plugins/webhook-verifier-stripe": "1.3.3",
-  "e2e": "16.5.1"
+  "e2e": "16.5.2"
 }
