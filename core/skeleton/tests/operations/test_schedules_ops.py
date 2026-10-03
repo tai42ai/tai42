@@ -35,6 +35,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
@@ -547,16 +548,35 @@ async def test_delete_unsettled_operation_surface_is_503(install, caplog) -> Non
 _VALID_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 
 
-async def test_create_accepts_a_well_formed_subject(install) -> None:
-    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
-    out = await schedules_ops.create_schedule("send", {"subject": _VALID_SUBJECT, "to": "x"}, {"cron": "* * * * *"})
+async def test_create_stamps_the_top_level_subject_as_the_reserved_door_arg(install) -> None:
+    # ``subject`` is the schedule's top-level door field: the create door stamps it onto the recurring
+    # dispatch as the reserved ``backend_schedule_subject`` arg (like the firing identity / contract),
+    # and ``tool_kwargs`` ride through untouched.
+    from tai42_contract.states import StateSubject
+    from tai42_kit.utils.schedule_subject import SCHEDULE_SUBJECT_ARG
+
+    dispatched: list[dict] = []
+
+    class _RecordingTools(_FakeTools):
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None):
+            dispatched.append(dict(arguments))
+            return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
+
+    install(_RecordingTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
+    out = await schedules_ops.create_schedule(
+        "send", {"to": "x"}, {"cron": "* * * * *"}, subject=StateSubject.model_validate(_VALID_SUBJECT)
+    )
     assert out == "ok"
+    (arguments,) = dispatched
+    assert arguments[SCHEDULE_SUBJECT_ARG] == _VALID_SUBJECT
+    assert arguments["to"] == "x"
+    assert "subject" not in arguments
 
 
-async def test_create_refuses_a_malformed_subject_before_dispatch(install) -> None:
-    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
-    with pytest.raises(BadRequestError, match="invalid schedule subject"):
-        await schedules_ops.create_schedule("send", {"subject": {"kind": "person"}}, {"cron": "* * * * *"})
+async def test_malformed_subject_is_refused_by_the_model() -> None:
+    # A malformed top-level ``subject`` fails the model's ``StateSubject`` validation; the router surfaces it as a 400.
+    with pytest.raises(ValidationError):
+        schedules_ops.ScheduleCreate.model_validate({"tool_name": "send", "subject": {"kind": "person"}})
 
 
 async def test_run_once_schedule_applies_binding_around_start_without_injecting_it(install, monkeypatch) -> None:

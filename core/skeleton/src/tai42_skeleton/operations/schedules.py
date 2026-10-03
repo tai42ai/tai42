@@ -67,6 +67,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_NAME_KEY,
+    SCHEDULE_SUBJECT_ARG,
     ReservedScheduleKeyError,
     assert_no_reserved_schedule_keys,
     schedule_create_fire,
@@ -194,10 +195,12 @@ async def _resolve_schedule_dispatch(
 class ScheduleCreate(ParkableDoorMixin):
     """Create a schedule that periodically runs ``tool_name`` on the cadence in ``schedule_kwargs``.
 
-    ``tool_kwargs`` are the arguments each fire passes to the tool.
-    ``state_binding`` is the OPTIONAL door-layer binding the fire applies. Unlike the per-schedule
-    ``subject`` (a free key inside ``tool_kwargs`` that legitimately reaches the base tool), it is a
-    top-level field applied around the started tool alone (never the base tool's).
+    ``tool_kwargs`` are the arguments each fire passes to the tool, the tool's alone and forwarded
+    untouched — a tool whose OWN argument is named ``subject`` carries it here like any argument.
+    ``subject`` is the OPTIONAL top-level door field naming the ``schedule``-door state context each
+    fire re-establishes: the create door stamps it onto the job, and the fire keys its state writes and
+    parks on it (it never reaches the base tool). ``state_binding`` is the OPTIONAL door-layer binding
+    the fire applies around the started tool alone (never the base tool's).
 
     A schedule is a parkable-driving door: it carries the four :class:`ParkableDoorMixin` jqs
     (``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr`` act on the run's
@@ -216,6 +219,7 @@ class ScheduleCreate(ParkableDoorMixin):
         min_length=1,
         description="The api-key user_id a contract-bearing recurring fire runs as (required with any contract jq).",
     )
+    subject: StateSubject | None = None
     state_binding: StateBinding | None = None
 
     @model_validator(mode="after")
@@ -315,22 +319,6 @@ async def server_datetime() -> Any:
         raise OperationFailedError(f"server-datetime lookup failed ({type(exc).__name__})") from exc
 
 
-def _validate_schedule_subject(tool_kwargs: dict[str, Any]) -> None:
-    """A ``subject`` in a schedule's tool kwargs must be a well-formed :class:`~tai42_contract.states.StateSubject`.
-
-    That value is what the fire re-establishes as its ``schedule``-door state context (the fire is anonymous, so the
-    subject is stamped at creation, where it is known). A malformed one is refused HERE, loudly, so
-    a job that could never resolve its subject is never persisted. Absent leaves the fire with no state context.
-    """
-    subject = tool_kwargs.get("subject")
-    if subject is None:
-        return
-    try:
-        StateSubject.model_validate(subject)
-    except ValueError as exc:
-        raise BadRequestError(f"invalid schedule subject: {exc}") from exc
-
-
 # The jq-typed flat params carry the ``x-tai42-expression`` vendor annotation so the generated MCP
 # tool form recognizes them as jq — the model-level annotation on ``ScheduleCreate`` never reaches
 # this FLAT projection, which fastmcp derives from the signature alone. Each door-contract expression
@@ -398,6 +386,7 @@ def _refuse_reserved_schedule_keys(arguments: dict[str, Any]) -> None:
 def _stamp_recurring_reserved(
     arguments: dict[str, Any],
     *,
+    subject: StateSubject | None,
     state_binding: StateBinding | None,
     execution_key: str | None,
     fingerprint: str | None,
@@ -407,9 +396,12 @@ def _stamp_recurring_reserved(
     """Stamp the reserved door kwargs a recurring fire's worker ``backend_fire`` pops, from validated fields.
 
     The binding rides the kit's ``schedule_task`` preparer as the plain ``state_binding`` key; the
-    firing identity ``(user_id, fingerprint)`` pair and the contract are stamped here — the raw
-    execution key never enters the queue in any other form.
+    subject, the firing identity ``(user_id, fingerprint)`` pair and the contract are stamped here as
+    reserved args — the raw execution key never enters the queue in any other form, and the subject
+    never rides ``tool_kwargs``.
     """
+    if subject is not None:
+        arguments[SCHEDULE_SUBJECT_ARG] = subject.model_dump(mode="json")
     if state_binding is not None:
         arguments["state_binding"] = state_binding.model_dump(mode="json")
     if execution_key is not None:
@@ -503,6 +495,7 @@ async def create_schedule(
     tool_kwargs: dict[str, Any],
     schedule_kwargs: dict[str, Any],
     execution_key: str | None = None,
+    subject: StateSubject | None = None,
     state_binding: StateBinding | None = None,
     start_expr: _SCHEDULE_START_EXPR_PARAM = None,
     cancel_expr: _SCHEDULE_CANCEL_EXPR_PARAM = None,
@@ -524,7 +517,6 @@ async def create_schedule(
     """
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
-    _validate_schedule_subject(tool_kwargs)
     contract = ParkableDoorMixin(
         start_expr=start_expr, cancel_expr=cancel_expr, resume_expr=resume_expr, extras_expr=extras_expr
     )
@@ -548,8 +540,6 @@ async def create_schedule(
         # Validate the key is bindable and derive its per-mint fingerprint, the way a hook does; the
         # stored identity is that (user_id, fingerprint) pair — the raw key never enters the queue.
         fingerprint = await assert_execution_key_bindable(await resolve_caller(), execution_key)
-    subject_value = tool_kwargs.get("subject")
-    subject = StateSubject.model_validate(subject_value) if subject_value is not None else None
     # The recurring firing has no live caller, so this creation is the ONLY edge the inner tool
     # reaches — decide it here, over the exact arguments the dispatch below fires.
     await authorize_submitted_tool(dispatch_name, arguments)
@@ -558,6 +548,7 @@ async def create_schedule(
         if recurring:
             _stamp_recurring_reserved(
                 arguments,
+                subject=subject,
                 state_binding=state_binding,
                 execution_key=execution_key,
                 fingerprint=fingerprint,

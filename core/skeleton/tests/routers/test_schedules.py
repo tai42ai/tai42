@@ -51,14 +51,18 @@ class _FakeTools:
         self._registered = registered
         self._run_result = run_result
         self.run_calls: list[tuple] = []
+        self.run_contexts: list = []
 
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
     async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
+        from tai42_kit.utils.state_context import current_state_context
+
         if key not in self._registered:
             raise UnknownToolError(key)
         self.run_calls.append((key, arguments))
+        self.run_contexts.append(current_state_context())
         return self._run_result
 
 
@@ -151,6 +155,60 @@ async def test_create_translates_cron_to_the_branch(install):
     assert fake.run_calls == [
         ("send_report_schedule_task", {"to": "a", "backend_schedule_name": "nightly", "backend_schedule": "0 9 * * *"})
     ]
+
+
+async def test_create_passes_a_plain_string_subject_kwarg_to_the_tool(install):
+    # ``subject`` is the schedule's own top-level door field, not a key the create door reads out of
+    # ``tool_kwargs``. A tool whose OWN ``subject`` argument is a plain string schedules and fires with
+    # that string reaching the tool untouched.
+    fake = install(_FakeTools(_MARKERS | {"greet"}, run_result={"ran": True}))
+    body = b'{"tool_name": "greet", "tool_kwargs": {"subject": "hello"}}'
+    resp = await router.create_schedule(_body_req(body))
+    assert resp.status_code == 200
+    assert fake.run_calls == [("greet", {"subject": "hello"})]
+
+
+async def test_create_stamps_the_top_level_subject_as_the_reserved_door_arg(install):
+    # The create door stamps the top-level ``subject`` onto the recurring dispatch as the reserved
+    # ``backend_schedule_subject`` arg (the way it stamps ``state_binding`` / the firing identity), so
+    # the worker fire re-establishes the ``schedule`` state context from the reserved key. ``tool_kwargs``
+    # ride through untouched.
+    from tai42_kit.utils.schedule_subject import SCHEDULE_SUBJECT_ARG
+
+    subject = {"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"}
+    fake = install(_FakeTools(_MARKERS | {"send_report", "send_report_schedule_task"}, run_result=None))
+    body = (
+        b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
+        b' "subject": {"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"},'
+        b' "schedule_kwargs": {"cron": "0 9 * * *", "backend_schedule_name": "nightly"}}'
+    )
+    resp = await router.create_schedule(_body_req(body))
+    assert resp.status_code == 200
+    (dispatch_name, arguments) = fake.run_calls[0]
+    assert dispatch_name == "send_report_schedule_task"
+    assert arguments["to"] == "a"
+    assert arguments[SCHEDULE_SUBJECT_ARG] == subject
+
+
+async def test_create_run_once_fires_under_the_top_level_subject_state_context(install):
+    # A run-once schedule (no cadence) created with a top-level ``subject`` fires its tool under the
+    # ``schedule`` door state context keyed on that subject — the door field is the fire's state context.
+    subject = {"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"}
+    fake = install(_FakeTools(_MARKERS | {"greet"}, run_result=None))
+    body = (
+        b'{"tool_name": "greet", "tool_kwargs": {"message": "hi"},'
+        b' "subject": {"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"}}'
+    )
+    resp = await router.create_schedule(_body_req(body))
+    assert resp.status_code == 200
+    assert fake.run_calls == [("greet", {"message": "hi"})]
+    (context,) = fake.run_contexts
+    assert context is not None
+    assert context.door == "schedule"
+    assert context.candidates.target_kind == subject["target_kind"]
+    assert context.candidates.target_name == subject["target_name"]
+    assert context.candidates.by_kind == {subject["kind"]: subject["key"]}
+    assert context.actor is None
 
 
 async def test_create_defaults_kwargs_to_empty(install):

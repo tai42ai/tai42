@@ -1,15 +1,16 @@
-"""The schedule door of the platform state store — a scheduled fire carrying a
-``subject`` writes the subject's record under the platform-stamped ``schedule`` door,
-and a malformed subject is refused when the schedule is created.
+"""The schedule door of the platform state store — a scheduled fire carrying a top-level
+``subject`` door field writes the subject's record under the platform-stamped ``schedule``
+door, and a malformed subject is refused when the schedule is created.
 
 A schedule fire is anonymous/system: the worker sees only the job kwargs, so "this is a
-schedule, keyed on this subject" is stamped at creation (the backend ``schedule_task``
-wrapper) and re-established at the fire (the worker's ``schedule`` state context). Over
-``schedule_stack`` (the scheduling home, backend + scheduler process, access control OFF):
+schedule, keyed on this subject" is stamped at creation (the create door, from the top-level
+``subject`` field) and re-established at the fire (the worker's ``schedule`` state context).
+Over ``schedule_stack`` (the scheduling home, backend + scheduler process, access control OFF):
 
-- a schedule whose ``tool_kwargs`` carry a well-formed ``subject`` fires ``state_merge``,
-  and the record lands under that subject with the ledger recording the ``schedule`` door
-  and a null actor (a system fire has no accountable principal);
+- a schedule created with a well-formed top-level ``subject`` fires ``state_merge``, which
+  resolves the subject from the ambient ``schedule`` context, and the record lands under that
+  subject with the ledger recording the ``schedule`` door and a null actor (a system fire has
+  no accountable principal);
 - a schedule whose ``subject`` is malformed is refused at ``POST /api/schedules`` — a job
   that could never resolve its subject is never persisted.
 """
@@ -71,7 +72,8 @@ async def test_scheduled_job_with_subject_writes_record_via_the_schedule_door(
         "/api/schedules",
         json={
             "tool_name": "state_merge_schedule_task",
-            "tool_kwargs": {"state": state, "patch": {"last": marker}, "subject": _SUBJECT},
+            "tool_kwargs": {"state": state, "patch": {"last": marker}},
+            "subject": _SUBJECT,
             "schedule_kwargs": {"backend_schedule_name": schedule_name, "backend_schedule": _INTERVAL_SECONDS},
         },
         retry_on_reloading=True,
@@ -104,13 +106,14 @@ async def test_malformed_schedule_subject_is_refused_at_create(
     state = uniq("jobstatus")
     await _declare_state(api, state)
 
-    # A partial subject (no target) can never resolve — refused at create, never persisted.
+    # A partial subject (no target) can never resolve — refused at create by the model, never persisted.
     resp = await api.request_raw(
         "POST",
         "/api/schedules",
         json={
             "tool_name": "state_merge_schedule_task",
-            "tool_kwargs": {"state": state, "patch": {"last": "x"}, "subject": {"kind": "job", "key": "j1"}},
+            "tool_kwargs": {"state": state, "patch": {"last": "x"}},
+            "subject": {"kind": "job", "key": "j1"},
             "schedule_kwargs": {"backend_schedule_name": uniq("bad"), "backend_schedule": _INTERVAL_SECONDS},
         },
     )

@@ -97,6 +97,10 @@ def create_schedule(
     extras_expr: Annotated[
         str | None, typer.Option("--extras-expr", help="jq building the extras mapping handed to the started target.")
     ] = None,
+    subject: Annotated[
+        str | None,
+        typer.Option("--subject", help="The schedule-door state context as a JSON object the fire keys its writes on."),
+    ] = None,
     state_binding: Annotated[
         str | None, typer.Option("--state-binding", help="The door-layer state binding as a JSON object.")
     ] = None,
@@ -132,6 +136,8 @@ def create_schedule(
     ):
         if value is not None:
             body[field] = {"content": value}
+    if subject is not None:
+        body["subject"] = parse_json_object(subject, param_hint="--subject")
     if state_binding is not None:
         body["state_binding"] = parse_json_object(state_binding, param_hint="--state-binding")
     with ctx_obj.client() as client:

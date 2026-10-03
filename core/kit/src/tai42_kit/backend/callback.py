@@ -61,17 +61,14 @@ async def prepare_backend_kwargs(
     submitter's own admin verdict; stamped AFTER the caller's arguments are stripped, so a
     caller can never forge a higher capability.
 
-    With ``scheduled=True`` and a parseable top-level ``subject`` argument, the job's
-    subject is additionally stamped under :data:`SCHEDULE_SUBJECT_ARG` so the worker fire
-    can re-establish a ``schedule`` state context the anonymous/system fire otherwise loses;
-    a submit wrapper passes ``scheduled=False`` and stamps nothing. The ``subject`` argument
-    stays in ``kwargs`` (a consumer reads ``.subject``, a state tool takes it as an explicit
-    override) — the stamp is the door signal, not a replacement.
-
-    Also with ``scheduled=True``, a reserved top-level ``state_binding`` argument (the door
-    binding the create door injected) is re-stamped under :data:`SCHEDULE_STATE_BINDING_ARG`
-    and the raw key is POPPED — UNLIKE the subject, the binding must never reach the base
-    tool, so the worker fire is its only reader (tools stay pure).
+    With ``scheduled=True`` the create door has already stamped the job's subject under
+    :data:`SCHEDULE_SUBJECT_ARG` (one of :data:`SCHEDULE_STAMPED_DOOR_OPTS`, reaching this branch
+    through the widened signature) so the worker fire can re-establish a ``schedule`` state context
+    the anonymous/system fire otherwise loses; ``kwargs["subject"]``, if present, is the tool's own
+    argument and is forwarded untouched. A reserved top-level ``state_binding`` argument (the door
+    binding the create door injected) is re-stamped under :data:`SCHEDULE_STATE_BINDING_ARG` and the
+    raw key is POPPED — the binding must never reach the base tool, so the worker fire is its only
+    reader (tools stay pure).
 
     With ``scheduled=False`` (a background task tool) any caller-supplied reserved schedule-door key is
     REFUSED first (:func:`assert_no_reserved_schedule_keys`) — a task tool's caller never supplies one,
@@ -92,16 +89,13 @@ async def prepare_backend_kwargs(
     kwargs[WORKER_SECRET_CAPABILITY_ARG] = caller_may_read_secrets()
     if scheduled:
         assert_schedule_create_fire()
-        subject = _parse_schedule_subject(kwargs.get("subject"))
-        if subject is not None:
-            kwargs[SCHEDULE_SUBJECT_ARG] = subject.model_dump()
         state_binding = kwargs.pop("state_binding", None)
         if state_binding is not None:
             kwargs[SCHEDULE_STATE_BINDING_ARG] = state_binding
         # The branch signature declares the create-door-stamped reserved keys so the dispatch
         # validates; makefun materialises any the create door did NOT stamp as ``None``. Drop those
         # absent Nones so a plain schedule's stored job carries no reserved door signal — only a real
-        # firing identity / door contract rides to the worker's ``backend_fire`` pop.
+        # subject / firing identity / door contract rides to the worker's ``backend_fire`` pop.
         for key in SCHEDULE_STAMPED_DOOR_OPTS:
             if kwargs.get(key) is None:
                 kwargs.pop(key, None)
@@ -152,22 +146,6 @@ def _candidates_subject(context: Any) -> StateSubject | None:
         kind=kind,
         key=key,
     )
-
-
-def _parse_schedule_subject(raw: Any) -> StateSubject | None:
-    """A schedule's top-level ``subject`` argument as a full :class:`StateSubject`, or ``None``.
-
-    Returns ``None`` when it is absent or not a full subject (a caller may carry a subject shape the
-    ambient door resolves rather than a stamped one — only a full subject is a door signal).
-    """
-    if raw is None or isinstance(raw, StateSubject):
-        return raw
-    if not isinstance(raw, dict):
-        return None
-    try:
-        return StateSubject.model_validate(raw)
-    except ValueError:
-        return None
 
 
 def carry_forwarded_fire(callback: CallbackSchema | dict[str, Any], kwargs: dict[str, Any]) -> None:
