@@ -193,6 +193,8 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
             "tai42_skeleton.routers.login",
             "tai42_skeleton.routers.setup",
             "tai42_skeleton.routers.principals",
+            "tai42_skeleton.routers.members",
+            "tai42_skeleton.routers.member_actions",
             "tai42_skeleton.routers.system_kinds",
             "tai42_accounts_postgres.routes_login",
             "tai42_accounts_postgres.routes_users",
