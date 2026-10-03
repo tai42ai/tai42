@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from tai42_contract.template import TemplatedText
 
 _ROUTE_PATH_CHARS = re.compile(r"\A[A-Za-z0-9._~/%-]*\Z")
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
@@ -144,14 +146,82 @@ class LoginAttachment(BaseModel):
     login_path: str | None = None
 
 
+MemberActionScope = Literal["page", "member_row", "invite_row"]
+"""Where a declared member action renders: a page-level button, a member-row menu item,
+or an invite-row menu item. A provider classifies each of its own actions into one of
+these three places; the platform never reads the provider's meaning behind it."""
+
+
+class MemberAction(BaseModel):
+    """One member-admin action an accounts provider declares.
+
+    An IN-PROCESS declaration returned by
+    :meth:`~tai42_contract.accounts.provider.AccountsProvider.member_actions`. The
+    platform serializes a wire :class:`MemberActionDescriptor` from it and validates an
+    invoke's input by calling ``input_model.model_validate(input)`` (plain pydantic).
+    ``input_model`` and ``result_model`` are OPAQUE to the platform: it reads no field of
+    either, it only renders their JSON schema and runs the ordinary model validation and
+    dump. ``id`` is the provider's OWN action id — the platform maps it to an opaque wire
+    key and never parses or branches on it. ``label`` is a :class:`TemplatedText`
+    reference (a stored template id or inline content), so the wording is localizable
+    through the platform's existing resource manager and never held as a literal here.
+
+    Not serialized to the wire (it carries class references), so
+    ``arbitrary_types_allowed`` is safe.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True, frozen=True)
+
+    id: str = Field(min_length=1)
+    label: TemplatedText
+    scope: MemberActionScope
+    destructive: bool = False
+    input_model: type[BaseModel]
+    result_model: type[BaseModel]
+
+
+class MemberActionDescriptor(BaseModel):
+    """One declared member action, serialized for the catalog wire.
+
+    ``key`` is the opaque catalog key the platform mints for (provider, action) — a caller
+    joins and echoes it, never parses it. ``label`` is the resolved wording (the
+    declaration's :class:`TemplatedText` rendered at the door). ``input_schema`` and
+    ``result_schema`` are the declared models' ``model_json_schema()`` — a caller renders
+    a form and a read-only result view from them generically, with no provider field name
+    known to the platform.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1)
+    label: str
+    scope: MemberActionScope
+    destructive: bool
+    input_schema: dict[str, Any]
+    result_schema: dict[str, Any]
+
+
+class MemberActionCatalog(BaseModel):
+    """Every declared member action across the registered accounts providers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    actions: list[MemberActionDescriptor]
+
+
 class MemberEntry(BaseModel):
     """One person an accounts provider owns: an account the operator manages.
 
-    ``id`` is the provider's stable handle for the person — the id its own member
-    routes act on. ``email`` is the sign-in identity the provider holds for them.
-    ``role`` names the platform role the person holds; only the name rides here, the
-    role's definition is read from the role listing. ``disabled`` turns off the
-    account; ``created_at`` is timezone-aware (UTC).
+    ``id`` is the provider's stable handle for the person — the id its own actions act on.
+    ``email`` is the sign-in identity the provider holds for them. ``role`` names the
+    platform role the person holds; only the name rides here, the role's definition is read
+    from the role listing. ``created_at`` is timezone-aware (UTC).
+
+    ``principal_ids`` are the platform principal id(s) this person holds (at least one — a
+    person with none is an invitation, not a member); the Members operation joins them
+    against the platform's own principal records to resolve the access-control
+    ``disabled`` state, which is NOT a provider fact and so does not ride here.
+    ``actions`` are the provider's OWN member-action ids applicable to this row.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -159,8 +229,9 @@ class MemberEntry(BaseModel):
     id: str = Field(min_length=1)
     email: str = Field(min_length=1)
     role: str = Field(min_length=1)
-    disabled: bool
     created_at: datetime
+    principal_ids: list[str] = Field(min_length=1)
+    actions: list[str] = Field(default_factory=list)
 
     @field_validator("created_at")
     @classmethod
@@ -173,10 +244,12 @@ class MemberEntry(BaseModel):
 class InviteEntry(BaseModel):
     """One outstanding invitation an accounts provider holds.
 
-    ``id`` is the provider's stable handle for the invited person — the id its own
-    invite routes act on. ``email`` is the invited address; ``role`` names the platform
-    role the person will hold (only the name, as on :class:`MemberEntry`). ``created_at``
-    and ``expires_at`` are timezone-aware (UTC).
+    ``id`` is the provider's stable handle for the invited person — the id its own actions
+    act on. ``email`` is the invited address; ``role`` names the platform role the person
+    will hold (only the name, as on :class:`MemberEntry`). ``created_at`` and
+    ``expires_at`` are timezone-aware (UTC). ``actions`` are the provider's OWN
+    member-action ids applicable to this row. An invitation holds no principal yet, so it
+    carries no ``principal_ids``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -186,6 +259,7 @@ class InviteEntry(BaseModel):
     role: str = Field(min_length=1)
     created_at: datetime
     expires_at: datetime
+    actions: list[str] = Field(default_factory=list)
 
     @field_validator("created_at", "expires_at")
     @classmethod
@@ -210,16 +284,124 @@ class MemberListing(BaseModel):
     invites: list[InviteEntry]
 
 
+class MemberPrincipalState(BaseModel):
+    """One platform principal a member holds, with its access-control state joined in.
+
+    ``user_id`` is the platform principal id; ``disabled`` is taken from that principal's
+    own record (the store the principals listing reads), never from a provider.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1)
+    disabled: bool
+
+
+class MemberRow(BaseModel):
+    """A member row in the aggregated directory the Members door returns.
+
+    Display fields plus the platform-joined principal state and opaque routing tokens.
+    ``handle`` routes an invoke back to the producing provider and pins this row;
+    ``action_keys`` are the opaque catalog keys of the actions applicable to it — a caller
+    joins and echoes both, never parses them. ``principals`` carries each principal's
+    joined state; ``disabled`` is derived True only when EVERY principal is disabled, so a
+    person with any enabled principal still reads active while the per-principal truth
+    stays visible. ``role`` is provider-sourced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    created_at: datetime
+    principals: list[MemberPrincipalState]
+    disabled: bool
+    handle: str = Field(min_length=1)
+    action_keys: list[str] = Field(default_factory=list)
+
+
+class InviteRow(BaseModel):
+    """An invite row in the aggregated directory the Members door returns.
+
+    Display fields plus the opaque routing tokens. An invitation holds no principal, so it
+    carries no principal state; ``role`` is provider-sourced, correct while no principal
+    exists yet.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    created_at: datetime
+    expires_at: datetime
+    handle: str = Field(min_length=1)
+    action_keys: list[str] = Field(default_factory=list)
+
+
+class MemberDirectory(BaseModel):
+    """The aggregated, platform-joined membership the Members door returns.
+
+    The wire shape of the deployment-wide Members view: every provider's people and
+    invitations as :class:`MemberRow` / :class:`InviteRow`, each carrying opaque routing
+    tokens and (for a member) the platform-joined principal state. The provider's raw
+    action ids and principal ids never reach this wire.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[MemberRow]
+    invites: list[InviteRow]
+
+
+class InvokeMemberActionRequest(BaseModel):
+    """The invoke-door envelope: which action, which row, and the per-action input.
+
+    ``action_key`` is the opaque catalog key; ``target_handle`` is the row handle an
+    action acts on (``None`` for a page-scoped action); ``input`` is an open mapping the
+    operation hands to the declared ``input_model`` for ordinary validation, so the
+    platform's static envelope never needs to know the per-action fields. Unknown
+    top-level keys are ignored (pydantic's default extra behaviour).
+    """
+
+    action_key: str = Field(min_length=1)
+    target_handle: str | None = None
+    input: dict[str, Any] = Field(default_factory=dict)
+
+
+class InvokeMemberActionResult(BaseModel):
+    """The invoke-door result: the provider's result-model dump, carried opaquely.
+
+    ``result`` is the ``model_dump(mode="json")`` of the action's declared
+    ``result_model`` instance; the platform reads no field of it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: dict[str, Any]
+
+
 __all__ = [
     "ButtonMethod",
     "FormField",
     "FormMethod",
     "InviteCredential",
     "InviteEntry",
+    "InviteRow",
+    "InvokeMemberActionRequest",
+    "InvokeMemberActionResult",
     "LoginAttachment",
     "LoginCredential",
     "LoginMethod",
+    "MemberAction",
+    "MemberActionCatalog",
+    "MemberActionDescriptor",
+    "MemberActionScope",
+    "MemberDirectory",
     "MemberEntry",
     "MemberListing",
+    "MemberPrincipalState",
+    "MemberRow",
     "PasswordCredential",
 ]

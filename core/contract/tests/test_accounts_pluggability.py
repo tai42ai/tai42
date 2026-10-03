@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic import BaseModel
 
 from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.access_control.registry import (
@@ -19,6 +20,12 @@ from tai42_contract.access_control.registry import (
     register_identity_provider,
 )
 from tai42_contract.access_control.registry import reset_registry as reset_identity_registry
+from tai42_contract.accounts.errors import (
+    MemberActionBadRequestError,
+    MemberActionConflictError,
+    MemberActionError,
+    MemberActionNotFoundError,
+)
 from tai42_contract.accounts.models import (
     FormField,
     FormMethod,
@@ -26,6 +33,7 @@ from tai42_contract.accounts.models import (
     LoginAttachment,
     LoginCredential,
     LoginMethod,
+    MemberAction,
     MemberListing,
     PasswordCredential,
 )
@@ -41,6 +49,7 @@ from tai42_contract.accounts.registry import (
     register_accounts_provider,
     reset_registry,
 )
+from tai42_contract.errors import ErrorKind, error_kind
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +82,12 @@ class _FakeAccounts(AccountsProvider):
 
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
+
+    def member_actions(self) -> list[MemberAction]:
+        return []
+
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        raise ValueError(f"no member action {action_id!r}")
 
     async def revoke_session(self, token: str) -> bool:
         return token == "tai-sess-ok"
@@ -229,6 +244,46 @@ class _MissingListMembers(AccountsProvider):
     async def revoke_session(self, token: str) -> bool:
         return False
 
+    def member_actions(self) -> list[MemberAction]:
+        return []
+
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        raise ValueError(action_id)
+
+
+class _MissingMemberActions(AccountsProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
+    async def revoke_session(self, token: str) -> bool:
+        return False
+
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        raise ValueError(action_id)
+
+
+class _MissingInvokeMemberAction(AccountsProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
+    async def revoke_session(self, token: str) -> bool:
+        return False
+
+    def member_actions(self) -> list[MemberAction]:
+        return []
+
 
 @pytest.mark.parametrize(
     "cls",
@@ -237,6 +292,8 @@ class _MissingListMembers(AccountsProvider):
         _MissingRevokeSession,
         _MissingValidateToken,
         _MissingListMembers,
+        _MissingMemberActions,
+        _MissingInvokeMemberAction,
     ],
 )
 def test_subclass_missing_any_abstract_method_cannot_instantiate(cls: type[AccountsProvider]):
@@ -379,3 +436,19 @@ def test_settings_protocol_is_runtime_checkable():
             self.something_else = object()
 
     assert not isinstance(_MissingAdmin(), AccountsProviderSettings)
+
+
+# -- member-action error family ------------------------------------------------
+
+
+def test_member_action_errors_are_one_family_classified_by_kind():
+    # A contract-only provider raises these (it cannot import the application errors); each
+    # resolves to the stable kind the invoke operation maps to a status, and all share one
+    # base so a single catch reaches every correctable failure.
+    assert issubclass(MemberActionNotFoundError, MemberActionError)
+    assert issubclass(MemberActionConflictError, MemberActionError)
+    assert issubclass(MemberActionBadRequestError, MemberActionError)
+    assert error_kind(MemberActionError("rejected")) is ErrorKind.BAD_INPUT
+    assert error_kind(MemberActionNotFoundError("missing")) is ErrorKind.NOT_FOUND
+    assert error_kind(MemberActionConflictError("taken")) is ErrorKind.CONFLICT
+    assert error_kind(MemberActionBadRequestError("malformed")) is ErrorKind.BAD_INPUT

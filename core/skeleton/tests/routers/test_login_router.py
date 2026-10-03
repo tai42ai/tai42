@@ -11,6 +11,7 @@ import json
 from contextlib import asynccontextmanager
 
 import pytest
+from pydantic import BaseModel
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.routing import Route
@@ -23,6 +24,7 @@ from tai42_contract.accounts.models import (
     LoginAttachment,
     LoginCredential,
     LoginMethod,
+    MemberAction,
     MemberListing,
 )
 from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider
@@ -63,6 +65,14 @@ class _FakeAccounts(AccountsProvider):
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused
         return MemberListing(members=[], invites=[])
 
+    def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
+        return []
+
+    async def invoke_member_action(  # pragma: no cover - unused
+        self, action_id: str, *, target: str | None, payload: BaseModel
+    ) -> BaseModel:
+        raise ValueError(action_id)
+
     async def revoke_session(self, token: str) -> bool:
         self.revoke_calls.append(token)
         if self._revoke_raises:
@@ -81,6 +91,14 @@ class _FakeLoginAttaching(LoginAttachingProvider):
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused
         return MemberListing(members=[], invites=[])
+
+    def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
+        return []
+
+    async def invoke_member_action(  # pragma: no cover - unused
+        self, action_id: str, *, target: str | None, payload: BaseModel
+    ) -> BaseModel:
+        raise ValueError(action_id)
 
     async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
         return False

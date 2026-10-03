@@ -12,12 +12,18 @@ failure past the owner-create) and the gate lifecycle.
 from __future__ import annotations
 
 import pytest
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 from tai42_contract.accounts import LoginAttachingProvider
 from tai42_contract.accounts.errors import LoginAttachError, LoginConflictError
-from tai42_contract.accounts.models import LoginAttachment, LoginCredential, MemberListing, PasswordCredential
+from tai42_contract.accounts.models import (
+    LoginAttachment,
+    LoginCredential,
+    MemberAction,
+    MemberListing,
+    PasswordCredential,
+)
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import roles as roles_module
@@ -83,6 +89,14 @@ class _FakeLoginAttaching(LoginAttachingProvider):
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused here
         return MemberListing(members=[], invites=[])
 
+    def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused here
+        return []
+
+    async def invoke_member_action(  # pragma: no cover - unused here
+        self, action_id: str, *, target: str | None, payload: BaseModel
+    ) -> BaseModel:
+        raise ValueError(action_id)
+
     async def has_login(self, user_id: str) -> bool:  # pragma: no cover - unused here
         return False
 
@@ -110,6 +124,14 @@ class _RaisingLoginAttaching(LoginAttachingProvider):
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused here
         return MemberListing(members=[], invites=[])
+
+    def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused here
+        return []
+
+    async def invoke_member_action(  # pragma: no cover - unused here
+        self, action_id: str, *, target: str | None, payload: BaseModel
+    ) -> BaseModel:
+        raise ValueError(action_id)
 
     async def has_login(self, user_id: str) -> bool:  # pragma: no cover - unused here
         return False

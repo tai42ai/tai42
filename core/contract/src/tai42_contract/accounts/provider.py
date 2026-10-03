@@ -5,8 +5,16 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from pydantic import BaseModel
+
 from tai42_contract.access_control.identity import IdentityProvider
-from tai42_contract.accounts.models import LoginAttachment, LoginCredential, LoginMethod, MemberListing
+from tai42_contract.accounts.models import (
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    MemberAction,
+    MemberListing,
+)
 
 
 @runtime_checkable
@@ -107,6 +115,38 @@ class AccountsProvider(IdentityProvider):
         provider partitions its accounts between the two lists is its own concern. Reads
         the provider's own store, so this is I/O (async). Backend errors raise (the
         aggregate fails loudly rather than dropping a provider's accounts silently).
+        """
+        ...
+
+    @abstractmethod
+    def member_actions(self) -> list[MemberAction]:
+        """Declare this provider's member-admin actions.
+
+        Static, config-derived metadata, side-effect free (sync by contract, like
+        ``login_methods``). Each :class:`~tai42_contract.accounts.models.MemberAction`
+        names the action's own id, its label (by template id), where it renders, whether
+        it is destructive, and its input/result models. WHICH of these apply to a given
+        row is a separate, state-dependent decision reported per row by ``list_members``
+        (see :attr:`~tai42_contract.accounts.models.MemberEntry.actions`). A provider with
+        no actions returns ``[]``.
+        """
+        ...
+
+    @abstractmethod
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        """Perform the action named by this provider's own ``action_id``.
+
+        ``target`` is the provider's stable id of the member/invite row the action acts on
+        (``None`` for a page-scoped action). ``payload`` is the already-validated instance
+        of the action's declared ``input_model``. Returns an instance of the action's
+        declared ``result_model``, which the platform carries opaquely (it reads no field
+        of it). A correctable failure is raised as a member-action error from
+        :mod:`tai42_contract.accounts.errors` — :class:`~tai42_contract.accounts.errors.MemberActionError`
+        for a rejected input, :class:`~tai42_contract.accounts.errors.MemberActionNotFoundError`
+        for an unknown target, :class:`~tai42_contract.accounts.errors.MemberActionConflictError`
+        for a state conflict, :class:`~tai42_contract.accounts.errors.MemberActionBadRequestError`
+        for a malformed request — so the invoke operation maps it to the matching status
+        without the provider importing the application package.
         """
         ...
 

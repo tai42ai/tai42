@@ -1,10 +1,15 @@
-"""Errors a login-attaching accounts provider raises.
+"""Errors an accounts provider raises through the contract.
 
-One family so the setup door catches :class:`LoginAttachError` and reaches every
-attach failure a human can correct, without importing any provider-private
-exception type. Each carries the stable :class:`~tai42_contract.errors.ErrorKind`
-the caller maps to a transport status (a bad credential is a rejected input, a
-login/email collision is a conflict).
+Two families, each so a generic application door catches ONE base type and reaches every
+failure a caller can correct, without importing any provider-private exception type — an
+accounts plugin never imports the application package. Each carries the stable
+:class:`~tai42_contract.errors.ErrorKind` the caller maps to a transport status.
+
+:class:`LoginAttachError` is raised by ``attach_login`` (the setup/invite flow); the
+:class:`MemberActionError` family is raised by ``invoke_member_action`` so the generic
+invoke operation surfaces a provider's typed failure at the right status instead of a
+generic server error. The platform reads only the typed kind and surfaces the message; it
+reads no provider-specific content.
 """
 
 from __future__ import annotations
@@ -36,7 +41,51 @@ class LoginConflictError(LoginAttachError):
     __tai_error_kind__ = ErrorKind.CONFLICT
 
 
+class MemberActionError(Exception):
+    """Base for a member action a provider rejected with a correctable, typed failure.
+
+    Raised by :meth:`~tai42_contract.accounts.provider.AccountsProvider.invoke_member_action`
+    so the generic invoke operation reaches every correctable failure without a provider
+    importing the application package. The base is a rejected input the caller can fix (the
+    invoke operation maps it to ``422``); the subclasses name the other correctable outcomes.
+    The message is surfaced to the caller; the platform reads only the typed kind, never any
+    provider-specific content. A provider carries no action-specific vocabulary on these — it
+    classifies its own failure into the generic kind.
+    """
+
+    # A correctable-input member-action failure — a rejected input.
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
+
+
+class MemberActionNotFoundError(MemberActionError):
+    """The action's target does not exist. The invoke operation maps it to ``404``."""
+
+    # An unknown target — not found.
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
+
+
+class MemberActionConflictError(MemberActionError):
+    """The action conflicts with current state. The invoke operation maps it to ``409``.
+
+    The state is unchanged, so the caller resolves the conflict and retries.
+    """
+
+    # A state conflict.
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+
+class MemberActionBadRequestError(MemberActionError):
+    """The request to the action was malformed. The invoke operation maps it to ``400``."""
+
+    # A malformed request.
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
+
+
 __all__ = [
     "LoginAttachError",
     "LoginConflictError",
+    "MemberActionBadRequestError",
+    "MemberActionConflictError",
+    "MemberActionError",
+    "MemberActionNotFoundError",
 ]
