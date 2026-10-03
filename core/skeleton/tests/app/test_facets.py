@@ -278,7 +278,6 @@ async def test_media_facet_forwarding():
             declared_mime="image/png",
             filename="p.png",
             declared_size=10,
-            integrity_sha256=None,
             origin=origin,
         )
         == "ingested"
@@ -289,7 +288,6 @@ async def test_media_facet_forwarding():
         declared_mime="image/png",
         filename="p.png",
         declared_size=10,
-        integrity_sha256=None,
         origin=origin,
     )
     assert await f.bind_media("mid", origin=origin) == "bound"

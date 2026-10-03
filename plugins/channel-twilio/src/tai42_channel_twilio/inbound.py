@@ -378,7 +378,6 @@ async def _accept_media_item(
                 declared_mime=content_type,
                 filename=None,
                 declared_size=stream.content_length,
-                integrity_sha256=None,
                 origin=MediaOrigin(
                     channel_id="twilio",
                     participant_identity=client_address,

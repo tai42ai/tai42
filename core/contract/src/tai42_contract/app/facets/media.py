@@ -27,7 +27,6 @@ class AppMedia(Protocol):
         declared_mime: str | None,
         filename: str | None,
         declared_size: int | None,
-        integrity_sha256: str | None,
         origin: MediaOrigin,
     ) -> IngestedMedia:
         """Ingest one streamed inbound media, returning its served reference and metadata.

@@ -35,7 +35,6 @@ class MediaFacet:
         declared_mime: str | None,
         filename: str | None,
         declared_size: int | None,
-        integrity_sha256: str | None,
         origin: MediaOrigin,
     ) -> IngestedMedia:
         """Ingest one streamed inbound media, returning its served reference and metadata."""
@@ -45,7 +44,6 @@ class MediaFacet:
             declared_mime=declared_mime,
             filename=filename,
             declared_size=declared_size,
-            integrity_sha256=integrity_sha256,
             origin=origin,
         )
 

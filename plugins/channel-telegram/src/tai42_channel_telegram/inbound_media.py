@@ -193,7 +193,6 @@ async def _bridge_media(
                 declared_mime=member.declared_mime or stream.content_type,
                 filename=member.filename,
                 declared_size=member.declared_size or stream.content_length,
-                integrity_sha256=None,
                 origin=origin,
             )
     except MediaFetchError as exc:

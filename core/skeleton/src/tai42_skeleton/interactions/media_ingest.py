@@ -283,13 +283,11 @@ async def ingest_media(
     declared_mime: str | None,
     filename: str | None,
     declared_size: int | None,
-    integrity_sha256: str | None,
     origin: MediaOrigin,
 ) -> IngestedMedia:
     """The ONE ingestion chokepoint — cap, sniff, allowlist, record-first persist, served reference.
 
-    ``integrity_sha256`` is the vendor-supplied content hash, accepted for the contract surface; the
-    seam trusts its OWN computed digest (returned as :attr:`IngestedMedia.sha256`).
+    The seam trusts its OWN computed content digest (returned as :attr:`IngestedMedia.sha256`).
     """
     settings = media_ingest_settings()
     cap_settings = media_ingest_cap_settings()

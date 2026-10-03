@@ -169,7 +169,6 @@ async def test_inbound_image_with_caption_ingests_and_bridges_typed_attachment(
     (ingest,) = stub_app.media.ingest_calls
     assert ingest["declared_mime"] == "image/jpeg"
     assert ingest["declared_size"] == 1234
-    assert ingest["integrity_sha256"] == "deadbeef"
     assert ingest["origin"].channel_id == "whatsapp"
     assert ingest["origin"].participant_identity == WA_ID
     assert ingest["origin"].message_id == _WAMID

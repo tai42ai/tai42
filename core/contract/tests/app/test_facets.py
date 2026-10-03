@@ -618,10 +618,9 @@ def test_app_media_facet_methods_are_coroutines_with_the_expected_parameters():
         "declared_mime",
         "filename",
         "declared_size",
-        "integrity_sha256",
         "origin",
     ]
-    for name in ("source", "kind_hint", "declared_mime", "filename", "declared_size", "integrity_sha256", "origin"):
+    for name in ("source", "kind_hint", "declared_mime", "filename", "declared_size", "origin"):
         assert ingest_sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     assert inspect.iscoroutinefunction(AppMedia.bind_media)
     bind_sig = inspect.signature(AppMedia.bind_media)
