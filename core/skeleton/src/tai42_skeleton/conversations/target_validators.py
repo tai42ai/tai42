@@ -92,6 +92,28 @@ def caller_ask_landing_for_route(route: ConversationRoute) -> CallerAskLanding:
     )
 
 
+async def caller_ask_landing_for_tool_route(route: ConversationRoute) -> CallerAskLanding | None:
+    """The caller-ask landing a ``target_kind=tool`` route declares around its run, or ``None``.
+
+    Only an agent's caller-ask is governed by the route's reply/resume landing — the SAME rule the
+    create-time bind check (:func:`_platform_target_lines`) applies, which names ONLY an agent target.
+    So this resolves the tool target's owner exactly as the bind check does: when the target resolves
+    to an agent (a direct agent run tool, or a preset over one) the route's landing governs its
+    caller-ask and is declared; when it resolves to a plain tool/flow the door makes NO claim
+    (``None``). A plain tool/flow that asks its caller binds its OWN resume continuation and delivers
+    the answer back through the door's park-completion binding, so the route's ``resume_expr`` is not
+    its landing path and a missing one must not refuse its legitimate park. Keeping the run-time
+    declaration resolution-aligned with the create-time check is what stops a route allowed at create
+    from being refused at the seam.
+    """
+    from tai42_skeleton.app import instance
+
+    base = await _resolve_base_tool_name(route.target_name)
+    if base in instance.app.agents.all_agents():
+        return caller_ask_landing_for_route(route)
+    return None
+
+
 def _agent_declared_tool_names(agent: Agent) -> object:
     """An agent's statically-declared ``tool_names`` — the fixed tool set it always binds.
 
