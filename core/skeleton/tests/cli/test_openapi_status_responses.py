@@ -292,6 +292,7 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/auth/api-keys/{user_id}/policy/rollback"),
     ("POST", "/api/auth/api-keys/{user_id}/scopes"),
     ("POST", "/api/auth/claim-links"),
+    ("POST", "/api/auth/member-actions/invoke"),
     ("POST", "/api/auth/roles"),
     ("PUT", "/api/auth/roles/{name}"),
     ("POST", "/api/auth/roles/{name}/grants"),
