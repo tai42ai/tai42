@@ -131,3 +131,116 @@ def test_auth_claim_reads_url_from_stdin(monkeypatch: pytest.MonkeyPatch) -> Non
     result = run_cli(monkeypatch, handler, ["auth", "claim", "-"], stdin="https://host/login#claim=tok-123\n")
     assert result.exit_code == 0, result.output
     assert seen["token"] == "tok-123"
+
+
+def test_member_actions_list_renders_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/auth/member-actions"
+        assert request.headers["x-api-key"] == "test-key"
+        return data_response(
+            {
+                "actions": [
+                    {
+                        "key": "k-invite",
+                        "label": "Invite a member",
+                        "scope": "page",
+                        "destructive": False,
+                        "input_schema": {"type": "object"},
+                        "result_schema": {"type": "object"},
+                    }
+                ]
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["auth", "member-actions", "list"])
+    assert result.exit_code == 0, result.output
+    # The catalog rows render by their opaque key and label.
+    assert "k-invite" in result.output
+    assert "Invite a member" in result.output
+
+
+def test_member_actions_list_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response({"actions": [{"key": "k-1", "label": "L", "scope": "member_row", "destructive": True}]})
+
+    result = run_cli(monkeypatch, handler, ["auth", "member-actions", "list"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["actions"][0]["key"] == "k-1"
+
+
+def test_member_actions_invoke_sends_the_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/auth/member-actions/invoke"
+        seen.update(json.loads(request.content))
+        return data_response({"result": {"login_path": "/login#claim=tok"}})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "auth",
+            "member-actions",
+            "invoke",
+            "--action-key",
+            "k-invite",
+            "--target-handle",
+            "h-row1",
+            "--input",
+            '{"role": "editor"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == {"action_key": "k-invite", "target_handle": "h-row1", "input": {"role": "editor"}}
+    # The opaque result renders.
+    assert "/login#claim=tok" in result.output
+
+
+def test_member_actions_invoke_page_action_omits_the_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return data_response({"result": {}})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["auth", "member-actions", "invoke", "--action-key", "k-page", "--input", "{}"],
+    )
+    assert result.exit_code == 0, result.output
+    # A page-scoped action carries no target handle and an empty input.
+    assert seen == {"action_key": "k-page", "target_handle": None, "input": {}}
+
+
+def test_member_actions_invoke_reads_input_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return data_response({"result": {}})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["auth", "member-actions", "invoke", "--action-key", "k-1", "--input-file", "-"],
+        stdin='{"email": "alice@example.com"}',
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["input"] == {"email": "alice@example.com"}
+
+
+def test_member_actions_invoke_error_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response("invalid action input", 422)
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["auth", "member-actions", "invoke", "--action-key", "k-1", "--input", '{"role": 5}'],
+    )
+    assert result.exit_code != 0
+    assert "invalid action input" in result.output

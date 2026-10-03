@@ -41,6 +41,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("version", "body", "tags", "created_at", "is_current")
     ),
     ("GET", "/api/auth/capabilities"): RouteShape(items_key="providers", columns=("name", "mintable")),
+    ("GET", "/api/auth/member-actions"): RouteShape(
+        items_key="actions", columns=("key", "label", "scope", "destructive", "input_schema", "result_schema")
+    ),
     ("GET", "/api/auth/principals"): RouteShape(
         items_key=None, columns=("user_id", "kind", "display_name", "created_by", "disabled", "created_at")
     ),
