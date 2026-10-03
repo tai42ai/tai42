@@ -59,6 +59,8 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     "tai42_skeleton.routers.login": ("GET", "/api/login/methods", None),
     "tai42_skeleton.routers.manifest": ("GET", "/api/manifest", None),
     "tai42_skeleton.routers.marketplace": ("GET", "/api/marketplace/installed", None),
+    "tai42_skeleton.routers.member_actions": ("GET", "/api/auth/member-actions", None),
+    "tai42_skeleton.routers.members": ("GET", "/api/auth/members", None),
     # A concrete non-``/api`` GET (like ``/health``). The route is ``authed=True``, but
     # non-404 is the mounted verdict: on this bare stack the request answers (auth off ->
     # 200; a pinned/guarded stack -> 401/403) rather than 404, proving it is mounted.
