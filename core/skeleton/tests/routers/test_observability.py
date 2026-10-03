@@ -19,9 +19,11 @@ from urllib.parse import urlencode
 import pytest
 from starlette.requests import Request
 from tai42_contract.monitoring import (
+    Dimension,
+    Measure,
+    MetricsCapability,
     MetricsResult,
     MetricsRow,
-    MetricsView,
     MonitoringLevel,
     MonitoringObservation,
     MonitoringReadNotSupportedError,
@@ -86,8 +88,8 @@ class _FakeMonitoring:
     def writer(self) -> _FakeWriter:
         return self._writer
 
-    def add_project(self, project) -> None:
-        pass
+
+_FULL_CAPABILITY = MetricsCapability(measures=frozenset(Measure), dimensions=frozenset(Dimension))
 
 
 class _FakeReader:
@@ -97,17 +99,24 @@ class _FakeReader:
         self.model_rows: list[MetricsRow] = []
         self.summaries: list[MonitoringTraceSummary] = []
         self.traces_by_id: dict[str, MonitoringTrace] = {}
+        self.capability: MetricsCapability = _FULL_CAPABILITY
         self.query_error: Exception | None = None
+        self.model_query_error: Exception | None = None
         self.list_error: Exception | None = None
         self.get_trace_error: Exception | None = None
         self.list_calls: list[dict] = []
 
-    async def query_metrics(self, filter_) -> MetricsResult:
+    def metrics_capability(self) -> MetricsCapability:
+        return self.capability
+
+    async def query_metrics(self, query) -> MetricsResult:
         if self.query_error is not None:
             raise self.query_error
-        if filter_.view == MetricsView.OBSERVATIONS:
+        if Dimension.MODEL in query.dimensions:
+            if self.model_query_error is not None:
+                raise self.model_query_error
             return MetricsResult(rows=self.model_rows)
-        if filter_.granularity:
+        if query.granularity:
             return MetricsResult(rows=self.series_rows)
         return MetricsResult(rows=self.summary_rows)
 
@@ -159,27 +168,25 @@ def _summary(**kw) -> MonitoringTraceSummary:
 # -- GET /api/observability/metrics ------------------------------------------
 
 
+def _measures(count=0, cost=0.0, tokens=0, latency=0.0) -> dict[Measure, float | None]:
+    return {Measure.COUNT: count, Measure.COST: cost, Measure.TOKENS: tokens, Measure.LATENCY: latency}
+
+
 async def test_metrics_composed_shape():
     reader = _install(_FakeReader())
-    reader.summary_rows = [MetricsRow(metrics={"count": 10, "totalCost": 2.5, "totalTokens": 1000, "latency": 1500})]
+    reader.summary_rows = [MetricsRow(measures=_measures(count=10, cost=2.5, tokens=1000, latency=1500))]
     reader.series_rows = [
-        MetricsRow(
-            dimensions={"time": "2026-07-01"},
-            metrics={"count": 4, "totalCost": 1.0, "totalTokens": 400, "latency": 1200},
-        ),
-        MetricsRow(
-            dimensions={"time": "2026-07-02"},
-            metrics={"count": 6, "totalCost": 1.5, "totalTokens": 600, "latency": 1800},
-        ),
+        MetricsRow(bucket="2026-07-01", measures=_measures(count=4, cost=1.0, tokens=400, latency=1200)),
+        MetricsRow(bucket="2026-07-02", measures=_measures(count=6, cost=1.5, tokens=600, latency=1800)),
     ]
     reader.model_rows = [
         MetricsRow(
-            dimensions={"providedModelName": "gpt-4o"},
-            metrics={"count": 7, "totalCost": 2.0, "totalTokens": 700, "latency": 1600},
+            dimensions={Dimension.MODEL: "gpt-4o"},
+            measures=_measures(count=7, cost=2.0, tokens=700, latency=1600),
         ),
         MetricsRow(
-            dimensions={"providedModelName": "claude"},
-            metrics={"count": 3, "totalCost": 0.5, "totalTokens": 300, "latency": 900},
+            dimensions={Dimension.MODEL: "claude"},
+            measures=_measures(count=3, cost=0.5, tokens=300, latency=900),
         ),
     ]
 
@@ -218,28 +225,23 @@ async def test_metrics_empty_rows_zero_summary():
     assert data["byModel"] == []
 
 
-async def test_metrics_bymodel_omitted_when_subquery_rejected():
+async def test_by_model_query_error_propagates_not_swallowed():
+    # A backend that DECLARES the model dimension runs the by-model query hard: a
+    # failure propagates loudly (mapped to 501), never swallowed into an empty panel.
     reader = _install(_FakeReader())
-    reader.summary_rows = [MetricsRow(metrics={"count": 1})]
-
-    # The by-model view is the only OBSERVATIONS query; reject just that one.
-    async def query(filter_):
-        if filter_.view == MetricsView.OBSERVATIONS:
-            raise MonitoringReadNotSupportedError("no observations metrics")
-        return MetricsResult(rows=reader.summary_rows if not filter_.granularity else [])
-
-    reader.query_metrics = query  # type: ignore[method-assign]
+    reader.summary_rows = [MetricsRow(measures=_measures(count=1))]
+    reader.model_query_error = MonitoringReadNotSupportedError("no observations metrics")
     resp = await router.get_metrics(_req(""))
-    assert resp.status_code == 200
-    assert _json(resp)["data"]["byModel"] == []  # omitted, tiles intact
+    assert resp.status_code == 501
+    assert _json(resp)["code"] == "monitoring-read-not-supported"
 
 
 async def test_by_model_available_true_with_rows():
     reader = _install(_FakeReader())
     reader.model_rows = [
         MetricsRow(
-            dimensions={"providedModelName": "gpt-4o"},
-            metrics={"count": 7, "totalCost": 2.0, "totalTokens": 700, "latency": 1600},
+            dimensions={Dimension.MODEL: "gpt-4o"},
+            measures=_measures(count=7, cost=2.0, tokens=700, latency=1600),
         )
     ]
     resp = await router.get_metrics(_req(""))
@@ -251,25 +253,22 @@ async def test_by_model_available_true_with_rows():
 
 
 async def test_by_model_available_true_when_empty():
-    # A successful but empty by-model sub-query is AVAILABLE — empty is not unavailable.
-    _install(_FakeReader())  # all row sets empty
+    # A backend declaring the model dimension is AVAILABLE even with no rows — empty
+    # is not unavailable.
+    _install(_FakeReader())  # all row sets empty, full capability
     resp = await router.get_metrics(_req(""))
     data = _json(resp)["data"]
     assert data["byModelAvailable"] is True
     assert data["byModel"] == []
 
 
-async def test_by_model_unavailable_when_safe_query_none():
+async def test_by_model_unavailable_when_dimension_not_declared():
     reader = _install(_FakeReader())
-    reader.summary_rows = [MetricsRow(metrics={"count": 1})]
-
-    # Reject only the by-model OBSERVATIONS query → ``_safe_query`` returns None.
-    async def query(filter_):
-        if filter_.view == MetricsView.OBSERVATIONS:
-            raise MonitoringReadNotSupportedError("no observations metrics")
-        return MetricsResult(rows=reader.summary_rows if not filter_.granularity else [])
-
-    reader.query_metrics = query  # type: ignore[method-assign]
+    reader.summary_rows = [MetricsRow(measures=_measures(count=1))]
+    # The backend does not declare the model dimension: the panel is reported absent
+    # (declared, not a swallowed error) and no by-model query is issued.
+    reader.capability = MetricsCapability(measures=frozenset(Measure), dimensions=frozenset())
+    reader.model_query_error = AssertionError("by-model query must not be issued when undeclared")
     resp = await router.get_metrics(_req(""))
     assert resp.status_code == 200
     data = _json(resp)["data"]
@@ -277,6 +276,16 @@ async def test_by_model_unavailable_when_safe_query_none():
     assert data["byModel"] == []
     assert data["summary"]["totalRuns"] == 1  # tiles intact
     assert "timeSeries" in data
+
+
+async def test_metrics_core_measure_not_served_501():
+    # A backend that does not declare the core measures cannot drive the tiles: the
+    # door fails loudly with the read-not-supported code, never a zeroed dashboard.
+    reader = _install(_FakeReader())
+    reader.capability = MetricsCapability(measures=frozenset({Measure.COUNT}), dimensions=frozenset())
+    resp = await router.get_metrics(_req(""))
+    assert resp.status_code == 501
+    assert _json(resp)["code"] == "monitoring-read-not-supported"
 
 
 async def test_metrics_bad_token_400():
@@ -524,7 +533,6 @@ async def test_get_trace_maps_full_detail():
                 "metadata": {"node_id": "n1"},
                 "input": {"p": 1},
                 "output": "ok",
-                "nodeId": "n1",
             }
         ],
     }
@@ -592,12 +600,12 @@ async def test_plain_list_error_propagates_loudly():
 
 async def test_swapping_reader_changes_response():
     r1 = _install(_FakeReader())
-    r1.summary_rows = [MetricsRow(metrics={"count": 5})]
+    r1.summary_rows = [MetricsRow(measures=_measures(count=5))]
     resp1 = await router.get_metrics(_req(""))
     assert _json(resp1)["data"]["summary"]["totalRuns"] == 5
 
     r2 = _install(_FakeReader())  # swap the registered backend
-    r2.summary_rows = [MetricsRow(metrics={"count": 9})]
+    r2.summary_rows = [MetricsRow(measures=_measures(count=9))]
     resp2 = await router.get_metrics(_req(""))
     assert _json(resp2)["data"]["summary"]["totalRuns"] == 9
 

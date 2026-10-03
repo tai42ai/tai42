@@ -1,11 +1,13 @@
-"""Classify a tool run's returned envelope.
+"""Diagnostics for a tool run's outcome at a conversation turn.
 
-Distinguishes a failed terminal, a suspended re-park, an interrupt pause, or a value-free
-structural shape diagnostic.
-
-Every classifier is positive discrimination on a CLOSED, exact, case-sensitive status set —
-never "anything not success" — so a status from a tool's own vocabulary keeps mapping as an
-ordinary payload field, and no participant content ever crosses into a log line.
+A FAILURE is RAISED as the contract's :class:`~tai42_contract.interactions.RunTerminalFailed`,
+carrying the driver's outcome as an OPAQUE payload; the turn catches it and records the payload
+WHOLE (:func:`_failed_outcome_detail`), never reading a key inside it. A RETURNED value is a
+success the turn maps through ``reply_expr`` with NO status inspection, and a still-parked run is
+already a typed contract value the visit normalises. This module no longer classifies a returned
+envelope by status: it renders a raised failure's payload for the record, and a value-free
+structural shape diagnostic for a reply-mapping fault. No participant content ever crosses into a
+log line.
 """
 
 from __future__ import annotations
@@ -13,33 +15,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-#: The terminal-outcome names a result envelope reports a NON-SUCCESS run with: the caller cut
-#: it short, it ended early, or it failed. A result naming one of these is a failed run — its
-#: ``result`` is partial (or empty) by construction, so it must never be mapped as an answer.
-#:
-#: EXACTLY the returned-envelope terminal vocabulary, and a CLOSED set on purpose: tools return
-#: arbitrary dicts, and a ``status`` from a tool's own vocabulary (``"queued"``,
-#: ``"not_found"``, ``"deleted"``) is an ordinary payload field that keeps mapping through
-#: ``reply_expr``. Two near-neighbours are deliberately OUT. ``"failed"`` is a park-completion
-#: FIRE status — the vocabulary a resumer names a DEFERRED terminal with (see
-#: :data:`PARK_COMPLETION_FAILED`), carried beside the result rather than inside it, and read
-#: on the completion-delivery path, not here. ``"errored"`` is run-STATUS REPORT vocabulary: a
-#: report ABOUT a run is a successful answer to a "how did it go?" turn and must MAP — a route
-#: whose whole purpose is relaying run status would otherwise fail every turn it answers
-#: honestly. Matching is exact and case-sensitive for the same reason: a fuzzy or case-folded
-#: match would swallow tool vocabularies that merely read like a terminal.
-_FAILED_RESULT_STATUSES: frozenset[str] = frozenset({"aborted", "stopped", "error"})
-
-#: The envelope keys naming WHY a non-success terminal failed, carried into the turn's error
-#: detail in this order: the failure text and its kind, the recorded exception, the outputs the
-#: run never produced, and the run handle the whole detail is traceable by. A falsy value (an
-#: absent key, an empty list, a blank string) is skipped, so the detail names only what the
-#: envelope actually carries. The partial ``result`` itself is deliberately excluded: the
-#: detail is recorded and logged, and a partial payload belongs in neither.
-_FAILED_RESULT_DETAIL_KEYS: tuple[str, ...] = ("error", "error_kind", "last_error", "missing_results", "session_id")
-
-#: Each failure key's rendered value is capped, so an envelope carrying a large payload under
-#: one of them cannot bloat the recorded detail.
+#: A rendered value (a raised failure's whole payload, or a diagnostic value) is capped, so a
+#: large payload cannot bloat the recorded detail.
 _FAILED_RESULT_DETAIL_LIMIT = 200
 
 #: Appended to a value the cap clipped, so a truncated detail never reads as a complete one.
@@ -50,7 +27,7 @@ def _capped_repr(value: object) -> str:
     """``value``'s repr, clipped to :data:`_FAILED_RESULT_DETAIL_LIMIT` with an explicit truncation marker.
 
     Never silently: a clipped value that read as a whole one would make a recorded detail lie about
-    the envelope it came from.
+    the payload it came from.
     """
     text = repr(value)
     if len(text) <= _FAILED_RESULT_DETAIL_LIMIT:
@@ -58,104 +35,15 @@ def _capped_repr(value: object) -> str:
     return text[:_FAILED_RESULT_DETAIL_LIMIT] + _FAILED_RESULT_DETAIL_ELLIPSIS
 
 
-def _failed_result_detail(result: object) -> str | None:
-    """The internal detail for a tool result that NAMES a non-success terminal, or ``None`` when it names none.
+def _failed_outcome_detail(outcome: object) -> str:
+    """The internal detail for a RAISED :class:`RunTerminalFailed`, carrying its payload WHOLE.
 
-    A result envelope reports its own outcome: a ``status`` of :data:`_FAILED_RESULT_STATUSES`
-    is a run that was aborted, stopped early, or failed. Anything else — a success, a status
-    from the tool's own vocabulary, a non-string ``status``, a dict with no ``status`` at all,
-    or a non-dict result — names no terminal and stays on the normal reply path.
-
-    The detail names the terminal plus whichever of :data:`_FAILED_RESULT_DETAIL_KEYS` the
-    envelope carries, each capped. It is recorded and logged, never delivered.
+    The outcome is an OPAQUE payload the driver that failed wrote; the turn records it as-is
+    (capped), never pulling ``error_kind`` / ``missing_results`` / ``session_id`` out by name. It
+    is recorded and logged, never delivered — the delivered reply is the route's generic
+    client-safe error. A UI shows the stored payload generically.
     """
-    if not isinstance(result, dict):
-        return None
-    status = result.get("status")
-    if not isinstance(status, str) or status not in _FAILED_RESULT_STATUSES:
-        return None
-    reasons = [f"{key}={_capped_repr(value)}" for key in _FAILED_RESULT_DETAIL_KEYS if (value := result.get(key))]
-    reason_text = f" ({'; '.join(reasons)})" if reasons else ""
-    return f"tool result status {status!r}{reason_text}"
-
-
-#: A run envelope can hand control back MID-RUN instead of finishing, reporting a NON-TERMINAL
-#: PAUSED status rather than a success or a failure: its flagged reply surface is still
-#: DOWNSTREAM of the pause (unproduced), so mapping the envelope through ``reply_expr`` would read
-#: an empty/not-ready surface as though it were the produced reply — faulting an authored
-#: completeness guard or delivering a blank. Two paused statuses reach here, and they take
-#: DIFFERENT dispositions because they differ in one fact: whether the paused reply has a
-#: DELIVERY LEG back to this turn.
-#:
-#: ``"suspended"`` is an async re-park whose envelope did not cross a tool-face — a consumer's own
-#: resume caller keeps the run-outcome dict rather than the :class:`SuspendedInteraction` sentinel a
-#: consumer's auto-pilot tool-face emits. It HAS a delivery leg: the completion continuation bound
-#: around the dispatch carries this thread, so the resumed answer arrives out of band when the
-#: resume drives past the pause. The turn ends SILENTLY, exactly as the :class:`SuspendedInteraction`
-#: marker path does, and the recorded note reads as pending — not lost.
-#:
-#: ``"interrupt"`` is a tool-call pause on a run a conversation turn cannot drive, so an interrupt
-#: reaching one has NO delivery leg — the reply would never arrive. That is a permanent route
-#: misconfiguration (a hidden looping tool no route sensibly targets), and the standard disposition
-#: for a permanent misconfiguration is LOUD: it takes the ERROR path (the same client-safe error
-#: reply a failed run gets), so the failure is noticed rather than converted into silent data loss.
-#:
-#: POSITIVE discrimination on CLOSED, exact, case-sensitive sets — never "anything not success" —
-#: for the same reason :data:`_FAILED_RESULT_STATUSES` is closed: a ``status`` from a tool's OWN
-#: vocabulary is an ordinary payload field that must keep mapping. ``missing_results`` is
-#: deliberately NOT the discriminator — it rides EVERY non-error envelope the engine returns, a
-#: SUCCESS terminal included (as an empty list), so its presence names no pause; the status does.
-#: It is read only to ENRICH the recorded detail for producers that ride ``missing_results`` on
-#: paused envelopes, and is simply absent for older producers that do not.
-_SUSPENDED_RESULT_STATUSES: frozenset[str] = frozenset({"suspended"})
-_INTERRUPT_RESULT_STATUSES: frozenset[str] = frozenset({"interrupt"})
-
-
-def _suspended_result_note(result: object) -> str | None:
-    """The internal note for a tool result that NAMES a non-terminal SUSPENDED re-park, or ``None`` otherwise.
-
-    Matches :data:`_SUSPENDED_RESULT_STATUSES`.
-    A suspended envelope is the run handing control back mid-run on an engine-caller async park,
-    with its flagged reply surface still downstream of the pause, so it must never be mapped as a
-    reply. The turn ends SILENTLY and the real reply delivers out of band when the resume drives
-    past the pause. The note names the paused status and, for a producer that rides it, the
-    ``missing_results`` surfaces the run has not produced YET, so the record can say WHY the turn
-    produced no reply; a producer that does not ride it omits that cleanly. Recorded and logged,
-    never delivered — the paused-run sibling of :func:`_failed_result_detail`.
-    """
-    if not isinstance(result, dict):
-        return None
-    status = result.get("status")
-    if not isinstance(status, str) or status not in _SUSPENDED_RESULT_STATUSES:
-        return None
-    missing = result.get("missing_results")
-    if isinstance(missing, list) and missing:
-        return f"tool run paused (status {status!r}); reply pending, missing_results={_capped_repr(missing)}"
-    return f"tool run paused (status {status!r}); reply pending"
-
-
-def _interrupt_result_detail(result: object) -> str | None:
-    """The internal error detail for a tool result that NAMES an INTERRUPT pause, or ``None`` otherwise.
-
-    Matches :data:`_INTERRUPT_RESULT_STATUSES`.
-    An interrupt reaching a conversation turn is a permanent route misconfiguration: the turn
-    cannot drive such a run, so the pause has NO delivery leg and the reply would never
-    arrive. It is surfaced as the SAME client-safe error a failed run is, so the failure is loud
-    and noticed rather than silent data loss. The detail names the real cause and, for a producer
-    that rides it, the ``missing_results`` surfaces the run will never produce here. Recorded and
-    logged, never delivered — the loud sibling of :func:`_suspended_result_note`.
-    """
-    if not isinstance(result, dict):
-        return None
-    status = result.get("status")
-    if not isinstance(status, str) or status not in _INTERRUPT_RESULT_STATUSES:
-        return None
-    missing = result.get("missing_results")
-    surfaces = f"; missing_results={_capped_repr(missing)}" if isinstance(missing, list) and missing else ""
-    return (
-        f"tool run paused (status {status!r}) on a conversation turn that cannot "
-        f"drive it — a route misconfiguration; the reply has no delivery leg{surfaces}"
-    )
+    return f"tool run failed: {_capped_repr(outcome)}"
 
 
 #: The failure-path structural diagnostic lists at most this many key names per level, so a

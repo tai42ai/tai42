@@ -139,7 +139,7 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     )
     assert skip["ok"], skip
     report = skip["sections"]["sub_mcp"]
-    assert report["skipped_existing"] == 1, report
+    assert report["details"]["skipped_existing"] == 1, report
     assert report["created"] == 0, report
     assert report["updated"] == 0, report
     assert report["errors"] == [], report
@@ -156,7 +156,7 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     report = over["sections"]["sub_mcp"]
     assert report["updated"] == 1, report
     assert report["created"] == 0, report
-    assert report["skipped_existing"] == 0, report
+    assert report["details"]["skipped_existing"] == 0, report
     assert report["errors"] == [], report
     after_over = await api.get("/api/sub-mcp", retry_on_reloading=True)
     assert after_over[slug]["tools"] == ["e2e_echo"], "overwrite must restore the backup's record fleet-wide"
@@ -258,18 +258,18 @@ async def test_skip_import_preserves_conversation_secret_and_token(
 
     # (a) the conversation route is skipped and its callback secret is NOT re-minted.
     conv = result["sections"]["conversations"]
-    assert conv["skipped_existing"] == 1, conv
+    assert conv["details"]["skipped_existing"] == 1, conv
     assert conv["created"] == 0, conv
     assert conv["updated"] == 0, conv
-    assert conv["new_callback_secrets"] == [], conv  # a re-mint would surface here
+    assert conv["details"]["new_callback_secrets"] == [], conv  # a re-mint would surface here
     assert conv["errors"] == [], conv
 
     # (b) the token is left untouched — skipped_existing, never re-minted (skip-only).
     ac = result["sections"]["access_control"]
     assert ac["created"] == 0, ac
     assert ac["updated"] == 0, ac
-    assert ac["new_api_keys"] == [], ac  # a token mint would surface here
-    assert ac["skipped_existing"] >= 1, ac
+    assert ac["details"]["new_api_keys"] == [], ac  # a token mint would surface here
+    assert ac["details"]["skipped_existing"] >= 1, ac
     assert ac["errors"] == [], ac
 
 

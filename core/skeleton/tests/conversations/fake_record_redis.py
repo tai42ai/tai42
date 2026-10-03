@@ -378,6 +378,9 @@ class FakeRecordRedis:
                 "created_at": new_created_at,
                 "addresses": [removed],
             }
+            # Carry the stored locale onto the split-off person, matching the detach Lua.
+            if person.get("locale") is not None:
+                fresh["locale"] = person["locale"]
             fresh_json = json.dumps(fresh)
             self._strings[new_row_key] = fresh_json
             index_key = index_prefix + person["target_kind"] + ":" + person["target_name"]

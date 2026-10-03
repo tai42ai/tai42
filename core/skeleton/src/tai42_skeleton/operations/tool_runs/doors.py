@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 from tai42_contract.app import tai42_app
@@ -114,12 +113,24 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
             set_run_attribution(RunAttribution(user_id=owning_identity)) if owning_identity is not None else None
         )
 
-        run_id = secrets.token_urlsafe(16)
-        started = _pkg._now()
+        # Rebuild the detached run's subject context from the submitted ``StateSubject`` — the SAME
+        # ``door="api"`` context the supervisor deposits around the live run — so a crash-resume
+        # re-drive replays the run under that subject and its park indexes where the original's
+        # would have. A submit with no subject stores none.
+        from tai42_skeleton.states.api_context import api_state_context_value
+
+        submit_context = api_state_context_value(subject, owning_identity) if subject is not None else None
         try:
             async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-                await store.create_run(
-                    r, run_id, tool_name, started.isoformat(), started.timestamp(), settings, user_id=owning_identity
+                run_id = await reconcile.create_recorded_run(
+                    r,
+                    store,
+                    tool_name,
+                    settings,
+                    user_id=owning_identity,
+                    arguments=arguments,
+                    extras=None,
+                    state_context=submit_context,
                 )
             supervisor._spawn_supervisor(run_id, tool_name, arguments, subject)
         except Exception:

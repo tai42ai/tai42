@@ -30,19 +30,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def api_state_context_value(subject: StateSubject, actor: str | None) -> StateContext:
+    """The ``door="api"`` :class:`StateContext` for ``subject`` — the value the direct doors deposit.
+
+    The single source of the shape: :func:`api_state_context` deposits it around a live run, and the
+    background-submit door stores it on a crash-resume record so the re-drive replays under the same
+    subject. Both reach it here, so the stored context can never drift from the deposited one.
+    """
+    return StateContext(
+        door="api",
+        candidates=SubjectCandidates(
+            target_kind=subject.target_kind,
+            target_name=subject.target_name,
+            by_kind={subject.kind: subject.key},
+        ),
+        actor=actor,
+    )
+
+
 @contextmanager
 def _deposited(subject: StateSubject, actor: str | None) -> Iterator[None]:
-    with state_context(
-        StateContext(
-            door="api",
-            candidates=SubjectCandidates(
-                target_kind=subject.target_kind,
-                target_name=subject.target_name,
-                by_kind={subject.kind: subject.key},
-            ),
-            actor=actor,
-        )
-    ):
+    with state_context(api_state_context_value(subject, actor)):
         yield
 
 

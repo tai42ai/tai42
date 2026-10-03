@@ -23,6 +23,7 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
+    SuspendedInteraction,
     is_chained_park_key,
 )
 from tai42_contract.template import TemplatedText
@@ -102,11 +103,10 @@ def test_tools_agent_chains_a_nested_runs_park_and_resumes_with_its_terminal(
             user_message=TemplatedText(content="go"),
             thread_id="t-chained",
         )
-        assert isinstance(receipt, dict)
-        assert receipt["status"] == "suspended"
+        assert isinstance(receipt, SuspendedInteraction)
         # Parked on the CALL, not on the nested run's interaction: that park stays untouched and
         # resumes on its own path.
-        (chain_token,) = receipt["interaction_ids"]
+        (chain_token,) = receipt.interaction_ids
         assert is_chained_park_key(chain_token)
         assert nested.calls == 1
         assert await idx.read_park_entry("i-nested") is None
@@ -176,7 +176,7 @@ def test_two_chained_calls_in_one_super_step_resume_together(
         receipt = await agent.run(
             presets=presets, checkpoint_provider="redis", user_message=TemplatedText(content="go"), thread_id="t-two"
         )
-        keys = receipt["interaction_ids"]
+        keys = receipt.interaction_ids
         assert len(set(keys)) == 2
         assert set(keys) == {first.chained_keys[0], second.chained_keys[0]}
 
@@ -226,7 +226,7 @@ def test_the_delivery_tool_accepts_the_whole_contract_fire_payload(
             user_message=TemplatedText(content="go"),
             thread_id="t-payload",
         )
-        (chain_token,) = receipt["interaction_ids"]
+        (chain_token,) = receipt.interaction_ids
         fire = {
             CHAINED_PARK_TOKEN_KEY: chain_token,
             "result": "the call said yes",
@@ -267,7 +267,7 @@ def test_a_chained_park_inherits_the_nested_asks_horizon(
             user_message=TemplatedText(content="go"),
             thread_id="t-horizon",
         )
-        assert receipt["expiry_at"] == deadline.isoformat()
+        assert receipt.expiry_at == deadline
 
     asyncio.run(go())
 
@@ -299,7 +299,8 @@ def test_a_chained_park_horizon_is_capped(
         receipt = await agent.run(
             presets=[preset], checkpoint_provider="redis", user_message=TemplatedText(content="go"), thread_id="t-cap"
         )
-        capped = datetime.fromisoformat(receipt["expiry_at"])
+        capped = receipt.expiry_at
+        assert capped is not None
         assert capped < far
         assert capped <= datetime.now(UTC) + timedelta(hours=1)
 
@@ -352,7 +353,7 @@ def test_a_re_park_extends_the_chained_parks_inherited_horizon(
             user_message=TemplatedText(content="go"),
             thread_id="t-repark",
         )
-        (chain_token,) = receipt["interaction_ids"]
+        (chain_token,) = receipt.interaction_ids
         entry = await idx.read_park_entry(chain_token)
         assert entry is not None
         before = await fake_park_redis.ttl(f"agent:park:{chain_token}")
@@ -429,7 +430,7 @@ def test_a_failed_nested_terminal_re_enters_as_a_model_visible_tool_error(
             user_message=TemplatedText(content="go"),
             thread_id="t-failed",
         )
-        (chain_token,) = receipt["interaction_ids"]
+        (chain_token,) = receipt.interaction_ids
         with caplog.at_level(logging.WARNING):
             assert (
                 await deliver_chained_park(chain_token=chain_token, completion_id="c-1", status=status)

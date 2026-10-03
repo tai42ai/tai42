@@ -108,6 +108,90 @@ async def test_crash_resume_re_drive_passes_the_recorded_extras(wired, monkeypat
     assert captured == {"tool_name": "alpha", "arguments": {"x": 1}, "extras": {"warm": "y"}}
 
 
+async def test_crash_resume_re_drive_uses_the_original_runs_secret_capability_not_the_readers(
+    wired, monkeypatch
+) -> None:
+    # The re-drive runs on a READ path under the reader's ambient context. The secret-read
+    # capability the re-drive acts under must be the ORIGINAL run key's, never the reader's:
+    # a NON-admin original key must keep the secret fence closed even when an ADMIN reader
+    # triggered the reconcile, and an ADMIN original key must open it even under a NON-admin
+    # reader — the escalation guard in both directions.
+    from tai42_contract.access_control import (
+        caller_may_read_secrets,
+        reset_request_secret_capability,
+        set_request_secret_capability,
+    )
+
+    from tai42_skeleton.authz.identity import CallerIdentity
+    from tai42_skeleton.operations.tool_runs import reconcile, supervisor
+
+    seen: dict = {}
+
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None) -> None:
+        # The same read ``_SupervisedRunContext.capture`` makes at the top of ``run_recorded``.
+        seen["secret_capable"] = caller_may_read_secrets()
+
+    monkeypatch.setattr(supervisor, "run_recorded", _fake_run_recorded)
+
+    record = {"tool_name": "alpha", "arguments": "{}", "extras": "{}", "user_id": "svc-key"}
+
+    # Non-admin original key, admin reader: fence must stay CLOSED.
+    async def _non_admin(user_id):
+        return CallerIdentity(user_id=user_id, is_admin=False)
+
+    monkeypatch.setattr(reconcile, "_rebuild_crash_resume_identity", _non_admin)
+    token = set_request_secret_capability(True)
+    try:
+        await reconcile._crash_resume("r-sec-closed", record)
+    finally:
+        reset_request_secret_capability(token)
+    assert seen["secret_capable"] is False
+
+    # Admin original key, non-admin reader: fence must OPEN.
+    async def _admin(user_id):
+        return CallerIdentity(user_id=user_id, is_admin=True)
+
+    monkeypatch.setattr(reconcile, "_rebuild_crash_resume_identity", _admin)
+    token = set_request_secret_capability(False)
+    try:
+        await reconcile._crash_resume("r-sec-open", record)
+    finally:
+        reset_request_secret_capability(token)
+    assert seen["secret_capable"] is True
+
+
+async def test_crash_resume_fails_closed_on_the_secret_fence_when_the_key_lost_authority(wired, monkeypatch) -> None:
+    # The original key no longer carries authority (rebuild yields ``None``): the re-drive binds
+    # an identity-less execution and the secret fence must be CLOSED, never inheriting the
+    # reader's open capability.
+    from tai42_contract.access_control import (
+        caller_may_read_secrets,
+        reset_request_secret_capability,
+        set_request_secret_capability,
+    )
+
+    from tai42_skeleton.operations.tool_runs import reconcile, supervisor
+
+    seen: dict = {}
+
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None) -> None:
+        seen["secret_capable"] = caller_may_read_secrets()
+
+    monkeypatch.setattr(supervisor, "run_recorded", _fake_run_recorded)
+
+    async def _revoked(user_id):
+        return None
+
+    monkeypatch.setattr(reconcile, "_rebuild_crash_resume_identity", _revoked)
+    record = {"tool_name": "alpha", "arguments": "{}", "extras": "{}", "user_id": "svc-key"}
+    token = set_request_secret_capability(True)
+    try:
+        await reconcile._crash_resume("r-sec-revoked", record)
+    finally:
+        reset_request_secret_capability(token)
+    assert seen["secret_capable"] is False
+
+
 async def test_create_run_stores_neither_for_an_unflagged_run(wired) -> None:
     store, fake, settings = wired
     # An un-flagged run stores none of the re-drive inputs even when a subject was passed: the

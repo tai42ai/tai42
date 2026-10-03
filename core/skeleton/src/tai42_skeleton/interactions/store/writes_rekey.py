@@ -39,14 +39,22 @@ class _StoreRekeyWrites(_StoreKeys):
         if old_key == new_key:
             return []
         scopes_key = self.subject_scopes_key(kind, old_key)
+        new_scopes_key = self.subject_scopes_key(kind, new_key)
         scope_tokens = [
             serde.as_str(token) for token in await cast("Awaitable[set[str | bytes]]", r.smembers(scopes_key))
         ]
+        # The old sets carry the set-or-extend-to-greater TTL every park/outcome write stamps, so
+        # they outlive the entries they index. Carry that horizon onto the NEW sets (``EXPIRE NX``
+        # sets it on a set the merge created fresh, ``GT`` only raises an existing one) so a merge
+        # never leaves a new index set with no expiry (a permanent leak) or one shorter than the
+        # moved entries.
+        scopes_ttl = await cast("Awaitable[int]", r.ttl(scopes_key))
         moved: list[str] = []
         for token in scope_tokens:
             scope_kind, _, scope_name = token.partition(":")
             scope_target_kind = cast("ConversationTargetKind", scope_kind)
             old_parks = self.subject_parks_key(scope_target_kind, scope_name, kind, old_key)
+            parks_ttl = await cast("Awaitable[int]", r.ttl(old_parks))
             members = [serde.as_str(m) for m in await cast("Awaitable[set[str | bytes]]", r.smembers(old_parks))]
             for member in members:
                 await self._rekey_member(r, member, kind, old_key, new_key)
@@ -56,8 +64,14 @@ class _StoreRekeyWrites(_StoreKeys):
             if members:
                 pipe.sadd(new_parks, *members)
                 pipe.srem(old_parks, *members)
-            pipe.sadd(self.subject_scopes_key(kind, new_key), token)
+                if parks_ttl > 0:
+                    pipe.expire(new_parks, parks_ttl, nx=True)
+                    pipe.expire(new_parks, parks_ttl, gt=True)
+            pipe.sadd(new_scopes_key, token)
             pipe.srem(scopes_key, token)
+            if scopes_ttl > 0:
+                pipe.expire(new_scopes_key, scopes_ttl, nx=True)
+                pipe.expire(new_scopes_key, scopes_ttl, gt=True)
             await pipe.execute()
         return moved
 

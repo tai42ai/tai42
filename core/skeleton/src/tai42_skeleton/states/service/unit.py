@@ -9,12 +9,18 @@ committed document overlaid with the unit's staged deltas, on a monotonic provis
 the scope reads its own staged writes while every other scope still sees the store's committed
 document.
 
-``commit`` replays every staged batch through :meth:`~tai42_skeleton.states.service.StatesService.
-apply_batch` — ONE store transaction, whole-batch rollback, the ledger and guards authoritative —
-and reports any divergence between the staged projection and the committed answer. ``discard`` drops
-the staging. A unit neither committed nor discarded when its scope ends is discarded at teardown and
-the discard is logged. A savepoint nests: writes staged inside it are kept on a clean exit and
-dropped on an exception, only the child's deltas rolling back.
+A write door (``replace``/``apply``, and ``merge`` through ``apply``) that runs while the unit is the
+ambient unit STAGES into it rather than touching the store, exactly as the read seam serves staged
+subjects — so a step's writes read back within the scope, roll back with a discard, and replay in
+authored order at commit. A ``conn``-threaded write (the commit itself) always goes to the store.
+
+``commit`` replays every staged write — ops/template_jq batch items and whole-document replaces —
+through :meth:`~tai42_skeleton.states.service.StatesService._commit_writes` — ONE store transaction,
+whole-batch rollback, the ledger and guards authoritative — and reports any divergence between the
+staged projection and the committed answer. ``discard`` drops the staging. A unit neither committed
+nor discarded when its scope ends is discarded at teardown and the discard is logged. A savepoint
+nests: writes staged inside it are kept on a clean exit and dropped on an exception, only the child's
+deltas rolling back.
 """
 
 from __future__ import annotations
@@ -23,6 +29,8 @@ import logging
 import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.states.errors import InvalidPathError
@@ -35,9 +43,9 @@ from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.store.trace import _iso_now, _refuse_composing_shape, stamp_trace
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
-    from tai42_contract.states.models import StateBatchWrite
+    from tai42_contract.states.models import StateBatchWrite, WriteOrigin
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +55,21 @@ _SEQ_EPSILON = 1e-6
 
 _SubjectKey = tuple[str, str, str, str, str]
 _ApplyContext = tuple[dict[str, Any], list[str], list[tuple[list[Any], str, str]], tuple[tuple[str | int, ...], ...]]
+
+
+@dataclass(frozen=True)
+class _StagedReplace:
+    """A whole-document replace staged in a unit, replayed through the facet's replace door at commit.
+
+    Carried in the unit's ordered staging alongside the ``StateBatchWrite`` ops/template_jq items so a
+    replace interleaves with them in authored order; the store is touched only when the unit commits.
+    """
+
+    state: str
+    subject: StateSubject
+    data: dict[str, Any]
+    origin: WriteOrigin
+
 
 # The ambient unit of work bound to the caller's scope. Homed here (not the kit) because only the
 # skeleton's own facet reads consult it; a door outside any unit reads ``None`` and behaves as today.
@@ -69,7 +92,7 @@ class _StateUnit:
 
     def __init__(self, service: _StatesServiceBase) -> None:
         self._service = service
-        self._staged: list[StateBatchWrite] = []
+        self._staged: list[StateBatchWrite | _StagedReplace] = []
         self._provisional: list[ApplyResult] = []
         self._staged_op_ids: set[str] = set()
         self._base: dict[_SubjectKey, dict[str, Any] | None] = {}
@@ -116,6 +139,17 @@ class _StateUnit:
             self._provisional.append(result)
             out.append(result)
         return out
+
+    async def stage_replace(
+        self, state: str, subject: StateSubject, data: dict[str, Any], origin: WriteOrigin
+    ) -> ApplyResult:
+        """Stage a whole-document replace, projecting ``data`` as the subject's document for later reads."""
+        self._ensure_open()
+        item = _StagedReplace(state=state, subject=subject, data=data, origin=origin)
+        result = await self._project_replace(item)
+        self._staged.append(item)
+        self._provisional.append(result)
+        return result
 
     async def _apply_context(self, state: str) -> _ApplyContext:
         ctx = self._contexts.get(state)
@@ -195,6 +229,25 @@ class _StateUnit:
         self._proj_seq[key] = seq
         return ApplyResult(applied=True, data=merged, seq=seq, skipped=skipped)
 
+    async def _project_replace(self, item: _StagedReplace) -> ApplyResult:
+        """Project a staged replace onto the subject's document on a fresh provisional sequence.
+
+        Validates ``data`` whole against the effective schema and mirrors the persisted replace door (no
+        composing-shape refusal and no ``_trace`` stamp), so the projection matches what the commit replay
+        writes.
+        """
+        effective_schema, subject_kinds, _regime_paths, _traced_paths = await self._apply_context(item.state)
+        await self._service._validate_subject_admitted(subject_kinds, item.state, item.subject)
+        _validate_document(effective_schema, item.data)
+        key = self._key(item.state, item.subject)
+        base = await self._base_view(item.state, item.subject)
+        base_seq = base["seq"] if base is not None else 0.0
+        new_doc = deepcopy(item.data)
+        seq = self._next_seq(base_seq)
+        self._projected[key] = new_doc
+        self._proj_seq[key] = seq
+        return ApplyResult(applied=True, data=new_doc, seq=seq, skipped=[])
+
     def _next_seq(self, base_seq: float) -> float:
         candidate = max(time.time(), self._last_seq + _SEQ_EPSILON, base_seq + _SEQ_EPSILON)
         self._last_seq = candidate
@@ -205,7 +258,7 @@ class _StateUnit:
         self._ensure_open()
         staged = list(self._staged)
         provisional = list(self._provisional)
-        results = await self._service.apply_batch(staged)
+        results = await self._service._commit_writes(staged)
         divergences = self._divergences(provisional, results)
         self._closed = True
         self._clear()
@@ -304,6 +357,59 @@ class _UnitMixin(_StatesServiceBase):
     def open_unit(self) -> AbstractAsyncContextManager[_StateUnit]:
         self._ensure_available()
         return _open_unit(self)
+
+    async def _commit_writes(self, writes: Sequence[StateBatchWrite | _StagedReplace]) -> list[ApplyResult]:
+        """Apply an ordered write set — ops/template_jq batch items and whole-document replaces — as ONE transaction.
+
+        One :class:`ApplyResult` per item in input order. Items are STABLY sorted by ``(state, subject)`` so two
+        concurrent multi-subject commits take the per-declaration locks in one order rather than opposing; items
+        sharing a ``(state, subject)`` keep their input order, so a subject's writes land as authored. Each item is
+        dispatched on the shared connection — a replace through :meth:`replace`, an ``ops`` item through
+        :meth:`apply`, a ``template_jq`` item through :meth:`apply_template_jq` — so items on one subject read each
+        other's uncommitted writes in order. Any item that raises propagates out of the transaction, rolling the
+        WHOLE batch back — no partial write survives, loud. An empty set returns ``[]`` without opening a
+        transaction. The shared seam the facet's ``apply_batch`` and the unit of work's commit both run through.
+        """
+        if not writes:
+            return []
+        order = sorted(
+            range(len(writes)),
+            key=lambda i: (
+                writes[i].state,
+                writes[i].subject.target_kind,
+                writes[i].subject.target_name,
+                writes[i].subject.kind,
+                writes[i].subject.key,
+            ),
+        )
+        results: dict[int, ApplyResult] = {}
+        async with self._store.begin() as conn:
+            for i in order:
+                item = writes[i]
+                if isinstance(item, _StagedReplace):
+                    record = await self.replace(item.state, item.subject, item.data, origin=item.origin, conn=conn)
+                    results[i] = ApplyResult(applied=True, data=record.data, seq=record.seq, skipped=[])
+                    continue
+                if item.ops is not None:
+                    results[i] = await self.apply(
+                        item.state, item.subject, item.ops, op_id=item.op_id, origin=item.origin, conn=conn
+                    )
+                    continue
+                if item.template_jq is None:
+                    raise AssertionError
+                outcome = await self.apply_template_jq(
+                    item.state,
+                    item.subject,
+                    item.template_jq,
+                    item.input,
+                    op_id=item.op_id,
+                    origin=item.origin,
+                    conn=conn,
+                )
+                results[i] = ApplyResult(
+                    applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped
+                )
+        return [results[i] for i in range(len(writes))]
 
     async def _projected_record_view(
         self, state: str, subject: StateSubject, *, conn: Any | None = None

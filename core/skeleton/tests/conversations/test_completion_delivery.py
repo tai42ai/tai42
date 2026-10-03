@@ -58,6 +58,10 @@ class FakeManager:
 
 
 class FakeChannel:
+    # A neutral fixture channel declares its OWN outbound split cap through the generic
+    # ``max_message_chars`` seam, read off the channel by the conversation-delivery machine.
+    max_message_chars = 1600
+
     def __init__(self) -> None:
         self.sends: list = []
 

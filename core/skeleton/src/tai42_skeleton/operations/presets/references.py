@@ -202,6 +202,101 @@ async def _rename_referees(name: str) -> list[str]:
     return holders
 
 
+async def _routes_bound_to(names: set[str]) -> dict[str, Any]:
+    """Every conversation route whose ``tool`` target is one of ``names``, keyed by route name.
+
+    A ``tool``-target route binds a preset as its target; a write that changes or removes the
+    preset — or a preset that composes it — can strand it. A deployment without the routes
+    capability holds none.
+    """
+    from tai42_skeleton.conversations import get_conversations_manager
+    from tai42_skeleton.operations import NotSupportedError
+
+    try:
+        routes, _ = await get_conversations_manager().list_routes()
+    except NotSupportedError:
+        return {}
+    return {
+        route.route_name: route
+        for route in routes.values()
+        if route.target_kind == "tool" and route.target_name in names
+    }
+
+
+async def _composing_closure(name: str) -> set[str]:
+    """Every preset that transitively COMPOSES ``name`` as a tool, via the ``used_by`` graph (``name`` excluded).
+
+    A new version of ``name`` can break a preset that composes it as a tool, however deeply nested, so a
+    route bound to any such composer is re-checked too. Built over the active preset population's
+    reference maps; an empty set on a store-less deployment (no active bodies).
+    """
+    bodies = await instance.app.presets.list_active_bodies()
+    _uses, used_by = _reference_maps(bodies)
+    closure: set[str] = set()
+    frontier = [name]
+    while frontier:
+        current = frontier.pop()
+        for composer in used_by.get(current, []):
+            if composer != name and composer not in closure:
+                closure.add(composer)
+                frontier.append(composer)
+    return closure
+
+
+async def _assert_bound_routes_still_bind(name: str, candidate_body: Any) -> None:
+    """Refuse a preset write whose new version would break a conversation route bound to it or a composer.
+
+    Re-runs the route bind check of every route bound to ``name`` AND every route bound to a preset that
+    transitively composes ``name`` (:func:`_composing_closure`), against the UNSAVED new version — the
+    same referential-integrity stance a rename takes: a save/rollback that would leave a bound route
+    unable to bind is a 409 that commits nothing, naming the routes so the operator fixes them first.
+
+    For a route bound directly to ``name`` the candidate IS ``candidate_body``; for a route bound to a
+    composer the candidate is the composer's own (unchanged) active body, while the changed ``name`` is
+    made visible to the composer's composed-preset resolution through the candidate scope — so a composer
+    the new version breaks (its target can now ask with no reply/resume path, or reads a state nothing
+    binds) is refused too. The scope is cleared on exit so the candidate never leaks into the commit.
+    """
+    from tai42_skeleton.conversations.target_validators import active_target_candidate_body, target_bind_refusal_lines
+    from tai42_skeleton.operations import ConflictError
+    from tai42_skeleton.presets.candidate_scope import candidate_bodies
+
+    targets = {name} | await _composing_closure(name)
+    routes = await _routes_bound_to(targets)
+    if not routes:
+        return
+
+    broken: list[str] = []
+    with candidate_bodies({name: candidate_body}):
+        for route_name, route in sorted(routes.items()):
+            if route.target_name == name:
+                candidate = candidate_body
+            else:
+                candidate = await active_target_candidate_body(route.target_kind, route.target_name)
+            lines = await target_bind_refusal_lines(route, candidate)
+            if lines:
+                broken.append(f"{route_name!r} ({'; '.join(lines)})")
+    if broken:
+        raise ConflictError(
+            f"preset {name!r} cannot be saved — the new version would break conversation route(s): "
+            f"{'; '.join(broken)}; update those routes first"
+        )
+
+
+async def _assert_no_bound_routes(name: str) -> None:
+    """Refuse a preset DELETE while a conversation route is still bound to the preset.
+
+    A deleted target leaves the route answering each turn with its error reply, so a delete is
+    refused — naming the routes — the same way a rename is refused, rather than stranding them.
+    """
+    from tai42_skeleton.operations import ConflictError
+
+    routes = await _routes_bound_to({name})
+    if routes:
+        held = "; ".join(f"conversation route {route_name!r}" for route_name in sorted(routes))
+        raise ConflictError(f"preset {name!r} cannot be deleted — held by: {held}; delete those routes first")
+
+
 async def _delete_referees(name: str) -> list[str]:
     """Every VETO a delete of preset ``name`` draws from the registered delete referees.
 

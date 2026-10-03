@@ -88,6 +88,8 @@ def build_request(
         continuation_tool=park_binding.continuation_tool,
         continuation_identity=park_binding.continuation_identity,
         continuation_state_context=park_binding.continuation_state_context,
+        # The door's caller-ask landing, captured across the park so the resume re-establishes it.
+        caller_ask_landing=park_binding.caller_ask_landing,
         # The live call chain WITHOUT the ask-performing frame (the innermost entry,
         # this ask's own tool dispatch), so a resume restores the parking run's chain
         # and never re-adds the ask frame. Empty outside any tool/agent frame.
@@ -96,6 +98,12 @@ def build_request(
         # binding is empty); every ask of a run stores the SAME pair, no ``to`` branch.
         run_delivery_id=park_binding.run_delivery_id,
         delivery=park_binding.delivery,
+        # The door's merged binding + the run input it saw + the door id, captured at park time so
+        # the deferred UPDATES apply once at the run's real terminal. All None when the run carried
+        # no state binding (and for a sync ask, whose binding is empty).
+        deferred_binding=park_binding.deferred_binding,
+        run_input=park_binding.run_input,
+        door_id=park_binding.door_id,
         expiry_at=expiry_at,
     )
 

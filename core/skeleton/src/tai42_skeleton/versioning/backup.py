@@ -20,18 +20,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
+from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
 
-# The report shape every importer returns, matching the backup section contract.
-_SectionReport = dict[str, Any]
 
-
-def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+def _empty_report() -> BackupSectionReport:
+    # ``skipped_existing`` (rows left untouched under ``skip``) is this section's own
+    # count, so it rides ``details``.
+    return BackupSectionReport(details={"skipped_existing": 0})
 
 
 async def export_versioned_documents() -> dict[str, Any]:
@@ -78,7 +78,7 @@ async def export_versioned_documents() -> dict[str, Any]:
 
 async def import_versioned_documents(
     payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
-) -> _SectionReport:
+) -> BackupSectionReport:
     """Restore document + version rows under their original ids.
 
     Keyed by row ``id`` (documents counted; versions follow their document): under
@@ -106,7 +106,7 @@ async def import_versioned_documents(
 
         for document in documents:
             if document["id"] in existing and mode == "skip":
-                report["skipped_existing"] += 1
+                report.details["skipped_existing"] += 1
                 continue
             await cur.execute(
                 "INSERT INTO versioned_documents (id, kind, name, active_version, is_active, created_at) "
@@ -127,9 +127,9 @@ async def import_versioned_documents(
                 ),
             )
             if document["id"] in existing:
-                report["updated"] += 1
+                report.updated += 1
             else:
-                report["created"] += 1
+                report.created += 1
 
         for version in versions:
             if version["id"] in existing_versions and mode == "skip":

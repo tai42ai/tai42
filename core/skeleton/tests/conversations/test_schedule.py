@@ -38,7 +38,7 @@ from .conftest import (
 )
 from .fake_record_redis import FakeRecordRedis
 
-_PROBE: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_turn_probe", default="default")
+_PROBE: contextvars.ContextVar[str] = contextvars.ContextVar("turn_probe", default="default")
 
 
 class _RunContextProbeAgent(EchoAgent):

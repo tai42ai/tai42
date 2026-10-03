@@ -7,8 +7,8 @@ kwargs; the worker pop turns them back into a
 
 A schedule fire is anonymous/system — the worker sees only the job kwargs, so "this is a
 schedule, keyed on this subject, applying this binding" is stamped where it is KNOWN (at
-creation, by the backend ``schedule_task`` wrapper) and read back where it is USED (at the
-fire, by the worker). Homed in kit beside
+creation, by the create door and the backend ``schedule_task`` wrapper) and read back where
+it is USED (at the fire, by the worker). Homed in kit beside
 :data:`tai42_kit.utils.worker_secret_capability.WORKER_SECRET_CAPABILITY_ARG` because the
 execution backends below the skeleton stamp and pop these and never import tai42-skeleton;
 the skeleton's write chokepoint reads the deposited context, and its dispatch chokepoint
@@ -124,17 +124,17 @@ def assert_schedule_create_fire() -> None:
         )
 
 
-# The reserved job kwarg a scheduled fire carries its subject under. Stamped server-side
-# by the backend ``schedule_task`` wrapper (only when ``scheduled=True``), so a submit
-# wrapper stamps nothing and a caller can never forge it; namespaced under the
-# ``backend_`` dispatch-kwarg convention so it cannot collide with a tool parameter.
+# The reserved job kwarg a scheduled fire carries its subject under. Stamped by the create door
+# from the top-level ``subject`` door field (a recurring job) or by the ambient-fire forwarder (a
+# background task that inherits its door's subject), so a caller can never forge it; namespaced under
+# the ``backend_`` dispatch-kwarg convention so it cannot collide with a tool parameter. The subject
+# never rides ``tool_kwargs`` — a tool's own ``subject`` argument is the tool's alone.
 SCHEDULE_SUBJECT_ARG = "backend_schedule_subject"
 
 # The reserved job kwarg a scheduled fire carries its door-layer state binding under.
 # Stamped server-side by the backend ``schedule_task`` wrapper (only when ``scheduled=True``)
-# under the same ``backend_`` convention. UNLIKE the subject — which also stays a live
-# ``subject`` kwarg a state tool reads — the raw request key is POPPED at the stamp, so the
-# binding never reaches the base tool (tools stay pure).
+# under the same ``backend_`` convention from the create door's plain request key, which is POPPED
+# at the stamp so the binding never reaches the base tool (tools stay pure).
 SCHEDULE_STATE_BINDING_ARG = "backend_schedule_state_binding"
 
 # The reserved job kwargs a CONTRACT-bearing scheduled fire carries its firing identity and door
@@ -146,14 +146,15 @@ SCHEDULE_EXECUTION_FINGERPRINT_ARG = "backend_schedule_execution_fingerprint"
 SCHEDULE_CONTRACT_ARG = "backend_schedule_contract"
 
 # The reserved schedule-door kwargs the CREATE door stamps onto a recurring fire's arguments before
-# it dispatches ``<tool>_schedule_task`` (the firing identity pair and the door contract). They reach
-# the branch as validated dispatch kwargs, so every backend's schedule branch must widen its
+# it dispatches ``<tool>_schedule_task`` (the subject, the firing identity pair and the door contract).
+# They reach the branch as validated dispatch kwargs, so every backend's schedule branch must widen its
 # signature to accept them (each optional, defaulting absent) or the tool binding refuses them as
 # unexpected — the worker's ``backend_fire`` pop reads them back off the stored job. One kit
 # definition the three backends compose beside their own ``*_SCHEDULE_OPTS`` so the reserved set is
-# never hand-copied per backend. The subject and state binding are stamped INSIDE the branch (after
-# validation) and so are not listed here.
+# never hand-copied per backend. The state binding is the exception: it rides the create door's plain
+# request key and is re-stamped INSIDE the branch (after validation), so it is not listed here.
 SCHEDULE_STAMPED_DOOR_OPTS: dict[str, Any] = {
+    SCHEDULE_SUBJECT_ARG: dict[str, Any] | None,
     SCHEDULE_EXECUTION_KEY_ARG: str | None,
     SCHEDULE_EXECUTION_FINGERPRINT_ARG: str | None,
     SCHEDULE_CONTRACT_ARG: dict[str, Any] | None,

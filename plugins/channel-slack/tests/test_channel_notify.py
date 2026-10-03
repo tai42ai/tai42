@@ -217,7 +217,7 @@ async def test_notify_location_renders_section_with_openstreetmap_link(http_scri
 async def test_notify_template_is_refused_before_any_send(http_script, fake_redis):
     # Slack has no vendor-template registry, so a template carries only substitution
     # parameters with no skeleton to render — refused loudly, never a meaningless dump.
-    template = ChannelTemplate(name="welcome", language="en_US", body_parameters=["Ada"])
+    template = ChannelTemplate(name="welcome", language="en_US", parameters={"body_parameters": ["Ada"]})
     with pytest.raises(ChannelInputError, match="vendor template"):
         await SlackChannel().notify(ChannelNotification(message="Hi", template=template))
     assert http_script.requests == []

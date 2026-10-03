@@ -68,14 +68,14 @@ async def agent_resume_tool(interaction_id: str, answer: Any) -> Any:
     address. The return is the OUTERMOST run's outcome expressed ONLY in contract types
     (:func:`~tai42_agents._internal.park.resume.to_contract_outcome`): a ``ResumeBuffered`` while
     siblings are outstanding, a ``SuspendedInteraction`` on a re-park, the final result on a clean
-    terminal, or a raised ``ParkResumeFailed`` for a mid-drive abort or an ``aborted`` replay.
+    terminal, or a raised ``RunTerminalFailed`` for a mid-drive abort or an ``aborted`` replay.
 
     Args:
         interaction_id: The parked interaction to resume.
         answer: The answer value (or the expiry marker) fed to the awaiting tool result.
     """
     await tai42_app.interactions.assert_resume_authorized(interaction_id)
-    return to_contract_outcome(await agent_resume(interaction_id, answer))
+    return to_contract_outcome(await agent_resume(interaction_id, answer), raise_failed=True)
 
 
 def register_agent_resume_tool() -> None:
@@ -155,7 +155,7 @@ async def agent_park_kill_handler(interaction_id: str, reason: str) -> None:
     TTL expires. Holding the lease, it fires the captured cross-driver chain FAILED so an ancestor
     that waited on it tears down too (that fire PROPAGATES on failure so the kill is redelivered and
     the ancestor is never left standing), then finalizes its super-step ``aborted`` under the same
-    token — so a redrive of any still-open sibling due-record RAISES ``ParkResumeFailed``, deduped
+    token — so a redrive of any still-open sibling due-record RAISES ``RunTerminalFailed``, deduped
     against the kill's own FAILED at the chain root. In the SAME teardown every OTHER resolved
     super-step of the run — the prior delivered outcomes, which can hold person data — has its record
     and tombstones DROPPED, read from the run's resolution index. A live entry whose barrier is not

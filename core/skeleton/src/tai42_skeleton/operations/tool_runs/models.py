@@ -29,6 +29,10 @@ _PARKED = "parked"
 # The platform-generic registration meta key a consumer sets to opt one of its runs
 # into crash-resume (``meta={"tai42/crash_resume": True}``), the existing ``tai42/*``
 # meta convention. The skeleton reads it and stores a generic bool; it names no consumer.
+# It governs a DETACHED recorded run — a run with no live caller to retry it on a crash: a
+# hook/trigger fire and a background submit, the two doors that create a tool-run record. A
+# live-caller door (the sync run-tool door, the MCP ``tools/call`` edge) keeps no such record
+# and is not re-driven — its caller sees the failure and retries.
 _CRASH_RESUME_META_KEY = "tai42/crash_resume"
 
 

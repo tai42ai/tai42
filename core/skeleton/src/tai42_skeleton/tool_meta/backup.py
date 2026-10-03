@@ -16,18 +16,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
+from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
 
-# The report shape every importer returns, matching the backup section contract.
-_SectionReport = dict[str, Any]
 
-
-def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+def _empty_report() -> BackupSectionReport:
+    # ``skipped_existing`` (rows left untouched under ``skip``) is this section's own
+    # count, so it rides ``details``.
+    return BackupSectionReport(details={"skipped_existing": 0})
 
 
 def _topological(folders: list[dict[str, Any]], existing_ids: set[str]) -> list[dict[str, Any]]:
@@ -103,7 +103,7 @@ async def export_tool_meta() -> dict[str, Any]:
     return {"folders": folders, "rows": rows}
 
 
-async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip") -> _SectionReport:
+async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip") -> BackupSectionReport:
     """Restore folder + overlay rows under their original keys.
 
     Folders are keyed by ``id``, overlay rows by ``tool_name``: under ``skip`` an
@@ -135,7 +135,7 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
         # dangling parent surfaces loudly as an FK violation.
         for folder in _topological(folders, existing_folders):
             if folder["id"] in existing_folders and mode == "skip":
-                report["skipped_existing"] += 1
+                report.details["skipped_existing"] += 1
                 continue
             await cur.execute(
                 "INSERT INTO tool_folders (id, name, parent_id, created_at) "
@@ -150,13 +150,13 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
                 ),
             )
             if folder["id"] in existing_folders:
-                report["updated"] += 1
+                report.updated += 1
             else:
-                report["created"] += 1
+                report.created += 1
 
         for row in rows:
             if row["tool_name"] in existing_rows and mode == "skip":
-                report["skipped_existing"] += 1
+                report.details["skipped_existing"] += 1
                 continue
             await cur.execute(
                 "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden, badges, created_at) "
@@ -176,8 +176,8 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
                 ),
             )
             if row["tool_name"] in existing_rows:
-                report["updated"] += 1
+                report.updated += 1
             else:
-                report["created"] += 1
+                report.created += 1
 
     return report

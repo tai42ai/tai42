@@ -34,60 +34,6 @@
       "title": "HookSubject",
       "type": "object"
     },
-    "MediaItem": {
-      "description": "One media item shown WITH a message — a display element, and inbound a participant's sent media.\n\n``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as\nthe matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file\nkind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a\nsame-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an\nabsolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a\nchannel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP\n``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``\nremote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline\n``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file\nkind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by\n``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS\nname, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded\n``user@`` credential form is rejected as it spoofs the authority — and is always a single\nline — raw whitespace and control/format characters are rejected. ``caption`` is the\naccessibility text — the image's alt text, a file's label, or the link's display label.\n``filename`` is the document's suggested display name; it is meaningful ONLY for a\n``document`` item and is refused on every other kind.",
-      "properties": {
-        "caption": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Caption"
-        },
-        "filename": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Filename"
-        },
-        "kind": {
-          "$ref": "#/$defs/MediaKind"
-        },
-        "url": {
-          "title": "Url",
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "url"
-      ],
-      "title": "MediaItem",
-      "type": "object"
-    },
-    "MediaKind": {
-      "description": "How a media item renders: an inline image, a file bubble, or a labelled link.",
-      "enum": [
-        "image",
-        "link",
-        "document",
-        "video",
-        "audio"
-      ],
-      "title": "MediaKind",
-      "type": "string"
-    },
     "OverlapPolicy": {
       "description": "How a route treats a running turn and the newer participant messages that overlap it.\n\nGoverns participant MESSAGE turns on one thread only (``origin=\"client\"``,\n``inbound_kind=\"message\"``); an event turn always runs as its own turn. Two knobs and a\nwindow:\n\n* ``running`` — what happens to the turn in flight when a newer message is accepted:\n  ``continue`` leaves it running (one turn per message), ``cancel`` cancels it cooperatively\n  in favour of the newer message.\n* ``deliver`` — what a turn carries: ``one`` exactly one message per turn, ``all`` every\n  message accepted since the last turn started, in order, as one turn.\n* ``settle_seconds`` — a turn starts no earlier than this many seconds after its lead\n  message was accepted, so a burst inside the window rides in one turn. ``0`` disables it.\n\nThe default policy (``continue``/``one``/``0``) runs one turn per message and leaves the\npayload unchanged. Frozen.",
       "properties": {
@@ -196,26 +142,6 @@
       "title": "PresetSpec",
       "type": "object"
     },
-    "QuickReplyButtonParam": {
-      "description": "The runtime argument for one QUICK-REPLY button of a template's buttons component.\n\n``payload`` is the string the medium returns when the human taps the button. Frozen.",
-      "properties": {
-        "kind": {
-          "const": "quick_reply",
-          "default": "quick_reply",
-          "title": "Kind",
-          "type": "string"
-        },
-        "payload": {
-          "title": "Payload",
-          "type": "string"
-        }
-      },
-      "required": [
-        "payload"
-      ],
-      "title": "QuickReplyButtonParam",
-      "type": "object"
-    },
     "StateAttach": {
       "additionalProperties": false,
       "description": "One state attached by a binding.\n\nCarries the ``state`` name, the ``templates`` to attach on it (attach-on-use, idempotent at save),\nthe ``subject_expr`` (a templated text rendering to a jq over the run input → a full subject object\nor the record KEY, its scope taken from the ambient door context and its kind from the state's\ndeclared subject kind), an optional ``scope_expr`` (a templated text rendering to a BOOLEAN predicate\nover the run input evaluated first — ``false`` skips this state for the run, a non-boolean is a loud\nerror, absent engages), and the ordered ``input_injections`` / ``updates``. Frozen.",
@@ -287,7 +213,7 @@
     },
     "StateBinding": {
       "additionalProperties": false,
-      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and repeated per node by a flow engine.",
+      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and re-applied per binding site by a consumer.",
       "properties": {
         "states": {
           "items": {
@@ -724,26 +650,6 @@
       "x-tai42-templated-text": {
         "language": "jinja"
       }
-    },
-    "UrlButtonParam": {
-      "description": "The runtime argument for one URL button of a template's buttons component.\n\n``url_parameter`` is the dynamic suffix substituted into the button's pre-approved URL.\nFrozen.",
-      "properties": {
-        "kind": {
-          "const": "url",
-          "default": "url",
-          "title": "Kind",
-          "type": "string"
-        },
-        "url_parameter": {
-          "title": "Url Parameter",
-          "type": "string"
-        }
-      },
-      "required": [
-        "url_parameter"
-      ],
-      "title": "UrlButtonParam",
-      "type": "object"
     }
   },
   "contract_version": "15.4.1",
@@ -873,47 +779,8 @@
       "type": "object"
     },
     "ChannelTemplate": {
-      "description": "A pre-approved, named template a channel sends outside its freeform window.\n\nSome media only accept arbitrary text inside a bounded conversation window (e.g. WhatsApp's\n24-hour customer-service window); outside it, the sole accepted send is an operator-authored\ntemplate referenced by ``name`` in an approved ``language`` — both required and non-blank.\n\nThe template's runtime arguments are its NAMED components (never one flat positional list):\n\n* ``header_media`` — the media argument for a media HEADER component (a display item:\n  image/document/video/audio, never a ``link``); ``None`` when the template has no media\n  header (or a static/text header needing no argument).\n* ``body_parameters`` — the POSITIONAL body-text values substituted into the body's\n  placeholders in order; empty when the body has no placeholders. Typed values (currency,\n  date-time) ride as their pre-formatted STRING here — the contract does not model the type.\n* ``buttons`` — the POSITIONAL per-button arguments of the buttons component\n  (:data:`TemplateButtonParam`: a :class:`QuickReplyButtonParam` payload or a\n  :class:`UrlButtonParam` url suffix); the i-th entry parameterises the i-th button, at most\n  ``TEMPLATE_BUTTONS_MAX``. Empty when no button needs a runtime argument.",
+      "description": "A pre-approved, named template a channel sends outside its freeform window.\n\nSome media only accept arbitrary text inside a bounded conversation window (a provider's\ncustomer-service window); outside it, the sole accepted send is an operator-authored,\npre-approved template referenced by ``name`` in an approved ``language`` locale — both\nrequired and non-blank.\n\n``parameters`` is the template's runtime arguments as an OPAQUE object: the platform\nthreads it UNOPENED (never looking inside it), and the channel that declares the\n``supports_template_notifications`` capability owns its shape — it validates ``parameters``\nagainst its OWN template-parameter schema through its OPTIONAL ``validate_template`` hook\n(see :class:`~tai42_contract.channels.Channel`) and maps it to its own send API in its own\ncode. A template with no runtime arguments carries no ``parameters``; a present\n``parameters`` is a non-empty dict.",
       "properties": {
-        "body_parameters": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Body Parameters",
-          "type": "array"
-        },
-        "buttons": {
-          "items": {
-            "discriminator": {
-              "mapping": {
-                "quick_reply": "#/$defs/QuickReplyButtonParam",
-                "url": "#/$defs/UrlButtonParam"
-              },
-              "propertyName": "kind"
-            },
-            "oneOf": [
-              {
-                "$ref": "#/$defs/QuickReplyButtonParam"
-              },
-              {
-                "$ref": "#/$defs/UrlButtonParam"
-              }
-            ]
-          },
-          "title": "Buttons",
-          "type": "array"
-        },
-        "header_media": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MediaItem"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "language": {
           "title": "Language",
           "type": "string"
@@ -921,6 +788,19 @@
         "name": {
           "title": "Name",
           "type": "string"
+        },
+        "parameters": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parameters"
         }
       },
       "required": [
@@ -2582,7 +2462,7 @@
     },
     "StateBinding": {
       "additionalProperties": false,
-      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and repeated per node by a flow engine.",
+      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and re-applied per binding site by a consumer.",
       "properties": {
         "states": {
           "items": {

@@ -42,7 +42,16 @@ def captured(monkeypatch):
     calls: list[dict] = []
 
     async def _stub(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         calls.append({"identity": identity, "fingerprint": fingerprint, "answer": answer})
         return SuspendedInteraction(interaction_id=interaction_id)

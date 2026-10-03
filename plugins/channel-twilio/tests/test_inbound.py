@@ -469,7 +469,6 @@ async def test_mms_single_image_fetches_ingests_and_bridges_served_turn(
     assert ingest["declared_mime"] == "image/jpeg"
     assert ingest["filename"] is None
     assert ingest["declared_size"] == 2048
-    assert ingest["integrity_sha256"] is None
     assert ingest["origin"].channel_id == "twilio"
     assert ingest["origin"].participant_identity == _HUMAN
     assert ingest["origin"].message_id == "SM777-0"

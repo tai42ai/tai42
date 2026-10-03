@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from tai42_kit.utils.data.jq_util import _envelope, get_compiled_jq
 
-from tai42_skeleton.access_control.roles import EDITOR_JQ, VIEWER_JQ
+from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.authz.token_free import (
     TokenFreeConditionError,
     assert_token_free_evaluable,
@@ -33,9 +33,8 @@ from tai42_skeleton.authz.token_free.lexer import _lex
 # Conditions a fire CAN evaluate: every context field but ``identity``, plus the exact
 # owner reference — the one identity claim readable from the execution key's policy.
 _EVALUABLE = [
-    # The seeded base-tier role conditions: the common case, so they must bind freely.
-    EDITOR_JQ,
-    VIEWER_JQ,
+    # The seeded base-tier role conditions are the common case; they are built per
+    # deployment (editor_jq()/viewer_jq()), so they bind freely in their own test below.
     # The owner reference, the only readable identity claim.
     '.identity.owner_user_id == "alice"',
     '.identity.owner_user_id != "banned"',
@@ -234,18 +233,19 @@ def test_a_construct_outside_the_grammar_is_refused(condition: str) -> None:
         assert_token_free_evaluable(condition)
 
 
-@pytest.mark.parametrize("condition", [EDITOR_JQ, VIEWER_JQ])
-def test_the_seeded_role_conditions_bind_freely(condition: str) -> None:
+@pytest.mark.parametrize("builder", [editor_jq, viewer_jq])
+def test_the_seeded_role_conditions_bind_freely(builder) -> None:
     # Every non-admin role holder's policy carries these, so their keys must be bindable.
     # Both embed ``"/api/auth/api-keys"``, which lexes as a string and not the ``keys`` builtin.
-    assert_token_free_evaluable(condition)
+    assert_token_free_evaluable(builder())
 
 
-@pytest.mark.parametrize(("condition", "tokens", "depth"), [(EDITOR_JQ, 84, 16), (VIEWER_JQ, 135, 22)])
-def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(condition: str, tokens: int, depth: int) -> None:
-    # The seeded conditions are the platform's real worst case (VIEWER_JQ spends 53% of the
-    # token allowance, 69% of the depth). An edit eating the margin must fail here rather
+@pytest.mark.parametrize(("builder", "tokens", "depth"), [(editor_jq, 77, 16), (viewer_jq, 119, 19)])
+def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(builder, tokens: int, depth: int) -> None:
+    # The seeded conditions are the platform's real worst case (the viewer condition spends
+    # the most of the token/depth allowance). An edit eating the margin must fail here rather
     # than as a PermissionDeniedError on every fire under a viewer-role key.
+    condition = builder()
     budget = _Budget()
     peak = 0
     descend = _Budget.descend
@@ -285,8 +285,8 @@ def test_a_newline_in_a_condition_is_refused_at_the_bind_gate() -> None:
         assert_token_free_evaluable('# \\\n"a"\n.identity.suspended != true')
 
     # Over-refusal guard: the seeded single-line conditions must still bind.
-    assert_token_free_evaluable(EDITOR_JQ)
-    assert_token_free_evaluable(VIEWER_JQ)
+    assert_token_free_evaluable(editor_jq())
+    assert_token_free_evaluable(viewer_jq())
 
 
 def test_the_compile_gate_answers_before_the_source_shape_gate() -> None:

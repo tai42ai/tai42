@@ -1,9 +1,12 @@
 """Concrete ``AppBackup`` registry behind the ``app.backup`` facet.
 
 A section is a named ``(exporter, importer)`` pair plus a ``secret`` flag, stored
-in registration order. Exporter/importer may be sync or async; the registry
-returns their result verbatim (a coroutine for an async section) without awaiting
-or inspecting it — pure name-to-callable dispatch, and the caller awaits.
+in registration order. An exporter may be sync or async; :meth:`export_section`
+returns its result verbatim (a coroutine for an async section) without awaiting —
+pure name-to-callable dispatch, and the caller awaits. An importer is awaited and
+its result VALIDATED against :class:`BackupSectionReport`: a wrong shape raises
+:class:`BackupSectionReportError` naming the section rather than reaching the
+platform as an opaque object it digs keys out of.
 
 The per-import ``skip``/``overwrite`` mode rides a request-scoped contextvar, not
 the ``import_section`` signature (which is the vendor-neutral contract shape):
@@ -13,19 +16,30 @@ via :func:`current_import_mode`. Default ``skip`` (non-destructive) outside any 
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from tai42_contract.backup import BackupSectionInfo
+from pydantic import ValidationError
+from tai42_contract.backup import BackupSectionInfo, BackupSectionReport
 
 # Per keyed record: ``skip`` leaves an existing record untouched, ``overwrite``
 # upserts it; new records are created under both.
 BackupMode = Literal["skip", "overwrite"]
 
 _import_mode: ContextVar[BackupMode] = ContextVar("tai42_backup_import_mode", default="skip")
+
+
+class BackupSectionReportError(ValueError):
+    """An importer returned a value that is not a valid ``BackupSectionReport``.
+
+    Raised by :meth:`BackupRegistry.import_section` naming the section, so the
+    restore route reports it under that section's errors exactly as it does a
+    raising importer — never a silently mis-shaped report reaching the platform.
+    """
 
 
 def current_import_mode() -> BackupMode:
@@ -85,9 +99,22 @@ class BackupRegistry:
         """Run ``name``'s exporter and return its payload. Unknown name raises."""
         return self._require(name).exporter()
 
-    def import_section(self, name: str, payload: Any) -> Any:
-        """Run ``name``'s importer over ``payload`` and return its report; unknown name raises."""
-        return self._require(name).importer(payload)
+    async def import_section(self, name: str, payload: Any) -> BackupSectionReport:
+        """Run ``name``'s importer over ``payload`` and return its validated report.
+
+        Awaits an async importer, then validates the result against
+        :class:`BackupSectionReport`. An unknown name raises; a result that is not a
+        valid report raises :class:`BackupSectionReportError` naming the section.
+        """
+        result = self._require(name).importer(payload)
+        if inspect.isawaitable(result):
+            result = await result
+        try:
+            return BackupSectionReport.model_validate(result)
+        except ValidationError as exc:
+            raise BackupSectionReportError(
+                f"backup section {name!r} importer returned an invalid report shape: {exc}"
+            ) from exc
 
     def _require(self, name: str) -> _Section:
         try:

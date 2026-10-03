@@ -9,7 +9,6 @@ import copy
 import inspect
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar, cast
 
 from fastmcp.tools.function_tool import FunctionTool
@@ -17,7 +16,12 @@ from makefun import create_function
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined, core_schema
 from tai42_contract.agent import Agent
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import (
+    RunTerminalFailed,
+    binds_caller_ask,
+    caller_ask_no_landing_outcome,
+    current_caller_ask_landing,
+)
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.session_thread import get_agent_session_thread
@@ -64,40 +68,6 @@ _AGENT_RESULT_SCHEMA: dict[str, Any] = {
     "properties": {"result": {"title": "Result"}},
     "x-fastmcp-wrap-result": True,
 }
-
-
-def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInteraction:
-    """Convert an agent's suspended-RECEIPT dict into the tool-face park sentinel with BOTH id lists.
-
-    An agent's ``run`` returns ``{"status": "suspended", "interaction_ids": [...],
-    "caller_interaction_ids": [...], ...}`` when the run parks on one or more async asks — the shape
-    the agent's OWN internal driver consumes. That dict is INTERNAL: a park crossing a tool-face must
-    be a :class:`SuspendedInteraction` sentinel, recognized by type, so a caller (a tool-running
-    tool, another agent, the conversation turn) sees the park uniformly. This converts the receipt at
-    the agent tool-face only — the driver keeps its dict.
-
-    The sentinel carries the WHOLE super-step: ``interaction_ids`` are every ask this park
-    represents and ``caller_interaction_ids`` the subset addressed to the caller (``to="caller"``),
-    so the platform's ``visit`` normalises a run that parked on several asks at once (parallel
-    sub-agent asks) at one tool-face — the per-ask ids are merged onto the sentinel rather than
-    only one park surfacing while the siblings strand. ``interaction_id`` is the first of them, its
-    single-id key.
-
-    It carries NO ``resume_owner``: the parked run recorded its OWN resume state against those
-    interactions and is the only thing the platform ever resumes for them. A caller must not adopt
-    the park as its own suspended state (it would wait on a resume fired at the nested run), and
-    ``assert_park_adoptable`` refuses it on the caller's behalf.
-    """
-    ids = receipt["interaction_ids"]
-    caller_ids = receipt.get("caller_interaction_ids") or []
-    expiry_raw = receipt.get("expiry_at")
-    expiry = datetime.fromisoformat(expiry_raw) if expiry_raw else None
-    return SuspendedInteraction(
-        interaction_id=ids[0],
-        expiry_at=expiry,
-        interaction_ids=list(ids),
-        caller_interaction_ids=list(caller_ids),
-    )
 
 
 def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:
@@ -268,6 +238,19 @@ class AgentBinding:
             }
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
+            # FAIL FAST where the run's tool set is EXACT (the preset transform has already filled
+            # every omitted argument): if the run WILL bind the caller-ask tool and the door that
+            # started it declared NO caller-ask landing, fail as the typed run failure before
+            # ``agent.run`` — so no tool side effect happens. This ONE site covers the tool-turn door
+            # for a direct agent target, a preset over an agent, and any nested dispatch; a door that
+            # declared nothing makes no claim and nothing is refused.
+            landing = current_caller_ask_landing()
+            if (
+                landing is not None
+                and not landing.can_land
+                and binds_caller_ask(run_kwargs.get("tool_names", agent.tool_names))
+            ):
+                raise RunTerminalFailed(caller_ask_no_landing_outcome(landing.label))
             # Thread the ambient in-process session thread onto the run when one is deposited
             # and the caller pinned no thread of its own — so an out-of-band in-process
             # driver can carry an agent's memory across successive runs without the run
@@ -299,15 +282,12 @@ class AgentBinding:
                 if message is not None:
                     raise ReservedThreadNamespaceError(message)
                 run_kwargs["thread_id"] = session_thread
-            result = await self.get_agent(name).run(**run_kwargs)
-            # A park crossing the agent TOOL-face is uniformly a SuspendedInteraction sentinel
-            # (recognized by type), never the internal suspended-receipt dict: convert it here
-            # so a caller running this agent as a tool (a flow, another agent) recognizes the
-            # park exactly as it recognizes any parking tool's. The agent's own driver keeps
-            # consuming its dict, untouched.
-            if isinstance(result, dict) and result.get("status") == "suspended":
-                return _suspended_interaction_from_receipt(result)
-            return result
+            # A parked run leaves ``Agent.run`` as a ``SuspendedInteraction`` typed value, and a
+            # terminal leaves it as its plain answer. The run tool-face passes BOTH through
+            # unchanged: a park is recognized by TYPE downstream, and a returned value is never
+            # inspected for a status key — so an agent whose own answer is a dict carrying a
+            # ``status`` is delivered as the SUCCESS it is.
+            return await self.get_agent(name).run(**run_kwargs)
 
         # makefun's ``func_impl`` is typed ``Callable[[Any], Any]`` but it accepts
         # any callable (it drives the separate ``signature`` above); the ``**arguments``

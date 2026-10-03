@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -453,27 +452,21 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any], *, extras: Map
     # bound execution identity — so the record is attributed and per-identity indexed
     # exactly as a restricted submit's is.
     user_id, _restricted = _pkg.request_identity()
-    # Read the tool's registration meta BY NAME for the generic crash-resume flag
-    # (absent → False): the recording caller holds only tool_name/arguments/user_id and
-    # cannot address the record, so the flag comes from the registration meta, never a
-    # record write. The skeleton just READS a platform-generic meta key and STORES a
-    # generic bool + a generic argument blob — it never names the consumer.
-    crash_resume = await reconcile._tool_declares_crash_resume(tool_name)
-    run_id = secrets.token_urlsafe(16)
-    started = _pkg._now()
+    # Create the detached record through the ONE shared seam both detached-record doors call:
+    # it reads the generic crash-resume flag off the tool's registration meta and stores the
+    # re-drive inputs (arguments, door extras, and — for a crash-resume run — the fire's ambient
+    # subject context) with no second copy of the field list. The fire's ambient context is the
+    # subject the re-drive replays under; the store writes it only on a crash-resume record.
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-        await store.create_run(
+        run_id = await reconcile.create_recorded_run(
             r,
-            run_id,
+            store,
             tool_name,
-            started.isoformat(),
-            started.timestamp(),
             settings,
             user_id=user_id,
             arguments=arguments,
             extras=extras,
-            state_context=current_state_context() if crash_resume else None,
-            crash_resume=crash_resume,
+            state_context=current_state_context(),
         )
     # Run under a supervisor task ENROLLED in the drain registry exactly like a submitted
     # run — so a drain (process shutdown or an epoch retire) cancels-and-awaits it and its

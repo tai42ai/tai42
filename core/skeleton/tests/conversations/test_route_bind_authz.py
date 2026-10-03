@@ -8,7 +8,9 @@ stubbed); a refusal must write NO row.
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
+from tai42_contract.agent import Agent
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
@@ -51,9 +53,23 @@ class _DictManager(BaseConversationsManager):
         return dict(self.rows), 0
 
 
+class _RelayInput(BaseModel):
+    user_message: str = ""
+
+
+class _RelayAgent(Agent):
+    """A plain, non-asking agent — the bind gate reads its ``tool_names`` (none), so it binds freely."""
+
+    tool_name = "relay"
+    ToolInput = _RelayInput
+
+    async def run(self, *, user_message=None, **kwargs):
+        return ""
+
+
 class _FakeAgents:
     def all_agents(self):
-        return {"relay": object()}
+        return {"relay": _RelayAgent()}
 
 
 class _FakeApp:

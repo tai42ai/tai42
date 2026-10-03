@@ -483,6 +483,9 @@ class SlackChannel:
     # user_typing frame, unsupported by this plugin), so this channel emits no
     # working-on-it signal.
     working_signal_expiry_seconds: ClassVar[None] = None
+    # Slack accepts a large message body; the conversation-delivery machine splits a long answer
+    # against this generous cap (an operator may override it per deployment).
+    max_message_chars: ClassVar[int] = 40000
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
         """Enforce this channel's ask-time-knowable Block Kit caps at ask-time, before any state is written.

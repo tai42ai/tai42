@@ -24,12 +24,12 @@ from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.access_control.role_audit import role_audit
 from tai42_skeleton.access_control.roles import (
-    EDITOR_JQ,
     RESERVED_ADMIN_ROLE,
     ROLE_POINTER_KEY,
-    VIEWER_JQ,
+    editor_jq,
     grantable_feature_tags,
     role_store,
+    viewer_jq,
 )
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.operations._authority import require_admin, resolve_caller
@@ -38,9 +38,10 @@ from tai42_skeleton.operations.errors import BadRequestError, ConflictError, For
 from tai42_skeleton.operations.response_models_group_b import RoleDeleted, RoleVersionsView
 
 # The base-tier jq a NEW role inherits from its ``base_tier`` — resolved SERVER-SIDE from
-# the seeded constants, NEVER accepted as raw jq from the operator. ``admin`` is reserved
-# (its base is ``None``/``allow_all``, not operator-authored).
-_BASE_TIER_CONDITIONS = {"editor": EDITOR_JQ, "viewer": VIEWER_JQ}
+# the seeded builders, NEVER accepted as raw jq from the operator. ``admin`` is reserved
+# (its base is ``None``/``allow_all``, not operator-authored). Built per call because the
+# ceilings include the registered accounts providers' self-service routes.
+_BASE_TIER_BUILDERS = {"editor": editor_jq, "viewer": viewer_jq}
 
 _GrantLevel = Literal["none", "read", "write"]
 _GrantMap = dict[str, _GrantLevel]
@@ -112,12 +113,12 @@ def _validate_grants(grants: Mapping[str, str]) -> None:
 def _resolved_create(name: str, description: str, base_tier: str, grants: Mapping[str, str]) -> RoleDefinition:
     if name == RESERVED_ADMIN_ROLE:
         raise ForbiddenError("the 'admin' role is reserved and permanent; it cannot be created or replaced")
-    if base_tier not in _BASE_TIER_CONDITIONS:
+    if base_tier not in _BASE_TIER_BUILDERS:
         raise BadRequestError(
-            f"base_tier must be one of {sorted(_BASE_TIER_CONDITIONS)} (admin is reserved); got {base_tier!r}"
+            f"base_tier must be one of {sorted(_BASE_TIER_BUILDERS)} (admin is reserved); got {base_tier!r}"
         )
     _validate_grants(grants)
-    condition = _BASE_TIER_CONDITIONS[base_tier]
+    condition = _BASE_TIER_BUILDERS[base_tier]()
     # Belt-and-suspenders lock-out guard: the resolved base jq compiles cleanly (a
     # non-compiling base would deny every request the role governs). The grant LEVELS are
     # already the validated ``none``/``read``/``write`` Literal (the request model / the

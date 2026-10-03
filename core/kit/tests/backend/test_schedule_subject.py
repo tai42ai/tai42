@@ -33,38 +33,31 @@ def _func(subject=None, backend_tool_name=None, **_: object) -> None:
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 
 
-async def test_scheduled_prepare_stamps_a_parseable_subject() -> None:
+async def test_scheduled_prepare_forwards_a_plain_subject_kwarg_untouched() -> None:
+    # ``subject`` is never a door signal the kit reads out of a tool's kwargs: a tool whose OWN
+    # argument is named ``subject`` carries it like any argument and the scheduled preparer forwards
+    # it untouched. The door's subject rides the reserved :data:`SCHEDULE_SUBJECT_ARG`, stamped by the
+    # create door, not derived here.
     with schedule_create_fire():
         kwargs = await prepare_backend_kwargs(
-            _func, "backend_tool_name", "greet", {"subject": _SUBJECT}, scheduled=True
+            _func, "backend_tool_name", "greet", {"subject": "a plain string", "message": "hi"}, scheduled=True
         )
-    stamped = kwargs[SCHEDULE_SUBJECT_ARG]
-    assert StateSubject.model_validate(stamped) == StateSubject.model_validate(_SUBJECT)
-    # The subject argument stays for the tool (a flow reads ``.subject``, a state tool
-    # takes it as an override) — the stamp is an additional door signal, not a move.
-    assert kwargs["subject"] == _SUBJECT
+    assert kwargs["subject"] == "a plain string"
+    assert kwargs["message"] == "hi"
 
 
 async def test_scheduled_prepare_outside_the_create_fire_is_refused() -> None:
     # A ``<tool>_schedule_task`` branch named directly at the run-tool/MCP edge reaches the scheduled
     # preparer with no create fire on the stack — refused loudly so its reserved keys never reach a fire.
     with pytest.raises(ReservedScheduleKeyError, match="schedule-create door"):
-        await prepare_backend_kwargs(_func, "backend_tool_name", "greet", {"subject": _SUBJECT}, scheduled=True)
+        await prepare_backend_kwargs(_func, "backend_tool_name", "greet", {"message": "hi"}, scheduled=True)
 
 
 async def test_unscheduled_prepare_stamps_nothing() -> None:
     kwargs = await prepare_backend_kwargs(_func, "backend_tool_name", "greet", {"subject": _SUBJECT})
     assert SCHEDULE_SUBJECT_ARG not in kwargs
-
-
-async def test_scheduled_prepare_ignores_a_non_full_subject() -> None:
-    # A partial ``{kind, key}`` is not a full subject the fire could re-key on; it stays a
-    # plain argument and no schedule-subject is stamped.
-    with schedule_create_fire():
-        kwargs = await prepare_backend_kwargs(
-            _func, "backend_tool_name", "greet", {"subject": {"kind": "person", "key": "p-1"}}, scheduled=True
-        )
-    assert SCHEDULE_SUBJECT_ARG not in kwargs
+    # A plain ``subject`` tool kwarg is the tool's own argument, forwarded untouched.
+    assert kwargs["subject"] == _SUBJECT
 
 
 def test_pop_schedule_subject_strips_and_parses() -> None:
@@ -90,8 +83,8 @@ async def test_scheduled_prepare_stamps_the_binding_and_pops_the_raw_key() -> No
         kwargs = await prepare_backend_kwargs(
             _func, "backend_tool_name", "greet", {"state_binding": _BINDING, "message": "hi"}, scheduled=True
         )
-    # The binding is stamped under the reserved arg; UNLIKE the subject, the raw key is POPPED
-    # so the base tool never sees it (tools stay pure).
+    # The binding is stamped under the reserved arg and its plain request key is POPPED so the base
+    # tool never sees it (tools stay pure).
     assert kwargs[SCHEDULE_STATE_BINDING_ARG] == _BINDING
     assert "state_binding" not in kwargs
     assert kwargs["message"] == "hi"
@@ -143,9 +136,10 @@ def test_assert_no_reserved_schedule_keys_names_the_offending_key() -> None:
 
 def test_stamped_door_opts_are_the_create_stamped_reserved_keys() -> None:
     # The opts a schedule branch widens its signature with are exactly the reserved keys the create
-    # door stamps (the firing identity pair + the door contract) and the worker's ``backend_fire`` pop
-    # reads back — never the subject/binding, which the branch re-stamps after validation.
+    # door stamps (the subject, the firing identity pair + the door contract) and the worker's
+    # ``backend_fire`` pop reads back — never the binding, which the branch re-stamps after validation.
     assert set(SCHEDULE_STAMPED_DOOR_OPTS) == {
+        SCHEDULE_SUBJECT_ARG,
         SCHEDULE_EXECUTION_KEY_ARG,
         SCHEDULE_EXECUTION_FINGERPRINT_ARG,
         SCHEDULE_CONTRACT_ARG,
@@ -154,8 +148,8 @@ def test_stamped_door_opts_are_the_create_stamped_reserved_keys() -> None:
 
 async def test_scheduled_prepare_preserves_the_create_stamped_keys() -> None:
     # The create door stamps these onto the recurring arguments before dispatch; the scheduled preparer
-    # leaves them untouched (unlike the subject/binding it re-stamps) so they ride the stored job to the
-    # worker fire, where ``backend_fire`` pops them into the firing identity and door contract.
+    # leaves them untouched (unlike the binding it re-stamps) so they ride the stored job to the worker
+    # fire, where ``backend_fire`` pops them into the subject, firing identity and door contract.
     contract = {"resume_expr": {"content": "."}}
     with schedule_create_fire():
         kwargs = await prepare_backend_kwargs(
@@ -163,6 +157,7 @@ async def test_scheduled_prepare_preserves_the_create_stamped_keys() -> None:
             "backend_tool_name",
             "greet",
             {
+                SCHEDULE_SUBJECT_ARG: _SUBJECT,
                 SCHEDULE_EXECUTION_KEY_ARG: "svc-key",
                 SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
                 SCHEDULE_CONTRACT_ARG: contract,
@@ -170,6 +165,7 @@ async def test_scheduled_prepare_preserves_the_create_stamped_keys() -> None:
             },
             scheduled=True,
         )
+    assert kwargs[SCHEDULE_SUBJECT_ARG] == _SUBJECT
     assert kwargs[SCHEDULE_EXECUTION_KEY_ARG] == "svc-key"
     assert kwargs[SCHEDULE_EXECUTION_FINGERPRINT_ARG] == "fp-1"
     assert kwargs[SCHEDULE_CONTRACT_ARG] == contract

@@ -15,14 +15,16 @@ from typing import Any
 
 from tai42_contract.monitoring import (
     DEFAULT_LEVEL,
-    MetricsFilter,
+    Dimension,
+    Measure,
+    MetricsCapability,
+    MetricsQuery,
     MetricsResult,
     MonitoringFilter,
     MonitoringLevel,
     MonitoringTrace,
     MonitoringTraceSummary,
     OrderBy,
-    ProjectConfig,
     Span,
     SpanKind,
     SpanWindowItem,
@@ -145,11 +147,6 @@ class NoOpWriter:
         return []
 
     @contextmanager
-    def scope(self, public_key: str) -> Iterator[None]:
-        """Enter a no-op project scope."""
-        yield
-
-    @contextmanager
     def disable(self) -> Iterator[None]:
         """Enter a no-op disable scope."""
         yield
@@ -164,7 +161,11 @@ class NoOpWriter:
 class NoOpReader:
     """A reader that returns empty results."""
 
-    async def query_metrics(self, filter_: MetricsFilter) -> MetricsResult:
+    def metrics_capability(self) -> MetricsCapability:
+        """Declare the full neutral vocabulary; the disabled backend serves it as empty data, not an error."""
+        return MetricsCapability(measures=frozenset(Measure), dimensions=frozenset(Dimension))
+
+    async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
         """Return an empty metrics result."""
         return MetricsResult()
 
@@ -218,6 +219,3 @@ class NoOpMonitoring:
     def reader(self) -> NoOpReader:
         """The no-op reader."""
         return self._reader
-
-    def add_project(self, project: ProjectConfig) -> None:
-        """Register nothing for a project."""

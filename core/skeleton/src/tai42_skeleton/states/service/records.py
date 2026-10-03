@@ -37,6 +37,7 @@ from tai42_skeleton.states.paths import validate_op
 from tai42_skeleton.states.schema import _validate_document
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.rows import _page_limit, _subject_from_row
+from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.states.store import make_cursor, store_settings_retention
 
 logger = logging.getLogger(__name__)
@@ -68,17 +69,37 @@ class _RecordMixin(_StatesServiceBase):
         )
 
     async def replace(
-        self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: WriteOrigin
+        self,
+        state: str,
+        subject: StateSubject,
+        data: dict[str, Any],
+        *,
+        origin: WriteOrigin,
+        conn: AsyncConnection[Any] | None = None,
     ) -> StateRecord:
-        """Replace ``subject``'s whole document with ``data`` and return the new record."""
+        """Replace ``subject``'s whole document with ``data`` and return the new record.
+
+        While an out-of-transaction unit of work is bound to the caller's scope the replace
+        STAGES into it rather than touching the store, so it reads back within the scope and
+        rolls back with a discard — mirroring the read seam. A ``conn``-threaded call (the
+        unit's own commit) writes the store directly.
+        """
         self._ensure_available()
         if not isinstance(data, dict):
             raise ValueValidationError("a record document must be a JSON object")
         decl = await self._require_declaration_decl(state)
         await self.validate_subject(decl, subject)
+        if conn is None:
+            unit = current_state_unit()
+            if unit is not None:
+                await unit.stage_replace(state, subject, data, origin)
+                view = await self.read(state, subject)
+                if view is None:
+                    raise AssertionError
+                return view
         completed = self._complete_origin(origin)
-        await self._store.replace(state, subject, data, origin=completed, validate_doc=_validate_document)
-        view = await self.read(state, subject)
+        await self._store.replace(state, subject, data, origin=completed, validate_doc=_validate_document, conn=conn)
+        view = await self.read(state, subject, conn=conn)
         if view is None:
             raise AssertionError
         return view
@@ -124,6 +145,17 @@ class _RecordMixin(_StatesServiceBase):
             raise InvalidPathError("ops must be a list of operations")
         if not ops:
             return ApplyResult(applied=False, data=None, seq=None, skipped=[])
+        if conn is None:
+            unit = current_state_unit()
+            if unit is not None:
+                # An out-of-transaction unit is bound to the caller's scope: stage the write into it
+                # (read-your-writes within the scope, a discard that truly discards, ordered replay at
+                # commit) rather than touching the store, mirroring the read seam. A ``conn``-threaded
+                # call (the unit's own commit) falls through to the direct store write below.
+                staged = await unit.stage(
+                    [StateBatchWrite(state=state, subject=subject, ops=ops, op_id=op_id, origin=origin)]
+                )
+                return staged[0]
         for i, op in enumerate(ops):
             validate_op(op, where=f"ops[{i}]")
         completed = self._complete_origin(origin)
@@ -169,40 +201,7 @@ class _RecordMixin(_StatesServiceBase):
         self._ensure_available()
         if not writes:
             return []
-        order = sorted(
-            range(len(writes)),
-            key=lambda i: (
-                writes[i].state,
-                writes[i].subject.target_kind,
-                writes[i].subject.target_name,
-                writes[i].subject.kind,
-                writes[i].subject.key,
-            ),
-        )
-        results: dict[int, ApplyResult] = {}
-        async with self._store.begin() as conn:
-            for i in order:
-                item = writes[i]
-                if item.ops is not None:
-                    results[i] = await self.apply(
-                        item.state, item.subject, item.ops, op_id=item.op_id, origin=item.origin, conn=conn
-                    )
-                    continue
-                if item.template_jq is None:
-                    raise AssertionError
-                outcome = await self.apply_template_jq(
-                    item.state,
-                    item.subject,
-                    item.template_jq,
-                    item.input,
-                    op_id=item.op_id,
-                    origin=item.origin,
-                    conn=conn,
-                )
-                results[i] = ApplyResult(
-                    applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped
-                )
-        return [results[i] for i in range(len(writes))]
+        return await self._commit_writes(writes)
 
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
         """Erase ``subject``'s record, recording the write."""

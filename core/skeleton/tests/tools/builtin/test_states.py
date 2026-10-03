@@ -68,7 +68,7 @@ class _FakeStore:
             return None
         return {"data": row["data"], "seq": row["seq"], "canonical_subject": subject, "folded_from": []}
 
-    async def replace(self, state, subject, data, *, origin, validate_doc) -> None:
+    async def replace(self, state, subject, data, *, origin, validate_doc, conn=None) -> None:
         self._seq += 1
         self.records[self._key(state, subject)] = {"data": dict(data), "seq": self._seq}
         self._append_write(state, subject, origin, [[]])

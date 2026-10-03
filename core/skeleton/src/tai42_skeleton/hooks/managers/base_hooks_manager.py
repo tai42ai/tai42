@@ -156,6 +156,20 @@ class BaseHooksManager(ABC):
         async with self._run_semaphore:
             await self._run_hook(hook, payload, tool_kwargs_override)
 
+    async def _check_then_run(
+        self, hook: HookParams, payload: dict[str, Any], tool_kwargs_override: dict[str, Any] | None
+    ):
+        """Evaluate one hook's condition and, if it holds, fire it — the per-hook isolation unit.
+
+        The condition check runs HERE, inside the hook's own task, so a condition that raises at
+        fire time is that hook's failure alone (surfaced by the fan-out's error log), never a halt
+        of the rest of the topic's hooks. A condition that evaluates to a falsy value skips the fire
+        without firing the tool.
+        """
+        if not await self._check_condition(hook, payload):
+            return
+        await self._run_hook_with_limit(hook, payload, tool_kwargs_override)
+
     @abstractmethod
     async def register(self, params: HookParams) -> bool:
         """Register the hook described by ``params``; return whether it was newly added."""
@@ -246,17 +260,16 @@ class BaseHooksManager(ABC):
             if not hooks_map:
                 return
 
-            valid_hooks = [hook for hook in hooks_map.values() if await self._check_condition(hook, payload)]
-            if not valid_hooks:
-                return
-
-            # Every execution goes through the manager-wide semaphore, so this
-            # event's fan-out shares the global in-flight bound with every
-            # concurrently firing event.
-            tasks = [self._run_hook_with_limit(h, payload, tool_kwargs_override) for h in valid_hooks]
+            # Each hook's condition check AND its fire run in the hook's OWN task, so a
+            # condition error on one hook is isolated like a firing error — it never halts
+            # the rest of the fan-out. Every execution goes through the manager-wide
+            # semaphore, so this event's fan-out shares the global in-flight bound with
+            # every concurrently firing event.
+            hooks = list(hooks_map.values())
+            tasks = [self._check_then_run(h, payload, tool_kwargs_override) for h in hooks]
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for hook, result in zip(valid_hooks, results, strict=True):
+            for hook, result in zip(hooks, results, strict=True):
                 if isinstance(result, BaseException):
                     logger.error(
                         "hook %r on topic %r failed: %s",

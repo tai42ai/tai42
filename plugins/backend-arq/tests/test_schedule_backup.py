@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, patch
 
 import orjson
@@ -82,9 +82,13 @@ async def _export(redis: Any) -> list[dict[str, Any]]:
         return await tools.backend_export_schedules()
 
 
-async def _import(redis: Any, records: list[dict[str, Any]]) -> dict[str, Any]:
+async def _import(
+    redis: Any, records: list[dict[str, Any]], *, mode: Literal["skip", "overwrite"] | None = None
+) -> dict[str, Any]:
     async with _redis_bound(redis):
-        return await tools.backend_import_schedules(records)
+        if mode is None:
+            return await tools.backend_import_schedules(records)
+        return await tools.backend_import_schedules(records, mode)
 
 
 def _read_hash(redis: Any, name: str) -> dict[bytes, bytes]:
@@ -107,7 +111,7 @@ async def test_interval_schedule_round_trips(fake_redis) -> None:
 
     dst = type(src)()
     result = await _import(dst, exported)
-    assert result == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert result == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     stored = _read_hash(dst, "interval_one")
     assert orjson.loads(stored[b"schedule"]) == INTERVAL_SCHEDULE
@@ -134,7 +138,7 @@ async def test_crontab_schedule_round_trips(fake_redis) -> None:
 
     dst = type(src)()
     result = await _import(dst, exported)
-    assert result == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert result == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     stored = _read_hash(dst, "cron_one")
     assert orjson.loads(stored[b"kwargs"]) == CRONTAB_KWARGS
@@ -193,14 +197,42 @@ async def test_import_upsert_overwrites_existing_name(fake_redis) -> None:
     }
 
     first = await _import(dst, [record])
-    assert first == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     changed = dict(record, kwargs={"backend_tool_name": "changed"})
-    second = await _import(dst, [changed])
-    assert second == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
+    second = await _import(dst, [changed], mode="overwrite")
+    assert second == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     stored = _read_hash(dst, "dup")
     assert orjson.loads(stored[b"kwargs"]) == {"backend_tool_name": "changed"}
+
+
+async def test_import_skip_leaves_existing_untouched(fake_redis) -> None:
+    """Under ``skip`` (the default the host forwards) an existing name is left in
+    place — not aborted, not re-applied — and counted in ``skipped_existing``. This
+    is the mode the backup restore passes across the tool boundary, so the tool must
+    accept and honor it on this backend exactly as every backend does."""
+    dst = fake_redis
+    record = {
+        "name": "dup",
+        "args": [],
+        "kwargs": INTERVAL_KWARGS,
+        "schedule": INTERVAL_SCHEDULE,
+        "enabled": True,
+    }
+
+    first = await _import(dst, [record], mode="skip")
+    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    original_job_id = _read_hash(dst, "dup")[b"job_id"]
+
+    changed = dict(record, kwargs={"backend_tool_name": "changed"})
+    second = await _import(dst, [changed], mode="skip")
+    assert second == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
+
+    # The original schedule is untouched — the changed re-import never applied.
+    stored = _read_hash(dst, "dup")
+    assert orjson.loads(stored[b"kwargs"]) == INTERVAL_KWARGS
+    assert stored[b"job_id"] == original_job_id
 
 
 async def test_malformed_record_reported_not_silently_dropped(fake_redis) -> None:
@@ -243,7 +275,7 @@ async def test_failed_abort_of_replaced_job_surfaces_not_swallowed(fake_redis) -
     }
 
     async with _redis_bound(dst, job_cls=_FailingAbortJob):
-        result = await tools.backend_import_schedules([record])
+        result = await tools.backend_import_schedules([record], "overwrite")
 
     assert result["created"] == 0
     assert result["updated"] == 0
@@ -270,7 +302,7 @@ async def test_pending_abort_confirmation_does_not_block_import(fake_redis) -> N
     }
 
     async with _redis_bound(dst, job_cls=_PendingAbortJob):
-        result = await tools.backend_import_schedules([record])
+        result = await tools.backend_import_schedules([record], "overwrite")
 
-    assert result == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
+    assert result == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
     assert _read_hash(dst, "dup")[b"job_id"] != b"seed-job"

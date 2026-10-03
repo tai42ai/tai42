@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import types
-from typing import Any
+from typing import Any, get_protocol_members
 
 import pytest
 
@@ -227,22 +227,9 @@ def test_incomplete_subclass_cannot_instantiate():
 # -- IdentityProviderSettings Protocol -----------------------------------------
 
 
-class _StandInSettings:
-    # A duck-typed stand-in for skeleton's AccessControlSettings — it names no
-    # contract class, only the fields a provider factory reads.
-    def __init__(self) -> None:
-        self.key_prefix = "ac:key:"
-        self.redis = object()  # kit connection settings in production; opaque here
-
-
-class _MissingKeyPrefix:
-    def __init__(self) -> None:
-        self.redis = object()
-
-
-def test_stand_in_structurally_satisfies_settings_protocol():
-    assert isinstance(_StandInSettings(), IdentityProviderSettings)
-
-
-def test_object_missing_a_field_is_rejected():
-    assert not isinstance(_MissingKeyPrefix(), IdentityProviderSettings)
+def test_settings_marker_names_no_backing_store_field():
+    # The marker Protocol carries no field: a provider reads its OWN configuration
+    # (connection handles, key namespaces) from its own settings, so any identity
+    # provider's injected settings object satisfies the seam regardless of backing
+    # store. The absence of a declared field is what keeps the contract store-agnostic.
+    assert get_protocol_members(IdentityProviderSettings) == frozenset()

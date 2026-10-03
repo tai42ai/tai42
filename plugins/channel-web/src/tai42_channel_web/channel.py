@@ -323,6 +323,9 @@ class WebChannel:
     # The chat page runs its own client-side typing bubble from send until the
     # reply lands, so no server-driven working-on-it signal is emitted.
     working_signal_expiry_seconds: ClassVar[None] = None
+    # The web chat page has no medium length cap; a large split bound keeps an agent answer whole
+    # while the delivery machine's chunk cap still bounds a runaway fan-out (operator-overridable).
+    max_message_chars: ClassVar[int] = 8000
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Reserve the pending-question record, then append the question to the recipient's chat transcript.

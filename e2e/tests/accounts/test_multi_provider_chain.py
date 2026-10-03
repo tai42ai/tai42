@@ -12,6 +12,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import invite_member
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
@@ -30,7 +31,7 @@ async def test_key_and_session_both_resolve(accounts_stack: TaiStack, uniq: Call
     admin = stack.api(port=stack.port_a)  # seeded root sk- key (the redis provider's principal)
 
     # A session credential from the accounts provider, minted via an accepted invite.
-    created = await admin.post("/api/auth/users", json={"email": f"{uniq('user')}@e2e.test", "role": "editor"})
+    created = await invite_member(admin, email=f"{uniq('user')}@e2e.test", role="editor")
     public = ApiClient(f"http://{stack.host}:{stack.port_a}")
     accepted = await public.post(
         "/api/login/invite/accept",

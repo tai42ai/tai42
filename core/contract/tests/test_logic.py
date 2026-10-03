@@ -39,6 +39,7 @@ from tai42_contract.connectors.errors import OperatorMisconfiguredError
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord, ConnectorRef
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.extensions.kinds import ExtensionFactory
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.manifest import Manifest, MCPConfig, TaiMCPConfig
 from tai42_contract.storage import assert_not_root
 from tai42_contract.template import TemplatedText
@@ -272,9 +273,9 @@ def test_drain_returns_recursion_limit_outcome():
     assert result is outcome
 
 
-def test_drain_suspended_returns_receipt_without_raising():
-    # A park is a clean, non-error outcome: _drain returns the suspended RECEIPT dict and
-    # NEVER raises AgentInterruptedError.
+def test_drain_suspended_returns_typed_sentinel_without_raising():
+    # A park is a clean, non-error outcome: _drain returns a SuspendedInteraction typed value
+    # (recognised by TYPE, never a status-keyed dict) and NEVER raises AgentInterruptedError.
     agent = _DummyAgent()
     events = [
         SuspendedFinal(
@@ -285,22 +286,23 @@ def test_drain_suspended_returns_receipt_without_raising():
         )
     ]
     result = asyncio.run(agent._drain(_agen(events)))  # pyright: ignore[reportPrivateUsage]
-    assert result == {
-        "status": "suspended",
-        "interaction_ids": ["i1", "i2"],
-        "caller_interaction_ids": ["i2"],
-        "thread_id": "t",
-        "expiry_at": "2030-01-01T00:00:00+00:00",
-    }
+    assert isinstance(result, SuspendedInteraction)
+    assert result.interaction_id == "i1"
+    assert result.interaction_ids == ["i1", "i2"]
+    assert result.caller_interaction_ids == ["i2"]
+    assert result.expiry_at == datetime(2030, 1, 1, tzinfo=UTC)
+    # It carries no resume owner: a caller may not adopt a park the run owns and resumes itself.
+    assert result.resume_owner is None
 
 
 def test_drain_suspended_takes_precedence_over_interrupt():
     # If both a park and a HITL interrupt are drained, the park wins as a clean outcome
-    # (they never coexist in one pause, but the receipt-before-raise order is explicit).
+    # (they never coexist in one pause, but the park-before-raise order is explicit).
     agent = _DummyAgent()
     events = [InterruptFinal(interrupt_id="x"), SuspendedFinal(interaction_ids=["i1"], thread_id="t")]
     result = asyncio.run(agent._drain(_agen(events)))  # pyright: ignore[reportPrivateUsage]
-    assert result["status"] == "suspended"
+    assert isinstance(result, SuspendedInteraction)
+    assert result.interaction_id == "i1"
 
 
 # === connectors/models.py — ConnectionRecord helpers ========================

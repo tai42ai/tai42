@@ -104,9 +104,9 @@ async def test_import_re_mints_an_orphan_and_leaves_its_policy_unchanged(
 
     # The orphan is re-minted: a fresh identity carrying the re-homed owner claim, the raw
     # key surfaced once, and the surviving policy row byte-equal.
-    assert report["created"] == 1
-    assert report["skipped_existing"] == 0
-    assert report["new_api_keys"] == [{"user_id": "orphan", "description": "restored", "api_key": "sk-orphan"}]
+    assert report.created == 1
+    assert report.details["skipped_existing"] == 0
+    assert report.details["new_api_keys"] == [{"user_id": "orphan", "description": "restored", "api_key": "sk-orphan"}]
     assert provider.identities["orphan"] == "restored"
     assert provider.provision_owners["orphan"] == owner
     assert pg.policy_body("orphan") == body_before
@@ -116,9 +116,9 @@ async def test_import_skips_a_live_key(pg: FakeAccessControlPg, provider: _SpyPr
     await management.add_user_api_key("live", "live-desc", [], owner_user_id="owner-1")
     report = await sections._import_access_control({"tokens": [_token("live")]})
     # Policy AND identity present: left in place, never re-minted.
-    assert report["skipped_existing"] == 1
-    assert report["created"] == 0
-    assert report["new_api_keys"] == []
+    assert report.details["skipped_existing"] == 1
+    assert report.created == 0
+    assert report.details["new_api_keys"] == []
     assert provider.identities["live"] == "live-desc"
 
 
@@ -126,8 +126,8 @@ async def test_import_skips_an_account_row_without_minting(pg: FakeAccessControl
     pg.add_policy("account", scopes=["hooks"])
     report = await sections._import_access_control({"tokens": [_token("account")]})
     # A role-assigned account row (no fingerprint, no identity) is never overwritten with a key.
-    assert report["skipped_existing"] == 1
-    assert report["created"] == 0
+    assert report.details["skipped_existing"] == 1
+    assert report.created == 0
     assert "account" not in provider.identities
     assert pg.policy_body("account")["scopes"] == ["hooks"]
 
@@ -135,9 +135,9 @@ async def test_import_skips_an_account_row_without_minting(pg: FakeAccessControl
 async def test_import_mints_an_absent_token(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
     report = await sections._import_access_control({"tokens": [_token("fresh")]})
     # No policy row for this user id: a brand-new key is minted.
-    assert report["created"] == 1
-    assert report["skipped_existing"] == 0
-    assert report["new_api_keys"] == [{"user_id": "fresh", "description": "restored", "api_key": "sk-fresh"}]
+    assert report.created == 1
+    assert report.details["skipped_existing"] == 0
+    assert report.details["new_api_keys"] == [{"user_id": "fresh", "description": "restored", "api_key": "sk-fresh"}]
     assert provider.identities["fresh"] == "restored"
 
 
@@ -181,7 +181,7 @@ async def test_import_restores_principals_before_tokens(pg: FakeAccessControlPg,
     assert created["created_by"] == "owner-1"
     # The token minted, owned by the just-restored principal.
     assert provider.identities["k1"] == "restored"
-    assert any(row["user_id"] == "k1" for row in report["new_api_keys"])
+    assert any(row["user_id"] == "k1" for row in report.details["new_api_keys"])
 
 
 async def test_import_existing_principal_is_a_clean_skip(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
@@ -201,7 +201,7 @@ async def test_import_existing_principal_is_a_clean_skip(pg: FakeAccessControlPg
         "tokens": [],
     }
     report = await sections._import_access_control(payload)
-    assert report["skipped_existing"] == 1
+    assert report.details["skipped_existing"] == 1
     assert pg.principal("owner-1")["display_name"] == "Owner One"  # untouched
 
 
@@ -225,8 +225,8 @@ async def test_import_principal_keeps_a_surviving_policy_row(pg: FakeAccessContr
         "tokens": [],
     }
     report = await sections._import_access_control(payload)
-    assert report["created"] == 1
-    assert report["errors"] == []
+    assert report.created == 1
+    assert report.errors == []
     created = pg.principal("owner-3")
     assert created is not None
     assert created["kind"] == "service"
@@ -242,7 +242,7 @@ async def test_import_ownerless_token_is_a_loud_per_token_error(
     # never re-minted ownerless.
     payload = {"tokens": [{"user_id": "k1", "description": "d", "scopes": [], "policy_data": {}, "condition": None}]}
     report = await sections._import_access_control(payload)
-    assert report["created"] == 0
-    assert report["skipped"] == 1
-    assert any("no owner claim" in err for err in report["errors"])
+    assert report.created == 0
+    assert report.skipped == 1
+    assert any("no owner claim" in err for err in report.errors)
     assert "k1" not in provider.identities

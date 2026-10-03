@@ -29,7 +29,7 @@ async def list_roles() -> list[dict[str, Any]]:
     """The seeded/operator-authored roles as full ``RoleDefinition``-shaped bodies.
 
     Each body is ``{name, description, scopes, condition, base_tier, allow_all, grants}`` — the
-    users-admin role picker and the Studio Roles page read this. A store-less deployment (no
+    Members page's role action and the Studio Roles page read this. A store-less deployment (no
     versioned store configured) has no roles — the seed step is skipped at boot — so the read is
     skipped and the list is empty.
 

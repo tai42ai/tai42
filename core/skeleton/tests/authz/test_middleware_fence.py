@@ -30,7 +30,7 @@ from tai42_skeleton.access_control.request_scopes import (
     set_request_identity_claims,
 )
 from tai42_skeleton.access_control.role_gate import reset_route_index
-from tai42_skeleton.access_control.roles import EDITOR_JQ
+from tai42_skeleton.access_control.roles import editor_jq
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.middleware import AuthzMiddleware
 from tai42_skeleton.authz.resolver import resolve_dispatch
@@ -73,7 +73,7 @@ def ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     redis = FakeRedis()
     pg.add_route(_SECRET_PATH, _CONFIG_SCOPE)
     pg.add_route(_GRANTABLE_PATH, _CONFIG_SCOPE)
-    pg.add_policy("editor-key", scopes=["*"], condition={"content": EDITOR_JQ})
+    pg.add_policy("editor-key", scopes=["*"], condition={"content": editor_jq()})
     pg.add_policy("root", scopes=["*"])
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")

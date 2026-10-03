@@ -9,11 +9,11 @@ from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
     ChannelTemplate,
-    QuickReplyButtonParam,
-    UrlButtonParam,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
+from tai42_channel_whatsapp import WhatsAppChannel
+from tai42_channel_whatsapp.channel.template_params import TEMPLATE_BUTTONS_MAX
 from tai42_channel_whatsapp.client import (
     mark_read,
     mark_read_typing,
@@ -53,7 +53,7 @@ async def test_send_template_builder_with_and_without_parameters(fake_redis: Fak
     await send_template(
         PHONE_NUMBER_ID,
         ALLOWED_A,
-        ChannelTemplate(name="status_update", language="en_US", body_parameters=["Jane", "A-42"]),
+        ChannelTemplate(name="status_update", language="en_US", parameters={"body_parameters": ["Jane", "A-42"]}),
     )
     assert fake_httpx.calls[0]["json"] == {
         "messaging_product": "whatsapp",
@@ -82,11 +82,13 @@ async def test_send_template_builder_maps_header_media_and_buttons(fake_redis: F
         PHONE_NUMBER_ID,
         ALLOWED_A,
         ChannelTemplate(
-            name="order_update",
+            name="status_update",
             language="en_US",
-            header_media=MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.jpg"),
-            body_parameters=["Jane", "A-42"],
-            buttons=[QuickReplyButtonParam(payload="STOP"), UrlButtonParam(url_parameter="order/42")],
+            parameters={
+                "header_media": MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.jpg"),
+                "body_parameters": ["Jane", "A-42"],
+                "buttons": [{"kind": "quick_reply", "payload": "STOP"}, {"kind": "url", "url_parameter": "item/42"}],
+            },
         ),
     )
     assert fake_httpx.calls[0]["json"]["template"]["components"] == [
@@ -98,7 +100,7 @@ async def test_send_template_builder_maps_header_media_and_buttons(fake_redis: F
             "index": "0",
             "parameters": [{"type": "payload", "payload": "STOP"}],
         },
-        {"type": "button", "sub_type": "url", "index": "1", "parameters": [{"type": "text", "text": "order/42"}]},
+        {"type": "button", "sub_type": "url", "index": "1", "parameters": [{"type": "text", "text": "item/42"}]},
     ]
 
 
@@ -110,9 +112,11 @@ async def test_send_template_document_header_carries_filename(fake_redis: FakeRe
         ChannelTemplate(
             name="report",
             language="en_US",
-            header_media=MediaItem(
-                kind=MediaKind.DOCUMENT, url="https://cdn.example/report.pdf", filename="report.pdf"
-            ),
+            parameters={
+                "header_media": MediaItem(
+                    kind=MediaKind.DOCUMENT, url="https://cdn.example/report.pdf", filename="report.pdf"
+                )
+            },
         ),
     )
     assert fake_httpx.calls[0]["json"]["template"]["components"] == [
@@ -134,10 +138,52 @@ async def test_send_template_audio_header_refused(fake_redis: FakeRedis, fake_ht
             ChannelTemplate(
                 name="jingle",
                 language="en_US",
-                header_media=MediaItem(kind=MediaKind.AUDIO, url="https://cdn.example/a.mp3"),
+                parameters={"header_media": MediaItem(kind=MediaKind.AUDIO, url="https://cdn.example/a.mp3")},
             ),
         )
     assert not fake_httpx.calls
+
+
+def test_validate_template_accepts_this_channels_parameter_shape():
+    # This channel owns the opaque ``parameters`` shape; a well-formed one passes its hook.
+    WhatsAppChannel().validate_template(
+        ChannelTemplate(
+            name="status_update",
+            language="en_US",
+            parameters={
+                "header_media": {"kind": "image", "url": "https://cdn.example/banner.jpg"},
+                "body_parameters": ["Jane", "A-42"],
+                "buttons": [{"kind": "quick_reply", "payload": "STOP"}],
+            },
+        )
+    )
+
+
+def test_validate_template_rejects_an_unknown_parameter_key():
+    # A parameter shape this channel could not map (an unknown key) is refused loudly up front.
+    with pytest.raises(ValueError, match="invalid WhatsApp template parameters"):
+        WhatsAppChannel().validate_template(
+            ChannelTemplate(name="t", language="en_US", parameters={"not_a_whatsapp_field": 1})
+        )
+
+
+def test_validate_template_rejects_an_over_cap_button_list():
+    buttons = [{"kind": "quick_reply", "payload": f"p{i}"} for i in range(TEMPLATE_BUTTONS_MAX + 1)]
+    with pytest.raises(ValueError, match="invalid WhatsApp template parameters"):
+        WhatsAppChannel().validate_template(
+            ChannelTemplate(name="t", language="en_US", parameters={"buttons": buttons})
+        )
+
+
+def test_validate_template_rejects_a_link_header():
+    with pytest.raises(ValueError, match="invalid WhatsApp template parameters"):
+        WhatsAppChannel().validate_template(
+            ChannelTemplate(
+                name="t",
+                language="en_US",
+                parameters={"header_media": {"kind": "link", "url": "https://x.example/p"}},
+            )
+        )
 
 
 async def test_send_interactive_buttons_builder_shape(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

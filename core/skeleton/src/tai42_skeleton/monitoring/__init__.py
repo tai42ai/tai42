@@ -4,7 +4,7 @@ The vendor-neutral monitoring *contract* (protocols, models, errors) lives in
 ``tai42_contract.monitoring`` — import interfaces from there. This package owns
 only the concrete pieces the framework ships: the registry that holds the active
 backend and the explicit ``NoOp*`` default used when monitoring is disabled. Real
-backends (e.g. Langfuse) are external plugins installed via
+backends are external plugins installed via
 ``@tai42_app.monitoring.register_monitoring``.
 """
 

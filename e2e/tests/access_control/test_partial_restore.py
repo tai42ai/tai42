@@ -227,7 +227,7 @@ async def _prove_export_reimport_remints_orphans(
     authenticates with its NEW plaintext, its policy (scopes, fingerprint, owner claim) intact."""
     result = await admin.post("/api/backup/import", json={"document": document, "sections": ["access_control"]})
     ac_report = result["sections"]["access_control"]
-    new_by_user = {entry["user_id"]: entry["api_key"] for entry in ac_report["new_api_keys"]}
+    new_by_user = {entry["user_id"]: entry["api_key"] for entry in ac_report["details"]["new_api_keys"]}
     assert new_by_user.keys() == {"alpha", "beta"}, ac_report
     assert ac_report["created"] == 2, ac_report
 

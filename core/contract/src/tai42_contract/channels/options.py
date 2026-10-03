@@ -12,9 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tai42_contract.interactions.models import MEDIA_CAPTION_MAX_CHARS, MediaItem, MediaKind, validate_action_url
 
-# Upper bound on a notification's tappable option list — one notification cannot fan
-# out an unbounded set of tappable options; matches the richest interactive-list medium.
-NOTIFICATION_OPTIONS_MAX = 10
+# Generous platform abuse bound on a notification's tappable option list — NOT a per-medium
+# UX limit. A tappable option set persists into every replayed transcript/feed frame, so one
+# notification may not fan out an unbounded set; the bound is set well above any medium's native
+# interactive affordance so no legitimate send is refused here, while a runaway list is still
+# capped. Each channel enforces or degrades to its OWN tighter per-medium limit in its own code.
+NOTIFICATION_OPTIONS_MAX = 100
 
 # Per-option character bound — same cap as the media caption, the other short label that
 # rides a replayed frame.
@@ -29,10 +32,11 @@ NOTIFICATION_SECTIONS_MAX = 10
 # as an option label, the other short rider on an interactive frame.
 NOTIFICATION_FOOTER_MAX_CHARS = MEDIA_CAPTION_MAX_CHARS
 
-# Bound on an AUTHORED reply-option id — the stable id a sender may set on a quick-reply button
-# or a list row so the tap echoes it back verbatim. Set to the STRICTEST carrier's cap (WhatsApp
-# limits an interactive button/row id to 256 characters); a channel that mints its own id when
-# the author sets none is unaffected.
+# Platform abuse bound on an AUTHORED reply-option id — the stable id a sender may set on a
+# quick-reply button or a list row so the tap echoes it back verbatim. An author-set id rides the
+# wire and persists into a replayed frame, so it is bounded here; a channel with a tighter id cap
+# enforces it in its own code, and a channel that mints its own id when the author sets none is
+# unaffected.
 OPTION_ID_MAX_CHARS = 256
 
 
@@ -47,8 +51,9 @@ class ReplyOption(BaseModel):
     ``id`` is an OPTIONAL author-set stable identifier for the button/list row. When set, a channel
     sends it verbatim on the wire and the participant's tap echoes it back (a channel surfaces the echoed
     id to the inbound turn as opaque enrichment — e.g. Slack forwards it as ``params.reply_id``);
-    when ``None`` the channel mints its own id. Bounded by ``OPTION_ID_MAX_CHARS`` and a
-    single-line non-blank label — the strictest carrier's rule. Frozen.
+    when ``None`` the channel mints its own id. Bounded by the platform abuse bound
+    ``OPTION_ID_MAX_CHARS`` and a single-line non-blank label; a channel with a tighter id cap
+    enforces it in its own code. Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -85,7 +90,7 @@ class ReplyOption(BaseModel):
     @field_validator("id")
     @classmethod
     def _id_valid(cls, value: str | None) -> str | None:
-        # An author-set id is a single-line non-blank token within the strictest carrier's cap;
+        # An author-set id is a single-line non-blank token within the platform abuse bound;
         # raw whitespace and control/format characters are rejected (an id rides the wire and is
         # echoed back, so it must not carry a newline or a bidi spoof).
         if value is not None:

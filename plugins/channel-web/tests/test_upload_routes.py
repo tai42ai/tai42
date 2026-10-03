@@ -70,7 +70,6 @@ class _IngestStub:
         declared_mime: str | None,
         filename: str | None,
         declared_size: int | None,
-        integrity_sha256: str | None,
         origin: Any,
     ) -> IngestedMedia:
         collected = bytearray()
@@ -83,7 +82,6 @@ class _IngestStub:
                 "declared_mime": declared_mime,
                 "filename": filename,
                 "declared_size": declared_size,
-                "integrity_sha256": integrity_sha256,
                 "origin": origin,
             }
         )
@@ -212,12 +210,11 @@ async def test_upload_ingests_pending_and_streams_the_part(
     # PENDING ingest owned by the visitor, no owning message yet.
     assert (origin.channel_id, origin.participant_identity, origin.message_id) == ("web", VISITOR_ID, None)
     # The browser content-type is advisory (the seam sniffs); the door passes it and the
-    # actual part size, never a caller sha or a kind hint.
+    # actual part size, never a kind hint.
     assert call["declared_mime"] == "image/png"
     assert call["filename"] == "photo.png"
     assert call["declared_size"] == len(_IMAGE_BYTES)
     assert call["kind_hint"] is None
-    assert call["integrity_sha256"] is None
 
 
 async def test_upload_document_returns_the_seams_sanitised_filename(

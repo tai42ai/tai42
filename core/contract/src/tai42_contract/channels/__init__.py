@@ -44,21 +44,12 @@ from tai42_contract.channels.options import (
 from tai42_contract.channels.options import NOTIFICATION_OPTION_MAX_CHARS as NOTIFICATION_OPTION_MAX_CHARS
 from tai42_contract.channels.options import NOTIFICATION_OPTIONS_MAX as NOTIFICATION_OPTIONS_MAX
 from tai42_contract.channels.protocol import Channel, notify_in_order
-from tai42_contract.channels.templates import (
-    TEMPLATE_BUTTONS_MAX,
-    TEMPLATE_PARAM_MAX_CHARS,
-    ChannelTemplate,
-    QuickReplyButtonParam,
-    TemplateButtonParam,
-    UrlButtonParam,
-)
+from tai42_contract.channels.templates import ChannelTemplate
 
 __all__ = [
     "NOTIFICATION_FOOTER_MAX_CHARS",
     "NOTIFICATION_SECTIONS_MAX",
     "OPTION_ID_MAX_CHARS",
-    "TEMPLATE_BUTTONS_MAX",
-    "TEMPLATE_PARAM_MAX_CHARS",
     "AnswerForwardError",
     "Channel",
     "ChannelDelivery",
@@ -74,10 +65,7 @@ __all__ = [
     "LinkOption",
     "Option",
     "OptionSection",
-    "QuickReplyButtonParam",
     "ReplyOption",
-    "TemplateButtonParam",
-    "UrlButtonParam",
     "check_footer",
     "check_header",
     "check_interactive_composition",

@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from cryptography.exceptions import InvalidTag
 from psycopg.errors import UniqueViolation
+from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -209,7 +210,7 @@ async def test_categories_round_trip(pg):
 
     _wipe(pg)
     report = await import_connector_categories(payload)
-    assert report == {"created": 2, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert report == BackupSectionReport(created=2, updated=0, skipped=0, details={"skipped_existing": 0})
     assert pg.categories["data"]["display_name"] == "Data"
     assert pg.categories["other"]["sort_order"] == 1000
 
@@ -220,16 +221,16 @@ async def test_categories_reimport_is_idempotent_updates(pg):
 
     _wipe(pg)
     first = await import_connector_categories(payload)
-    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert first == BackupSectionReport(created=1, updated=0, skipped=0, details={"skipped_existing": 0})
 
     # Re-import over the now-populated table under overwrite: the row is an update.
     second = await import_connector_categories(payload, "overwrite")
-    assert second == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert second == BackupSectionReport(created=0, updated=1, skipped=0, details={"skipped_existing": 0})
 
     # Re-import over the same table under skip (the default): the row is left as it
     # stands, counted as a clean skip rather than an update.
     third = await import_connector_categories(payload)
-    assert third == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
+    assert third == BackupSectionReport(created=0, updated=0, skipped=0, details={"skipped_existing": 1})
 
 
 async def test_categories_created_at_preserved_on_restore(pg):
@@ -271,7 +272,7 @@ async def test_connections_round_trip_blob_identical(pg):
     # Wipe and restore.
     _wipe(pg)
     report = await import_connector_connections(payload)
-    assert report == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert report == BackupSectionReport(created=1, updated=0, skipped=0, details={"skipped_existing": 0})
 
     restored = pg.connections[CID]
     assert restored["blob"] == blob  # byte-for-byte identical
@@ -328,11 +329,11 @@ async def test_connections_alias_collision_on_different_id_is_reported(pg):
     ]
 
     report = await import_connector_connections(payload)
-    assert report["created"] == 1  # the clean row restored
-    assert report["skipped"] == 1  # the colliding row rejected
-    assert len(report["errors"]) == 1
-    assert "already in use" in report["errors"][0]
-    assert CID2 in report["errors"][0]
+    assert report.created == 1  # the clean row restored
+    assert report.skipped == 1  # the colliding row rejected
+    assert len(report.errors) == 1
+    assert "already in use" in report.errors[0]
+    assert CID2 in report.errors[0]
     # The clean row landed; the colliding one did not.
     assert cid3 in pg.connections
     assert CID2 not in pg.connections
@@ -345,7 +346,7 @@ async def test_connections_reimport_counts_updates(pg):
 
     # Re-import over the existing row under overwrite: it's an update, not a create.
     report = await import_connector_connections(payload, "overwrite")
-    assert report == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
+    assert report == BackupSectionReport(created=0, updated=1, skipped=0, details={"skipped_existing": 0})
 
 
 async def test_connections_reimport_under_skip_leaves_existing(pg):
@@ -356,7 +357,7 @@ async def test_connections_reimport_under_skip_leaves_existing(pg):
     payload = await export_connector_connections()
 
     report = await import_connector_connections(payload)
-    assert report == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
+    assert report == BackupSectionReport(created=0, updated=0, skipped=0, details={"skipped_existing": 1})
 
 
 async def test_import_invalidates_warm_cache(pg):

@@ -22,6 +22,9 @@ def _edit_name_list(current: list[Any], add: list[str], remove: list[str], field
     first, additions appended. Pure / re-runnable: builds a fresh list from the arguments.
     """
     names = [str(n) for n in current]
+    duplicates = sorted({n for n in add if add.count(n) > 1})
+    if duplicates:
+        raise ValueError(f"api_tools {field}: names repeated within add: {duplicates}")
     present = set(names)
     already = sorted(n for n in add if n in present)
     if already:

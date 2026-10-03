@@ -26,10 +26,9 @@ Errors are loud. Only two typed monitoring errors are mapped:
 ``MonitoringReadNotSupportedError`` → 501 with a ``code`` the UI keys its
 dedicated state on, and ``TraceNotFoundError`` → 404 on the trace routes. Every
 other exception propagates as a 500 — no blanket catch, no silent degrade. The
-one deliberate exception is the OPTIONAL by-model metrics sub-query
-(``_safe_query``), which is logged and omitted rather than allowed to break the
-core tiles. Success bodies are ``{"data": ...}``; failures are
-``{"error": "<message>"}``.
+by-model panel is driven by the backend's declared capability, not a swallowed
+query error (see ``get_metrics``). Success bodies are ``{"data": ...}``; failures
+are ``{"error": "<message>"}``.
 """
 
 from __future__ import annotations

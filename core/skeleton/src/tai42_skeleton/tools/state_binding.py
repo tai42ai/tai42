@@ -14,7 +14,10 @@ fails, a subject that cannot be resolved — each raises and the run's outcome c
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.states import (
@@ -31,10 +34,47 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import compile_check
 
+from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
+
+
+@dataclass(frozen=True)
+class DeferredBinding:
+    """The merged binding, the run input it saw, and the door id a parking run carries to its terminal.
+
+    Deposited around the OUTERMOST dispatch (after the binding's injections ran) so a run that
+    PARKS deep inside can capture the exact binding, input and door the live apply would have used
+    — then apply the UPDATES once at its real terminal instead of dropping them on the pause.
+    """
+
+    binding: StateBinding
+    run_input: dict[str, Any]
+    door_id: str
+
+
+_deferred_binding: ContextVar[DeferredBinding | None] = ContextVar("tai42_deferred_binding", default=None)
+
+
+def current_deferred_binding() -> DeferredBinding | None:
+    """The merged binding, run input and door id the outermost dispatch deposited, or ``None`` under no binding."""
+    return _deferred_binding.get()
+
+
+@contextmanager
+def deferred_binding_scope(binding: StateBinding, run_input: dict[str, Any], door_id: str) -> Iterator[None]:
+    """Deposit the merged binding (+ its run input + door id) for the span of the outermost dispatch.
+
+    A nested park captures it from :func:`current_deferred_binding`; the token is reset on exit so it
+    never leaks past the dispatch.
+    """
+    token = _deferred_binding.set(DeferredBinding(binding, run_input, door_id))
+    try:
+        yield
+    finally:
+        _deferred_binding.reset(token)
 
 
 async def _render_slot(app: TaiMCP, slot: str, text: TemplatedText) -> str:
@@ -186,8 +226,79 @@ async def _resolve_op_id(
     raise ValueValidationError(f"state binding op_id expression must yield a string or null, got {value!r}")
 
 
+async def _attach_update_writes(
+    app: TaiMCP,
+    attach: StateAttach,
+    subject: StateSubject,
+    arguments: dict[str, Any],
+    output: Any,
+    door_id: str,
+    *,
+    idempotency_scope: str | None,
+    base_index: int,
+) -> list[StateBatchWrite]:
+    """Build one engaged attach's ``updates`` into its write set over the tool ``output``.
+
+    The node-entry record is read ONCE and every custom update authors ``$record`` against that one
+    snapshot. A deferred apply (``idempotency_scope`` set) keys each author-op-id-less write on
+    ``<scope>:<index>`` — its position in the whole binding's write set — so a redelivery replays the
+    same ops idempotently.
+    """
+    writes: list[StateBatchWrite] = []
+    record_data: dict[str, Any] | None = None
+    for update in attach.updates:
+        op_id = await _resolve_op_id(app, attach.state, update.op_id, arguments, output)
+        if op_id is None and idempotency_scope is not None:
+            op_id = f"tai42:park-binding:{idempotency_scope}:{base_index + len(writes)}"
+        if update.template_jq is not None:
+            if update.adapter is not None:
+                adapter = await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter)
+                adapted = await run_jq_first(adapter, output, variables={"input": arguments})
+            else:
+                adapted = arguments
+            writes.append(
+                StateBatchWrite(
+                    state=attach.state,
+                    subject=subject,
+                    template_jq=update.template_jq,
+                    input=adapted,
+                    op_id=op_id,
+                    origin=WriteOrigin(consumer="template_jq", meta={"template_jq": update.template_jq}),
+                )
+            )
+            continue
+        if update.jq is None:
+            raise AssertionError
+        if record_data is None:
+            record = await app.states.read(attach.state, subject)
+            record_data = record.data if record is not None else {}
+        jq = await _render_slot(app, f"update jq for state {attach.state!r}", update.jq)
+        ops = await run_jq_first(jq, output, variables={"input": arguments, "record": record_data})
+        if not isinstance(ops, list):
+            raise ValueValidationError(
+                f"state binding custom update jq for state {attach.state!r} must return an op batch "
+                f"(a list), got {type(ops).__name__}"
+            )
+        writes.append(
+            StateBatchWrite(
+                state=attach.state,
+                subject=subject,
+                ops=ops,
+                op_id=op_id,
+                origin=WriteOrigin(consumer=f"door:{door_id}"),
+            )
+        )
+    return writes
+
+
 async def apply_binding_updates(
-    app: TaiMCP, binding: StateBinding, arguments: dict[str, Any], output: Any, door_id: str
+    app: TaiMCP,
+    binding: StateBinding,
+    arguments: dict[str, Any],
+    output: Any,
+    door_id: str,
+    *,
+    idempotency_scope: str | None = None,
 ) -> None:
     """Build every engaged attach's ``updates`` into ONE write set and apply it as ONE transaction after the dispatch.
 
@@ -206,54 +317,40 @@ async def apply_binding_updates(
     its resolved program name (the SAME update from any door on one state is one writer); a
     CUSTOM update writes as the door's own writer (``door_id`` = the dispatched definition).
     An attach whose ``scope_expr`` predicate is ``false`` is skipped.
+
+    While a states unit of work is bound to the caller's scope the write set STAGES into it rather
+    than landing in the store — so these binding writes read back within the scope and roll back
+    with a discard, exactly as the facet's own read seam serves a bound unit; with no unit open the
+    set applies directly, as one transaction, through :meth:`app.states.apply_batch`.
+
+    ``idempotency_scope`` makes a DEFERRED apply (a parked run's updates applied at its real
+    terminal) land exactly once under at-least-once delivery: every item that carries no author
+    ``op_id`` is keyed on ``<scope>:<index>`` so a redelivery re-driving the same terminal replays
+    the same ops the ledger already recorded (``ON CONFLICT DO NOTHING``). The live apply passes
+    ``None`` (one dispatch, one apply) and is unchanged.
     """
     items: list[StateBatchWrite] = []
     for attach in binding.states:
         if not await _scope_engaged(app, attach, arguments):
             continue
         subject = await _resolve_subject(app, attach, arguments)
-        record_data: dict[str, Any] | None = None
-        for update in attach.updates:
-            op_id = await _resolve_op_id(app, attach.state, update.op_id, arguments, output)
-            if update.template_jq is not None:
-                if update.adapter is not None:
-                    adapter = await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter)
-                    adapted = await run_jq_first(adapter, output, variables={"input": arguments})
-                else:
-                    adapted = arguments
-                items.append(
-                    StateBatchWrite(
-                        state=attach.state,
-                        subject=subject,
-                        template_jq=update.template_jq,
-                        input=adapted,
-                        op_id=op_id,
-                        origin=WriteOrigin(consumer="template_jq", meta={"template_jq": update.template_jq}),
-                    )
-                )
-            else:
-                if update.jq is None:
-                    raise AssertionError
-                if record_data is None:
-                    record = await app.states.read(attach.state, subject)
-                    record_data = record.data if record is not None else {}
-                jq = await _render_slot(app, f"update jq for state {attach.state!r}", update.jq)
-                ops = await run_jq_first(jq, output, variables={"input": arguments, "record": record_data})
-                if not isinstance(ops, list):
-                    raise ValueValidationError(
-                        f"state binding custom update jq for state {attach.state!r} must return an op batch "
-                        f"(a list), got {type(ops).__name__}"
-                    )
-                items.append(
-                    StateBatchWrite(
-                        state=attach.state,
-                        subject=subject,
-                        ops=ops,
-                        op_id=op_id,
-                        origin=WriteOrigin(consumer=f"door:{door_id}"),
-                    )
-                )
-    await app.states.apply_batch(items)
+        items.extend(
+            await _attach_update_writes(
+                app,
+                attach,
+                subject,
+                arguments,
+                output,
+                door_id,
+                idempotency_scope=idempotency_scope,
+                base_index=len(items),
+            )
+        )
+    unit = current_state_unit()
+    if unit is not None:
+        await unit.stage(items)
+    else:
+        await app.states.apply_batch(items)
 
 
 async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> None:

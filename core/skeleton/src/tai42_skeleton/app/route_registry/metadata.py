@@ -80,6 +80,12 @@ class RouteMetadata:
     additional_success_statuses: tuple[int, ...]
     success_media_types: dict[str, tuple[str, ...]]
     action: RouteAction
+    # Whether this route is a caller SELF-SERVICE surface: a non-admin editor/viewer may
+    # invoke it even under an otherwise admin-gated prefix. The seeded editor/viewer
+    # base-tier jq carves in every route declaring this (see
+    # ``tai42_skeleton.access_control.roles``), so a provider that ships a self-service route
+    # under ``/api/auth`` keeps it reachable for non-admins without the platform naming it.
+    self_service: bool = False
     # A model whose fields the emitter publishes as ``in: query`` parameters for ANY
     # method, additive to ``request_model`` (which stays a body on a write, query on a
     # read). It is the only way a WRITE-method door documents the query it reads.

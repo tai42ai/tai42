@@ -198,8 +198,8 @@ async def test_round_trip_restores_same_name_folders_under_different_parents(pg:
     pg.meta = {}
     report = await import_tool_meta(payload)
 
-    assert report["created"] == 4  # three folders + the one overlay row, none lost to a collision
-    assert not report["errors"]
+    assert report.created == 4  # three folders + the one overlay row, none lost to a collision
+    assert not report.errors
     by_id = pg.folders
     assert len(by_id) == 3  # all three folders restored
     assert by_id["arch-root"]["parent_id"] is None
@@ -228,7 +228,7 @@ async def test_round_trip_restores_child_listed_before_parent(pg: FakeBackupPg) 
         "rows": [],
     }
     report = await import_tool_meta(payload)
-    assert report["created"] == 2
+    assert report.created == 2
     assert pg.folders["child"]["parent_id"] == "parent"
 
 
@@ -268,9 +268,9 @@ async def test_skip_vs_overwrite_over_existing_rows(pg: FakeBackupPg) -> None:
     # skip (the default): f2 is new -> created; f1 + weather already exist -> left as
     # they stand, counted as clean skips.
     skip = await import_tool_meta(payload)
-    assert skip["created"] == 1
-    assert skip["updated"] == 0
-    assert skip["skipped_existing"] == 2
+    assert skip.created == 1
+    assert skip.updated == 0
+    assert skip.details["skipped_existing"] == 2
     assert pg.folders["f1"]["name"] == "Old"  # untouched
     assert pg.meta["weather"]["display_name"] == "Old label"  # untouched
     assert pg.folders["f2"]["name"] == "Fresh"  # the new folder landed
@@ -278,9 +278,9 @@ async def test_skip_vs_overwrite_over_existing_rows(pg: FakeBackupPg) -> None:
     # overwrite: every row now exists (the skip pass already created f2), so all three
     # are replaced in place.
     over = await import_tool_meta(payload, "overwrite")
-    assert over["created"] == 0
-    assert over["updated"] == 3
-    assert over["skipped_existing"] == 0
+    assert over.created == 0
+    assert over.updated == 3
+    assert over.details["skipped_existing"] == 0
     assert pg.folders["f1"]["name"] == "Renamed"
     assert pg.meta["weather"]["display_name"] == "New label"
     assert pg.meta["weather"]["badges"] == ["storage-write"]  # the overwrite replaced the badge set

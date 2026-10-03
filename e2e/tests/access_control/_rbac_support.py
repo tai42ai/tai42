@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import invite_member
 from tai42_e2e.stack import TaiStack
 
 # The mintable scope every seeded e2e route table maps its routes to (the catch-all the
@@ -68,9 +69,9 @@ async def create_user_with_role(
 ) -> tuple[str, str]:
     """Create an accounts user holding ``role`` and accept its invite into a live
     session. Returns ``(user_id, session_token)``. The role must already exist (the
-    accounts create-user path applies it through ``apply_role``, which raises on an
+    invite member-action applies it through ``apply_role``, which raises on an
     unknown role)."""
-    created = await admin.post("/api/auth/users", json={"email": f"{uniq('rbac')}@e2e.test", "role": role})
+    created = await invite_member(admin, email=f"{uniq('rbac')}@e2e.test", role=role)
     public = ApiClient(f"http://{stack.host}:{stack.port_a}")
     password = f"{uniq('pw')}-Aa1"
     accepted = await public.post(

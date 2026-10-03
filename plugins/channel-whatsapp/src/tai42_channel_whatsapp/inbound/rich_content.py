@@ -153,7 +153,7 @@ async def _fetch_and_ingest(media: dict[str, Any], kind: InboundMediaKind, wa_id
 
     Raises the kit fetch faults / contract ingest faults for :func:`_handle_media` to classify; a
     media object with no fetchable id is a permanent, participant-visible failure (the metadata
-    lookup already makes an absent lookaside ``url`` one). The vendor-declared mime/size/sha256 ride
+    lookup already makes an absent lookaside ``url`` one). The vendor-declared mime/size ride
     the ingest, and the origin binds the item to this message at ingest.
     """
     media_id = media.get("id")
@@ -167,7 +167,6 @@ async def _fetch_and_ingest(media: dict[str, Any], kind: InboundMediaKind, wa_id
             declared_mime=meta.get("mime_type") or media.get("mime_type") or stream.content_type,
             filename=media.get("filename"),
             declared_size=meta.get("file_size") or stream.content_length,
-            integrity_sha256=meta.get("sha256"),
             origin=MediaOrigin(channel_id="whatsapp", participant_identity=wa_id, message_id=wamid),
         )
 

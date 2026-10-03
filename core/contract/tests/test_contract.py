@@ -58,7 +58,8 @@ def test_runtime_purity_models_rebuild():
         ("tai42_contract.connectors.models.AuthHealthState", {"HEALTHY", "RECONNECT_REQUIRED", "REFRESH_FAILING"}),
         ("tai42_contract.monitoring.SpanKind", {"CHAIN", "EVENT", "LLM", "TOOL"}),
         ("tai42_contract.monitoring.MonitoringLevel", {"DEBUG", "DEFAULT", "WARNING", "ERROR"}),
-        ("tai42_contract.monitoring.MetricsView", {"OBSERVATIONS", "TRACES"}),
+        ("tai42_contract.monitoring.Measure", {"COUNT", "COST", "TOKENS", "LATENCY"}),
+        ("tai42_contract.monitoring.Dimension", {"MODEL"}),
     ],
 )
 def test_enums_have_expected_members(dotted: str, expected: set[str]):

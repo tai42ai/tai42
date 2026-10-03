@@ -50,6 +50,8 @@ from tai42_contract.versioning import VersionedStore
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
+from tai42_skeleton.presets.candidate_scope import candidate_body_override
+
 _KIND = "preset"
 
 # The carry-forward sentinel is ``None`` (the argument default): omitted/``None``
@@ -185,7 +187,15 @@ class PresetStoreView(PresetStore):
             raise PresetVersionNotFoundError(name, version) from exc
 
     async def get_active_body(self, name: str) -> PresetBody:
-        """The active :class:`PresetBody` of preset ``name``."""
+        """The active :class:`PresetBody` of preset ``name``.
+
+        Inside a bound-routes re-check scope (:func:`~tai42_skeleton.presets.candidate_scope.candidate_bodies`)
+        a name under check resolves to its UNSAVED candidate body, so a composing route's composed-preset
+        resolution sees the version the write would commit; outside that scope the committed body.
+        """
+        override = candidate_body_override(name)
+        if override is not None:
+            return override
         return await self._active_body(name)
 
     async def rollback(self, name: str, version: int) -> DocumentRecord:

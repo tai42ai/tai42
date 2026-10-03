@@ -7,13 +7,13 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
-from tai42_contract.monitoring import ProjectConfig
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
+from tai42_monitoring_langfuse.project import LangfuseProject
 
 
 def _cfg(public_key="pk", source="tai", timeout_seconds=30):
-    return ProjectConfig(
+    return LangfuseProject(
         public_key=public_key,
         secret_key="sk",
         host="http://localhost",

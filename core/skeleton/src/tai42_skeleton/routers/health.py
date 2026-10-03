@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel
 from starlette.requests import Request
@@ -81,7 +82,7 @@ def _auth_connections() -> list[tuple[str, type, ClientSettings]]:
     if not ac.enable:
         return []
     conns: list[tuple[str, type, ClientSettings]] = []
-    for name in ac.auth_providers:
+    for name in ac.resolved_auth_providers():
         provider = get_identity_provider_factory(name)(ac)
         conns.extend((target.name, target.client, target.settings) for target in provider.readiness_targets())
     return conns
@@ -180,6 +181,14 @@ async def _ping_postgres(settings: ClientSettings) -> None:
         await conn.execute("SELECT 1")
 
 
+# The per-store-type readiness ping, dispatched by the wired connection's client class. A class not
+# listed here has no ping and is a loud wiring bug, never a Postgres fallback.
+_PING_BY_CLIENT: dict[type, Callable[[ClientSettings], Awaitable[None]]] = {
+    RedisClient: _ping_redis,
+    PostgresClient: _ping_postgres,
+}
+
+
 async def _ping_connection(client_cls: type, settings: ClientSettings) -> Exception | None:
     """Ping one distinct connection under the readiness timeout.
 
@@ -188,12 +197,15 @@ async def _ping_connection(client_cls: type, settings: ClientSettings) -> Except
     connection, with the traceback) and returned so the response can carry the
     exception TYPE only — the message would leak internal hosts/ports.
     """
+    # Resolve the ping for this store type BEFORE the try. A type the probe has no ping for is a
+    # wiring bug, not a store outage — surface it loudly here rather than ping it as Postgres (a
+    # silent catch-all else would both mis-probe it and hide the bug).
+    ping = _PING_BY_CLIENT.get(client_cls)
+    if ping is None:
+        raise TypeError(f"readiness probe has no ping for client type {client_cls.__name__!r}")
     try:
         async with asyncio.timeout(_READINESS_TIMEOUT_SECONDS):
-            if client_cls is RedisClient:
-                await _ping_redis(settings)
-            else:
-                await _ping_postgres(settings)
+            await ping(settings)
     except Exception as exc:  # reported to the caller and logged with detail — never swallowed
         logger.warning("readiness ping failed for %s", client_cls.__name__, exc_info=True)
         return exc

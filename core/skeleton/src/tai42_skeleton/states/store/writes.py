@@ -70,20 +70,24 @@ class _RecordWriteStore(_StoreBase):
         )
 
     async def replace(
-        self, state: str, subject: StateSubject, data: dict[str, Any], *, origin: CompletedOrigin, validate_doc: Any
+        self,
+        state: str,
+        subject: StateSubject,
+        data: dict[str, Any],
+        *,
+        origin: CompletedOrigin,
+        validate_doc: Any,
+        conn: AsyncConnection[Any] | None = None,
     ) -> tuple[dict[str, Any], float]:
         """Replace ``subject``'s whole document with ``data`` and record the write.
 
         ``data`` is validated whole against the effective schema; the write records
         paths ``[[]]`` (the whole document). ONE txn under the declaration
-        ``FOR SHARE`` lock; the subject resolves through the alias table first.
+        ``FOR SHARE`` lock; the subject resolves through the alias table first. With
+        ``conn`` the write joins the caller's transaction (the unit of work's commit
+        replaying a staged replace alongside the batch's other writes).
         """
-        async with (
-            _pool(_settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR SHARE", (state,))
             decl = await cur.fetchone()
             if decl is None:

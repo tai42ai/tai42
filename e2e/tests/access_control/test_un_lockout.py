@@ -21,6 +21,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e.member_admin import handle_for_user, invite_member, remove_member_raw, update_member_raw
 from tai42_e2e.stack import TaiStack
 
 from ._rbac_support import create_role, create_user_with_role
@@ -72,7 +73,8 @@ async def test_reserved_admin_role_and_assigned_role_guards(
     )
 
     # Remove the holder (its policy + role pointer), then the role deletes cleanly.
-    removed = await admin.request_raw("DELETE", f"/api/auth/users/{holder_id}")
+    holder_handle = await handle_for_user(admin, holder_id)
+    removed = await remove_member_raw(admin, holder_handle)
     assert removed.status_code == 200, f"removing the holder must succeed: {removed.status_code} {removed.text}"
     now_deletable = await admin.request_raw("DELETE", f"/api/auth/roles/{assigned_role}")
     assert now_deletable.status_code == 200, (
@@ -89,26 +91,26 @@ async def test_multiple_admins_and_last_admin_guard(accounts_stack: TaiStack, un
 
     # Two admin holders (the accounts admin population starts empty — the seeded root key
     # is not an accounts user).
-    a = await admin.post("/api/auth/users", json={"email": f"{uniq('admin-a')}@e2e.test", "role": "admin"})
-    b = await admin.post("/api/auth/users", json={"email": f"{uniq('admin-b')}@e2e.test", "role": "admin"})
-    a_id, b_id = a["user_id"], b["user_id"]
+    a = await invite_member(admin, email=f"{uniq('admin-a')}@e2e.test", role="admin")
+    b = await invite_member(admin, email=f"{uniq('admin-b')}@e2e.test", role="admin")
+    a_handle, b_handle = a["handle"], b["handle"]
 
     # With two admins, demoting one is ALLOWED (the other remains).
-    demote_a = await admin.request_raw("PUT", f"/api/auth/users/{a_id}", json={"role": "viewer"})
+    demote_a = await update_member_raw(admin, a_handle, role="viewer")
     assert demote_a.status_code == 200, (
         f"demoting one of two admins must be allowed: {demote_a.status_code} {demote_a.text}"
     )
 
     # B is now the last enabled admin: demote / disable / delete are each refused (409).
-    demote_last = await admin.request_raw("PUT", f"/api/auth/users/{b_id}", json={"role": "viewer"})
+    demote_last = await update_member_raw(admin, b_handle, role="viewer")
     assert demote_last.status_code == 409, (
         f"demoting the last enabled admin must be refused: {demote_last.status_code} {demote_last.text}"
     )
-    disable_last = await admin.request_raw("PUT", f"/api/auth/users/{b_id}", json={"disabled": True})
+    disable_last = await update_member_raw(admin, b_handle, disabled=True)
     assert disable_last.status_code == 409, (
         f"disabling the last enabled admin must be refused: {disable_last.status_code} {disable_last.text}"
     )
-    delete_last = await admin.request_raw("DELETE", f"/api/auth/users/{b_id}")
+    delete_last = await remove_member_raw(admin, b_handle)
     assert delete_last.status_code == 409, (
         f"deleting the last enabled admin must be refused: {delete_last.status_code} {delete_last.text}"
     )

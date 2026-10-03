@@ -265,7 +265,6 @@ async def _fetch_and_ingest_file(
                 declared_mime=declared_mime or stream.content_type,
                 filename=filename,
                 declared_size=declared_size or stream.content_length,
-                integrity_sha256=None,
                 origin=origin,
             )
     except MediaFetchError as exc:

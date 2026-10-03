@@ -52,7 +52,16 @@ def make_captured(monkeypatch) -> list[dict]:
     calls: list[dict] = []
 
     async def _stub(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         calls.append(
             {
@@ -63,6 +72,7 @@ def make_captured(monkeypatch) -> list[dict]:
                 "answer": answer,
                 "park_context": park_context,
                 "park_asked_by": park_asked_by,
+                "caller_ask_landing": caller_ask_landing,
             }
         )
         # A re-park sentinel: non-terminal, so the delivery ladder delivers nothing and the drive

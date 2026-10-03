@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from tai42_contract.conversation_target import ConversationTargetKind
-from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.interactions import CallerAskLanding
+from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 
 def subjects_descriptor(candidates: SubjectCandidates) -> dict[str, Any]:
@@ -65,6 +66,17 @@ class ContinuationDue:
     # context (a receiver-less door) or a sync question.
     delivery: dict[str, Any] | None = None
     run_delivery_id: str | None = None
+    # The door's caller-ask landing (the ``CallerAskLanding`` as a model), re-established around the
+    # reaper's detached redelivery so a caller re-ask during that re-drive is judged by the same
+    # declaration the park captured. None for a park the door declared nothing around.
+    caller_ask_landing: CallerAskLanding | None = None
+    # The door's MERGED state binding, the run input it saw, and the door id — self-contained copies
+    # of the park's stored fields so the reaper's detached redelivery applies the deferred UPDATES at
+    # the run's real terminal without re-reading the request. All ``None`` for a park that carried no
+    # state binding.
+    deferred_binding: StateBinding | None = None
+    run_input: dict[str, Any] | None = None
+    door_id: str | None = None
 
 
 class ContinuationRetryDrop(enum.Enum):
@@ -106,6 +118,10 @@ def _continuation_due_mapping(
     asked_by: list[str] | None = None,
     delivery: str | None = None,
     run_delivery_id: str | None = None,
+    caller_ask_landing: str | None = None,
+    deferred_binding: str | None = None,
+    run_input: str | None = None,
+    door_id: str | None = None,
 ) -> dict[str, str]:
     """The flow-blind continuation-due record fields.
 
@@ -136,6 +152,14 @@ def _continuation_due_mapping(
         mapping["delivery"] = delivery
     if run_delivery_id is not None:
         mapping["run_delivery_id"] = run_delivery_id
+    if caller_ask_landing is not None:
+        mapping["caller_ask_landing"] = caller_ask_landing
+    if deferred_binding is not None:
+        mapping["deferred_binding"] = deferred_binding
+    if run_input is not None:
+        mapping["run_input"] = run_input
+    if door_id is not None:
+        mapping["door_id"] = door_id
     return mapping
 
 

@@ -39,6 +39,7 @@ from tai42_skeleton.routers import tools as tools_router
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 from tai42_skeleton.tools import binding as binding_module
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.retry import ToolRetryRegistry
 
 from .._fakes.tool_runs_redis import FakeRedis
@@ -127,6 +128,13 @@ class _FakeTools:
 
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
+
+    async def get_tool(self, key):
+        # The submit door resolves the tool's registration meta (the crash-resume flag) through
+        # this facet method, as the real ``tai42_app.tools`` does.
+        if key not in self._registered:
+            raise UnknownToolError(key)
+        return SimpleNamespace(name=key, meta=None)
 
     async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         self.calls.append((key, arguments, offload_sync))
@@ -616,6 +624,9 @@ async def test_result_ttl_applied_on_create_and_terminal(wired):
 def _function_tool(fn):
     tool = MagicMock(spec=binding_module.FunctionTool)
     tool.fn = fn
+    # The real ``FunctionTool`` carries a ``meta`` field (``None`` by default); the submit door
+    # reads it for the crash-resume flag, so the double carries it too.
+    tool.meta = None
     return tool
 
 

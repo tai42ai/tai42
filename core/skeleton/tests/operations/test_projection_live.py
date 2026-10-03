@@ -131,8 +131,8 @@ def test_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 220 total = 4 tier-1 (hardcode-blocked from projection) + 47 tier-2
-            # (default-excluded, includable) + 167 tier-0 (default-projected). A destructive
+            # 223 total = 4 tier-1 (hardcode-blocked from projection) + 50 tier-2
+            # (default-excluded, includable) + 169 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
             # is destructive but not authority_changing, so it stays tier-0 like
@@ -141,7 +141,7 @@ def test_projected_surface_is_the_expected_op_count():
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
             # ``search``/``fold``/``apply`` doors, the mount/subjects/consumers/stats
             # reads, and ``prune_state_retention``) are all tier-0 CRUD over the states service.
-            assert total == 220, total
+            assert total == 223, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -159,7 +159,10 @@ def test_projected_surface_is_the_expected_op_count():
             # (authority_changing — the public deployment-initialize door, off /api/auth, that
             # must never project) — plus ``reencrypt_connector_tokens`` (the connector-token
             # KEK-rotation convergence sweep, authority_changing) plus the four principals doors
-            # (all under /api/auth/principals*) — 47 in all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
+            # (all under /api/auth/principals*) plus list_members (under /api/auth/members) plus the
+            # two member-actions doors (list_member_actions under /api/auth/member-actions and
+            # invoke_member_action, authority_changing, under /api/auth/member-actions/invoke) — 50 in
+            # all. ``get_me`` is tier-1 hardcode-blocked, not tier-2.
             assert set(tier2) == {
                 "add_scope_url",
                 "apply_profile",
@@ -178,6 +181,9 @@ def test_projected_surface_is_the_expected_op_count():
                 "exchange_claim_token",
                 "get_capabilities",
                 "import_backup",
+                "invoke_member_action",
+                "list_member_actions",
+                "list_members",
                 "list_policy_versions",
                 "list_principals",
                 "list_public_routes",

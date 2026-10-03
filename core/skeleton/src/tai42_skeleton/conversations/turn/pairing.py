@@ -97,7 +97,7 @@ async def _mint_and_owe_greeting(multichannel: _Multichannel, thread_id: str) ->
     """
     greeting, minted = await _greeting_and_code(multichannel)
     if greeting is not None:
-        await accessors._store().record_owed_greeting(thread_id, greeting)
+        await accessors._store().record_owed_greeting(thread_id, greeting, carries_pair_code=minted is not None)
     return minted
 
 

@@ -48,6 +48,36 @@ class _FakeSaver:
         self._threads.pop(thread_id, None)
 
 
+class _FakeParkStore:
+    """A thread/subject index that reports the configured threads as backing a live park."""
+
+    def __init__(self, parked_threads: set[str]) -> None:
+        self._parked = parked_threads
+
+    async def thread_park_members(self, conn: object, thread_id: str) -> list[str]:
+        return ["i-parked"] if thread_id in self._parked else []
+
+    async def subject_members(self, conn: object, kind: str, key: str) -> list[str]:
+        return []
+
+
+def _install_parks(monkeypatch: pytest.MonkeyPatch, *, parked_threads: set[str], configured: bool = True) -> None:
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setattr(
+        checkpoints_ops,
+        "interactions_settings",
+        lambda: SimpleNamespace(redis=SimpleNamespace(redis_url="redis://x" if configured else None), key_prefix="ix:"),
+    )
+    monkeypatch.setattr(checkpoints_ops, "InteractionStore", lambda prefix: _FakeParkStore(parked_threads))
+
+    @asynccontextmanager
+    async def _ctx(cls: object, settings: object):
+        yield object()
+
+    monkeypatch.setattr(checkpoints_ops, "client_ctx", _ctx)
+
+
 def _install(monkeypatch: pytest.MonkeyPatch, *, provider: str, ttl_minutes: int | None, saver: object) -> None:
     monkeypatch.setattr(
         checkpoints_ops,
@@ -84,6 +114,28 @@ async def test_sweeps_stale_and_keeps_fresh(monkeypatch: pytest.MonkeyPatch) -> 
     assert saver.deleted == ["bridge:sms:old"]
     assert result["provider"] == "postgres"
     assert result["ttl_minutes"] == 60
+
+
+async def test_keeps_a_thread_backing_a_live_park(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A parked run writes its checkpoint at park time, so after the idle TTL its newest checkpoint
+    # looks stale though the run is alive and waiting (e.g. a 24h park under a 60-min sweep TTL).
+    # The sweep must keep such a thread — deleting it would destroy the parked run's state.
+    now = datetime.now(UTC)
+    saver = _FakeSaver(
+        {
+            "bridge:sms:parked": [_iso(now - timedelta(hours=2))],
+            "bridge:sms:idle": [_iso(now - timedelta(hours=2))],
+        }
+    )
+    _install(monkeypatch, provider="postgres", ttl_minutes=60, saver=saver)
+    _install_parks(monkeypatch, parked_threads={"bridge:sms:parked"})
+
+    result = await checkpoints_ops.sweep_checkpoints()
+
+    assert saver.deleted == ["bridge:sms:idle"]
+    assert result["swept_threads"] == ["bridge:sms:idle"]
+    assert result["swept_count"] == 1
+    assert "bridge:sms:parked" in saver._threads  # the live park's thread survives the sweep
 
 
 async def test_swept_thread_gone_on_next_list(monkeypatch: pytest.MonkeyPatch) -> None:

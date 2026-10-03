@@ -178,6 +178,9 @@ class TwilioChannel:
     # SMS and WhatsApp-over-Twilio carry no typing indicator, so this channel
     # emits no working-on-it signal.
     working_signal_expiry_seconds: ClassVar[None] = None
+    # The SMS segment ceiling this channel splits a long answer against; the
+    # conversation-delivery machine reads it (an operator may override it per deployment).
+    max_message_chars: ClassVar[int] = 1600
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Resolve the "To" number, then push the question to it.

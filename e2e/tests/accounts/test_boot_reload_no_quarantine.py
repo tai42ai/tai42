@@ -63,12 +63,12 @@ async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, un
         admin, public_a, email=user_email, role="admin", password=_PASSWORD, retry_on_reloading=True
     )
 
-    # routes_users serves: the invited admin's session reads the authed user list under
-    # /api/auth on the OTHER replica, so the session minted by routes_login authorizes a read
-    # on the sibling routes_users mount cross-worker.
+    # routes_users serves: the invited admin's session reads the authed members directory
+    # under /api/auth on the OTHER replica, so the session minted by routes_login authorizes a
+    # read on the sibling members mount cross-worker.
     owner_client = stack.api(port=stack.port_b).with_token(session)
-    listed = await owner_client.get("/api/auth/users")
-    assert any(u["email"] == user_email for u in listed["users"]), listed
+    listed = await owner_client.get("/api/auth/members")
+    assert any(m["email"] == user_email for m in listed["members"]), listed
 
     # A fleet reload re-imports every manifest module under its binding on every worker: the
     # dual-role distribution must re-fire each route submodule once and stay live.
@@ -84,11 +84,13 @@ async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, un
     await _assert_ready(stack, stack.port_b)
 
     # Both route families still serve after the reload: a fresh password login and an authed
-    # users read both succeed against the re-imported route table.
+    # members read both succeed against the re-imported route table.
     relogin = await public_a.post(
         "/api/login/password", json={"email": user_email, "password": _PASSWORD}, retry_on_reloading=True
     )
     reread = (
-        await stack.api(port=stack.port_b).with_token(relogin["token"]).get("/api/auth/users", retry_on_reloading=True)
+        await stack.api(port=stack.port_b)
+        .with_token(relogin["token"])
+        .get("/api/auth/members", retry_on_reloading=True)
     )
-    assert any(u["email"] == user_email for u in reread["users"]), reread
+    assert any(m["email"] == user_email for m in reread["members"]), reread

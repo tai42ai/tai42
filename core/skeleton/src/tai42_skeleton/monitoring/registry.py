@@ -87,8 +87,8 @@ def abort_staging() -> None:
 def register_monitoring(builder=None):
     """Decorator installing the process monitoring backend — the ``app.monitoring`` facet body.
 
-    Selected by the manifest ``monitoring_module``. A monitoring plugin (e.g. the
-    Langfuse impl) decorates a zero-arg callable
+    Selected by the manifest ``monitoring_module``. A monitoring plugin decorates a
+    zero-arg callable
     that returns a ``Monitoring``; it is built and installed via
     ``init_monitoring``, replacing the no-op default. One provider per process,
     last registration wins. The skeleton never names a concrete vendor — the

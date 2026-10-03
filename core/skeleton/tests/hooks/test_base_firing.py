@@ -83,7 +83,10 @@ async def test_on_event_skips_hook_when_condition_false(make_app):
     assert app.tools.runs == []
 
 
-async def test_on_event_raises_when_condition_errors_at_runtime(make_app):
+async def test_on_event_condition_error_is_isolated_and_logged_loudly(make_app, caplog):
+    # A fire-time jq evaluation error on ONE hook's condition is that hook's failure,
+    # isolated and logged loudly — it never halts the fan-out, and the condition is
+    # never silently treated as a cleanly-false skip.
     app = make_app()
     manager = InMemoryHooksManager(_settings())
     # Compiles at register time, raises at evaluation (string -> number).
@@ -98,12 +101,41 @@ async def test_on_event_raises_when_condition_errors_at_runtime(make_app):
         )
     )
 
-    # A fire-time jq evaluation error must surface loudly, not silently skip the
-    # hook (a skip is indistinguishable from a cleanly-false condition).
-    with pytest.raises(ValueError, match="cannot be parsed as a number"):
+    with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {"x": "not-a-number"})
 
+    # The erroring-condition hook never fired, and its error surfaced loudly in the log.
     assert app.tools.runs == []
+    assert any(rec.levelno == logging.ERROR and "bad-runtime" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_on_event_one_bad_condition_does_not_halt_the_other_hooks(make_app, caplog):
+    # Hook A's condition errors at fire time; hook B has no condition. B must still fire
+    # — a condition error on one hook never stops the rest of the topic's fan-out.
+    app = make_app()
+    manager = InMemoryHooksManager(_settings())
+    await manager.register(
+        HookParams(
+            name="bad",
+            topic="t",
+            tool="never",
+            execution_key="k-fire",
+            execution_key_fingerprint="fp-fire",
+            condition=TemplatedText(content=".x | tonumber"),
+        )
+    )
+    await manager.register(
+        HookParams(name="good", topic="t", tool="ok", execution_key="k-fire", execution_key_fingerprint="fp-fire")
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await manager.on_event("t", {"x": "not-a-number"})
+
+    ran = {name for name, _ in app.tools.runs}
+    # B fired despite A's condition error; A never fired.
+    assert ran == {"ok"}
+    # A's condition error surfaced loudly rather than being swallowed.
+    assert any(rec.levelno == logging.ERROR and "bad" in rec.getMessage() for rec in caplog.records)
 
 
 async def test_on_event_no_hooks_for_topic_is_noop(make_app):

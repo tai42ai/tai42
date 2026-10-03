@@ -58,6 +58,18 @@ async def test_update_api_tools_add_already_present_400(monkeypatch: pytest.Monk
     assert store.persisted == []
 
 
+async def test_update_api_tools_duplicate_name_within_add_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A name repeated WITHIN one add list is a malformed request: refuse it loudly rather than
+    # append it twice (the include/exclude list would then carry the name duplicated).
+    store = _MutateStore(manifest={"api_tools": {"include": ["keep_in"]}})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="dup_op"):
+        await manifest_ops.update_api_tools(include_add=["dup_op", "dup_op"])
+
+    assert store.persisted == []
+
+
 async def test_update_api_tools_remove_absent_404(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _MutateStore(manifest={"api_tools": {"include": ["op_a"]}})
     _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())

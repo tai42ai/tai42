@@ -8,13 +8,15 @@ from __future__ import annotations
 from datetime import datetime
 
 from tai42_contract.monitoring import (
-    MetricsFilter,
-    ProjectConfig,
+    Dimension,
+    Measure,
+    MetricsCapability,
+    MetricsQuery,
     SpanKind,
     TraceContext,
 )
 
-from tai42_skeleton.monitoring import NoOpMonitoring, NoOpReader, NoOpSpan, NoOpWriter
+from tai42_skeleton.monitoring import NoOpReader, NoOpSpan, NoOpWriter
 
 
 def _ctx() -> TraceContext:
@@ -52,8 +54,6 @@ def test_noop_writer_context_managers_yield() -> None:
     writer = NoOpWriter()
     with writer.trace_attributes(name="n", tags=["t"], metadata={}):
         pass
-    with writer.scope("pk"):
-        pass
     with writer.disable():
         pass
 
@@ -79,16 +79,16 @@ async def test_noop_reader_returns_empty_results() -> None:
     now = datetime.now()
     from tai42_contract.monitoring import MetricsResult
 
-    result = await reader.query_metrics(MetricsFilter(metrics=[], from_timestamp=now, to_timestamp=now))
+    result = await reader.query_metrics(MetricsQuery(measures=[Measure.COUNT], from_timestamp=now, to_timestamp=now))
     assert isinstance(result, MetricsResult)
+    assert result.rows == []
     assert await reader.list_spans_in_window(now, now) == []
     assert await reader.list_traces() == []
 
 
-# --- monitoring composite ---------------------------------------------------
-
-
-def test_noop_monitoring_add_project_is_inert() -> None:
-    monitoring = NoOpMonitoring()
-    project = ProjectConfig(public_key="pk", secret_key="sk", host="http://localhost")
-    assert monitoring.add_project(project) is None
+def test_noop_reader_declares_the_full_capability() -> None:
+    # The disabled backend declares the whole neutral vocabulary and serves it as
+    # empty data, so a dashboard renders zeros rather than a read-not-supported error.
+    assert NoOpReader().metrics_capability() == MetricsCapability(
+        measures=frozenset(Measure), dimensions=frozenset(Dimension)
+    )

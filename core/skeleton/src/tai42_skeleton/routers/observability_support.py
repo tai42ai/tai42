@@ -9,26 +9,24 @@ Two groups, neither of which owns a reader instance:
   ``select_granularity``). These take a Starlette ``Request`` but do no I/O and
   raise ``RequestParseError`` (→ 400) on malformed input.
 * **Output transforms** — pure functions over plain values / contract models:
-  the metrics summary + series + by-model row readers, the trace → run / trace
-  mapping, the structurally-bounded input/output preview, and the CSV-injection
-  guard.
-
-``_safe_query`` is the one helper that touches a reader: it runs an OPTIONAL
-metrics sub-query and returns ``None`` (logged, never raised) when the backend
-rejects it, so an unsupported extra dimension cannot break the core tiles.
+  the metrics summary + series + by-model row readers (which read neutral measures
+  off the typed :class:`MetricsRow`, never hunting a column or a date), the trace →
+  run / trace mapping, the structurally-bounded input/output preview, and the
+  CSV-injection guard.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from tai42_contract.monitoring import (
-    MetricsFilter,
+    Dimension,
+    Measure,
     MetricsResult,
+    MetricsRow,
     MonitoringFilter,
     MonitoringLevel,
     MonitoringTrace,
@@ -38,9 +36,7 @@ from tai42_contract.monitoring import (
 
 if TYPE_CHECKING:
     from starlette.requests import Request
-    from tai42_contract.monitoring import MonitoringObservation, MonitoringReader
-
-logger = logging.getLogger(__name__)
+    from tai42_contract.monitoring import MonitoringObservation
 
 
 class RequestParseError(Exception):
@@ -339,77 +335,70 @@ def csv_safe(value: Any) -> Any:
 # Metrics-row readers (Dashboard tab)
 # ---------------------------------------------------------------------------
 
-_ISO_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+def _measure_float(row: MetricsRow, measure: Measure) -> float:
+    """Read a measure's value off a typed row as a float.
 
-def _num(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def extract_bucket(row: Any) -> str | None:
-    """Find the time-bucket value in a granularity row.
-
-    The contract does not standardize the time-field key, so search dimensions then metrics for the
-    first ISO-date-like string.
+    The backend maps every requested measure onto the row, so the key is present; a
+    missing key is a backend-contract violation and raises loudly (never a silent
+    zero). A ``None`` value is a genuine "no data" for a served measure and reads as
+    ``0.0`` for the tile.
     """
-    for source in (row.dimensions, row.metrics):
-        for value in source.values():
-            if isinstance(value, str) and _ISO_LIKE.match(value):
-                return value
-    return None
+    value = row.measures[measure]
+    return float(value) if value is not None else 0.0
 
 
-def metric_value(metrics: dict[str, Any], measure: str) -> float:
-    """Read a measure's value from a metrics row.
-
-    The backend names output columns by measure + aggregation (e.g.
-    ``count_count``, ``totalCost_sum``, ``latency_avg``), and the order is not
-    standardized across versions — so match by measure-name substring, with an
-    exact-key fast path when present.
-    """
-    if measure in metrics:
-        return _num(metrics[measure])
-    needle = measure.lower()
-    for key, value in metrics.items():
-        if isinstance(key, str) and needle in key.lower() and not _ISO_LIKE.match(str(value)):
-            return _num(value)
-    return 0.0
+def _measure_int(row: MetricsRow, measure: Measure) -> int:
+    """Read a measure's value off a typed row as an int (see :func:`_measure_float`)."""
+    return int(_measure_float(row, measure))
 
 
-def summary_from_rows(rows: list[Any]) -> dict[str, Any]:
+def summary_from_rows(rows: list[MetricsRow]) -> dict[str, Any]:
     """The Dashboard summary tile derived from the first (ungrouped) metrics row.
 
     Empty rows → all zeros. ``avgCostPerRun`` / ``avgTokensPerRun`` are derived
-    from the totals; ``timeToFirstTokenMs`` is always ``None`` (no neutral
-    measure for it — the field is kept for a stable response shape).
+    from the totals; ``timeToFirstTokenMs`` is always ``None`` (the dashboard
+    requests no measure that feeds it — the field is kept for a stable response
+    shape).
     """
-    m = rows[0].metrics if rows else {}
-    total_runs = int(metric_value(m, "count"))
-    total_cost = metric_value(m, "totalCost")
-    total_tokens = int(metric_value(m, "totalTokens"))
+    if not rows:
+        return {
+            "totalRuns": 0,
+            "totalCost": 0.0,
+            "totalTokens": 0,
+            "averageLatencyMs": 0,
+            "avgCostPerRun": 0.0,
+            "avgTokensPerRun": 0,
+            "timeToFirstTokenMs": None,
+        }
+    row = rows[0]
+    total_runs = _measure_int(row, Measure.COUNT)
+    total_cost = _measure_float(row, Measure.COST)
+    total_tokens = _measure_int(row, Measure.TOKENS)
     return {
         "totalRuns": total_runs,
         "totalCost": total_cost,
         "totalTokens": total_tokens,
-        "averageLatencyMs": int(metric_value(m, "latency")),
+        "averageLatencyMs": _measure_int(row, Measure.LATENCY),
         "avgCostPerRun": (total_cost / total_runs) if total_runs else 0.0,
         "avgTokensPerRun": int(total_tokens / total_runs) if total_runs else 0,
         "timeToFirstTokenMs": None,
     }
 
 
-def time_series_from_rows(rows: list[Any]) -> list[dict[str, Any]]:
-    """Per-bucket series points for the Dashboard chart, one per granularity row."""
+def time_series_from_rows(rows: list[MetricsRow]) -> list[dict[str, Any]]:
+    """Per-bucket series points for the Dashboard chart, one per granularity row.
+
+    ``bucket`` is the backend's time-bucket label off the typed row (never hunted
+    out of the values).
+    """
     return [
         {
-            "bucket": extract_bucket(row),
-            "runs": int(metric_value(row.metrics, "count")),
-            "cost": metric_value(row.metrics, "totalCost"),
-            "avgLatencyMs": int(metric_value(row.metrics, "latency")),
-            "totalTokens": int(metric_value(row.metrics, "totalTokens")),
+            "bucket": row.bucket,
+            "runs": _measure_int(row, Measure.COUNT),
+            "cost": _measure_float(row, Measure.COST),
+            "avgLatencyMs": _measure_int(row, Measure.LATENCY),
+            "totalTokens": _measure_int(row, Measure.TOKENS),
         }
         for row in rows
     ]
@@ -418,37 +407,23 @@ def time_series_from_rows(rows: list[Any]) -> list[dict[str, Any]]:
 def map_model_rows(res: MetricsResult | None) -> list[dict[str, Any]]:
     """Per-model breakdown rows, top 8 by cost.
 
-    Empty when unavailable (the by-model sub-query is optional — see ``_safe_query``).
+    Empty when the by-model panel is unavailable — the backend does not declare the
+    model dimension (see ``get_metrics``), so no query was issued.
     """
     if res is None:
         return []
     rows = [
         {
-            "model": row.dimensions.get("providedModelName") or "unknown",
-            "calls": int(metric_value(row.metrics, "count")),
-            "cost": metric_value(row.metrics, "totalCost"),
-            "totalTokens": int(metric_value(row.metrics, "totalTokens")),
-            "avgLatencyMs": int(metric_value(row.metrics, "latency")),
+            "model": row.dimensions.get(Dimension.MODEL) or "unknown",
+            "calls": _measure_int(row, Measure.COUNT),
+            "cost": _measure_float(row, Measure.COST),
+            "totalTokens": _measure_int(row, Measure.TOKENS),
+            "avgLatencyMs": _measure_int(row, Measure.LATENCY),
         }
         for row in res.rows
     ]
     rows.sort(key=lambda r: r["cost"], reverse=True)
     return rows[:8]
-
-
-async def _safe_query(reader: MonitoringReader, f: MetricsFilter) -> MetricsResult | None:
-    """Run an OPTIONAL metrics sub-query, returning ``None`` (logged, not raised) if the backend rejects it.
-
-    So an unsupported measure/dimension cannot break the core tiles. This is the single deliberate, visible
-    degrade path; every other reader error propagates.
-    """
-    try:
-        return await reader.query_metrics(f)
-    except Exception as exc:
-        # Optional enrichment: any backend error → omit this panel + log (the one
-        # deliberate, visible degrade path; every other reader error propagates).
-        logger.warning("optional metrics sub-query failed: %s", exc, exc_info=True)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -480,9 +455,8 @@ def derive_run(row: MonitoringTraceSummary) -> dict[str, Any]:
 
 
 def _map_span(o: MonitoringObservation) -> dict[str, Any]:
-    node_id = None
-    if isinstance(o.metadata, dict):
-        node_id = o.metadata.get("node_id") or o.metadata.get("nodeId")
+    # ``metadata`` passes through WHOLE and opaque — the platform reads no consumer
+    # key out of it.
     return {
         "id": o.id,
         "parentId": o.parent_id,
@@ -498,7 +472,6 @@ def _map_span(o: MonitoringObservation) -> dict[str, Any]:
         "metadata": o.metadata,
         "input": o.input,
         "output": o.output,
-        "nodeId": node_id,
     }
 
 

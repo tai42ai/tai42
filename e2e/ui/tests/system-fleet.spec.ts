@@ -12,7 +12,7 @@
  * reads the unfenced census. Two sessions prove both sides of the gate.
  */
 import { expect, type APIRequestContext } from '@playwright/test';
-import { apiHeaders, awaitMutation, seedCredential, uniq } from './helpers';
+import { awaitMutation, createMemberInvite, seedCredential, uniq } from './helpers';
 import { needs, test } from './needs';
 
 needs('kind:identity', 'kind:accounts', 'mutable', 'topology:multiworker');
@@ -29,12 +29,7 @@ const VIEWER_PASSWORD = 'e2e-viewer-password-000';
  * as `x-api-key` (the gate reads `tai-sess-` from either auth header).
  */
 async function createViewerSession(request: APIRequestContext): Promise<string> {
-  const created = await request.post('/api/auth/users', {
-    headers: apiHeaders(),
-    data: { email: `${uniq('viewer')}@e2e.test`, role: 'viewer' },
-  });
-  expect(created.status(), await created.text()).toBe(200);
-  const inviteToken = ((await created.json()) as { data: { invite_token: string } }).data.invite_token;
+  const inviteToken = await createMemberInvite(request, { email: `${uniq('viewer')}@e2e.test`, role: 'viewer' });
 
   const accepted = await request.post('/api/login/invite/accept', {
     data: { invite_token: inviteToken, password: VIEWER_PASSWORD, password_confirm: VIEWER_PASSWORD },

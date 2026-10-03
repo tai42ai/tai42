@@ -7,7 +7,11 @@ key revoked since the backup was taken."""
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
+from pydantic import BaseModel
+from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError
@@ -15,6 +19,7 @@ from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.conversations import backup
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 
 
 class _DictManager(BaseConversationsManager):
@@ -121,9 +126,9 @@ async def test_import_remints_secret_and_surfaces_it(wired):
     payload = {"routes": [row]}
 
     report = await backup.import_conversation_routes(payload)
-    assert report["created"] == 1
-    assert len(report["new_callback_secrets"]) == 1
-    entry = report["new_callback_secrets"][0]
+    assert report.created == 1
+    assert len(report.details["new_callback_secrets"]) == 1
+    entry = report.details["new_callback_secrets"][0]
     assert entry["route_name"] == "chat"
     # The re-minted secret is now the stored one.
     assert wired.rows["chat"].callback_secret == entry["callback_secret"]
@@ -133,8 +138,8 @@ async def test_import_remints_secret_and_surfaces_it(wired):
 async def test_import_channel_row_carries_no_secret(wired):
     payload = {"routes": [_channel_route("line").model_dump(mode="json")]}
     report = await backup.import_conversation_routes(payload)
-    assert report["created"] == 1
-    assert report["new_callback_secrets"] == []
+    assert report.created == 1
+    assert report.details["new_callback_secrets"] == []
     assert wired.rows["line"].callback_secret is None
 
 
@@ -150,7 +155,7 @@ async def test_round_trip_preserves_every_field_but_the_secret(monkeypatch):
     monkeypatch.setattr(backup, "get_conversations_manager", lambda: restored)
     report = await backup.import_conversation_routes(payload)
 
-    assert report["created"] == 1
+    assert report.created == 1
     row = restored.rows["chat"]
     assert row.target_name == "relay"
     assert row.execution_key == "svc"
@@ -178,8 +183,8 @@ async def test_import_rejects_a_row_missing_its_fingerprint(wired):
         # execution_key_fingerprint missing
     }
     report = await backup.import_conversation_routes({"routes": [bad]})
-    assert report["skipped"] == 1
-    assert report["errors"]
+    assert report.skipped == 1
+    assert report.errors
     assert "chat" not in wired.rows
 
 
@@ -201,9 +206,9 @@ async def test_a_backend_less_deployment_restores_its_own_empty_backup(monkeypat
         backup, "get_conversations_manager", lambda: InMemoryConversationsManager(ConversationsSettings())
     )
     report = await backup.import_conversation_routes({"routes": []})
-    assert report["created"] == 0
-    assert report["skipped"] == 0
-    assert report["errors"] == []
+    assert report.created == 0
+    assert report.skipped == 0
+    assert report.errors == []
 
 
 async def test_a_backend_less_deployment_refuses_to_restore_actual_rows(monkeypatch):
@@ -236,14 +241,14 @@ async def test_import_skips_a_row_whose_bound_execution_key_is_no_longer_live(wi
 
     report = await backup.import_conversation_routes({"routes": [dead, live]})
 
-    assert report["skipped"] == 1
-    assert report["created"] == 1
-    assert any("account" in error and "has no policy" in error for error in report["errors"])
+    assert report.skipped == 1
+    assert report.created == 1
+    assert any("account" in error and "has no policy" in error for error in report.errors)
     assert "account" not in wired.rows  # the refused row was never written
     assert "chat" in wired.rows
     # Only the restored row got a secret, and each row was asserted against the
     # fingerprint the backup pinned for it.
-    assert [entry["route_name"] for entry in report["new_callback_secrets"]] == ["chat"]
+    assert [entry["route_name"] for entry in report.details["new_callback_secrets"]] == ["chat"]
     assert scan.seen == [(_RefusingScan.refused, "fp-1"), ("svc", "fp-1")]
 
 
@@ -255,9 +260,9 @@ async def test_import_skips_a_row_whose_key_condition_no_background_turn_can_eva
 
     report = await backup.import_conversation_routes({"routes": [row]})
 
-    assert report["skipped"] == 1
-    assert report["created"] == 0
-    assert any("identity claim" in error for error in report["errors"])
+    assert report.skipped == 1
+    assert report.created == 0
+    assert any("identity claim" in error for error in report.errors)
     assert wired.rows == {}
 
 
@@ -285,9 +290,9 @@ async def test_import_skips_a_row_claiming_a_live_channel_identity(wired):
 
     report = await backup.import_conversation_routes({"routes": [renamed]})
 
-    assert report["created"] == 0
-    assert report["skipped"] == 1
-    assert "already routed by 'sms-support'" in report["errors"][0]
+    assert report.created == 0
+    assert report.skipped == 1
+    assert "already routed by 'sms-support'" in report.errors[0]
     assert set(wired.rows) == {"sms-support"}
 
 
@@ -298,9 +303,9 @@ async def test_import_skips_the_second_of_two_colliding_rows_in_one_payload(wire
 
     report = await backup.import_conversation_routes({"routes": [first, second]})
 
-    assert report["created"] == 1
-    assert report["skipped"] == 1
-    assert "already routed by 'line-a'" in report["errors"][0]
+    assert report.created == 1
+    assert report.skipped == 1
+    assert "already routed by 'line-a'" in report.errors[0]
     assert set(wired.rows) == {"line-a"}
 
 
@@ -313,8 +318,8 @@ async def test_import_replaces_a_row_on_the_identity_it_already_holds(wired):
 
     report = await backup.import_conversation_routes({"routes": [moved, taking_over]}, "overwrite")
 
-    assert report["errors"] == []
-    assert report["skipped"] == 0
+    assert report.errors == []
+    assert report.skipped == 0
     assert wired.rows["line-a"].our_identity == "+15559999999"
     assert wired.rows["line-b"].our_identity == "+15550001111"
 
@@ -328,10 +333,10 @@ async def test_import_under_skip_leaves_existing_route_and_its_secret_untouched(
 
     report = await backup.import_conversation_routes({"routes": [row]})
 
-    assert report["created"] == 0
-    assert report["updated"] == 0
-    assert report["skipped_existing"] == 1
-    assert report["new_callback_secrets"] == []
+    assert report.created == 0
+    assert report.updated == 0
+    assert report.details["skipped_existing"] == 1
+    assert report.details["new_callback_secrets"] == []
     # The live secret is preserved verbatim, not re-minted.
     assert wired.rows["chat"].callback_secret == "live-secret"
 
@@ -345,9 +350,61 @@ async def test_import_under_overwrite_replaces_route_and_remints_secret(wired):
 
     report = await backup.import_conversation_routes({"routes": [row]}, "overwrite")
 
-    assert report["updated"] == 1
-    assert report["skipped_existing"] == 0
-    assert len(report["new_callback_secrets"]) == 1
-    new_secret = report["new_callback_secrets"][0]["callback_secret"]
+    assert report.updated == 1
+    assert report.details["skipped_existing"] == 0
+    assert len(report.details["new_callback_secrets"]) == 1
+    new_secret = report.details["new_callback_secrets"][0]["callback_secret"]
     assert wired.rows["chat"].callback_secret == new_secret
     assert new_secret != "live-secret"
+
+
+class _AskerInput(BaseModel):
+    user_message: str = ""
+
+
+class _AskingAgent(Agent):
+    """An agent whose declared ``tool_names`` include ``ask`` — the platform bind rule needs a reply/resume path."""
+
+    tool_name = "asker"
+    tool_names: ClassVar[list[str]] = ["ask"]
+    ToolInput = _AskerInput
+
+    async def run(self, *, user_message=None, **kwargs):
+        return ""
+
+
+class _BindCheckApp:
+    """A minimal app exposing the agent registry and validator registry the route bind check reads."""
+
+    class _Agents:
+        def all_agents(self):
+            return {"asker": _AskingAgent()}
+
+    def __init__(self) -> None:
+        self.agents = _BindCheckApp._Agents()
+        self._target_validator_registry = TargetBindValidatorRegistry()
+
+
+async def test_import_rejects_a_row_whose_target_fails_the_bind_check(wired, monkeypatch):
+    """A restored row whose target cannot bind — an asking agent bound with no reply/resume path — is a
+    per-row rejection in the report, never written, the SAME bind check the create door runs."""
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setattr(instance, "app", _BindCheckApp(), raising=False)
+
+    row = ConversationRoute(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="asker",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+        execution_key_fingerprint="fp-1",
+    ).model_dump(mode="json")
+    del row["callback_secret"]
+
+    report = await backup.import_conversation_routes({"routes": [row]})
+    assert report.created == 0
+    assert report.skipped == 1
+    assert any("reply_expr" in err for err in report.errors)
+    assert "chat" not in wired.rows

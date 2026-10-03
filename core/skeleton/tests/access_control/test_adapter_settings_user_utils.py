@@ -239,10 +239,28 @@ def test_access_control_settings_accessor_returns_settings():
     assert isinstance(access_control_settings(), AccessControlSettings)
 
 
-def test_auth_providers_defaults_preserve_single_redis():
-    # The default is byte-for-byte today's single-provider behavior.
-    assert AccessControlSettings().auth_providers == ["redis"]
+def test_auth_providers_default_is_derived_not_hardcoded():
+    # Unset, the raw field is None (the platform hard-codes no implementation name) and the
+    # chain is DERIVED from the registered identity providers — the autouse fixture registers
+    # one, so a deployment that installs any provider boots without naming it.
+    assert AccessControlSettings().auth_providers is None
+    assert AccessControlSettings().resolved_auth_providers() == ["redis"]
     assert AccessControlSettings().always_public_path_prefixes == ("/api/login",)
+
+
+def test_auth_providers_derives_from_any_registered_provider(monkeypatch):
+    # A NEUTRAL (non-redis) identity provider boots under the derived chain with NO env and
+    # NO hardcoded default — the agnostic proof that another provider can use the contract.
+    from tai42_contract.access_control import registry
+
+    saved = dict(registry._write_target())
+    registry._write_target().clear()
+    try:
+        registry.register_identity_provider("neutral-idp", lambda s: _StubProvider(s))
+        assert AccessControlSettings().resolved_auth_providers() == ["neutral-idp"]
+    finally:
+        registry._write_target().clear()
+        registry._write_target().update(saved)
 
 
 def test_auth_providers_parses_json_list_from_env(monkeypatch):
@@ -252,12 +270,13 @@ def test_auth_providers_parses_json_list_from_env(monkeypatch):
     reset_all_settings()
     try:
         assert AccessControlSettings().auth_providers == ["accounts-postgres", "redis"]
+        assert AccessControlSettings().resolved_auth_providers() == ["accounts-postgres", "redis"]
     finally:
         reset_all_settings()
 
 
-def test_empty_auth_providers_with_enable_raises():
-    with pytest.raises(ValueError, match="auth_providers is empty"):
+def test_explicit_empty_auth_providers_with_enable_raises():
+    with pytest.raises(ValueError, match="auth_providers is explicitly empty"):
         AccessControlSettings(enable=True, auth_providers=[])
 
 

@@ -241,16 +241,35 @@ class _FakeAgents:
         return dict(self._agents)
 
 
+def _plain_tool(name: str) -> Any:
+    """A FunctionTool named ``name`` — a base (non-preset) tool for the fake registry."""
+    from fastmcp.tools import Tool
+
+    return Tool.from_function(lambda x: x, name=name)
+
+
+def _preset_tool(base: Any, name: str) -> Any:
+    """A TransformedTool named ``name`` over ``base`` — a preset for the fake registry.
+
+    Walks ``parent_tool`` back to ``base`` exactly as a live preset does, so the bind check's
+    owner resolution reaches the base tool (or agent run tool) a preset is built on.
+    """
+    from fastmcp.tools import Tool
+
+    return Tool.from_tool(base, name=name)
+
+
 class _OpsFakeTools:
-    def __init__(self, names: set[str]) -> None:
-        self._names = names
+    def __init__(self, tools: dict[str, Any]) -> None:
+        self._tools = tools
 
     async def get_tool(self, key: str) -> object:
         from tai42_skeleton.tools.binding import UnknownToolError
 
-        if key not in self._names:
+        tool = self._tools.get(key)
+        if tool is None:
             raise UnknownToolError(key)
-        return object()
+        return tool
 
 
 class _FakeResourceManager:
@@ -276,10 +295,30 @@ class _FakeStorage:
         self.resource_manager = resource_manager
 
 
+class _OpsFakePresetStore:
+    """The slice of the preset store the bound-routes re-check reads; this suite holds no presets."""
+
+    async def get_active_body(self, name: str) -> Any:
+        from tai42_contract.presets.errors import PresetNotFoundError
+
+        raise PresetNotFoundError(name)
+
+
+class _OpsFakePresets:
+    """The ``app.presets`` slice the bound-routes re-check reads: the active population + the store."""
+
+    def __init__(self) -> None:
+        self.store = _OpsFakePresetStore()
+
+    async def list_active_bodies(self) -> dict[str, Any]:
+        return {}
+
+
 class _OpsFakeApp:
-    def __init__(self, agents: dict[str, Agent], tools: set[str], by_id: dict[str, str] | None = None) -> None:
+    def __init__(self, agents: dict[str, Agent], tools: dict[str, Any], by_id: dict[str, str] | None = None) -> None:
         self.agents = _FakeAgents(agents)
         self.tools = _OpsFakeTools(tools)
+        self.presets = _OpsFakePresets()
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
         self.storage = _FakeStorage(_FakeResourceManager(by_id))
@@ -317,9 +356,21 @@ def wired(monkeypatch, record_redis):
 
     from tai42_skeleton.app import instance
 
+    # A tool registry of base tools, the per-agent run tools (so a ``tool``-kind route can target an
+    # agent, which every agent also is), and presets over both a plain tool and the asking agent (so
+    # the bind check's owner resolution walks the ``parent_tool`` chain to the base).
+    echo_tool = _plain_tool("echo-tool")
+    agent_run_tools = {name: _plain_tool(name) for name in ("relay", "mute", "asker")}
+    tools = {
+        "echo-tool": echo_tool,
+        "other-tool": _plain_tool("other-tool"),
+        "echo-preset": _preset_tool(echo_tool, "echo-preset"),
+        "asker-preset": _preset_tool(agent_run_tools["asker"], "asker-preset"),
+        **agent_run_tools,
+    }
     app = _OpsFakeApp(
         {"relay": _MemoryAgent(), "mute": _MemorylessAgent(), "asker": _AskingAgent()},
-        {"echo-tool"},
+        tools,
         by_id={"route-payload": "{message: .message}", "route-reply": ".result.reply // null"},
     )
     monkeypatch.setattr(instance, "app", app, raising=False)
@@ -435,6 +486,12 @@ class FakeManager:
 
 
 class FakeChannel:
+    # A neutral fixture channel declares its OWN outbound split cap through the generic
+    # ``max_message_chars`` seam (no skeleton per-channel table) — the conversation-delivery machine
+    # reads it off the channel when no operator override is set. ``int | None`` so a subclass can
+    # model a channel that declares no cap.
+    max_message_chars: ClassVar[int | None] = 1600
+
     def __init__(self) -> None:
         self.sends: list = []
 

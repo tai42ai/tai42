@@ -42,6 +42,7 @@ from tai42_skeleton.tools.retry import dispatch_with_retry
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
+    deferred_binding_scope,
     merge_bindings,
 )
 from tai42_skeleton.tools.turn_budget import turn_budget
@@ -172,14 +173,22 @@ async def _binding_application(
     over ``arguments`` itself (an empty dict kept by identity, so an in-place injection reaches
     the dispatch) or a fresh ``{}`` when the door carried none. A dispatch with no arguments
     never silently skips its injections.
+
+    The merged binding (+ its post-injection input + the door id) is also DEPOSITED for the span of
+    the dispatch, so a run that PARKS deep inside captures it and applies the UPDATES once at its
+    real terminal (``interactions.continuation.drive_and_deliver``) rather than dropping them on the
+    pause.
     """
     from tai42_contract.states import StateBinding
 
     args = arguments if arguments is not None else {}
-    if isinstance(merged, StateBinding):
-        await apply_binding_injections(app, merged, args)
-    yield
-    if isinstance(merged, StateBinding) and scope._succeeded:
+    if not isinstance(merged, StateBinding):
+        yield
+        return
+    await apply_binding_injections(app, merged, args)
+    with deferred_binding_scope(merged, args, door_id):
+        yield
+    if scope._succeeded:
         await apply_binding_updates(app, merged, args, scope._result, door_id)
 
 
@@ -292,6 +301,7 @@ class DispatchScopeMiddleware(Middleware):
         """Enter the shared dispatch scope for the MCP ``tools/call``, then delegate to ``call_next``."""
         from tai42_skeleton.access_control.user import request_identity
         from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
+        from tai42_skeleton.tools.binding.result import _tool_result_value
 
         name = context.message.name
         # The MCP call's arguments, mutated in place by any binding injection so the edge
@@ -332,5 +342,9 @@ class DispatchScopeMiddleware(Middleware):
                     if marker is not None:
                         scope.observe_park(marker["interaction_id"])
                     else:
-                        scope.observe(result)
+                        # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
+                        # so the binding's update jq runs over the same value the in-process door
+                        # observes (its raw return) — the edge otherwise feeds the wrapper to jq,
+                        # which carries no tool field and is not even JSON-serializable.
+                        scope.observe(_tool_result_value(result))
                     return result

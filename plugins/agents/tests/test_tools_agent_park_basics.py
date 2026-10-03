@@ -19,6 +19,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     ChainedResume,
+    SuspendedInteraction,
     reset_chained_resume,
     reset_park_completion,
     set_chained_resume,
@@ -77,13 +78,11 @@ def test_tools_agent_caller_ask_park_carries_both_id_lists(
             user_message=TemplatedText(content="go"),
             thread_id="t-caller",
         )
-        assert receipt == {
-            "status": "suspended",
-            "interaction_ids": ["i1"],
-            "caller_interaction_ids": ["i1"],
-            "thread_id": "t-caller",
-            "expiry_at": None,
-        }
+        assert isinstance(receipt, SuspendedInteraction)
+        assert receipt.interaction_id == "i1"
+        assert receipt.interaction_ids == ["i1"]
+        assert receipt.caller_interaction_ids == ["i1"]
+        assert receipt.expiry_at is None
 
     asyncio.run(go())
 
@@ -106,13 +105,11 @@ def test_tools_agent_park_then_answer_exactly_once(
             user_message=TemplatedText(content="go"),
             thread_id="t-tools",
         )
-        assert receipt == {
-            "status": "suspended",
-            "interaction_ids": ["i1"],
-            "caller_interaction_ids": [],
-            "thread_id": "t-tools",
-            "expiry_at": None,
-        }
+        assert isinstance(receipt, SuspendedInteraction)
+        assert receipt.interaction_id == "i1"
+        assert receipt.interaction_ids == ["i1"]
+        assert receipt.caller_interaction_ids == []
+        assert receipt.expiry_at is None
         assert ask.calls == 1
         entry = await idx.read_park_entry("i1")
         assert entry is not None
@@ -159,7 +156,7 @@ def test_tools_agent_run_park_is_outermost_and_captures_no_chain(
             )
         finally:
             reset_park_completion(token)
-        assert receipt["status"] == "suspended"
+        assert isinstance(receipt, SuspendedInteraction)
 
         entry = await idx.read_park_entry("i1")
         assert entry is not None
@@ -197,7 +194,7 @@ def test_tools_agent_run_park_captures_the_ambient_chain_routing(
             )
         finally:
             reset_chained_resume(token)
-        assert receipt["status"] == "suspended"
+        assert isinstance(receipt, SuspendedInteraction)
 
         entry = await idx.read_park_entry("i1")
         assert entry is not None
@@ -228,7 +225,7 @@ def test_tools_agent_run_park_without_a_completion_binds_none(
             user_message=TemplatedText(content="go"),
             thread_id="t-run-nocompletion",
         )
-        assert receipt["status"] == "suspended"
+        assert isinstance(receipt, SuspendedInteraction)
         entry = await idx.read_park_entry("i1")
         assert entry is not None
         assert entry["completion_tool"] is None
@@ -262,7 +259,7 @@ def test_tools_agent_resume_delivers_a_legacy_ownerless_park_answer_end_to_end(
             user_message=TemplatedText(content="go"),
             thread_id="t-legacy-e2e",
         )
-        assert receipt["status"] == "suspended"
+        assert isinstance(receipt, SuspendedInteraction)
 
         # Downgrade every marker the resume middleware reads to the legacy TWO-KEY wire form (no
         # resume_owner key), standing in for a park persisted by a released predecessor.
@@ -310,7 +307,7 @@ def test_tools_agent_park_then_expiry_feeds_the_expiry_marker(
             user_message=TemplatedText(content="go"),
             thread_id="t-expiry",
         )
-        assert receipt["expiry_at"] == deadline.isoformat()
+        assert receipt.expiry_at == deadline
         result = await agent_resume("i1", EXPIRY_ANSWER)
         assert result == "expired path"
         # A clean drive finalizes the park entry to a resolved tombstone (not an absent key).

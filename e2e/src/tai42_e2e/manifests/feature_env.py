@@ -43,15 +43,22 @@ def _redis_feature_env(res: StackResources) -> dict[str, str]:
     index) rather than a globally-unique token — is namespaced by the same
     per-stack id the bus uses, so two stacks can never share a key.
 
-    Access-control is deliberately absent: its identity records are addressed by
-    ``sha256(raw-token)`` with a random token minted per stack, so no foreign
-    process can read or claim a live stack's credential even on a re-leased DB,
-    and no background reaper sweeps the ``ac:*`` range. Namespacing it would also
-    demand a change to the identity-redis provider's hardcoded reverse-key prefix
-    (a public settings-Protocol surface) for no theft that unique addressing does
-    not already prevent."""
+    The auth stores take no per-stack key-prefix namespace: access-control
+    (``ACCESS_CONTROL_REDIS_URL``), the Redis identity provider
+    (``TAI_IDENTITY_REDIS_URL``) and the accounts plugin's login throttle
+    (``TAI_ACCOUNTS_REDIS_URL``) each point their own Redis URL at this stack's DB
+    unprefixed. The identity records are addressed by ``sha256(raw-token)`` with a
+    random token minted per stack, so no foreign process can read or claim a live
+    stack's credential even on a re-leased DB, and no background reaper sweeps the
+    ``ac:*`` range; the accounts session store lives in Postgres, its Redis holding
+    only TTL-bound login-failure counters. Namespacing the identity keyspace would
+    also demand a change to the identity-redis provider's hardcoded reverse-key
+    prefix (a public settings-Protocol surface) for no theft that unique addressing
+    does not already prevent."""
     return {
         "ACCESS_CONTROL_REDIS_URL": res.redis_url,
+        "TAI_IDENTITY_REDIS_URL": res.redis_url,
+        "TAI_ACCOUNTS_REDIS_URL": res.redis_url,
         "INTERACTIONS_REDIS_URL": res.redis_url,
         "INTERACTIONS_KEY_PREFIX": f"{res.bus_namespace}:interactions:",
         "TAI_TOOL_RUNS_REDIS_URL": res.redis_url,

@@ -261,6 +261,7 @@ async def _schedule_detach_referee(state: str, template: str) -> list[str]:
     # applies — from the same raw export surface the rename schedule referee reads. Feature-off
     # holds none; an unreadable holder store fails loudly (never a silent stranding).
     from tai42_contract.states import StateBinding
+    from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
     from tai42_skeleton.operations import NotSupportedError
     from tai42_skeleton.operations.schedules import export_schedules_raw
@@ -292,7 +293,10 @@ async def _schedule_detach_referee(state: str, template: str) -> list[str]:
             raise TypeError(
                 f"schedule detach referee: schedule {name!r} carries no dict 'kwargs' (keys: {sorted(row)})"
             )
-        raw = kwargs.get("state_binding")
+        # A stored schedule carries its door binding under the kit's reserved key — the create
+        # door's ``state_binding`` is re-stamped to ``backend_schedule_state_binding`` and the
+        # plain key popped, so that reserved key is where a live binding actually lives.
+        raw = kwargs.get(SCHEDULE_STATE_BINDING_ARG)
         if raw is None:
             continue
         binding = StateBinding.model_validate(raw)

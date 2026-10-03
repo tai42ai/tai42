@@ -17,9 +17,9 @@ from typing import Any
 import pytest
 from fakeredis import aioredis
 from tai42_contract.interactions import (
-    ParkResumeFailed,
     ParkResumeUnauthorizedError,
     ResumeBuffered,
+    RunTerminalFailed,
     SuspendedInteraction,
 )
 
@@ -93,16 +93,12 @@ def test_conversion_buffered_becomes_resume_buffered() -> None:
     assert out.remaining_ids == ["iB", "iC"]
 
 
-def test_conversion_suspended_receipt_becomes_a_sentinel_with_both_id_lists() -> None:
-    receipt = {
-        "status": "suspended",
-        "interaction_ids": ["i1", "i2"],
-        "caller_interaction_ids": ["i2"],
-        "expiry_at": None,
-    }
-    out = to_contract_outcome(receipt)
-    assert isinstance(out, SuspendedInteraction)
-    assert out.interaction_id == "i1"
+def test_conversion_suspended_repark_sentinel_passes_through_with_both_id_lists() -> None:
+    # A re-park crosses as a SuspendedInteraction typed value (recognised by TYPE, never a
+    # status-keyed dict), so the face passes it through unchanged with both id lists intact.
+    sentinel = SuspendedInteraction(interaction_id="i1", interaction_ids=["i1", "i2"], caller_interaction_ids=["i2"])
+    out = to_contract_outcome(sentinel)
+    assert out is sentinel
     assert out.interaction_ids == ["i1", "i2"]
     assert out.caller_interaction_ids == ["i2"]
     # A re-park sentinel names no resume owner — the platform re-normalises it, never adopts it.
@@ -236,7 +232,7 @@ def test_kill_handler_aborts_a_live_park_and_fires_the_chain_upward(fake_park_re
         assert call["continues_chain"] == ("caller",)
 
         # The super-step is finalized ``aborted``: a redrive of any still-open sibling due-record
-        # RAISES ParkResumeFailed (deduped against the kill's own FAILED).
+        # RAISES RunTerminalFailed (deduped against the kill's own FAILED).
         entry = await idx.read_park_entry("i1")
         assert entry is not None
         assert idx.is_resolved_tombstone(entry)
@@ -304,7 +300,7 @@ def test_kill_handler_drops_the_whole_runs_resolution_records(fake_park_redis: A
             assert await idx.read_superstep_resolution("t", ss) is None
             assert await idx.read_park_entry(pid) is None
         # The killed super-step: its live park entry is gone (an aborted tombstone), its drive claim
-        # (the kill's own, held while it finalized) is released, and a redrive RAISES ParkResumeFailed.
+        # (the kill's own, held while it finalized) is released, and a redrive RAISES RunTerminalFailed.
         assert idx.is_resolved_tombstone(await idx.read_park_entry("live") or {})
         assert await fake_park_redis.get(idx._claim_key("t", ss_live)) is None
         live_record = await idx.read_superstep_resolution("t", ss_live)
@@ -336,9 +332,9 @@ def test_kill_handler_aborted_tombstone_replays_as_park_resume_failed(fake_park_
     async def go() -> None:
         await _write_park(["i1"])
         await agent_park_kill_handler("i1", "cancelled")
-        # A redrive of the killed super-step's due-record RAISES ParkResumeFailed carrying the
+        # A redrive of the killed super-step's due-record RAISES RunTerminalFailed carrying the
         # aborted outcome, so the platform delivers FAILED (once, deduped against the kill).
-        with pytest.raises(ParkResumeFailed) as exc:
+        with pytest.raises(RunTerminalFailed) as exc:
             await agent_resume_tool("i1", "late")
         assert exc.value.outcome == {"status": "aborted", "reason": "cancelled"}
 
@@ -460,7 +456,7 @@ def test_drive_whose_lease_a_kill_took_does_not_fire_its_chain_and_raises(
         record = await idx.read_superstep_resolution("t", superstep_id)
         assert record is not None
         assert record["resolution"] == "aborted"
-        with pytest.raises(ParkResumeFailed) as exc:
+        with pytest.raises(RunTerminalFailed) as exc:
             await agent_resume("i1", "the answer")
         assert exc.value.outcome == {"status": "aborted", "reason": "thread deleted"}
 

@@ -14,9 +14,12 @@ discarded at teardown.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.states import StateAttach, StateBinding, StateUpdate
 from tai42_contract.states.errors import RegimeViolationError, ValueValidationError
 from tai42_contract.states.models import (
     AttachBody,
@@ -26,10 +29,14 @@ from tai42_contract.states.models import (
     StateTemplateDocument,
     WriteOrigin,
 )
+from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
+from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.states.store import PostgresStatesStore
+from tai42_skeleton.tools.state_binding import apply_binding_updates
 
 from .conftest import FakeStatesPg
 from .fake_service_store import _FakeApp
@@ -75,9 +82,6 @@ async def test_a_root_task_does_not_inherit_the_ambient_unit(svc: StatesService)
     # it (``spawn_root_task``) inherits no ambient unit, so its reads go to the store rather
     # than the caller's staging. An ordinary ``create_task`` WOULD copy the unit; the contrast
     # is the point.
-    from tai42_skeleton.app.root_task import spawn_root_task
-    from tai42_skeleton.states.service.unit import current_state_unit
-
     seen: dict = {}
 
     async def _in_root() -> None:
@@ -129,6 +133,64 @@ async def test_commit_lands_all_staged_writes_in_one_transaction(svc: StatesServ
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"n": 1, "note": "hi"}
+
+
+async def test_the_write_doors_stage_into_an_open_unit_and_a_discard_writes_nothing(
+    svc: StatesService, pg: FakeStatesPg
+) -> None:
+    # Every write door (apply, merge-through-apply, replace) run while a unit is the ambient unit
+    # STAGES into it rather than touching the store — so a discard truly discards every one.
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await svc.apply("notes", _subject("t1"), [_set("n", 1)], op_id=None, origin=_ORIGIN)
+        await svc.merge("notes", _subject("t2"), {"note": "hi"}, origin=_ORIGIN)
+        await svc.replace("notes", _subject("t3"), {"n": 3}, origin=_ORIGIN)
+        assert not pg.records  # staged in the unit, nothing in the store
+        await unit.discard()
+    assert not pg.records  # the discard drops every door's write — none leaked to the store
+
+
+async def test_merge_through_a_door_reads_back_its_patch_and_a_later_read_sees_it(
+    svc: StatesService, pg: FakeStatesPg
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        # Prime the subject's projection so the read-back is served from the unit — the bug's precondition.
+        await svc.apply("notes", _subject(), [_set("n", 1)], op_id=None, origin=_ORIGIN)
+        merged = await svc.merge("notes", _subject(), {"note": "hello"}, origin=_ORIGIN)
+        assert merged.data == {"n": 1, "note": "hello"}  # the merge returns a record carrying its own patch
+        later = await svc.read("notes", _subject())
+        assert later is not None
+        assert later.data == {"n": 1, "note": "hello"}  # a later read in the same drive sees it
+        assert not pg.records
+        await unit.discard()
+
+
+async def test_replace_through_a_door_reads_back_within_the_drive(svc: StatesService, pg: FakeStatesPg) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await svc.apply("notes", _subject(), [_set("n", 1)], op_id=None, origin=_ORIGIN)
+        replaced = await svc.replace("notes", _subject(), {"note": "x"}, origin=_ORIGIN)
+        assert replaced.data == {"note": "x"}  # a whole-document replace — the earlier n is gone
+        later = await svc.read("notes", _subject())
+        assert later is not None
+        assert later.data == {"note": "x"}
+        assert not pg.records
+        await unit.discard()
+
+
+async def test_commit_applies_the_final_state_without_stale_replay_over_a_later_replace(svc: StatesService) -> None:
+    # A later whole-document replace must win at commit: the earlier staged op does NOT replay on top of it
+    # (the bug let the earlier op resurrect a field the later replace had wiped, with no divergence signal).
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await svc.apply("notes", _subject(), [_set("n", 1)], op_id=None, origin=_ORIGIN)
+        await svc.replace("notes", _subject(), {"note": "final"}, origin=_ORIGIN)
+        result = await unit.commit()
+    assert result.diverged is False
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"note": "final"}  # n=1 did not replay over the later replace
 
 
 async def test_discard_drops_the_staging(svc: StatesService, pg: FakeStatesPg) -> None:
@@ -205,8 +267,9 @@ async def test_commit_reports_divergence_when_the_ledger_moves(svc: StatesServic
     async with svc.open_unit() as unit:
         staged = await unit.stage([_write(_subject(), [_set("n", 1)], op_id="k1")])
         assert staged[0].applied is True  # k1 not yet in the ledger at stage time
-        # Another writer commits op_id k1 before this unit commits.
-        await svc.apply("notes", _subject(), [_set("n", 9)], op_id="k1", origin=_ORIGIN)
+        # Another writer commits op_id k1 before this unit commits — a root of execution so its
+        # write goes to the store rather than staging into this scope's unit.
+        await spawn_root_task(svc.apply("notes", _subject(), [_set("n", 9)], op_id="k1", origin=_ORIGIN))
         result = await unit.commit()
     assert result.diverged is True
     assert result.results[0].applied is False
@@ -293,8 +356,9 @@ async def test_commit_reports_a_skipped_divergence(svc: StatesService) -> None:
         staged = await unit.stage([_write(_subject(), [_set("n", 1, guard={"path": ["n"], "expected": None})])])
         assert staged[0].applied is True
         assert staged[0].skipped == []
-        # Another writer sets n before this unit commits; now the guard fails and the op skips.
-        await svc.apply("notes", _subject(), [_set("n", 5)], op_id=None, origin=_ORIGIN)
+        # Another writer sets n before this unit commits (a root of execution, so the write lands in
+        # the store, not this scope's unit); now the guard fails and the op skips.
+        await spawn_root_task(svc.apply("notes", _subject(), [_set("n", 5)], op_id=None, origin=_ORIGIN))
         result = await unit.commit()
     assert result.diverged is True
     assert [d.field for d in result.divergences] == ["skipped"]
@@ -373,3 +437,67 @@ async def test_template_read_after_a_staged_update_sees_the_staged_value(svc: St
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"ledger": [{"id": "x"}]}
+
+
+class _RenderRM:
+    """The resource-manager subset the binding render seam calls: an inline slot renders to its own text."""
+
+    async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
+        assert text.content is not None
+        return text.content
+
+
+def _binding_app(svc: StatesService) -> Any:
+    return SimpleNamespace(states=svc, storage=SimpleNamespace(resource_manager=_RenderRM()))
+
+
+# A subject_expr jq yielding ``_subject()`` as a full object, so no ambient context is needed.
+_SUBJECT_JQ = '{target_kind: "agent", target_name: "a", kind: "thread", key: "t1"}'
+
+
+def _n7_binding() -> StateBinding:
+    return StateBinding(
+        states=[
+            StateAttach(
+                state="notes",
+                subject_expr=TemplatedText(content=_SUBJECT_JQ),
+                updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["n"], value: 7}]'))],
+            )
+        ]
+    )
+
+
+async def test_binding_updates_write_the_store_directly_with_no_unit_open(svc: StatesService, pg: FakeStatesPg) -> None:
+    await svc.put_declaration(_decl())
+    await apply_binding_updates(_binding_app(svc), _n7_binding(), {}, {}, door_id="d1")
+    assert pg.records  # no unit open — the write lands in the store, as today
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 7}
+
+
+async def test_binding_updates_stage_into_an_open_unit_read_back_and_a_discard_clears_them(
+    svc: StatesService, pg: FakeStatesPg
+) -> None:
+    # The door/preset binding-update seam honours an open unit exactly as the engine's node-binding seam
+    # does: stage into it (read-your-writes within the drive), never write around it; a discard clears it.
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await apply_binding_updates(_binding_app(svc), _n7_binding(), {}, {}, door_id="d1")
+        assert not pg.records  # staged into the unit, not written around it
+        view = await svc.read("notes", _subject())
+        assert view is not None
+        assert view.data == {"n": 7}  # read-your-writes within the drive
+        await unit.discard()
+    assert not pg.records  # the discard cleared the staged binding write
+
+
+async def test_binding_updates_commit_lands_through_the_unit(svc: StatesService) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await apply_binding_updates(_binding_app(svc), _n7_binding(), {}, {}, door_id="d1")
+        result = await unit.commit()
+    assert result.diverged is False
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 7}

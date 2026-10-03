@@ -24,6 +24,8 @@ from typing import Any
 
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.backup import BackupSectionReport
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.backup.registry import BackupMode, import_mode
@@ -92,7 +94,7 @@ async def list_sections() -> list:
     request_model=BackupImport,
     response_model=BackupImportResult,
 )
-async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> dict:
+async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> BackupImportResult:
     """Import each SELECTED section of ``document`` in registration order and return a per-section report.
 
     ``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1
@@ -108,7 +110,7 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
         raise BadRequestError("document must contain a 'sections' object")
 
     registered = _registered_section_names()
-    reports: dict[str, Any] = {}
+    reports: dict[str, BackupSectionReport] = {}
     ok = True
     # One mode for the whole import, read from the request-scoped context (the
     # ``import_section`` seam carries no mode arg).
@@ -124,30 +126,31 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
                 ok = False
                 continue
             try:
-                report = await _maybe_await(tai42_app.backup.import_section(name, document_sections[name]))
+                report = await tai42_app.backup.import_section(name, document_sections[name])
             except Exception as exc:
-                # A raising importer is reported with zero counts plus its message (no
-                # cross-record transaction, so records committed before the raise still
-                # stand). Logged too, so a genuine code bug is visible server-side.
+                # A raising importer — or one whose report fails the typed-shape validation —
+                # is reported with zero counts plus its message (no cross-record transaction,
+                # so records committed before the raise still stand). Logged too, so a genuine
+                # code bug is visible server-side.
                 logger.warning("backup import of section %r failed: %s", name, exc, exc_info=True)
                 reports[name] = _absent_section_report(str(exc))
                 ok = False
                 continue
             reports[name] = report
-            if name == _TEMPLATES_SECTION and (report.get("created") or report.get("updated")):
+            if name == _TEMPLATES_SECTION and (report.created or report.updated):
                 # The templates importer wrote the store on THIS worker with a local-only
                 # evict; a restore rewriting many keys drops every worker's compiled cache
                 # in one broadcast rather than per key (cheaper, and on a forking backend
                 # it turns the prefork pool over once — matching reload semantics). The
                 # fan-out rides the section report, as the manifest/env sections do.
-                report["fanout"] = await _evict_templates_fleetwide()
-            if report.get("errors"):
+                report.fanout = await _evict_templates_fleetwide()
+            if report.errors:
                 ok = False
 
-    return {"ok": ok, "sections": reports}
+    return BackupImportResult(ok=ok, sections=reports)
 
 
-async def _evict_templates_fleetwide() -> dict[str, Any]:
+async def _evict_templates_fleetwide() -> FanoutSummary:
     """Broadcast a ``clear_template_cache`` so every worker cold-starts its compiled cache after a restore.
 
     Returns the per-worker fan-out summary.
@@ -158,13 +161,13 @@ async def _evict_templates_fleetwide() -> dict[str, Any]:
         manager.clear_cache()
 
     fleet = FleetResult.model_validate(await broadcast({"op": "clear_template_cache"}, None, _apply))
-    return fleet_fanout(fleet)
+    return FanoutSummary.model_validate(fleet_fanout(fleet))
 
 
-def _absent_section_report(error: str) -> dict[str, Any]:
+def _absent_section_report(error: str) -> BackupSectionReport:
     """Return a zero-count section report carrying a single ``error`` for a section that never ran.
 
-    For a section that is unknown, absent, or whose importer raised. Mirrors the importer
-    report shape so the per-section reports are uniform.
+    For a section that is unknown, absent, or whose importer raised. A plain
+    :class:`BackupSectionReport` with one error, so the per-section reports are uniform.
     """
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": [error]}
+    return BackupSectionReport(errors=[error])

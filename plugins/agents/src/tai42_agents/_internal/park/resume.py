@@ -22,8 +22,8 @@ from tai42_contract.conversations import TurnSupersededError
 from tai42_contract.interactions import (
     CHAINED_PARK_TOKEN_KEY,
     PARK_COMPLETION_SUCCEEDED,
-    ParkResumeFailed,
     ResumeBuffered,
+    RunTerminalFailed,
     SuspendedInteraction,
     reset_chained_resume,
     set_chained_resume,
@@ -66,34 +66,16 @@ _CONTRACT_TAG_KEY: Final[str] = "__contract__"
 
 
 def is_suspended_receipt(result: Any) -> bool:
-    """Whether a drive outcome is a re-park RECEIPT (the run parked again) rather than a clean terminal answer.
+    """Whether a drive outcome is a re-park (the run parked again) rather than a clean terminal answer.
 
-    The discriminator for whether the terminal cascade fires now or the outcome is carried forward
-    to the new park entry as a still-suspended re-park.
+    A park crosses as a :class:`SuspendedInteraction` typed value, recognised by TYPE (never a
+    status-keyed dict). The discriminator for whether the terminal cascade fires now or the outcome
+    is carried forward to the new park entry as a still-suspended re-park.
     """
-    return isinstance(result, dict) and result.get("status") == "suspended"
+    return isinstance(result, SuspendedInteraction)
 
 
-def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInteraction:
-    """Convert this driver's own suspended-RECEIPT dict into the shared park sentinel with both id lists.
-
-    The receipt is ``{"status": "suspended", "interaction_ids": [...], ...}`` the driver produces
-    when a run parks (or re-parks). The face turns it into a :class:`SuspendedInteraction` carrying
-    both id lists of the super-step — every parked interaction and the subset addressed to the
-    caller — so the platform's ``visit`` normalises a whole super-step at one face. It carries NO
-    ``resume_owner``: the platform re-normalises the park, it does not adopt it, and no caller may.
-    """
-    ids = receipt["interaction_ids"]
-    caller_ids = receipt.get("caller_interaction_ids") or []
-    return SuspendedInteraction(
-        interaction_id=ids[0],
-        expiry_at=receipt.get("expiry_at"),
-        interaction_ids=list(ids),
-        caller_interaction_ids=list(caller_ids),
-    )
-
-
-def to_contract_outcome(value: Any) -> Any:
+def to_contract_outcome(value: Any, *, raise_failed: bool = False) -> Any:
     """Map this driver's OWN raw resume outcome to the shared contract types; pass a contract type through.
 
     The two driver-facing tools (:func:`~tai42_agents._internal.park.resume_tool.agent_resume_tool`
@@ -102,19 +84,23 @@ def to_contract_outcome(value: Any) -> Any:
     CONTRACT types only — a cross-driver caller cannot read this plugin's private envelopes.
 
     * a ``buffered`` receipt → :class:`ResumeBuffered` naming the super-step's still-unanswered ids;
-    * a ``suspended`` re-park receipt → :class:`SuspendedInteraction` with both id lists;
-    * an already-contract-typed value (one that came UP a cross-driver chain fire already
-      converted) → passed through unchanged;
+    * an already-contract-typed value (a re-park :class:`SuspendedInteraction`, or a value that came
+      UP a cross-driver chain fire already converted) → passed through unchanged;
+    * a FAILED terminal — a chained ancestor's ``error`` / ``stopped`` / ``aborted`` outcome dict
+      flowing back up — RAISES :class:`RunTerminalFailed` carrying it WHOLE, but ONLY when
+      ``raise_failed`` is set: the PLATFORM-continuation face (``agent_resume_tool``) sets it so the
+      platform's delivery ladder delivers FAILED; a CHAIN-fire face (``deliver_chained_park``) leaves
+      it unset so the failed outcome RETURNS into the firing run's drive, which finalizes and carries
+      it up to ITS OWN continuation face to raise — never unwinding the firing run before its finalize;
     * anything else (a plain terminal value, ``None`` for a benign no-op landing) → returned as is.
     """
     if isinstance(value, (SuspendedInteraction, ResumeBuffered)):
         return value
     if isinstance(value, dict):
-        status = value.get("status")
-        if status == "suspended":
-            return _suspended_interaction_from_receipt(value)
-        if status == "buffered":
+        if value.get("status") == "buffered":
             return ResumeBuffered(remaining_ids=list(value.get("remaining_ids") or []))
+        if raise_failed and value.get("status") in ("error", "stopped", "aborted"):
+            raise RunTerminalFailed(value)
     return value
 
 
@@ -145,7 +131,7 @@ def decode_outcome(encoded: Any) -> Any:
 
 
 def _aborted_outcome(reason: str) -> dict[str, str]:
-    """The FAILED outcome a mid-drive abort/supersede carries on its ``ParkResumeFailed``.
+    """The FAILED outcome a mid-drive abort/supersede carries on its ``RunTerminalFailed``.
 
     ``reason`` names the abort kind (a turn supersede, a cancellation) for the operator trace.
     """
@@ -158,7 +144,7 @@ async def _replay_resolution(entry: dict[str, Any]) -> Any:
     A resolved super-step's tombstone carries the ``(thread_id, superstep_id)`` that locate its
     resolution record. A ``terminal`` / ``suspended`` record REPLAYS its stored value (the platform
     re-runs its idempotent ladder / re-normalises the re-park); an ``aborted`` record (written by the
-    kill teardown) RAISES :class:`ParkResumeFailed`, so the ladder delivers FAILED once under the
+    kill teardown) RAISES :class:`RunTerminalFailed`, so the ladder delivers FAILED once under the
     run's delivery id, deduped against the kill's own FAILED. A record-less tombstone (a detached
     chain that never drove a super-step, or a record aged past its horizon-bounded TTL) has no
     outcome to replay, so it is the benign no-op landing.
@@ -172,7 +158,7 @@ async def _replay_resolution(entry: dict[str, Any]) -> Any:
         return None
     value = decode_outcome(record["value"])
     if record["resolution"] == "aborted":
-        raise ParkResumeFailed(value)
+        raise RunTerminalFailed(value)
     return value
 
 
@@ -200,7 +186,7 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
       chain-delivery fire (which cascades the outermost outcome UP) when it was a nested run;
     * a REPLAY of the stored resolution when the park key holds a resolved tombstone (a lapped
       redelivery of a losing sibling's orphaned due-record): the stored terminal/suspended value,
-      or a raised :class:`ParkResumeFailed` for an ``aborted`` record; ``None`` for a benign
+      or a raised :class:`RunTerminalFailed` for an ``aborted`` record; ``None`` for a benign
       detach tombstone.
 
     Raises loudly (never a bare KeyError, never a benign shape) on an interaction with no park
@@ -209,7 +195,7 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     :class:`AgentResumeDriveInProgressError`, so the platform keeps this continuation's durable
     retry ticket for the reaper to redeliver until the live drive completes or its lease expires. A
     mid-drive ABORT or SUPERSEDE (a turn supersede / cancellation) raises
-    :class:`ParkResumeFailed`, so the platform delivers FAILED and does not retry. When a
+    :class:`RunTerminalFailed`, so the platform delivers FAILED and does not retry. When a
     whole-chain kill reclaimed the lease during the drive — observed by the re-check before the
     terminal chain fire, or by the token-guarded finalize — the drive fires no chain routing and
     raises :class:`AgentSuperstepLeaseLostError`, so the redrive lands on the kill's ``aborted``
@@ -245,7 +231,7 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
         # ``aborted`` record); it just raises, and the platform clears the due record and delivers
         # FAILED. Every OTHER raise from the drive propagates as a plain raise (the drive released
         # its lease and left the index live), so the platform retains-or-clears by receives_outcome.
-        raise ParkResumeFailed(_aborted_outcome(type(exc).__name__)) from exc
+        raise RunTerminalFailed(_aborted_outcome(type(exc).__name__)) from exc
 
     # Re-check the drive lease before the terminal chain fire. The heartbeat stopped when the drive
     # returned, so a whole-chain kill can reclaim a lapsed lease and finalize this super-step

@@ -111,6 +111,18 @@ def get_identity_provider_factory_staged(name: str) -> Callable[..., IdentityPro
     return factory
 
 
+def iter_identity_provider_names_staged() -> list[str]:
+    """Name-sorted snapshot of the registered identity providers in the generation being resolved.
+
+    Reads the STAGED generation while a build is staging, else the committed one, so a
+    build decides against the registrations it is assembling. The derived default for
+    the access-control auth-provider chain: when no chain is configured, every
+    registered identity provider is resolved, so a deployment that registers any
+    identity provider boots without naming one.
+    """
+    return sorted(_write_target())
+
+
 def reset_registry() -> None:
     """Clear the write-target registry — the staged generation while staging, else the committed map.
 
@@ -153,6 +165,7 @@ __all__ = [
     "commit_staging",
     "get_identity_provider_factory",
     "get_identity_provider_factory_staged",
+    "iter_identity_provider_names_staged",
     "register_identity_provider",
     "reset_registry",
     "same_factory",

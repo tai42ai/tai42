@@ -464,7 +464,6 @@ async def test_file_share_single_file_ingests_served_attachment_and_parity_param
     assert ingest.origin.channel_id == "slack"
     assert ingest.origin.participant_identity == "U012345"
     assert ingest.origin.message_id == "Ev001-0"
-    assert ingest.integrity_sha256 is None
 
 
 async def test_file_share_two_files_bridge_two_served_turns_with_per_item_ids(

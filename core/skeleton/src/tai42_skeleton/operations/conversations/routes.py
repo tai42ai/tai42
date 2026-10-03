@@ -76,22 +76,21 @@ async def _assert_target_exists(target_kind: str, target_name: str) -> None:
 
 
 async def _assert_target_bindable(create: ConversationRouteCreate) -> None:
-    """Consult the registered bind validator for the target's kind, once the target exists.
+    """Run the route bind check once the target exists, refusing a route whose target cannot bind.
 
-    The validator receives the FULL create model, so it can judge the target against the
-    route's own door fields. The platform registers the ``agent`` kind's validator (an
-    asking agent needs a reply/resume path); a plugin registers others through
-    ``app.conversations.register_target_validator``. A validator returning message lines
-    refuses the route with them (a 422), so a defect the target carries — reading a state no
-    binding supplies, an asking agent with no reply/resume path — is caught at bind, never
-    deferred to run time. No validator for the kind leaves the create unchanged.
+    Resolves the route's target to its registered owner and runs the platform's own rules (an
+    asking agent, reached as either kind, needs a reply/resume path) plus the one validator the
+    owner registered, passing the target's active body as the candidate. A refusal returns message
+    lines joined into a 422, so a defect the target carries — reading a state no binding supplies,
+    an asking agent with no reply/resume path — is caught at bind, never deferred to run time.
     """
-    from tai42_skeleton.app import instance
+    from tai42_skeleton.conversations.target_validators import (
+        active_target_candidate_body,
+        target_bind_refusal_lines,
+    )
 
-    validator = instance.app.conversations.target_validator(create.target_kind)
-    if validator is None:
-        return
-    messages = await validator(create)
+    candidate = await active_target_candidate_body(create.target_kind, create.target_name)
+    messages = await target_bind_refusal_lines(create, candidate)
     if messages:
         raise ValidationRejectedError("\n".join(messages))
 

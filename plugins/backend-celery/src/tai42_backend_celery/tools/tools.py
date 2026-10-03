@@ -16,7 +16,7 @@ import asyncio
 import json
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult
@@ -465,25 +465,33 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
 
 
 @tai42_app.tools.tool(tags={"backend"})
-async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str, Any]:
+async def backend_import_schedules(
+    schedules: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+) -> dict[str, Any]:
     """Recreate schedules produced by ``backend_export_schedules`` as RedBeat entries.
 
     Each row is validated as a ScheduleRecord and saved via a
-    ``RedBeatSchedulerEntry`` exactly as the create extension does. Idempotency is
-    upsert by name: an existing ``redbeat:{name}`` entry is overwritten (counted
-    'updated'), a new one is created (counted 'created'). Scheduling is recomputed
-    on save, so no stale next-run time is persisted.
+    ``RedBeatSchedulerEntry`` exactly as the create extension does. A new name is
+    created (counted 'created'); scheduling is recomputed on save, so no stale
+    next-run time is persisted.
 
-    Returns counts plus a per-row 'errors' list (each row is
-    ``{"index", "name", "error"}``). A row that fails to validate or save is
-    reported there loudly, never silently dropped. ``skipped`` is always 0 —
-    this backend has no skip case (a disabled record persists as a disabled
-    RedBeat entry).
+    ``mode`` keys an existing ``redbeat:{name}`` entry: under ``skip`` (the default)
+    an existing name is left untouched, never re-applied, and counted in
+    ``skipped_existing``; under ``overwrite`` the existing entry is replaced in place
+    (counted 'updated'). This is the per-record import mode the backup restore
+    forwards across the tool boundary, honored here as every backend honors it.
+
+    Returns ``{"created", "updated", "skipped", "skipped_existing", "errors"}`` to
+    match the shared section-report contract; each error row is
+    ``{"index", "name", "error"}``. A row that fails to validate or save is reported
+    there loudly, never silently dropped. ``skipped`` is always 0 — this backend has
+    no per-row skip case (a disabled record persists as a disabled RedBeat entry).
     """
     settings = celery_settings()
     created = 0
     updated = 0
     skipped = 0
+    skipped_existing = 0
     errors: list[dict[str, Any]] = []
 
     async with _redbeat_redis() as r:
@@ -493,6 +501,11 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
                 record = ScheduleRecord.model_validate(entry)
                 key = settings.redbeat_task_key(record.name)
                 exists = bool(await r.exists(key))
+
+                if exists and mode == "skip":
+                    # An existing schedule (keyed by name) is left in place.
+                    skipped_existing += 1
+                    continue
 
                 norm = normalize_schedule(record.schedule)
                 if norm["__type__"] == "interval":
@@ -529,4 +542,10 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
             except Exception as e:
                 errors.append({"index": index, "name": entry_name, "error": repr(e)})
 
-    return {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "skipped_existing": skipped_existing,
+        "errors": errors,
+    }

@@ -122,7 +122,7 @@ async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app)
     from tai42_contract.access_control import registry
 
     registry._REGISTRY.clear()
-    settings = AccessControlSettings()  # auth_providers=["redis"]
+    settings = AccessControlSettings(auth_providers=["redis"])  # name configured, registry mid-reload
     adapter = AuthAdapter(settings)
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)
     conn = _conn({"X-Api-Key": "sk-x"})
@@ -137,7 +137,7 @@ async def test_real_adapter_empty_registry_outside_reload_denies_401():
     from tai42_contract.access_control import registry
 
     registry._REGISTRY.clear()
-    settings = AccessControlSettings()
+    settings = AccessControlSettings(auth_providers=["redis"])
     adapter = AuthAdapter(settings)
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)
     conn = _conn({"X-Api-Key": "sk-x"})

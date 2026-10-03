@@ -3,9 +3,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 The Postgres-backed **accounts provider** for the TAI ecosystem — an installable
-plugin that owns human user accounts, password login, sessions, and invites, and
-ships a Studio users-admin UI. It registers itself as the `"accounts-postgres"`
-provider and mints/validates its own `tai-sess-…` session tokens.
+plugin that owns human user accounts, password login, sessions, and invites. It
+registers itself as the `"accounts-postgres"` provider and mints/validates its own
+`tai-sess-…` session tokens.
 
 Importing the package registers the provider in `tai42-contract`'s module-level
 accounts registry (`register_accounts_provider("accounts-postgres", ...)`), which
@@ -66,17 +66,24 @@ Public (`/api/login/*`, always-public prefix):
 | `POST /api/login/password` | Verify email + password, mint a session. Failures-only throttling; uniform 401; argon2 verify on every attempt (503 load-shed under a hash flood). |
 | `POST /api/login/invite/accept` | Consume an invite, set the first password, mint a session. |
 
-Authed (`/api/auth/users*`, reserved prefix, admin-fenced by the seeded role
-conditions — except `PUT /users/me/password`, self-service):
+Authed (`/api/auth/users*`, reserved prefix):
 
 | Route | Does |
 |---|---|
-| `GET /api/auth/users` | List accounts (never a hash, never a token). |
-| `POST /api/auth/users` | Create a user with a NULL password and a one-time invite. |
-| `PUT /api/auth/users/{user_id}` | Change role and/or disabled state (credentials-die-first on disable; last-admin guard). |
-| `DELETE /api/auth/users/{user_id}` | Delete a user (policy first, then plugin rows; last-admin guard). |
-| `POST /api/auth/users/{user_id}/invite` | Regenerate the invite (only while the password is unset). |
 | `PUT /api/auth/users/me/password` | Change your own password; every OTHER session is revoked. |
+
+**Self-service password route stays.** `PUT /api/auth/users/me/password` is
+**self-service**, not member administration: it acts on the caller's OWN credential,
+targets no member row, and is open to every signed-in user (carved out of the
+admin fence with `self_service=True`). It is therefore NOT part of the generic
+member-actions seam and is the one route this module still ships. Member
+administration — inviting a user, sending a new login link, cancelling an
+invitation, changing a member's role or access, and removing a member — is no
+longer bespoke routes or a bespoke Studio page here: the provider **declares**
+those actions (`member_actions`) and performs them (`invoke_member_action`)
+through the platform's generic member-actions seam, which the Studio's own generic
+Members page renders. The one-time invite link a new invite or a resend produces
+surfaces on that action's result.
 
 Logout is NOT here — the skeleton owns the single `POST /api/auth/logout`
 dispatcher; this plugin contributes `revoke_session`.
@@ -146,9 +153,11 @@ In the deployment manifest:
 ```yaml
 lifecycle_modules: ["tai42_accounts_postgres"]                 # provider registration
 routers_modules: ["tai42_accounts_postgres.routes_login",
-                  "tai42_accounts_postgres.routes_users"]       # the HTTP surface
-studio_plugins: ["tai42_accounts_postgres"]                    # the users-admin UI
+                  "tai42_accounts_postgres.routes_users"]       # login + self-service password
 ```
+
+Member administration is the Studio's own generic Members page over the provider's
+declared member actions, so the plugin ships no Studio bundle of its own.
 
 and in access control (example alongside the api-key provider):
 
@@ -176,8 +185,9 @@ ACCESS_CONTROL_AUTH_PROVIDERS=["accounts-postgres","redis"]
   creation; this provider only attaches the owner's login (password or invite) to the
   already-created owner principal, never creating a second owner.
 
-Invite and session tokens are **shown once** — the create/regenerate response is
-the only place the raw invite link or session token appears.
+Invite and session tokens are **shown once** — the raw invite link appears only in
+the result of the invite / resend member action, and the raw session token only in
+the login response that mints it.
 
 ## Requirements
 
@@ -207,8 +217,6 @@ uv add --editable ../tai42/plugins/accounts-postgres
 
 ## Development
 
-Two toolchains, one repo — CI gates both.
-
 **Python** (from the repo root):
 
 ```bash
@@ -222,22 +230,6 @@ uv run --no-sync pytest --cov --cov-report=term-missing
 
 Coverage is gated at 95% (`fail_under` in `pyproject.toml`). CI installs with
 `uv sync --locked --python 3.13 --extra dev`, so a stale `uv.lock` fails there.
-
-**Studio bundle**:
-
-```bash
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm run format:check
-pnpm test
-pnpm run build
-git diff --exit-code src/tai42_accounts_postgres/studio/
-```
-
-The last line is the freshness gate. After any change under `studio-src/` (or the
-JS toolchain), run `pnpm run build` and commit the regenerated
-`src/tai42_accounts_postgres/studio/` alongside the source — a stale committed
-bundle fails CI.
 
 ## License
 

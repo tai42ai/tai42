@@ -92,6 +92,28 @@ def test_schedules_add_sends_the_door_contract_flags(monkeypatch: pytest.MonkeyP
     assert result.exit_code == 0, result.output
 
 
+def test_schedules_add_sends_the_subject_door_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    subject = {"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["subject"] == subject
+        return data_response({"name": "report"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "schedules",
+            "add",
+            "report",
+            "--subject",
+            '{"target_kind": "agent", "target_name": "a-42", "kind": "job", "key": "j1"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_schedules_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"

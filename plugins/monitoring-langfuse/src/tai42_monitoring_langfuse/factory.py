@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from tai42_contract.monitoring import Monitoring, ProjectConfig
+from tai42_contract.monitoring import Monitoring
 
 from tai42_monitoring_langfuse.monitoring import LangfuseMonitoring
+from tai42_monitoring_langfuse.project import LangfuseProject
 from tai42_monitoring_langfuse.settings import langfuse_settings
 
 
 def build_langfuse_backend(
-    projects: list[ProjectConfig] | None = None,
+    projects: list[LangfuseProject] | None = None,
     default_public_key: str | None = None,
 ) -> Monitoring:
     """Construct a ``LangfuseMonitoring``.

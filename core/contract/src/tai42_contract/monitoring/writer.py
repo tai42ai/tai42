@@ -16,10 +16,9 @@ inheriting that method's catch-and-log guarantee.
 The NON-emit methods are NOT fail-safe and propagate errors loudly:
 ``flush`` / ``shutdown`` (fork-safety must not be silently skipped),
 ``inject_context``, ``get_monitoring_callbacks`` (returning ``[]`` on failure
-would silently drop all tracing), ``scope`` / ``disable`` (a backend may
-legitimately no-op these — doing nothing successfully — but a real FAILURE
-inside them must raise, never be swallowed: a silently-failed ``scope()``
-could cross-project-leak traces).
+would silently drop all tracing), ``disable`` (a backend may
+legitimately no-op it — doing nothing successfully — but a real FAILURE
+inside it must raise, never be swallowed).
 
 ``current_trace_id()`` is the sole exception: it returns ``None`` and never
 raises, since it is a guard query, not an operation — ``None`` safely means
@@ -30,7 +29,7 @@ AMBIENT vs EXPLICIT context
 ``trace_context`` is OPTIONAL. ``None`` = emit into the CURRENT (ambient OTel)
 context — what the no-handle sites use (plain functions with no trace handle).
 An explicit ``TraceContext`` is passed only when one is held (e.g. a
-downstream/parent span in flows/agents).
+downstream/parent span held by a run driver).
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ RUN_ATTRIBUTION_TRACE_NAME = "run"
 # The documented ``metadata`` key a run's ROOT version rides in, so a writer can
 # lift it onto the backend's native version DIMENSION rather than leaving it a
 # plain metadata attribute. Vendor-neutral: a backend with a native version field
-# maps this key onto it (see the langfuse writer); one without keeps it as ordinary
+# maps this key onto it; one without keeps it as ordinary
 # metadata. Kept as a stable constant so the depositing seam and the writer name the
 # SAME key. Only the OUTERMOST attribution stamp sets it, so the value is unambiguous
 # (a single root version) no matter how tags accumulate across nested scopes.
@@ -182,29 +181,21 @@ class MonitoringWriter(Protocol):
     # --- propagation / callbacks (propagate errors loudly) -----------------
 
     def inject_context(self, ctx: TraceContext) -> dict[str, Any]:
-        """Build the opaque downstream-propagation blob merged into the langgraph ``RunnableConfig``.
+        """Build the opaque downstream-propagation blob merged into the run config.
 
         Carries ``ctx.tags`` + ``ctx.metadata``.
         """
         ...
 
     def get_monitoring_callbacks(self, ctx: TraceContext) -> list[object]:
-        """The LangChain/LangGraph callback handlers appended to the langgraph ``config["callbacks"]``.
+        """The backend's callback handlers appended to the run config's callbacks.
 
         The caller builds ``ctx`` (keeping the auto-generated-trace-id fallback);
         the impl reads its fields to construct the vendor handler.
         """
         ...
 
-    # --- scoping / suppression (no-op success allowed; real failure raises) -
-
-    def scope(self, public_key: str) -> AbstractContextManager[None]:
-        """Bind tracing to a project (``public_key``) for the block.
-
-        Mirrors a single-backend multi-project switch. OTel-native backends
-        may no-op it; a real failure must raise (cross-project leak risk).
-        """
-        ...
+    # --- suppression (no-op success allowed; real failure raises) ----------
 
     def disable(self) -> AbstractContextManager[None]:
         """Suppress emission within the block.
@@ -241,14 +232,13 @@ def attribute_run(writer: MonitoringWriter, attribution: RunAttribution) -> Abst
     span exists and silently no-op the stamp.
 
     It does NOT gate on :meth:`MonitoringWriter.current_trace_id`. A stamp deposited
-    BEFORE any trace is open is NOT lost: ``trace_attributes`` is context-scoped
-    (langfuse's ``propagate_attributes`` writes the attributes into the ambient OTel
-    context — see ``propagation.py``'s ``_set_propagated_attribute`` — and the span
-    processor lifts them onto the trace ROOT when a span is subsequently opened
-    inside the scope, ``span_processor.py``). Short-circuiting to a ``nullcontext``
-    when ``current_trace_id()`` is ``None`` therefore DROPPED the attribution on the
-    common case — a door that deposits then opens the run's first span — so the guard
-    is removed. This helper is NOT itself fail-safe against a non-conforming writer: it
+    BEFORE any trace is open is NOT lost: ``trace_attributes`` is context-scoped — a
+    conforming backend writes the attributes into the ambient context and lifts them
+    onto the trace ROOT when a span is subsequently opened inside the scope.
+    Short-circuiting to a ``nullcontext`` when ``current_trace_id()`` is ``None``
+    therefore DROPS the attribution on the common case — a door that deposits then
+    opens the run's first span — so there is no such guard. This helper is NOT itself
+    fail-safe against a non-conforming writer: it
     CALLS ``trace_attributes`` here, so a writer whose signature omits these keywords
     raises a ``TypeError`` at THIS call — before any enter/exit guard inside the writer
     could run — and a writer that raises on enter/exit surfaces likewise. A caller that

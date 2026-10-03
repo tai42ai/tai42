@@ -93,7 +93,7 @@ def _identity_row() -> KindStatus:
     settings = access_control_settings()
     if not settings.enable:
         return KindStatus(kind="identity", state="off", plugin=None, detail="access control disabled")
-    names = settings.auth_providers
+    names = settings.resolved_auth_providers()
     parts = [name if _identity_provider_registered(name) else f"{name} (not registered)" for name in names]
     return KindStatus(
         kind="identity",

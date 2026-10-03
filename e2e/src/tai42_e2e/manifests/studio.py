@@ -37,12 +37,12 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     ``DEFAULT_API_ROUTERS`` set (a curated manifest that omits one leaves its Studio page
     dark), then this manifest's extras, then the SPA catch-all last. So the browser suite
     drives every nav page against the same router set production serves. The only extras
-    named here are the accounts plugin's own login + users routes.
+    named here are the accounts plugin's own login route and its self-service password route.
 
     The accounts + redis key providers coexist so the login screen renders its password
-    form and keeps the key-paste fallback; ``studio_plugins`` carries the accounts plugin
-    so its users-admin page mounts into the Studio shell (its API routers alone mount no
-    page). The setup door's gate is pinned to ``_SETUP_TOKEN``.
+    form and keeps the key-paste fallback; member administration is the Studio's own generic
+    Members page, so the accounts plugin contributes no Studio page of its own. The setup
+    door's gate is pinned to ``_SETUP_TOKEN``.
 
     TRAP: ``/api/login``'s public-ness comes from the code-side
     ``always_public_path_prefixes`` default, not a route row or ``ACCESS_CONTROL_PATH_PATTERNS``.
@@ -88,9 +88,9 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
             {"title": "tai-agents", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},
         ],
         # Installed studio plugins whose built ``studio/`` dists the skeleton serves via
-        # the injected import map: the reference plugin and the accounts plugin (its
-        # API routers alone register no Studio page, so it must be listed here).
-        "studio_plugins": ["reference_plugin", "tai42_accounts_postgres"],
+        # the injected import map: the reference plugin. The accounts plugin ships no Studio
+        # page — member administration is the Studio's own generic Members page.
+        "studio_plugins": ["reference_plugin"],
         # The web channel: its PUBLIC chat page, asset, stream and answer doors serve the
         # browser widget alongside the Studio, so the ``ui/`` suite can drive a real
         # web-channel ``ask`` in the rendered widget. The doors are ``public: true``
@@ -219,7 +219,8 @@ def build_studio_setup_stack(res: StackResources, variants: Variants) -> StackCo
         "default_routers": "all",
         "lifecycle_modules": [variants.identity.lifecycle_module, "tai42_accounts_postgres"],
         # The "all" set already mounts every core + feature router (incl. the SPA catch-all);
-        # the accounts plugin's own login + users routes are the only extras.
+        # the accounts plugin's own login route and its self-service password route are the
+        # only extras.
         "routers_modules": [
             "tai42_accounts_postgres.routes_login",
             "tai42_accounts_postgres.routes_users",
@@ -227,7 +228,9 @@ def build_studio_setup_stack(res: StackResources, variants: Variants) -> StackCo
         "extensions_modules": _EXTENSION_MODULES,
         "storage_module": variants.storage.module,
         "tools": [*_builtin_entries()],
-        "studio_plugins": ["tai42_accounts_postgres"],
+        # The accounts plugin ships no Studio page of its own — member administration is the
+        # Studio's own generic Members page.
+        "studio_plugins": [],
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask", "notify_user", "reload_config"],
     }

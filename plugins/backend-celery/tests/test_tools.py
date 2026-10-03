@@ -554,7 +554,7 @@ async def test_import_then_export_round_trips_interval_and_crontab(roundtrip_red
     """Interval + crontab records survive an import/export cycle: kwargs
     (tool name), schedule, and enabled all come back unchanged."""
     result = await tools.backend_import_schedules([_INTERVAL_RECORD, _CRONTAB_RECORD])
-    assert result == {"created": 2, "updated": 0, "skipped": 0, "errors": []}
+    assert result == {"created": 2, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     exported = await tools.backend_export_schedules()
     by_name = {rec["name"]: rec for rec in exported}
@@ -562,16 +562,35 @@ async def test_import_then_export_round_trips_interval_and_crontab(roundtrip_red
     assert by_name["weekday-report"] == _CRONTAB_RECORD
 
 
-async def test_import_upsert_overwrites_existing(roundtrip_redis):
-    """Re-importing the same name overwrites it and is counted as 'updated'."""
+async def test_import_overwrite_replaces_existing(roundtrip_redis):
+    """Under ``overwrite`` a re-import of the same name replaces it, counted 'updated'."""
     first = await tools.backend_import_schedules([_INTERVAL_RECORD])
-    assert first == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
-    second = await tools.backend_import_schedules([_INTERVAL_RECORD])
-    assert second == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
+    changed = dict(_INTERVAL_RECORD, schedule={"__type__": "interval", "every": 99.0, "relative": False})
+    second = await tools.backend_import_schedules([changed], "overwrite")
+    assert second == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
 
     exported = await tools.backend_export_schedules()
     assert len(exported) == 1  # upsert, not a duplicate
+    assert exported[0]["schedule"]["every"] == 99.0  # the replacement applied
+
+
+async def test_import_skip_leaves_existing_untouched(roundtrip_redis):
+    """Under ``skip`` (the default the host forwards) an existing name is left in
+    place — not re-applied — and counted in ``skipped_existing``. This is the mode
+    the backup restore passes across the tool boundary, so the tool must accept and
+    honor it on this backend exactly as every backend does."""
+    first = await tools.backend_import_schedules([_INTERVAL_RECORD], "skip")
+    assert first == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+
+    changed = dict(_INTERVAL_RECORD, schedule={"__type__": "interval", "every": 99.0, "relative": False})
+    second = await tools.backend_import_schedules([changed], "skip")
+    assert second == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
+
+    exported = await tools.backend_export_schedules()
+    assert len(exported) == 1
+    assert exported[0]["schedule"]["every"] == 30.0  # the original is untouched
 
 
 async def test_import_malformed_record_reported_in_errors_not_silent(roundtrip_redis):

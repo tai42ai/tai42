@@ -32,6 +32,7 @@ Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 
 from __future__ import annotations
 
+import json
 from json import JSONDecodeError
 from typing import Any
 
@@ -138,17 +139,28 @@ async def _extract_api_tools_lists(request: Request) -> dict[str, Any]:
 
 
 async def _optional_targets(request: Request) -> list[str] | None:
-    """The optional ``targets`` fan-out restriction from a POST body, tolerating an absent/empty body.
+    """The optional ``targets`` fan-out restriction from a POST body.
 
-    No body → ``targets=None`` → the unchanged single-worker path.
+    An ABSENT body (nothing sent) restricts nothing — ``targets=None`` fans out to the whole
+    fleet. A body that IS sent must parse as a JSON object; a malformed body, a non-object
+    body, or a ``targets`` that is not a list of worker-name strings is a loud 400, never a
+    silent widening to the whole fleet. The raw bytes are read so an empty body (the
+    whole-fleet default) is told apart from a malformed one (both of which the JSON parse
+    alone would collapse to the same error).
     """
+    raw = await request.body()
+    if not raw.strip():
+        return None
     try:
-        body = await request.json()
-    except (JSONDecodeError, ValueError):
-        return None
+        body = json.loads(raw)
+    except (JSONDecodeError, ValueError) as exc:
+        raise BadRequestError(f"invalid JSON body: {exc}") from exc
     if not isinstance(body, dict):
-        return None
-    return body.get("targets")
+        raise BadRequestError("request body must be a JSON object")
+    targets = body.get("targets")
+    if targets is not None and (not isinstance(targets, list) or not all(isinstance(t, str) for t in targets)):
+        raise BadRequestError("'targets' must be a list of worker names")
+    return targets
 
 
 async def _extract_targets(request: Request) -> dict[str, Any]:

@@ -36,9 +36,9 @@ async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnec
     assert len(await users.list()) == 0
 
     report = await import_accounts(payload)
-    assert report["created"] == 2
-    assert report["skipped_existing"] == 0
-    assert report["errors"] == []
+    assert report.created == 2
+    assert report.details["skipped_existing"] == 0
+    assert report.errors == []
 
     restored = await users.get_by_user_id("usr-alice")
     assert restored is not None
@@ -52,9 +52,9 @@ async def test_export_import_roundtrip_and_skip_only(accounts_db: PostgresConnec
 
     # Skip-only: a second import of the same payload creates nothing.
     again = await import_accounts(payload)
-    assert again["created"] == 0
-    assert again["skipped_existing"] == 2
-    assert again["errors"] == []
+    assert again.created == 0
+    assert again.details["skipped_existing"] == 2
+    assert again.errors == []
 
 
 async def test_import_email_collision_is_contained_per_user(accounts_db: PostgresConnectionSettings) -> None:
@@ -84,10 +84,10 @@ async def test_import_email_collision_is_contained_per_user(accounts_db: Postgre
     }
 
     report = await import_accounts(payload)
-    assert report["created"] == 1  # only usr-ok landed
-    assert report["skipped_existing"] == 0
-    assert len(report["errors"]) == 1
-    assert "usr-clash" in report["errors"][0]
+    assert report.created == 1  # only usr-ok landed
+    assert report.details["skipped_existing"] == 0
+    assert len(report.errors) == 1
+    assert "usr-clash" in report.errors[0]
 
     assert await users.get_by_user_id("usr-clash") is None  # the savepoint rolled it back
     assert await users.get_by_user_id("usr-ok") is not None  # its sibling still restored

@@ -14,8 +14,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from langfuse import Langfuse, get_client
-from tai42_contract.monitoring import ProjectConfig
 
+from tai42_monitoring_langfuse.project import LangfuseProject
 from tai42_monitoring_langfuse.sdk_internals import (
     bind_public_key,
     current_scoped_public_key,
@@ -38,13 +38,13 @@ class LangfuseClientManager:
 
     def __init__(
         self,
-        projects: list[ProjectConfig],
+        projects: list[LangfuseProject],
         default_public_key: str,
     ) -> None:
         """Build the manager from ``projects`` and the ``default_public_key`` (clients are built lazily)."""
         if not projects:
             raise ValueError("LangfuseClientManager requires at least one project")
-        self._projects: dict[str, ProjectConfig] = {p.public_key: p for p in projects}
+        self._projects: dict[str, LangfuseProject] = {p.public_key: p for p in projects}
         if default_public_key not in self._projects:
             raise ValueError(f"default_public_key {default_public_key!r} is not among the configured projects")
         self._default_public_key = default_public_key
@@ -56,7 +56,7 @@ class LangfuseClientManager:
         # worker threads run concurrently with emit-path reads.
         self._lock = threading.RLock()
 
-    def _build_client(self, cfg: ProjectConfig) -> Langfuse:
+    def _build_client(self, cfg: LangfuseProject) -> Langfuse:
         return Langfuse(
             public_key=cfg.public_key,
             secret_key=cfg.secret_key,
@@ -76,7 +76,7 @@ class LangfuseClientManager:
                 self._clients[cfg.public_key] = self._build_client(cfg)
             self._built = True
 
-    def add_project(self, config: ProjectConfig) -> None:
+    def add_project(self, config: LangfuseProject) -> None:
         """Register an additional project after construction; idempotent.
 
         If the clients are already built, the new one is constructed immediately

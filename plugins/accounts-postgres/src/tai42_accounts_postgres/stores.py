@@ -395,3 +395,24 @@ class InvitesStore:
             conn.cursor() as cur,
         ):
             await cur.execute("DELETE FROM accounts_invites WHERE user_id = %s", (user_id,))
+
+    async def list_open(self) -> list[dict[str, Any]]:
+        """Every open (unconsumed) invitation with its invited person, oldest first.
+
+        Joins the invitation to its ``accounts_users`` row so each carries the invited
+        ``email``/``role`` and the user's ``created_at``, plus the invitation's own
+        ``expires_at``. An invitation past ``expires_at`` is still listed (so an admin
+        can see it and regenerate); a consumed one is excluded — its person has a
+        password and is a member, not a pending invite.
+        """
+        async with (
+            client_ctx(PostgresClient, self._settings) as pool,
+            pool.connection() as conn,
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(
+                "SELECT u.user_id, u.email, u.role, u.created_at, i.expires_at "
+                "FROM accounts_invites i JOIN accounts_users u ON u.user_id = i.user_id "
+                "WHERE i.consumed_at IS NULL ORDER BY u.created_at"
+            )
+            return list(await cur.fetchall())

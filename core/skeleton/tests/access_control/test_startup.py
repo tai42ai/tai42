@@ -12,10 +12,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 from tai42_contract.accounts import registry as accounts_registry
-from tai42_contract.accounts.models import LoginMethod
+from tai42_contract.accounts.models import LoginMethod, MemberAction, MemberListing
 from tai42_contract.accounts.provider import AccountsProvider
 from tai42_kit.settings import reset_all_settings
 
@@ -93,6 +94,19 @@ async def test_provider_probe_first_failure_propagates(monkeypatch: pytest.Monke
     assert second.ran is False
 
 
+async def test_provider_probe_raises_when_no_identity_provider_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gate enabled, chain DERIVED (no env) and the registry empty: no credential could ever
+    # authenticate, so the boot fails loudly rather than minting a dead gate.
+    registry._REGISTRY.clear()
+    monkeypatch.delenv("ACCESS_CONTROL_AUTH_PROVIDERS", raising=False)
+    reset_all_settings()
+    try:
+        with pytest.raises(RuntimeError, match="no identity provider is registered"):
+            await probe_identity_provider()
+    finally:
+        reset_all_settings()
+
+
 # -- registered-vs-configured accounts check ---------------------------------
 
 
@@ -105,6 +119,15 @@ class _FakeAccountsProvider(AccountsProvider):
 
     def login_methods(self) -> list[LoginMethod]:
         return []
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
+    def member_actions(self) -> list[MemberAction]:
+        return []
+
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        raise ValueError(action_id)
 
     async def revoke_session(self, token: str) -> bool:
         return False

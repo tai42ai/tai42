@@ -9,6 +9,7 @@ LangGraph chunks (the normalized event projection lives in ``stream_events``).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from datetime import datetime
 from typing import Any
 
 from langchain.agents import create_agent
@@ -17,6 +18,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from tai42_contract.agent.events import SuspendedFinal
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
@@ -49,18 +51,20 @@ _async_park_middleware = AsyncParkMiddleware()
 ParkBuilder = Callable[[dict[str, Any]], ParkIdentity | None]
 
 
-def _suspended_receipt(event: SuspendedFinal) -> dict[str, Any]:
-    """The suspended RECEIPT a parked run returns in place of an answer.
+def _suspended_receipt(event: SuspendedFinal) -> SuspendedInteraction:
+    """The typed park value a parked run returns in place of an answer.
 
-    The same shape :meth:`Agent._drain` yields, so a park is a clean non-error outcome.
+    The same typed value :meth:`Agent._drain` yields, so a park is a clean non-error outcome
+    recognised by TYPE (never a status-keyed dict). Carries the whole super-step's two id lists and
+    the earliest deadline; it carries NO ``resume_owner`` — the platform re-normalises the park, no
+    caller adopts it. ``thread_id`` is dropped: no consumer reads it off the park value.
     """
-    return {
-        "status": "suspended",
-        "interaction_ids": event.interaction_ids,
-        "caller_interaction_ids": event.caller_interaction_ids,
-        "thread_id": event.thread_id,
-        "expiry_at": event.expiry_at,
-    }
+    return SuspendedInteraction(
+        interaction_id=event.interaction_ids[0],
+        expiry_at=datetime.fromisoformat(event.expiry_at) if event.expiry_at else None,
+        interaction_ids=list(event.interaction_ids),
+        caller_interaction_ids=list(event.caller_interaction_ids),
+    )
 
 
 async def _compile_tools_agent(

@@ -72,8 +72,8 @@ __all__ = [
     "ChainedResume",
     "NestedParkOwnershipError",
     "ParkDeliveryUnauthorizedError",
-    "ParkResumeFailed",
     "ParkResumeUnauthorizedError",
+    "RunTerminalFailed",
     "assert_park_adoptable",
     "attach_chained_park",
     "bound_execution_identity_for_fire",
@@ -155,20 +155,30 @@ def reset_chained_resume(token: Token[ChainedResume | None]) -> None:
 # delivery chokepoint reads that return and delivers it. Two exception signals cross that seam.
 
 
-class ParkResumeFailed(Exception):  # noqa: N818 (a control-flow signal, not an *Error condition)
-    """A resumed run reached a TERMINAL that must be delivered FAILED — do NOT retry.
+class RunTerminalFailed(Exception):  # noqa: N818 (a control-flow signal, not an *Error condition)
+    """A run reached a TERMINAL that must be delivered FAILED — do NOT retry.
 
-    A resuming driver RAISES this from its continuation face for a mid-drive ABORT or SUPERSEDE
-    terminal, carrying the failed ``outcome``. The delivery chokepoint catches it, CLEARS the
-    continuation-due record (no redelivery), and delivers ``outcome`` through the ladder with a
-    FAILED status. Distinct from a PLAIN raise, which means "transient — retain the due record and
-    redeliver", and from an ordinary business-error terminal, which the face RETURNS as a
-    FAILED-status outcome rather than raising.
+    A driver's run face RAISES this on every failed terminal — a first run and a resume alike —
+    carrying the failed ``outcome`` as its payload. Each caller handles the one raise by what it
+    owns: the platform (a conversation turn, a door, the delivery chokepoint) records and delivers
+    the ``outcome`` WHOLE with a FAILED status, never reading a key inside it; a driver that nests
+    another run catches it and reads the ``outcome`` its own engine wrote. Distinct from a PLAIN
+    raise, which means "transient — retain the due record and redeliver".
+
+    A RETURN from a run face is never a failure: it is a SUCCESS value, or a still-parked typed
+    contract value (:class:`~tai42_contract.interactions.SuspendedInteraction` /
+    :class:`~tai42_contract.interactions.ResumeBuffered`). A failure is always this raise.
+
+    ``outcome`` is an OPAQUE payload the platform never inspects: it is written by whichever driver
+    raised the failure and read only by that driver (or a run of the same engine). It MUST be a
+    plain, JSON-serializable mapping, since a driver whose nested-dispatch seam serializes the
+    failure (a checkpointed graph) carries ``outcome`` across that seam and re-raises this type with
+    the payload intact.
     """
 
     def __init__(self, outcome: Any) -> None:
         """Carry the failed terminal ``outcome`` the ladder delivers with a FAILED status."""
-        super().__init__("park resume reached a terminal to deliver FAILED")
+        super().__init__("run reached a terminal to deliver FAILED")
         self.outcome = outcome
 
 

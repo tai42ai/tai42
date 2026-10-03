@@ -464,6 +464,24 @@ async def test_rekey_subject_moves_index_scope_and_stored_context(fake_redis):
     assert context.candidates.by_kind["person"] == "pB"
 
 
+async def test_rekey_subject_gives_the_new_index_sets_a_ttl(fake_redis):
+    # The merge's new subject-parks and subject-scopes sets must carry a TTL that outlives the
+    # entries they index — otherwise a fresh set created by the merge leaks forever (no expiry).
+    store = InteractionStore("t:")
+    await store.add(
+        fake_redis,
+        _park(store, "i1", candidates=_candidates(target_name="a", person="pA"), expiry_minutes=60),
+        idle_ttl=86400,
+        to="caller",
+    )
+    await store.rekey_subject(fake_redis, kind="person", old_key="pA", new_key="pB")
+    # Both new index sets carry a positive TTL (not -1 == no expiry, not -2 == absent).
+    parks_ttl = await fake_redis.ttl(store.subject_parks_key("agent", "a", "person", "pB"))
+    scopes_ttl = await fake_redis.ttl(store.subject_scopes_key("person", "pB"))
+    assert parks_ttl > 0
+    assert scopes_ttl > 0
+
+
 async def test_rekey_subject_rewrites_the_continuation_due_state_context(fake_redis):
     store = InteractionStore("t:")
     ctx = _context(_candidates(person="pA"))

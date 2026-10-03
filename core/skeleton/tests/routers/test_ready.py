@@ -14,12 +14,13 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from starlette.requests import Request
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider, ReadinessTarget
-from tai42_kit.clients import PostgresConnectionSettings, RedisConnectionSettings
+from tai42_kit.clients import ClientSettings, PostgresConnectionSettings, RedisConnectionSettings
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -141,6 +142,22 @@ async def test_ready_failure_returns_503_type_only(monkeypatch, caplog) -> None:
     # distinct connection.
     assert "secret-redis-host" in caplog.text
     assert sum("readiness ping failed" in rec.getMessage() for rec in caplog.records) == 1
+
+
+async def test_ping_connection_rejects_an_unknown_client_type(monkeypatch) -> None:
+    # A backing-store client type the probe does not know (neither Redis nor Postgres) must
+    # surface loudly as that connection's failure — never be pinged as Postgres by a silent
+    # catch-all else branch, which would both mis-probe it and hide the wiring bug.
+    calls: list = []
+    monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
+
+    class _MysteryClient:
+        pass
+
+    # The unknown type raises loudly before any ping is dispatched — never a silent Postgres probe.
+    with pytest.raises(TypeError, match="_MysteryClient"):
+        await health._ping_connection(_MysteryClient, cast(ClientSettings, SimpleNamespace()))
+    assert calls == []
 
 
 async def test_ready_dedupes_shared_connection(monkeypatch) -> None:

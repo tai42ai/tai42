@@ -66,7 +66,11 @@ class _RecordingAgent(Agent):
 
 
 def _agent_route(
-    *, start_expr: str | None = None, reply_expr: str | None = None, extras_expr: str | None = None
+    *,
+    start_expr: str | None = None,
+    reply_expr: str | None = None,
+    resume_expr: str | None = None,
+    extras_expr: str | None = None,
 ) -> ConversationRoute:
     return ConversationRoute(
         route_name="chat",
@@ -79,6 +83,7 @@ def _agent_route(
         execution_key_fingerprint="fp-1",
         start_expr=TemplatedText(content=start_expr) if start_expr is not None else None,
         reply_expr=TemplatedText(content=reply_expr) if reply_expr is not None else None,
+        resume_expr=TemplatedText(content=resume_expr) if resume_expr is not None else None,
         extras_expr=TemplatedText(content=extras_expr) if extras_expr is not None else None,
     )
 
@@ -153,6 +158,85 @@ async def test_agent_start_expr_builds_the_astream_kwargs(monkeypatch):
     assert kwargs["strategy"] == "fast"
     assert kwargs["user_message"] == {"content": "hello"}
     assert kwargs["thread_id"] == "bridge:chat:+15550002222"
+
+
+class _InnerCallerAskAgent(Agent):
+    """An agent that declares no ``tool_names`` and resolves ``ask(to="caller")`` INSIDE its own run."""
+
+    tool_name = "assistant"
+    ToolInput = _Input
+
+    def __init__(self) -> None:
+        self.reached_after_ask = False
+
+    async def run(self, **kwargs):  # pragma: no cover - astream is overridden
+        raise NotImplementedError
+
+    async def astream(self, **kwargs):
+        from datetime import UTC, datetime, timedelta
+
+        from tai42_skeleton.interactions.helper import ask
+
+        await ask("proceed?", to="caller", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+        self.reached_after_ask = True
+        yield MessageFinal(text="unreachable")
+
+
+async def test_agent_resolving_caller_ask_inside_itself_fails_at_the_seam(monkeypatch):
+    # Neutral consumer + termination on the AGENT door: the agent declares no tool_names and
+    # nothing is injected, so the fail-fast cannot see the ask — but it resolves ``ask(to="caller")``
+    # inside its own run. The park seam raises the typed run failure (the route declares no landing);
+    # it propagates out of the agent drive and the agent-turn door surfaces it as an error outcome.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:1/0")
+    agent = _InnerCallerAskAgent()
+    route = _agent_route()  # no reply_expr, no resume_expr
+    _wire_agent(monkeypatch, route, agent)
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "error"
+    error = outcome.error or ""
+    assert "chat" in error
+    assert "ask" in error
+    assert "reply/resume" in error
+    # The ask never returned to the agent: the run terminated at the seam, not routed around.
+    assert agent.reached_after_ask is False
+
+
+async def test_agent_run_binding_ask_with_no_reply_resume_fails_fast_at_bind_time(monkeypatch):
+    # Neutral consumer: a ``start_expr`` injects ``ask`` into the run's per-call ``tool_names`` —
+    # the run would bind the caller-ask tool — but the route carries neither ``reply_expr`` nor
+    # ``resume_expr``: the caller ask has no landing. The agent-turn FAILS FAST with the typed run
+    # failure (``RunTerminalFailed``) before the drive, surfaced through the door's failure path as an
+    # error outcome whose detail names the route and the tool, and the agent is never driven.
+    agent = _RecordingAgent(MessageFinal(text="must not run"))
+    route = _agent_route(start_expr='{user_message: {content: .message}, tool_names: ["ask"]}')
+    _wire_agent(monkeypatch, route, agent)
+
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "error"
+    error = outcome.error or ""
+    assert "chat" in error  # the route
+    assert "ask" in error  # the tool
+    assert "reply/resume" in error
+    assert agent.seen == []  # never driven — the caller-ask has nowhere to land
+
+
+async def test_agent_run_binding_ask_with_reply_and_resume_binds(monkeypatch):
+    # Neutral consumer, agent turn: the SAME per-call ``ask`` binds cleanly once the route carries
+    # both ``reply_expr`` and ``resume_expr`` — the run is driven (the landing exists).
+    agent = _RecordingAgent(MessageFinal(text="done"))
+    route = _agent_route(
+        start_expr='{user_message: {content: .message}, tool_names: ["ask"]}',
+        reply_expr=".",
+        resume_expr="$parked[0].id",
+    )
+    _wire_agent(monkeypatch, route, agent)
+
+    await _run_agent(route)
+    assert len(agent.seen) == 1
+    assert agent.seen[0]["tool_names"] == ["ask"]
 
 
 async def test_agent_reply_expr_maps_the_structured_final(monkeypatch):

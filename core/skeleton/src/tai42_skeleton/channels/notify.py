@@ -122,6 +122,20 @@ def _guard_channel_capabilities(
         raise NotImplementedError(f"channel {channel!r} does not support form notifications")
 
 
+def _validate_channel_template(channel_obj: Channel, template: ChannelTemplate) -> None:
+    """Refuse a template the channel could never render, before any feed write or send.
+
+    The template's ``parameters`` are OPAQUE to the platform; the channel's OPTIONAL
+    ``validate_template`` hook parses them against the channel's OWN template-parameter schema
+    and raises ``ValueError`` on an unmappable shape, exactly as ``validate_form_schema`` checks a
+    form at ask-time. A channel that omits the hook advertises no up-front parameter check; its
+    ``notify`` still refuses an unmappable template at send time.
+    """
+    validate_template = getattr(channel_obj, "validate_template", None)
+    if validate_template is not None:
+        validate_template(template)
+
+
 def _validate_channel_form(channel_obj: Channel, schema: dict[str, Any], message: str) -> None:
     """Refuse a form schema the channel could never render, before any feed write or send.
 
@@ -328,6 +342,10 @@ async def notify_user(
     choice surface but not the header/footer simply omits them. The guard fires BEFORE
     the in-app feed record, so a refused send leaves no phantom feed entry. (The sink path
     stores rich content unconditionally — there is no channel to advertise a capability.)
+    A ``template`` carries a ``name``/``language`` reference and an OPAQUE ``parameters`` object the
+    platform threads unopened; after the capability gate the channel's OPTIONAL
+    ``validate_template`` hook parses ``parameters`` against the channel's OWN schema and refuses an
+    unmappable template up front (a ``ValueError`` → 400), BEFORE any feed write.
 
     ``schema`` is the ask-less form's answer schema: the channel renders ``message`` as the
     form's prompt and ``schema`` as the fillable form, and the participant's submission enters the
@@ -456,6 +474,8 @@ async def notify_user(
         sections=sections,
         schema=schema,
     )
+    if template is not None:
+        _validate_channel_template(channel_obj, template)
     if schema is not None:
         _validate_channel_form(channel_obj, schema, message)
         _validate_channel_form_extras(schema, data, pages)

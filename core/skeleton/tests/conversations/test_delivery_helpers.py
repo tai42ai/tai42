@@ -26,7 +26,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 async def test_delivery_spawn_runs_in_a_fresh_root_context():
     # A delivery task is a root of execution (reached from a done-callback that runs in the
     # caller's captured context): a ContextVar set by the spawner does not leak into it.
-    probe: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_delivery_probe", default="default")
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("delivery_probe", default="default")
     seen: dict = {}
 
     async def _coro() -> None:

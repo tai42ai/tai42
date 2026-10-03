@@ -275,6 +275,9 @@ local fresh = {
   target_name = person.target_name,
   created_at = new_created_at,
   addresses = {removed},
+  -- Carry the stored locale onto the split-off person (nil assignment is a no-op), so the
+  -- detached conversation still renders in the participant's resolved language.
+  locale = person.locale,
 }
 local fresh_json = cjson.encode(fresh)
 redis.call('SET', new_row_key, fresh_json)

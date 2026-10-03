@@ -681,7 +681,6 @@ class TaiMCP(TaiMCPLifecycleMixin):
         declared_mime: str | None,
         filename: str | None,
         declared_size: int | None,
-        integrity_sha256: str | None,
         origin: "MediaOrigin",
     ) -> "IngestedMedia":
         from tai42_skeleton.interactions.media_ingest import ingest_media
@@ -692,7 +691,6 @@ class TaiMCP(TaiMCPLifecycleMixin):
             declared_mime=declared_mime,
             filename=filename,
             declared_size=declared_size,
-            integrity_sha256=integrity_sha256,
             origin=origin,
         )
 

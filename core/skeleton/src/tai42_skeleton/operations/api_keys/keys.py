@@ -161,6 +161,13 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     return {"user_id": user_id, "updated": True}
 
 
+def _reject_add_duplicates(add: list[str]) -> None:
+    """Refuse a scope repeated WITHIN one add list — it would be appended to the stored set twice."""
+    duplicates = sorted({scope for scope in add if add.count(scope) > 1})
+    if duplicates:
+        raise BadRequestError(f"scopes repeated within add: {duplicates}")
+
+
 @operation(
     summary="Add/remove scopes on an api key",
     tags=["access-control"],
@@ -180,6 +187,7 @@ async def modify_api_key_scopes(
     """
     add = add or []
     remove = remove or []
+    _reject_add_duplicates(add)
     # OFF: access control disabled → refuse the write with a named, machine-readable
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:

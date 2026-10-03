@@ -100,13 +100,17 @@ def build_owned_keys_stack(res: StackResources, variants: Variants) -> StackConf
     ``tai-sess-`` sessions, invites) and the principals door alongside the identity
     provider that answers ``sk-`` keys, so this builder adds the accounts lifecycle
     module, the principals + accounts login/users routers, and orders the accounts
-    provider ahead of the identity provider in the resolution chain. Every other axis is
-    the shared auth profile, so ``auth_stack`` stays untouched for its own suites."""
+    provider ahead of the identity provider in the resolution chain. The generic member-admin
+    doors (members directory + member-actions catalog/invoke) ride alongside so the suite
+    provisions owners through the same seam the accounts suite uses. Every other axis is the
+    shared auth profile, so ``auth_stack`` stays untouched for its own suites."""
     manifest = _auth_manifest(variants)
     manifest["lifecycle_modules"] = [variants.identity.lifecycle_module, "tai42_accounts_postgres"]
     manifest["routers_modules"] = [
         *manifest["routers_modules"],
         "tai42_skeleton.routers.principals",
+        "tai42_skeleton.routers.members",
+        "tai42_skeleton.routers.member_actions",
         "tai42_accounts_postgres.routes_login",
         "tai42_accounts_postgres.routes_users",
     ]
@@ -193,6 +197,8 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
             "tai42_skeleton.routers.login",
             "tai42_skeleton.routers.setup",
             "tai42_skeleton.routers.principals",
+            "tai42_skeleton.routers.members",
+            "tai42_skeleton.routers.member_actions",
             "tai42_skeleton.routers.system_kinds",
             "tai42_accounts_postgres.routes_login",
             "tai42_accounts_postgres.routes_users",
@@ -217,10 +223,11 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     # also defaults to ``default``), the template carrying both schemas — both resolve
     # through the default database _base_env already declares; no per-store PG env here.
     env["TAI_SETUP_TOKEN"] = _SETUP_TOKEN
-    # The plugin's rate-limit counters ride the same ACCESS_CONTROL_REDIS_URL the
-    # identity-provider factory receives; sessions live in Postgres, so no plugin Redis
-    # env exists. /api/login needs no path/pattern env — its always-public prefix makes the
-    # login namespace public code-side.
+    # The accounts plugin's login-throttle counters ride its own TAI_ACCOUNTS_REDIS_URL,
+    # the Redis identity provider reads TAI_IDENTITY_REDIS_URL, and the access-control gate
+    # reads ACCESS_CONTROL_REDIS_URL — all pointed at this stack's e2e Redis by
+    # _redis_feature_env; sessions live in Postgres. /api/login needs no path/pattern env —
+    # its always-public prefix makes the login namespace public code-side.
     return StackConfig(
         name="accounts",
         topology=Topology.REPLICAS,
@@ -251,6 +258,8 @@ def build_accounts_fresh_stack(res: StackResources, variants: Variants) -> Stack
             "tai42_skeleton.routers.login",
             "tai42_skeleton.routers.setup",
             "tai42_skeleton.routers.principals",
+            "tai42_skeleton.routers.members",
+            "tai42_skeleton.routers.member_actions",
             "tai42_skeleton.routers.system_kinds",
             "tai42_accounts_postgres.routes_login",
             "tai42_accounts_postgres.routes_users",

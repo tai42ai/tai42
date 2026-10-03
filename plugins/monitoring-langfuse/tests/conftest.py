@@ -17,10 +17,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.monitoring import ProjectConfig
 from tai42_kit.settings import reset_all_settings
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
+from tai42_monitoring_langfuse.project import LangfuseProject
 
 
 class _StubMonitoring:
@@ -60,8 +60,8 @@ def _fresh_settings() -> Iterator[None]:
 
 
 @pytest.fixture
-def project() -> ProjectConfig:
-    return ProjectConfig(public_key="pk-test", secret_key="sk-test", host="http://localhost")
+def project() -> LangfuseProject:
+    return LangfuseProject(public_key="pk-test", secret_key="sk-test", host="http://localhost")
 
 
 @pytest.fixture
@@ -70,7 +70,7 @@ def mock_client() -> MagicMock:
 
 
 @pytest.fixture
-def manager(project: ProjectConfig, mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> LangfuseClientManager:
+def manager(project: LangfuseProject, mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> LangfuseClientManager:
     mgr = LangfuseClientManager([project], project.public_key)
     # Never construct a real Langfuse client in unit tests.
     monkeypatch.setattr(mgr, "_ensure_built", lambda: None)

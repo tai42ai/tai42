@@ -26,9 +26,9 @@ from tai42_contract.interactions import (
     InteractionRequest,
     InteractionResponse,
     ParkDeliveryUnauthorizedError,
-    ParkResumeFailed,
     ParkResumeUnauthorizedError,
     ResumeBuffered,
+    RunTerminalFailed,
     SuspendedInteraction,
 )
 from tai42_contract.states import SubjectCandidates
@@ -177,19 +177,23 @@ async def test_terminal_success_fires_the_address_with_the_run_completion_id(wir
     assert not await _due_present(wired, "iid-1")
 
 
-async def test_terminal_non_success_fires_the_address_failed(wired, monkeypatch):
+async def test_a_returned_value_is_fired_succeeded_without_status_inspection(wired, monkeypatch):
+    # A RETURN from a resume is a SUCCESS (a failure RAISES RunTerminalFailed): the delivery fires
+    # SUCCEEDED with no inspection of the returned value, so a success payload that happens to carry
+    # a ``status`` key reading failure-adjacent is delivered as the success it is.
     tools = _wire_tools(
         monkeypatch,
-        {"resume_tool": lambda _a: {"status": "failed", "error": "boom"}, "deliver_tool": lambda a: None},
+        {"resume_tool": lambda _a: {"status": "failed", "error": "a plain field"}, "deliver_tool": lambda a: None},
     )
     await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
     fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
-    assert fire["arguments"]["status"] == PARK_COMPLETION_FAILED
+    assert fire["arguments"]["status"] == PARK_COMPLETION_SUCCEEDED
+    assert fire["arguments"]["result"] == {"status": "failed", "error": "a plain field"}
 
 
-async def test_park_resume_failed_delivers_failed_and_clears_due(wired, monkeypatch):
+async def test_run_terminal_failed_delivers_failed_and_clears_due(wired, monkeypatch):
     def _raise(_a):
-        raise ParkResumeFailed({"aborted": True})
+        raise RunTerminalFailed({"aborted": True})
 
     tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
     await _seed_due(wired, "iid-1")
@@ -211,6 +215,28 @@ async def test_plain_raise_keeps_the_due_record_and_fires_nothing(wired, monkeyp
     # A receiver-less plain raise KEEPS the record for the reaper and fires no address.
     assert not any(c["key"] == "deliver_tool" for c in tools.calls)
     assert await _due_present(wired, "iid-1")
+
+
+async def test_address_delivery_drops_the_subject_index_membership(wired, monkeypatch):
+    # An answered park moves ``asking`` → ``running`` and KEEPS its subject-index membership while
+    # the run drives. When the terminal is delivered through an ADDRESS the run is complete, so that
+    # running membership must leave — exactly as the subject-track rung drops it via ``add_outcome``.
+    tools = _wire_tools(monkeypatch, {"resume_tool": lambda _a: {"status": "success"}, "deliver_tool": lambda a: None})
+    candidates = SubjectCandidates(target_kind="tool", target_name="tool-a", by_kind={"person": "p1"})
+    parks_key = wired.store.subject_parks_key("tool", "tool-a", "person", "p1")
+    await wired.fake.sadd(parks_key, "iid-1")
+
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=("deliver_tool", {"thread_id": "t1"}),
+        run_delivery_id="rd-1",
+        candidates=candidates,
+    )
+
+    # The address fired AND the interaction left the subject index (its run is complete).
+    assert any(c["key"] == "deliver_tool" for c in tools.calls)
+    assert await wired.fake.smembers(parks_key) == set()
 
 
 # --- the ladder's subject and drop rungs ------------------------------------------------
@@ -309,12 +335,12 @@ async def test_inline_receiver_gets_the_outcome_and_nothing_is_fired(wired, monk
     assert drive_call["run_delivery_id"] is None
 
 
-async def test_inline_receiver_propagates_a_park_resume_failed(wired, monkeypatch):
+async def test_inline_receiver_propagates_a_run_terminal_failed(wired, monkeypatch):
     def _raise(_a):
-        raise ParkResumeFailed({"aborted": True})
+        raise RunTerminalFailed({"aborted": True})
 
     tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
-    with pytest.raises(ParkResumeFailed):
+    with pytest.raises(RunTerminalFailed):
         await _drive(
             wired,
             tool="resume_tool",

@@ -95,15 +95,15 @@ def test_notifications_notify_media_and_template_ride_validated_body(monkeypatch
     assert result.exit_code == 0, result.output
 
     def template_handler(request: httpx.Request) -> httpx.Response:
+        # A template rides as a name/locale reference plus an opaque, channel-owned ``parameters``
+        # object the CLI threads unopened.
         assert json.loads(request.content) == {
             "message": "shipped",
             "channel": "whatsapp",
             "template": {
                 "name": "status_update",
                 "language": "en_US",
-                "header_media": None,
-                "body_parameters": ["A-42"],
-                "buttons": [],
+                "parameters": {"body_parameters": ["A-42"]},
             },
         }
         return data_response("notification sent via 'whatsapp'")
@@ -118,7 +118,7 @@ def test_notifications_notify_media_and_template_ride_validated_body(monkeypatch
             "--channel",
             "whatsapp",
             "--template",
-            '{"name": "status_update", "language": "en_US", "body_parameters": ["A-42"]}',
+            '{"name": "status_update", "language": "en_US", "parameters": {"body_parameters": ["A-42"]}}',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -341,9 +341,7 @@ def test_notifications_notify_options_and_template_still_post(monkeypatch: pytes
             "template": {
                 "name": "status_update",
                 "language": "en_US",
-                "header_media": None,
-                "body_parameters": [],
-                "buttons": [],
+                "parameters": None,
             },
             "options": [{"kind": "reply", "text": "Yes", "description": None, "id": None}],
         }
@@ -499,9 +497,10 @@ def test_notifications_notify_header_and_footer_ride_with_options(monkeypatch: p
 
 
 def test_notifications_notify_unknown_template_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The pre-7 ``parameters`` key (now ``body_parameters``) is not a ChannelTemplate field.
-    # The CLI rejects it LOUDLY rather than letting model_validate silently drop it — no request
-    # leaves and the accepted keys are named.
+    # A channel-specific parameter key (``body_parameters``) belongs INSIDE the opaque
+    # ``parameters`` object, not at the top level of the template reference — it is not a
+    # ChannelTemplate field. The CLI rejects the stray top-level key LOUDLY rather than letting
+    # model_validate silently drop it — no request leaves and the accepted keys are named.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request must be made for an unknown template key")
 
@@ -515,12 +514,12 @@ def test_notifications_notify_unknown_template_key_raises_before_request(monkeyp
             "--channel",
             "whatsapp",
             "--template",
-            '{"name": "status_update", "language": "en_US", "parameters": ["A-42"]}',
+            '{"name": "status_update", "language": "en_US", "body_parameters": ["A-42"]}',
         ],
     )
     assert result.exit_code != 0
-    assert "parameters" in result.output.lower()
     assert "body_parameters" in result.output.lower()
+    assert "parameters" in result.output.lower()
 
 
 def test_notifications_notify_unknown_location_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:

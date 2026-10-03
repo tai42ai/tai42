@@ -381,10 +381,14 @@ async def _resume_one(
         answer=answer,
         park_context=_mixed_context(ctx, park_candidates, request),
         park_asked_by=request.asked_by,
+        caller_ask_landing=request.caller_ask_landing,
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=park_candidates,
         receives_outcome=receives_outcome,
+        deferred_binding=request.deferred_binding,
+        run_input=request.run_input,
+        door_id=request.door_id,
     )
 
 

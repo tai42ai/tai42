@@ -84,15 +84,8 @@ class ConversationsFacet:
         """The thread's participant messages accepted after ``after`` and not yet carried into a turn."""
         return await self._app._conversation_pending_messages(thread_id, after=after)
 
-    def register_target_validator(self, target_kind: ConversationTargetKind, validator: TargetBindValidator) -> None:
-        """Register a bind ``validator`` for ``target_kind``."""
-        self._app._target_validator_registry.register(target_kind, validator)
-
-    def target_validator(self, target_kind: str) -> TargetBindValidator | None:
-        """The registered bind validator for ``target_kind``, or ``None`` when none is registered.
-
-        Skeleton-only — ``create_conversation_route`` consults it, so it is not on the
-        ``AppConversations`` protocol (the register-only seam), the precedent
-        ``AppPresets.write_validator`` sets.
-        """
-        return self._app._target_validator_registry.get(target_kind)
+    def register_target_validator(
+        self, target_kind: ConversationTargetKind, target_name: str, validator: TargetBindValidator
+    ) -> None:
+        """Register a bind ``validator`` for the ``(target_kind, target_name)`` the plugin owns."""
+        self._app._target_validator_registry.register(target_kind, target_name, validator)

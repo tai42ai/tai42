@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
@@ -15,17 +17,30 @@ from tai42_kit.utils.data import run_jq_first
 import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.roles import (
-    EDITOR_JQ,
-    VIEWER_JQ,
     SkeletonAccountsAdminServices,
     apply_role,
+    editor_jq,
     role_store,
     seed_default_roles,
+    viewer_jq,
 )
 from tai42_skeleton.access_control.store import access_control_store
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx
 from .test_policy_store import _MemStore
+
+# A NEUTRAL self-service route — NOT any one provider's path. It proves the
+# editor/viewer carve-in is built from whatever route DECLARES ``self_service=True``,
+# so the platform never names an implementation's route.
+_NEUTRAL_SELF_SERVICE_PATH = "/api/auth/widgets/me/rotate"
+
+
+@pytest.fixture
+def neutral_self_service_route(monkeypatch):
+    """Make the jq builders see one neutral declared self-service route."""
+    import tai42_skeleton.access_control.roles as roles_module
+
+    monkeypatch.setattr(roles_module, "self_service_route_paths", lambda: {_NEUTRAL_SELF_SERVICE_PATH})
 
 
 class _SpyProvider(ApiKeyIdentityProvider):
@@ -106,11 +121,11 @@ async def _allows(jq: str, path: str, method: str) -> bool:
         ("/api/auth/public-routes", "POST", False),  # admin area gated
         ("/api/auth/roles", "GET", False),  # the roles management surface is admin-only
         ("/api/auth/logout", "POST", True),
-        ("/api/auth/users/me/password", "PUT", True),
+        (_NEUTRAL_SELF_SERVICE_PATH, "PUT", True),  # a registered provider's self-service route
     ],
 )
-async def test_editor_jq_matrix(path, method, allowed):
-    assert await _allows(EDITOR_JQ, path, method) is allowed
+async def test_editor_jq_matrix(neutral_self_service_route, path, method, allowed):
+    assert await _allows(editor_jq(), path, method) is allowed
 
 
 @pytest.mark.parametrize(
@@ -127,7 +142,7 @@ async def test_editor_jq_matrix(path, method, allowed):
         # the leg is in BOTH conjuncts — the both-conjuncts pin.
         ("/api/auth/claim-links", "POST", True),
         ("/api/auth/logout", "POST", True),
-        ("/api/auth/users/me/password", "PUT", True),
+        (_NEUTRAL_SELF_SERVICE_PATH, "PUT", True),  # a registered provider's self-service route
         ("/api/auth/me", "GET", True),  # capability projection carve-in (read-only)
         ("/api/auth/me", "POST", False),  # only the read-only leg admits /me for a viewer
         ("/api/auth/scopes", "GET", True),
@@ -135,8 +150,38 @@ async def test_editor_jq_matrix(path, method, allowed):
         ("/api/auth/public-routes", "GET", False),  # admin area gated even for reads
     ],
 )
-async def test_viewer_jq_matrix(path, method, allowed):
-    assert await _allows(VIEWER_JQ, path, method) is allowed
+async def test_viewer_jq_matrix(neutral_self_service_route, path, method, allowed):
+    assert await _allows(viewer_jq(), path, method) is allowed
+
+
+async def test_self_service_carve_in_is_route_declared(neutral_self_service_route):
+    # A declared self-service route is carved into both ceilings...
+    assert _NEUTRAL_SELF_SERVICE_PATH in editor_jq()
+    assert _NEUTRAL_SELF_SERVICE_PATH in viewer_jq()
+    assert await _allows(editor_jq(), _NEUTRAL_SELF_SERVICE_PATH, "PUT") is True
+
+
+def test_self_service_route_paths_reads_the_registry_flag(monkeypatch):
+    # ``self_service_route_paths`` derives the set from the route registry's ``self_service``
+    # flag exactly as ``grantable_feature_tags`` derives the grant map — a route declaring the
+    # flag is in; one that does not is not; the platform names no route of its own.
+    import tai42_skeleton.access_control.roles as roles_module
+    import tai42_skeleton.app.route_registry as route_registry_module
+
+    routes = [
+        SimpleNamespace(path=_NEUTRAL_SELF_SERVICE_PATH, self_service=True),
+        SimpleNamespace(path="/api/auth/admin/thing", self_service=False),
+        SimpleNamespace(path="/api/tools/run", self_service=False),
+    ]
+    monkeypatch.setattr(route_registry_module, "load_all_routes", lambda: routes)
+    assert roles_module.self_service_route_paths() == {_NEUTRAL_SELF_SERVICE_PATH}
+
+
+async def test_no_self_service_route_without_a_declaring_route():
+    # With no route declaring itself self-service, the platform carves in nothing of its own:
+    # the control plane stays admin-only but for the platform's fixed self-service set.
+    assert _NEUTRAL_SELF_SERVICE_PATH not in editor_jq()
+    assert await _allows(editor_jq(), _NEUTRAL_SELF_SERVICE_PATH, "PUT") is False
 
 
 # -- the admin-only fence is the route action-class, enforced in code --------
@@ -173,7 +218,7 @@ async def _level_allows(role_name: str, path: str, method: str) -> tuple[bool, o
 
     # A non-admin policy carries its base-tier condition, so ``is_admin_policy`` is False
     # (a scopes-only ["*"] with no condition would read as admin and skip the pass).
-    base = {"editor": EDITOR_JQ, "viewer": VIEWER_JQ}[role_name]
+    base = {"editor": editor_jq(), "viewer": viewer_jq()}[role_name]
     policy = AccessPolicy(scopes=["*"], condition=TemplatedText(content=base), policy_data={"role": role_name})
     return await role_level_decision(policy, None, path, method, 0)
 
@@ -421,7 +466,7 @@ async def test_apply_role_upserts_when_no_prior_policy(mem, pg: FakeAccessContro
 async def test_apply_role_copies_and_does_not_retroapply(mem, pg: FakeAccessControlPg, redis_mgmt):
     await seed_default_roles()
     await apply_role("bob", "editor")
-    assert pg.policy_body("bob")["condition"] == TemplatedText(content=EDITOR_JQ).model_dump()
+    assert pg.policy_body("bob")["condition"] == TemplatedText(content=editor_jq()).model_dump()
     # Editing the template afterwards does NOT change bob's already-applied policy.
     await mem.save_version(
         "role",
@@ -433,7 +478,7 @@ async def test_apply_role_copies_and_does_not_retroapply(mem, pg: FakeAccessCont
             "description": "x",
         },
     )
-    assert pg.policy_body("bob")["condition"] == TemplatedText(content=EDITOR_JQ).model_dump()
+    assert pg.policy_body("bob")["condition"] == TemplatedText(content=editor_jq()).model_dump()
 
 
 async def test_apply_role_preserves_disabled_marker(mem, pg: FakeAccessControlPg, redis_mgmt):
@@ -447,7 +492,7 @@ async def test_apply_role_preserves_disabled_marker(mem, pg: FakeAccessControlPg
     body = pg.policy_body("bob")
     assert body["policy_data"]["disabled"] is True  # the marker survived the re-role
     assert body["scopes"] == ["*"]  # scopes WERE updated
-    assert body["condition"] == TemplatedText(content=EDITOR_JQ).model_dump()  # condition WAS updated
+    assert body["condition"] == TemplatedText(content=editor_jq()).model_dump()  # condition WAS updated
 
 
 async def test_apply_role_unknown_raises_keyerror(mem, pg: FakeAccessControlPg, redis_mgmt):
@@ -460,7 +505,7 @@ async def test_apply_role_normalizes_condition_dimension(mem, pg: FakeAccessCont
     await seed_default_roles()
     # A prior role leaves a condition; re-assigning admin (no condition) clears it.
     await apply_role("bob", "editor")
-    assert pg.policy_body("bob")["condition"] == {"content": EDITOR_JQ}
+    assert pg.policy_body("bob")["condition"] == {"content": editor_jq()}
     await apply_role("bob", "admin")
     body = pg.policy_body("bob")
     assert body["condition"] is None
@@ -477,7 +522,7 @@ async def test_services_apply_role_bumps_version(mem, pg: FakeAccessControlPg, r
     await seed_default_roles()
     services = SkeletonAccountsAdminServices()
     await services.apply_role("bob", "viewer")
-    assert pg.policy_body("bob")["condition"] == TemplatedText(content=VIEWER_JQ).model_dump()
+    assert pg.policy_body("bob")["condition"] == TemplatedText(content=viewer_jq()).model_dump()
     assert int(redis_mgmt._strings["ac:policy_version"]) >= 1
 
 

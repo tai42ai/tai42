@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.backup import BackupSectionReport
 from tai42_contract.states.errors import StatesError
 from tai42_contract.states.models import AttachBody, StateDeclaration, StateTemplateDocument, WriteOrigin
 
@@ -194,10 +195,13 @@ async def _import_records(payload: dict[str, Any], report: dict[str, Any]) -> No
         report["records"]["restored"] += len(rows)
 
 
-async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
+async def import_states(payload: dict[str, Any]) -> BackupSectionReport:
     """The section importer: upsert templates, declarations, attachments, aliases, then records through the facet doors.
 
-    Reports per-entity outcomes. A newer payload version is refused.
+    Rolls the per-entity outcomes into the typed section report: ``created`` sums each
+    entity kind's newly-made rows (and the bulk-restored aliases/records), ``updated`` the
+    replaced rows, ``skipped`` the per-entity REJECTIONS (each also in ``errors``). The
+    full per-entity breakdown rides ``details``. A newer payload version is refused.
     """
     version = payload.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
@@ -208,13 +212,19 @@ async def import_states(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             "cannot import the states section: bind the 'states' component's database to enable the feature"
         )
-    report = _new_import_report()
-    await _import_templates(payload, report)
-    await _import_declarations(payload, report)
-    await _import_attachments(payload, report)
-    await _import_aliases(payload, report)
-    await _import_records(payload, report)
-    return report
+    tally = _new_import_report()
+    await _import_templates(payload, tally)
+    await _import_declarations(payload, tally)
+    await _import_attachments(payload, tally)
+    await _import_aliases(payload, tally)
+    await _import_records(payload, tally)
+
+    errors = tally.pop("errors")
+    entities = tally.values()
+    created = sum(entity.get("created", 0) + entity.get("restored", 0) for entity in entities)
+    updated = sum(entity.get("updated", 0) for entity in entities)
+    skipped = sum(entity.get("failed", 0) for entity in entities)
+    return BackupSectionReport(created=created, updated=updated, skipped=skipped, errors=errors, details=tally)
 
 
 def register_states_backup_section(registry: Any) -> None:

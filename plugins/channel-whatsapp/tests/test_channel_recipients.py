@@ -72,7 +72,9 @@ async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_
         ChannelNotification(
             message="Item done.",
             recipient=ALLOWED_A,
-            template=ChannelTemplate(name="status_update", language="en_US", body_parameters=["Jane", "A-42"]),
+            template=ChannelTemplate(
+                name="status_update", language="en_US", parameters={"body_parameters": ["Jane", "A-42"]}
+            ),
         )
     )
 

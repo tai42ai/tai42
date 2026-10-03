@@ -17,14 +17,42 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from tai42_kit.clients import client_ctx
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.settings import llm_provider_settings
 
+from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations import operation
 from tai42_skeleton.operations.response_models_group_c import CheckpointSweepResult
 
 # Providers with a persisted store the sweep walks; redis uses a native key TTL, memory is process-lifetime.
 _SWEEPABLE_PROVIDERS = frozenset({"postgres", "sqlite"})
+
+
+async def _threads_with_live_parks(thread_ids: list[str]) -> set[str]:
+    """The subset of ``thread_ids`` that still back at least one live async park.
+
+    Reads the interactions store's thread reverse index UNION the thread subject index — the
+    platform's authoritative reach of a thread's live parks, the SAME reach a thread delete kills
+    through (:func:`~tai42_skeleton.interactions.helper.cancel_parks_for_thread`). A terminal exit
+    removes a park's member, so a member present here is a park still waiting for an answer or its
+    expiry. Empty when the interactions store is unconfigured — no park could ever have been
+    persisted.
+    """
+    settings = interactions_settings()
+    if not settings.redis.redis_url:
+        return set()
+    store = InteractionStore(settings.key_prefix)
+    parked: set[str] = set()
+    async with client_ctx(RedisClient, settings.redis) as conn:
+        for thread_id in thread_ids:
+            if await store.thread_park_members(conn, thread_id) or await store.subject_members(
+                conn, "thread", thread_id
+            ):
+                parked.add(thread_id)
+    return parked
 
 
 @operation(
@@ -77,12 +105,18 @@ async def sweep_checkpoints() -> dict[str, Any]:
             newest_by_thread[thread_id] = ts
 
     stale = sorted(thread_id for thread_id, ts in newest_by_thread.items() if ts < cutoff)
-    for thread_id in stale:
+    # A thread backing a still-live async park is NOT idle: deleting its checkpoints would destroy
+    # a run that is parked and waiting for an answer or its expiry. Keep every such thread — the
+    # idle-staleness heuristic cannot see that a parked run is alive, so the live-park index is
+    # consulted before any delete.
+    parked = await _threads_with_live_parks(stale)
+    swept = [thread_id for thread_id in stale if thread_id not in parked]
+    for thread_id in swept:
         await saver.adelete_thread(thread_id)
 
     return {
         "provider": provider,
         "ttl_minutes": ttl_minutes,
-        "swept_count": len(stale),
-        "swept_threads": stale,
+        "swept_count": len(swept),
+        "swept_threads": swept,
     }

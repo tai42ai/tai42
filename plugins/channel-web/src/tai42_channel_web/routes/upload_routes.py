@@ -127,7 +127,6 @@ async def _ingest_upload(upload: UploadFile, address: str) -> IngestedMedia | Re
             declared_mime=upload.content_type,
             filename=upload.filename,
             declared_size=upload.size,
-            integrity_sha256=None,
             origin=origin,
         )
     except MediaTooLargeError:

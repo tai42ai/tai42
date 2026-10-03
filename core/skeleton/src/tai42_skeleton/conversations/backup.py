@@ -18,6 +18,7 @@ import secrets
 from typing import Any, Literal
 
 from pydantic import ValidationError
+from tai42_contract.backup import BackupSectionReport
 from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
@@ -29,11 +30,11 @@ from tai42_skeleton.conversations.managers.in_memory_conversations_manager impor
 
 logger = logging.getLogger(__name__)
 
-_SectionReport = dict[str, Any]
 
-
-def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": [], "new_callback_secrets": []}
+def _empty_report() -> BackupSectionReport:
+    # ``skipped_existing`` (routes left untouched under ``skip``) and the once-shown
+    # ``new_callback_secrets`` are this section's own counts, so they ride ``details``.
+    return BackupSectionReport(details={"skipped_existing": 0, "new_callback_secrets": []})
 
 
 def _channel_identity(route: ConversationRoute) -> tuple[str, str] | None:
@@ -65,7 +66,7 @@ async def export_conversation_routes() -> dict[str, Any]:
 
 
 def _validate_row(
-    item: Any, existing: dict[str, ConversationRoute], mode: Literal["skip", "overwrite"], report: _SectionReport
+    item: Any, existing: dict[str, ConversationRoute], mode: Literal["skip", "overwrite"], report: BackupSectionReport
 ) -> ConversationRoute | None:
     """The :class:`ConversationRoute` a backup row parses to, or ``None`` when it is not written.
 
@@ -78,17 +79,17 @@ def _validate_row(
         route = ConversationRoute.model_validate(item)
     except ValidationError as exc:
         # Rejected per row rather than written unanchored.
-        report["errors"].append(f"route {route_name!r}: {exc}")
-        report["skipped"] += 1
+        report.errors.append(f"route {route_name!r}: {exc}")
+        report.skipped += 1
         return None
     if route.route_name in existing and mode == "skip":
-        report["skipped_existing"] += 1
+        report.details["skipped_existing"] += 1
         return None
     return route
 
 
 async def _authorize_row(
-    route: ConversationRoute, scan: ExecutionKeyScan, claimed: dict[tuple[str, str], str], report: _SectionReport
+    route: ConversationRoute, scan: ExecutionKeyScan, claimed: dict[tuple[str, str], str], report: BackupSectionReport
 ) -> bool:
     """Whether ``route`` may be written.
 
@@ -103,16 +104,38 @@ async def _authorize_row(
     except (ExecutionKeyAuthorityError, TokenFreeConditionError) as exc:
         # A property of the ROW, so it is rejected per row. Other types (a corrupt stored
         # policy, a store read error) propagate as the section's own failure.
-        report["errors"].append(f"route {route.route_name!r}: {exc}")
-        report["skipped"] += 1
+        report.errors.append(f"route {route.route_name!r}: {exc}")
+        report.skipped += 1
         return False
     pair = _channel_identity(route)
     holder = claimed.get(pair) if pair is not None else None
     if pair is not None and holder is not None and holder != route.route_name:
-        report["errors"].append(
+        report.errors.append(
             f"route {route.route_name!r}: channel {pair[0]!r} identity {pair[1]!r} is already routed by {holder!r}"
         )
-        report["skipped"] += 1
+        report.skipped += 1
+        return False
+    return True
+
+
+async def _bind_check_row(route: ConversationRoute, report: BackupSectionReport) -> bool:
+    """Whether ``route`` passes the SAME bind check the create door runs, a per-row rejection on failure.
+
+    Resolves the row's target to its owner and runs the platform's own rules plus the owner's
+    validator against the target's active body; a target with a bind-time defect against the route's
+    door fields — an asking target bound with no reply/resume path, say — is rejected per row in the
+    report rather than restored as a route that cannot run.
+    """
+    from tai42_skeleton.conversations.target_validators import (
+        active_target_candidate_body,
+        target_bind_refusal_lines,
+    )
+
+    candidate = await active_target_candidate_body(route.target_kind, route.target_name)
+    lines = await target_bind_refusal_lines(route, candidate)
+    if lines:
+        report.errors.append(f"route {route.route_name!r}: {'; '.join(lines)}")
+        report.skipped += 1
         return False
     return True
 
@@ -122,7 +145,7 @@ async def _write_row(
     manager: BaseConversationsManager,
     existing: dict[str, ConversationRoute],
     claimed: dict[tuple[str, str], str],
-    report: _SectionReport,
+    report: BackupSectionReport,
 ) -> None:
     """Persist ``route`` with a freshly minted callback secret (shown once) and record it.
 
@@ -141,16 +164,18 @@ async def _write_row(
     if pair is not None:
         claimed[pair] = route.route_name
     if route.route_name in existing:
-        report["updated"] += 1
+        report.updated += 1
     else:
-        report["created"] += 1
+        report.created += 1
     if callback_secret is not None:
-        report["new_callback_secrets"].append({"route_name": route.route_name, "callback_secret": callback_secret})
+        report.details["new_callback_secrets"].append(
+            {"route_name": route.route_name, "callback_secret": callback_secret}
+        )
 
 
 async def import_conversation_routes(
     payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
-) -> _SectionReport:
+) -> BackupSectionReport:
     """Restore routing rows, keyed by ``route_name``.
 
     A malformed envelope raises BEFORE any write. Each row written is validated, its
@@ -189,6 +214,8 @@ async def import_conversation_routes(
         if route is None:
             continue
         if not await _authorize_row(route, scan, claimed, report):
+            continue
+        if not await _bind_check_row(route, report):
             continue
         await _write_row(route, manager, existing, claimed, report)
 

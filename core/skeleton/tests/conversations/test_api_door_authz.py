@@ -13,6 +13,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_identity_redis import redis_api_key_provider as provider_module
+from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
 import tai42_skeleton.conversations as conversations_package
@@ -110,12 +111,12 @@ def client(monkeypatch, bound_app) -> TestClient:
     ac_settings = AccessControlSettings(path_patterns={_MESSAGES_PATTERN: _TEMPLATE})
     redis = FakeRedis(
         hashes={
-            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {
+            f"{redis_identity_settings().key_prefix}{hash_api_key(_SENDER_KEY)}": {
                 "user_id": "sender",
                 "description": "d",
                 "owner_user_id": "owner1",
             },
-            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {
+            f"{redis_identity_settings().key_prefix}{hash_api_key(_STRANGER_KEY)}": {
                 "user_id": "stranger",
                 "description": "d",
                 "owner_user_id": "owner1",
@@ -234,12 +235,12 @@ def event_client(monkeypatch, bound_app) -> TestClient:
     ac_settings = AccessControlSettings(path_patterns={_EVENTS_PATTERN: _TEMPLATE})
     redis = FakeRedis(
         hashes={
-            f"{ac_settings.key_prefix}{hash_api_key(_SENDER_KEY)}": {
+            f"{redis_identity_settings().key_prefix}{hash_api_key(_SENDER_KEY)}": {
                 "user_id": "sender",
                 "description": "d",
                 "owner_user_id": "owner1",
             },
-            f"{ac_settings.key_prefix}{hash_api_key(_STRANGER_KEY)}": {
+            f"{redis_identity_settings().key_prefix}{hash_api_key(_STRANGER_KEY)}": {
                 "user_id": "stranger",
                 "description": "d",
                 "owner_user_id": "owner1",

@@ -333,6 +333,7 @@ def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
     from typing import cast
 
     from fastmcp.server.middleware import MiddlewareContext
+    from fastmcp.tools.base import ToolResult
 
     from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
 
@@ -354,10 +355,10 @@ def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
             context = SimpleNamespace(message=message, fastmcp_context=None)
             dispatched: dict[str, Any] = {}
 
-            async def call_next(_ctx: object) -> object:
+            async def call_next(_ctx: object) -> ToolResult:
                 # The edge fires ``context.message`` — read the arguments it will dispatch.
                 dispatched["arguments"] = message.arguments
-                return SimpleNamespace(structured_content=None)
+                return ToolResult(structured_content={"done": True})
 
             await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
 
@@ -394,6 +395,49 @@ def test_injections_run_even_when_arguments_is_None_one_invariant() -> None:
             assert "v_in" in fake.evals
             # ...and the update engaged on the clean success — one shared guard.
             assert any(name == "v_up" for name, _ in fake.applies)
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_binding_update_runs_over_the_tool_output_not_the_toolresult() -> None:
+    # HIGH: at the MCP ``tools/call`` edge the binding's UPDATE jq must run over the tool's
+    # reduced OUTPUT (the ``ToolResult``'s structured content), exactly as the in-process door
+    # runs it over the raw return — not over the opaque ``ToolResult`` wrapper, whose top level
+    # carries no tool field, so ``.ok`` would resolve to null and the state write would be wrong.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from fastmcp.server.middleware import MiddlewareContext
+    from fastmcp.tools.base import ToolResult
+
+    from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
+
+    seen: dict[str, Any] = {}
+    fake = _FakeStates(record={})
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            fake.patch_onto(app._states_facet)
+            binding = StateBinding(
+                states=[
+                    _attach(
+                        updates=[StateUpdate(jq=TemplatedText(content='[{op: "set", path: ["last"], value: .ok}]'))]
+                    )
+                ]
+            )
+            await _register_preset("pe", binding, seen)
+
+            mw = DispatchScopeMiddleware(app)
+            message = SimpleNamespace(name="pe", arguments={"x": 5})
+            context = SimpleNamespace(message=message, fastmcp_context=None)
+
+            async def call_next(_ctx: object) -> ToolResult:
+                return ToolResult(structured_content={"ok": 5})
+
+            await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)
+
+            # The update's ``.ok`` resolved against the tool's output (5), not the ToolResult.
+            assert ("__custom__", [{"op": "set", "path": ["last"], "value": 5}]) in fake.applies
 
     asyncio.run(run())
 
@@ -458,6 +502,7 @@ def test_mcp_edge_passes_an_encodable_result() -> None:
     from typing import cast
 
     from fastmcp.server.middleware import MiddlewareContext
+    from fastmcp.tools.base import ToolResult
 
     from tai42_skeleton.tools.dispatch_scope import DispatchScopeMiddleware
 
@@ -466,9 +511,9 @@ def test_mcp_edge_passes_an_encodable_result() -> None:
             mw = DispatchScopeMiddleware(app)
             message = SimpleNamespace(name="emits", arguments={})
             context = SimpleNamespace(message=message, fastmcp_context=None)
-            sentinel = SimpleNamespace(structured_content={"emoji": "😀"}, content=[])
+            sentinel = ToolResult(structured_content={"emoji": "😀"})
 
-            async def call_next(_ctx: object) -> object:
+            async def call_next(_ctx: object) -> ToolResult:
                 return sentinel
 
             result = await mw.on_call_tool(cast(MiddlewareContext[Any], context), call_next)

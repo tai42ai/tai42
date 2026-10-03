@@ -91,7 +91,7 @@ def _verifier(settings: AccessControlSettings) -> AccessControlVerifier:
     """
 
     def _factories() -> list[IdentityProvider]:
-        return [get_identity_provider_factory(name)(settings) for name in settings.auth_providers]
+        return [get_identity_provider_factory(name)(settings) for name in settings.resolved_auth_providers()]
 
     return AccessControlVerifier(settings, provider_factories=_factories)
 

@@ -23,20 +23,24 @@ carries ``.request.method``/``.request.path``.
 - ``admin``: unconditional ``["*"]``, ``allow_all`` — full control including
   access-control administration. Its per-tag pass is SKIPPED at enforcement; it is
   reserved, permanent, and un-lockable.
-- ``editor``: ``["*"]`` under ``EDITOR_JQ`` (the ``/api/auth`` control-plane gate with
+- ``editor``: ``["*"]`` under :func:`editor_jq` (the ``/api/auth`` control-plane gate with
   self-service carve-outs), with ``write`` on every grantable feature tag — everything
   EXCEPT the admin-only fence and the access-control admin area, self-service surfaces
   carved back in (own API keys, tokens payload, mint capabilities, ``/api/auth/logout``,
-  own-password change, the read-only scopes listing, ``/api/auth/me``, one-time
-  claim-link creation).
-- ``viewer``: ``["*"]`` under ``VIEWER_JQ`` (the viewer read-only ceiling), with ``read``
+  the read-only scopes listing, ``/api/auth/me``, one-time claim-link creation) plus every
+  self-service route the registered accounts providers declare.
+- ``viewer``: ``["*"]`` under :func:`viewer_jq` (the viewer read-only ceiling), with ``read``
   on every grantable feature tag — read-only plus login/logout and own-key management.
+
+The base-tier jq is BUILT per deployment: the platform-owned clauses are fixed, and each
+registered accounts provider's declared self-service routes are appended, so the platform
+names no provider's route.
 
 No ``/api/login`` clause exists in either base-tier string: always-public paths
 short-circuit to the public resource id before any jq evaluates, so a login-namespace
 carve-out would be dead text.
 
-The ``EDITOR_JQ``/``VIEWER_JQ`` carve-in admits the whole ``/api/auth/api-keys`` subtree
+The :func:`editor_jq`/:func:`viewer_jq` carve-in admits the whole ``/api/auth/api-keys`` subtree
 for own-key CRUD, but the policy-administration routes beneath it
 (``/api/auth/api-keys/{user_id}/policy/versions`` and ``.../policy/rollback``) are
 enforced ADMIN-ONLY at the route level: a non-admin editor/viewer is denied there
@@ -46,6 +50,7 @@ enforced policy back to a prior version.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
@@ -73,12 +78,15 @@ RESERVED_ADMIN_ROLE = "admin"
 # no pointer so that discriminator holds byte-for-byte.
 ROLE_POINTER_KEY = "role"
 
-# editor = everything except the access-control admin area, with the self-service
-# surfaces carved back in (own keys / tokens-payload / capabilities / me /
-# one-time claim-link creation / GET scopes / logout / own-password). This is the
-# base-tier control-plane ceiling; the admin-only mutation fence is the route
-# action-class (enforced in code), not composed here.
-_EDITOR_AUTH_CARVE = (
+# The platform-owned control-plane carve-ins (editor ceiling): the skeleton's own
+# self-service surfaces — own keys, tokens-payload, capabilities, me, one-time
+# claim-link creation, GET scopes, logout — plus "everything outside /api/auth". The
+# routes an accounts provider owns for self-service (own-credential change and the
+# like) are NOT named here: they are appended at build time from the registered
+# providers (see :func:`_self_service_route_clauses`), so the platform never names an
+# implementation's route. This is the base-tier control-plane ceiling; the admin-only
+# mutation fence is the route action-class (enforced in code), not composed here.
+_EDITOR_FIXED_CARVE = (
     '((.request.path | startswith("/api/auth")) | not) '
     'or (.request.path | startswith("/api/auth/api-keys")) '
     'or (.request.path == "/api/auth/tokens-payload") '
@@ -86,33 +94,64 @@ _EDITOR_AUTH_CARVE = (
     'or (.request.path == "/api/auth/me") '
     'or (.request.path == "/api/auth/claim-links") '
     'or ((.request.path == "/api/auth/scopes") and (.request.method == "GET")) '
-    'or (.request.path == "/api/auth/logout") '
-    'or (.request.path == "/api/auth/users/me/password")'
+    'or (.request.path == "/api/auth/logout")'
 )
-EDITOR_JQ = f"({_EDITOR_AUTH_CARVE})"
 
-# viewer = read-only methods OR logout OR own-key surface OR own-password OR one-time
-# claim-link creation, so state-changing calls are confined to the self-service
-# surfaces; the second conjunct is the editor control-plane ceiling. This is the
-# base-tier viewer read ceiling; the admin-only mutation fence is the route
-# action-class (enforced in code), not composed here.
-_VIEWER_AUTH_CARVE = (
-    '(((.request.path | startswith("/api/auth/api-keys")) '
+# The platform-owned state-changing self-service surfaces a VIEWER may still invoke
+# (own keys, logout, one-time claim-link creation); the provider-owned self-service
+# routes are appended at build time, as in the editor carve. The read-method clause
+# completes the viewer's first conjunct.
+_VIEWER_FIXED_WRITE_CARVE = (
+    '(.request.path | startswith("/api/auth/api-keys")) '
     'or (.request.path == "/api/auth/logout") '
-    'or (.request.path == "/api/auth/users/me/password") '
-    'or (.request.path == "/api/auth/claim-links") '
-    'or (.request.method | IN("GET","HEAD","OPTIONS"))) '
-    'and (((.request.path | startswith("/api/auth")) | not) '
-    'or (.request.path | startswith("/api/auth/api-keys")) '
-    'or (.request.path == "/api/auth/tokens-payload") '
-    'or (.request.path == "/api/auth/capabilities") '
-    'or (.request.path == "/api/auth/me") '
-    'or (.request.path == "/api/auth/claim-links") '
-    'or ((.request.path == "/api/auth/scopes") and (.request.method == "GET")) '
-    'or (.request.path == "/api/auth/logout") '
-    'or (.request.path == "/api/auth/users/me/password")))'
+    'or (.request.path == "/api/auth/claim-links")'
 )
-VIEWER_JQ = f"({_VIEWER_AUTH_CARVE})"
+
+
+def self_service_route_paths() -> set[str]:
+    """Every registered route that DECLARES itself a caller self-service surface.
+
+    A self-service route (``self_service=True`` at registration) is reachable by a
+    non-admin editor/viewer even under an otherwise admin-gated prefix. Derived from
+    the live route registry exactly as :func:`grantable_feature_tags` derives the grant
+    map, so the platform names no provider's route — a provider that ships a
+    self-service route under ``/api/auth`` declares it, and the seed carves it in.
+    """
+    from tai42_skeleton.app.route_registry import load_all_routes
+
+    return {meta.path for meta in load_all_routes() if meta.self_service}
+
+
+def _self_service_route_clauses() -> str:
+    """The jq ``or``-clauses for every declared self-service route.
+
+    Each declared self-service route becomes an exact-path equality clause carved into
+    the editor/viewer reach. Returns ``""`` when no route declares itself self-service
+    (an identity-only or external-issuer deployment), leaving the base-tier ceiling to
+    the platform-owned clauses alone.
+    """
+    return "".join(f" or (.request.path == {json.dumps(path)})" for path in sorted(self_service_route_paths()))
+
+
+def editor_jq() -> str:
+    """The editor base-tier jq ceiling: the platform-owned carve-ins plus the providers' self-service routes."""
+    return f"({_EDITOR_FIXED_CARVE}{_self_service_route_clauses()})"
+
+
+def viewer_jq() -> str:
+    """The viewer base-tier jq ceiling.
+
+    Read-only methods OR the platform-owned self-service surfaces OR the providers'
+    self-service routes (first conjunct), intersected with the editor control-plane
+    ceiling (second conjunct), so a viewer's state-changing calls are confined to the
+    self-service surfaces. The admin-only mutation fence is the route action-class
+    (enforced in code), not composed here.
+    """
+    self_service = _self_service_route_clauses()
+    read_methods = '(.request.method | IN("GET","HEAD","OPTIONS"))'
+    write_conjunct = f"({_VIEWER_FIXED_WRITE_CARVE}{self_service} or {read_methods})"
+    ceiling = f"({_EDITOR_FIXED_CARVE}{self_service})"
+    return f"({write_conjunct} and {ceiling})"
 
 
 def grantable_feature_tags() -> set[str]:
@@ -151,14 +190,14 @@ def _seeded_roles() -> list[dict[str, Any]]:
             description="Everything except access-control administration; may manage own API keys.",
             base_tier="editor",
             grants=dict.fromkeys(grantable, "write"),
-            condition=TemplatedText(content=EDITOR_JQ),
+            condition=TemplatedText(content=editor_jq()),
         ).model_dump(),
         RoleDefinition(
             name="viewer",
             description="Read-only, plus login/logout and own-key management.",
             base_tier="viewer",
             grants=dict.fromkeys(grantable, "read"),
-            condition=TemplatedText(content=VIEWER_JQ),
+            condition=TemplatedText(content=viewer_jq()),
         ).model_dump(),
     ]
 

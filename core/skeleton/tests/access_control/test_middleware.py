@@ -22,7 +22,7 @@ from tai42_skeleton.access_control.middleware import (
     ResourceGuardMiddleware,
 )
 from tai42_skeleton.access_control.policy import PolicyEnforcer
-from tai42_skeleton.access_control.roles import EDITOR_JQ
+from tai42_skeleton.access_control.roles import editor_jq
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
@@ -539,7 +539,7 @@ async def test_carve_out_is_exact_matching_the_jq_fence():
     # The carve-out membership test uses the EXACT request path (no trailing-slash
     # normalization) so it admits exactly the shape the companion role jq fence admits:
     # ``/api/auth/me`` exact is carved, but ``/api/auth/me/`` is NOT — it falls through to
-    # resolution (here unmapped → 403), mirroring EDITOR_JQ's exact-match, so the two never
+    # resolution (here unmapped → 403), mirroring editor_jq()'s exact-match, so the two never
     # disagree on the trailing-slash variant — a normalizing carve-out would admit
     # ``/api/auth/me/`` here (200) yet the jq fence denies it (403).
     captured: dict = {}
@@ -555,9 +555,9 @@ async def test_carve_out_is_exact_matching_the_jq_fence():
     # jq parity: the editor fence admits the exact path and denies the trailing-slash one,
     # exactly as the carve-out now does.
     enforcer = PolicyEnforcer(AccessControlSettings())
-    await enforcer.enforce({"request": {"path": "/api/auth/me", "method": "GET"}}, EDITOR_JQ)
+    await enforcer.enforce({"request": {"path": "/api/auth/me", "method": "GET"}}, editor_jq())
     with pytest.raises(AuthenticationError):
-        await enforcer.enforce({"request": {"path": "/api/auth/me/", "method": "GET"}}, EDITOR_JQ)
+        await enforcer.enforce({"request": {"path": "/api/auth/me/", "method": "GET"}}, editor_jq())
 
 
 async def test_no_carve_out_configured_leaves_path_to_resolution():

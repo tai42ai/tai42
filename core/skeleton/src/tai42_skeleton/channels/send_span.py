@@ -18,7 +18,7 @@ PII: the recipient rides the span INPUT, never the metadata. The writer masks ON
 input path (``mask_secrets`` unwraps ``SecretValue`` there), so a wrapped value is
 masked; a plain-string recipient still reaches the (self-hosted) monitoring backend
 UNREDACTED, exactly as conversation content already does — recipient redaction is a
-Langfuse-project-side concern, not something this seam performs.
+monitoring-backend-side concern, not something this seam performs.
 """
 
 from __future__ import annotations

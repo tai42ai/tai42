@@ -13,6 +13,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import invite_member, invoke_raw, resolve_action_key
 from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres", "topology:replicas")
@@ -31,7 +32,7 @@ async def test_invite_accept_login_and_rejections(accounts_stack: TaiStack, uniq
     public_b = _unauth(stack, stack.port_b)
 
     email = f"{uniq('invitee')}@e2e.test"
-    invite = await admin.post("/api/auth/users", json={"email": email, "role": "editor"})
+    invite = await invite_member(admin, email=email, role="editor")
     invite_token = invite["invite_token"]
     assert invite["login_path"].startswith("/login?invite="), invite
 
@@ -66,9 +67,10 @@ async def test_invite_accept_login_and_rejections(accounts_stack: TaiStack, uniq
     assert unknown.status_code == 400, f"an unknown invite must 400: {unknown.status_code} {unknown.text}"
 
     # The invited editor is a NON-admin: its jq condition fences it out of the reserved
-    # user-administration surface, so it cannot create (mutate) users.
+    # member-administration surface, so it cannot invoke a member action to create members.
+    invite_key = await resolve_action_key(admin, scope="page")
     editor = stack.api(port=stack.port_b).with_token(session)
-    denied = await editor.request_raw(
-        "POST", "/api/auth/users", json={"email": f"{uniq('x')}@e2e.test", "role": "viewer"}
+    denied = await invoke_raw(
+        editor, action_key=invite_key, action_input={"email": f"{uniq('x')}@e2e.test", "role": "viewer"}
     )
-    assert denied.status_code == 403, f"an invited editor must not mutate /api/auth/users: {denied.status_code}"
+    assert denied.status_code == 403, f"an invited editor must not invoke a member action: {denied.status_code}"

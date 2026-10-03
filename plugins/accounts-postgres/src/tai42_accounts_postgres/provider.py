@@ -11,22 +11,27 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
 from tai42_contract.access_control.identity import AuthIdentity, ReadinessTarget
 from tai42_contract.accounts import (
     FormField,
     FormMethod,
+    InviteEntry,
     LoginAttachError,
     LoginAttachingProvider,
     LoginAttachment,
     LoginCredential,
     LoginMethod,
+    MemberAction,
+    MemberEntry,
+    MemberListing,
     register_accounts_provider,
 )
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import component_store_settings
 
-from tai42_accounts_postgres import service
+from tai42_accounts_postgres import member_actions, service
 from tai42_accounts_postgres.db import COMPONENT, assert_accounts_schema_applied
 from tai42_accounts_postgres.hashing import hash_password_async
 from tai42_accounts_postgres.settings import accounts_settings
@@ -45,10 +50,11 @@ class PostgresAccountsProvider(LoginAttachingProvider):
     """Validate sessions, declare login methods, and attach the owner's login at setup."""
 
     def __init__(self, settings: AccountsProviderSettings) -> None:
-        """Bind the injected ``settings`` (Postgres + Redis connection) to this provider instance."""
-        # The injected settings live on the INSTANCE; the epoch records this provider so
-        # the routes resolve it through the accounts facet — no module holder to leak on
-        # a failed build.
+        """Bind the injected ``settings`` (the application's ``admin`` services) to this instance."""
+        # The injected settings carry the application's policy ``admin`` services; the
+        # plugin's own backing-store configuration lives in ``accounts_settings()``. The
+        # settings live on the INSTANCE; the epoch records this provider so the routes
+        # resolve it through the accounts facet — no module holder to leak on a failed build.
         self.settings = settings
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
@@ -134,6 +140,62 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             ),
         ]
 
+    async def list_members(self) -> MemberListing:
+        """The deployment's people and its open invitations.
+
+        A user awaiting an open (unconsumed) invitation is an INVITE, carrying that
+        invitation's expiry; every other user is a MEMBER. The two lists are disjoint and
+        total — each user appears exactly once, so a user in any anomalous in-between state
+        is shown as a member rather than dropped. Store errors propagate (fail loud).
+
+        Each member carries the platform principal id it holds (this provider provisions one
+        principal per user, keyed by ``user_id``) so the Members aggregator joins the
+        access-control ``disabled`` state from the platform's own principal record; the
+        provider does not report ``disabled`` itself (``users.disabled`` stays this
+        plugin's private bookkeeping). Each row names the provider's own action ids that
+        apply to it.
+        """
+        rows = await service.users_store().list()
+        open_invites = await service.invites_store().list_open()
+        invited_ids = {row["user_id"] for row in open_invites}
+        members = [
+            MemberEntry(
+                id=row["user_id"],
+                email=row["email"],
+                role=row["role"],
+                created_at=row["created_at"],
+                principal_ids=[row["user_id"]],
+                actions=list(member_actions.MEMBER_ROW_ACTIONS),
+            )
+            for row in rows
+            if row["user_id"] not in invited_ids
+        ]
+        invites = [
+            InviteEntry(
+                id=row["user_id"],
+                email=row["email"],
+                role=row["role"],
+                created_at=row["created_at"],
+                expires_at=row["expires_at"],
+                actions=list(member_actions.INVITE_ROW_ACTIONS),
+            )
+            for row in open_invites
+        ]
+        return MemberListing(members=members, invites=invites)
+
+    def member_actions(self) -> list[MemberAction]:
+        """Declare this provider's member-admin actions (static metadata)."""
+        return member_actions.declare_member_actions()
+
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        """Perform this provider's action ``action_id`` against ``target`` with ``payload``.
+
+        ``payload`` is the already-validated instance of the action's declared input model.
+        A correctable failure raises a member-action error from
+        :mod:`tai42_contract.accounts.errors`, which the invoke operation maps to a status.
+        """
+        return await member_actions.invoke(self.settings, action_id, target=target, payload=payload)
+
     async def has_login(self, user_id: str) -> bool:
         """Whether an ``accounts_users`` login row exists for principal ``user_id``.
 
@@ -195,11 +257,11 @@ class PostgresAccountsProvider(LoginAttachingProvider):
         await assert_accounts_schema_applied()
 
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
-        """The provider's backing stores probed by the readiness check: its Postgres and the injected Redis."""
-        # Both backing stores: the plugin's own Postgres and the injected Redis.
+        """The provider's backing stores probed by the readiness check: its Postgres and its Redis."""
+        # Both backing stores: the plugin's own Postgres and its own login-throttle Redis.
         return (
             ReadinessTarget("accounts", PostgresClient, component_store_settings(COMPONENT)),
-            ReadinessTarget("accounts", RedisClient, self.settings.redis),
+            ReadinessTarget("accounts", RedisClient, accounts_settings().redis),
         )
 
 

@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e.member_admin import invite_member, update_member
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
@@ -29,10 +30,11 @@ async def test_owned_key_follows_owner_role_over_time(accounts_stack: TaiStack, 
     stack = accounts_stack
     admin = stack.api(port=stack.port_a)  # seeded root sk- key (unconditional "*" admin)
 
-    # An editor owner with a live policy (create-user applies the role), and a
+    # An editor owner with a live policy (the invite action applies the role), and a
     # machine key owned by that editor.
-    owner = await admin.post("/api/auth/users", json={"email": f"{uniq('owner')}@e2e.test", "role": "editor"})
+    owner = await invite_member(admin, email=f"{uniq('owner')}@e2e.test", role="editor")
     owner_id = owner["user_id"]
+    owner_handle = owner["handle"]
     owned_id = uniq("owned")
     created_key = await admin.post(
         "/api/auth/api-keys",
@@ -63,7 +65,7 @@ async def test_owned_key_follows_owner_role_over_time(accounts_stack: TaiStack, 
     # Demote the owner to viewer — a jq-CONDITION swap on the owner's policy, not a
     # scope change. The same POST is now denied through the key (owner attenuation),
     # once the policy-version bump propagates to replica B.
-    await admin.put(f"/api/auth/users/{owner_id}", json={"role": "viewer"})
+    await update_member(admin, owner_handle, role="viewer")
 
     async def hook_post_denied() -> bool:
         response = await key_b.request_raw(
@@ -90,7 +92,7 @@ async def test_owned_key_follows_owner_role_over_time(accounts_stack: TaiStack, 
     assert alive.status_code == 200, f"a viewer-owned key must still GET: {alive.status_code} {alive.text}"
 
     # Disable the owner — the key is now dead entirely, even for a GET the viewer allowed.
-    await admin.put(f"/api/auth/users/{owner_id}", json={"disabled": True})
+    await update_member(admin, owner_handle, disabled=True)
 
     async def get_denied() -> bool:
         response = await key_b.request_raw("GET", "/api/system/kinds")

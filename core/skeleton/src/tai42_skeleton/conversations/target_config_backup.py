@@ -15,6 +15,7 @@ import logging
 from typing import Any, Literal
 
 from pydantic import ValidationError
+from tai42_contract.backup import BackupSectionReport
 from tai42_contract.conversations import TargetConversationConfig
 
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -22,11 +23,11 @@ from tai42_skeleton.conversations.target_config import ConversationTargetConfigS
 
 logger = logging.getLogger(__name__)
 
-_SectionReport = dict[str, Any]
 
-
-def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+def _empty_report() -> BackupSectionReport:
+    # ``skipped_existing`` (configs left untouched under ``skip``) is this section's own
+    # count, so it rides ``details``.
+    return BackupSectionReport(details={"skipped_existing": 0})
 
 
 async def export_target_configs() -> dict[str, Any]:
@@ -40,7 +41,9 @@ async def export_target_configs() -> dict[str, Any]:
     return {"target_configs": [config.model_dump(mode="json") for config in configs.values()]}
 
 
-async def import_target_configs(payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip") -> _SectionReport:
+async def import_target_configs(
+    payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
+) -> BackupSectionReport:
     """Restore per-target configs, keyed by ``(target_kind, target_name)``.
 
     A malformed envelope raises BEFORE any write. Each row is model-validated; a row failing
@@ -77,18 +80,18 @@ async def import_target_configs(payload: dict[str, Any], mode: Literal["skip", "
             config = TargetConversationConfig.model_validate(item)
         except ValidationError as exc:
             # Rejected per row rather than written unvalidated.
-            report["errors"].append(f"config {key!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"config {key!r}: {exc}")
+            report.skipped += 1
             continue
         pair = (config.target_kind, config.target_name)
         if pair in existing and mode == "skip":
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         await store.upsert(config)
         if pair in existing:
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
         # Now that this pair is stored, a later duplicate in the same payload must treat it as
         # existing: skipped_existing under skip, updated under overwrite.
         existing.add(pair)

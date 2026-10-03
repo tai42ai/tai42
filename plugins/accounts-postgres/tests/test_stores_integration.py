@@ -200,3 +200,24 @@ async def test_invite_create_replaces_prior_for_user(accounts_db: PostgresConnec
     await invites.create("inv-new", uid, _future())  # one live invite per user
     assert await invites.consume("inv-old", _now()) is None
     assert await invites.consume("inv-new", _now()) == uid
+
+
+async def test_list_open_joins_the_invited_person_and_skips_consumed(
+    accounts_db: PostgresConnectionSettings,
+) -> None:
+    users = UsersStore(accounts_db)
+    invites = InvitesStore(accounts_db)
+    pending = await _make_user(users, "pending@a-42.example", "viewer")
+    consumed = await _make_user(users, "consumed@a-42.example", "editor")
+    exp = _future(1800)
+    await invites.create("inv-pending", pending, exp)
+    await invites.create("inv-consumed", consumed, _future())
+    assert await invites.consume("inv-consumed", _now()) == consumed
+
+    rows = await invites.list_open()
+
+    # Only the open invitation is listed, carrying its person's email/role and its expiry.
+    assert [r["user_id"] for r in rows] == [pending]
+    assert rows[0]["email"] == "pending@a-42.example"
+    assert rows[0]["role"] == "viewer"
+    assert rows[0]["expires_at"] == exp

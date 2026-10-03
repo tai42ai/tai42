@@ -29,8 +29,9 @@ from tai42_e2e_fixtures.tools.driving import driving_as
 _CALLER_PARK_IDENTITY = "e2e-caller-driver"
 
 # The resume answer that makes a resumed ``held_run`` drive reach a FAILED terminal: the drive
-# RETURNS a failure-stamped outcome (a business-error terminal, not a plain raise, which would
-# mean "transient, redeliver"), so a receiverless resume leaves a ``failed`` waiting outcome.
+# RAISES the typed run failure (a terminal failure to deliver FAILED, distinct from a plain raise,
+# which would mean "transient, redeliver"), so a receiverless resume leaves a ``failed`` waiting
+# outcome.
 _FAIL_ANSWER = "__held_fail__"
 
 # The resume answer that makes the FIRST drive raise a PLAIN (transient) error — the receiverless
@@ -200,9 +201,13 @@ async def held_run_resume(interaction_id: str, answer: object) -> object:
                 raise RuntimeError("held_run resume transient failure — the reaper must redeliver")
 
     if answer == _FAIL_ANSWER:
-        # A failure-stamped terminal: the ladder reads its status and delivers FAILED, so a
-        # receiverless resume leaves a ``failed`` waiting outcome a later take fails on.
-        return {"status": "failed", "reason": "resume-failed", "chain": chain}
+        # A FAILED terminal: a run fails by RAISING the typed failure (never by returning a
+        # status-keyed value — a return is always a success), so a receiverless resume delivers
+        # FAILED through the ladder and leaves a ``failed`` waiting outcome a later take fails on.
+        # Distinct from the plain raise the transient answer takes above (which means "redeliver").
+        from tai42_contract.interactions import RunTerminalFailed
+
+        raise RunTerminalFailed({"reason": "resume-failed", "chain": chain})
     if not bool(request_payload.get("reask")):
         return {"answer": answer, "chain": chain}
     marker = f"{state.request.question}:reasked"

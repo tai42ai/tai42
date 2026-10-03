@@ -5,8 +5,16 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from pydantic import BaseModel
+
 from tai42_contract.access_control.identity import IdentityProvider
-from tai42_contract.accounts.models import LoginAttachment, LoginCredential, LoginMethod
+from tai42_contract.accounts.models import (
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    MemberAction,
+    MemberListing,
+)
 
 
 @runtime_checkable
@@ -56,13 +64,13 @@ class AccountsAdminServices(Protocol):
 class AccountsProviderSettings(Protocol):
     """Settings shape handed to an accounts-provider factory.
 
-    ``redis`` and ``admin`` are typed loosely for the same reason
-    ``IdentityProviderSettings.redis`` is ``Any``: the contract cannot name
-    application or kit types. ``admin`` carries the application's
-    ``AccountsAdminServices`` implementation.
+    ``admin`` is typed loosely (``Any``) because the contract cannot name the
+    application's ``AccountsAdminServices`` implementation class; it carries that
+    implementation. A provider reads its OWN backing-store handles and key
+    namespaces from its own settings, never off this object, so the contract names
+    no store-specific field here.
     """
 
-    redis: Any
     admin: Any
 
 
@@ -92,6 +100,53 @@ class AccountsProvider(IdentityProvider):
         Called by the application's public login-methods aggregator. Must be
         cheap and side-effect free: this is static, config-derived metadata,
         not I/O (sync by contract, like ``readiness_targets``).
+        """
+        ...
+
+    @abstractmethod
+    async def list_members(self) -> MemberListing:
+        """List the people this provider owns and the invitations it holds.
+
+        Called by the application's Members aggregator, which concatenates one
+        :class:`~tai42_contract.accounts.models.MemberListing` per registered accounts
+        provider into a single deployment-wide view. Each person is a
+        :class:`~tai42_contract.accounts.models.MemberEntry` and each outstanding
+        invitation an :class:`~tai42_contract.accounts.models.InviteEntry`; how a
+        provider partitions its accounts between the two lists is its own concern. Reads
+        the provider's own store, so this is I/O (async). Backend errors raise (the
+        aggregate fails loudly rather than dropping a provider's accounts silently).
+        """
+        ...
+
+    @abstractmethod
+    def member_actions(self) -> list[MemberAction]:
+        """Declare this provider's member-admin actions.
+
+        Static, config-derived metadata, side-effect free (sync by contract, like
+        ``login_methods``). Each :class:`~tai42_contract.accounts.models.MemberAction`
+        names the action's own id, its label (by template id), where it renders, whether
+        it is destructive, and its input/result models. WHICH of these apply to a given
+        row is a separate, state-dependent decision reported per row by ``list_members``
+        (see :attr:`~tai42_contract.accounts.models.MemberEntry.actions`). A provider with
+        no actions returns ``[]``.
+        """
+        ...
+
+    @abstractmethod
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        """Perform the action named by this provider's own ``action_id``.
+
+        ``target`` is the provider's stable id of the member/invite row the action acts on
+        (``None`` for a page-scoped action). ``payload`` is the already-validated instance
+        of the action's declared ``input_model``. Returns an instance of the action's
+        declared ``result_model``, which the platform carries opaquely (it reads no field
+        of it). A correctable failure is raised as a member-action error from
+        :mod:`tai42_contract.accounts.errors` — :class:`~tai42_contract.accounts.errors.MemberActionError`
+        for a rejected input, :class:`~tai42_contract.accounts.errors.MemberActionNotFoundError`
+        for an unknown target, :class:`~tai42_contract.accounts.errors.MemberActionConflictError`
+        for a state conflict, :class:`~tai42_contract.accounts.errors.MemberActionBadRequestError`
+        for a malformed request — so the invoke operation maps it to the matching status
+        without the provider importing the application package.
         """
         ...
 

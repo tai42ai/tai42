@@ -62,10 +62,10 @@ def notify(
         typer.Option(
             "--template",
             help=(
-                "JSON object for an out-of-window template send with contract-7 components — "
-                "``name``, ``language`` and optional ``header_media`` / ``body_parameters`` / "
-                '``buttons``, e.g. \'{"name":"status_update","language":"en_US",'
-                '"body_parameters":["A-42"]}\'.'
+                "JSON object for an out-of-window template send — ``name``, ``language`` and an "
+                "optional channel-owned opaque ``parameters`` object (the declaring channel "
+                'validates its shape), e.g. \'{"name":"status_update","language":"en_US",'
+                '"parameters":{"body":["A-42"]}}\'.'
             ),
         ),
     ] = None,

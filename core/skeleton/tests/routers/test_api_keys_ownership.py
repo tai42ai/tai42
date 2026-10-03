@@ -352,7 +352,7 @@ async def test_list_roles_empty_when_no_role_documents(wired, monkeypatch):
 
 # -- policy-administration routes are admin-only -----------------------------
 #
-# ``EDITOR_JQ``/``VIEWER_JQ`` admit the whole ``/api/auth/api-keys`` subtree for own-key
+# ``editor_jq()``/``viewer_jq()`` admit the whole ``/api/auth/api-keys`` subtree for own-key
 # CRUD, but the policy version-history + rollback routes beneath it are enforced
 # ADMIN-ONLY at the route level: a non-admin editor/viewer must never read another
 # user's policy history (which leaks raw jq conditions) nor roll an enforced policy back.

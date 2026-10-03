@@ -20,7 +20,7 @@ from tai42_skeleton.operations._broadcast import fleet_fanout
 from tai42_skeleton.operations.presets import fanout
 from tai42_skeleton.operations.presets.authoring import _enforce_registration_tier
 from tai42_skeleton.operations.presets.models import PresetRename
-from tai42_skeleton.operations.presets.references import _delete_referees, _rename_referees
+from tai42_skeleton.operations.presets.references import _assert_no_bound_routes, _delete_referees, _rename_referees
 from tai42_skeleton.operations.response_models_group_a import PresetDeleteResult, PresetRenameResult
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
@@ -235,6 +235,10 @@ async def delete_preset(name: str) -> dict[str, Any]:
     blockers = await _delete_referees(name)
     if blockers:
         raise ConflictError(f"preset {name!r} cannot be deleted — held by: {'; '.join(blockers)}")
+    # A conversation route bound to this preset as its target is stranded by a delete (the target
+    # vanishes), so a delete is refused naming those routes, the same way a rename is — the plugin
+    # referees above do not cover routes.
+    await _assert_no_bound_routes(name)
 
     if mgr.is_quarantined(name):
         # A conflicted record was never registered — remove ONLY the stored

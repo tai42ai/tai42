@@ -21,7 +21,22 @@ def _req(body=None, **path_params) -> Request:
     async def _json():
         return body
 
-    return cast(Request, SimpleNamespace(json=_json, path_params=path_params, query_params={}))
+    async def _body():
+        return b"" if body is None else json.dumps(body).encode()
+
+    return cast(Request, SimpleNamespace(json=_json, body=_body, path_params=path_params, query_params={}))
+
+
+def _raw_body_req(raw: bytes, **path_params) -> Request:
+    """A request whose raw body is ``raw`` verbatim — for the malformed-body fan-out doors."""
+
+    async def _body():
+        return raw
+
+    async def _json():
+        return json.loads(raw)
+
+    return cast(Request, SimpleNamespace(json=_json, body=_body, path_params=path_params, query_params={}))
 
 
 def _data(resp):
@@ -602,6 +617,33 @@ async def test_mcp_config_malformed_json_400(fake):
     resp = await router.set_mcp_config(req)
     assert resp.status_code == 400
     assert "Expecting value" in _data(resp)["error"]
+
+
+async def test_deregister_mcp_route_malformed_body_is_400_not_whole_fleet(fake_full):
+    # A truncated/malformed JSON body on a fan-out door must be a loud 400 — never swallowed
+    # into ``targets=None``, which fans the deregister out to the WHOLE fleet.
+    resp = await router.deregister_mcp(_raw_body_req(b'{"targets": ["w1"', title="gh"))
+    assert resp.status_code == 400
+    assert "invalid JSON body" in _data(resp)["error"]
+
+
+async def test_deregister_mcp_route_non_object_body_is_400(fake_full):
+    resp = await router.deregister_mcp(_raw_body_req(b'["w1", "w2"]', title="gh"))
+    assert resp.status_code == 400
+    assert _data(resp)["error"] == "request body must be a JSON object"
+
+
+async def test_reload_mcp_route_non_string_targets_is_400(fake_full):
+    resp = await router.reload_mcp(_raw_body_req(b'{"targets": [1, 2]}', title="gh"))
+    assert resp.status_code == 400
+    assert _data(resp)["error"] == "'targets' must be a list of worker names"
+
+
+async def test_reload_failed_mcps_route_empty_body_is_whole_fleet(fake_full):
+    # A genuinely empty body stays the whole-fleet default (no silent narrowing to 400).
+    resp = await router.reload_failed_mcps(_raw_body_req(b""))
+    assert resp.status_code == 200
+    assert _data(resp)["data"]["results"][0]["payload"] == [{"title": "gh", "status": "ok"}]
 
 
 async def test_reload_mcp_route_targeting_self(fake_full):

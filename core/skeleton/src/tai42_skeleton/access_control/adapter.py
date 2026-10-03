@@ -119,7 +119,7 @@ class AuthAdapter(TokenVerifier):
         # ``IdentityProviderUnavailableError`` so the backend answers the retriable
         # ``reloading`` envelope while a build is in flight and fails closed otherwise.
         providers: list[IdentityProvider] = []
-        for name in self.settings.auth_providers:
+        for name in self.settings.resolved_auth_providers():
             provider = tai42_app.accounts.active_provider(name)
             if provider is None:
                 raise IdentityProviderUnavailableError(f"identity provider {name!r} is not registered")

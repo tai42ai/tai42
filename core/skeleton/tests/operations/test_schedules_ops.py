@@ -1,19 +1,20 @@
 """Op-level oracles for the scheduling operations.
 
 The route oracles (``tests/routers/test_schedules.py``) pin the enveloped surface;
-these pin the ops directly, including the paths all four doors share. Every door
-dispatches a NAMED tool, so every door discriminates an ``UnknownToolError`` by name:
-one naming a DIFFERENT tool than the door asked for is the inner dispatch's own
-failure, so it becomes a structured ``OperationFailedError`` (500) like any other raise
-during execution, never a verdict about the tool the door asked for — including when
-the name is the door's SIBLING marker tool, which is still not the tool that door
-asked for. One naming the door's OWN tool is that tool's absence, and each door answers
-it honestly: ``NotSupportedError`` (501) for ``list_schedules`` / ``delete_schedule``
-(their marker tool passed the presence pre-check and vanished before the dispatch) and
-for ``server_datetime`` (no pre-check at all — the dispatch is how it learns), and
-``NotFoundError`` (404) for ``create_schedule``, whose named tool is the caller's and is
-never covered by the marker pre-check. A typed ``OperationError`` from the dispatch seam
-passes through untouched — a ``PermissionDeniedError`` 403, or the retriable
+these pin the ops directly, including the paths the tool-dispatching doors share.
+``list_schedules`` / ``create_schedule`` / ``delete_schedule`` each dispatch a NAMED
+tool, so each discriminates an ``UnknownToolError`` by name: one naming a DIFFERENT tool
+than the door asked for is the inner dispatch's own failure, so it becomes a structured
+``OperationFailedError`` (500) like any other raise during execution, never a verdict
+about the tool the door asked for — including when the name is the door's SIBLING marker
+tool, which is still not the tool that door asked for. One naming the door's OWN tool is
+that tool's absence, and each door answers it honestly: ``NotSupportedError`` (501) for
+``list_schedules`` / ``delete_schedule`` (their marker tool passed the presence pre-check
+and vanished before the dispatch) and ``NotFoundError`` (404) for ``create_schedule``,
+whose named tool is the caller's and is never covered by the marker pre-check.
+``server_datetime`` dispatches no tool at all — it reads the platform's own clock, so it
+needs no backend and answers unconditionally. A typed ``OperationError`` from the
+dispatch seam passes through untouched — a ``PermissionDeniedError`` 403, or the retriable
 ``OperationSurfaceUnsettledError`` (503) the seam's execution authorization raises while
 the operation surface is being rebuilt.
 
@@ -35,6 +36,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.authz.resolver import OperationSurfaceUnsettledError
@@ -145,13 +147,12 @@ def _assert_warned_server_side(caplog: pytest.LogCaptureFixture, door: str, tool
 
 def _assert_nothing_logged_server_side(caplog: pytest.LogCaptureFixture) -> None:
     """No record at all from the schedules ops logger, at any level. Silence is the
-    contract wherever the outcome is not an anomaly: an unregistered ``current_time_info``
-    is steady-state configuration (the toolbox extra is not installed), so a record there
-    would repeat on every request; a caller naming a tool that is not registered is an
-    ordinary caller error the 404 already answers in full; and a typed ``OperationError``
-    from the dispatch seam is the tool's own answer delivered to the caller intact, a
-    routine refusal such as a 403 rather than a server-side failure. Pinning the absence
-    keeps a later log line from turning any of them into per-request noise."""
+    contract wherever the outcome is not an anomaly: a caller naming a tool that is not
+    registered is an ordinary caller error the 404 already answers in full; and a typed
+    ``OperationError`` from the dispatch seam is the tool's own answer delivered to the
+    caller intact, a routine refusal such as a 403 rather than a server-side failure.
+    Pinning the absence keeps a later log line from turning any of them into per-request
+    noise."""
     assert [r for r in caplog.records if r.name == schedules_ops.logger.name] == []
 
 
@@ -242,76 +243,16 @@ async def test_list_unsettled_operation_surface_is_503(install, caplog) -> None:
     _assert_nothing_logged_server_side(caplog)
 
 
-async def test_server_datetime_501_when_tool_absent(install, caplog) -> None:
-    # This door has no presence pre-check, so the dispatch is where it learns
-    # ``current_time_info`` is not registered — answered as the door's own honest 501. The
-    # absence leaves no server record: an uninstalled toolbox extra is steady-state
-    # configuration, so a log here would repeat on every request.
+async def test_server_datetime_reads_the_platform_clock_without_any_tool(install, caplog) -> None:
+    # The door dispatches no tool: it reads the platform's own clock and answers the typed
+    # server-time structure, needing no backend and no toolbox extra. Nothing is logged —
+    # there is no failure path to record.
     install(_FakeTools(set()))
-    with (
-        caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(NotSupportedError, match="current_time_info tool is not available"),
-    ):
-        await schedules_ops.server_datetime()
-    _assert_nothing_logged_server_side(caplog)
-
-
-async def test_server_datetime_maps_unknown_tool_raised_for_another_name_to_structured_500(install, caplog) -> None:
-    # ``current_time_info`` is registered and ran; the ``UnknownToolError`` that escaped
-    # names a different tool, so it is that inner dispatch's failure — a structured 500
-    # naming that tool, never "the time tool is not available" (501). The caught error
-    # itself stays server-side on an ERROR record.
-    install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=UnknownToolError("not_current_time_info")))
-    with (
-        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
-        pytest.raises(OperationFailedError) as caught,
-    ):
-        await schedules_ops.server_datetime()
-    assert caught.value.message == "server-datetime lookup failed (unknown tool not_current_time_info)"
-    _assert_logged_server_side(caplog, "No such tool: not_current_time_info.")
-
-
-async def test_server_datetime_raise_during_execution_is_500(install, caplog) -> None:
-    # The time tool is registered and ran; a raise from its body is a structured
-    # OperationFailedError (500) naming the door and the exception class, never "the time tool
-    # is not available" (501) and never the caught exception's own text — which lands in
-    # the log.
-    install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=RuntimeError("boom clock at 10.0.0.7:6379")))
-    with (
-        caplog.at_level(logging.ERROR, logger=schedules_ops.logger.name),
-        pytest.raises(OperationFailedError) as caught,
-    ):
-        await schedules_ops.server_datetime()
-    assert caught.value.message == "server-datetime lookup failed (RuntimeError)"
-    _assert_logged_server_side(caplog, "10.0.0.7:6379")
-
-
-async def test_server_datetime_permission_denied_passes_through(install, caplog) -> None:
-    # A ``PermissionDeniedError`` taken by the tool-dispatch seam is already the caller's
-    # answer (403); it passes through typed rather than being flattened into a 500, and
-    # records nothing — it is the tool's own answer, not a failure of this door.
-    install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=PermissionDeniedError("access denied: clock refused")))
-    with (
-        caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(PermissionDeniedError, match="clock refused"),
-    ):
-        await schedules_ops.server_datetime()
-    _assert_nothing_logged_server_side(caplog)
-
-
-async def test_server_datetime_unsettled_operation_surface_is_503(install, caplog) -> None:
-    # Mid-rebuild the dispatch seam's execution authorization cannot decide either way, so
-    # it refuses with the retriable ``OperationSurfaceUnsettledError`` — an
-    # ``UnavailableError`` (503) and a typed ``OperationError``, so it reaches the caller
-    # retriable rather than flattened into a 500, and records nothing.
-    unsettled = OperationSurfaceUnsettledError("the operation surface is being rebuilt — retry shortly")
-    install(_FakeTools({schedules_ops._TIME_TOOL}, run_exc=unsettled))
-    with (
-        caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(UnavailableError, match="retry shortly") as caught,
-    ):
-        await schedules_ops.server_datetime()
-    assert caught.value.status == 503
+    with caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name):
+        result = await schedules_ops.server_datetime()
+    assert set(result) == {"utc", "local", "system"}
+    assert result["utc"]["iso"].endswith("+00:00")
+    assert isinstance(result["system"]["epoch_nanoseconds"], int)
     _assert_nothing_logged_server_side(caplog)
 
 
@@ -547,16 +488,35 @@ async def test_delete_unsettled_operation_surface_is_503(install, caplog) -> Non
 _VALID_SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 
 
-async def test_create_accepts_a_well_formed_subject(install) -> None:
-    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
-    out = await schedules_ops.create_schedule("send", {"subject": _VALID_SUBJECT, "to": "x"}, {"cron": "* * * * *"})
+async def test_create_stamps_the_top_level_subject_as_the_reserved_door_arg(install) -> None:
+    # ``subject`` is the schedule's top-level door field: the create door stamps it onto the recurring
+    # dispatch as the reserved ``backend_schedule_subject`` arg (like the firing identity / contract),
+    # and ``tool_kwargs`` ride through untouched.
+    from tai42_contract.states import StateSubject
+    from tai42_kit.utils.schedule_subject import SCHEDULE_SUBJECT_ARG
+
+    dispatched: list[dict] = []
+
+    class _RecordingTools(_FakeTools):
+        async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None):
+            dispatched.append(dict(arguments))
+            return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
+
+    install(_RecordingTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
+    out = await schedules_ops.create_schedule(
+        "send", {"to": "x"}, {"cron": "* * * * *"}, subject=StateSubject.model_validate(_VALID_SUBJECT)
+    )
     assert out == "ok"
+    (arguments,) = dispatched
+    assert arguments[SCHEDULE_SUBJECT_ARG] == _VALID_SUBJECT
+    assert arguments["to"] == "x"
+    assert "subject" not in arguments
 
 
-async def test_create_refuses_a_malformed_subject_before_dispatch(install) -> None:
-    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
-    with pytest.raises(BadRequestError, match="invalid schedule subject"):
-        await schedules_ops.create_schedule("send", {"subject": {"kind": "person"}}, {"cron": "* * * * *"})
+async def test_malformed_subject_is_refused_by_the_model() -> None:
+    # A malformed top-level ``subject`` fails the model's ``StateSubject`` validation; the router surfaces it as a 400.
+    with pytest.raises(ValidationError):
+        schedules_ops.ScheduleCreate.model_validate({"tool_name": "send", "subject": {"kind": "person"}})
 
 
 async def test_run_once_schedule_applies_binding_around_start_without_injecting_it(install, monkeypatch) -> None:

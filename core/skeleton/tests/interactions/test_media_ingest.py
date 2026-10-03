@@ -174,7 +174,6 @@ async def test_ingests_image_returns_served_item(provider, meta, client):
         declared_mime="image/png",
         filename=None,
         declared_size=len(_PNG),
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert result.item.kind is MediaKind.IMAGE
@@ -199,7 +198,6 @@ async def test_document_sets_filename_on_item(provider, meta):
         declared_mime="application/pdf",
         filename="r.pdf",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert doc.item.kind is MediaKind.DOCUMENT
@@ -211,7 +209,6 @@ async def test_document_sets_filename_on_item(provider, meta):
         declared_mime="image/png",
         filename="photo.png",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert img.item.filename is None
@@ -236,7 +233,6 @@ async def test_over_length_filename_truncation(provider, raw, expected):
         declared_mime="application/pdf",
         filename=raw,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert expected(doc.item.filename)
@@ -249,7 +245,6 @@ async def test_control_char_and_newline_filename_sanitised(provider):
         declared_mime="application/pdf",
         filename="\nre\rp\x00ort.pdf ",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert doc.item.filename == "report.pdf"
@@ -262,7 +257,6 @@ async def test_bidi_control_stripped(provider):
         declared_mime="application/pdf",
         filename="re‮port.pdf",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert doc.item.filename is not None
@@ -278,7 +272,6 @@ async def test_blank_or_absent_filename_gets_generic_kind_name(provider):
             declared_mime="application/pdf",
             filename=raw,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
         assert doc.item.filename == "document.pdf"
@@ -288,7 +281,6 @@ async def test_blank_or_absent_filename_gets_generic_kind_name(provider):
         declared_mime="text/plain",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert txt.item.filename == "document.txt"
@@ -301,7 +293,6 @@ async def test_parity_media_filename_equals_sanitised(provider):
         declared_mime="application/pdf",
         filename="re\rport.pdf",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     params = build_inbound_media_params(kind="document", media_id=doc.media_id, filename=doc.item.filename)
@@ -317,7 +308,6 @@ async def test_programmer_error_from_bad_sanitiser_propagates(provider, monkeypa
             declared_mime="application/pdf",
             filename="ok.pdf",
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
 
@@ -340,7 +330,6 @@ async def test_declared_size_over_cap_raises_before_read(provider, monkeypatch):
             declared_mime="image/png",
             filename=None,
             declared_size=9 * 1024 * 1024,
-            integrity_sha256=None,
             origin=_origin(),
         )
     assert consumed is False
@@ -358,7 +347,6 @@ async def test_streamed_body_over_cap_raises_not_truncates(provider, monkeypatch
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
     assert provider.blobs == {}
@@ -377,7 +365,6 @@ async def test_sniffed_kind_cap_applies_after_early_sniff(provider, monkeypatch)
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
     assert provider.blobs == {}
@@ -394,7 +381,6 @@ async def test_declared_image_none_sniff_rejected(provider, events):
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
     assert events["rejected"][0]["reason"].value == "unsupported_type"
@@ -409,7 +395,6 @@ async def test_declared_image_sniffs_different_image_accepted_as_sniffed(provide
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert result.item.kind is MediaKind.IMAGE
@@ -429,7 +414,6 @@ async def test_declared_image_sniffs_cross_top_level_rejected(provider):
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
 
@@ -444,7 +428,6 @@ async def test_declared_image_sniffs_not_allowlisted_rejected(provider):
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
 
@@ -458,7 +441,6 @@ async def test_html_or_svg_declared_as_document_rejected(provider, body, declare
             declared_mime=declared,
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
 
@@ -471,7 +453,6 @@ async def test_textlike_document_none_sniff_accepted(provider):
             declared_mime=declared,
             filename="f",
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
         assert doc.item.kind is MediaKind.DOCUMENT
@@ -483,7 +464,6 @@ async def test_textlike_document_none_sniff_accepted(provider):
             declared_mime="application/x-unknown",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
 
@@ -495,7 +475,6 @@ async def test_pdf_sniff_agrees_accepted(provider):
         declared_mime="application/pdf",
         filename="r.pdf",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert doc.item.kind is MediaKind.DOCUMENT
@@ -530,7 +509,6 @@ async def test_every_allowlisted_binary_type_accepts_synthetic_sample(provider, 
         declared_mime=declared,
         filename="f",
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert result.item.kind is kind
@@ -544,7 +522,6 @@ async def test_plain_3gp_accepts_via_isobmff_matcher(provider):
         declared_mime="video/3gpp",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert result.item.kind is MediaKind.VIDEO
@@ -593,7 +570,6 @@ async def test_no_provider_raises_store_unavailable(events, monkeypatch):
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
     assert events["rejected"][0]["reason"].value == "could_not_receive"
@@ -611,7 +587,6 @@ async def test_source_fault_raises_source_read_error(provider):
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
 
@@ -630,7 +605,6 @@ async def test_upload_fault_after_record_write_raises_typed_and_leaves_record_fo
             declared_mime="image/png",
             filename=None,
             declared_size=None,
-            integrity_sha256=None,
             origin=_origin(),
         )
     # The metadata record + expiry member survive for the reaper; no blob exists.
@@ -651,7 +625,6 @@ async def test_ingest_with_message_id_is_bound_at_ingest(provider, meta, client)
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id="m-bound"),
     )
     assert result.pending is False
@@ -671,7 +644,6 @@ async def test_ingest_without_message_id_is_pending(provider, meta):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id=None, channel_id="web", identity="sess-1"),
     )
     assert result.pending is True
@@ -692,7 +664,6 @@ async def test_bind_pending_promotes_to_record_horizon(provider, meta):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id=None, channel_id="web", identity="sess-1"),
     )
     bound = await bind_media(pending.media_id, origin=_origin(message_id="m-1", channel_id="web", identity="sess-1"))
@@ -713,7 +684,6 @@ async def test_bind_expired_pending_raises_not_found(provider, meta):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id=None, channel_id="web", identity="sess-1"),
     )
     # Simulate the reaper having deleted the past-horizon pending record.
@@ -729,7 +699,6 @@ async def test_bind_wrong_owner_raises_not_found(provider):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id=None, channel_id="web", identity="sess-1"),
     )
     with pytest.raises(MediaNotFoundError):
@@ -743,7 +712,6 @@ async def test_rebind_same_message_is_idempotent(provider):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id=None, channel_id="web", identity="sess-1"),
     )
     origin = _origin(message_id="m-1", channel_id="web", identity="sess-1")
@@ -760,7 +728,6 @@ async def test_rebind_different_message_raises_already_bound(provider):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(message_id=None, channel_id="web", identity="sess-1"),
     )
     await bind_media(pending.media_id, origin=_origin(message_id="m-1", channel_id="web", identity="sess-1"))
@@ -790,7 +757,6 @@ async def test_ingest_writes_the_exact_path_the_reaper_deletes(provider, meta):
         declared_mime="image/png",
         filename=None,
         declared_size=None,
-        integrity_sha256=None,
         origin=_origin(),
     )
     assert list(provider.blobs) == [meta_module.inbound_media_blob_path(result.media_id)]

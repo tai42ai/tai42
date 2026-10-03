@@ -19,6 +19,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 from tai42_identity_redis import redis_api_key_provider as provider_module
+from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.access_control import policy as policy_module
@@ -54,7 +55,7 @@ def bound_app():
 
 def _client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     settings = AccessControlSettings()
-    identity_key = f"{settings.key_prefix}{hash_api_key(_VALID_KEY)}"
+    identity_key = f"{redis_identity_settings().key_prefix}{hash_api_key(_VALID_KEY)}"
     # The identity record hash + the version counter stay on Redis; the route and
     # the enforced policy body come from the Postgres store. No context is seeded —
     # an absent context hash reads as the empty live view via ``HGETALL``.
