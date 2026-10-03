@@ -2,16 +2,16 @@
 
 Availability is detected at CALL time, never probed at import: list/create/delete
 pre-check that an installed backend registers the marker tools (``_MARKER_TOOLS``) and
-raise :class:`NotSupportedError` (501) when it does not. ``server_datetime`` has no
-pre-check — it dispatches ``current_time_info`` and learns of its absence from the
-dispatch itself, so its 501 is independent of the scheduling backend. An unknown
-caller-named tool on create is :class:`NotFoundError` (404) instead.
+raise :class:`NotSupportedError` (501) when it does not. ``server_datetime`` dispatches
+no tool at all — it reads the platform's own clock (:func:`~tai42_skeleton.tools.time.server_time`),
+so it needs no backend and answers unconditionally. An unknown caller-named tool on
+create is :class:`NotFoundError` (404) instead.
 
-Every door dispatches a NAMED inner tool and wraps that dispatch identically:
+List/create/delete each dispatch a NAMED inner tool and wrap that dispatch identically:
 
 * an :class:`~tai42_skeleton.tools.binding.UnknownToolError` naming the tool the door
   itself asked for is that tool's absence — the door's own verdict (501 for
-  list/delete/server-datetime, 404 for create);
+  list/delete, 404 for create);
 * an ``UnknownToolError`` naming a DIFFERENT tool escaped the running tool's own body —
   a structured :class:`OperationFailedError` (500);
 * a typed :class:`OperationError` (most sharply ``PermissionDeniedError``) passes through as
@@ -21,14 +21,14 @@ Every door dispatches a NAMED inner tool and wraps that dispatch identically:
 
 Only list's and delete's absent-marker-tool branch logs (``logger.warning``): the
 marker passed the presence pre-check moments earlier, so failing to resolve at dispatch
-is an ANOMALY worth a trace, and the caller sees only a plain 501. server-datetime's 501
-and create's 404 stay silent — an uninstalled toolbox extra and an unregistered
-caller-named tool are both steady-state/ordinary, and logging either would repeat every
-request. Both 500 branches always ``logger.exception``.
+is an ANOMALY worth a trace, and the caller sees only a plain 501. create's 404 stays
+silent — an unregistered caller-named tool is steady-state/ordinary, and logging it would
+repeat every request. Both 500 branches always ``logger.exception``.
 
-``UnavailableError`` (503) on every door: the tool-dispatch seam — and for create,
-``authorize_submitted_tool`` — refuses mid-rebuild with the retriable
-``OperationSurfaceUnsettledError``.
+``UnavailableError`` (503) on every tool-dispatching door (list/create/delete): the
+tool-dispatch seam — and for create, ``authorize_submitted_tool`` — refuses mid-rebuild
+with the retriable ``OperationSurfaceUnsettledError``. ``server_datetime`` dispatches no
+tool, so it has no such 503.
 
 These doors are authed but NOT admin-fenced: an UNTYPED failure's exception text never
 reaches the caller (it can carry internal detail, e.g. a dialled host:port) and stays
@@ -86,6 +86,7 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
 from tai42_skeleton.tools.binding import UnknownToolError
+from tai42_skeleton.tools.time import server_time
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,6 @@ _DELETE_TOOL = "backend_delete_schedule"
 _EXPORT_TOOL = "backend_export_schedules"
 _MARKER_TOOLS = (_LIST_TOOL, _DELETE_TOOL)
 _NO_BACKEND_MESSAGE = "no installed backend exposes scheduling tools"
-_TIME_TOOL = "current_time_info"
 
 # A schedule fires the branch tool ``<tool_name>_schedule_task`` (the backend's
 # ``schedule_task`` extension), reading its cadence from two EXPERT keys. The friendly
@@ -300,23 +300,12 @@ async def export_schedules_raw() -> Any:
 @operation(
     summary="Get the server date and time",
     tags=["schedules"],
-    errors=[NotSupportedError, PermissionDeniedError, UnavailableError, OperationFailedError],
+    errors=[],
     response_model=OpaqueJson,
 )
 async def server_datetime() -> Any:
-    """Return the server's current date and time; raises 501 when the time tool is not available."""
-    try:
-        return await tai42_app.tools.run_tool(_TIME_TOOL, {})
-    except UnknownToolError as exc:
-        if exc.tool_name == _TIME_TOOL:
-            raise NotSupportedError(f"{_TIME_TOOL} tool is not available") from exc
-        logger.exception("server-datetime %r raised unknown-tool %r during execution", _TIME_TOOL, exc.tool_name)
-        raise OperationFailedError(f"server-datetime lookup failed (unknown tool {exc.tool_name})") from exc
-    except OperationError:
-        raise
-    except Exception as exc:
-        logger.exception("server-datetime %r raised during execution", _TIME_TOOL)
-        raise OperationFailedError(f"server-datetime lookup failed ({type(exc).__name__})") from exc
+    """Return the server's current date and time, read from the platform's own clock."""
+    return server_time().model_dump()
 
 
 # The jq-typed flat params carry the ``x-tai42-expression`` vendor annotation so the generated MCP

@@ -22,7 +22,13 @@ BRIDGE_THREAD_PREFIX = "bridge:"
 # route-keyed ``bridge:{route_name}:{address}`` thread.
 PERSON_THREAD_PREFIX = f"{BRIDGE_THREAD_PREFIX}@person:"
 
-# LangGraph thread-scoping keys a caller could steer into the reserved namespace.
+# The contract's own uniform thread kwargs — the top-level keys every agent run addresses a
+# thread through (``tai42_contract.agent.Agent.run``). A caller that exposes one of these on an
+# agent's ``ToolInput`` could steer the run into the reserved namespace through it.
+_RESERVED_THREAD_KEYS = ("thread_id", "resume_checkpoint_id")
+
+# Thread-scoping keys a caller could steer into the reserved namespace through an engine's own
+# config blob (an agent that pins its thread inside a ``configurable`` mapping on a run kwarg).
 _RESERVED_CONFIGURABLE_KEYS = ("thread_id", "checkpoint_id")
 
 
@@ -31,13 +37,18 @@ class ReservedThreadNamespaceError(ValueError):
 
 
 def reserved_thread_namespace_error(run_kwargs: dict[str, Any]) -> str | None:
-    """The message for a caller-supplied ``bridge:``-prefixed ``thread_id``/``checkpoint_id``, or ``None``.
+    """The message for a caller-supplied ``bridge:``-prefixed thread id, or ``None``.
 
-    Returns the message when such an id appears anywhere in ``run_kwargs``, else ``None``.
-    These ids ride inside a ``configurable`` mapping on a config-shaped run kwarg, and a run
-    can carry several (``langgraph_config``, a voting agent's ``judge_``/``voter_`` variants),
-    each an equal steering vector — so EVERY config-bearing value is scanned.
+    Returns the message when such an id appears in ``run_kwargs``, else ``None``. Two forms
+    are scanned: the contract's own top-level thread kwargs (``thread_id`` /
+    ``resume_checkpoint_id``), and a config-shaped spelling riding inside a ``configurable``
+    mapping on any run-kwarg value (a run can carry several config-bearing kwargs, each an
+    equal steering vector, so EVERY config-bearing value is scanned).
     """
+    for key in _RESERVED_THREAD_KEYS:
+        candidate = run_kwargs.get(key)
+        if isinstance(candidate, str) and candidate.startswith(BRIDGE_THREAD_PREFIX):
+            return f"{key} may not use the reserved {BRIDGE_THREAD_PREFIX!r} namespace"
     for value in run_kwargs.values():
         if not isinstance(value, dict):
             continue

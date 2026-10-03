@@ -124,7 +124,6 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/interactions/media/{media_id}"),
     ("HEAD", "/api/interactions/media/{media_id}"),
     ("GET", "/api/schedules"),
-    ("GET", "/api/schedules/server-datetime"),
     ("POST", "/api/conversations/{route_name}/thread/messages"),
     # The send door declares the transient channel-delivery UnavailableError (503,
     # retryable, carrying the medium's retry_after); it is not reload-gated, so it
@@ -516,9 +515,8 @@ _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
     # only 503 is the reload gate's, so none is declared here.
     ("POST", "/api/run-tool"): {400, 401, 403, 404, 500, 502},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
-    # (503 — these two doors are not reload-gated, so the dispatch seam is its only source).
+    # (503 — this door is not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},
-    ("GET", "/api/schedules/server-datetime"): {401, 403, 500, 501, 503},
     # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, OperationFailedError,
     # NotSupportedError, UnavailableError (503) — and the reload gate's own 503 beside it.
     ("POST", "/api/schedules"): {400, 401, 403, 404, 500, 501, 503},

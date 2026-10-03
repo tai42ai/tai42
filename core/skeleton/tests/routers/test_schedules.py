@@ -331,25 +331,21 @@ async def test_extract_create_bad_state_binding_400():
 
 
 async def test_server_datetime_happy(install):
-    fake = install(_FakeTools({"current_time_info"}, run_result={"iso": "2026-07-05T00:00:00Z"}))
+    # No tool is dispatched at all: the door reads the platform's own clock and answers
+    # the typed server-time structure.
+    fake = install(_FakeTools(set()))
     resp = await router.server_datetime(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"iso": "2026-07-05T00:00:00Z"}}
-    assert fake.run_calls == [("current_time_info", {})]
-
-
-async def test_server_datetime_501_when_tool_absent(install):
-    # Scheduling backend present, but the time tool is not — independent 501.
-    install(_FakeTools(_MARKERS))
-    resp = await router.server_datetime(_req())
-    assert resp.status_code == 501
-    assert _json(resp) == {"error": "current_time_info tool is not available"}
+    body = _json(resp)["data"]
+    assert set(body) == {"utc", "local", "system"}
+    assert body["utc"]["iso"].endswith("+00:00")
+    assert fake.run_calls == []
 
 
 async def test_server_datetime_independent_of_backend(install):
-    # No scheduling backend at all, but the time tool is present -> still 200.
-    fake = install(_FakeTools({"current_time_info"}, run_result="now"))
+    # No scheduling backend and no time tool installed -> still 200 from the platform clock.
+    fake = install(_FakeTools(set()))
     resp = await router.server_datetime(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": "now"}
-    assert fake.run_calls == [("current_time_info", {})]
+    assert set(_json(resp)["data"]) == {"utc", "local", "system"}
+    assert fake.run_calls == []

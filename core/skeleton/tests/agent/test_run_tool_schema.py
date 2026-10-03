@@ -456,6 +456,23 @@ def test_the_run_tool_allows_an_unreserved_thread():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
+def test_the_run_tool_refuses_a_reserved_top_level_thread_key(key):
+    # The reservation guards the contract's OWN top-level thread kwargs, not only a
+    # config-shaped spelling: an agent whose ToolInput exposes ``thread_id`` or
+    # ``resume_checkpoint_id`` directly must not let a caller steer the run into the
+    # reserved ``bridge:`` namespace through it.
+    async def run() -> None:
+        async with app.app_context(_thread_recorder_manifest()):
+            _thread_recorder_seen().clear()
+            with pytest.raises(ReservedThreadNamespaceError, match=key):
+                await app.tools.run_tool("thread_recorder", {"text": "hi", key: "bridge:chat:+15550001111"})
+            # The run was refused before reaching the agent — nothing was recorded.
+            assert _thread_recorder_seen() == []
+
+    asyncio.run(run())
+
+
 # -- the ambient in-process session thread ------------------------------------
 
 

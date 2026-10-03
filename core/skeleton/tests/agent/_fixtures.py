@@ -273,12 +273,14 @@ thread_recorder_seen: list[str | None] = []
 
 class ThreadInput(BaseModel):
     """A ``ToolInput`` whose optional ``thread_id`` lets a caller pin the run thread
-    directly, standing in for an agent input that already carries one. The optional
+    directly, standing in for an agent input that already carries one. ``resume_checkpoint_id``
+    is the contract's other top-level thread kwarg, exposed the same way. The optional
     ``langgraph_config`` stands in for the config-shaped spelling of the same pin
     (``configurable.thread_id``), which the ambient-deposit gate must also yield to."""
 
     text: str
     thread_id: str | None = None
+    resume_checkpoint_id: str | None = None
     langgraph_config: dict | None = None
 
 

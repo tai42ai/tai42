@@ -4,9 +4,8 @@ Four doors, all AUTHED, thin adapters over operations in
 ``tai42_skeleton.operations.schedules``:
 
 - ``GET /api/schedules`` — list schedules via ``backend_list_schedules``.
-- ``GET /api/schedules/server-datetime`` — the server's current time via
-  ``current_time_info`` (a toolbox tool, available independently of any scheduling
-  backend).
+- ``GET /api/schedules/server-datetime`` — the server's current time, read from the
+  platform's own clock (independent of any scheduling backend).
 - ``POST /api/schedules`` — schedule a caller-chosen tool run; the body names the
   ``tool_name`` and carries its ``tool_kwargs`` and the ``schedule_kwargs`` the
   backend's scheduling tool consumes (schedule keys win on collision).
@@ -15,8 +14,8 @@ Four doors, all AUTHED, thin adapters over operations in
 
 Availability is detected at REQUEST time, never probed at import. When no installed
 backend registers the scheduling marker tools the list/create/delete doors answer a
-loud 501; ``server-datetime`` reports its own 501 when ``current_time_info`` is
-absent. Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
+loud 501; ``server-datetime`` needs no backend and always answers from the platform's
+own clock. Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 """
 
 from __future__ import annotations
