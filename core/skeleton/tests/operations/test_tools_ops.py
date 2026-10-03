@@ -329,6 +329,23 @@ async def test_run_tool_raise_during_execution_is_500(monkeypatch: pytest.Monkey
     _assert_logged_server_side(caplog, "kaboom at 10.0.0.7:6379")
 
 
+async def test_run_tool_failed_terminal_surfaces_the_outcome_detail(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    # A driver's failed terminal RAISES ``RunTerminalFailed`` carrying its outcome WHOLE (never a
+    # returned status-keyed value). This admin-fenced door is the one privileged live caller that
+    # keeps the full failure detail, so it surfaces the opaque payload WHOLE as the structured-500
+    # detail — recording it capped, never reading a key inside it — rather than collapsing it to the
+    # bare contract message. So the 500 body carries the driver's own graceful surface.
+    from tai42_contract.interactions import RunTerminalFailed
+
+    outcome = {"status": "error", "detail": "graceful-surface-GRACE123"}
+    tools = _Tools({"flow"}, run_exc=RunTerminalFailed(outcome))
+    _install(monkeypatch, tools=tools)
+    with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
+        await tools_ops.run_tool("flow", {})
+    assert "graceful-surface-GRACE123" in caught.value.message
+    _assert_logged_server_side(caplog, "graceful-surface-GRACE123")
+
+
 async def test_run_tool_resolve_unrelated_runtime_error_propagates(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     # A RuntimeError from get_tool that is NOT the unknown-tool error must propagate
     # loudly, never be masked into a 404 — and the door leaves it untouched, neither

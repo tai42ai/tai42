@@ -41,9 +41,9 @@ from tai42_skeleton.conversations.turn.outcome import (
     _tool_error,
     _ToolOutcome,
 )
-from tai42_skeleton.conversations.turn.tool_result import _failed_outcome_detail
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_payload, _tool_reply
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
+from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.interactions.visit import list_parked, visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
@@ -350,7 +350,7 @@ async def _run_agent_turn(
         # typed run failure — never a tool-level error the model could route around. Surface it
         # through the door's failure path: record the opaque payload WHOLE and deliver the route's
         # generic client-safe error. Caught BEFORE the generic arm so the payload is preserved.
-        detail = _failed_outcome_detail(exc.outcome)
+        detail = failed_outcome_detail(exc.outcome)
         logger.exception("conversations: agent turn for route %r failed: %s", route.route_name, detail)
         return _tool_error(detail, route)
     except PermissionDeniedError as exc:

@@ -23,14 +23,17 @@ Mutations:
 worker and then broadcast to the fleet over the bus. All three are ``destructive`` and
 honor the reload gate.
 
-What each ``run_tool`` branch records: the two 500 branches — an
+What each ``run_tool`` branch records: the three 500 branches — an
 :class:`~tai42_skeleton.tools.binding.UnknownToolError` naming a DIFFERENT tool than the
-one asked for (a dispatch failure inside the running tool's own body) and any other
-raise during execution — emit ``logger.exception`` (ERROR, with the caught exception's
-traceback); the latter falls back to the exception's CLASS name when the message is
-empty, so the envelope always names something. The 404 for a tool that resolved at
-lookup and then did not resolve at dispatch emits a ``logger.warning``, so an anomaly
-answered as a plain 404 still leaves a server record. Three branches are silent: the 404
+one asked for (a dispatch failure inside the running tool's own body), a
+:class:`~tai42_contract.interactions.RunTerminalFailed` (a driver's FAILED terminal,
+whose opaque outcome this admin-fenced door surfaces WHOLE as the 500 detail via
+:func:`~tai42_skeleton.interactions.terminal_failure.failed_outcome_detail`, never reading
+a key inside it), and any other raise during execution — emit ``logger.exception`` (ERROR,
+with the caught exception's traceback); the last falls back to the exception's CLASS name
+when the message is empty, so the envelope always names something. The 404 for a tool that
+resolved at lookup and then did not resolve at dispatch emits a ``logger.warning``, so an
+anomaly answered as a plain 404 still leaves a server record. Three branches are silent: the 404
 for a name that never resolved at all (a caller's own typo, which the response answers),
 the typed-``OperationError`` passthrough (the tool's own answer, delivered to the caller
 intact), and a RESOLVE that fails for anything OTHER than an unknown tool — that raise
@@ -46,10 +49,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import OpaqueJson
+from tai42_contract.interactions import RunTerminalFailed
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
 
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
@@ -296,6 +301,17 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
                 raise NotFoundError(f"unknown tool: {tool_name}") from exc
             logger.exception("run-tool %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
             raise OperationFailedError(str(exc)) from exc
+        except RunTerminalFailed as exc:
+            # A driver's FAILED terminal RAISES this carrying the failed outcome WHOLE (never a
+            # returned status-keyed value) — the live receiver this door started owns the failure.
+            # This admin-fenced door is the one privileged live caller that keeps the FULL failure
+            # detail (it already reveals wrapped secrets above), so surface the opaque payload WHOLE
+            # as the structured-500 detail — recording it capped, never reading a key inside it —
+            # rather than letting the generic arm below collapse it to ``str(exc)`` (the bare
+            # contract message). So the 500 body carries the driver's own graceful surface.
+            detail = failed_outcome_detail(exc.outcome)
+            logger.exception("run-tool %r failed on a terminal: %s", tool_name, detail)
+            raise OperationFailedError(detail) from exc
         except OperationError:
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.

@@ -19,6 +19,7 @@ from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 from tai42_skeleton.conversations.turn import tool_result as tool_result_module
+from tai42_skeleton.interactions import terminal_failure as terminal_failure_module
 
 from .conftest import (
     _TURN_LOGGER,
@@ -115,9 +116,9 @@ async def test_a_raised_failures_payload_is_capped_with_a_truncation_marker(env,
     record = await _store().get_record(message_id)
     assert record is not None
     assert record.error is not None
-    assert tool_result_module._FAILED_RESULT_DETAIL_ELLIPSIS in record.error
+    assert terminal_failure_module.FAILED_OUTCOME_DETAIL_ELLIPSIS in record.error
     # Bounded by the cap plus the surrounding detail wording, nowhere near the 10KB value.
-    assert len(record.error) < 2 * tool_result_module._FAILED_RESULT_DETAIL_LIMIT
+    assert len(record.error) < 2 * terminal_failure_module.FAILED_OUTCOME_DETAIL_LIMIT
     assert "boom-" in record.error
 
 
