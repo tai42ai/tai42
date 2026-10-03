@@ -37,6 +37,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 from tai42_contract.app import tai42_app
+from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import component_store_settings
@@ -82,14 +83,16 @@ class _BackupUserStore:
             for r in rows
         ]
 
-    async def restore_users(self, users: list[dict[str, Any]]) -> dict[str, Any]:
+    async def restore_users(self, users: list[dict[str, Any]]) -> BackupSectionReport:
         """Create each absent user under its own savepoint (skip-only).
 
-        An existing ``user_id`` is a clean ``skipped_existing``; an email that collides with a
-        DIFFERENT existing user is a per-user error (the savepoint rolls it back), so one bad row
-        never poisons the rest.
+        An existing ``user_id`` is a clean ``details["skipped_existing"]``; an email that
+        collides with a DIFFERENT existing user is a per-user error rejection (the savepoint
+        rolls it back, counted in ``skipped``), so one bad row never poisons the rest. These
+        are the section's OWN per-entity counts, so the ``skipped_existing`` tally rides
+        ``details`` beside the typed ``created``/``skipped``/``errors``.
         """
-        report: dict[str, Any] = {"created": 0, "skipped_existing": 0, "errors": []}
+        report = BackupSectionReport(details={"skipped_existing": 0})
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
             pool.connection() as conn,
@@ -100,7 +103,8 @@ class _BackupUserStore:
                 except psycopg.errors.UniqueViolation as exc:
                     # An email already held by a different user_id — loud per-user
                     # rejection, the rest still restore.
-                    report["errors"].append(f"user {user.get('user_id')!r}: {exc.diag.constraint_name or exc}")
+                    report.errors.append(f"user {user.get('user_id')!r}: {exc.diag.constraint_name or exc}")
+                    report.skipped += 1
                     continue
                 except (
                     KeyError,
@@ -120,9 +124,13 @@ class _BackupUserStore:
                     # message names the user_id only, never the full record (it
                     # carries the password hash and email).
                     uid = user.get("user_id", "<missing user_id>") if isinstance(user, dict) else repr(user)
-                    report["errors"].append(f"malformed user record {uid!r}: {type(exc).__name__}: {exc}")
+                    report.errors.append(f"malformed user record {uid!r}: {type(exc).__name__}: {exc}")
+                    report.skipped += 1
                     continue
-                report["created" if created else "skipped_existing"] += 1
+                if created:
+                    report.created += 1
+                else:
+                    report.details["skipped_existing"] += 1
         return report
 
     async def _create_if_absent(self, conn: Any, user: dict[str, Any]) -> bool:
@@ -171,8 +179,8 @@ async def export_accounts() -> dict[str, Any]:
     return {"version": _VERSION, "users": users}
 
 
-async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
-    """The section importer: restore absent users from ``payload`` (skip-only), returning per-entity counts.
+async def import_accounts(payload: dict[str, Any]) -> BackupSectionReport:
+    """The section importer: restore absent users from ``payload`` (skip-only), returning the typed report.
 
     A payload from a newer schema version is refused.
     """

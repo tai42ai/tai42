@@ -37,7 +37,7 @@ async def test_export_import_round_trip(store):
     for kind, name in (("agent", "assistant"), ("tool", "lookup")):
         await store.delete(kind, name)
     report = await import_target_configs(exported, "skip")
-    assert report["created"] == 2
+    assert report.created == 2
     restored = await store.get("tool", "lookup")
     assert restored is not None
     assert restored.greeting_template == "hi {pairing_code}"
@@ -47,8 +47,8 @@ async def test_skip_leaves_an_existing_config_untouched(store):
     await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=False))
     payload = {"target_configs": [{"target_kind": "agent", "target_name": "assistant", "multichannel": True}]}
     report = await import_target_configs(payload, "skip")
-    assert report["skipped_existing"] == 1
-    assert report["created"] == 0
+    assert report.details["skipped_existing"] == 1
+    assert report.created == 0
     kept = await store.get("agent", "assistant")
     assert kept is not None
     assert kept.multichannel is False
@@ -58,7 +58,7 @@ async def test_overwrite_replaces_an_existing_config(store):
     await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=False))
     payload = {"target_configs": [{"target_kind": "agent", "target_name": "assistant", "multichannel": True}]}
     report = await import_target_configs(payload, "overwrite")
-    assert report["updated"] == 1
+    assert report.updated == 1
     updated = await store.get("agent", "assistant")
     assert updated is not None
     assert updated.multichannel is True
@@ -75,8 +75,8 @@ async def test_a_duplicate_pair_in_one_payload_under_skip_is_created_once(store)
         ]
     }
     report = await import_target_configs(payload, "skip")
-    assert report["created"] == 1
-    assert report["skipped_existing"] == 1
+    assert report.created == 1
+    assert report.details["skipped_existing"] == 1
     stored = await store.get("agent", "assistant")
     assert stored is not None
     assert stored.multichannel is True
@@ -90,9 +90,9 @@ async def test_a_malformed_row_is_rejected_per_row(store):
         ]
     }
     report = await import_target_configs(payload, "skip")
-    assert report["created"] == 1
-    assert report["skipped"] == 1
-    assert len(report["errors"]) == 1
+    assert report.created == 1
+    assert report.skipped == 1
+    assert len(report.errors) == 1
     assert await store.get("agent", "good") is not None
     assert await store.get("agent", "bad") is None
 
@@ -117,5 +117,5 @@ async def test_import_with_rows_refuses_without_the_backend(monkeypatch):
 async def test_import_empty_is_a_noop_without_the_backend(monkeypatch):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
     report = await import_target_configs({"target_configs": []}, "skip")
-    assert report["created"] == 0
-    assert report["errors"] == []
+    assert report.created == 0
+    assert report.errors == []

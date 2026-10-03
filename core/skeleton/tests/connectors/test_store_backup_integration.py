@@ -103,8 +103,8 @@ async def test_connection_records_round_trip_verbatim(fix: _Fixture) -> None:
 
     await _pg_exec("DELETE FROM connector_connections WHERE provider_id = %s", (token,))
     report = await import_connector_connections(exported)
-    assert report["errors"] == []
-    assert report["created"] == 2
+    assert report.errors == []
+    assert report.created == 2
     # The durable rows are back under their original UUID ids with the exact ciphertext.
     assert await s.get(first) == b"cipher-1"
     assert await s.get(second) == b"cipher-2"
@@ -133,9 +133,9 @@ async def test_alias_collision_isolated_to_one_reported_error(fix: _Fixture) -> 
         },
     ]
     report = await import_connector_connections(payload)
-    assert report["created"] == 1
-    assert report["skipped"] == 1
-    reported = [err for err in report["errors"] if "dup" in err and clash in err]
+    assert report.created == 1
+    assert report.skipped == 1
+    reported = [err for err in report.errors if "dup" in err and clash in err]
     assert reported
     assert await s.get(good) == b"good"
     assert await s.get(clash) is None
@@ -155,12 +155,12 @@ async def test_category_import_creates_then_skips(fix: _Fixture) -> None:
         ]
     }
     created = await import_connector_categories(payload)
-    assert created["created"] == 1
+    assert created.created == 1
     assert await _category_display(new_id) == "Custom"
     # ``skip`` mode leaves an already-present id untouched — reported as skipped_existing.
     skipped = await import_connector_categories(payload, mode="skip")
-    assert skipped["created"] == 0
-    assert skipped["skipped_existing"] == 1
+    assert skipped.created == 0
+    assert skipped.details["skipped_existing"] == 1
 
 
 async def _category_display(category_id: str) -> str | None:

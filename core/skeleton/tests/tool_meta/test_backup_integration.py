@@ -103,8 +103,8 @@ async def test_backup_round_trip_preserves_tree_and_tristate_hidden(
 
     await _wipe(token)
     report = await import_tool_meta(payload)
-    assert report["errors"] == []
-    assert report["created"] == 7  # 4 folders + 3 overlay rows
+    assert report.errors == []
+    assert report.created == 7  # 4 folders + 3 overlay rows
 
     # The tree restored: the two same-named children survive under their real parents.
     by_id = {f.id: f for f in await store.list_folders()}
@@ -121,5 +121,5 @@ async def test_backup_round_trip_preserves_tree_and_tristate_hidden(
 
     # A second import of the same payload is idempotent — every key already present.
     again = await import_tool_meta(payload)
-    assert again["created"] == 0
-    assert again["skipped_existing"] == 7
+    assert again.created == 0
+    assert again.details["skipped_existing"] == 7

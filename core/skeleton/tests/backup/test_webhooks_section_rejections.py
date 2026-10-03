@@ -59,9 +59,9 @@ async def test_per_item_malformation_error_and_skipped_rest_proceeds(store, reco
         "tombstones": [],
     }
     report = await webhooks_section._import_webhooks(doc)
-    assert report["errors"]  # the malformed item is surfaced
-    assert report["skipped"] == 1
-    assert report["created"] == 1  # the hook still restored
+    assert report.errors  # the malformed item is surfaced
+    assert report.skipped == 1
+    assert report.created == 1  # the hook still restored
     assert set(await store.manager.list_hooks()) == {"h"}
 
 
@@ -93,11 +93,11 @@ async def test_import_rejects_a_keyless_hook_per_record_rest_restored(store, key
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert len(report["errors"]) == 1
-    assert "keyless" in report["errors"][0]
-    assert "execution_key" in report["errors"][0]
-    assert report["skipped"] == 1
-    assert report["created"] == 1
+    assert len(report.errors) == 1
+    assert "keyless" in report.errors[0]
+    assert "execution_key" in report.errors[0]
+    assert report.skipped == 1
+    assert report.created == 1
     # The keyless record was never stored; the record after it still was.
     assert set(await store.manager.list_hooks()) == {"bound"}
 
@@ -130,9 +130,9 @@ async def test_non_string_name_or_hash_per_item_error_valid_entries_restored(sto
         "tombstones": [],
     }
     report = await webhooks_section._import_webhooks(doc)
-    assert len(report["errors"]) == 2  # both ill-typed rows surfaced per-item
-    assert report["skipped"] == 2
-    assert report["created"] == 2  # the hook + the one valid trigger link
+    assert len(report.errors) == 2  # both ill-typed rows surfaced per-item
+    assert report.skipped == 2
+    assert report.created == 2  # the hook + the one valid trigger link
     # The hook and the valid trigger link were restored despite the two bad rows.
     assert set(await store.manager.list_hooks()) == {"h"}
     assert store.settings.trigger_record_key("b" * 64) in store.redis._strings
@@ -164,9 +164,9 @@ async def test_non_string_tombstone_per_item_error_section_proceeds(store) -> No
     }
     report = await webhooks_section._import_webhooks(doc)
     # The bad tombstone is surfaced per-item and skipped; the section does NOT abort.
-    assert len(report["errors"]) == 1
-    assert report["skipped"] == 1
-    assert report["created"] == 2  # the hook + the one valid trigger link
+    assert len(report.errors) == 1
+    assert report.skipped == 1
+    assert report.created == 2  # the hook + the one valid trigger link
     # The hook, the valid trigger link, and the valid tombstone were all applied.
     assert set(await store.manager.list_hooks()) == {"h"}
     assert store.settings.trigger_record_key("b" * 64) in store.redis._strings
@@ -200,11 +200,11 @@ async def test_hook_with_non_compiling_jq_per_record_rest_restored(store) -> Non
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert len(report["errors"]) == 1
-    assert "broken" in report["errors"][0]
-    assert "not valid jq" in report["errors"][0]
-    assert report["skipped"] == 1
-    assert report["created"] == 1
+    assert len(report.errors) == 1
+    assert "broken" in report.errors[0]
+    assert "not valid jq" in report.errors[0]
+    assert report.skipped == 1
+    assert report.created == 1
     assert set(await store.manager.list_hooks()) == {"sound"}
 
 
@@ -247,10 +247,10 @@ async def test_import_refuses_records_bound_to_a_key_no_fire_can_evaluate(store,
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert len(report["errors"]) == 2
-    assert all("k-blind" in error and "unusable at a fire" in error for error in report["errors"])
-    assert report["skipped"] == 2
-    assert report["created"] == 2  # the hook and the link bound to the evaluable key
+    assert len(report.errors) == 2
+    assert all("k-blind" in error and "unusable at a fire" in error for error in report.errors)
+    assert report.skipped == 2
+    assert report.created == 2  # the hook and the link bound to the evaluable key
     assert set(await store.manager.list_hooks()) == {"bound"}
     assert store.settings.trigger_record_key("a" * 64) not in store.redis._strings
     assert store.settings.trigger_record_key("b" * 64) in store.redis._strings
@@ -286,10 +286,10 @@ async def test_import_refuses_records_bound_to_a_key_with_no_policy_row(store, p
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert len(report["errors"]) == 2
-    assert all("k-ghost" in error and "has no policy" in error for error in report["errors"])
-    assert report["skipped"] == 2
-    assert report["created"] == 2
+    assert len(report.errors) == 2
+    assert all("k-ghost" in error and "has no policy" in error for error in report.errors)
+    assert report.skipped == 2
+    assert report.created == 2
     assert set(await store.manager.list_hooks()) == {"bound"}
     assert store.settings.trigger_record_key("a" * 64) not in store.redis._strings
 
@@ -328,10 +328,10 @@ async def test_import_refuses_a_record_whose_bound_fingerprint_no_longer_matches
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert len(report["errors"]) == 2
-    assert all("no longer matches the bound key identity" in error for error in report["errors"])
-    assert report["skipped"] == 2
-    assert report["created"] == 2  # the hook and the link carrying the current fingerprint
+    assert len(report.errors) == 2
+    assert all("no longer matches the bound key identity" in error for error in report.errors)
+    assert report.skipped == 2
+    assert report.created == 2  # the hook and the link carrying the current fingerprint
     assert set(await store.manager.list_hooks()) == {"fresh"}
     assert store.settings.trigger_record_key("a" * 64) not in store.redis._strings
     assert store.settings.trigger_record_key("b" * 64) in store.redis._strings
@@ -391,8 +391,8 @@ async def test_one_execution_key_is_read_once_for_the_whole_import(store, policy
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert report["created"] == 4
-    assert report["errors"] == []
+    assert report.created == 4
+    assert report.errors == []
     assert policy_store.rendered == [_EVALUABLE]
 
 
@@ -413,9 +413,9 @@ async def test_a_refused_key_is_read_once_and_refuses_every_record_naming_it(sto
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert report["created"] == 0
-    assert len(report["errors"]) == 3
-    assert all("unusable at a fire" in error for error in report["errors"])
+    assert report.created == 0
+    assert len(report.errors) == 3
+    assert all("unusable at a fire" in error for error in report.errors)
     assert policy_store.rendered == [_UNEVALUABLE]
 
 
@@ -437,8 +437,8 @@ async def test_keys_of_one_owner_read_the_owner_row_once_for_the_batch(store, po
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert report["created"] == 2
-    assert report["errors"] == []
+    assert report.created == 2
+    assert report.errors == []
     selects = [sql for sql in policy_store.executed if sql.startswith("SELECT") and "access_control_policies" in sql]
     assert len(selects) == 3  # k-one, k-two, and the owner ONCE
 
@@ -455,9 +455,9 @@ async def test_a_tombstoned_record_skips_benignly_before_its_key_is_read(store, 
     }
     report = await webhooks_section._import_webhooks(doc)
 
-    assert report["errors"] == []
-    assert report["skipped"] == 1
-    assert report["created"] == 0
+    assert report.errors == []
+    assert report.skipped == 1
+    assert report.created == 0
     assert policy_store.rendered == []
     assert store.settings.trigger_record_key("a" * 64) not in store.redis._strings
 
@@ -470,7 +470,7 @@ async def test_old_list_shape_imports_clean(store) -> None:
         {"name": "h1", "topic": "t", "tool": "notify", "execution_key": "k-fire", "execution_key_fingerprint": "fp"}
     ]
     report = await webhooks_section._import_webhooks(payload)
-    assert report["created"] == 1
+    assert report.created == 1
     assert set(await store.manager.list_hooks()) == {"h1"}
 
 

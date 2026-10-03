@@ -192,9 +192,9 @@ async def test_backup_round_trip_restores_documents_and_history(pg: _FakeVersion
     assert restored_versions == original_versions
 
     # Wipe → import is all-new.
-    assert report["created"] == 3
-    assert report["updated"] == 0
-    assert report["errors"] == []
+    assert report.created == 3
+    assert report.updated == 0
+    assert report.errors == []
 
 
 async def test_backup_reimport_over_existing_is_idempotent(pg: _FakeVersioningBackupPg):
@@ -205,8 +205,8 @@ async def test_backup_reimport_over_existing_is_idempotent(pg: _FakeVersioningBa
     # document upserts as "updated" and the tables are unchanged.
     report = await import_versioned_documents(payload, "overwrite")
 
-    assert report["created"] == 0
-    assert report["updated"] == 3
+    assert report.created == 0
+    assert report.updated == 3
     assert len(pg.documents) == 3
     assert len(pg.versions) == 6
 
@@ -219,9 +219,9 @@ async def test_backup_reimport_under_skip_leaves_existing(pg: _FakeVersioningBac
     # document id is a clean skip, none is re-upserted, and the tables are unchanged.
     report = await import_versioned_documents(payload)
 
-    assert report["created"] == 0
-    assert report["updated"] == 0
-    assert report["skipped_existing"] == 3
+    assert report.created == 0
+    assert report.updated == 0
+    assert report.details["skipped_existing"] == 3
     assert len(pg.documents) == 3
     assert len(pg.versions) == 6
 
@@ -251,7 +251,7 @@ async def test_backup_round_trip_preserves_a_preset_secret_reference(pg: _FakeVe
     pg.documents.clear()
     pg.versions.clear()
     report = await import_versioned_documents(payload)
-    assert report["errors"] == []
+    assert report.errors == []
 
     restored = next(v for v in pg.versions if v["document_id"] == 1 and v["version"] == 1)
     assert restored["body"]["fixed_kwargs"] == {"token": marker}

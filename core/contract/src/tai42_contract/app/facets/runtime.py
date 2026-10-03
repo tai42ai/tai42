@@ -6,7 +6,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
-from tai42_contract.backup import BackupSectionInfo
+from tai42_contract.backup import BackupSectionInfo, BackupSectionReport
 from tai42_contract.clients import BaseClient
 from tai42_contract.config import ConfigManager
 from tai42_contract.monitoring import Monitoring
@@ -162,10 +162,13 @@ class AppBackup(Protocol):
 
     A plugin (or the host itself, the first consumer) registers a section under
     ``name`` by supplying an ``exporter()`` that returns a JSON-safe payload and
-    an ``importer(payload)`` that applies it and returns a section report.
+    an ``importer(payload)`` that applies it and returns a :class:`BackupSectionReport`.
     ``sections()`` lists the registered sections for the UI. ``export_section``
     / ``import_section`` run one section's exporter/importer by name and raise
-    loudly on an unknown name — never a silent no-op.
+    loudly on an unknown name — never a silent no-op. ``import_section`` also
+    validates the importer's result against :class:`BackupSectionReport` and raises
+    naming the section on a wrong shape, so the platform never reads keys out of an
+    opaque object.
     """
 
     def register_section(
@@ -182,8 +185,12 @@ class AppBackup(Protocol):
         """Run one section's exporter by ``name`` and return its payload."""
         ...
 
-    def import_section(self, name: str, payload: Any) -> Any:
-        """Apply ``payload`` via one section's importer by ``name`` and return its report."""
+    async def import_section(self, name: str, payload: Any) -> BackupSectionReport:
+        """Apply ``payload`` via one section's importer by ``name``, returning the validated report.
+
+        Awaits an async importer, validates its result against
+        :class:`BackupSectionReport`, and raises naming the section on a wrong shape.
+        """
         ...
 
 

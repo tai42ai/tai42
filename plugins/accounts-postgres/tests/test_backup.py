@@ -65,7 +65,7 @@ async def test_restore_creates_absent_and_skips_existing(monkeypatch):
     pg = ScriptedPg(fetches=[{"user_id": "usr-a"}, None])
     _pg(monkeypatch, pg)
     report = await _BackupUserStore(_settings()).restore_users([_row("usr-a", "a@x.io"), _row("usr-b", "b@x.io")])
-    assert report == {"created": 1, "skipped_existing": 1, "errors": []}
+    assert (report.created, report.details["skipped_existing"], report.errors) == (1, 1, [])
     assert all("ON CONFLICT (user_id) DO NOTHING" in sql for sql, _ in pg.executed)
 
 
@@ -73,9 +73,9 @@ async def test_restore_email_collision_is_a_per_user_error(monkeypatch):
     pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_email_unique")])
     _pg(monkeypatch, pg)
     report = await _BackupUserStore(_settings()).restore_users([_row("usr-a", "taken@x.io")])
-    assert report["created"] == 0
-    assert report["skipped_existing"] == 0
-    assert report["errors"] == ["user 'usr-a': accounts_users_email_unique"]
+    assert report.created == 0
+    assert report.details["skipped_existing"] == 0
+    assert report.errors == ["user 'usr-a': accounts_users_email_unique"]
 
 
 async def test_import_refuses_a_newer_version():
@@ -121,9 +121,9 @@ async def test_restore_contains_a_malformed_created_at_per_user(monkeypatch):
     _pg(monkeypatch, pg)
     bad = _row("usr-a", "a@x.io") | {"created_at": "not-a-timestamp"}
     report = await _BackupUserStore(_settings()).restore_users([bad, _row("usr-b", "b@x.io")])
-    assert report["created"] == 1
-    assert len(report["errors"]) == 1
-    assert "usr-a" in report["errors"][0]
+    assert report.created == 1
+    assert len(report.errors) == 1
+    assert "usr-a" in report.errors[0]
 
 
 async def test_restore_defaults_a_missing_created_at_to_now(monkeypatch):
@@ -133,7 +133,7 @@ async def test_restore_defaults_a_missing_created_at_to_now(monkeypatch):
     _pg(monkeypatch, pg)
     absent = {k: v for k, v in _row("usr-a", "a@x.io").items() if k != "created_at"}
     report = await _BackupUserStore(_settings()).restore_users([absent])
-    assert report["created"] == 1
+    assert report.created == 1
     sent = pg.executed[-1][1][-1]  # the created_at param of the INSERT
     assert isinstance(sent, datetime)
     assert sent.tzinfo is not None
@@ -160,10 +160,10 @@ async def test_restore_contains_psycopg_adaptation_errors_per_user(monkeypatch):
     _pg(monkeypatch, pg)
     bad = _row("usr-a", "a@x.io") | {"role": {"x": 1}}
     report = await _BackupUserStore(_settings()).restore_users([bad, _row("usr-b", "b@x.io")])
-    assert report["created"] == 1
-    assert len(report["errors"]) == 1
-    assert "usr-a" in report["errors"][0]
-    assert "argon2" not in report["errors"][0]  # never the record repr
+    assert report.created == 1
+    assert len(report.errors) == 1
+    assert "usr-a" in report.errors[0]
+    assert "argon2" not in report.errors[0]  # never the record repr
 
 
 def test_package_imports_before_bind():

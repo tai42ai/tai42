@@ -92,9 +92,9 @@ async def test_backup_round_trip_preserves_history_and_soft_delete(
 
     await _wipe(kind1, kind2)
     created = await import_versioned_documents(payload)
-    assert created["errors"] == []
-    assert created["created"] == 2  # two documents restored
-    assert created["updated"] == 0
+    assert created.errors == []
+    assert created.created == 2  # two documents restored
+    assert created.updated == 0
 
     # The append log restored intact: active pointer at v2, both bodies + tags present.
     version, body = await store.get_active_version_and_body(kind1, "a")
@@ -110,8 +110,8 @@ async def test_backup_round_trip_preserves_history_and_soft_delete(
 
     # A second import of the same payload is idempotent — every document already present.
     again = await import_versioned_documents(payload)
-    assert again["created"] == 0
-    assert again["skipped_existing"] == 2
+    assert again.created == 0
+    assert again.details["skipped_existing"] == 2
 
 
 async def _row_is_active(kind: str, name: str) -> bool:

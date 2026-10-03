@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from fastmcp.tools import Tool
-    from tai42_contract.backup import BackupSectionInfo
+    from tai42_contract.backup import BackupSectionInfo, BackupSectionReport
     from tai42_contract.manifest import ExtensionElement
     from tai42_contract.presets import (
         CarryForward,
@@ -333,6 +333,6 @@ class BackupFacet(_Facet):
         """Export the backup section named ``name``."""
         return self._app._backup_registry.export_section(name)
 
-    def import_section(self, name: str, payload: Any) -> Any:
-        """Import ``payload`` into the backup section named ``name``."""
-        return self._app._backup_registry.import_section(name, payload)
+    async def import_section(self, name: str, payload: Any) -> BackupSectionReport:
+        """Import ``payload`` into the backup section named ``name``, returning the validated report."""
+        return await self._app._backup_registry.import_section(name, payload)

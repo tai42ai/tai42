@@ -5,11 +5,14 @@ read/write seam; no backup logic lives in the subsystems. Exporters/importers re
 the live subsystems through ``tai42_app`` at CALL time, so a section is a closure
 over the running app, not a snapshot taken at registration.
 
-An exporter returns a JSON-safe payload; an importer returns a section report
-``{"created", "updated", "skipped", "skipped_existing", "errors"}`` (``access_control``
-adds ``"new_api_keys"``; ``manifest`` and ``env`` add ``"fanout"``, the per-worker fleet
-report of their reload broadcast). A section whose backing subsystem is absent lets
-the seam raise; the router catches it per-section — these functions never swallow it.
+An exporter returns a JSON-safe payload; an importer returns a
+:class:`BackupSectionReport`. The platform reads only its typed fields
+(``created``/``updated``/``skipped``/``errors`` plus the ``fanout`` ``manifest`` and
+``env`` fill with the per-worker fleet report of their reload broadcast); each
+section's own counts (the ``skipped_existing`` tally, ``access_control``'s minted
+``new_api_keys``) ride the open ``details`` map. A section whose backing subsystem is
+absent lets the seam raise; the router catches it per-section — these functions never
+swallow it.
 """
 
 from __future__ import annotations
@@ -18,20 +21,23 @@ import logging
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.backup import BackupSectionReport
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.backup.registry import current_import_mode
 
 logger = logging.getLogger(__name__)
 
-# ``skipped`` counts per-record REJECTIONS (invalid/unauthorized, each also in
-# ``errors``); ``skipped_existing`` counts records left untouched under ``skip`` mode —
-# a clean skip, never an error.
-_SectionReport = dict[str, Any]
 
+def _empty_report() -> BackupSectionReport:
+    """A zeroed report for a mode-aware section, its ``details`` carrying a ``skipped_existing`` tally.
 
-def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+    ``skipped`` counts per-record REJECTIONS (invalid/unauthorized, each also in
+    ``errors``); ``details["skipped_existing"]`` counts records left untouched under
+    ``skip`` mode — a clean skip, never an error.
+    """
+    return BackupSectionReport(details={"skipped_existing": 0})
 
 
 # -- manifest ----------------------------------------------------------------
@@ -43,7 +49,7 @@ def _export_manifest() -> dict[str, Any]:
     return tai42_app.config.config_manager.read_manifest_preserved()
 
 
-async def _import_manifest(payload: dict[str, Any]) -> _SectionReport:
+async def _import_manifest(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.config.service import ConfigService
     from tai42_skeleton.operations._broadcast import translate_orphan_env_write
 
@@ -55,10 +61,7 @@ async def _import_manifest(payload: dict[str, Any]) -> _SectionReport:
     # mapped to a loud, typed OperationFailedError exactly as the marketplace / manifest doors.
     with translate_orphan_env_write():
         result = await ConfigService.from_app().apply_replace(payload)
-    report = _empty_report()
-    report["updated"] = 1
-    report["fanout"] = result.fanout
-    return report
+    return BackupSectionReport(updated=1, fanout=FanoutSummary.model_validate(result.fanout))
 
 
 # -- env ---------------------------------------------------------------------
@@ -72,7 +75,7 @@ def _export_env() -> dict[str, str]:
         return {}
 
 
-async def _import_env(payload: dict[str, str]) -> _SectionReport:
+async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
     from tai42_skeleton.config.service import ConfigService
 
     config_manager = tai42_app.config.config_manager
@@ -80,13 +83,11 @@ async def _import_env(payload: dict[str, str]) -> _SectionReport:
         existing = config_manager.read_env()
     except FileNotFoundError:
         existing = {}
-    report = _empty_report()
-    report["created"] = sum(1 for key in payload if key not in existing)
-    report["updated"] = sum(1 for key in payload if key in existing)
+    created = sum(1 for key in payload if key not in existing)
+    updated = sum(1 for key in payload if key in existing)
     # Apply through the pipeline: validated, reloaded, broadcast to the fleet.
     result = await ConfigService.from_app().apply_env_change(payload)
-    report["fanout"] = result.fanout
-    return report
+    return BackupSectionReport(created=created, updated=updated, fanout=FanoutSummary.model_validate(result.fanout))
 
 
 # -- access_control ----------------------------------------------------------
@@ -124,7 +125,7 @@ async def _export_access_control() -> dict[str, Any]:
     }
 
 
-async def _restore_principals(payload: dict[str, Any], report: _SectionReport) -> None:
+async def _restore_principals(payload: dict[str, Any], report: BackupSectionReport) -> None:
     """Restore principals FIRST so the token restore below finds every owner provisioned.
 
     Each principal's own policy row (the fingerprint-less role policy) travels with it. An
@@ -142,11 +143,11 @@ async def _restore_principals(payload: dict[str, Any], report: _SectionReport) -
     for principal in payload.get("principals") or []:
         user_id = principal.get("user_id")
         if not isinstance(user_id, str) or not user_id:
-            report["errors"].append(f"principal with missing or empty user_id: {user_id!r}")
-            report["skipped"] += 1
+            report.errors.append(f"principal with missing or empty user_id: {user_id!r}")
+            report.skipped += 1
             continue
         if await store.get_principal(user_id) is not None:
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         try:
             await store.create_principal(
@@ -160,19 +161,19 @@ async def _restore_principals(payload: dict[str, Any], report: _SectionReport) -
             if principal.get("disabled"):
                 await store.set_principal_disabled(user_id, True)
         except (ValueError, KeyError) as exc:
-            report["errors"].append(f"principal {user_id!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"principal {user_id!r}: {exc}")
+            report.skipped += 1
             continue
-        report["created"] += 1
+        report.created += 1
 
 
-async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
+async def _import_access_control(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.access_control import management
     from tai42_skeleton.access_control.settings import access_control_settings
 
     mode = current_import_mode()
     report = _empty_report()
-    report["new_api_keys"] = []
+    report.details["new_api_keys"] = []
 
     await _restore_principals(payload, report)
 
@@ -187,7 +188,7 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
     for url, scope_id in scopes.items():
         existed = url in existing_urls
         if existed and mode == "skip":
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         if scope_id == marker:
             # The marker is a column value, not a scope: a public route restores through
@@ -196,9 +197,9 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
         else:
             await management.add_url_to_scope(scope_id, url, patterns.get(url))
         if existed:
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
 
     await _restore_tokens(payload, report)
 
@@ -206,7 +207,7 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
     return report
 
 
-async def _restore_token(token: dict[str, Any], report: _SectionReport) -> None:
+async def _restore_token(token: dict[str, Any], report: BackupSectionReport) -> None:
     """Restore one exported api-key token, minting a fresh key and recording its plaintext.
 
     A user id with a live key or an account row is a clean ``skipped_existing``; an orphaned
@@ -221,20 +222,20 @@ async def _restore_token(token: dict[str, Any], report: _SectionReport) -> None:
 
     user_id = token.get("user_id")
     if not isinstance(user_id, str) or not user_id:
-        report["errors"].append(f"token with missing or empty user_id: {user_id!r}")
-        report["skipped"] += 1
+        report.errors.append(f"token with missing or empty user_id: {user_id!r}")
+        report.skipped += 1
         return
     description = token.get("description", "")
     state = await management.api_key_state(user_id)
     if state in ("live", "account"):
-        report["skipped_existing"] += 1
+        report.details["skipped_existing"] += 1
         return
     owner_user_id = (token.get("policy_data") or {}).get(OWNER_USER_ID_CLAIM)
     if state != "orphaned" and not (isinstance(owner_user_id, str) and owner_user_id):
         # A minted key with no owner claim is an ownerless key row — a loud per-token
         # error, never re-minted ownerless.
-        report["errors"].append(f"token {user_id!r}: no owner claim (ownerless key; re-initialize the deployment)")
-        report["skipped"] += 1
+        report.errors.append(f"token {user_id!r}: no owner claim (ownerless key; re-initialize the deployment)")
+        report.skipped += 1
         return
     try:
         if state == "orphaned":
@@ -255,14 +256,14 @@ async def _restore_token(token: dict[str, Any], report: _SectionReport) -> None:
             )
     except ValueError as exc:
         # Per-token failure (collided id, absent scope, bad condition) surfaced loudly.
-        report["errors"].append(f"token {user_id!r}: {exc}")
-        report["skipped"] += 1
+        report.errors.append(f"token {user_id!r}: {exc}")
+        report.skipped += 1
         return
-    report["created"] += 1
-    report["new_api_keys"].append({"user_id": user_id, "description": description, "api_key": api_key})
+    report.created += 1
+    report.details["new_api_keys"].append({"user_id": user_id, "description": description, "api_key": api_key})
 
 
-async def _restore_tokens(payload: dict[str, Any], report: _SectionReport) -> None:
+async def _restore_tokens(payload: dict[str, Any], report: BackupSectionReport) -> None:
     """Restore every exported api-key token (see :func:`_restore_token`).
 
     API-key hashes are one-way, so a restore mints BRAND-NEW keys and surfaces each
@@ -283,7 +284,7 @@ async def _export_sub_mcp() -> dict[str, Any]:
     return {slug: config.model_dump() for slug, config in routes.items()}
 
 
-async def _import_sub_mcp(payload: dict[str, Any]) -> _SectionReport:
+async def _import_sub_mcp(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.sub_mcp import service
     from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 
@@ -295,27 +296,27 @@ async def _import_sub_mcp(payload: dict[str, Any]) -> _SectionReport:
         existed = await store.get_route(slug) is not None
         if existed and mode == "skip":
             # Existing route (keyed by slug) left untouched — stored config and local binding intact.
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         if not isinstance(config, dict) or "tools" not in config:
             # Malformed entry is a loud per-slug rejection, never an aborted restore.
-            report["errors"].append(
+            report.errors.append(
                 f"sub-MCP app {slug!r}: malformed backup entry (expected a mapping with a 'tools' key)"
             )
-            report["skipped"] += 1
+            report.skipped += 1
             continue
         try:
             # The service validates slug shape + transport BEFORE its store write, so a
             # malformed slug is a per-slug rejection, never a phantom route or garbage row.
             await service.register_sub_mcp_app(slug, config["tools"], config.get("transport", "http"))
         except ValueError as exc:
-            report["errors"].append(f"sub-MCP app {slug!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"sub-MCP app {slug!r}: {exc}")
+            report.skipped += 1
             continue
         if existed:
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
     return report
 
 
@@ -328,7 +329,7 @@ async def _export_conversations() -> dict[str, Any]:
     return await export_conversation_routes()
 
 
-async def _import_conversations(payload: dict[str, Any]) -> _SectionReport:
+async def _import_conversations(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.conversations.backup import import_conversation_routes
 
     return await import_conversation_routes(payload, current_import_mode())
@@ -343,7 +344,7 @@ async def _export_conversation_target_config() -> dict[str, Any]:
     return await export_target_configs()
 
 
-async def _import_conversation_target_config(payload: dict[str, Any]) -> _SectionReport:
+async def _import_conversation_target_config(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.conversations.target_config_backup import import_target_configs
 
     return await import_target_configs(payload, current_import_mode())
@@ -358,7 +359,7 @@ async def _export_templates() -> dict[str, str]:
     return {path: await resource_manager.fetch_template(path) for path in paths}
 
 
-async def _import_templates(payload: dict[str, str]) -> _SectionReport:
+async def _import_templates(payload: dict[str, str]) -> BackupSectionReport:
     from tai42_contract.storage import StoragePathConflictError
 
     from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
@@ -374,13 +375,13 @@ async def _import_templates(payload: dict[str, str]) -> _SectionReport:
             # a silent drop and never an aborted restore.
             safe_template_path(path)
         except UnsafeTemplatePathError as exc:
-            report["errors"].append(f"template {path!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"template {path!r}: {exc}")
+            report.skipped += 1
             logger.warning("backup restore skipped unsafe template path %r: %s", path, exc)
             continue
         if path in existing and mode == "skip":
             # Existing template (keyed by path) left untouched.
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         try:
             await resource_manager.upload_template(path, content)
@@ -388,14 +389,14 @@ async def _import_templates(payload: dict[str, str]) -> _SectionReport:
             # A key colliding with a directory that still holds templates is a
             # per-path rejection recorded loudly, never a silently dropped or
             # whole-restore-aborting failure.
-            report["errors"].append(f"template {path!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"template {path!r}: {exc}")
+            report.skipped += 1
             logger.warning("backup restore skipped conflicting template path %r: %s", path, exc)
             continue
         if path in existing:
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
     return report
 
 
@@ -408,14 +409,52 @@ async def _export_schedules() -> Any:
     return await tai42_app.tools.run_tool("backend_export_schedules", {})
 
 
-async def _import_schedules(payload: Any) -> _SectionReport:
+async def _import_schedules(payload: Any) -> BackupSectionReport:
     # The document is opaque, but the mode is forwarded explicitly across the tool
     # boundary (a backend cannot read this process's import-mode context). A backend
     # whose import tool predates ``mode`` rejects it — a loud per-section error, not a
     # silent mode mismatch.
-    return await tai42_app.tools.run_tool(
+    raw = await tai42_app.tools.run_tool(
         "backend_import_schedules", {"schedules": payload, "mode": current_import_mode()}
     )
+    return _schedules_report(raw)
+
+
+def _schedules_report(raw: Any) -> BackupSectionReport:
+    """Map the scheduling backend's import result into the typed section report.
+
+    The ``backend_import_schedules`` result is the schedules section's own round-trip
+    convention with any task backend: its counts fill the typed fields, its per-row
+    error records (each rendered as a string) fill ``errors``, and every other count it
+    carries (a backend's ``skipped_existing`` tally, say) rides ``details``. A result
+    that is not a mapping is refused loudly rather than mis-reported as an empty restore.
+    """
+    if not isinstance(raw, dict):
+        raise TypeError(f"schedules backend returned a non-mapping import report: {type(raw).__name__}")
+    typed_keys = ("created", "updated", "skipped", "errors")
+    errors = [_schedule_error_text(entry) for entry in raw.get("errors") or []]
+    details = {key: value for key, value in raw.items() if key not in typed_keys}
+    return BackupSectionReport(
+        created=int(raw.get("created", 0)),
+        updated=int(raw.get("updated", 0)),
+        skipped=int(raw.get("skipped", 0)),
+        errors=errors,
+        details=details,
+    )
+
+
+def _schedule_error_text(entry: Any) -> str:
+    """Render one backend error record as a string for the typed report.
+
+    A backend reports a per-row error as ``{"index", "name", "error"}``; a plain string
+    is kept as-is, so a backend reporting either shape is carried without loss.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        name, index, message = entry.get("name"), entry.get("index"), entry.get("error")
+        return f"schedule {name!r} (row {index}): {message}"
+    return str(entry)
 
 
 # -- connector_categories / connector_connections ----------------------------
@@ -427,7 +466,7 @@ async def _export_connector_categories() -> dict[str, Any]:
     return await export_connector_categories()
 
 
-async def _import_connector_categories(payload: dict[str, Any]) -> _SectionReport:
+async def _import_connector_categories(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.connectors.store.backup import import_connector_categories
 
     return await import_connector_categories(payload, current_import_mode())
@@ -439,7 +478,7 @@ async def _export_connector_connections() -> list[dict[str, Any]]:
     return await export_connector_connections()
 
 
-async def _import_connector_connections(payload: list[dict[str, Any]]) -> _SectionReport:
+async def _import_connector_connections(payload: list[dict[str, Any]]) -> BackupSectionReport:
     from tai42_skeleton.connectors.store.backup import import_connector_connections
 
     return await import_connector_connections(payload, current_import_mode())
@@ -454,7 +493,7 @@ async def _export_versioned_documents() -> dict[str, Any]:
     return await export_versioned_documents()
 
 
-async def _import_versioned_documents(payload: dict[str, Any]) -> _SectionReport:
+async def _import_versioned_documents(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.versioning.backup import import_versioned_documents
 
     return await import_versioned_documents(payload, current_import_mode())
@@ -469,7 +508,7 @@ async def _export_tool_meta() -> dict[str, Any]:
     return await export_tool_meta()
 
 
-async def _import_tool_meta(payload: dict[str, Any]) -> _SectionReport:
+async def _import_tool_meta(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.tool_meta.backup import import_tool_meta
 
     return await import_tool_meta(payload, current_import_mode())

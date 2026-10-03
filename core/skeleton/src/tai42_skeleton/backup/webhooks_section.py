@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import ValidationError
+from tai42_contract.backup import BackupSectionReport
 from tai42_contract.hooks import HookParams
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
@@ -62,7 +63,7 @@ def _validate_webhooks_envelope(payload: dict[str, Any]) -> tuple[list, dict, li
 async def _restore_hooks(
     manager: Any,
     mode: str,
-    report: dict[str, Any],
+    report: BackupSectionReport,
     scan: ExecutionKeyScan,
     hooks: list[dict[str, Any]],
     unlocked_topics: frozenset[str] = frozenset(),
@@ -78,20 +79,20 @@ async def _restore_hooks(
         try:
             params = HookParams.model_validate(item)
         except ValidationError as exc:
-            report["errors"].append(f"hook {name!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"hook {name!r}: {exc}")
+            report.skipped += 1
             continue
         if params.name in existing and mode == "skip":
             # Existing hook (keyed by name) left untouched — not re-registered, not re-validated.
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         if params.topic in unlocked_topics:
             # Lock absent: writing the hook would hand an unverified public door its execution key.
-            report["errors"].append(
+            report.errors.append(
                 f"hook {name!r}: topic {params.topic!r} is not restored — its verifier binding failed, "
                 "which would leave this hook live on an unverified public door"
             )
-            report["skipped"] += 1
+            report.skipped += 1
             continue
         try:
             # A stored hook must name a usable, token-free-evaluable execution key,
@@ -100,27 +101,27 @@ async def _restore_hooks(
             await scan.assert_usable(params.execution_key, bound_fingerprint=params.execution_key_fingerprint)
         except (ExecutionKeyAuthorityError, TokenFreeConditionError) as exc:
             # Only these two are per-record faults; other types propagate as the section's failure.
-            report["errors"].append(f"hook {name!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"hook {name!r}: {exc}")
+            report.skipped += 1
             continue
         try:
             await manager.register(params)
         except ValueError as exc:
             # A non-compiling inline condition/expr jq is a per-hook rejection; other
             # types (store/transport) propagate as the section's failure.
-            report["errors"].append(f"hook {name!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"hook {name!r}: {exc}")
+            report.skipped += 1
             continue
         if params.name in existing:
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
 
 
 async def _restore_topic_verifiers(
     manager: Any,
     mode: str,
-    report: dict[str, Any],
+    report: BackupSectionReport,
     topic_verifiers: dict[str, Any],
     existing_verifiers: dict[str, Any],
 ) -> set[str]:
@@ -132,30 +133,30 @@ async def _restore_topic_verifiers(
     unlocked_topics: set[str] = set()
     for topic, binding in topic_verifiers.items():
         if not isinstance(topic, str) or not topic:
-            report["errors"].append(f"topic verifier with missing or empty topic: {topic!r}")
-            report["skipped"] += 1
+            report.errors.append(f"topic verifier with missing or empty topic: {topic!r}")
+            report.skipped += 1
             continue
         if topic in existing_verifiers and mode == "skip":
             # Existing verifier binding left in place; the lock is present, so records on
             # this topic are NOT treated as unlocked below.
-            report["skipped_existing"] += 1
+            report.details["skipped_existing"] += 1
             continue
         try:
             # Validates the binding shape on write: a bad entry is a per-topic rejection.
             await manager.set_topic_verifier(topic, binding)
         except ValidationError as exc:
-            report["errors"].append(f"topic verifier {topic!r}: {exc}")
-            report["skipped"] += 1
+            report.errors.append(f"topic verifier {topic!r}: {exc}")
+            report.skipped += 1
             unlocked_topics.add(topic)
             continue
         if topic in existing_verifiers:
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
     return unlocked_topics
 
 
-async def _restore_tombstones(report: dict[str, Any], tombstones: list[Any]) -> None:
+async def _restore_tombstones(report: BackupSectionReport, tombstones: list[Any]) -> None:
     """Restore tombstones first, so a tombstoned hash then refuses its own record below (tombstone wins).
 
     An idempotent set-union keyed by ``token_hash``.
@@ -164,12 +165,12 @@ async def _restore_tombstones(report: dict[str, Any], tombstones: list[Any]) -> 
         try:
             await restore_tombstone(token_hash)
         except TriggerLinkError as exc:
-            report["errors"].append(f"tombstone {token_hash!r}: {exc.message}")
-            report["skipped"] += 1
+            report.errors.append(f"tombstone {token_hash!r}: {exc.message}")
+            report.skipped += 1
 
 
 async def _restore_trigger_links(
-    report: dict[str, Any],
+    report: BackupSectionReport,
     mode: str,
     trigger_links: list[Any],
     live_link_names: dict[str, str],
@@ -188,7 +189,7 @@ async def _restore_trigger_links(
             if item["name"] in live_link_names and mode == "skip":
                 # Existing trigger link (keyed by name) left untouched — its live record
                 # and token hash stand, so a re-import does not re-key it.
-                report["skipped_existing"] += 1
+                report.details["skipped_existing"] += 1
                 continue
             record = item["record"]
             topic = record.get("topic") if isinstance(record, dict) else None
@@ -204,18 +205,18 @@ async def _restore_trigger_links(
             )
         except (TriggerLinkError, KeyError) as exc:
             message = exc.message if isinstance(exc, TriggerLinkError) else f"missing key {exc}"
-            report["errors"].append(f"trigger link {name!r}: {message}")
-            report["skipped"] += 1
+            report.errors.append(f"trigger link {name!r}: {message}")
+            report.skipped += 1
             continue
         if outcome in ("skipped_expired", "skipped_tombstoned"):
-            report["skipped"] += 1
+            report.skipped += 1
         elif outcome == "updated":
-            report["updated"] += 1
+            report.updated += 1
         else:
-            report["created"] += 1
+            report.created += 1
 
 
-async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> dict[str, Any]:
+async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> BackupSectionReport:
     """Order the webhooks restore.
 
     A bare LIST is the hooks-only shape; else validate the envelope, run the duplicate-hash pre-scan,

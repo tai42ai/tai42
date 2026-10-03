@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from psycopg.errors import UniqueViolation
+from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
@@ -30,12 +31,11 @@ from tai42_skeleton.connectors.settings import connector_store_settings
 from tai42_skeleton.connectors.store.redis_pg import _ALIAS_UNIQUE_CONSTRAINT, RedisPgConnectorTokenStore
 from tai42_skeleton.db import SKELETON_COMPONENT
 
-# The backup section report shape, built here rather than imported across the seam.
-_SectionReport = dict[str, Any]
 
-
-def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
+def _empty_report() -> BackupSectionReport:
+    # ``skipped_existing`` (rows left untouched under ``skip``) is this section's own
+    # count, so it rides ``details``.
+    return BackupSectionReport(details={"skipped_existing": 0})
 
 
 # -- connector_category (public, secret-free) --------------------------------
@@ -68,7 +68,7 @@ async def export_connector_categories() -> dict[str, Any]:
 
 async def import_connector_categories(
     payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
-) -> _SectionReport:
+) -> BackupSectionReport:
     """Restore the ``connector_category`` grouping rows, keyed by ``id``.
 
     Under ``overwrite`` each row is an ``ON CONFLICT (id) DO UPDATE``; under ``skip`` an
@@ -89,7 +89,7 @@ async def import_connector_categories(
 
         for category in categories:
             if category["id"] in existing_categories and mode == "skip":
-                report["skipped_existing"] += 1
+                report.details["skipped_existing"] += 1
                 continue
             await cur.execute(
                 "INSERT INTO connector_category (id, display_name, sort_order, created_at) "
@@ -141,7 +141,7 @@ async def export_connector_connections() -> list[dict[str, Any]]:
 
 async def import_connector_connections(
     payload: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
-) -> _SectionReport:
+) -> BackupSectionReport:
     """Re-insert each connection's ciphertext under its original connection id.
 
     Keyed by ``connection_id``: ``skip`` leaves an already-present connection untouched,
@@ -164,7 +164,7 @@ async def import_connector_connections(
             connection_id = entry["connection_id"]
             if connection_id in existing and mode == "skip":
                 # Left untouched — stored ciphertext and warm cache stand, no invalidation needed.
-                report["skipped_existing"] += 1
+                report.details["skipped_existing"] += 1
                 continue
             conn_uuid = uuid.UUID(connection_id)
             blob = base64.b64decode(entry["encrypted_blob_b64"])
@@ -187,11 +187,11 @@ async def import_connector_connections(
                     )
             except UniqueViolation as exc:
                 if getattr(exc.diag, "constraint_name", None) == _ALIAS_UNIQUE_CONSTRAINT:
-                    report["errors"].append(
+                    report.errors.append(
                         f"connection {connection_id!r}: alias {entry['alias']!r} is already in use "
                         f"for provider {entry['provider_id']!r} by a different connection"
                     )
-                    report["skipped"] += 1
+                    report.skipped += 1
                     continue
                 raise
             _count(report, connection_id in existing)
@@ -221,9 +221,9 @@ async def _invalidate_connection_cache(connection_ids: list[str]) -> None:
             await client.delete(store._rec_key(connection_id))
 
 
-def _count(report: _SectionReport, existed: bool) -> None:
+def _count(report: BackupSectionReport, existed: bool) -> None:
     """Bump the created/updated tally for one upserted row."""
     if existed:
-        report["updated"] += 1
+        report.updated += 1
     else:
-        report["created"] += 1
+        report.created += 1

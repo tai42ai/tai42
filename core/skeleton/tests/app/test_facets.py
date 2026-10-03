@@ -157,8 +157,10 @@ def test_webhook_verifiers_facet_forwarding():
     app._webhook_verifier_registry.get.assert_called_once_with("n")
 
 
-def test_backup_facet_forwarding():
+async def test_backup_facet_forwarding():
     app = _app()
+    # ``import_section`` is async on the registry, so the facet awaits it.
+    app._backup_registry.import_section = AsyncMock(return_value="import-section-result")
     f = BackupFacet(app)
 
     def _importer(payload: object) -> None: ...
@@ -170,7 +172,7 @@ def test_backup_facet_forwarding():
     app._backup_registry.sections.assert_called_once_with()
     assert f.export_section("n") is app._backup_registry.export_section.return_value
     app._backup_registry.export_section.assert_called_once_with("n")
-    assert f.import_section("n", {"p": 1}) is app._backup_registry.import_section.return_value
+    assert await f.import_section("n", {"p": 1}) == "import-section-result"
     app._backup_registry.import_section.assert_called_once_with("n", {"p": 1})
 
 

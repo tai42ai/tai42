@@ -7,7 +7,7 @@ agent's input JSON schema, a trace's free-form input/output/metadata, a
 verifier-stripped ``format_payload``) are typed ``JsonValue``; a bare list body is
 a named ``RootModel[list[...]]`` subclass and a dynamic slug-keyed map a named
 ``RootModel[dict[...]]`` subclass, so every body carries a stable, uniquely-named
-component schema. Existing models (``FanoutSummary``, ``KindStatus``,
+component schema. Existing models (``BackupSectionReport``, ``KindStatus``,
 ``LoginMethod``, ``RouteConfig``, ``StudioPluginManifest`` and the channel/media
 contract shapes) are reused, never re-authored.
 """
@@ -18,7 +18,7 @@ import warnings
 
 from pydantic import BaseModel, JsonValue, RootModel
 from tai42_contract.accounts.models import LoginMethod
-from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.backup import BackupSectionReport
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.interactions.models import LocationElement, MediaItem
 from tai42_contract.sub_mcp import RouteConfig
@@ -81,21 +81,6 @@ class BackupSectionInfo(BaseModel):
 
 class BackupSectionListing(RootModel[list[BackupSectionInfo]]):
     """The bare-list body of ``list_sections`` — one entry per registered section."""
-
-
-class BackupSectionReport(BaseModel):
-    """One section's per-import counts plus any per-record ``errors``.
-
-    ``fanout`` is present ONLY for the templates section (a template restore fans
-    a cache-evict across the fleet); every other section omits it.
-    """
-
-    created: int
-    updated: int
-    skipped: int
-    skipped_existing: int
-    errors: list[str]
-    fanout: FanoutSummary | None = None
 
 
 class BackupImportResult(BaseModel):

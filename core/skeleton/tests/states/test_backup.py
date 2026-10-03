@@ -198,12 +198,12 @@ async def test_import_creates_all_entities(monkeypatch: pytest.MonkeyPatch) -> N
     facet = _FakeStatesFacet()
     _wire(monkeypatch, facet)
     report = await import_states(_payload())
-    assert report["templates"] == {"created": 1, "updated": 0, "failed": 0}
-    assert report["declarations"] == {"created": 1, "updated": 0, "failed": 0}
-    assert report["attachments"] == {"created": 1, "updated": 0, "failed": 0}
-    assert report["aliases"] == {"restored": 1, "failed": 0}
-    assert report["records"] == {"restored": 1, "failed": 0}
-    assert report["errors"] == []
+    assert report.details["templates"] == {"created": 1, "updated": 0, "failed": 0}
+    assert report.details["declarations"] == {"created": 1, "updated": 0, "failed": 0}
+    assert report.details["attachments"] == {"created": 1, "updated": 0, "failed": 0}
+    assert report.details["aliases"] == {"restored": 1, "failed": 0}
+    assert report.details["records"] == {"restored": 1, "failed": 0}
+    assert report.errors == []
     assert facet.attached == [("alerts", "m")]
     # A restored attach is a snapshot, not a re-attach — it must NOT fire the reconcilers.
     assert facet.skip_reconcilers_seen == [True]
@@ -214,9 +214,9 @@ async def test_import_updates_present_entities(monkeypatch: pytest.MonkeyPatch) 
     facet = _FakeStatesFacet(existing={"m", "alerts"}, existing_attachments={("alerts", "m")})
     _wire(monkeypatch, facet)
     report = await import_states(_payload())
-    assert report["templates"] == {"created": 0, "updated": 1, "failed": 0}
-    assert report["declarations"] == {"created": 0, "updated": 1, "failed": 0}
-    assert report["attachments"] == {"created": 0, "updated": 1, "failed": 0}
+    assert report.details["templates"] == {"created": 0, "updated": 1, "failed": 0}
+    assert report.details["declarations"] == {"created": 0, "updated": 1, "failed": 0}
+    assert report.details["attachments"] == {"created": 0, "updated": 1, "failed": 0}
     assert facet.updated_attachments == [("alerts", "m")]
     assert facet.skip_reconcilers_seen == [True]
     assert facet.attached == []
@@ -228,12 +228,12 @@ async def test_import_reports_each_failed_entity_and_skips_it(monkeypatch: pytes
     report = await import_states(_payload())
     # the template and declaration doors both refuse; the attach refuses (its template failed);
     # the alias and record restores refuse (state "alerts"). Each is reported, none aborts.
-    assert report["templates"]["failed"] == 1
-    assert report["declarations"]["failed"] == 1
-    assert report["attachments"]["failed"] == 1
-    assert report["aliases"]["failed"] == 1
-    assert report["records"]["failed"] == 1
-    assert len(report["errors"]) == 5
+    assert report.details["templates"]["failed"] == 1
+    assert report.details["declarations"]["failed"] == 1
+    assert report.details["attachments"]["failed"] == 1
+    assert report.details["aliases"]["failed"] == 1
+    assert report.details["records"]["failed"] == 1
+    assert len(report.errors) == 5
 
 
 async def test_import_groups_alias_and_record_rows_by_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,8 +289,8 @@ async def test_import_groups_alias_and_record_rows_by_state(monkeypatch: pytest.
         attachments=[],
     )
     report = await import_states(payload)
-    assert report["aliases"] == {"restored": 3, "failed": 0}
-    assert report["records"] == {"restored": 2, "failed": 0}
+    assert report.details["aliases"] == {"restored": 3, "failed": 0}
+    assert report.details["records"] == {"restored": 2, "failed": 0}
     assert sorted(facet.restored_aliases) == [("alerts", 2), ("status", 1)]
     assert sorted(facet.restored_records) == [("alerts", 1), ("status", 1)]
 
@@ -299,5 +299,5 @@ async def test_import_tolerates_absent_sections(monkeypatch: pytest.MonkeyPatch)
     facet = _FakeStatesFacet()
     _wire(monkeypatch, facet)
     report = await import_states({"version": 1})
-    assert report["templates"] == {"created": 0, "updated": 0, "failed": 0}
-    assert report["errors"] == []
+    assert report.details["templates"] == {"created": 0, "updated": 0, "failed": 0}
+    assert report.errors == []

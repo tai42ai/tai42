@@ -68,14 +68,17 @@ def _json(resp) -> dict:
 
 
 def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_existing: int = 0) -> dict:
-    """The five-key section report shape, defaulting every count to zero — the router
-    tests assert exact reports, so this keeps them terse and one place to evolve."""
+    """The section report's wire shape, defaulting every count to zero — the router tests
+    assert exact reports, so this keeps them terse and one place to evolve. The platform
+    reads the typed counts; ``skipped_existing`` rides the open ``details`` map, and
+    ``fanout`` is ``null`` for a section whose restore broadcasts nothing."""
     return {
         "created": created,
         "updated": updated,
         "skipped": skipped,
-        "skipped_existing": skipped_existing,
         "errors": [],
+        "details": {"skipped_existing": skipped_existing},
+        "fanout": None,
     }
 
 
@@ -369,7 +372,7 @@ async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["access_control"]})))["data"]
     assert data["ok"] is True
     report = data["sections"]["access_control"]
-    minted = report["new_api_keys"]
+    minted = report["details"]["new_api_keys"]
     assert len(minted) == 1
     assert minted[0]["user_id"] == "user1"
     assert minted[0]["description"] == "first key"
@@ -514,7 +517,9 @@ async def test_templates_roundtrip(monkeypatch):
     # carries the eviction fan-out, as the manifest/env sections do.
     templates_report = data["sections"]["templates"]
     assert templates_report.pop("fanout")["mode"] == "local-only"
-    assert templates_report == _report(created=1)
+    expected = _report(created=1)
+    del expected["fanout"]
+    assert templates_report == expected
     assert manager.cleared == 1
     assert manager._templates == {"greeting.j2": "hello {{ name }}"}
 
@@ -723,7 +728,7 @@ async def test_access_control_import_rejects_blank_user_id(monkeypatch):
     assert data["ok"] is False
     report = data["sections"]["access_control"]
     assert report["skipped"] == 1
-    assert report["new_api_keys"] == []
+    assert report["details"]["new_api_keys"] == []
     assert any("user_id" in err for err in report["errors"])
 
 
@@ -857,7 +862,14 @@ async def test_plugin_section_round_trips_through_both_doors(monkeypatch):
     store["value"] = "changed"  # wipe/mutate
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["demo_plugin"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["demo_plugin"] == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
+    assert data["sections"]["demo_plugin"] == {
+        "created": 0,
+        "updated": 1,
+        "skipped": 0,
+        "errors": [],
+        "details": {},
+        "fanout": None,
+    }
     assert store == {"value": "seeded"}
 
 
@@ -1111,7 +1123,9 @@ async def test_import_templates_existing_path_overwrites(monkeypatch):
     # store mutation drops the compiled cache fleet-wide (fan-out on the report).
     templates_report = data["sections"]["templates"]
     assert templates_report.pop("fanout")["mode"] == "local-only"
-    assert templates_report == _report(updated=1)
+    expected = _report(updated=1)
+    del expected["fanout"]
+    assert templates_report == expected
     assert manager.cleared == 1
     assert manager._templates == {"greeting.j2": "new"}
 
@@ -1158,7 +1172,7 @@ async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch
     report = data["sections"]["access_control"]
     assert report["skipped"] == 1
     assert report["created"] == 0
-    assert report["new_api_keys"] == []
+    assert report["details"]["new_api_keys"] == []
     assert any("u1" in err for err in report["errors"])
 
 
@@ -1198,11 +1212,11 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     data = _json(await import_backup(_post_req({"document": document, "sections": ["access_control"]})))["data"]
     assert data["ok"] is True  # a clean skip is not an error
     report = data["sections"]["access_control"]
-    assert report["skipped_existing"] == 1
+    assert report["details"]["skipped_existing"] == 1
     assert report["skipped"] == 0
     assert report["created"] == 0
     assert report["errors"] == []
-    assert report["new_api_keys"] == []
+    assert report["details"]["new_api_keys"] == []
     # The live key's fingerprint is untouched — nothing was re-minted.
     assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == fingerprint
 
@@ -1246,10 +1260,10 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
     )["data"]
     assert data["ok"] is True  # a clean skip is not an error, even under overwrite
     report = data["sections"]["access_control"]
-    assert report["skipped_existing"] >= 1
+    assert report["details"]["skipped_existing"] >= 1
     assert report["created"] == 0
     assert report["errors"] == []
-    assert report["new_api_keys"] == []
+    assert report["details"]["new_api_keys"] == []
     # Overwrite mode does NOT re-mint the token: the live key's fingerprint is unchanged.
     assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == fingerprint
 

@@ -41,7 +41,7 @@ async def test_restore_conflict_is_recorded_and_restore_continues() -> None:
         report = await sections._import_templates(payload)
 
     # The colliding id is a per-path skip with a loud error; the clean id still restores.
-    assert report["skipped"] == 1
-    assert report["created"] == 1
-    assert any("a/b" in e and "a/b/child.j2" in e for e in report["errors"])
+    assert report.skipped == 1
+    assert report.created == 1
+    assert any("a/b" in e and "a/b/child.j2" in e for e in report.errors)
     assert renderer.stored == {"clean.j2": "fine"}

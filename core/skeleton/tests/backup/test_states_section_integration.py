@@ -158,12 +158,12 @@ async def test_backup_round_trip_through_facet_doors(run_token: str) -> None:
     # drop every row, then import the scoped payload — each entity is CREATED
     await _wipe(token)
     created = await import_states(scoped)
-    assert created["errors"] == []
-    assert created["templates"] == {"created": 1, "updated": 0, "failed": 0}
-    assert created["declarations"] == {"created": 1, "updated": 0, "failed": 0}
-    assert created["attachments"] == {"created": 1, "updated": 0, "failed": 0}
-    assert created["aliases"] == {"restored": 1, "failed": 0}
-    assert created["records"] == {"restored": 1, "failed": 0}
+    assert created.errors == []
+    assert created.details["templates"] == {"created": 1, "updated": 0, "failed": 0}
+    assert created.details["declarations"] == {"created": 1, "updated": 0, "failed": 0}
+    assert created.details["attachments"] == {"created": 1, "updated": 0, "failed": 0}
+    assert created.details["aliases"] == {"restored": 1, "failed": 0}
+    assert created.details["records"] == {"restored": 1, "failed": 0}
 
     # the data landed: declaration, module, attach, record, and the alias resolves
     assert await tai42_app.states.get_declaration(state) is not None
@@ -178,10 +178,10 @@ async def test_backup_round_trip_through_facet_doors(run_token: str) -> None:
 
     # a second import of the same payload UPDATES every entity in place
     updated = await import_states(scoped)
-    assert updated["errors"] == []
-    assert updated["templates"]["updated"] == 1
-    assert updated["declarations"]["updated"] == 1
-    assert updated["attachments"]["updated"] == 1
+    assert updated.errors == []
+    assert updated.details["templates"]["updated"] == 1
+    assert updated.details["declarations"]["updated"] == 1
+    assert updated.details["attachments"]["updated"] == 1
 
 
 async def test_import_reports_refused_entity_and_lands_the_rest(run_token: str) -> None:
@@ -216,11 +216,11 @@ async def test_import_reports_refused_entity_and_lands_the_rest(run_token: str) 
     report = await import_states(payload)
 
     # the one bad module is reported and skipped; the good module and every other entity land
-    assert report["templates"]["created"] == 1
-    assert report["templates"]["failed"] == 1
-    assert any(bad_module in err for err in report["errors"])
-    assert report["declarations"] == {"created": 1, "updated": 0, "failed": 0}
-    assert report["records"] == {"restored": 1, "failed": 0}
+    assert report.details["templates"]["created"] == 1
+    assert report.details["templates"]["failed"] == 1
+    assert any(bad_module in err for err in report.errors)
+    assert report.details["declarations"] == {"created": 1, "updated": 0, "failed": 0}
+    assert report.details["records"] == {"restored": 1, "failed": 0}
 
     assert await tai42_app.states.get_template(good_module) is not None
     assert await tai42_app.states.get_template(bad_module) is None

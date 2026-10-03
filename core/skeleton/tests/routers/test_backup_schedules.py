@@ -103,11 +103,42 @@ async def test_schedules_round_trip_through_bound_backend(monkeypatch):
     assert doc["errors"] == {}
 
     # Import hands the whole document back to the backend under ``schedules``, forwarding
-    # the per-record mode across the tool boundary (skip is the default).
+    # the per-record mode across the tool boundary (skip is the default). The backend's
+    # result maps into the typed section report: its counts fill the typed fields, and any
+    # other count it carries (its ``skipped_existing`` tally) rides ``details``.
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["schedules"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["schedules"] == import_report
+    assert data["sections"]["schedules"] == {
+        "created": 2,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+        "details": {"skipped_existing": 0},
+        "fanout": None,
+    }
     assert ("backend_import_schedules", {"schedules": backend_doc, "mode": "skip"}) in tools.run_calls
+
+
+async def test_schedules_backend_structured_errors_render_as_strings(monkeypatch):
+    # A backend reports a per-row failure as ``{"index", "name", "error"}``; the section
+    # maps each to a string for the typed report (list[str]), so a landed restore that a
+    # backend partly rejected is reported truthfully rather than failing the typed shape.
+    backend_doc = [{"name": "nightly", "cron": "bad"}]
+    import_report = {
+        "created": 0,
+        "updated": 0,
+        "skipped": 1,
+        "errors": [{"index": 0, "name": "nightly", "error": "unsupported schedule"}],
+    }
+    tools = _FakeTools({"backend_import_schedules": import_report})
+    _install(monkeypatch, tools)
+
+    document = {"version": 1, "sections": {"schedules": backend_doc}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+    assert data["ok"] is False
+    section = data["sections"]["schedules"]
+    assert section["skipped"] == 1
+    assert section["errors"] == ["schedule 'nightly' (row 0): unsupported schedule"]
 
 
 async def test_schedules_import_forwards_overwrite_mode(monkeypatch):
