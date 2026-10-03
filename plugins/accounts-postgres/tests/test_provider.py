@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.access_control.registry import get_identity_provider_factory
@@ -263,6 +265,16 @@ def test_login_methods_submit_path_follows_remapped_mount_base(monkeypatch):
     assert by_purpose["invite"].submit_path == "/api/sign-in/invite/accept"
 
 
+def test_password_route_declares_self_service():
+    # The one self-service route under the admin-gated users surface declares the flag the
+    # platform carves into the default editor/viewer reach — the platform names no route.
+    from tai42_accounts_postgres import routes_users  # noqa: F401 - import fires the registrations
+
+    from .conftest import _FakeHttp
+
+    assert _FakeHttp.registrations["/users/me/password"]["self_service"] is True
+
+
 # -- healthcheck ----------------------------------------------------------------
 
 
@@ -288,9 +300,11 @@ async def test_healthcheck_passes_when_schema_applied(monkeypatch):
     await _provider().healthcheck()
 
 
-def test_readiness_targets_names_both_stores():
+def test_readiness_targets_names_both_stores(monkeypatch):
     redis_settings = object()
-    provider = _provider(redis=redis_settings)
+    # The Redis target is the plugin's OWN login-throttle connection, not an injected one.
+    monkeypatch.setattr(provider_module, "accounts_settings", lambda: SimpleNamespace(redis=redis_settings))
+    provider = _provider()
     pg_target, redis_target = provider.readiness_targets()
     assert pg_target.name == "accounts"
     assert pg_target.client is PostgresClient

@@ -76,6 +76,7 @@ class AppHttp(Protocol):
         authed: bool | None = None,
         destructive: bool = False,
         action: RouteAction | None = None,
+        self_service: bool = False,
         declared: DeclaredRouteMetadata | None = None,
         no_body_reason: str | None = None,
         enveloped: bool = True,
@@ -123,6 +124,12 @@ class AppHttp(Protocol):
         * ``action`` — the route's authorization character (a :data:`RouteAction`);
           ``None`` (the default) lets the surface derive the grantable class from
           the HTTP methods.
+        * ``self_service`` — whether this route is a caller SELF-SERVICE surface
+          (default ``False``). A ``True`` route is carved into the default
+          editor/viewer control-plane reach, so a non-admin role may invoke it even
+          under an otherwise admin-gated prefix (an own-credential change under
+          ``/api/auth``). The seed derives the carve-in from every route declaring
+          this, so the platform names no provider's route.
         * ``declared`` — the route's behavioral OpenAPI properties (a
           :class:`DeclaredRouteMetadata`): its ``reload_gated`` / ``reads_body`` /
           error statuses / success status. A route in the ``/api/*`` spec surface

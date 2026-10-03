@@ -93,6 +93,19 @@ async def test_provider_probe_first_failure_propagates(monkeypatch: pytest.Monke
     assert second.ran is False
 
 
+async def test_provider_probe_raises_when_no_identity_provider_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gate enabled, chain DERIVED (no env) and the registry empty: no credential could ever
+    # authenticate, so the boot fails loudly rather than minting a dead gate.
+    registry._REGISTRY.clear()
+    monkeypatch.delenv("ACCESS_CONTROL_AUTH_PROVIDERS", raising=False)
+    reset_all_settings()
+    try:
+        with pytest.raises(RuntimeError, match="no identity provider is registered"):
+            await probe_identity_provider()
+    finally:
+        reset_all_settings()
+
+
 # -- registered-vs-configured accounts check ---------------------------------
 
 

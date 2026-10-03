@@ -157,22 +157,18 @@ class ApiKeyIdentityProvider(IdentityProvider):
 
 @runtime_checkable
 class IdentityProviderSettings(Protocol):
-    """The settings shape an identity-provider factory receives.
+    """Marker for the settings object an identity-provider factory receives.
 
     A provider factory is ``Callable[[IdentityProviderSettings], IdentityProvider]``.
-    The concrete settings class lives in the application layer and structurally
-    satisfies this Protocol, so the factory contract stays in the contract layer
-    without the contract naming an application class.
+    The application injects its own settings object here; the factory contract stays
+    in the contract layer without the contract naming an application class.
 
-    ``redis`` is typed ``Any``: tai42-contract does not depend on tai42-kit, so this
-    Protocol cannot name kit's ``RedisConnectionSettings``. A provider that opens
-    a kit client from ``redis`` must ``cast`` the value at its ``client_ctx`` call
-    site — kit's ``client_ctx`` takes a NOMINAL settings param, which a
-    structurally-typed value does not satisfy on its own.
+    The contract names no backing-store field on this Protocol: a provider reads its
+    OWN configuration — connection handles, key namespaces — from its own settings,
+    never off this object. That is what lets any identity provider (one backed by
+    Redis, one that validates against an external issuer over HTTP) be constructed
+    through this one seam without the contract assuming a particular store.
     """
-
-    key_prefix: str
-    redis: Any
 
 
 __all__ = [

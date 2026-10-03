@@ -13,7 +13,8 @@ from .conftest import FakeRedis, make_redis_ctx
 
 def _limiter(monkeypatch, fake: FakeRedis) -> RateLimiter:
     monkeypatch.setattr(rate_limit, "client_ctx", make_redis_ctx(fake))
-    return RateLimiter(object(), AccountsSettings())
+    settings = AccountsSettings()
+    return RateLimiter(settings.redis, settings)
 
 
 async def test_account_failures_up_to_threshold_do_not_raise(monkeypatch):

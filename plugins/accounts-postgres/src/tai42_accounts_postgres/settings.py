@@ -1,11 +1,12 @@
 """Plugin behavior config — the ``TAI_ACCOUNTS_*`` env namespace.
 
 ``AccountsSettings`` (``TAI_ACCOUNTS_*``) carries the session/invite lifetimes,
-login-throttle knobs, argon2 concurrency bound, and the Redis key namespace. The
-plugin's Postgres connection is not configured here — it
-resolves through the central database registry from the component's binding
-(``TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES``). Redis likewise comes through the
-injected ``settings.redis``.
+login-throttle knobs, argon2 concurrency bound, the Redis key namespace, and the
+Redis connection the login throttle rides. The plugin owns its backing stores, so it
+owns their configuration: the Postgres connection resolves through the central
+database registry from the component's binding
+(``TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES``), and the Redis connection is composed
+here from the ``TAI_ACCOUNTS_`` env — the contract injects no connection handle.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import os
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.db import component_store_settings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
@@ -36,10 +38,33 @@ def _default_hash_concurrency() -> int:
     return _HASH_CONCURRENCY_CPU_MULTIPLE
 
 
+class AccountsRedisConnectionSettings(RedisConnectionSettings):
+    """The login throttle's Redis connection, composed from the kit connection shape.
+
+    The throttle rides the login path, so the connection tunes a short socket read
+    timeout plus timeout-retry: a black-holed Redis fails the login fast rather than
+    hanging it. Connection values come from the ``TAI_ACCOUNTS_`` env
+    (``TAI_ACCOUNTS_REDIS_URL`` …), falling back to ``TAI_DEFAULT_REDIS_URL`` when
+    unset; only the resilience defaults are set here.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TAI_ACCOUNTS_")
+
+    redis_url: str | None = None
+    redis_max_connections: int | None = 10
+    socket_connect_timeout: float | None = Field(default=5, gt=0)
+    socket_timeout: float | None = 5
+    retry_on_timeout: bool = True
+
+
 class AccountsSettings(TaiBaseSettings):
     """``TAI_ACCOUNTS_*`` behavior config for the accounts plugin."""
 
     model_config = SettingsConfigDict(env_prefix="TAI_ACCOUNTS_")
+
+    # Infra: the login-throttle Redis connection is composed from the kit (a field, not
+    # a base), so this config declares no connection fields of its own.
+    redis: AccountsRedisConnectionSettings = Field(default_factory=AccountsRedisConnectionSettings)
 
     # Idle expiry is the sliding window; absolute expiry is the hard cap from mint.
     session_idle_seconds: int = 86400

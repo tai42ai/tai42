@@ -41,8 +41,15 @@ async def probe_identity_provider() -> None:
     from tai42_skeleton.app.instance import app
 
     settings = access_control_settings()
+    chain = settings.resolved_auth_providers()
+    if not chain:
+        raise RuntimeError(
+            "access_control: the gate is enabled but no identity provider is registered — the "
+            "resolved auth-provider chain is empty, so no credential could ever authenticate. "
+            "Register an identity provider in the manifest, or set ACCESS_CONTROL_AUTH_PROVIDERS"
+        )
     core = app._serving_core
-    for name in settings.auth_providers:
+    for name in chain:
         provider = get_identity_provider_factory_staged(name)(settings)
         core.active_auth_providers[name] = provider
         await provider.healthcheck()
@@ -387,7 +394,7 @@ async def check_accounts_providers_configured() -> None:
     fails loudly naming the missing providers and the fix.
     """
     settings = access_control_settings()
-    configured = set(settings.auth_providers)
+    configured = set(settings.resolved_auth_providers())
     # Read the STAGED generation: this boot check keys on the providers THIS build
     # registered, so a reload validates the generation it is assembling.
     missing = [name for name, _factory in iter_accounts_provider_factories_staged() if name not in configured]

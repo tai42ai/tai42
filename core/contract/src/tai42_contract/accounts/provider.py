@@ -56,13 +56,13 @@ class AccountsAdminServices(Protocol):
 class AccountsProviderSettings(Protocol):
     """Settings shape handed to an accounts-provider factory.
 
-    ``redis`` and ``admin`` are typed loosely for the same reason
-    ``IdentityProviderSettings.redis`` is ``Any``: the contract cannot name
-    application or kit types. ``admin`` carries the application's
-    ``AccountsAdminServices`` implementation.
+    ``admin`` is typed loosely (``Any``) because the contract cannot name the
+    application's ``AccountsAdminServices`` implementation class; it carries that
+    implementation. A provider reads its OWN backing-store handles and key
+    namespaces from its own settings, never off this object, so the contract names
+    no store-specific field here.
     """
 
-    redis: Any
     admin: Any
 
 

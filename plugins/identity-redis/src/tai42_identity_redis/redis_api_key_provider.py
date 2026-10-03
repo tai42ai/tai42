@@ -28,6 +28,8 @@ from tai42_kit.clients import RedisConnectionSettings, client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, hgetall, hset_mapping, scan_iter
 from tai42_kit.utils.data.string_util import hash_api_key
 
+from tai42_identity_redis.settings import RedisIdentitySettings, redis_identity_settings
+
 logger = logging.getLogger(__name__)
 
 # The ``user_id -> hashed-key`` reverse lookup, so a user id resolves to its stored
@@ -83,8 +85,14 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
     """Validate and provision api keys against plain Redis hashes."""
 
     def __init__(self, settings: IdentityProviderSettings) -> None:
-        """Store the provider ``settings``."""
-        self.settings = settings
+        """Bind the provider's OWN configuration.
+
+        The injected ``settings`` is the application's object the factory seam passes
+        for every provider; this provider owns its backing store, so it reads its Redis
+        connection and key namespace from its own :class:`RedisIdentitySettings` rather
+        than off the injected object — the contract names neither field.
+        """
+        self.settings: RedisIdentitySettings = redis_identity_settings()
 
     def _identity_key(self, hashed: str) -> str:
         return f"{self.settings.key_prefix}{hashed}"
@@ -93,8 +101,7 @@ class RedisApiKeyProvider(ApiKeyIdentityProvider):
         return f"{_REVERSE_KEY_PREFIX}{user_id}"
 
     def _redis_settings(self) -> RedisConnectionSettings:
-        # Bridge the contract's ``Any`` redis to kit's nominal settings type.
-        return cast("RedisConnectionSettings", self.settings.redis)
+        return self.settings.redis
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
         """Resolve ``token`` to an :class:`AuthIdentity`, or ``None`` when no identity is stored.

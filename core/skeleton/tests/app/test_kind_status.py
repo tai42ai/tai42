@@ -162,7 +162,9 @@ def test_every_gated_feature_has_offline_readable_metadata() -> None:
 
 def test_identity_active_single_registered(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
     # ``redis`` is registered by the autouse identity fixture.
-    monkeypatch.setattr(ks, "access_control_settings", lambda: SimpleNamespace(enable=True, auth_providers=["redis"]))
+    monkeypatch.setattr(
+        ks, "access_control_settings", lambda: SimpleNamespace(enable=True, resolved_auth_providers=lambda: ["redis"])
+    )
     row = _row("identity")
     assert row.state == "active"
     assert row.plugin == "redis"
@@ -171,7 +173,9 @@ def test_identity_active_single_registered(bound_app, monkeypatch: pytest.Monkey
 
 def test_identity_active_multi_flags_unregistered(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        ks, "access_control_settings", lambda: SimpleNamespace(enable=True, auth_providers=["redis", "ghost"])
+        ks,
+        "access_control_settings",
+        lambda: SimpleNamespace(enable=True, resolved_auth_providers=lambda: ["redis", "ghost"]),
     )
     row = _row("identity")
     assert row.state == "active"
@@ -180,7 +184,9 @@ def test_identity_active_multi_flags_unregistered(bound_app, monkeypatch: pytest
 
 
 def test_identity_off_when_access_control_disabled(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "access_control_settings", lambda: SimpleNamespace(enable=False, auth_providers=["redis"]))
+    monkeypatch.setattr(
+        ks, "access_control_settings", lambda: SimpleNamespace(enable=False, resolved_auth_providers=lambda: ["redis"])
+    )
     row = _row("identity")
     assert row.state == "off"
     assert row.plugin is None

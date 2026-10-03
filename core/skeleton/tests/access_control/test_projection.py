@@ -24,7 +24,7 @@ from tai42_skeleton.access_control import projection
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.projection import build_projection
-from tai42_skeleton.access_control.roles import EDITOR_JQ, VIEWER_JQ
+from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 
@@ -164,7 +164,7 @@ async def test_deny_wins_requires_all_resolved_scopes(env: _Env):
 
 
 async def test_editor_projects_me_and_non_auth_but_not_admin_area(env: _Env):
-    env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
+    env.pg.add_policy("editor1", scopes=["*"], condition={"content": editor_jq()})
     env.pg.add_route("/api/auth/scopes", "auth-api")
     env.pg.add_route("/api/tools", "tools")
     env.routes(
@@ -267,7 +267,7 @@ async def test_non_admin_projection_omits_a_fenced_route(env: _Env):
 
 
 async def test_agents_projected_per_run_path_for_editor(env: _Env):
-    env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
+    env.pg.add_policy("editor1", scopes=["*"], condition={"content": editor_jq()})
     env.pg.add_route("/api/agents/alpha/runs", "agents")
     env.pg.add_route("/api/agents/beta/runs", "agents")
     env.agents(["alpha", "beta"])
@@ -278,7 +278,7 @@ async def test_agents_projected_per_run_path_for_editor(env: _Env):
 async def test_agents_excluded_when_run_door_jq_denies(env: _Env):
     # A viewer cannot POST an agent run (only the read-only leg admits its methods), so no
     # agent projects even though the run door resolves and its scope is covered.
-    env.pg.add_policy("viewer1", scopes=["*"], condition={"content": VIEWER_JQ})
+    env.pg.add_policy("viewer1", scopes=["*"], condition={"content": viewer_jq()})
     env.pg.add_route("/api/agents/alpha/runs", "agents")
     env.agents(["alpha"])
     result = await build_projection("viewer1", ["*"], {})
@@ -440,7 +440,7 @@ async def test_projection_equals_gate_across_identity_matrix(env: _Env):
     # condition (the two-pass owner branch).
     settings = access_control_settings()
     env.pg.add_principal("owner1", kind="human", display_name="Owner One")
-    env.pg.add_policy("editor1", scopes=["*"], condition={"content": EDITOR_JQ})
+    env.pg.add_policy("editor1", scopes=["*"], condition={"content": editor_jq()})
     env.pg.add_policy("admin1", scopes=["*"])
     env.pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     env.pg.add_policy("owner1", scopes=["tools", "other"], condition={"content": '.request.path == "/api/tools"'})

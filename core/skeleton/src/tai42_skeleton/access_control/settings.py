@@ -51,10 +51,15 @@ class AccessControlSettings(TaiBaseSettings):
 
     # The ordered token-resolution chain: the verifier tries each named provider in
     # turn and the first to recognize a credential wins (a provider error propagates,
-    # never falls through). The default preserves the single-``redis`` behavior. Parsed
-    # from env as a JSON list (``ACCESS_CONTROL_AUTH_PROVIDERS='["redis"]'``); an empty
-    # list with the gate enabled is a misconfiguration rejected in ``model_post_init``.
-    auth_providers: list[str] = ["redis"]  # noqa: RUF012
+    # never falls through). ``None`` (the default) is DERIVED: the chain is every
+    # registered identity provider (see :meth:`resolved_auth_providers`), so a
+    # deployment that registers any identity provider boots without naming one — the
+    # platform never hard-codes an implementation name here. An explicit JSON list
+    # (``ACCESS_CONTROL_AUTH_PROVIDERS='["a","b"]'``) overrides, fixing both the set
+    # and the order; an explicitly EMPTY list with the gate enabled is a
+    # misconfiguration rejected in ``model_post_init``, and a DERIVED-empty chain (the
+    # gate enabled with no identity provider registered) fails the boot probe loudly.
+    auth_providers: list[str] | None = None
 
     # Runtime slot, NOT configuration: the application installs its
     # ``AccountsAdminServices`` implementation here (at ``AuthAdapter`` construction)
@@ -71,7 +76,6 @@ class AccessControlSettings(TaiBaseSettings):
     cache_size: int = 5000
     cache_ttl_seconds: int = 60
 
-    key_prefix: str = "ac:key:"
     context_prefix: str = "ac:context:"
 
     # Setup-door gate keys on the AC Redis. The setup token itself and its dev-open
@@ -215,11 +219,27 @@ class AccessControlSettings(TaiBaseSettings):
         self._compile_path_patterns()
         self._compile_always_public_route_patterns()
 
+    def resolved_auth_providers(self) -> list[str]:
+        """The ordered identity-provider chain this deployment resolves credentials through.
+
+        The explicit ``auth_providers`` override when one is set; otherwise every
+        registered identity provider, name-sorted, in the generation being resolved
+        (the staged one during an epoch build, else the committed one). The derived
+        default is why a deployment that registers any identity provider boots without
+        naming it in the env, and why the platform hard-codes no implementation name.
+        """
+        if self.auth_providers is not None:
+            return self.auth_providers
+        from tai42_contract.access_control.registry import iter_identity_provider_names_staged
+
+        return iter_identity_provider_names_staged()
+
     def _check_provider_present(self) -> None:
-        if self.enable and not self.auth_providers:
+        if self.enable and self.auth_providers == []:
             raise ValueError(
-                "auth_providers is empty while access control is enabled — an enabled gate "
-                "with no identity provider is a misconfiguration; set ACCESS_CONTROL_AUTH_PROVIDERS"
+                "auth_providers is explicitly empty while access control is enabled — an enabled gate "
+                "with no identity provider is a misconfiguration; leave ACCESS_CONTROL_AUTH_PROVIDERS "
+                "unset to derive the chain from the registered providers, or name at least one"
             )
 
     def _check_prefix_sets_disjoint(self) -> None:

@@ -521,6 +521,7 @@ def test_http_facet_forwarding():
         authed=None,
         destructive=False,
         action=None,
+        self_service=False,
         declared=None,
         no_body_reason=None,
         enveloped=True,

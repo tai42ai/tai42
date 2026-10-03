@@ -335,7 +335,6 @@ class _StandInAdmin:
 
 class _StandInSettings:
     def __init__(self) -> None:
-        self.redis = object()
         self.admin = _StandInAdmin()
 
 
@@ -345,15 +344,13 @@ def test_admin_services_protocol_is_runtime_checkable():
 
 
 def test_settings_protocol_is_runtime_checkable():
+    # ``admin`` (the injected policy-services implementation) is the only field the
+    # contract names: a provider reads its own backing-store handles from its own
+    # settings, so a stand-in carrying only ``admin`` satisfies the seam.
     assert isinstance(_StandInSettings(), AccountsProviderSettings)
 
     class _MissingAdmin:
         def __init__(self) -> None:
-            self.redis = object()
-
-    class _MissingRedis:
-        def __init__(self) -> None:
-            self.admin = _StandInAdmin()
+            self.something_else = object()
 
     assert not isinstance(_MissingAdmin(), AccountsProviderSettings)
-    assert not isinstance(_MissingRedis(), AccountsProviderSettings)

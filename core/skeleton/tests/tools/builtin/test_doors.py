@@ -18,6 +18,7 @@ from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_C
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationEvent
 from tai42_identity_redis import redis_api_key_provider as provider_module
+from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
 import tai42_skeleton.conversations as conversations_package
@@ -316,7 +317,7 @@ async def test_the_http_door_and_the_tool_reach_the_same_verdict(ac, bound_app, 
     ac_settings = AccessControlSettings()
     redis = ACFakeRedis(
         hashes={
-            f"{ac_settings.key_prefix}{hash_api_key('run-key')}": {
+            f"{redis_identity_settings().key_prefix}{hash_api_key('run-key')}": {
                 "user_id": "runner",
                 "description": "d",
                 "owner_user_id": "owner1",

@@ -14,7 +14,7 @@ failure propagates (fail closed). Client IP is the direct peer — no
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from tai42_kit.clients import RedisConnectionSettings, client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -35,14 +35,13 @@ class RateLimitedError(Exception):
 class RateLimiter:
     """Failures-only login throttle over the injected Redis."""
 
-    def __init__(self, redis_settings: Any, settings: AccountsSettings) -> None:
+    def __init__(self, redis_settings: RedisConnectionSettings, settings: AccountsSettings) -> None:
         """Bind the throttle to ``redis_settings`` and the accounts ``settings``."""
         self._redis_settings = redis_settings
         self._settings = settings
 
     def _redis(self) -> RedisConnectionSettings:
-        # Bridge the contract's ``Any`` redis to kit's nominal settings type.
-        return cast("RedisConnectionSettings", self._redis_settings)
+        return self._redis_settings
 
     def _account_key(self, email: str) -> str:
         return f"{self._settings.key_prefix}:acc:login:fail:{email}"

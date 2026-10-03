@@ -36,16 +36,19 @@ _REVERSE_PREFIX = "ac:management:key:"
 
 
 @dataclass
-class _Settings:
-    """A minimal settings shape structurally satisfying ``IdentityProviderSettings``."""
+class _OwnSettings:
+    """A stand-in for the provider's OWN ``RedisIdentitySettings`` (its key prefix + redis handle)."""
 
     key_prefix: str = _KEY_PREFIX
     redis: Any = None
 
 
 def _provider(fake: FakeRedis, monkeypatch: pytest.MonkeyPatch) -> RedisApiKeyProvider:
+    # The provider reads its OWN settings (not the injected object), so drive its
+    # behaviour by patching the plugin's cached settings accessor.
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(fake))
-    return RedisApiKeyProvider(_Settings())
+    monkeypatch.setattr(provider_module, "redis_identity_settings", _OwnSettings)
+    return RedisApiKeyProvider(object())
 
 
 # -- registration hook -------------------------------------------------------
@@ -309,7 +312,8 @@ def test_readiness_targets_declares_the_redis_record_store(monkeypatch):
     """The provider declares its own Redis record store as core's ``/ready`` target:
     the ``"access_control"`` label, kit's ``RedisClient``, and its redis settings."""
     redis_settings = object()  # opaque kit connection settings in production
-    provider = RedisApiKeyProvider(_Settings(redis=redis_settings))
+    monkeypatch.setattr(provider_module, "redis_identity_settings", lambda: _OwnSettings(redis=redis_settings))
+    provider = RedisApiKeyProvider(object())
 
     (target,) = provider.readiness_targets()
 

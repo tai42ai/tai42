@@ -82,7 +82,7 @@ def _client_ip(request: Request) -> str:
 
 
 def _limiter() -> RateLimiter:
-    return RateLimiter(service.provider_settings().redis, accounts_settings())
+    return RateLimiter(accounts_settings().redis, accounts_settings())
 
 
 def _session_response(raw_token: str, user_id: str) -> JSONResponse:

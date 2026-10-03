@@ -16,6 +16,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_identity_redis import redis_api_key_provider as provider_module
+from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
 import tai42_skeleton.routers.hooks as router
@@ -183,7 +184,7 @@ def credentialed_client(monkeypatch, bound_app):
     # policy row and the route rows the enforcement reads.
     fake = FakeRedis(
         hashes={
-            f"{ac_settings.key_prefix}{hash_api_key(_VALID_KEY)}": {
+            f"{redis_identity_settings().key_prefix}{hash_api_key(_VALID_KEY)}": {
                 "user_id": "u1",
                 "description": "d",
                 # Every api key belongs to a principal, so the record carries the owner claim.

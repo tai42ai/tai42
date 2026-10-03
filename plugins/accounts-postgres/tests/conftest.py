@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import psycopg
 import pytest
@@ -32,7 +32,15 @@ from tai42_accounts_postgres.db import COMPONENT, accounts_migration_entry
 
 
 class _FakeHttp:
+    # Records each route registration's path -> keyword metadata so a test can assert a
+    # route declares a flag (e.g. ``self_service``) at its ``custom_route`` call.
+    registrations: ClassVar[dict[str, dict[str, Any]]] = {}
+
     def custom_route(self, *args: Any, **kwargs: Any):
+        path = args[0] if args else kwargs.get("path")
+        if path is not None:
+            _FakeHttp.registrations[path] = kwargs
+
         def _decorator(func):
             return func
 

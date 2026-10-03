@@ -106,12 +106,13 @@ def _identity_provider() -> ApiKeyIdentityProvider:
     ahead of a mint attempt rather than a raw 500 at mint time.
     """
     s = _settings()
-    for name in s.auth_providers:
+    chain = s.resolved_auth_providers()
+    for name in chain:
         provider = _resolve_provider(name)
         if isinstance(provider, ApiKeyIdentityProvider):
             return provider
     raise TypeError(
-        f"no configured identity provider {s.auth_providers!r} implements ApiKeyIdentityProvider; "
+        f"no configured identity provider {chain!r} implements ApiKeyIdentityProvider; "
         "the api-key provisioning surface requires a key-minting provider"
     )
 
@@ -122,7 +123,10 @@ def provider_capabilities() -> list[tuple[str, bool]]:
     The capabilities route surfaces this so a validator-only deployment disables its mint UI
     instead of erroring at mint time.
     """
-    return [(name, isinstance(_resolve_provider(name), ApiKeyIdentityProvider)) for name in _settings().auth_providers]
+    return [
+        (name, isinstance(_resolve_provider(name), ApiKeyIdentityProvider))
+        for name in _settings().resolved_auth_providers()
+    ]
 
 
 def _context_key(s: AccessControlSettings, user_id: str) -> str:

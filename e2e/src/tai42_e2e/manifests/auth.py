@@ -217,10 +217,11 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     # also defaults to ``default``), the template carrying both schemas — both resolve
     # through the default database _base_env already declares; no per-store PG env here.
     env["TAI_SETUP_TOKEN"] = _SETUP_TOKEN
-    # The plugin's rate-limit counters ride the same ACCESS_CONTROL_REDIS_URL the
-    # identity-provider factory receives; sessions live in Postgres, so no plugin Redis
-    # env exists. /api/login needs no path/pattern env — its always-public prefix makes the
-    # login namespace public code-side.
+    # The accounts plugin's login-throttle counters ride its own TAI_ACCOUNTS_REDIS_URL,
+    # the Redis identity provider reads TAI_IDENTITY_REDIS_URL, and the access-control gate
+    # reads ACCESS_CONTROL_REDIS_URL — all pointed at this stack's e2e Redis by
+    # _redis_feature_env; sessions live in Postgres. /api/login needs no path/pattern env —
+    # its always-public prefix makes the login namespace public code-side.
     return StackConfig(
         name="accounts",
         topology=Topology.REPLICAS,

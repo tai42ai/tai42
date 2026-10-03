@@ -240,6 +240,10 @@ async def create_user(request: Request) -> Response:
     request_model=ChangePasswordBody,
     response_model=PasswordChangedResponse,
     action="write",
+    # The one self-service route under the admin-gated users surface: the platform carves
+    # it into the default editor/viewer reach from this flag, so a non-admin may change
+    # their own password while the rest of the surface stays admin-only.
+    self_service=True,
 )
 async def change_own_password(request: Request) -> Response:
     """Self password change: verify the current password, set the new one, and revoke every other session.

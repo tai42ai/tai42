@@ -1,9 +1,9 @@
 """Shared plumbing for the provider and both route modules.
 
-Two concerns: resolving the CURRENT epoch's provider settings (``.admin`` /
-``.redis``) from the live provider instance the epoch recorded — no module holder, so
-a failed epoch build never leaks; and token/id minting and email normalization
-(tokens are distinctly prefixed, stored only as SHA-256).
+Two concerns: resolving the CURRENT epoch's injected provider services (``.admin``)
+from the live provider instance the epoch recorded — no module holder, so a failed
+epoch build never leaks; and token/id minting and email normalization (tokens are
+distinctly prefixed, stored only as SHA-256).
 """
 
 from __future__ import annotations
@@ -43,10 +43,10 @@ PASSWORD_MIN_LENGTH = 10
 
 
 # -- live provider resolution (per epoch, no module holder) ---------------------
-# The injected settings (``.admin`` / ``.redis``) live on the epoch's provider
-# INSTANCE. Route handlers and the record helpers resolve the CURRENT epoch's instance
-# through the app's accounts facet, so a failed epoch build's provider is discarded
-# with its core and never leaks into the live epoch.
+# The injected services (``.admin``) live on the epoch's provider INSTANCE. Route
+# handlers and the record helpers resolve the CURRENT epoch's instance through the
+# app's accounts facet, so a failed epoch build's provider is discarded with its core
+# and never leaks into the live epoch.
 
 
 def provider_settings() -> AccountsProviderSettings:

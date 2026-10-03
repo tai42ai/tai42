@@ -45,10 +45,11 @@ class PostgresAccountsProvider(LoginAttachingProvider):
     """Validate sessions, declare login methods, and attach the owner's login at setup."""
 
     def __init__(self, settings: AccountsProviderSettings) -> None:
-        """Bind the injected ``settings`` (Postgres + Redis connection) to this provider instance."""
-        # The injected settings live on the INSTANCE; the epoch records this provider so
-        # the routes resolve it through the accounts facet — no module holder to leak on
-        # a failed build.
+        """Bind the injected ``settings`` (the application's ``admin`` services) to this instance."""
+        # The injected settings carry the application's policy ``admin`` services; the
+        # plugin's own backing-store configuration lives in ``accounts_settings()``. The
+        # settings live on the INSTANCE; the epoch records this provider so the routes
+        # resolve it through the accounts facet — no module holder to leak on a failed build.
         self.settings = settings
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
@@ -195,11 +196,11 @@ class PostgresAccountsProvider(LoginAttachingProvider):
         await assert_accounts_schema_applied()
 
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
-        """The provider's backing stores probed by the readiness check: its Postgres and the injected Redis."""
-        # Both backing stores: the plugin's own Postgres and the injected Redis.
+        """The provider's backing stores probed by the readiness check: its Postgres and its Redis."""
+        # Both backing stores: the plugin's own Postgres and its own login-throttle Redis.
         return (
             ReadinessTarget("accounts", PostgresClient, component_store_settings(COMPONENT)),
-            ReadinessTarget("accounts", RedisClient, self.settings.redis),
+            ReadinessTarget("accounts", RedisClient, accounts_settings().redis),
         )
 
 

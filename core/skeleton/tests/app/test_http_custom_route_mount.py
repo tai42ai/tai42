@@ -264,3 +264,50 @@ def test_core_route_through_the_facade_defaults_authed_true(monkeypatch: pytest.
     assert meta is not None
     assert meta.authed is True
     assert meta.owner.kind == "core"
+
+
+def test_self_service_flag_threads_through_the_facade(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The production door a plugin calls: tai42_app.http / TaiMCP.http -> HttpFacet ->
+    # HttpSurface -> route_registry. A route registering self_service=True records a
+    # RouteMetadata whose self_service is True, so the access-control carve-in derived
+    # from the registry reaches it; the flag must ride every forwarder on that path.
+    registry = RouteRegistry()
+    monkeypatch.setattr("tai42_skeleton.app.http.route_registry", registry)
+    app = TaiMCP(name="self-service-facade")
+
+    app.http.custom_route(
+        "/api/thing",
+        ["POST"],
+        summary="s",
+        tags=["t"],
+        response_model=None,
+        no_body_reason="test fixture",
+        action="write",
+        self_service=True,
+    )(_handler)
+
+    meta = registry.match("/api/thing", "POST")
+    assert meta is not None
+    assert meta.self_service is True
+
+
+def test_self_service_defaults_false_through_the_facade(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Omitting self_service at the facade records the default False, so a route carries
+    # the carve-in only when it declares it.
+    registry = RouteRegistry()
+    monkeypatch.setattr("tai42_skeleton.app.http.route_registry", registry)
+    app = TaiMCP(name="self-service-default-facade")
+
+    app.http.custom_route(
+        "/api/thing",
+        ["POST"],
+        summary="s",
+        tags=["t"],
+        response_model=None,
+        no_body_reason="test fixture",
+        action="write",
+    )(_handler)
+
+    meta = registry.match("/api/thing", "POST")
+    assert meta is not None
+    assert meta.self_service is False

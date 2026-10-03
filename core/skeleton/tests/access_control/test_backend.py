@@ -22,7 +22,7 @@ from tai42_skeleton.access_control.backend import (
     effective_scopes,
 )
 from tai42_skeleton.access_control.path_canon import canonicalize_path
-from tai42_skeleton.access_control.roles import EDITOR_JQ
+from tai42_skeleton.access_control.roles import editor_jq
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.access_control.verifier import is_always_public_prefix
@@ -371,12 +371,12 @@ async def test_owned_key_both_conditions_pass_allows(monkeypatch, bound_app, sto
 
 
 async def test_owned_key_owner_editor_role_reaches_me(monkeypatch, bound_app, store_pg):
-    # An owned key whose OWNER carries the seeded EDITOR_JQ passes GET /api/auth/me: the
+    # An owned key whose OWNER carries the seeded editor_jq() passes GET /api/auth/me: the
     # owner-condition second pass admits the capability-projection route via its carve-in,
     # so a scoped delegated key can still introspect its own capabilities.
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a"])  # no key condition
-    store_pg.add_policy("owner1", scopes=["*"], condition={"content": EDITOR_JQ})
+    store_pg.add_policy("owner1", scopes=["*"], condition={"content": editor_jq()})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     _creds, user = await backend.authenticate(_conn({"X-Api-Key": "k"}, path="/api/auth/me"))
@@ -384,11 +384,11 @@ async def test_owned_key_owner_editor_role_reaches_me(monkeypatch, bound_app, st
 
 
 async def test_owned_key_owner_editor_role_denied_on_admin_area(monkeypatch, bound_app, store_pg):
-    # The mirror: the same owner EDITOR_JQ still fences the access-control admin area, so
+    # The mirror: the same owner editor_jq() still fences the access-control admin area, so
     # the owned key is denied a non-carved /api/auth route (the owner second pass denies).
     settings = AccessControlSettings()
     store_pg.add_policy("key1", scopes=["a"])
-    store_pg.add_policy("owner1", scopes=["*"], condition={"content": EDITOR_JQ})
+    store_pg.add_policy("owner1", scopes=["*"], condition={"content": editor_jq()})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     with pytest.raises(AuthorizationError):
@@ -523,13 +523,13 @@ async def test_step5b_level_miss_and_hard_fence_deny_with_cause(monkeypatch, bou
             "scopes": ["*"],
             "base_tier": "editor",
             "grants": {},
-            "condition": {"content": EDITOR_JQ},
+            "condition": {"content": editor_jq()},
             "allow_all": False,
         },
     )
 
     settings = AccessControlSettings()
-    store_pg.add_policy("ed", scopes=["*"], condition={"content": EDITOR_JQ}, policy_data={"role": "narrow"})
+    store_pg.add_policy("ed", scopes=["*"], condition={"content": editor_jq()}, policy_data={"role": "narrow"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_FakeVerifier({"tok": "ed"}), settings)
 
