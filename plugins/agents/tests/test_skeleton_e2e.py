@@ -459,8 +459,8 @@ def test_boot_fails_loudly_when_no_identity_provider_registered(skeleton: Any, m
     The companion of the RedisJSON pin above, for ``probe_identity_provider``: the
     ``skeleton`` fixture's re-registering wrapper is unwound back to the contract's
     plain ``reset_registry``, so boot's registry clear leaves no provider under the
-    configured ``auth_provider`` name and the probe's factory lookup must abort
-    the boot loudly with the unknown-provider error. The RedisJSON stand-in stays
+    configured ``auth_provider`` name and the probe must abort the boot loudly
+    because no identity provider is registered. The RedisJSON stand-in stays
     in place, so the identity probe is the only failure the boot can report. This
     is also what proves the fixture's wrapper is load-bearing: were boot not
     clearing the registry, or the probe not resolving through it, the fixture's
@@ -468,7 +468,7 @@ def test_boot_fails_loudly_when_no_identity_provider_registered(skeleton: Any, m
     monkeypatch.setattr(lifecycle, "reset_identity_registry", reset_registry)
 
     async def run() -> None:
-        with pytest.raises(RuntimeError, match=r"probe_identity_provider: KeyError.*Unknown identity provider"):
+        with pytest.raises(RuntimeError, match=r"probe_identity_provider:.*no identity provider is registered"):
             async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
                 raise AssertionError("boot must not succeed with no identity provider registered")
 
