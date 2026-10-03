@@ -11,8 +11,7 @@ Three backends are orchestrated here, each owning a distinct slice of state:
   Postgres — the :class:`~tai42_skeleton.access_control.store.PostgresAccessControlStore`
   this module delegates every policy op to. It is the ONLY policy store.
 - The api-key IDENTITY record (key hash → ``{user_id, description}`` plus its
-  ``user_id`` → hash reverse lookup) is OWNED by the active identity provider (the
-  ``tai42-identity-redis`` plugin for ``auth_providers=["redis"]``), reached ONLY through
+  ``user_id`` → hash reverse lookup) is OWNED by the active identity provider plugin, reached ONLY through
   the ``ApiKeyIdentityProvider`` API (``provision``/``revoke``/``update_description``/
   ``list_identities``) resolved through the module-level registry the runtime auth
   adapter uses — this module never imports the plugin nor touches ``ac:key:*``.

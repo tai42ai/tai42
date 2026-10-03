@@ -121,8 +121,7 @@ class BootMixin(LifecycleState):
         # _initialize_components() re-imports the manifest's identity-plugin modules,
         # which re-run their module-level register_identity_provider(...) calls.
         # The skeleton ships NO concrete identity provider: a deployment names one
-        # (e.g. tai42_identity_redis.redis_api_key_provider, the default in the example
-        # manifest) in its manifest lifecycle_modules, which _initialize_components
+        # in its manifest lifecycle_modules, which _initialize_components
         # imports below — that import-only registration is the sole home, exactly as
         # the shared_secret webhook verifier registers.
         _lifecycle.reset_identity_registry()

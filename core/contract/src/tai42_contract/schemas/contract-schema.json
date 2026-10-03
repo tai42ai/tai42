@@ -213,7 +213,7 @@
     },
     "StateBinding": {
       "additionalProperties": false,
-      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and repeated per node by a flow engine.",
+      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and re-applied per binding site by a consumer.",
       "properties": {
         "states": {
           "items": {
@@ -2462,7 +2462,7 @@
     },
     "StateBinding": {
       "additionalProperties": false,
-      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and repeated per node by a flow engine.",
+      "description": "The optional binding a door carries: one or more :class:`StateAttach` entries. Frozen.\n\nThe same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,\n``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the\nambient dispatch context, and re-applied per binding site by a consumer.",
       "properties": {
         "states": {
           "items": {

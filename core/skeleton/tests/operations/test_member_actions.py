@@ -289,8 +289,8 @@ async def test_invoke_input_type_error_is_422_with_field_paths(monkeypatch: pyte
 
 
 async def test_invoke_ignores_unknown_input_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The operator's ruling: the per-action input model uses pydantic's default extra
-    # behaviour, so an unknown key is accepted and dropped (never refused).
+    # The per-action input model uses pydantic's default extra behaviour, so an unknown
+    # key is accepted and dropped (never refused).
     _as_admin(monkeypatch, member_actions_ops)
     provider = _NeutralActionsProvider(_empty())
     _register("neutral", provider)

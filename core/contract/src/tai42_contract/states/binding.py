@@ -3,7 +3,7 @@
 A binding is OPTIONAL on a preset, a channel route, a hook and a schedule; it attaches one
 or more states to a run and, for each, injects template-input values into the run's input
 BEFORE the dispatch and applies template/custom updates AFTER it. The SAME document is
-repeated per NODE by a flow engine consuming the platform. Tools stay PURE — they never see
+re-applied per binding site by a consumer. Tools stay PURE — they never see
 the binding; the door applies it around them at the shared dispatch chokepoint.
 
 Only the SHAPE lives here (a contract holds models, never logic): every authored jq slot is a
@@ -190,7 +190,7 @@ class StateBinding(BaseModel):
 
     The same shape is stored on ``PresetBody``/``PresetSeed``, ``TargetConversationConfig``,
     ``HookRegister`` and ``ScheduleCreate``, deposited on ``ToolInvocation`` through the
-    ambient dispatch context, and repeated per node by a flow engine.
+    ambient dispatch context, and re-applied per binding site by a consumer.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

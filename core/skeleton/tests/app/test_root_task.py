@@ -7,7 +7,7 @@ import contextvars
 
 from tai42_skeleton.app.root_task import spawn_root_task
 
-_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_root_task_var", default="default")
+_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("root_task_var", default="default")
 
 
 async def test_spawn_root_task_runs_in_a_fresh_context() -> None:

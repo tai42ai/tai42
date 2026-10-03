@@ -205,7 +205,7 @@ async def test_background_submit_runs_in_a_fresh_root_with_an_explicit_acting_co
     )
 
     tools = wired.install()
-    probe: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_supervisor_probe", default="default")
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("supervisor_probe", default="default")
     seen: dict = {}
 
     async def _run_tool(key, arguments, *, offload_sync=False, extras=None):

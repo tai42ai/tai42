@@ -326,7 +326,7 @@ async def test_detached_continuation_drive_runs_in_a_fresh_root_context(wired, m
 
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
 
-    probe: contextvars.ContextVar[str] = contextvars.ContextVar("w9_5_continuation_probe", default="default")
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("continuation_probe", default="default")
     seen: dict = {}
 
     async def _fake_run_tool(tool, arguments, *, continues_chain=None):

@@ -36,7 +36,7 @@ _ACCESS_CONDITION_ANNOTATION: dict[str, Any] = {
 
 
 class IdentityRecord(BaseModel):
-    """Schema for data stored at 'ac:key:{hash}'. Represents purely WHO the user is.
+    """Schema for an api-key identity record. Represents purely WHO the user is.
 
     ``owner_user_id`` names the principal the key belongs to and is REQUIRED:
     every api key belongs to a principal, so a stored api-key record always
