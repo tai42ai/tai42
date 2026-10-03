@@ -314,6 +314,26 @@ async def test_detach_splits_one_address_into_a_fresh_provisional(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_detach_preserves_the_persons_locale(monkeypatch):
+    fake = FakeRecordRedis()
+    store = _store(monkeypatch, fake)
+    person = Person(
+        person_id="p-loc",
+        target_kind=_TARGET.target_kind,
+        target_name=_TARGET.target_name,
+        created_at=datetime.now(UTC),
+        addresses=[_addr("+1000"), _addr("+2000")],
+        locale="fr-FR",
+    )
+    _seed_person(fake, person)
+
+    fresh = await store.detach("p-loc", door="channel", channel="twilio", our_identity="+15550001111", address="+1000")
+    # The detached address rides into a fresh person that keeps the original's stored locale, so the
+    # split conversation still renders in the participant's language.
+    assert fresh.locale == "fr-FR"
+
+
+@pytest.mark.asyncio
 async def test_detach_refuses_the_only_address(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)

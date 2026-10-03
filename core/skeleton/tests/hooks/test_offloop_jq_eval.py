@@ -5,7 +5,8 @@ swallows it."""
 
 from __future__ import annotations
 
-import pytest
+import logging
+
 from tai42_contract.hooks import HookParams
 from tai42_contract.template import TemplatedText
 
@@ -46,8 +47,8 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
     assert ('.status == "ready"', {"id": 3, "status": "ready"}) in calls
 
 
-async def test_fire_time_jq_error_is_not_swallowed(make_app):
-    app = make_app()  # noqa: F841 - registers the app context the manager reads
+async def test_fire_time_jq_error_is_not_swallowed(make_app, caplog):
+    app = make_app()
     manager = InMemoryHooksManager(HooksSettings())
     await manager.register(
         # Compiles at register time, raises at evaluation (string -> number).
@@ -61,5 +62,10 @@ async def test_fire_time_jq_error_is_not_swallowed(make_app):
         )
     )
 
-    with pytest.raises(ValueError, match="cannot be parsed as a number"):
+    with caplog.at_level(logging.ERROR):
         await manager.on_event("t", {"x": "abc"})
+
+    # The condition's evaluation error is the hook's own failure: surfaced loudly in the
+    # log (never swallowed as a cleanly-false skip) and the hook does not fire.
+    assert app.tools.runs == []
+    assert any(rec.levelno == logging.ERROR and "bad" in rec.getMessage() for rec in caplog.records)

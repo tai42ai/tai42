@@ -167,6 +167,12 @@ class ConversationsSettings(TaiBaseSettings):
     # unredeemed. The raw code exists only in flight; only its sha256 is ever stored.
     pair_code_ttl_seconds: int = Field(default=900, gt=0)
 
+    # Seconds an owed first-contact greeting that carries NO pairing code stays parked for its
+    # thread's first delivering message turn to consume. A greeting WITH a code is bounded by the
+    # pair-code lifetime instead (a dead code must never be presented); a code-less greeting has
+    # nothing that expires, so it takes this (longer) horizon rather than the pair-code window.
+    owed_greeting_ttl_seconds: int = Field(default=86400, gt=0)
+
     # -- Redeem brute-force backoff ------------------------------------------
     #
     # A failures-only throttle on the pair-code REDEEM path (per target + the door's

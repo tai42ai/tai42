@@ -292,6 +292,7 @@ class DispatchScopeMiddleware(Middleware):
         """Enter the shared dispatch scope for the MCP ``tools/call``, then delegate to ``call_next``."""
         from tai42_skeleton.access_control.user import request_identity
         from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
+        from tai42_skeleton.tools.binding.result import _tool_result_value
 
         name = context.message.name
         # The MCP call's arguments, mutated in place by any binding injection so the edge
@@ -332,5 +333,9 @@ class DispatchScopeMiddleware(Middleware):
                     if marker is not None:
                         scope.observe_park(marker["interaction_id"])
                     else:
-                        scope.observe(result)
+                        # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
+                        # so the binding's update jq runs over the same value the in-process door
+                        # observes (its raw return) — the edge otherwise feeds the wrapper to jq,
+                        # which carries no tool field and is not even JSON-serializable.
+                        scope.observe(_tool_result_value(result))
                     return result

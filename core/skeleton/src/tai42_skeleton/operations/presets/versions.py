@@ -84,6 +84,9 @@ def _effective_version_body(
         extensions=active.extensions if extensions is None else extensions,
         output_schema=active.output_schema if not output_schema_provided else output_schema,
         input_schema=validation_input_schema,
+        # A version edit never changes the binding, so the write validator judges the active one —
+        # the same body create's validator sees, never a binding-less stand-in.
+        state_binding=active.state_binding,
     )
 
 

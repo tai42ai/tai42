@@ -394,6 +394,21 @@ async def test_modify_scopes_round_trip_through_route(store: _Fakes) -> None:
     assert store.pg.policy_body("u1")["scopes"] == ["scope-b"]
 
 
+async def test_modify_scopes_duplicate_within_add_is_400(store: _Fakes) -> None:
+    # A scope repeated WITHIN one add list is a malformed request: refuse it loudly rather than
+    # append it twice (the stored scope set would then carry the scope duplicated).
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-b", "url": "/b"}))
+    await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "desc", "scopes": ["scope-a"]}))
+
+    resp = await api_keys.modify_api_key_scopes(
+        _req(path_params={"user_id": "u1"}, body={"add": ["scope-b", "scope-b"]})
+    )
+    assert resp.status_code == 400
+    assert "scope-b" in _body(resp)["error"]
+    assert store.pg.policy_body("u1")["scopes"] == ["scope-a"]
+
+
 async def test_edit_explicit_null_clears_policy_and_condition(store: _Fakes) -> None:
     # An explicit null in the body IS an intentional clear (distinct from omission).
     await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))

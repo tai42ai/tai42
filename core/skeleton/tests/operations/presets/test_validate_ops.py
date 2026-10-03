@@ -109,6 +109,35 @@ def test_validate_verdict_carries_write_validator_issues(pg) -> None:
     asyncio.run(run())
 
 
+def test_validate_create_write_validator_sees_the_state_binding(pg) -> None:
+    # The dry-run write validator must judge the SAME body create's does — state_binding included.
+    # Otherwise a base tool whose validator inspects the binding blesses a draft at validate that
+    # create would 400.
+    from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.template import TemplatedText
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seen: dict[str, object] = {}
+
+            async def validator(body):
+                seen["state_binding"] = body.state_binding
+                return []
+
+            instance.app.presets.register_write_validator("weather", validator)
+            binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".x"))])
+            await preset_ops.validate_preset(
+                name="w",
+                base_tool="weather",
+                fixed_kwargs={"units": "v"},
+                state_binding_present=True,
+                state_binding_value=binding.model_dump(mode="json"),
+            )
+            assert seen["state_binding"] is not None
+
+    asyncio.run(run())
+
+
 # -- referees: store-less 404 ------------------------------------------------
 
 

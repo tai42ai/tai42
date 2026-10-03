@@ -188,6 +188,48 @@ def test_save_version_rejected_by_write_validator_400(pg) -> None:
     asyncio.run(run())
 
 
+def test_save_version_write_validator_sees_the_state_binding(pg) -> None:
+    # The save-version write validator must judge the SAME body create's does — the active
+    # binding carried forward included. Otherwise a base tool whose validator inspects the
+    # binding blesses a version-save that create would 400 (or the reverse).
+    from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.template import TemplatedText
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            binding = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content=".x"))])
+            await preset_ops.create_preset(
+                name="wv",
+                base_tool="weather",
+                description="d",
+                fixed_kwargs={"units": "v"},
+                extensions=[],
+                output_schema=None,
+                state_binding=binding,
+            )
+
+            seen: dict[str, object] = {}
+
+            async def validator(body):
+                seen["state_binding"] = body.state_binding
+                return []
+
+            instance.app.presets.register_write_validator("weather", validator)
+            await preset_ops.save_version(
+                name="wv",
+                fixed_kwargs={"units": "z"},
+                extensions=None,
+                output_schema=None,
+                output_schema_provided=False,
+                description=None,
+            )
+            # A version edit carries the active binding forward, so the body the save-version
+            # validator judges carries it too — never a binding-less stand-in.
+            assert seen["state_binding"] is not None
+
+    asyncio.run(run())
+
+
 def test_rollback_rejected_by_write_validator_400(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):

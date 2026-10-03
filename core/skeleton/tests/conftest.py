@@ -115,6 +115,36 @@ class _FakePool:
         return _FakeConn()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _load_full_route_universe():
+    """Load the whole offline route universe once per worker, before any test boots an app.
+
+    ``load_api_routes`` / ``load_all_routes`` return ``route_registry.routes()`` — the
+    process-wide dedup map of every registered route. The shared importer fills that map
+    from the WHOLE ``tai42_skeleton.routers`` package in an unbound/offline process, but
+    a STARTED app narrows the import to its manifest's effective router set. The process
+    app is a singleton whose ``_manifest`` a boot sets and never clears, and the test
+    conftests bind that singleton onto ``tai42_app`` at import time, so a test that boots
+    a narrow manifest leaves the singleton answering a narrowed effective set. A later
+    offline reader on the same xdist worker then takes the narrowed import branch, and if
+    no full import has run first the dedup map is missing the routers the narrow boot
+    omitted — a ``@covers`` attribution, a generated route-column table, or an OpenAPI
+    assertion for one of those routes reads as stale and reds, nondeterministically by
+    boot order.
+
+    Import the whole router package up front under the offline spec harness so the dedup
+    map is complete before any boot runs. The map only grows — a core ``/api`` route is
+    never removed, and a narrow boot only pops and re-registers its own subset — so one
+    load per worker keeps every offline reader enumerating the full surface each expects,
+    independent of boot order."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app.route_registry import _import_all_router_modules, _SpecApp
+
+    with tai42_app.bound(_SpecApp()):
+        _import_all_router_modules()
+
+
 @pytest.fixture(autouse=True)
 def _reset_settings_caches_between_tests():
     """Drop every cached settings accessor and settings-derived singleton around each test.

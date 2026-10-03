@@ -27,18 +27,23 @@ from tai42_skeleton.utils.redis_typing import awaited
 class RecordGreetingMixin(RecordStoreBase):
     """The per-thread owed first-contact greeting (keyspace 9)."""
 
-    async def record_owed_greeting(self, thread_id: str, greeting: str) -> None:
+    async def record_owed_greeting(self, thread_id: str, greeting: str, *, carries_pair_code: bool) -> None:
         """Park ``greeting`` as owed on ``thread_id`` until a turn delivers it.
 
         Written when a first-contact greeting is minted, before the turn runs, so a supersede or
         cancel that reaches the turn before it delivers leaves the greeting standing for the
-        successor to consume. TTL'd to the pair-code lifetime: a greeting may carry a
-        ``{pairing_code}``, and delivering it after that code expired would present a dead code, so
-        the owed greeting never outlives the window its code is live for.
+        successor to consume. A greeting that ``carries_pair_code`` is TTL'd to the pair-code
+        lifetime — delivering it after that code expired would present a dead code, so it never
+        outlives the window its code is live for. A greeting with NO code carries nothing that
+        expires, so it takes the (longer) owed-greeting horizon rather than being dropped at the
+        pair-code lifetime.
         """
+        ttl_seconds = (
+            self.settings.pair_code_ttl_seconds if carries_pair_code else self.settings.owed_greeting_ttl_seconds
+        )
         key = self.settings.owed_greeting_key(thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            await awaited(r.set(key, greeting, px=self.settings.pair_code_ttl_seconds * 1000))
+            await awaited(r.set(key, greeting, px=ttl_seconds * 1000))
 
     async def read_owed_greeting(self, thread_id: str) -> str | None:
         """Return the greeting owed on ``thread_id`` WITHOUT consuming it, or ``None`` when none is owed.

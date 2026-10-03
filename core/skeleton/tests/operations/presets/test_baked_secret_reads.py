@@ -117,7 +117,10 @@ def test_read_fails_closed_when_the_base_tool_is_unresolvable(pg, monkeypatch, c
             with caplog.at_level(logging.WARNING, logger="tai42_skeleton.operations.presets.read"):
                 detail = await preset_ops.get_preset(name="vaulted")
             assert detail["fixed_kwargs"] == {"token": SECRET_PLACEHOLDER, "label": SECRET_PLACEHOLDER}
-            warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
+            # Select THIS read's own warning by its logger, not the first WARNING on the
+            # worker: boot-time warnings (monitoring/rate-limiting OFF) share ``caplog``, so
+            # ``next(... levelno == WARNING)`` would pick whichever landed first.
+            warning = next(r for r in caplog.records if r.name == "tai42_skeleton.operations.presets.read")
             assert "vaulted" in warning.getMessage()
             assert "secret_sink" in warning.getMessage()
 

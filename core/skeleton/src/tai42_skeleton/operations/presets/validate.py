@@ -140,6 +140,7 @@ async def _verdict_bind_chain(
         extensions=combos,
         output_schema=output_schema,
         input_schema=input_schema,
+        state_binding=state_binding,
     )
     # A set ``input_schema`` over a base tool with no registered support is the same loud
     # authoring error the write door raises — mirror it as an invalid verdict, never a

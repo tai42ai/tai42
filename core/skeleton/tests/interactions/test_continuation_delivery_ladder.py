@@ -217,6 +217,28 @@ async def test_plain_raise_keeps_the_due_record_and_fires_nothing(wired, monkeyp
     assert await _due_present(wired, "iid-1")
 
 
+async def test_address_delivery_drops_the_subject_index_membership(wired, monkeypatch):
+    # An answered park moves ``asking`` → ``running`` and KEEPS its subject-index membership while
+    # the run drives. When the terminal is delivered through an ADDRESS the run is complete, so that
+    # running membership must leave — exactly as the subject-track rung drops it via ``add_outcome``.
+    tools = _wire_tools(monkeypatch, {"resume_tool": lambda _a: {"status": "success"}, "deliver_tool": lambda a: None})
+    candidates = SubjectCandidates(target_kind="tool", target_name="tool-a", by_kind={"person": "p1"})
+    parks_key = wired.store.subject_parks_key("tool", "tool-a", "person", "p1")
+    await wired.fake.sadd(parks_key, "iid-1")
+
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=("deliver_tool", {"thread_id": "t1"}),
+        run_delivery_id="rd-1",
+        candidates=candidates,
+    )
+
+    # The address fired AND the interaction left the subject index (its run is complete).
+    assert any(c["key"] == "deliver_tool" for c in tools.calls)
+    assert await wired.fake.smembers(parks_key) == set()
+
+
 # --- the ladder's subject and drop rungs ------------------------------------------------
 
 

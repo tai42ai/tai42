@@ -92,6 +92,22 @@ class _StoreOutcomeWrites(_StoreKeys):
                 pipe.expire(scopes_key, retention_ttl, gt=True)
         await pipe.execute()
 
+    async def leave_subject_index(self, r: Redis, *, interaction_id: str, candidates: SubjectCandidates) -> None:
+        """Drop ``interaction_id``'s ``running`` membership from every subject-parks set its subject addresses.
+
+        An answered park keeps its subject-index membership while the resumed run drives (``asking`` →
+        ``running``). When the terminal is delivered through an ADDRESS — not subject-tracked — the run
+        is complete but no :meth:`add_outcome` runs, so the membership must be dropped here, exactly as
+        ``add_outcome`` drops it on the subject-track path. Idempotent: a redelivery finds it gone.
+        """
+        subject_keys = records.iter_subject_keys(records.subjects_descriptor(candidates))
+        if not subject_keys:
+            return
+        pipe = r.pipeline()
+        for target_kind, target_name, kind, key in subject_keys:
+            pipe.srem(self.subject_parks_key(target_kind, target_name, kind, key), interaction_id)
+        await pipe.execute()
+
     async def claim_outcome(self, r: Redis, completion_id: str) -> WaitingOutcome | None:
         """Atomically TAKE a waiting outcome: read it, delete the row, and drop it from every index.
 

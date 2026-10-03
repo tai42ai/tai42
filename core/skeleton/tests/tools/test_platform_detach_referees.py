@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.conversations import TargetConversationConfig
+from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
 from tai42_skeleton.tools import platform_referees
 
@@ -135,10 +136,13 @@ async def test_hook_referee_blocks_on_binding_hook(monkeypatch) -> None:
 
 
 async def test_schedule_referee_blocks_on_binding_schedule(monkeypatch) -> None:
+    # A stored schedule row carries its door binding under the kit's reserved
+    # ``backend_schedule_state_binding`` key (the create door's ``state_binding`` is re-stamped
+    # there, never left as a plain ``state_binding`` tool kwarg), so the referee reads it there.
     async def fake_export() -> list[dict[str, object]]:
         return [
-            {"name": "nightly", "kwargs": {"state_binding": _BINDS_T1}},
-            {"name": "weekly", "kwargs": {"state_binding": _BINDS_OTHER}},
+            {"name": "nightly", "kwargs": {SCHEDULE_STATE_BINDING_ARG: _BINDS_T1}},
+            {"name": "weekly", "kwargs": {SCHEDULE_STATE_BINDING_ARG: _BINDS_OTHER}},
             {"name": "plain", "kwargs": {}},  # no binding -> no objection
         ]
 

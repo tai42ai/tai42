@@ -218,6 +218,12 @@ async def _deliver_terminal(
         # passes ``assert_delivery_authorized`` — the ONE place an address is fired.
         with delivery_fire(completion_id):
             await tai42_app.tools.run_tool(delivery_tool, payload)
+        # The run is complete: drop its ``running`` subject-index membership (an answered park kept
+        # it while the run drove). The subject-track rung does this through ``add_outcome``; the
+        # address rung must do it too, after the fire so a fire failure leaves it for a redelivery.
+        if candidates is not None and candidates.by_kind:
+            async with client_ctx(RedisClient, interactions_settings().redis) as r:
+                await store.leave_subject_index(r, interaction_id=interaction_id, candidates=candidates)
         return
     if candidates is not None and candidates.by_kind:
         # No address, but a subject: park the terminal for whoever next runs on the subject. Its
