@@ -133,8 +133,8 @@ Schedule tools (RedBeat): `backend_list_schedules` (canonical row keys `name`
 `backend_disable_schedule`, `backend_run_schedule_now`,
 `backend_update_schedule`, `backend_delete_schedule`, plus the backup round
 trip `backend_export_schedules` / `backend_import_schedules` (portable
-`ScheduleRecord` rows; upsert by name; per-row errors surfaced as
-`{"index", "name", "error"}`, never swallowed).
+`ScheduleRecord` rows; skip/overwrite import mode keyed by name; per-row errors
+surfaced as `{"index", "name", "error"}`, never swallowed).
 
 ## Configuration
 

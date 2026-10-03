@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import orjson
 from arq.constants import in_progress_key_prefix
@@ -313,7 +313,9 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
 
 
 @tai42_app.tools.tool(tags={"backend"})
-async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str, Any]:
+async def backend_import_schedules(
+    schedules: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+) -> dict[str, Any]:
     """Import schedules previously produced by ``backend_export_schedules``.
 
     Each entry is parsed as a ``ScheduleRecord`` and written through the same
@@ -323,13 +325,18 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
     The next run is recomputed from the schedule (never taken from a stale
     exported value).
 
-    Imports are idempotent by name: an existing name is overwritten and counted
-    as ``updated``; a new name is counted as ``created``. A malformed entry or a
-    failed write is recorded in ``errors`` -- never silently dropped. Returns
-    ``{"created": int, "updated": int, "skipped": int, "errors": [...]}``; each
-    error row is ``{"index", "name", "error"}``. ``skipped`` is always 0 --
-    this backend has no skip case (every valid record can be stored, enabled
-    or disabled).
+    ``mode`` keys an existing name: under ``skip`` (the default) an existing name is
+    left untouched -- not aborted, not re-applied -- and counted in
+    ``skipped_existing``; under ``overwrite`` the existing schedule is replaced in
+    place (counted ``updated``). A new name is created (counted ``created``) under
+    both. This is the per-record import mode the backup restore forwards across the
+    tool boundary, honored here as every backend honors it.
+
+    A malformed entry or a failed write is recorded in ``errors`` -- never silently
+    dropped. Returns ``{"created", "updated", "skipped", "skipped_existing",
+    "errors"}``; each error row is ``{"index", "name", "error"}``. ``skipped`` is
+    always 0 -- this backend has no per-row skip case (every valid record can be
+    stored, enabled or disabled).
     """
     arq_redis: Any = await RedisPoolManager.get()
     settings = arq_settings()
@@ -337,18 +344,24 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
     created = 0
     updated = 0
     skipped = 0
+    skipped_existing = 0
     errors: list[dict[str, Any]] = []
 
     for index, entry in enumerate(schedules):
         try:
             record = ScheduleRecord.model_validate(entry)
 
+            key = settings.arq_schedule_key(record.name)
+            exists = bool(await arq_redis.exists(key))
+
+            if exists and mode == "skip":
+                # An existing schedule (keyed by name) is left in place.
+                skipped_existing += 1
+                continue
+
             norm = normalize_schedule(record.schedule)
             cron_or_interval = derive_cron_or_interval(norm)
             defer_by, last_scheduled_ts = next_run_after(cron_or_interval, datetime.now(UTC))
-
-            key = settings.arq_schedule_key(record.name)
-            exists = bool(await arq_redis.exists(key))
 
             mapping_updates = {
                 "target": "tool_execution",
@@ -376,7 +389,13 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
             name = entry.get("name") if isinstance(entry, dict) else None
             errors.append({"index": index, "name": name, "error": repr(exc)})
 
-    return {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "skipped_existing": skipped_existing,
+        "errors": errors,
+    }
 
 
 @tai42_app.tools.tool(tags={"backend"})
