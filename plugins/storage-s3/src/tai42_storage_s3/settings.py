@@ -29,6 +29,12 @@ class S3Settings(TaiBaseSettings):
     read_timeout: int = 30
     addressing_style: Literal["path", "virtual", "auto"] | None = "auto"
     request_checksum_calculation: Literal["when_supported", "when_required"] | None = None
+    # The algorithm sent as the request-body ``ChecksumAlgorithm`` on writes that
+    # carry one (``put_object``, ``delete_objects``). Unset leaves botocore's own
+    # default (CRC32), so AWS S3 is unchanged; an S3-compatible store that refuses
+    # CRC32 sets one it accepts (e.g. ``SHA256``). CRC32C and CRC64NVME need the
+    # ``botocore[crt]`` extra and raise loudly without it.
+    checksum_algorithm: Literal["CRC32", "CRC32C", "SHA1", "SHA256", "CRC64NVME"] | None = None
 
 
 @settings_cache
