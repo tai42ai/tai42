@@ -15,11 +15,14 @@ from tai42_contract.access_control.identity import AuthIdentity, ReadinessTarget
 from tai42_contract.accounts import (
     FormField,
     FormMethod,
+    InviteEntry,
     LoginAttachError,
     LoginAttachingProvider,
     LoginAttachment,
     LoginCredential,
     LoginMethod,
+    MemberEntry,
+    MemberListing,
     register_accounts_provider,
 )
 from tai42_kit.clients.impl.postgres import PostgresClient
@@ -134,6 +137,40 @@ class PostgresAccountsProvider(LoginAttachingProvider):
                 submit_path=submit_path("/invite/accept"),
             ),
         ]
+
+    async def list_members(self) -> MemberListing:
+        """The deployment's people and its open invitations.
+
+        A user awaiting an open (unconsumed) invitation is an INVITE, carrying that
+        invitation's expiry; every other user is a MEMBER. The two lists are disjoint and
+        total — each user appears exactly once, so a user in any anomalous in-between state
+        is shown as a member rather than dropped. Store errors propagate (fail loud).
+        """
+        rows = await service.users_store().list()
+        open_invites = await service.invites_store().list_open()
+        invited_ids = {row["user_id"] for row in open_invites}
+        members = [
+            MemberEntry(
+                id=row["user_id"],
+                email=row["email"],
+                role=row["role"],
+                disabled=row["disabled"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+            if row["user_id"] not in invited_ids
+        ]
+        invites = [
+            InviteEntry(
+                id=row["user_id"],
+                email=row["email"],
+                role=row["role"],
+                created_at=row["created_at"],
+                expires_at=row["expires_at"],
+            )
+            for row in open_invites
+        ]
+        return MemberListing(members=members, invites=invites)
 
     async def has_login(self, user_id: str) -> bool:
         """Whether an ``accounts_users`` login row exists for principal ``user_id``.

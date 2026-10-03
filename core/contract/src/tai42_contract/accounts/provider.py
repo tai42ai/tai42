@@ -6,7 +6,7 @@ from abc import abstractmethod
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from tai42_contract.access_control.identity import IdentityProvider
-from tai42_contract.accounts.models import LoginAttachment, LoginCredential, LoginMethod
+from tai42_contract.accounts.models import LoginAttachment, LoginCredential, LoginMethod, MemberListing
 
 
 @runtime_checkable
@@ -92,6 +92,21 @@ class AccountsProvider(IdentityProvider):
         Called by the application's public login-methods aggregator. Must be
         cheap and side-effect free: this is static, config-derived metadata,
         not I/O (sync by contract, like ``readiness_targets``).
+        """
+        ...
+
+    @abstractmethod
+    async def list_members(self) -> MemberListing:
+        """List the people this provider owns and the invitations it holds.
+
+        Called by the application's Members aggregator, which concatenates one
+        :class:`~tai42_contract.accounts.models.MemberListing` per registered accounts
+        provider into a single deployment-wide view. Each person is a
+        :class:`~tai42_contract.accounts.models.MemberEntry` and each outstanding
+        invitation an :class:`~tai42_contract.accounts.models.InviteEntry`; how a
+        provider partitions its accounts between the two lists is its own concern. Reads
+        the provider's own store, so this is I/O (async). Backend errors raise (the
+        aggregate fails loudly rather than dropping a provider's accounts silently).
         """
         ...
 

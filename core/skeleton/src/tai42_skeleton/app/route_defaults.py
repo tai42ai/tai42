@@ -52,7 +52,7 @@ STUDIO_SPA_ROUTER = "tai42_skeleton.routers.plugins"
 # and never contains the SPA catch-all.
 CORE_API_ROUTERS: tuple[str, ...] = ("tai42_skeleton.routers.storage_presence",)
 
-# The 34 route-registering API router modules mounted by default under
+# The 36 route-registering API router modules mounted by default under
 # ``"all"``/``"api"``. Ordered alphabetically; among these each owns a distinct
 # ``/api/*`` (or ``/health``/``/ready``/``/metrics``) prefix, so their relative order is
 # not load-bearing — only the SPA catch-all's last position is.
@@ -73,6 +73,7 @@ DEFAULT_API_ROUTERS: tuple[str, ...] = (
     "tai42_skeleton.routers.login",
     "tai42_skeleton.routers.manifest",
     "tai42_skeleton.routers.marketplace",
+    "tai42_skeleton.routers.members",
     "tai42_skeleton.routers.metrics",
     "tai42_skeleton.routers.notifications",
     "tai42_skeleton.routers.observability",

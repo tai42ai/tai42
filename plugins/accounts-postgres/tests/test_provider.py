@@ -220,6 +220,61 @@ async def test_has_login_false_when_no_row(wire):
     assert await _provider().has_login("nobody") is False
 
 
+# -- list_members ---------------------------------------------------------------
+
+
+def _seed_login(wire, user_id: str, *, email: str, password_hash: str | None, role: str = "editor") -> None:
+    wire.users.rows[user_id] = {
+        "user_id": user_id,
+        "email": email,
+        "password_hash": password_hash,
+        "role": role,
+        "disabled": False,
+        "created_at": future(0),
+    }
+
+
+async def test_list_members_empty_lists_nothing(wire):
+    listing = await _provider().list_members()
+    assert listing.members == []
+    assert listing.invites == []
+
+
+async def test_list_members_partitions_active_members_and_open_invites(wire):
+    _seed_login(wire, "usr-active", email="a@x.test", password_hash="hash", role="admin")
+    _seed_login(wire, "usr-pending", email="p@x.test", password_hash=None, role="viewer")
+    exp = future(3600)
+    wire.invites.rows["th-1"] = {"user_id": "usr-pending", "expires_at": exp, "consumed_at": None}
+
+    listing = await _provider().list_members()
+
+    assert [(m.id, m.email, m.role) for m in listing.members] == [("usr-active", "a@x.test", "admin")]
+    assert [(i.id, i.email, i.role) for i in listing.invites] == [("usr-pending", "p@x.test", "viewer")]
+    assert listing.invites[0].expires_at == exp
+
+
+async def test_list_members_consumed_invite_user_is_a_member_not_dropped(wire):
+    # A password-less user whose invite was consumed (a half-finished acceptance) has no
+    # OPEN invite, so it is listed as a member rather than vanishing from both lists.
+    _seed_login(wire, "usr-edge", email="e@x.test", password_hash=None)
+    wire.invites.rows["th-1"] = {"user_id": "usr-edge", "expires_at": future(3600), "consumed_at": future(0)}
+
+    listing = await _provider().list_members()
+
+    assert [m.id for m in listing.members] == ["usr-edge"]
+    assert listing.invites == []
+
+
+async def test_list_members_expired_open_invite_is_still_listed(wire):
+    _seed_login(wire, "usr-pending", email="p@x.test", password_hash=None)
+    wire.invites.rows["th-1"] = {"user_id": "usr-pending", "expires_at": past(10), "consumed_at": None}
+
+    listing = await _provider().list_members()
+
+    assert listing.members == []
+    assert [i.id for i in listing.invites] == ["usr-pending"]
+
+
 # -- revoke_session -------------------------------------------------------------
 
 

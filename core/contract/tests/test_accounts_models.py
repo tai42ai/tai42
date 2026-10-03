@@ -4,6 +4,7 @@ owner-parameter signature lock."""
 from __future__ import annotations
 
 import inspect
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -14,9 +15,12 @@ from tai42_contract.accounts.models import (
     FormField,
     FormMethod,
     InviteCredential,
+    InviteEntry,
     LoginAttachment,
     LoginCredential,
     LoginMethod,
+    MemberEntry,
+    MemberListing,
     PasswordCredential,
 )
 
@@ -229,6 +233,78 @@ def test_login_attachment_defaults():
     attachment = LoginAttachment(attached=False)
     assert attachment.invite_token is None
     assert attachment.login_path is None
+
+
+# -- Membership listing shapes -------------------------------------------------
+
+
+def test_member_entry_accepts_an_aware_created_at_and_normalizes_to_utc():
+    created = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=2)))
+    entry = MemberEntry(id="usr-1", email="a@x.test", role="editor", disabled=False, created_at=created)
+    assert entry.created_at.tzinfo is UTC
+    assert entry.created_at == created
+
+
+def test_member_entry_rejects_a_naive_created_at():
+    with pytest.raises(ValidationError):
+        MemberEntry(
+            id="usr-1",
+            email="a@x.test",
+            role="editor",
+            disabled=False,
+            created_at=datetime(2026, 1, 2, 3, 4, 5),  # the naive timestamp under test
+        )
+
+
+def test_member_entry_requires_non_empty_id_email_role():
+    now = datetime.now(UTC)
+    for field, value in (("id", ""), ("email", ""), ("role", "")):
+        kwargs = {"id": "usr-1", "email": "a@x.test", "role": "editor", "disabled": False, "created_at": now}
+        kwargs[field] = value
+        with pytest.raises(ValidationError):
+            MemberEntry(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
+def test_member_entry_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        MemberEntry(
+            id="usr-1",
+            email="a@x.test",
+            role="editor",
+            disabled=False,
+            created_at=datetime.now(UTC),
+            surprise="x",  # pyright: ignore[reportCallIssue]
+        )
+
+
+def test_invite_entry_requires_aware_timestamps():
+    now = datetime.now(UTC)
+    entry = InviteEntry(id="usr-2", email="b@x.test", role="viewer", created_at=now, expires_at=now)
+    assert entry.created_at.tzinfo is UTC
+    assert entry.expires_at.tzinfo is UTC
+    with pytest.raises(ValidationError):
+        InviteEntry(
+            id="usr-2",
+            email="b@x.test",
+            role="viewer",
+            created_at=now,
+            expires_at=datetime(2026, 1, 2, 3, 4, 5),  # the naive timestamp under test
+        )
+
+
+def test_member_listing_holds_members_and_invites():
+    now = datetime.now(UTC)
+    listing = MemberListing(
+        members=[MemberEntry(id="usr-1", email="a@x.test", role="editor", disabled=False, created_at=now)],
+        invites=[InviteEntry(id="usr-2", email="b@x.test", role="viewer", created_at=now, expires_at=now)],
+    )
+    assert [m.id for m in listing.members] == ["usr-1"]
+    assert [i.id for i in listing.invites] == ["usr-2"]
+
+
+def test_member_listing_requires_both_lists():
+    with pytest.raises(ValidationError):
+        MemberListing(members=[])  # pyright: ignore[reportCallIssue]
 
 
 # -- provision signature lock --------------------------------------------------

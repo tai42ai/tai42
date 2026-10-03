@@ -26,6 +26,7 @@ from tai42_contract.accounts.models import (
     LoginAttachment,
     LoginCredential,
     LoginMethod,
+    MemberListing,
     PasswordCredential,
 )
 from tai42_contract.accounts.provider import (
@@ -69,6 +70,9 @@ class _FakeAccounts(AccountsProvider):
                 submit_path="/api/login/password",
             )
         ]
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
 
     async def revoke_session(self, token: str) -> bool:
         return token == "tai-sess-ok"
@@ -186,6 +190,9 @@ class _MissingLoginMethods(AccountsProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
     async def revoke_session(self, token: str) -> bool:
         return False
 
@@ -197,8 +204,25 @@ class _MissingRevokeSession(AccountsProvider):
     def login_methods(self) -> list[LoginMethod]:
         return []
 
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
 
 class _MissingValidateToken(AccountsProvider):
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
+    async def revoke_session(self, token: str) -> bool:
+        return False
+
+
+class _MissingListMembers(AccountsProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
     def login_methods(self) -> list[LoginMethod]:
         return []
 
@@ -212,6 +236,7 @@ class _MissingValidateToken(AccountsProvider):
         _MissingLoginMethods,
         _MissingRevokeSession,
         _MissingValidateToken,
+        _MissingListMembers,
     ],
 )
 def test_subclass_missing_any_abstract_method_cannot_instantiate(cls: type[AccountsProvider]):

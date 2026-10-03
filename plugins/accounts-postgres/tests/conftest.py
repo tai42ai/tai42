@@ -408,7 +408,8 @@ class FakeSessionsStore:
 
 
 class FakeInvitesStore:
-    def __init__(self) -> None:
+    def __init__(self, users: FakeUsersStore) -> None:
+        self._users = users
         self.rows: dict[str, dict[str, Any]] = {}
 
     async def create(self, token_hash: str, user_id: str, expires_at: Any) -> None:
@@ -428,6 +429,25 @@ class FakeInvitesStore:
         for th in list(self.rows):
             if self.rows[th]["user_id"] == user_id:
                 del self.rows[th]
+
+    async def list_open(self) -> list[dict[str, Any]]:
+        joined = []
+        for row in self.rows.values():
+            if row["consumed_at"] is not None:
+                continue
+            user = self._users.rows.get(row["user_id"])
+            if user is None:
+                continue
+            joined.append(
+                {
+                    "user_id": user["user_id"],
+                    "email": user["email"],
+                    "role": user["role"],
+                    "created_at": user["created_at"],
+                    "expires_at": row["expires_at"],
+                }
+            )
+        return sorted(joined, key=lambda r: r["created_at"])
 
 
 @dataclass
@@ -577,8 +597,8 @@ def sessions_store(users_store: FakeUsersStore) -> FakeSessionsStore:
 
 
 @pytest.fixture
-def invites_store() -> FakeInvitesStore:
-    return FakeInvitesStore()
+def invites_store(users_store: FakeUsersStore) -> FakeInvitesStore:
+    return FakeInvitesStore(users_store)
 
 
 @pytest.fixture

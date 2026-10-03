@@ -15,7 +15,7 @@ import pytest
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 from tai42_contract.accounts import registry as accounts_registry
-from tai42_contract.accounts.models import LoginMethod
+from tai42_contract.accounts.models import LoginMethod, MemberListing
 from tai42_contract.accounts.provider import AccountsProvider
 from tai42_kit.settings import reset_all_settings
 
@@ -118,6 +118,9 @@ class _FakeAccountsProvider(AccountsProvider):
 
     def login_methods(self) -> list[LoginMethod]:
         return []
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
 
     async def revoke_session(self, token: str) -> bool:
         return False

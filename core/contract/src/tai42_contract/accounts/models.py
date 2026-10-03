@@ -1,15 +1,21 @@
-"""Login-method metadata for the accounts plugin kind.
+"""Data models for the accounts plugin kind.
 
 An accounts provider declares HOW a human can sign in as data; the Studio
-login shell renders that data. Exactly two shapes exist: a credentials form
-posted to a provider route, and a button linking to a provider redirect
-flow. The provider supplies every piece of content (titles, labels, icons,
-paths); the renderer supplies only the two shapes.
+login shell renders that data. Exactly two login-method shapes exist: a
+credentials form posted to a provider route, and a button linking to a provider
+redirect flow. The provider supplies every piece of content (titles, labels,
+icons, paths); the renderer supplies only the two shapes.
+
+The same module carries the credential shapes a provider attaches to a principal
+and the membership shapes it lists — the people it owns and the invitations it
+holds — so a generic Members view can render every provider's accounts without
+naming any of them.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -138,13 +144,82 @@ class LoginAttachment(BaseModel):
     login_path: str | None = None
 
 
+class MemberEntry(BaseModel):
+    """One person an accounts provider owns: an account the operator manages.
+
+    ``id`` is the provider's stable handle for the person — the id its own member
+    routes act on. ``email`` is the sign-in identity the provider holds for them.
+    ``role`` names the platform role the person holds; only the name rides here, the
+    role's definition is read from the role listing. ``disabled`` turns off the
+    account; ``created_at`` is timezone-aware (UTC).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    disabled: bool
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_tz_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware (UTC)")
+        return value.astimezone(UTC)
+
+
+class InviteEntry(BaseModel):
+    """One outstanding invitation an accounts provider holds.
+
+    ``id`` is the provider's stable handle for the invited person — the id its own
+    invite routes act on. ``email`` is the invited address; ``role`` names the platform
+    role the person will hold (only the name, as on :class:`MemberEntry`). ``created_at``
+    and ``expires_at`` are timezone-aware (UTC).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    created_at: datetime
+    expires_at: datetime
+
+    @field_validator("created_at", "expires_at")
+    @classmethod
+    def _timestamp_tz_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware (UTC)")
+        return value.astimezone(UTC)
+
+
+class MemberListing(BaseModel):
+    """An accounts provider's membership: the people it owns and the invitations it holds.
+
+    Returned by :meth:`~tai42_contract.accounts.provider.AccountsProvider.list_members`.
+    The application's Members aggregation concatenates one of these per registered
+    accounts provider into a single deployment-wide view, so a provider's people and
+    outstanding invitations appear without the platform naming the provider.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[MemberEntry]
+    invites: list[InviteEntry]
+
+
 __all__ = [
     "ButtonMethod",
     "FormField",
     "FormMethod",
     "InviteCredential",
+    "InviteEntry",
     "LoginAttachment",
     "LoginCredential",
     "LoginMethod",
+    "MemberEntry",
+    "MemberListing",
     "PasswordCredential",
 ]

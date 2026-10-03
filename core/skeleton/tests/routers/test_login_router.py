@@ -17,7 +17,14 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity
 from tai42_contract.accounts import registry as accounts_registry
-from tai42_contract.accounts.models import FormField, FormMethod, LoginAttachment, LoginCredential, LoginMethod
+from tai42_contract.accounts.models import (
+    FormField,
+    FormMethod,
+    LoginAttachment,
+    LoginCredential,
+    LoginMethod,
+    MemberListing,
+)
 from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider
 
 import tai42_skeleton.routers.api_keys as api_keys_router
@@ -53,6 +60,9 @@ class _FakeAccounts(AccountsProvider):
             raise RuntimeError("methods failed")
         return self._methods
 
+    async def list_members(self) -> MemberListing:  # pragma: no cover - unused
+        return MemberListing(members=[], invites=[])
+
     async def revoke_session(self, token: str) -> bool:
         self.revoke_calls.append(token)
         if self._revoke_raises:
@@ -68,6 +78,9 @@ class _FakeLoginAttaching(LoginAttachingProvider):
 
     async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused
         return None
+
+    async def list_members(self) -> MemberListing:  # pragma: no cover - unused
+        return MemberListing(members=[], invites=[])
 
     async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
         return False
