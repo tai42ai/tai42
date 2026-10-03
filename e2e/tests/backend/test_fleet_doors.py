@@ -75,7 +75,7 @@ async def test_fleet_reload_config_all_confirms(core_stack: TaiStack) -> None:
     assert {worker.name for worker in core_stack.census()} <= outcomes.keys()
 
 
-@pytest.mark.needs
+@pytest.mark.needs("setting:ACCESS_CONTROL_ENABLE=false")
 async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: TaiStack) -> None:
     bogus = "no-such-worker-99999"
     api = core_stack.api()
