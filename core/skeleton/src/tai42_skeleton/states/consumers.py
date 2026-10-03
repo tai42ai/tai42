@@ -120,14 +120,11 @@ def schedule_consumer_rows(records: Iterable[dict[str, Any]], subject_kinds: set
 def _agent_state_tools(agent: Agent) -> list[str]:
     """The ``state_*`` builtins in an agent's statically-declared tool set, sorted.
 
-    Read from the agent's declared ``tool_names`` (the fixed tool set an agent binds).
-    An agent that resolves its tools at run time declares none, so it names no state
+    Read from the contract's declared ``tool_names`` (the fixed tool set an agent binds).
+    An agent that resolves its tools at run time declares ``None``, so it names no state
     tool here — the truthful answer, never a guess.
     """
-    declared = getattr(agent, "tool_names", None)
-    if declared is None:
-        field = agent.ToolInput.model_fields.get("tool_names")
-        declared = field.get_default(call_default_factory=True) if field is not None else None
+    declared = agent.tool_names
     if not isinstance(declared, Iterable) or isinstance(declared, str | bytes):
         return []
     return sorted({name for name in declared if isinstance(name, str) and name.startswith(_STATE_TOOL_PREFIX)})

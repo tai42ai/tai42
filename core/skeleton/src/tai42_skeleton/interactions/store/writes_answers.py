@@ -40,6 +40,7 @@ class _AnswerClaim:
     continuation_identity: str | None
     continuation_fingerprint: str | None
     continuation_state_context: str | None
+    caller_ask_landing: str | None
     remaining: int
 
 
@@ -187,6 +188,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
         continuation_identity: str | None = None
         continuation_fingerprint: str | None = None
         continuation_state_context: str | None = None
+        caller_ask_landing: str | None = None
         if continuation_tool is not None:
             continuation_identity = serde.as_str(
                 await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_identity"))
@@ -196,6 +198,9 @@ class _StoreAnswerWrites(_StoreWritesBase):
             )
             continuation_state_context = serde.as_str(
                 await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_state_context"))
+            )
+            caller_ask_landing = serde.as_str(
+                await cast("Awaitable[str | None]", pipe.hget(state_key, "caller_ask_landing"))
             )
             if continuation_due_ttl is None or continuation_first_attempt_at_ms is None:
                 raise RuntimeError(
@@ -224,6 +229,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
             continuation_identity=continuation_identity,
             continuation_fingerprint=continuation_fingerprint,
             continuation_state_context=continuation_state_context,
+            caller_ask_landing=caller_ask_landing,
             remaining=int(current) - 1,
         )
 
@@ -313,6 +319,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 claim.asked_by,
                 claim.delivery,
                 claim.run_delivery_id,
+                claim.caller_ask_landing,
             )
             pipe.hset(due_key, mapping=due_mapping)
             pipe.expire(due_key, continuation_due_ttl)

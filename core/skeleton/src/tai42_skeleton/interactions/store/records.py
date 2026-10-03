@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from tai42_contract.conversation_target import ConversationTargetKind
+from tai42_contract.interactions import CallerAskLanding
 from tai42_contract.states import StateContext, SubjectCandidates
 
 
@@ -65,6 +66,10 @@ class ContinuationDue:
     # context (a receiver-less door) or a sync question.
     delivery: dict[str, Any] | None = None
     run_delivery_id: str | None = None
+    # The door's caller-ask landing (the ``CallerAskLanding`` as a model), re-established around the
+    # reaper's detached redelivery so a caller re-ask during that re-drive is judged by the same
+    # declaration the park captured. None for a park the door declared nothing around.
+    caller_ask_landing: CallerAskLanding | None = None
 
 
 class ContinuationRetryDrop(enum.Enum):
@@ -106,6 +111,7 @@ def _continuation_due_mapping(
     asked_by: list[str] | None = None,
     delivery: str | None = None,
     run_delivery_id: str | None = None,
+    caller_ask_landing: str | None = None,
 ) -> dict[str, str]:
     """The flow-blind continuation-due record fields.
 
@@ -136,6 +142,8 @@ def _continuation_due_mapping(
         mapping["delivery"] = delivery
     if run_delivery_id is not None:
         mapping["run_delivery_id"] = run_delivery_id
+    if caller_ask_landing is not None:
+        mapping["caller_ask_landing"] = caller_ask_landing
     return mapping
 
 

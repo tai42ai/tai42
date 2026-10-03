@@ -16,6 +16,12 @@ from makefun import create_function
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined, core_schema
 from tai42_contract.agent import Agent
+from tai42_contract.interactions import (
+    RunTerminalFailed,
+    binds_caller_ask,
+    caller_ask_no_landing_outcome,
+    current_caller_ask_landing,
+)
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.session_thread import get_agent_session_thread
@@ -232,6 +238,19 @@ class AgentBinding:
             }
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
+            # FAIL FAST where the run's tool set is EXACT (the preset transform has already filled
+            # every omitted argument): if the run WILL bind the caller-ask tool and the door that
+            # started it declared NO caller-ask landing, fail as the typed run failure before
+            # ``agent.run`` — so no tool side effect happens. This ONE site covers the tool-turn door
+            # for a direct agent target, a preset over an agent, and any nested dispatch; a door that
+            # declared nothing makes no claim and nothing is refused.
+            landing = current_caller_ask_landing()
+            if (
+                landing is not None
+                and not landing.can_land
+                and binds_caller_ask(run_kwargs.get("tool_names", agent.tool_names))
+            ):
+                raise RunTerminalFailed(caller_ask_no_landing_outcome(landing.label))
             # Thread the ambient in-process session thread onto the run when one is deposited
             # and the caller pinned no thread of its own — so an out-of-band in-process
             # driver can carry an agent's memory across successive runs without the run

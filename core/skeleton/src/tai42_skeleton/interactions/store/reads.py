@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from redis.asyncio import Redis
 from tai42_contract.conversation_target import ConversationTargetKind
-from tai42_contract.interactions import InteractionRequest, InteractionResponse, InteractionState
+from tai42_contract.interactions import CallerAskLanding, InteractionRequest, InteractionResponse, InteractionState
 from tai42_contract.states import StateContext, SubjectCandidates
 
 from . import scripts, serde, ttl
@@ -291,6 +291,7 @@ class _StoreReads(_StoreKeys):
         raw_context = fields.get("state_context")
         raw_asked_by = fields.get("asked_by")
         raw_delivery = fields.get("delivery")
+        raw_landing = fields.get("caller_ask_landing")
         return ContinuationDue(
             interaction_id=interaction_id,
             tool=fields["tool"],
@@ -302,6 +303,7 @@ class _StoreReads(_StoreKeys):
             asked_by=json.loads(raw_asked_by) if raw_asked_by is not None else [],
             delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
             run_delivery_id=fields.get("run_delivery_id"),
+            caller_ask_landing=CallerAskLanding.model_validate_json(raw_landing) if raw_landing is not None else None,
         )
 
     async def read_kill_target(self, r: Redis, interaction_id: str) -> KillTarget | None:

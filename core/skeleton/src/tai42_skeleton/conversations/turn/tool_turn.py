@@ -17,6 +17,7 @@ from tai42_contract.interactions import (
     MediaItem,
     RunTerminalFailed,
     VisitOutcome,
+    declare_caller_ask_landing,
     reset_park_completion,
     set_park_completion,
 )
@@ -27,6 +28,7 @@ from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.conversations.models import ConversationRecord
+from tai42_skeleton.conversations.target_validators import caller_ask_landing_for_route
 from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.outcome import (
@@ -181,8 +183,10 @@ async def _drive_visit(
             # The outermost minting call frame in its DOOR form (name=None): it mints the run's
             # delivery id and reads the bound completion as its out-of-band address (so a park
             # captures the route's real address, never None) and pushes no chain entry, for a start
-            # AND a resume turn alike.
-            with tool_call_frame():
+            # AND a resume turn alike. The declared caller-ask landing wraps the dispatch so a caller
+            # ask ANY tool (a flow, an agent beneath a preset) resolves inside the run is judged by
+            # THIS route's reply/resume fact — the run-tool face's fail-fast reads the same fact.
+            with tool_call_frame(), declare_caller_ask_landing(caller_ask_landing_for_route(route)):
                 return await visit(
                     target_name=route.target_name,
                     cancel=contract.cancel,

@@ -17,6 +17,14 @@ from __future__ import annotations
 
 from tai42_contract.interactions.answer_check import AnswerMismatchError, QuestionFormat
 from tai42_contract.interactions.asker import Ask, check_ask_timing
+from tai42_contract.interactions.caller_ask_landing import (
+    CALLER_ASK_TOOL,
+    CallerAskLanding,
+    binds_caller_ask,
+    caller_ask_no_landing_outcome,
+    current_caller_ask_landing,
+    declare_caller_ask_landing,
+)
 from tai42_contract.interactions.continuation import (
     CHAINED_PARK_KEY_PREFIX,
     CHAINED_PARK_TOKEN_KEY,
@@ -119,6 +127,7 @@ from tai42_contract.interactions.visit import (
 )
 
 __all__ = [
+    "CALLER_ASK_TOOL",
     "CHAINED_PARK_KEY_PREFIX",
     "CHAINED_PARK_TOKEN_KEY",
     "EXPIRY_ANSWER",
@@ -142,6 +151,7 @@ __all__ = [
     "AnswerMismatchError",
     "AnswerMismatchPolicy",
     "Ask",
+    "CallerAskLanding",
     "ChainedResume",
     "DisplayBlock",
     "DoorContractError",
@@ -184,12 +194,16 @@ __all__ = [
     "VisitRequestError",
     "assert_park_adoptable",
     "attach_chained_park",
+    "binds_caller_ask",
     "bound_execution_identity_for_fire",
+    "caller_ask_no_landing_outcome",
     "chained_park_claims",
     "check_addressing",
     "check_ask_timing",
     "check_media_list",
+    "current_caller_ask_landing",
     "current_execution_identity",
+    "declare_caller_ask_landing",
     "fire_park_killed",
     "get_chained_resume",
     "get_park_completion",

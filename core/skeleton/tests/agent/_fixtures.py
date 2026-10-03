@@ -120,6 +120,30 @@ class NestedFieldsAgent(Agent):
         return ",".join(sorted(kwargs))
 
 
+asker_run_called = False
+
+
+class AskerInput(BaseModel):
+    user_message: str = ""
+    tool_names: list[str] = Field(default_factory=list)
+
+
+@tai42_app.agents.agent("asker_agent")
+class AskerAgent(Agent):
+    """An agent whose per-call tool set may include the caller-ask tool, with a flag recording whether
+    ``run`` was reached — so a test can observe the run-tool face REFUSE (``run`` never called) when
+    the door declared no caller-ask landing and the exact tool set binds ``ask``."""
+
+    tool_name = "asker_agent"
+    tool_description = "Resolve tools per call; record whether run was reached."
+    ToolInput = AskerInput
+
+    async def run(self, **kwargs) -> Any:
+        global asker_run_called
+        asker_run_called = True
+        return "ran"
+
+
 class ParkInput(BaseModel):
     text: str = ""
 

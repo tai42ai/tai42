@@ -88,6 +88,8 @@ def build_request(
         continuation_tool=park_binding.continuation_tool,
         continuation_identity=park_binding.continuation_identity,
         continuation_state_context=park_binding.continuation_state_context,
+        # The door's caller-ask landing, captured across the park so the resume re-establishes it.
+        caller_ask_landing=park_binding.caller_ask_landing,
         # The live call chain WITHOUT the ask-performing frame (the innermost entry,
         # this ask's own tool dispatch), so a resume restores the parking run's chain
         # and never re-adds the ask frame. Empty outside any tool/agent frame.

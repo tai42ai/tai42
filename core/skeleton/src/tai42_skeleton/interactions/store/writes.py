@@ -23,6 +23,23 @@ from .writes_base import AskTo, _StoreWritesBase
 PruneResult = Literal["pruned", "answered", "gone"]
 
 
+def _continuation_denorm_fields(request: InteractionRequest) -> dict[str, str]:
+    """The park's denormalized JSON fields the continuation-due redelivery re-establishes.
+
+    The original door's state context and its caller-ask landing, each as JSON, so the reaper's
+    at-least-once redelivery carries both without re-reading the request. A field is absent when the
+    park carried no such value.
+    """
+    fields: dict[str, str] = {}
+    for key, model in (
+        ("continuation_state_context", request.continuation_state_context),
+        ("caller_ask_landing", request.caller_ask_landing),
+    ):
+        if model is not None:
+            fields[key] = model.model_dump_json()
+    return fields
+
+
 class _StoreWrites(_StoreWritesBase):
     """The durable question add, atomic open-slot reservation, and prune."""
 
@@ -159,12 +176,10 @@ class _StoreWrites(_StoreWritesBase):
             state_mapping["continuation_identity"] = request.continuation_identity
             if continuation_fingerprint is not None:
                 state_mapping["continuation_fingerprint"] = continuation_fingerprint
-            if request.continuation_state_context is not None:
-                # Denormalized so the durable continuation-due record carries the
-                # original door's state context into an at-least-once REDELIVERY
-                # (which never re-reads the request). Absent when the park ran under
-                # no state context.
-                state_mapping["continuation_state_context"] = request.continuation_state_context.model_dump_json()
+            # Denormalized so the durable continuation-due record carries the original door's state
+            # context AND its caller-ask landing into an at-least-once REDELIVERY, which re-establishes
+            # both without re-reading the request. Each is absent when the park carried none.
+            state_mapping.update(_continuation_denorm_fields(request))
             if thread_id is not None:
                 # The conversation thread this park is bound to, denormalized so a
                 # terminal claim can read WHICH thread-parks SET to drop this

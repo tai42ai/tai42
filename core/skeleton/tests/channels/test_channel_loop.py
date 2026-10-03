@@ -1137,7 +1137,16 @@ async def test_async_park_callback_door_answerable_through_reaper_margin(
     resumed: list[Any] = []
 
     async def _stub(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         resumed.append(answer)
         return SuspendedInteraction(interaction_id=interaction_id)

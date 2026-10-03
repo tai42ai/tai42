@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from tai42_contract.interactions.caller_ask_landing import CallerAskLanding
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FormData,
@@ -224,6 +225,11 @@ class InteractionRequest(BaseModel):
     # same door — one generic snapshot (a later resume attribution joins the same
     # field). None when the park ran under no state context.
     continuation_state_context: StateContext | None = None
+    # The caller-ask landing the door that STARTED the run declared, captured verbatim across the
+    # park so the out-of-band resume re-establishes the SAME declaration and a re-ask during the
+    # resume is judged by it (a park under an absent landing is only ever a user ask — a caller ask
+    # there fails at the seam before it parks). None when the run carried no declaration.
+    caller_ask_landing: CallerAskLanding | None = None
     # async + FORM only: the registered tool NAME run via ``run_tool`` when the open form
     # reacts — a field named in ``format_payload["reactions"]`` changes, a named page
     # advances, or the form is submitted. It runs under ``continuation_identity`` /

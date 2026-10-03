@@ -45,10 +45,12 @@ from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
+    CallerAskLanding,
     InteractionRequest,
     ResumeBuffered,
     RunTerminalFailed,
     SuspendedInteraction,
+    declare_caller_ask_landing,
     register_execution_identity_accessor,
     register_execution_identity_binder,
 )
@@ -147,6 +149,7 @@ async def _run_continuation(
     answer: Any,
     park_context: StateContext | None = None,
     park_asked_by: Sequence[str] = (),
+    caller_ask_landing: CallerAskLanding | None = None,
     *,
     mark_detached: bool = True,
 ) -> Any:
@@ -155,8 +158,11 @@ async def _run_continuation(
     Binds ``resume_origin(interaction_id)`` UNCONDITIONALLY (the origin names the interaction being
     resumed regardless of who receives the outcome), re-deposits the park's ``StateContext``
     (so the resumed run's writes complete their provenance from the SAME door the park entered
-    through), restores the parking run's call chain (passed as ``continues_chain`` so the
-    continuation tool's own name is not re-added), and ALWAYS takes the ``run_tool`` return value.
+    through), RE-ESTABLISHES the park's caller-ask landing (so a re-ask during this out-of-band resume
+    is judged by the SAME door declaration the first ask was — a park under an absent landing is only
+    ever a user ask, and a caller re-ask there fails at the seam), restores the parking run's call
+    chain (passed as ``continues_chain`` so the continuation tool's own name is not re-added), and
+    ALWAYS takes the ``run_tool`` return value.
 
     ``mark_detached`` flags the run detached (the default) so a set synchronous turn budget never
     cancels a legitimately long out-of-band resume; an inline resume under a live caller passes
@@ -170,7 +176,7 @@ async def _run_continuation(
             state_context(park_context) if park_context is not None else nullcontext()
         )
         async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
-            with resume_origin(interaction_id), park_ctx:
+            with resume_origin(interaction_id), park_ctx, declare_caller_ask_landing(caller_ask_landing):
                 return await tai42_app.tools.run_tool(
                     tool, {"interaction_id": interaction_id, "answer": answer}, continues_chain=park_asked_by
                 )
@@ -247,6 +253,7 @@ async def drive_and_deliver(
     answer: Any,
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
+    caller_ask_landing: CallerAskLanding | None = None,
     delivery: _Delivery,
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
@@ -298,6 +305,7 @@ async def drive_and_deliver(
                 answer,
                 park_context,
                 park_asked_by,
+                caller_ask_landing,
                 mark_detached=not receives_outcome,
             )
     except RunTerminalFailed as exc:
@@ -389,6 +397,7 @@ def _spawn_detached_delivery(
     answer: Any,
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
+    caller_ask_landing: CallerAskLanding | None,
     delivery: _Delivery,
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
@@ -410,6 +419,7 @@ def _spawn_detached_delivery(
             answer=answer,
             park_context=park_context,
             park_asked_by=park_asked_by,
+            caller_ask_landing=caller_ask_landing,
             delivery=delivery,
             run_delivery_id=run_delivery_id,
             candidates=candidates,
@@ -467,6 +477,7 @@ def dispatch_continuation(
         answer=answer,
         park_context=request.continuation_state_context,
         park_asked_by=request.asked_by,
+        caller_ask_landing=request.caller_ask_landing,
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=candidates,
@@ -494,6 +505,7 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
         answer=due.answer,
         park_context=due.state_context,
         park_asked_by=due.asked_by,
+        caller_ask_landing=due.caller_ask_landing,
         delivery=delivery,
         run_delivery_id=due.run_delivery_id,
         candidates=candidates,

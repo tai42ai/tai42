@@ -192,6 +192,14 @@ class Agent(ABC):
     here. Like ``spec_runnable`` it is the implementation's own declaration, never
     inferred; every listed name must be a real ``ToolInput`` field. The empty
     default means nothing is bakeable unless the agent is ``spec_runnable``.
+
+    :attr:`tool_names` is the FIXED tool set this agent always binds — the
+    statically-declared set a bind check reads to judge what the agent will run
+    with (e.g. whether it can ask its caller). ``None`` (the default) declares an
+    agent that resolves its tool set per call (from its ``ToolInput``/run kwargs),
+    so nothing static is known. An agent whose tool set is fixed declares it here;
+    like ``spec_runnable`` it is the implementation's own declaration, never
+    inferred.
     """
 
     tool_name: ClassVar[str]
@@ -199,6 +207,7 @@ class Agent(ABC):
     ToolInput: ClassVar[type[BaseModel]]
     spec_runnable: ClassVar[bool] = False
     preset_bakeable_fields: ClassVar[frozenset[str]] = frozenset()
+    tool_names: ClassVar[Sequence[str] | None] = None
     # The door ``extras`` keys this agent target reads when a door starts it. The visit checks a
     # door's ``extras`` against this set before the run and refuses an undeclared key. The empty
     # default declares an agent that reads no extras.

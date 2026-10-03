@@ -16,11 +16,16 @@ target's bind gate out from under it.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from fastmcp.tools.tool_transform import TransformedTool
-from tai42_contract.conversations import ConversationRouteCreate, ConversationTargetKind, TargetBindValidator
+from tai42_contract.conversations import (
+    ConversationRoute,
+    ConversationRouteCreate,
+    ConversationTargetKind,
+    TargetBindValidator,
+)
+from tai42_contract.interactions import CALLER_ASK_TOOL, CallerAskLanding, binds_caller_ask
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetNotFoundError
 from tai42_kit.db import component_store_configured
@@ -54,32 +59,46 @@ class TargetBindValidatorRegistry:
         self._validators.clear()
 
 
-# The builtin tool an agent lists to ask its caller mid-run. A route whose target resolves to an
-# agent that lists it needs a reply and resume path, or an async caller-ask has nowhere to land.
-_ASK_TOOL_NAME = "ask"
+def _reply_resume_missing(reply_expr: object, resume_expr: object) -> list[str]:
+    """Which of ``reply_expr`` / ``resume_expr`` a route is missing — the caller-ask landing rule.
 
-
-def _declares_ask(tool_names: object) -> bool:
-    """Whether a statically-declared ``tool_names`` value names the caller-ask tool.
-
-    A non-iterable (or an unresolved run-time tool set declared as ``None``) is treated as not
-    asking — the truthful answer, never a guess.
+    A caller ask lands on a route IFF it carries BOTH: ``reply_expr`` (to map the answer back to the
+    caller) and ``resume_expr`` (to resume the parked run). This is the ONE source the route-create
+    check and the run-time landing both read, so the two cannot drift.
     """
-    if not isinstance(tool_names, Iterable) or isinstance(tool_names, str | bytes):
-        return False
-    return _ASK_TOOL_NAME in tool_names
+    return [field for field, value in (("reply_expr", reply_expr), ("resume_expr", resume_expr)) if value is None]
+
+
+def _ask_reply_resume_gaps(tool_names: object, *, reply_expr: object, resume_expr: object) -> list[str]:
+    """The route fields a tool set that binds the caller-ask tool is missing, or ``[]`` when it needs none.
+
+    A tool set that does not name the caller-ask tool needs neither field; one that does needs the
+    full landing (:func:`_reply_resume_missing`).
+    """
+    if not binds_caller_ask(tool_names):
+        return []
+    return _reply_resume_missing(reply_expr, resume_expr)
+
+
+def caller_ask_landing_for_route(route: ConversationRoute) -> CallerAskLanding:
+    """The caller-ask landing a conversation route declares: it CAN land iff it has both exprs.
+
+    The door passes this to :func:`~tai42_contract.interactions.declare_caller_ask_landing` around the
+    run, and the ask park seam reads it. Same rule as the route-create check, so a caller ask refused
+    at create and one failed at the seam agree.
+    """
+    return CallerAskLanding(
+        can_land=not _reply_resume_missing(route.reply_expr, route.resume_expr), label=route.route_name
+    )
 
 
 def _agent_declared_tool_names(agent: Agent) -> object:
-    """An agent's statically-declared ``tool_names`` (the fixed tool set an agent binds), or its ToolInput default.
+    """An agent's statically-declared ``tool_names`` — the fixed tool set it always binds.
 
-    An agent that resolves its tools at run time declares none.
+    Read from the contract's :attr:`~tai42_contract.agent.Agent.tool_names` declaration; an agent
+    that resolves its tools at run time declares ``None``.
     """
-    declared = getattr(agent, "tool_names", None)
-    if declared is None:
-        field = agent.ToolInput.model_fields.get("tool_names")
-        declared = field.get_default(call_default_factory=True) if field is not None else None
-    return declared
+    return agent.tool_names
 
 
 async def _resolve_base_tool_name(target_name: str) -> str:
@@ -170,17 +189,11 @@ async def _platform_target_lines(
     if kind != "agent" or name not in instance.app.agents.all_agents():
         return []
     tool_names = await _effective_tool_names(create, candidate_body, name)
-    if not _declares_ask(tool_names):
-        return []
-    missing = [
-        field
-        for field, value in (("reply_expr", create.reply_expr), ("resume_expr", create.resume_expr))
-        if value is None
-    ]
+    missing = _ask_reply_resume_gaps(tool_names, reply_expr=create.reply_expr, resume_expr=create.resume_expr)
     if not missing:
         return []
     return [
-        f"agent {create.target_name!r} can ask its caller (its tool_names include {_ASK_TOOL_NAME!r}) "
+        f"agent {create.target_name!r} can ask its caller (its tool_names include {CALLER_ASK_TOOL!r}) "
         f"but the route declares no {' and no '.join(missing)}: a caller-ask has no reply/resume path"
     ]
 

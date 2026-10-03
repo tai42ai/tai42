@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, AnswerMismatchPolicy, InteractionRequest
+from tai42_contract.interactions import AnswerFormat, AnswerMismatchPolicy, CallerAskLanding, InteractionRequest
 from tai42_contract.tools import current_call_chain, tool_call_frame
 
 if TYPE_CHECKING:
@@ -195,6 +195,76 @@ async def test_redeliver_continuation_forwards_due_asked_by(wired, captured):
     await drain()
     assert len(captured) == 1
     assert captured[0]["park_asked_by"] == ["main", "sub"]
+
+
+async def test_dispatch_continuation_forwards_request_caller_ask_landing(wired, captured):
+    # The door's caller-ask landing on the async request reaches the detached ``_run_continuation``,
+    # which re-declares it around the resume drive — so a re-ask during the resume is judged by the
+    # SAME door declaration the first ask was.
+    now = datetime.now(UTC)
+    request = InteractionRequest(
+        interaction_id="dl1",
+        group_id="g1",
+        question="?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=wired.store.reply_key("dl1"),
+        created_at=now,
+        timeout_at=now + timedelta(seconds=60),
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=now + timedelta(seconds=60),
+        caller_ask_landing=CallerAskLanding(can_land=True, label="chat"),
+    )
+    continuation_module.dispatch_continuation(wired.store, request, "fp-1", "go")
+    await drain()
+    assert len(captured) == 1
+    assert captured[0]["caller_ask_landing"] == CallerAskLanding(can_land=True, label="chat")
+
+
+async def test_redeliver_continuation_forwards_due_caller_ask_landing(wired, captured):
+    # The reaper redelivery path reads the landing off the durable due-record.
+    due = ContinuationDue(
+        interaction_id="rl1",
+        tool="resume_tool",
+        identity="svc-key",
+        fingerprint="fp-1",
+        answer="go",
+        attempts=1,
+        caller_ask_landing=CallerAskLanding(can_land=True, label="chat"),
+    )
+    continuation_module.redeliver_continuation(wired.store, due)
+    await drain()
+    assert len(captured) == 1
+    assert captured[0]["caller_ask_landing"] == CallerAskLanding(can_land=True, label="chat")
+
+
+def test_continuation_due_mapping_carries_caller_ask_landing_only_when_present() -> None:
+    landing = CallerAskLanding(can_land=True, label="chat").model_dump_json()
+    with_landing = records._continuation_due_mapping(
+        "resume_tool", "svc-key", "fp-1", "go", None, None, None, None, landing
+    )
+    assert with_landing["caller_ask_landing"] == landing
+    # An omitted landing adds no field (the record stays minimal).
+    without = records._continuation_due_mapping("resume_tool", "svc-key", "fp-1", "go")
+    assert "caller_ask_landing" not in without
+
+
+def test_async_request_round_trips_caller_ask_landing_on_the_model() -> None:
+    # The landing survives the durable whole-request JSON round-trip, so the resume re-establishes it.
+    now = datetime.now(UTC)
+    original = InteractionRequest(
+        interaction_id="rtl1",
+        group_id="g1",
+        question="?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to="reply:rtl1",
+        created_at=now,
+        timeout_at=now + timedelta(seconds=60),
+        caller_ask_landing=CallerAskLanding(can_land=False, label="chat"),
+    )
+    restored = InteractionRequest.model_validate_json(original.model_dump_json())
+    assert restored.caller_ask_landing == CallerAskLanding(can_land=False, label="chat")
 
 
 def test_continuation_due_mapping_carries_asked_by_only_when_present() -> None:

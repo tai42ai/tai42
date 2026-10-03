@@ -394,7 +394,16 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
     release = asyncio.Event()
 
     async def _slow(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         started.set()
         await release.wait()
@@ -510,7 +519,16 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
     release = asyncio.Event()
 
     async def _block(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         await release.wait()
         return SuspendedInteraction(interaction_id=interaction_id)

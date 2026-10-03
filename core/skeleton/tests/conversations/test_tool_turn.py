@@ -110,6 +110,80 @@ async def test_tool_target_start_expr_maps_the_kwargs(env, monkeypatch):
     assert tools.calls[0]["arguments"] == {"example_config_kwargs": {"text": "run it", "from": "+15550002222"}}
 
 
+def _asks_record(route):
+    return record_module._new_record(
+        route=route,
+        message_id="m-ev",
+        thread_id="bridge:tool-line:+15550002222",
+        client_address="+15550002222",
+        caller_principal=None,
+        provider_message_id="PID1",
+        inbound_text="hi",
+        delivery_status=DeliveryStatus.ACCEPTED,
+    )
+
+
+async def test_evidence_tool_caller_ask_with_no_reply_resume_parks_nowhere_today(env, monkeypatch):
+    # A non-agent tool (a flow) that caller-asks under a tool route
+    # with NO reply/resume. Establish BY TEST what the tool turn does with that caller-ask TODAY: the
+    # ask surfaces as an ``asks`` outcome and, with no ``reply_expr``, is dropped SILENTLY — the
+    # question never reaches the user. With no ``resume_expr`` the door has no path to resume the
+    # parked run either, and the completion-delivery path carries the run's TERMINAL (which never
+    # arrives while the caller-ask is unanswered), not the caller-ask's answer. So the caller-ask
+    # parks NOWHERE — the SAME defect the asking-agent create rule addresses, reached at run time.
+    from tai42_contract.interactions import ParkedEntry, VisitOutcome
+
+    route = _tool_channel_route()  # no reply_expr, no resume_expr
+    _wire(monkeypatch, FakeManager(route), FakeChannel())
+    _wire_tool(monkeypatch, lambda kw: "unused")
+
+    async def _asks(**kwargs):
+        return VisitOutcome(action="started", kind="asks", asks=[ParkedEntry(id="i-1", status="asking", to="caller")])
+
+    monkeypatch.setattr(tool_turn_module, "visit", _asks)
+
+    record = _asks_record(route)
+    outcome = await tool_turn_module._run_tool_turn(
+        route,
+        "hi",
+        "bridge:tool-line:+15550002222",
+        "+15550002222",
+        record=record,
+        batch=overlap_module.Batch(lead=record, members=[record]),
+    )
+    # TODAY: the caller-ask is dropped silently — it parks nowhere.
+    assert isinstance(outcome, outcome_module._SilentOutcome)
+
+
+async def test_evidence_tool_caller_ask_with_reply_and_resume_lands_today(env, monkeypatch):
+    # The counterpart: WITH both exprs the same caller-ask lands — its entries map through
+    # ``reply_expr`` to a delivered question, so landing is exactly reply_expr + resume_expr.
+    from tai42_contract.interactions import ParkedEntry, VisitOutcome
+
+    route = _tool_channel_route(reply_expr='"please decide: " + ($asks[0].id)', start_expr=".")
+    # resume_expr lives on the route directly (ParkableDoorMixin); build it through the model.
+    route = route.model_copy(update={"resume_expr": TemplatedText(content="$parked[0].id")})
+    _wire(monkeypatch, FakeManager(route), FakeChannel())
+    _wire_tool(monkeypatch, lambda kw: "unused")
+
+    async def _asks(**kwargs):
+        return VisitOutcome(action="started", kind="asks", asks=[ParkedEntry(id="i-1", status="asking", to="caller")])
+
+    monkeypatch.setattr(tool_turn_module, "visit", _asks)
+
+    record = _asks_record(route)
+    outcome = await tool_turn_module._run_tool_turn(
+        route,
+        "hi",
+        "bridge:tool-line:+15550002222",
+        "+15550002222",
+        record=record,
+        batch=overlap_module.Batch(lead=record, members=[record]),
+    )
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.answer_status == "answered"
+
+
 async def test_tool_target_parked_bound_as_jq_has_no_null_keys(env, monkeypatch):
     # A parked entry's unset optional fields are ABSENT from ``$parked``, never null-valued keys:
     # the door binds the one compact shape.

@@ -381,6 +381,7 @@ async def _resume_one(
         answer=answer,
         park_context=_mixed_context(ctx, park_candidates, request),
         park_asked_by=request.asked_by,
+        caller_ask_landing=request.caller_ask_landing,
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=park_candidates,

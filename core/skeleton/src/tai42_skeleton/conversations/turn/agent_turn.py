@@ -18,7 +18,11 @@ from tai42_contract.conversations import ConversationRoute, Person
 from tai42_contract.interactions import (
     LocationElement,
     MediaItem,
+    RunTerminalFailed,
     SuspendedInteraction,
+    binds_caller_ask,
+    caller_ask_no_landing_outcome,
+    declare_caller_ask_landing,
     reset_park_completion,
     set_park_completion,
 )
@@ -27,6 +31,7 @@ from tai42_contract.tools import tool_call_frame
 from tai42_kit.interactions.door_contract import DOOR_START_DEFAULT, evaluate_door_contract, parked_entries_for_jq
 
 from tai42_skeleton.authz.execution import authorize_execution_agent_run, bind_execution_identity
+from tai42_skeleton.conversations.target_validators import caller_ask_landing_for_route
 from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.outcome import (
     _ResolvedOutcome,
@@ -36,6 +41,7 @@ from tai42_skeleton.conversations.turn.outcome import (
     _tool_error,
     _ToolOutcome,
 )
+from tai42_skeleton.conversations.turn.tool_result import _failed_outcome_detail
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_payload, _tool_reply
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.interactions.visit import list_parked, visit
@@ -279,6 +285,11 @@ async def _run_agent_turn(
         return _tool_error(
             "a caller question is still pending on this thread; the run cannot start until it is answered", route
         )
+    # The caller-ask landing this door declares (it can land IFF the route carries both reply and
+    # resume paths). Declared around the drive so the ask park seam fails any caller ask the agent
+    # resolves INSIDE itself, at any depth; the fail-fast below uses the same fact where the tool set
+    # is exact, so no run is driven when the refusal is already certain.
+    landing = caller_ask_landing_for_route(route)
     turn_context = BridgeTurnContext(
         thread_id=thread_id,
         route_name=route.route_name,
@@ -293,6 +304,18 @@ async def _run_agent_turn(
         return await _drive_agent_terminal(agent, {**run_kwargs, "thread_id": thread_id})
 
     try:
+        # FAIL FAST where the run's tool set is EXACT: the per-call set a ``start_expr`` injected,
+        # else the agent's statically-declared one. A run that WILL bind the caller-ask tool on a
+        # door with no landing is failed as the typed run failure before any side effect — the SAME
+        # failure the seam raises, so a door that cannot host a caller ask never drives one.
+        if (
+            start_requested
+            and binds_caller_ask(run_kwargs.get("tool_names", agent.tool_names))
+            and not landing.can_land
+        ):
+            # Raised to be surfaced by THIS door's ``except RunTerminalFailed`` below — the same path
+            # the seam's raise takes, so the fail-fast and the seam produce one identical failure.
+            raise RunTerminalFailed(caller_ask_no_landing_outcome(landing.label))  # noqa: TRY301
         with bridge_turn_context(turn_context):
             async with bind_execution_identity(
                 route.execution_key, bound_fingerprint=route.execution_key_fingerprint
@@ -306,8 +329,12 @@ async def _run_agent_turn(
                     # bound identity and completion, carrying the door's extras: it mints the
                     # run-delivery id and reads the completion as the run's out-of-band address, and
                     # wraps the whole visit (a start OR a resume). The agent target carries no state
-                    # binding, so ``visit`` deposits none.
-                    with tool_call_frame(name=route.target_name, extras=contract.extras):
+                    # binding, so ``visit`` deposits none. The declared landing wraps the drive so a
+                    # caller ask the agent resolves inside itself is judged by this door's fact.
+                    with (
+                        tool_call_frame(name=route.target_name, extras=contract.extras),
+                        declare_caller_ask_landing(landing),
+                    ):
                         outcome = await visit(
                             target_name=route.target_name,
                             cancel=contract.cancel,
@@ -318,6 +345,14 @@ async def _run_agent_turn(
                         )
                 finally:
                     reset_park_completion(completion_token)
+    except RunTerminalFailed as exc:
+        # A caller ask with no landing (the fail-fast above, or the seam inside the run) RAISES this
+        # typed run failure — never a tool-level error the model could route around. Surface it
+        # through the door's failure path: record the opaque payload WHOLE and deliver the route's
+        # generic client-safe error. Caught BEFORE the generic arm so the payload is preserved.
+        detail = _failed_outcome_detail(exc.outcome)
+        logger.exception("conversations: agent turn for route %r failed: %s", route.route_name, detail)
+        return _tool_error(detail, route)
     except PermissionDeniedError as exc:
         return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:

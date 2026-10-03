@@ -48,7 +48,16 @@ async def test_crash_before_run_tool_is_redelivered_by_reaper(wired, monkeypatch
     attempts = {"n": 0}
 
     async def _flaky(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         attempts["n"] += 1
         if attempts["n"] == 1:

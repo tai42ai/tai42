@@ -15,6 +15,10 @@ from typing import Any, Literal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     PARK_COMPLETION_THREAD_KEY,
+    CallerAskLanding,
+    RunTerminalFailed,
+    caller_ask_no_landing_outcome,
+    current_caller_ask_landing,
     get_park_completion,
     get_resume_continuation_tool,
     repark_notice,
@@ -52,6 +56,9 @@ class AsyncParkBinding:
     # is ``None`` for a receiver-less run. Both are stored verbatim on the request.
     run_delivery_id: str | None = None
     delivery: tuple[str | None, dict[str, Any] | None] | None = None
+    # The caller-ask landing the door declared around the run, captured so the resume re-establishes
+    # it. ``None`` when no door declared one.
+    caller_ask_landing: CallerAskLanding | None = None
 
 
 def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncParkBinding:
@@ -62,8 +69,14 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
     driver, no identity to rebind it as, or (a platform bug) no ambient run-delivery
     identity is a failure that must fail loudly, never persist a question no answer/expiry
     could resume or deliver. A ``caller`` ask additionally requires an ambient state context
-    (its outcome is subject-tracked back through the parking run's subject).
+    (its outcome is subject-tracked back through the parking run's subject) AND a door that
+    declares a landing for it: a caller ask about to park where the door declared NO landing
+    (no reply/resume path) would park nowhere, so the run FAILS loudly (:class:`RunTerminalFailed`)
+    before any state is written — it is never a tool-level error the model could route around.
     """
+    landing = current_caller_ask_landing()
+    if to == "caller" and landing is not None and not landing.can_land:
+        raise RunTerminalFailed(caller_ask_no_landing_outcome(landing.label))
     continuation_tool = get_resume_continuation_tool()
     if continuation_tool is None:
         raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
@@ -114,6 +127,7 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
         park_thread_id=park_thread_id,
         run_delivery_id=run_delivery_id,
         delivery=delivery,
+        caller_ask_landing=landing,
     )
 
 

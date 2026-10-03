@@ -493,7 +493,16 @@ async def test_expiry_resume_takes_the_continuation_path_not_the_kill(wired, mon
     captured: list[str] = []
 
     async def _stub(
-        identity, fingerprint, tool, interaction_id, answer, park_context=None, park_asked_by=(), *, mark_detached=True
+        identity,
+        fingerprint,
+        tool,
+        interaction_id,
+        answer,
+        park_context=None,
+        park_asked_by=(),
+        caller_ask_landing=None,
+        *,
+        mark_detached=True,
     ):
         captured.append(interaction_id)
         from tai42_contract.interactions import SuspendedInteraction

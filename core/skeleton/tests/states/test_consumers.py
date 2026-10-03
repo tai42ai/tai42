@@ -11,7 +11,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel, Field
 from tai42_contract.hooks import HookParams, HookSubject
 from tai42_contract.presets import PresetBody
 from tai42_contract.states.models import StateSubject
@@ -104,14 +103,6 @@ def test_schedules_lister_returns_a_muted_row_with_no_backend(monkeypatch: pytes
     assert rows[0].name is None
 
 
-class _StateAgentInput(BaseModel):
-    tool_names: list[str] = Field(default_factory=lambda: ["state_replace", "other"])
-
-
-class _PlainAgentInput(BaseModel):
-    prompt: str = ""
-
-
 def test_agent_rows_match_an_agent_that_binds_a_state_builtin() -> None:
     agents = {
         "writer": SimpleNamespace(tool_names=["state_read", "echo"]),
@@ -124,15 +115,15 @@ def test_agent_rows_match_an_agent_that_binds_a_state_builtin() -> None:
     assert link.token == "agents"
 
 
-def test_agent_rows_read_tool_names_from_the_tool_input_default() -> None:
-    # An agent that declares no ``tool_names`` attribute but bakes them into its ToolInput
-    # default is still matched (the fallback read), while a plain agent names none.
+def test_agent_rows_skip_an_agent_that_declares_no_fixed_tool_set() -> None:
+    # An agent that resolves its tools per call declares ``tool_names = None`` (the contract default),
+    # so it binds no state tool statically — no row.
     agents = {
-        "baked": SimpleNamespace(ToolInput=_StateAgentInput),
-        "plain": SimpleNamespace(ToolInput=_PlainAgentInput),
+        "writer": SimpleNamespace(tool_names=["state_read", "echo"]),
+        "per-call": SimpleNamespace(tool_names=None),
     }
     rows = agent_consumer_rows(agents)  # type: ignore[arg-type]
-    assert [(r.kind, r.name, r.detail) for r in rows] == [("agent", "baked", "uses state_replace")]
+    assert [(r.kind, r.name, r.detail) for r in rows] == [("agent", "writer", "uses state_read")]
 
 
 def _preset(base_tool: str, tool_names: object) -> PresetBody:
