@@ -41,7 +41,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("GET", "/api/login/methods"),  # public pre-auth login screen (browser)
     ("POST", "/api/auth/logout"),  # browser/session logout, not an operator function
     ("GET", "/api/auth/capabilities"),  # studio mint-capability gating (browser)
-    ("GET", "/api/auth/roles"),  # studio users-admin role picker (browser)
+    ("GET", "/api/auth/roles"),  # Members page role action (browser)
     ("GET", "/api/auth/members"),  # studio members-admin listing (browser)
     # NB the settings-profiles surface is CLI-covered (``tai config profile ...``), so
     # those routes are attributed via ``@covers`` and NOT allowlisted.

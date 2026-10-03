@@ -1,11 +1,10 @@
 """C-accounts — the generic member-actions doors against a real accounts provider.
 
 An admin lists the declared member-action catalog, invokes one, and a non-admin is refused.
-This is the door the earlier gap missed: the catalog door renders every declared action's
-label to a plain string from the real provider's declarations, so an action whose label
-needs resolving can no longer 500 the listing unnoticed. The invoke door's happy path mints
+The catalog door renders every declared action's
+label to a plain string from the real provider's declarations; the invoke door's happy path mints
 a one-time invite link (surfaced only on the result) and its typed-error path maps a provider
-conflict to a 409, never a 500; both doors refuse a non-admin caller."""
+conflict to a 409; both doors refuse a non-admin caller."""
 
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
     admin = stack.api(port=stack.port_a)  # the seeded root sk- key (an unconditional "*" admin)
 
     # (1) The CATALOG door renders every declared action's label to a plain, non-empty
-    # string from the real provider's declarations — the class that once 500'd the listing.
+    # string from the real provider's declarations.
     catalog = await admin.get("/api/auth/member-actions")
     actions = catalog["actions"]
     assert actions, f"the accounts provider must declare member actions: {catalog}"

@@ -3,8 +3,7 @@
 ``PUT /api/auth/users/me/password`` is the one self-service route open to every user: a
 person changing their OWN password. It is NOT a member-admin action (it acts on the
 caller's own credential, targets no member row, and is not admin-only), so it is not part
-of the generic member-actions seam — the admin member routes this module once also carried
-are gone, their capability now declared through
+of the generic member-actions seam; the admin member-action capability is declared through
 :meth:`~tai42_accounts_postgres.provider.PostgresAccountsProvider.member_actions`. Admin
 reach for the surrounding ``/api/auth`` surface comes from the seeded jq conditions; this
 handler carves itself out with ``self_service=True``. The handler reaches the injected

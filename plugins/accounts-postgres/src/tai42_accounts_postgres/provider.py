@@ -151,7 +151,7 @@ class PostgresAccountsProvider(LoginAttachingProvider):
         Each member carries the platform principal id it holds (this provider provisions one
         principal per user, keyed by ``user_id``) so the Members aggregator joins the
         access-control ``disabled`` state from the platform's own principal record; the
-        provider no longer reports ``disabled`` itself (``users.disabled`` stays this
+        provider does not report ``disabled`` itself (``users.disabled`` stays this
         plugin's private bookkeeping). Each row names the provider's own action ids that
         apply to it.
         """
