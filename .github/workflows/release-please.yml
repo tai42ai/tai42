@@ -74,7 +74,7 @@ jobs:
           git fetch --no-tags origin main
           changed=$(git diff --name-only origin/main...HEAD)
           dirs=''
-          for dir in plugins/accounts-postgres plugins/channel-web; do
+          for dir in plugins/channel-web; do
             if grep -qx "$dir/pyproject.toml" <<<"$changed"; then
               echo "$dir pyproject is in this release PR; will rebuild its bundle."
               dirs="$dirs $dir"
