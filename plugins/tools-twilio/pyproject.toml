@@ -47,7 +47,7 @@ Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/tools-twilio/CHA
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.6",
+    "ruff>=0.16.9",
     "pyright>=1.1.389",
     # The plugin-spec test parses tai-plugin.yml.
     "pyyaml>=6",
