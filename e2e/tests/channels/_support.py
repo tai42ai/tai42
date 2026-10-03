@@ -76,7 +76,7 @@ async def _pending_items(stack: TaiStack, port: int, *, timeout: float = 3.0) ->
     """One read of the paged pending-list door on ``port`` — every pending item."""
     import httpx
 
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, params={"page": 1, "pageSize": 200})
         resp.raise_for_status()
@@ -189,7 +189,7 @@ class ChannelCase:
         public = self.stack.config.public_base_url
         if public is not None and self.stack.infra.settings.is_real(self.name):
             return public.rstrip("/")
-        return f"http://{self.stack.host}:{self.stack.port_b}"
+        return self.stack.origin(self.stack.port_b)
 
     def assert_inbound_forwarded(self, response: object) -> None:
         """Assert the medium's inbound door acked the forwarded answer (each
@@ -410,7 +410,7 @@ class WebChannelCase(ChannelCase):
         reads. Each case gets a conversation of its own, so no spec reads another's."""
         case = cls(stack, None)
         web, page = await WebChatClient.open_page(
-            f"http://{stack.host}:{stack.port_b}",
+            stack.origin(stack.port_b),
             manifests.WEB_IDENTITY,
             store_url=stack.resources.redis_url,
         )
@@ -466,7 +466,7 @@ async def post_inbound(stack: TaiStack, path: str, inbound: SignedInbound):
     on the worker that never saw the ask. Returns the raw httpx response."""
     import httpx
 
-    url = f"http://{stack.host}:{stack.port_b}{path}"
+    url = f"{stack.origin(stack.port_b)}{path}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.post(url, content=inbound.body, headers=inbound.headers)
 

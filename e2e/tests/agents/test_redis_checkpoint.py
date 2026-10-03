@@ -36,7 +36,7 @@ async def _run_sse(stack: TaiStack, port: int, path: str, body: dict) -> list[st
     """POST an agent run over the SSE run door on ``port`` and return the ``data:``
     frames, draining the stream so the run completes (and its checkpoint lands)
     before returning."""
-    url = f"http://{stack.host}:{port}{path}"
+    url = f"{stack.origin(port)}{path}"
     frames: list[str] = []
     async with httpx.AsyncClient(timeout=15.0) as client, client.stream("POST", url, json=body) as response:
         response.raise_for_status()

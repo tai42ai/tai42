@@ -30,7 +30,7 @@ _PASSWORD = "correct-horse-battery-staple"
 
 def _unauth(stack: TaiStack) -> ApiClient:
     """A client carrying NO credential — the public login surface and unauth-negative probes."""
-    return ApiClient(f"http://{stack.host}:{stack.port_a}")
+    return ApiClient(stack.origin(stack.port_a))
 
 
 async def test_setup_attaches_password_login_and_invites_create_principals(
@@ -78,7 +78,7 @@ async def test_setup_attaches_password_login_and_invites_create_principals(
     login = await public.post("/api/login/password", json={"email": owner_email, "password": _PASSWORD})
     session = login["token"]
     assert session.startswith("tai-sess-"), f"login must mint a session token: {session[:12]!r}"
-    owner = ApiClient(f"http://{stack.host}:{stack.port_a}").with_token(session)
+    owner = ApiClient(stack.origin(stack.port_a)).with_token(session)
     me = await owner.get("/api/auth/me")
     assert me["principal"]["kind"] == "human", me
 

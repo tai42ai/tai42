@@ -304,7 +304,7 @@ class BridgeHarness:
         """A genuinely-signed uncorrelated twilio inbound: From ``client`` to the
         deployment number ``our_identity``. The signed URL is the exact door URL on the
         replica the reply is POSTed to."""
-        public_url = f"http://{self.stack.host}:{port or self.stack.port_b}{TWILIO_INBOUND_PATH}"
+        public_url = f"{self.stack.origin(port or self.stack.port_b)}{TWILIO_INBOUND_PATH}"
         return self.fake_twilio.build_inbound(
             auth_token=self.twilio_secret,
             public_url=public_url,
@@ -317,7 +317,7 @@ class BridgeHarness:
     def twilio_status(
         self, *, message_sid: str, status: str, valid: bool = True, port: int | None = None
     ) -> SignedInbound:
-        public_url = f"http://{self.stack.host}:{port or self.stack.port_b}{TWILIO_STATUS_PATH}"
+        public_url = f"{self.stack.origin(port or self.stack.port_b)}{TWILIO_STATUS_PATH}"
         return self.fake_twilio.build_status(
             auth_token=self.twilio_secret, public_url=public_url, message_sid=message_sid, status=status, valid=valid
         )
@@ -442,7 +442,7 @@ class BridgeHarness:
         port: int | None = None,
     ) -> SignedInbound:
         """A genuinely-signed inbound MMS (one media item) from ``client`` to ``our_identity``."""
-        public_url = f"http://{self.stack.host}:{port or self.stack.port_b}{TWILIO_INBOUND_PATH}"
+        public_url = f"{self.stack.origin(port or self.stack.port_b)}{TWILIO_INBOUND_PATH}"
         return self.fake_twilio.build_inbound_mms(
             auth_token=self.twilio_secret,
             public_url=public_url,
@@ -482,7 +482,7 @@ async def post_inbound(stack: TaiStack, path: str, inbound: SignedInbound, *, po
     httpx response."""
     import httpx
 
-    url = f"http://{stack.host}:{port or stack.port_b}{path}"
+    url = f"{stack.origin(port or stack.port_b)}{path}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.post(url, content=inbound.body, headers=inbound.headers)
 
@@ -497,7 +497,7 @@ async def get_served_media(stack: TaiStack, url: str, *, port: int | None = None
     (default B). The capability id IS the secret, so no auth is carried. Returns the raw response."""
     import httpx
 
-    full = f"http://{stack.host}:{port or stack.port_b}{url}"
+    full = f"{stack.origin(port or stack.port_b)}{url}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.get(full)
 
@@ -507,7 +507,7 @@ async def whatsapp_get_verify(stack: TaiStack, params: dict[str, str], *, port: 
     the raw httpx response (200 echoes ``hub.challenge`` in plaintext; a mismatch is 403)."""
     import httpx
 
-    url = f"http://{stack.host}:{port or stack.port_b}{WHATSAPP_INBOUND_PATH}"
+    url = f"{stack.origin(port or stack.port_b)}{WHATSAPP_INBOUND_PATH}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.get(url, params=params)
 

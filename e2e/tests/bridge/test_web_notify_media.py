@@ -32,7 +32,7 @@ _MEDIA_REF_RE = re.compile(r"/api/interactions/media/[A-Za-z0-9_-]{43}")
 
 
 def _base_url(bridge: BridgeHarness) -> str:
-    return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    return bridge.stack.origin(bridge.stack.port_b)
 
 
 pytestmark = pytest.mark.needs(

@@ -24,7 +24,7 @@ MISS_MESSAGE = "unknown or expired trigger link"
 def no_auth(stack: TaiStack, port: int | None = None) -> ApiClient:
     """A client carrying NO Authorization header — the public resolver / boundary
     caller. The resolver door is reachable unauthenticated; the CRUD routes deny it."""
-    return ApiClient(f"http://{stack.host}:{port or stack.port_a}")
+    return ApiClient(stack.origin(port or stack.port_a))
 
 
 async def register_record_hook(

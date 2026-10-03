@@ -85,7 +85,7 @@ async def test_untitled_response_format_is_rejected(agents_stack: TaiStack, llm_
 async def _run_sse(stack: TaiStack, path: str, body: dict) -> list[dict]:
     """POST an agent run over the SSE run door and return the decoded ``data:`` frames
     (each frame's JSON), draining the stream to completion."""
-    url = f"http://{stack.host}:{stack.port_a}{path}"
+    url = f"{stack.origin(stack.port_a)}{path}"
     frames: list[dict] = []
     async with httpx.AsyncClient(timeout=15.0) as client, client.stream("POST", url, json=body) as response:
         response.raise_for_status()

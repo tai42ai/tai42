@@ -95,7 +95,7 @@ def _whatsapp_schema(leg: str) -> dict[str, Any]:
 
 
 def _base_url(bridge: BridgeHarness) -> str:
-    return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    return bridge.stack.origin(bridge.stack.port_b)
 
 
 def _fresh_wa_id() -> str:

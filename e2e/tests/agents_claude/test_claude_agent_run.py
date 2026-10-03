@@ -124,7 +124,7 @@ async def test_unhonored_params_are_refused_loudly(
 
     # SSE route: an input key that is not a ``ClaudeCodeInput`` field is a loud 400 that names
     # the offending field — never a silent drop that would run with a default.
-    url = f"http://{stack.host}:{stack.port_a}{CLAUDE_RUN_PATH}"
+    url = f"{stack.origin(stack.port_a)}{CLAUDE_RUN_PATH}"
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(url, json={"user_message": {"content": "hi"}, field: "x"})
     assert response.status_code == 400, response.text

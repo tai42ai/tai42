@@ -86,7 +86,7 @@ async def test_shipped_connector_descriptors_are_registered(shipped_connectors_s
 @pytest.mark.needs("setting:CONNECTORS_GOOGLE_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
-    origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
+    origin = shipped_connectors_stack.origin(shipped_connectors_stack.port_a)
 
     start = await api.post(
         "/api/connectors/connections/start",
@@ -116,7 +116,7 @@ async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> No
 @pytest.mark.needs("setting:CONNECTORS_ATLASSIAN_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
-    origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
+    origin = shipped_connectors_stack.origin(shipped_connectors_stack.port_a)
 
     start = await api.post(
         "/api/connectors/connections/start",
@@ -141,7 +141,7 @@ async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) ->
 @pytest.mark.needs("setting:CONNECTORS_SLACK_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
-    origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
+    origin = shipped_connectors_stack.origin(shipped_connectors_stack.port_a)
 
     start = await api.post(
         "/api/connectors/connections/start",
@@ -166,7 +166,7 @@ async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> Non
 @pytest.mark.needs("setting:CONNECTORS_GITHUB_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_github_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
-    origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
+    origin = shipped_connectors_stack.origin(shipped_connectors_stack.port_a)
 
     start = await api.post(
         "/api/connectors/connections/start",

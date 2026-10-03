@@ -229,7 +229,7 @@ async def test_external_question_carries_the_ticket_and_a_late_web_answer_is_409
         # one format the frame carries it for — and it resolves on replica B, the worker
         # that never asked.
         callback_url = case.tier1_callback_url(record)
-        assert callback_url.startswith(f"http://{stack.host}:{stack.port_b}")
+        assert callback_url.startswith(stack.origin(stack.port_b))
 
         # The visitor follows the link and answers OUT of band; the blocked run wakes.
         forwarded = await post_callback(callback_url, json.dumps({"answer": external_answer}).encode())

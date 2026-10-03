@@ -30,7 +30,7 @@ pytestmark = pytest.mark.needs(
 
 
 async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
 
     async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -52,7 +52,7 @@ async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: 
 
 
 async def _is_pending(stack: TaiStack, port: int, question: str) -> bool:
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
     async with httpx.AsyncClient(timeout=2.0) as client:
         resp = await client.get(url, params={"page": 1, "pageSize": 200})
         resp.raise_for_status()

@@ -120,7 +120,7 @@ async def test_web_participant_turn_keys_state_on_thread_and_ledgers_the_convers
         reply_expr="null",
     )
 
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     participant_a, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     marker_a = uniq("web-a")

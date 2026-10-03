@@ -23,7 +23,7 @@ from ._bridge_support import BridgeHarness
 
 
 def _base_url(bridge: BridgeHarness) -> str:
-    return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    return bridge.stack.origin(bridge.stack.port_b)
 
 
 async def _web_record_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str) -> str:

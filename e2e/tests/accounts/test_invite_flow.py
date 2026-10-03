@@ -22,7 +22,7 @@ _PASSWORD = "invited-user-password-1"
 
 
 def _unauth(stack: TaiStack, port: int) -> ApiClient:
-    return ApiClient(f"http://{stack.host}:{port}")
+    return ApiClient(stack.origin(port))
 
 
 async def test_invite_accept_login_and_rejections(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:

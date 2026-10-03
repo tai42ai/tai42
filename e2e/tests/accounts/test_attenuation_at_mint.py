@@ -24,7 +24,7 @@ _PASSWORD = "editor-user-password-1"
 
 
 def _unauth(stack: TaiStack, port: int) -> ApiClient:
-    return ApiClient(f"http://{stack.host}:{port}")
+    return ApiClient(stack.origin(port))
 
 
 async def _register_star_scope(admin: ApiClient, uniq: Callable[[str], str]) -> None:

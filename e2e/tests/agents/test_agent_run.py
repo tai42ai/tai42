@@ -202,7 +202,7 @@ async def test_agent_preset_over_agent_receives_the_engine_holder_per_call_kwarg
 
 
 async def _run_sse(stack: TaiStack, path: str, body: dict) -> list[str]:
-    url = f"http://{stack.host}:{stack.port_a}{path}"
+    url = f"{stack.origin(stack.port_a)}{path}"
     frames: list[str] = []
     async with httpx.AsyncClient(timeout=15.0) as client, client.stream("POST", url, json=body) as response:
         response.raise_for_status()

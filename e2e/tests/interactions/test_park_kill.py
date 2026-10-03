@@ -229,7 +229,7 @@ async def _open_held_route_and_park(
         },
         expect=200,
     )
-    base_url = f"http://{stack.host}:{stack.port_b}"
+    base_url = stack.origin(stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=stack.resources.redis_url)
     assert page.status_code == 200, page.text
 
@@ -383,7 +383,7 @@ async def _open_agent_route(
     if cancel_expr is not None:
         body["cancel_expr"] = {"content": cancel_expr}
     await api.post(f"/api/conversations/{route_name}", json=body, expect=200)
-    base_url = f"http://{stack.host}:{stack.port_b}"
+    base_url = stack.origin(stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web, route_name
@@ -547,7 +547,7 @@ async def test_a_route_started_user_ask_killed_by_expiry_delivers_one_door_faile
         },
         expect=200,
     )
-    base_url = f"http://{stack.host}:{stack.port_b}"
+    base_url = stack.origin(stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=stack.resources.redis_url)
     assert page.status_code == 200, page.text
 

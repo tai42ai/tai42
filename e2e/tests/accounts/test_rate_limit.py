@@ -27,7 +27,7 @@ async def test_wrong_passwords_throttle_then_correct_succeeds(
 ) -> None:
     stack = accounts_stack
     admin = stack.api(port=stack.port_a)
-    public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public = ApiClient(stack.origin(stack.port_a))
 
     # An account with a known password (set through an accepted invite).
     email = f"{uniq('user')}@e2e.test"

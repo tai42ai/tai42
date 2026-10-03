@@ -63,7 +63,7 @@ async def _open_tool_target_web_visitor(bridge: BridgeHarness, uniq: Callable[[s
         start_expr="{marker: .message}",
         reply_expr=".result.answer",
     )
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web

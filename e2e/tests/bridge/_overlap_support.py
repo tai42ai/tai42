@@ -70,7 +70,7 @@ async def create_web_tool_route(
 
 async def open_visitor(bridge: BridgeHarness, identity: str) -> WebChatClient:
     """Open the web chat page as a fresh first-time visitor and adopt its session."""
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web

@@ -271,7 +271,7 @@ def cli_env(stack: TaiStack, home: Path) -> dict[str, str]:
     return {
         "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
         "HOME": str(home),
-        "TAI_SERVER_URL": f"http://{stack.host}:{stack.port_a}",
+        "TAI_SERVER_URL": stack.origin(stack.port_a),
         "TAI_API_KEY": "sk-e2e-cli-not-a-real-key",
     }
 

@@ -72,7 +72,7 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
     )
 
     # The minted invite works: accepting it sets a password and mints the member's session.
-    public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public = ApiClient(stack.origin(stack.port_a))
     accepted = await public.post(
         "/api/login/invite/accept",
         json={"invite_token": invite_token, "password": _PASSWORD, "password_confirm": _PASSWORD},

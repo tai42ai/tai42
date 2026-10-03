@@ -53,11 +53,11 @@ _IDENTITY_KEY_PREFIXES = ("ac:key:", "ac:management:key:")
 
 def _public(stack: TaiStack) -> ApiClient:
     """A client for the stack carrying NO credential — the fresh install has no key."""
-    return ApiClient(f"http://{stack.host}:{stack.port_a}")
+    return ApiClient(stack.origin(stack.port_a))
 
 
 def _client(stack: TaiStack, token: str) -> ApiClient:
-    return ApiClient(f"http://{stack.host}:{stack.port_a}", auth_token=token)
+    return ApiClient(stack.origin(stack.port_a), auth_token=token)
 
 
 async def _setup(stack: TaiStack, owner_id: str) -> dict[str, Any]:

@@ -134,7 +134,7 @@ async def test_reload_door_is_admin_fenced_census_is_open(accounts_stack: TaiSta
 
     async def session_for(role: str) -> ApiClient:
         created = await invite_member(admin, email=f"{uniq(role)}@e2e.test", role=role)
-        public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+        public = ApiClient(stack.origin(stack.port_a))
         accepted = await public.post(
             "/api/login/invite/accept",
             json={"invite_token": created["invite_token"], "password": _PASSWORD, "password_confirm": _PASSWORD},

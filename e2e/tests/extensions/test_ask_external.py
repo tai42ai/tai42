@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.backendless, pytest.mark.needs("probe-tools", "setting
 async def _find_pending(stack: TaiStack, question: str, *, deadline: float = 10.0) -> dict:
     """Poll the paged pending-list door until the pending interaction carrying
     ``question`` appears; return its payload."""
-    url = f"http://{stack.host}:{stack.port_a}/api/interactions"
+    url = f"{stack.origin(stack.port_a)}/api/interactions"
 
     async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:
