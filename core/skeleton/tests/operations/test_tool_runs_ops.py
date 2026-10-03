@@ -420,6 +420,58 @@ async def test_crash_resume_re_drive_deposits_no_context_without_a_stored_one(wi
     assert [entry["status"] for entry in entries] == ["succeeded"]
 
 
+async def test_background_submit_of_a_crash_resume_tool_is_redriven_with_the_park_indexed(wired):
+    # A crash-resume-declared tool submitted in the BACKGROUND is a detached record: it goes through
+    # the SAME shared create seam the hook door does, so the submit record carries the crash-resume
+    # flag, its arguments/extras, and the subject context rebuilt from the submitted ``StateSubject``.
+    # When the supervisor dies before the tool finishes (here: it never ran its terminal write), the
+    # liveness->lost reconciler re-drives the run FROM SCRATCH under that subject, so the re-driven
+    # caller-asking tool's park indexes under the same subject a poller answers on. Before the shared
+    # seam the submit record stored none of these — so it reconciled to ``lost`` and was NEVER
+    # re-driven.
+    ifake, istore = _wire_interactions_store(wired.monkeypatch)
+    await _seed_caller_ask(istore, ifake, "c1")
+    tools = wired.install()
+
+    async def _get_crash_resume_tool(key):
+        # The generic crash-resume flag on the tool's registration meta (names no consumer).
+        return SimpleNamespace(name=key, meta={"tai42/crash_resume": True})
+
+    tools.get_tool = _get_crash_resume_tool
+    tools.result = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+
+    # The crash: the record is created but its supervisor never completes its terminal write.
+    wired.monkeypatch.setattr(ops.supervisor, "_spawn_supervisor", lambda *a, **k: None)
+    out = await ops.submit_run("alpha", {"x": 1}, subject=_SUBJECT)
+    run_id = out["run_id"]
+
+    # The submit record now carries the crash-resume fields the re-drive reads.
+    record = await wired.store.get_run(wired.fake, run_id)
+    assert record["crash_resume"] == "1"
+    assert json.loads(record["arguments"]) == {"x": 1}
+    stored_context = json.loads(record["state_context"])
+    assert stored_context["door"] == "api"
+    assert stored_context["candidates"]["by_kind"] == {"person": "pA"}
+
+    # The supervisor's liveness key lapses (the crash), so the GET-by-id reconcile door marks the
+    # record lost AND re-dispatches the crash-resume re-drive.
+    wired.fake.advance(wired.settings.liveness_ttl_seconds + 1)
+    view = await ops.get_run(run_id)
+    assert view["status"] == "lost"
+    await _drain()
+
+    # The re-driven run is a NEW parked record carrying the caller-ask entries, read back over the
+    # submit's subject — the proof the state context was replayed and the park indexed.
+    entries = await ops.list_tool_runs("alpha")
+    statuses = sorted(entry["status"] for entry in entries)
+    assert statuses == ["lost", "parked"]
+    parked = next(entry for entry in entries if entry["status"] == "parked")
+    answer = json.loads((await wired.store.get_run(wired.fake, parked["run_id"]))["result"])
+    assert list(answer) == ["asks"]
+    assert [entry["id"] for entry in answer["asks"]] == ["c1"]
+    assert answer["asks"][0]["to"] == "caller"
+
+
 async def test_background_submit_of_an_unencodable_result_records_failed_read_at_the_poll(wired):
     # A tool whose result cannot be JSON-encoded is refused at the dispatch seam with the named
     # ``ToolResultEncodingError``; the background supervisor's terminal-write path records the run

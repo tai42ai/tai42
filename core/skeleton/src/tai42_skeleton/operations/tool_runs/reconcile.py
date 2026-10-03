@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +30,10 @@ from .models import _CRASH_RESUME_META_KEY, _LOST, _RUNNING
 from .store import ToolRunStore
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from tai42_skeleton.authz.identity import CallerIdentity
+    from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,52 @@ async def _reconcile_lost_with_liveness(
     if record.get("crash_resume") == "1":
         _pkg._spawn_crash_resume(run_id, record)
     return lost_record
+
+
+async def create_recorded_run(
+    r: Any,
+    store: ToolRunStore,
+    tool_name: str,
+    settings: ToolRunsSettings,
+    *,
+    user_id: str | None,
+    arguments: dict[str, Any],
+    extras: Mapping[str, Any] | None,
+    state_context: StateContext | None,
+) -> str:
+    """Persist a new ``running`` record through the ONE create seam both detached-record doors share.
+
+    The background-submit door and the inline ``run_recorded`` (hook/trigger) door each create a
+    DETACHED tool-run record — one with no live caller to retry it on a crash — so a crash-resume
+    re-drive reads that record later. BOTH doors store the crash-resume inputs here, in one place,
+    with no second copy of the field list: the ``crash_resume`` flag read from the tool's
+    registration meta, and the ``arguments``/``extras``/``state_context`` the re-drive replays from.
+    An un-flagged tool stores only the base record — the store gates every crash-resume field on the
+    flag.
+
+    ``state_context`` is the subject context the re-drive deposits around the replay so its park
+    indexes where the original's would have. Each door resolves its own source and passes it here:
+    the hook door its ambient fire context, the submit door the ``door="api"`` context built from
+    the submitted ``StateSubject`` (the same context the supervisor deposits around the live run).
+    Returns the generated ``run_id``.
+    """
+    crash_resume = await _tool_declares_crash_resume(tool_name)
+    run_id = secrets.token_urlsafe(16)
+    started = _pkg._now()
+    await store.create_run(
+        r,
+        run_id,
+        tool_name,
+        started.isoformat(),
+        started.timestamp(),
+        settings,
+        user_id=user_id,
+        arguments=arguments,
+        extras=extras,
+        state_context=state_context,
+        crash_resume=crash_resume,
+    )
+    return run_id
 
 
 async def _tool_declares_crash_resume(tool_name: str) -> bool:
