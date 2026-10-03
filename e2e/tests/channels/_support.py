@@ -189,7 +189,7 @@ class ChannelCase:
         public = self.stack.config.public_base_url
         if public is not None and self.stack.infra.settings.is_real(self.name):
             return public.rstrip("/")
-        return self.stack.origin(self.stack.port_b)
+        return f"http://{self.stack.host}:{self.stack.port_b}"
 
     def assert_inbound_forwarded(self, response: object) -> None:
         """Assert the medium's inbound door acked the forwarded answer (each
