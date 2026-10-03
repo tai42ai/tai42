@@ -49,13 +49,13 @@ async def test_setup_attaches_password_login_and_invites_create_principals(
     assert ids["password"]["submit_path"] == "/api/login/password", methods
 
     # The methods door lives ONLY under the public /api/login prefix; the same suffix under
-    # the reserved /api/auth namespace is denied, and the user list is authed.
+    # the reserved /api/auth namespace is denied, and the members directory is authed.
     leaked = await public.request_raw("GET", "/api/auth/login/methods")
     assert leaked.status_code in (401, 403), (
         f"login methods must not answer public under /api/auth: {leaked.status_code}"
     )
-    unauth_users = await public.request_raw("GET", "/api/auth/users")
-    assert unauth_users.status_code in (401, 403), f"/api/auth must be authed, got {unauth_users.status_code}"
+    unauth_members = await public.request_raw("GET", "/api/auth/members")
+    assert unauth_members.status_code in (401, 403), f"/api/auth must be authed, got {unauth_members.status_code}"
 
     # Setup initializes the deployment AND attaches the owner's password login in one call.
     owner_email = f"{uniq('owner')}@e2e.test"

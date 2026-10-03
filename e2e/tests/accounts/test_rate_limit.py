@@ -12,6 +12,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import invite_member
 from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs(
@@ -30,7 +31,7 @@ async def test_wrong_passwords_throttle_then_correct_succeeds(
 
     # An account with a known password (set through an accepted invite).
     email = f"{uniq('user')}@e2e.test"
-    created = await admin.post("/api/auth/users", json={"email": email, "role": "editor"})
+    created = await invite_member(admin, email=email, role="editor")
     await public.post(
         "/api/login/invite/accept",
         json={"invite_token": created["invite_token"], "password": _PASSWORD, "password_confirm": _PASSWORD},

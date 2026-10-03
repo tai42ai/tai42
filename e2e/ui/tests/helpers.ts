@@ -390,6 +390,30 @@ export async function createClaimLink(
 }
 
 /**
+ * Mint a member invite through the generic member-actions seam and return its one-time
+ * `invite_token`. The bespoke users-admin route is gone: the catalog
+ * (`GET /api/auth/member-actions`) declares the page-scoped "invite" action with an opaque
+ * key, and the invoke door (`POST /api/auth/member-actions/invoke`) performs it. The action
+ * is resolved by its generic `page` scope, never by a provider label.
+ */
+export async function createMemberInvite(
+  request: APIRequestContext,
+  { email, role }: { email: string; role: string },
+): Promise<string> {
+  const catalog = await request.get('/api/auth/member-actions', { headers: apiHeaders() });
+  expect(catalog.status(), await catalog.text()).toBe(200);
+  const actions = ((await catalog.json()) as { data: { actions: { key: string; scope: string }[] } }).data.actions;
+  const pageActions = actions.filter((action) => action.scope === 'page');
+  expect(pageActions.length, `exactly one page-scoped member action expected: ${JSON.stringify(actions)}`).toBe(1);
+  const invoked = await request.post('/api/auth/member-actions/invoke', {
+    headers: apiHeaders(),
+    data: { action_key: pageActions[0].key, target_handle: null, input: { email, role } },
+  });
+  expect(invoked.status(), await invoked.text()).toBe(200);
+  return ((await invoked.json()) as { data: { result: { invite_token: string } } }).data.result.invite_token;
+}
+
+/**
  * Provision an UNRESTRICTED operator and return its `tai-sess-` session token. The operator
  * is a top-level ADMIN HUMAN — an admin invite, accepted with a password, then logged in
  * for a session — which carries no owner claim, so the isolation gates give it the full
@@ -399,9 +423,7 @@ export async function createClaimLink(
 export async function provisionAdminSession(request: APIRequestContext): Promise<string> {
   const email = `${uniq('operator')}@e2e.test`;
   const password = `${uniq('Pw')}-Aa1`;
-  const invite = await request.post('/api/auth/users', { headers: apiHeaders(), data: { email, role: 'admin' } });
-  expect(invite.status(), await invite.text()).toBe(200);
-  const inviteToken = ((await invite.json()) as { data: { invite_token: string } }).data.invite_token;
+  const inviteToken = await createMemberInvite(request, { email, role: 'admin' });
   const accepted = await request.post('/api/login/invite/accept', {
     data: { invite_token: inviteToken, password, password_confirm: password },
   });

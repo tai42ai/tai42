@@ -17,6 +17,7 @@ import pytest
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import invite_member
 from tai42_e2e.stack import TaiStack
 
 _PASSWORD = "fleet-fence-password-1"
@@ -132,7 +133,7 @@ async def test_reload_door_is_admin_fenced_census_is_open(accounts_stack: TaiSta
     admin = stack.api(port=stack.port_a)  # seeded root sk- key
 
     async def session_for(role: str) -> ApiClient:
-        created = await admin.post("/api/auth/users", json={"email": f"{uniq(role)}@e2e.test", "role": role})
+        created = await invite_member(admin, email=f"{uniq(role)}@e2e.test", role=role)
         public = ApiClient(f"http://{stack.host}:{stack.port_a}")
         accepted = await public.post(
             "/api/login/invite/accept",

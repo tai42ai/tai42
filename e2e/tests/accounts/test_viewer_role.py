@@ -11,6 +11,7 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.member_admin import invite_member
 from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres", "topology:replicas")
@@ -23,7 +24,7 @@ async def test_viewer_session_get_ok_post_denied(accounts_stack: TaiStack, uniq:
     admin = stack.api(port=stack.port_a)  # seeded root sk- key
 
     # A viewer account with a live policy, and a session for it (accept the invite).
-    created = await admin.post("/api/auth/users", json={"email": f"{uniq('viewer')}@e2e.test", "role": "viewer"})
+    created = await invite_member(admin, email=f"{uniq('viewer')}@e2e.test", role="viewer")
     public = ApiClient(f"http://{stack.host}:{stack.port_a}")
     accepted = await public.post(
         "/api/login/invite/accept",
