@@ -21,14 +21,6 @@ updates:
         patterns:
           - "*"
   - package-ecosystem: npm
-    directory: /plugins/accounts-postgres
-    schedule:
-      interval: weekly
-    groups:
-      npm:
-        patterns:
-          - "*"
-  - package-ecosystem: npm
     directory: /e2e/ui
     schedule:
       interval: weekly

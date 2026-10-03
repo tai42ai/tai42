@@ -263,7 +263,6 @@ jobs:
           # frontend table: name|dir|dist — dist is the committed bundle the
           # freshness check diffs after a rebuild.
           read -r -d '' FRONTEND <<'EOF' || true
-          accounts-postgres|plugins/accounts-postgres|src/tai42_accounts_postgres/studio
           channel-web|plugins/channel-web|src/tai42_channel_web/public
           EOF
           frontends='[]'

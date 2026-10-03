@@ -5,8 +5,8 @@ package: tai42-accounts-postgres
 version: 3.2.1
 description: >-
   Postgres-backed accounts provider for the TAI ecosystem: an installable plugin
-  that owns user accounts, password login, sessions, and invites, registers
-  itself as the "accounts-postgres" provider, and ships a Studio users-admin UI.
+  that owns user accounts, password login, sessions, and invites, and registers
+  itself as the "accounts-postgres" provider.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/accounts-postgres
@@ -50,31 +50,11 @@ provides:
   - kind: router
     name: users
     module: tai42_accounts_postgres.routes_users
-    description: The authed /api/auth/users* user-administration routes.
+    description: The authed /api/auth/users/me/password self-service password route.
     routes:
       base: auth
       paths:
-        - path: /users
-          methods:
-            - GET
-          public: false
-        - path: /users
-          methods:
-            - POST
-          public: false
         - path: /users/me/password
           methods:
             - PUT
-          public: false
-        - path: /users/{user_id}
-          methods:
-            - PUT
-          public: false
-        - path: /users/{user_id}
-          methods:
-            - DELETE
-          public: false
-        - path: /users/{user_id}/invite
-          methods:
-            - POST
           public: false

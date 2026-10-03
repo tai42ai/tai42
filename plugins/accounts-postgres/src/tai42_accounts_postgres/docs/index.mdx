@@ -1,12 +1,13 @@
 ---
 title: "Postgres accounts"
-description: "Wire the Postgres accounts provider, bind its database, run migrations, and invite the team."
+description: "Wire the Postgres accounts provider, bind its database, run migrations, and manage members."
 ---
 
-Provides human logins on Postgres — an email and password, a session, and a role —
-and contributes the Studio's Users screen. The account model itself stays central;
-see [Accounts](/concepts/accounts). This page wires the provider and
-its two routers.
+Provides human logins on Postgres — an email and password, a session, and a role.
+Member administration is the Studio's own generic Members page over the provider's
+declared member actions, so this plugin ships no Studio page of its own. The account
+model itself stays central; see [Accounts](/concepts/accounts). This page wires the
+provider and its two routers.
 
 ## accounts-postgres
 
@@ -19,8 +20,6 @@ lifecycle_modules:
 routers_modules:
   - tai42_accounts_postgres.routes_login
   - tai42_accounts_postgres.routes_users
-studio_plugins:
-  - tai42_accounts_postgres
 ```
 
 ```bash
@@ -101,16 +100,20 @@ The provider implements that attachment seam and owns no separate first-owner ro
 
 ## users
 
-The authed `/api/auth/users*` user-administration routes. There is no outbound email —
-creating a user returns a one-time invite link you deliver yourself. `role` names an
-existing access-control role template; an unknown name is rejected and no user is
-created. The response carries an invite token and a `/login?invite=...` path relative
-to your origin; the invitee sets a password through `POST /api/login/invite/accept`,
-which consumes the token and mints a session in one step. Re-issue an invite with
-`POST /api/auth/users/{user_id}/invite` — it refuses once that user has a password.
+`PUT /api/auth/users/me/password` is the one route this module carries: a signed-in
+person changing their OWN password, which revokes every other session. It is
+self-service, not member administration, so it is open to every user, not just an admin.
 
-The Studio's Users screen drives the same routes, and the last enabled admin cannot be
-demoted, disabled, or deleted.
+Member administration is not routes here. The provider **declares** its member actions —
+invite a user, send a new login link, cancel an invitation, change a member's role or
+access, and remove a member — through the platform's generic member-actions seam, and
+the Studio's own generic Members page renders them. There is no outbound email: inviting
+a user (or sending a new link) returns a one-time invite token and a `/login?invite=...`
+path relative to your origin, shown once on the action's result; the invitee sets a
+password through `POST /api/login/invite/accept`, which consumes the token and mints a
+session in one step. `role` names an existing access-control role template; an unknown
+name is rejected and no user is created. The last enabled admin cannot be demoted,
+disabled, or deleted.
 
 ## See also
 
