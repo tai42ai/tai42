@@ -26,9 +26,9 @@ dependencies = [
     # The pure interface contract the backend registers through — Storage,
     # ObjectStat, assert_not_root, and the tai42_app handle.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=15.4,<16",
+    "tai42-contract>=16.0,<17",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).
-    "tai42-kit>=7.4,<8",
+    "tai42-kit>=7.5,<8",
     "httpx>=0.28",
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
