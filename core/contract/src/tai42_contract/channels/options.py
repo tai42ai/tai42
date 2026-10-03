@@ -56,7 +56,7 @@ class ReplyOption(BaseModel):
     enforces it in its own code. Frozen.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True)
 
     kind: Literal["reply"] = "reply"
     text: str
@@ -111,7 +111,7 @@ class LinkOption(BaseModel):
     button text. The URL-button / call-to-action case. Frozen.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True)
 
     kind: Literal["link"] = "link"
     label: str
@@ -149,7 +149,7 @@ class OptionSection(BaseModel):
     text; a link action is a button, never a list row). A present ``rows`` is non-empty. Frozen.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True)
 
     title: str
     rows: list[ReplyOption]

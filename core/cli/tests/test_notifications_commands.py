@@ -246,8 +246,7 @@ def test_notifications_notify_data_and_pages_ride_validated_body(monkeypatch: py
 
 def test_notifications_notify_invalid_data_shape_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
     # A --data JSON object carrying a key FormData does not declare is refused loudly before
-    # any request leaves — FormData forbids an undeclared key (extra="forbid"), which the CLI
-    # surfaces as a clean error.
+    # any request leaves — the CLI guards its own seam against a silently dropped key.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request must be made for an invalid --data")
 
@@ -499,9 +498,9 @@ def test_notifications_notify_header_and_footer_ride_with_options(monkeypatch: p
 
 def test_notifications_notify_unknown_template_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
     # A channel-specific parameter key (``body_parameters``) belongs INSIDE the opaque
-    # ``parameters`` object, not at the top level of the template reference. ChannelTemplate
-    # forbids a stray top-level key (extra="forbid"), so validation raises and the CLI surfaces it
-    # loudly — no request leaves and the offending key is named.
+    # ``parameters`` object, not at the top level of the template reference — it is not a
+    # ChannelTemplate field. The CLI rejects the stray top-level key LOUDLY rather than letting
+    # model_validate silently drop it — no request leaves and the accepted keys are named.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request must be made for an unknown template key")
 
@@ -524,8 +523,8 @@ def test_notifications_notify_unknown_template_key_raises_before_request(monkeyp
 
 
 def test_notifications_notify_unknown_location_key_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An unknown --location key is rejected before any request — LocationElement forbids an
-    # undeclared key (extra="forbid"), which the CLI surfaces loudly.
+    # An unknown --location key is rejected before any request — LocationElement has no
+    # extra="forbid", so the CLI guards its own seam.
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no request must be made for an unknown location key")
 

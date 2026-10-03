@@ -17,6 +17,27 @@ _SECTIONS_ADAPTER = TypeAdapter(list[OptionSection])
 _PAGES_ADAPTER = TypeAdapter(list[FormPage])
 
 
+def _reject_unknown_keys(raw: object, model: type[BaseModel], *, param_hint: str) -> dict[str, Any]:
+    """Refuse a JSON object carrying keys the contract model does not declare.
+
+    The contract's channel models do not set ``extra="forbid"``, so an unknown key
+    would be silently DROPPED by ``model_validate`` and the caller would never learn
+    their input was ignored. The CLI guards its own seam: it validates the raw
+    object's keys against the model's fields FIRST and rejects any stray key loudly,
+    naming the accepted keys.
+    """
+    if not isinstance(raw, dict):
+        raise typer.BadParameter("must be a JSON object", param_hint=param_hint)
+    unknown = sorted(set(raw) - set(model.model_fields))
+    if unknown:
+        allowed = ", ".join(sorted(model.model_fields))
+        raise typer.BadParameter(
+            f"unknown key(s): {', '.join(unknown)}; accepted keys are: {allowed}",
+            param_hint=param_hint,
+        )
+    return raw
+
+
 def _list_field(raw: str, adapter: TypeAdapter[Any], label: str, *, param_hint: str) -> list[Any]:
     """Parse one JSON-array option, validate it through ``adapter``, and return the json-dumped list.
 
@@ -31,14 +52,14 @@ def _list_field(raw: str, adapter: TypeAdapter[Any], label: str, *, param_hint: 
 
 
 def _model_field(raw: str, model: type[BaseModel], label: str, *, param_hint: str) -> dict[str, Any]:
-    """Parse one JSON-object option, validate it into ``model``, and return the json-dumped dict.
+    """Parse one JSON-object option, reject unknown keys, validate it into ``model``, and return the json-dumped dict.
 
-    A validation error — including an undeclared key, which every notification-body model
-    forbids (``extra="forbid"``) — raises ``invalid {label}`` loudly.
+    A validation error raises ``invalid {label}``.
     """
     parsed = parse_json_value(raw, param_hint=param_hint)
+    raw_object = _reject_unknown_keys(parsed, model, param_hint=param_hint)
     try:
-        validated = model.model_validate(parsed)
+        validated = model.model_validate(raw_object)
     except ValidationError as exc:
         raise typer.BadParameter(f"invalid {label}: {exc}", param_hint=param_hint) from exc
     return validated.model_dump(mode="json")

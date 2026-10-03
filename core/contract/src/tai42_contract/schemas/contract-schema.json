@@ -779,7 +779,6 @@
       "type": "object"
     },
     "ChannelTemplate": {
-      "additionalProperties": false,
       "description": "A pre-approved, named template a channel sends outside its freeform window.\n\nSome media only accept arbitrary text inside a bounded conversation window (a provider's\ncustomer-service window); outside it, the sole accepted send is an operator-authored,\npre-approved template referenced by ``name`` in an approved ``language`` locale — both\nrequired and non-blank.\n\n``parameters`` is the template's runtime arguments as an OPAQUE object: the platform\nthreads it UNOPENED (never looking inside it), and the channel that declares the\n``supports_template_notifications`` capability owns its shape — it validates ``parameters``\nagainst its OWN template-parameter schema through its OPTIONAL ``validate_template`` hook\n(see :class:`~tai42_contract.channels.Channel`) and maps it to its own send API in its own\ncode. A template with no runtime arguments carries no ``parameters``; a present\n``parameters`` is a non-empty dict.",
       "properties": {
         "language": {
