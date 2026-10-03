@@ -42,6 +42,7 @@ from tai42_skeleton.tools.retry import dispatch_with_retry
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
+    deferred_binding_scope,
     merge_bindings,
 )
 from tai42_skeleton.tools.turn_budget import turn_budget
@@ -172,14 +173,22 @@ async def _binding_application(
     over ``arguments`` itself (an empty dict kept by identity, so an in-place injection reaches
     the dispatch) or a fresh ``{}`` when the door carried none. A dispatch with no arguments
     never silently skips its injections.
+
+    The merged binding (+ its post-injection input + the door id) is also DEPOSITED for the span of
+    the dispatch, so a run that PARKS deep inside captures it and applies the UPDATES once at its
+    real terminal (``interactions.continuation.drive_and_deliver``) rather than dropping them on the
+    pause.
     """
     from tai42_contract.states import StateBinding
 
     args = arguments if arguments is not None else {}
-    if isinstance(merged, StateBinding):
-        await apply_binding_injections(app, merged, args)
-    yield
-    if isinstance(merged, StateBinding) and scope._succeeded:
+    if not isinstance(merged, StateBinding):
+        yield
+        return
+    await apply_binding_injections(app, merged, args)
+    with deferred_binding_scope(merged, args, door_id):
+        yield
+    if scope._succeeded:
         await apply_binding_updates(app, merged, args, scope._result, door_id)
 
 

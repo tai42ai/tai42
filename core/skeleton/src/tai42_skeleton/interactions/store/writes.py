@@ -212,7 +212,9 @@ class _StoreWrites(_StoreWritesBase):
         full request. ``asked_by`` (the parking run's call chain), ``delivery`` (the run's durable
         address, JSON) and ``run_delivery_id`` are copied onto the continuation-due record by the
         answer path so the reaper's detached redelivery restores the chain and binds the address
-        without re-reading the request.
+        without re-reading the request. ``deferred_binding`` (the door's merged binding, JSON),
+        ``run_input`` (the input it saw, JSON) and ``door_id`` are copied the same way, so the
+        reaper's redelivery applies the deferred UPDATES at the run's real terminal.
         """
         if to != "user":
             state_mapping["to"] = to
@@ -226,6 +228,12 @@ class _StoreWrites(_StoreWritesBase):
             state_mapping["delivery"] = json.dumps(delivery)
         if run_delivery_id is not None:
             state_mapping["run_delivery_id"] = run_delivery_id
+        if request.deferred_binding is not None:
+            state_mapping["deferred_binding"] = request.deferred_binding.model_dump_json()
+        if request.run_input is not None:
+            state_mapping["run_input"] = json.dumps(request.run_input)
+        if request.door_id is not None:
+            state_mapping["door_id"] = request.door_id
 
     def _queue_record_writes(
         self,

@@ -41,6 +41,9 @@ class _AnswerClaim:
     continuation_fingerprint: str | None
     continuation_state_context: str | None
     caller_ask_landing: str | None
+    deferred_binding: str | None
+    run_input: str | None
+    door_id: str | None
     remaining: int
 
 
@@ -181,6 +184,12 @@ class _StoreAnswerWrites(_StoreWritesBase):
         asked_by = json.loads(asked_by_field) if asked_by_field is not None else None
         delivery = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "delivery")))
         run_delivery_id = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "run_delivery_id")))
+        # The door's merged binding + the run input it saw + the door id, denormalized at add time:
+        # the continuation-due record copies all three so the reaper's detached redelivery applies
+        # the deferred UPDATES at the run's real terminal without re-reading the request.
+        deferred_binding = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "deferred_binding")))
+        run_input = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "run_input")))
+        door_id = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "door_id")))
         # An async park carries a denormalized continuation tool + identity (+
         # fingerprint); their presence is the signal to enqueue the durable
         # continuation-due record in THIS claim's MULTI.
@@ -230,6 +239,9 @@ class _StoreAnswerWrites(_StoreWritesBase):
             continuation_fingerprint=continuation_fingerprint,
             continuation_state_context=continuation_state_context,
             caller_ask_landing=caller_ask_landing,
+            deferred_binding=deferred_binding,
+            run_input=run_input,
+            door_id=door_id,
             remaining=int(current) - 1,
         )
 
@@ -320,6 +332,9 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 claim.delivery,
                 claim.run_delivery_id,
                 claim.caller_ask_landing,
+                claim.deferred_binding,
+                claim.run_input,
+                claim.door_id,
             )
             pipe.hset(due_key, mapping=due_mapping)
             pipe.expire(due_key, continuation_due_ttl)

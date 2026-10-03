@@ -23,7 +23,7 @@ from tai42_contract.interactions import (
     get_resume_continuation_tool,
     repark_notice,
 )
-from tai42_contract.states import StateContext
+from tai42_contract.states import StateBinding, StateContext
 from tai42_contract.tools import get_run_delivery, get_run_delivery_id
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,12 @@ class AsyncParkBinding:
     # The caller-ask landing the door declared around the run, captured so the resume re-establishes
     # it. ``None`` when no door declared one.
     caller_ask_landing: CallerAskLanding | None = None
+    # The door's MERGED state binding, the run input it saw, and the door id — captured from the
+    # outermost dispatch so the deferred binding UPDATES apply once at the run's real terminal
+    # instead of being dropped on the pause. All ``None`` when the run carried no state binding.
+    deferred_binding: StateBinding | None = None
+    run_input: dict[str, Any] | None = None
+    door_id: str | None = None
 
 
 def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncParkBinding:
@@ -119,6 +125,14 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
         if raw_delivery is not None
         else None
     )
+    # The merged door binding the outermost dispatch deposited (after its injections ran), so the
+    # deferred UPDATES apply once at the run's real terminal. Function-local import mirrors the
+    # others above: an edge from interactions into the tools dispatch layer at module load would
+    # couple two peer packages at import time. A copy of the run input is taken so a later mutation
+    # of the live arguments never reaches the stored snapshot.
+    from tai42_skeleton.tools.state_binding import current_deferred_binding
+
+    deferred = current_deferred_binding()
     return AsyncParkBinding(
         continuation_tool=continuation_tool,
         continuation_identity=identity.user_id,
@@ -128,6 +142,9 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
         run_delivery_id=run_delivery_id,
         delivery=delivery,
         caller_ask_landing=landing,
+        deferred_binding=deferred.binding if deferred is not None else None,
+        run_input=dict(deferred.run_input) if deferred is not None else None,
+        door_id=deferred.door_id if deferred is not None else None,
     )
 
 

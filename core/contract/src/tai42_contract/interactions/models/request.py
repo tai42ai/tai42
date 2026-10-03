@@ -22,7 +22,7 @@ from tai42_contract.interactions.models.forms import (
     check_form_reactions,
 )
 from tai42_contract.interactions.models.media import MediaItem, check_media_list
-from tai42_contract.states import StateContext
+from tai42_contract.states import StateBinding, StateContext
 
 # Cap on a per-ask custom mismatch notice — the participant-facing rejection text a ``retry``-policy ask
 # may substitute for the built-in one. A single participant reply, so a small bound (channels impose
@@ -259,6 +259,22 @@ class InteractionRequest(BaseModel):
     # delivers exactly once. Captured with ``delivery`` at park time. None for a sync ask
     # (never parked); an async park always carries it (the persist raises without one).
     run_delivery_id: str | None = None
+    # The door's MERGED state binding (the door's own binding merged with the dispatched
+    # preset's), captured at park time so the deferred binding UPDATES apply once at the run's
+    # real terminal output rather than being dropped on the pause. A PER-RUN snapshot like the
+    # delivery address: every ask of the run carries the same one. None when the run started
+    # under no state binding. Applied at the terminal, keyed on the run's delivery identity so a
+    # redelivery applies once.
+    deferred_binding: StateBinding | None = None
+    # The run input the merged binding saw at the outermost dispatch (after the binding's own
+    # injections ran), captured at park time so the deferred update jqs evaluate ``$input`` over
+    # the same input the live apply would. None when the run carried no state binding. May hold
+    # person data; it leaves with the park record a person erase tears down.
+    run_input: dict[str, Any] | None = None
+    # The dispatched door/definition id the merged binding applied under, captured at park time so
+    # a deferred custom update writes as the same door-scoped writer the live apply would. None when
+    # the run carried no state binding.
+    door_id: str | None = None
     # When the parked question expires. Distinct from ``timeout_at`` (the sync
     # wait budget) and mutually exclusive with a sync ``timeout`` at the ask
     # surface (see ``check_ask_timing``). Required for async (a park always carries

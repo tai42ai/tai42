@@ -98,6 +98,12 @@ def build_request(
         # binding is empty); every ask of a run stores the SAME pair, no ``to`` branch.
         run_delivery_id=park_binding.run_delivery_id,
         delivery=park_binding.delivery,
+        # The door's merged binding + the run input it saw + the door id, captured at park time so
+        # the deferred UPDATES apply once at the run's real terminal. All None when the run carried
+        # no state binding (and for a sync ask, whose binding is empty).
+        deferred_binding=park_binding.deferred_binding,
+        run_input=park_binding.run_input,
+        door_id=park_binding.door_id,
         expiry_at=expiry_at,
     )
 

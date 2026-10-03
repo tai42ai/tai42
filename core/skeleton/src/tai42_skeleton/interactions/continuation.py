@@ -54,7 +54,7 @@ from tai42_contract.interactions import (
     register_execution_identity_accessor,
     register_execution_identity_binder,
 )
-from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 from tai42_contract.tools import RunDelivery, run_delivery
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -249,6 +249,47 @@ async def _deliver_terminal(
     )
 
 
+async def _apply_deferred_binding(
+    *,
+    deferred_binding: StateBinding | None,
+    run_input: Mapping[str, Any] | None,
+    door_id: str | None,
+    output: Any,
+    run_delivery_id: str | None,
+) -> None:
+    """Apply a parked run's DEFERRED door binding UPDATES at its real terminal, once per run.
+
+    The door that STARTED the run dropped its binding updates on the park (a pause is not a clean
+    output); they are applied HERE, over the run's real terminal ``output``, exactly as the live
+    dispatch would have. Keyed on the run's ``completion_id`` so an at-least-once redelivery
+    re-driving the same terminal replays the same ops idempotently. A run that carried no binding
+    (``deferred_binding`` None — a bindingless door, or a park stored before this deploy) is a
+    no-op; a stored binding with no run input or door id is a torn record and raises.
+    """
+    if deferred_binding is None:
+        return
+    if run_delivery_id is None:
+        raise RuntimeError(
+            "a parked run carries a deferred binding but no run_delivery_id to key its terminal apply on"
+        )
+    if run_input is None or door_id is None:
+        raise RuntimeError("a parked run's deferred binding is missing its run input or door id")
+    # The concrete process app the binding runtime applies through (``app.states``/``app.storage``).
+    # Function-local: a module-level edge into the app singleton would couple the detached-fire
+    # module to the whole server build at import.
+    from tai42_skeleton.app.instance import build_app
+    from tai42_skeleton.tools.state_binding import apply_binding_updates
+
+    await apply_binding_updates(
+        build_app(),
+        deferred_binding,
+        dict(run_input),
+        output,
+        door_id,
+        idempotency_scope=_completion_id(run_delivery_id),
+    )
+
+
 async def drive_and_deliver(
     store: InteractionStore,
     *,
@@ -264,6 +305,9 @@ async def drive_and_deliver(
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
     receives_outcome: bool,
+    deferred_binding: StateBinding | None = None,
+    run_input: Mapping[str, Any] | None = None,
+    door_id: str | None = None,
 ) -> Any:
     """The ONE delivery chokepoint every continuation runs through — drive, then deliver its terminal.
 
@@ -291,18 +335,35 @@ async def drive_and_deliver(
     returned status-keyed value), so a delivered terminal carries ``PARK_COMPLETION_SUCCEEDED``
     without any inspection of the returned value.
 
+    On a real terminal SUCCESS — both branches, a live inline receiver and a receiver-less drive —
+    the run's DEFERRED door binding updates apply over the terminal output (``_apply_deferred_binding``),
+    so a run that parked to ask writes the door updates the pause dropped; never on a
+    ``RunTerminalFailed`` or a re-park, matching the live apply which runs only on a clean output.
+
     The due record is cleared only AFTER a terminal is delivered, so a transient delivery failure
     leaves it for the reaper. Returns the inline receiver's outcome (or the non-terminal value); a
     receiver-less drive returns ``None``.
     """
+    from tai42_skeleton.tools.state_binding import deferred_binding_scope
+
     run_delivery_ctx: AbstractContextManager[Any] = (
         nullcontext()
         if receives_outcome
         else run_delivery(RunDelivery(run_delivery_id, delivery) if run_delivery_id is not None else None)
     )
+    # Re-establish the run's deferred door binding around the resume drive, EXACTLY as the delivery
+    # address is re-established above: so a run that asks AGAIN mid-drive re-captures the SAME per-run
+    # binding onto the re-park (``resolve_async_continuation`` reads it off this scope), rather than
+    # losing it — the generic resume tool carries no binding of its own. The final terminal applies it
+    # once, keyed on the run's unchanged ``completion_id``.
+    deferred_ctx: AbstractContextManager[Any] = (
+        deferred_binding_scope(deferred_binding, dict(run_input), door_id)
+        if deferred_binding is not None and run_input is not None and door_id is not None
+        else nullcontext()
+    )
     park_failed: RunTerminalFailed | None = None
     try:
-        with run_delivery_ctx:
+        with run_delivery_ctx, deferred_ctx:
             result = await _run_continuation(
                 identity,
                 fingerprint,
@@ -347,10 +408,25 @@ async def drive_and_deliver(
         return result
 
     if receives_outcome:
-        # A live inline receiver takes the run's outcome; nothing is fired.
+        # A live inline receiver takes the run's outcome; nothing is fired. The run's deferred door
+        # updates apply over the terminal output before the record is cleared.
+        await _apply_deferred_binding(
+            deferred_binding=deferred_binding,
+            run_input=run_input,
+            door_id=door_id,
+            output=result,
+            run_delivery_id=run_delivery_id,
+        )
         await _clear_due(store, interaction_id)
         return result
 
+    await _apply_deferred_binding(
+        deferred_binding=deferred_binding,
+        run_input=run_input,
+        door_id=door_id,
+        output=result,
+        run_delivery_id=run_delivery_id,
+    )
     await _deliver_terminal(
         store,
         interaction_id=interaction_id,
@@ -407,6 +483,9 @@ def _spawn_detached_delivery(
     delivery: _Delivery,
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
+    deferred_binding: StateBinding | None = None,
+    run_input: Mapping[str, Any] | None = None,
+    door_id: str | None = None,
 ) -> None:
     """Spawn the detached drive-and-deliver task, holding a strong reference until it ends.
 
@@ -430,6 +509,9 @@ def _spawn_detached_delivery(
             run_delivery_id=run_delivery_id,
             candidates=candidates,
             receives_outcome=False,
+            deferred_binding=deferred_binding,
+            run_input=run_input,
+            door_id=door_id,
         ),
         name=f"interaction-continuation-{interaction_id}",
     )
@@ -487,6 +569,9 @@ def dispatch_continuation(
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=candidates,
+        deferred_binding=request.deferred_binding,
+        run_input=request.run_input,
+        door_id=request.door_id,
     )
 
 
@@ -515,6 +600,9 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
         delivery=delivery,
         run_delivery_id=due.run_delivery_id,
         candidates=candidates,
+        deferred_binding=due.deferred_binding,
+        run_input=due.run_input,
+        door_id=due.door_id,
     )
 
 

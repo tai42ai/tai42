@@ -386,6 +386,9 @@ async def _resume_one(
         run_delivery_id=request.run_delivery_id,
         candidates=park_candidates,
         receives_outcome=receives_outcome,
+        deferred_binding=request.deferred_binding,
+        run_input=request.run_input,
+        door_id=request.door_id,
     )
 
 
