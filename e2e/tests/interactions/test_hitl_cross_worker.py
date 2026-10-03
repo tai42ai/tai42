@@ -25,7 +25,7 @@ pytestmark = pytest.mark.needs("kind:interactions", "topology:replicas")
 async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
     """Poll the paged pending-list door on ``port`` until a pending interaction whose
     payload carries ``question`` appears; return its list-item data."""
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
 
     async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:

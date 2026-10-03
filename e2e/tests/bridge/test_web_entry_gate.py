@@ -57,7 +57,7 @@ def _isolate_throttle(bridge: BridgeHarness) -> None:
 
 
 def _base_url(bridge: BridgeHarness) -> str:
-    return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    return bridge.stack.origin(bridge.stack.port_b)
 
 
 def _refusal_code(html: str) -> str | None:

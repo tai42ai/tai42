@@ -27,7 +27,7 @@ _CLAIM_MISS_MESSAGE = "unknown or already used claim token"
 
 def _no_auth(stack: TaiStack) -> ApiClient:
     """A client carrying NO Authorization header — the public exchange caller."""
-    return ApiClient(f"http://{stack.host}:{stack.port_a}")
+    return ApiClient(stack.origin(stack.port_a))
 
 
 @pytest.mark.needs("kind:accounts")

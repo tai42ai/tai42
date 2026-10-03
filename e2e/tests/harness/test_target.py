@@ -150,8 +150,7 @@ async def test_stack_of_a_target_run_addresses_the_target(
     infra = connect_infra(HarnessSettings(), Target(target_url))
     for builder in (build_core_stack, build_replicas_stack):
         with contextlib.contextmanager(boot_stack)(infra, tmp_path, builder, seed_auth=True) as stack:
-            assert stack.origin() == stack.origin(stack.port_b) == target_url
-            assert f"http://{stack.host}:{stack.port_a}" == target_url
+            assert stack.origin() == stack.origin(stack.port_a) == stack.origin(stack.port_b) == target_url
             assert (await stack.api().request_raw("GET", "/api/system/kinds")).status_code == 200
             for member in ("config", "resources", "infra"):
                 with pytest.raises(AttributeError, match="built no stack"):

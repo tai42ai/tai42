@@ -207,7 +207,7 @@ async def test_tier1_confirm_message_carries_callback_url(
         record = await _wait_one_send(case, confirm_q)
         callback_url = case.tier1_callback_url(record)
         assert "/api/interactions/callback/" in callback_url
-        assert callback_url.startswith(f"http://{stack.host}:{stack.port_b}")
+        assert callback_url.startswith(stack.origin(stack.port_b))
         # A confirm tap POSTs an empty body to the callback door (records True).
         response = await post_callback(callback_url, b"")
         assert response.status_code == 200

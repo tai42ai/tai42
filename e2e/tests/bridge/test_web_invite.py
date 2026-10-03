@@ -109,7 +109,7 @@ async def test_a_pair_url_invite_redeems_on_the_first_and_only_submit(
     # Open the chat page at ?tai_pair=<code>. The server ignores the query, so the shell it serves
     # is the ordinary one (the code is the browser's coordinate), and the session it mints is
     # this visitor's conversation.
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(
         base_url, identity, store_url=bridge.stack.resources.redis_url, query={"tai_pair": code}
     )

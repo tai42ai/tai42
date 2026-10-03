@@ -25,6 +25,7 @@ storage_module: tai42_storage_s3
 | `STORAGE_S3_CONNECT_TIMEOUT` | `5` | Connect timeout in seconds. |
 | `STORAGE_S3_READ_TIMEOUT` | `30` | Read timeout in seconds. |
 | `STORAGE_S3_REQUEST_CHECKSUM_CALCULATION` | unset | `when_supported` or `when_required`, for S3-compatible services that reject the AWS default. |
+| `STORAGE_S3_CHECKSUM_ALGORITHM` | unset | Request-body checksum algorithm — `CRC32`, `CRC32C`, `SHA1`, `SHA256`, or `CRC64NVME`. Unset keeps botocore's CRC32 default; set one the store accepts (e.g. `SHA256`) for an S3-compatible store that refuses CRC32. `CRC32C` and `CRC64NVME` require the `botocore[crt]` extra. |
 
 Leave the key pair unset to fall through to the AWS credential chain — an instance
 profile, IRSA, or `~/.aws/credentials`.

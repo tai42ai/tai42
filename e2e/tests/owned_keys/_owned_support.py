@@ -34,7 +34,7 @@ async def provision_human(
     scopes through the policy-edit door (the platform's attenuation authority) so a mint
     from below is subset-checked; ``None`` leaves the role's ``["*"]`` row."""
     email = f"{uniq('human')}@e2e.test"
-    public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public = ApiClient(stack.origin(stack.port_a))
     user_id, session = await invite_accept_login(root, public, email=email, role=role, password=_PASSWORD)
     if scopes is not None:
         await root.put(f"/api/auth/api-keys/{user_id}", json={"scopes": scopes})

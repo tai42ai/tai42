@@ -60,7 +60,7 @@ async def run_sse(stack: TaiStack, body: dict, *, path: str = CLAUDE_RUN_PATH) -
     ``{"type": "stream.end"}``, or a loud ``{"type": "stream.error", "message": ...}`` — the
     adapter surfaces a protocol/budget/identity fault as the error frame, never a silent
     close."""
-    url = f"http://{stack.host}:{stack.port_a}{path}"
+    url = f"{stack.origin(stack.port_a)}{path}"
     frames: list[dict] = []
     async with httpx.AsyncClient(timeout=30.0) as client, client.stream("POST", url, json=body) as response:
         response.raise_for_status()

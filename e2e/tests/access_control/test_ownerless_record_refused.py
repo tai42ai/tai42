@@ -58,7 +58,7 @@ async def test_ownerless_identity_record_is_refused(setup_stack: TaiStack) -> No
 
     # The credential resolves to a record with no owner claim, so it authenticates NOTHING —
     # a full ``*`` policy row for it notwithstanding.
-    ghost = ApiClient(f"http://{setup_stack.host}:{setup_stack.port_a}", auth_token=raw)
+    ghost = ApiClient(setup_stack.origin(setup_stack.port_a), auth_token=raw)
     resp = await ghost.request_raw("GET", "/api/auth/me")
     assert resp.status_code == 401, f"an ownerless key record must 401: {resp.status_code} {resp.text}"
 

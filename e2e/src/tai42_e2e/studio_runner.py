@@ -545,7 +545,7 @@ def _boot_studio_stack(
         signal.signal(signal.SIGTERM, _handle_signal)
         signal.signal(signal.SIGINT, _handle_signal)
         stack.boot()
-        _print_ready(f"http://{stack.host}:{stack.port_a}", runner.ui_api_key)
+        _print_ready(stack.origin(stack.port_a), runner.ui_api_key)
         stop.wait()
     finally:
         _remove_stack_handoff()

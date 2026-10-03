@@ -75,6 +75,7 @@ Settings are read from the `STORAGE_S3_` environment group (see
 | `STORAGE_S3_READ_TIMEOUT` | `30` | Read timeout (seconds) |
 | `STORAGE_S3_ADDRESSING_STYLE` | `auto` | `path` / `virtual` / `auto` |
 | `STORAGE_S3_REQUEST_CHECKSUM_CALCULATION` | — | `when_supported` / `when_required` |
+| `STORAGE_S3_CHECKSUM_ALGORITHM` | — | `CRC32` / `CRC32C` / `SHA1` / `SHA256` / `CRC64NVME` — request-body checksum for a store that refuses the CRC32 default (CRC32C/CRC64NVME need `botocore[crt]`) |
 
 ## Content-type behavior
 

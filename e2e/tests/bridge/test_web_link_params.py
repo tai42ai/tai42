@@ -41,7 +41,7 @@ def _record_expr(key_expr: str, value_expr: str) -> str:
 
 
 def _base_url(bridge: BridgeHarness) -> str:
-    return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    return bridge.stack.origin(bridge.stack.port_b)
 
 
 async def _web_tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, start_expr: str) -> str:

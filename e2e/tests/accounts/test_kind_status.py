@@ -33,7 +33,7 @@ async def test_kind_status_authed_and_reflects_providers(accounts_stack: TaiStac
     assert "accounts-postgres" in accounts["plugin"], accounts
 
     # The route is NOT public: an unauthenticated call is denied.
-    unauth = await ApiClient(f"http://{stack.host}:{stack.port_b}").request_raw("GET", "/api/system/kinds")
+    unauth = await ApiClient(stack.origin(stack.port_b)).request_raw("GET", "/api/system/kinds")
     assert unauth.status_code == 401, f"/api/system/kinds must be authed, got {unauth.status_code}"
 
 

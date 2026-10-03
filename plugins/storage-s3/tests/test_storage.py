@@ -358,3 +358,64 @@ async def test_stat_non_404_clienterror_propagates(s3_client: Any) -> None:
 
     with pytest.raises(ClientError):
         await S3Storage().stat("x.png")
+
+
+# --- checksum algorithm for S3-compatible stores -----------------------------
+# botocore signs an ``x-amz-checksum-crc32`` header on the request body of
+# ``delete_objects`` (always, the operation requires a checksum) and ``put_object``
+# (the ``aws-chunked`` trailer). An S3-compatible store that refuses CRC32 500s
+# such a request; ``STORAGE_S3_CHECKSUM_ALGORITHM`` lets the deployment pick an
+# algorithm the store accepts, sent as the operation's ``ChecksumAlgorithm``.
+
+
+def _settings_with_checksum(algorithm: Any) -> Any:
+    from types import SimpleNamespace
+
+    return lambda: SimpleNamespace(bucket="b", checksum_algorithm=algorithm)
+
+
+async def test_delete_dir_sends_configured_checksum_algorithm(s3_client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_storage_s3 import storage as storage_module
+
+    monkeypatch.setattr(storage_module, "s3_settings", _settings_with_checksum("SHA256"))
+    s3_client.get_paginator.return_value = FakePaginator([{"Contents": [{"Key": "d/a.j2"}]}])
+    s3_client.delete_objects.return_value = {}
+
+    await S3Storage().delete_dir("d")
+
+    _, kwargs = s3_client.delete_objects.call_args
+    assert kwargs["ChecksumAlgorithm"] == "SHA256"
+
+
+async def test_delete_dir_omits_checksum_algorithm_by_default(s3_client: Any) -> None:
+    # Unset default keeps botocore's own behaviour so real AWS S3 is unchanged.
+    s3_client.get_paginator.return_value = FakePaginator([{"Contents": [{"Key": "d/a.j2"}]}])
+    s3_client.delete_objects.return_value = {}
+
+    await S3Storage().delete_dir("d")
+
+    _, kwargs = s3_client.delete_objects.call_args
+    assert "ChecksumAlgorithm" not in kwargs
+
+
+async def test_upload_bytes_sends_configured_checksum_algorithm(
+    s3_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_storage_s3 import storage as storage_module
+
+    monkeypatch.setattr(storage_module, "s3_settings", _settings_with_checksum("SHA256"))
+    s3_client.get_paginator.return_value = FakePaginator([{}])
+
+    await S3Storage().upload_bytes("pic.png", b"\x89PNG", content_type="image/png")
+
+    _, kwargs = s3_client.put_object.call_args
+    assert kwargs["ChecksumAlgorithm"] == "SHA256"
+
+
+async def test_upload_bytes_omits_checksum_algorithm_by_default(s3_client: Any) -> None:
+    s3_client.get_paginator.return_value = FakePaginator([{}])
+
+    await S3Storage().upload_bytes("blob.bin", b"\x00\x01")
+
+    _, kwargs = s3_client.put_object.call_args
+    assert "ChecksumAlgorithm" not in kwargs

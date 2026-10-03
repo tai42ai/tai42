@@ -84,7 +84,7 @@ async def _create_web_route(bridge: BridgeHarness, uniq: Callable[[str], str], t
 async def _open_visitor(bridge: BridgeHarness, identity: str) -> tuple[WebChatClient, httpx.Response]:
     """Open the chat page as a first-time visitor, returning the door client bound to the
     session the page minted and registered, plus the page itself."""
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web, page
@@ -221,7 +221,7 @@ async def test_an_invented_cookie_cannot_open_a_conversation(bridge: BridgeHarne
 
     invented = mint_unregistered_token()
     speculative = WebChatClient(
-        base_url=f"http://{bridge.stack.host}:{bridge.stack.port_b}",
+        base_url=bridge.stack.origin(bridge.stack.port_b),
         identity=identity,
         token=invented,
         # No registration exists, so there is no server-side address; the census below is

@@ -108,7 +108,7 @@ async def test_identity_door_is_authed(projection_authz_stack) -> None:
     # (this profile registers none), so the refusal is the auth layer's, not an absent-kind
     # signal.
     stack, _root_token, _limited_token = projection_authz_stack
-    anon = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    anon = ApiClient(stack.origin(stack.port_a))
     resp = await anon.request_raw("GET", "/api/sandbox")
     assert resp.status_code == 401, resp.text
 

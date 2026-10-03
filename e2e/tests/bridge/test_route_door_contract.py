@@ -87,7 +87,7 @@ async def _open_agent_door_route(bridge: BridgeHarness, uniq: Callable[[str], st
         "reply_expr": {"content": _REPLY_EXPR},
     }
     await bridge.api().post(f"/api/conversations/{route_name}", json=body, expect=200)
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web
@@ -159,7 +159,7 @@ async def test_tool_route_null_start_starts_nothing(bridge: BridgeHarness, uniq:
         },
         expect=200,
     )
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
 
@@ -201,7 +201,7 @@ async def test_tool_route_start_and_extras_expr_reach_the_run(
         },
         expect=200,
     )
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
 
@@ -242,7 +242,7 @@ async def test_tool_route_cancel_expr_kills_a_parked_run(bridge: BridgeHarness, 
         },
         expect=200,
     )
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
 

@@ -64,7 +64,7 @@ async def _run_sse(
     ``subject`` names the run's async-park subject on the query the door reads it off
     (``subject_kind`` / ``subject_key`` / ``subject_target``) — a ``to="caller"`` ask needs one.
     """
-    url = f"http://{stack.host}:{stack.port_a}/api/agents/{name}/runs"
+    url = f"{stack.origin(stack.port_a)}/api/agents/{name}/runs"
     if subject is not None:
         query = urlencode({f"subject_{field}": value for field, value in subject.items()})
         url = f"{url}?{query}"

@@ -78,7 +78,7 @@ def _run(tai: Path, stack: TaiStack, *args: str, json_flag: bool = True) -> subp
         "HOME": os.environ.get("HOME", str(tai.parent)),
         "TAI_API_KEY": stack.auth_token,
     }
-    server = f"http://{stack.host}:{stack.port_a}"
+    server = stack.origin(stack.port_a)
     argv = [str(tai), "--server", server, *(["--json"] if json_flag else []), *args]
     return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
 

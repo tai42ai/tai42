@@ -54,14 +54,14 @@ def _parse_frame(frame: str) -> tuple[str | None, dict]:
 
 
 def _stream_url(stack: TaiStack, port: int) -> str:
-    return f"http://{stack.host}:{port}/api/interactions/stream"
+    return f"{stack.origin(port)}/api/interactions/stream"
 
 
 async def _visible_pending(stack: TaiStack, port: int, token: str, *, timeout: float = 8.0) -> list[dict]:
     """Read the paged pending-list door as ``token`` and return every item — the
     caller's whole visible pending set (the door is audience-filtered to the caller,
     so a restricted caller sees ONLY its own addressed questions)."""
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, params={"page": 1, "pageSize": 200}, headers=headers)

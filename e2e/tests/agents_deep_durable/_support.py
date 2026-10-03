@@ -56,7 +56,7 @@ async def run_sse(stack: TaiStack, port: int, path: str, body: dict[str, Any]) -
     The caller inspects ``status_code`` (a 404 for an unknown agent name) or streams
     ``response`` for the ``data:`` frames. The stream is fully drained by the context manager
     exit, so a 200 run completes (and its checkpoint lands) before this returns."""
-    url = f"http://{stack.host}:{port}{path}"
+    url = f"{stack.origin(port)}{path}"
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.request("POST", url, json=body)
     return response
@@ -65,7 +65,7 @@ async def run_sse(stack: TaiStack, port: int, path: str, body: dict[str, Any]) -
 async def run_sse_frames(stack: TaiStack, port: int, path: str, body: dict[str, Any]) -> list[str]:
     """POST an agent run over the SSE run door and return the ``data:`` frames, draining the
     stream so the run completes before returning. Raises on a non-2xx status."""
-    url = f"http://{stack.host}:{port}{path}"
+    url = f"{stack.origin(port)}{path}"
     frames: list[str] = []
     async with httpx.AsyncClient(timeout=20.0) as client, client.stream("POST", url, json=body) as response:
         response.raise_for_status()

@@ -319,7 +319,7 @@ async def test_public_acceptance_and_per_method_pin(
 ) -> None:
     stack = marketplace_authz_stack
     authed = stack.api()  # carries the seeded root token — the fenced install door needs it
-    anon = ApiClient(f"http://{stack.host}:{stack.port_a}")  # no token — the anonymous caller
+    anon = ApiClient(stack.origin(stack.port_a))  # no token — the anonymous caller
 
     # Preview flags the public route requiring acceptance.
     preview = await authed.post("/api/marketplace/install/preview", json={"ref": EPSILON_REF, "version": "0.1.0"})

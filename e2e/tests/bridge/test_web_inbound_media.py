@@ -94,7 +94,7 @@ async def _create_tool_web_route(web_media: BridgeHarness, uniq: Callable[[str],
 
 async def _open_visitor(web_media: BridgeHarness, identity: str) -> WebChatClient:
     """Open the chat page as a first-time visitor and adopt the minted, registered session."""
-    base_url = f"http://{web_media.stack.host}:{web_media.stack.port_b}"
+    base_url = web_media.stack.origin(web_media.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=web_media.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web

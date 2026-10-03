@@ -100,7 +100,7 @@ async def _list_pending(stack: TaiStack, port: int, question: str, *, timeout: f
     """Read the paged pending-list door and return the add-frame ``data`` for
     ``question`` if it is pending, else ``None`` (the paged pending-list door is the
     initial-load surface)."""
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, params={"page": 1, "pageSize": 200})
         resp.raise_for_status()
@@ -114,7 +114,7 @@ async def _list_pending(stack: TaiStack, port: int, question: str, *, timeout: f
 async def _fetch_media(stack: TaiStack, port: int, url_path: str, *, timeout: float = 3.0) -> httpx.Response:
     """GET the served-media capability url (the id IS the secret; no auth needed)."""
     async with httpx.AsyncClient(timeout=timeout) as client:
-        return await client.get(f"http://{stack.host}:{port}{url_path}")
+        return await client.get(f"{stack.origin(port)}{url_path}")
 
 
 async def _next_add_frame(frames: AsyncIterator[str], question: str, *, deadline: float) -> dict[str, Any]:
@@ -165,7 +165,7 @@ async def test_media_round_trips_through_the_list_door(replicas_stack: TaiStack,
 
 async def test_media_round_trips_on_the_live_tail(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
-    url = f"http://{replicas_stack.host}:{replicas_stack.port_b}/api/interactions/stream"
+    url = f"{replicas_stack.origin(replicas_stack.port_b)}/api/interactions/stream"
     async with httpx.AsyncClient(timeout=20.0) as client, client.stream("GET", url) as response:
         # Entering ``client.stream`` has already received the response headers, so the
         # server captured the tail cursor before the ask below — the later add is

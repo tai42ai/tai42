@@ -93,7 +93,7 @@ async def _create_extras_route(
     if expect != 200:
         return await api.request_raw("POST", f"/api/conversations/{route_name}", json=body)
     await api.post(f"/api/conversations/{route_name}", json=body, expect=200)
-    base_url = f"http://{stack.host}:{stack.port_b}"
+    base_url = stack.origin(stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web

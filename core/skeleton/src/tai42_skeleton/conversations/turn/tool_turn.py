@@ -40,10 +40,8 @@ from tai42_skeleton.conversations.turn.outcome import (
     _ToolOutcome,
 )
 from tai42_skeleton.conversations.turn.overlap import is_message_turn
-from tai42_skeleton.conversations.turn.tool_result import (
-    _failed_outcome_detail,
-    _result_shape,
-)
+from tai42_skeleton.conversations.turn.tool_result import _result_shape
+from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.interactions.visit import list_parked, visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
@@ -348,7 +346,7 @@ async def _run_tool_turn(
         # the turn's failure detail — no key is read out of it — and deliver the route's generic
         # client-safe error reply. Caught BEFORE the generic arm so the payload is preserved as the
         # detail rather than collapsed to ``str(exc)``.
-        detail = _failed_outcome_detail(exc.outcome)
+        detail = failed_outcome_detail(exc.outcome)
         logger.exception("conversations: tool turn for route %r failed: %s", route.route_name, detail)
         return _tool_error(detail, route)
     except PermissionDeniedError as exc:

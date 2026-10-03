@@ -92,7 +92,7 @@ async def _web_route(
 
 async def _open_visitor(bridge: BridgeHarness, identity: str) -> WebChatClient:
     """Open the chat page as a first-time visitor, adopting the session the page mints."""
-    base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    base_url = bridge.stack.origin(bridge.stack.port_b)
     web, page = await WebChatClient.open_page(base_url, identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
     return web

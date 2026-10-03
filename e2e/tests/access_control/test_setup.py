@@ -31,7 +31,7 @@ _THROTTLE_THRESHOLD = 5
 
 def _public(stack: TaiStack) -> ApiClient:
     """A client for the stack carrying NO credential — the fresh install has no key."""
-    return ApiClient(f"http://{stack.host}:{stack.port_a}")
+    return ApiClient(stack.origin(stack.port_a))
 
 
 def _setup_body(owner_id: str, *, token: str = _SETUP_TOKEN) -> dict:
@@ -98,7 +98,7 @@ async def test_setup_initializes_once_and_is_idempotent(fresh_setup_stack: TaiSt
 
     # The minted key authenticates and is a FULL admin, and its projection names the owner
     # principal it belongs to.
-    admin = ApiClient(f"http://{stack.host}:{stack.port_a}", auth_token=key)
+    admin = ApiClient(stack.origin(stack.port_a), auth_token=key)
     me = await admin.get("/api/auth/me")
     assert me["admin"] is True, me
     assert "*" in me["scopes"], me

@@ -25,7 +25,7 @@ async def test_viewer_session_get_ok_post_denied(accounts_stack: TaiStack, uniq:
 
     # A viewer account with a live policy, and a session for it (accept the invite).
     created = await invite_member(admin, email=f"{uniq('viewer')}@e2e.test", role="viewer")
-    public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public = ApiClient(stack.origin(stack.port_a))
     accepted = await public.post(
         "/api/login/invite/accept",
         json={"invite_token": created["invite_token"], "password": _PASSWORD, "password_confirm": _PASSWORD},

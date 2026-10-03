@@ -413,7 +413,7 @@ async def test_auth_stack_slashed_key_record_door_is_gated_for_a_non_admin_key(
     assert await caller.get(record) is None
 
     # -- the door is PROTECTED, never public: an unauthenticated caller is denied --
-    anon = ApiClient(f"http://{auth_stack.host}:{auth_stack.port_a}")
+    anon = ApiClient(auth_stack.origin(auth_stack.port_a))
     denied = await anon.request_raw("GET", record)
     assert denied.status_code in (401, 403), f"slashed-key record door served unauthenticated: {denied.status_code}"
 

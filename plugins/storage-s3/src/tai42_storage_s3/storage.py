@@ -50,6 +50,18 @@ def _bucket() -> str:
     return bucket
 
 
+def _checksum_kwargs() -> dict[str, str]:
+    """The ``ChecksumAlgorithm`` to send on writes that carry a request-body checksum.
+
+    botocore signs a CRC32 checksum on ``put_object`` and (always) ``delete_objects``;
+    an S3-compatible store that refuses CRC32 rejects the request. When
+    ``checksum_algorithm`` is set it is forwarded so the store receives an algorithm
+    it accepts; empty when unset, leaving botocore's default so AWS S3 is unchanged.
+    """
+    algorithm = s3_settings().checksum_algorithm
+    return {"ChecksumAlgorithm": algorithm} if algorithm else {}
+
+
 # Importing this module registers S3Storage as the app's storage provider.
 @tai42_app.storage.register_storage
 class S3Storage(Storage):
@@ -90,7 +102,7 @@ class S3Storage(Storage):
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
         """Upload ``data`` at ``path`` with an optional ``content_type``, refusing a flat-key-space collision."""
         bucket = _bucket()
-        put_kwargs: dict[str, Any] = {"Bucket": bucket, "Key": path, "Body": data}
+        put_kwargs: dict[str, Any] = {"Bucket": bucket, "Key": path, "Body": data, **_checksum_kwargs()}
         if content_type is not None:
             put_kwargs["ContentType"] = content_type
         async with tai42_app.clients.client_ctx(S3Client) as client:
@@ -158,7 +170,7 @@ class S3Storage(Storage):
 
             for start in range(0, len(keys), _DELETE_BATCH_SIZE):
                 chunk = keys[start : start + _DELETE_BATCH_SIZE]
-                resp = await client.delete_objects(Bucket=bucket, Delete={"Objects": chunk})
+                resp = await client.delete_objects(Bucket=bucket, Delete={"Objects": chunk}, **_checksum_kwargs())
                 errors = resp.get("Errors", [])
                 if errors:
                     raise RuntimeError(f"Failed to delete some objects under {path}: {errors}")

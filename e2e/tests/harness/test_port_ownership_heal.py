@@ -138,7 +138,7 @@ def test_heal_refreshes_the_origin_allowlist_to_the_new_port(
         stack = fresh_stack(_minimal_with_origin_allowlist)
         app_port = stack.app_ports[0]
         assert app_port != seize.port, "the stack kept the seized port instead of re-allocating"
-        new_origin = f"http://{stack.host}:{app_port}"
+        new_origin = stack.origin(app_port)
         seized_origin = f"http://{stack.host}:{seize.port}"
         # The serve process was (re)spawned advertising its NEW origin, never the seized one.
         assert stack._specs["serve"].env[_ALLOWLIST_KEY] == new_origin, stack._specs["serve"].env[_ALLOWLIST_KEY]

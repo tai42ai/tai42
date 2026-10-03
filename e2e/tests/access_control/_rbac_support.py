@@ -72,7 +72,7 @@ async def create_user_with_role(
     invite member-action applies it through ``apply_role``, which raises on an
     unknown role)."""
     created = await invite_member(admin, email=f"{uniq('rbac')}@e2e.test", role=role)
-    public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public = ApiClient(stack.origin(stack.port_a))
     password = f"{uniq('pw')}-Aa1"
     accepted = await public.post(
         "/api/login/invite/accept",

@@ -47,7 +47,7 @@ async def _assert_ready(stack: TaiStack, port: int) -> None:
 async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     stack = accounts_stack
     admin = stack.api(port=stack.port_a)  # seeded root sk- key
-    public_a = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public_a = ApiClient(stack.origin(stack.port_a))
 
     # Boot health: both replicas brought the dual-role accounts distribution to ready despite
     # its root riding lifecycle_modules while its route submodules ride routers_modules.

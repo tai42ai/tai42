@@ -68,7 +68,7 @@ def s3_client(monkeypatch: pytest.MonkeyPatch) -> Any:
     client.get_paginator = MagicMock()
 
     _stub_app.clients.client = client
-    monkeypatch.setattr(storage_module, "s3_settings", lambda: SimpleNamespace(bucket="b"))
+    monkeypatch.setattr(storage_module, "s3_settings", lambda: SimpleNamespace(bucket="b", checksum_algorithm=None))
     try:
         yield client
     finally:

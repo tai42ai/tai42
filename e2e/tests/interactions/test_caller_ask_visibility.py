@@ -40,7 +40,7 @@ async def _submit(api: Any, tool_name: str, arguments: dict[str, Any], subject: 
 
 
 async def _pending_items(stack: TaiStack, port: int) -> list[dict[str, Any]]:
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
     async with httpx.AsyncClient(timeout=2.0) as client:
         resp = await client.get(url, params={"page": 1, "pageSize": 200})
         resp.raise_for_status()
@@ -143,7 +143,7 @@ async def test_a_caller_ask_never_reaches_the_live_stream(replicas_stack: TaiSta
     subj = _subject(uniq("subject"))
     user_question = uniq("user-question")
     caller_marker = uniq("caller-marker")
-    url = f"http://{replicas_stack.host}:{replicas_stack.port_b}/api/interactions/stream"
+    url = f"{replicas_stack.origin(replicas_stack.port_b)}/api/interactions/stream"
 
     async with httpx.AsyncClient(timeout=20.0) as client, client.stream("GET", url) as response:
         assert response.status_code == 200, response

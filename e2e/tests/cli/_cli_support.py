@@ -98,7 +98,7 @@ def run_cli(stack: TaiStack, cwd: Path, *args: str, json_flag: bool = True) -> s
         "HOME": os.environ.get("HOME", str(cwd)),
         "TAI_API_KEY": stack.auth_token,
     }
-    server = f"http://{stack.host}:{stack.port_a}"
+    server = stack.origin(stack.port_a)
     argv = [tai_bin(), "--server", server, *(["--json"] if json_flag else []), *args]
     return subprocess.run(argv, env=env, cwd=str(cwd), capture_output=True, text=True, timeout=90)
 

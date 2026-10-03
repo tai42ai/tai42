@@ -42,7 +42,7 @@ _ECHO_EXPR = (
 
 
 def _base_url(bridge: BridgeHarness) -> str:
-    return f"http://{bridge.stack.host}:{bridge.stack.port_b}"
+    return bridge.stack.origin(bridge.stack.port_b)
 
 
 def _reply_matching(**expect: object) -> Callable[[str, dict], bool]:

@@ -206,7 +206,7 @@ async def test_sse_stream_survives_a_hot_apply(replicas_stack: TaiStack, uniq: C
     # The epoch of the worker that will serve the stream, captured before the swap.
     before_epoch = await _settings_epoch(replicas_stack)
 
-    url = f"http://{replicas_stack.host}:{replicas_stack.port_a}/api/interactions/stream"
+    url = f"{replicas_stack.origin(replicas_stack.port_a)}/api/interactions/stream"
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client, client.stream("GET", url) as response:
         assert response.status_code == 200, f"interactions SSE did not open: {response.status_code}"
         lines = response.aiter_lines()

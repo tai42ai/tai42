@@ -53,7 +53,7 @@ _REJECTED_TOPIC = "conversations_inbound_rejected"
 
 async def _post(stack: TaiStack, path: str, inbound: SignedInbound) -> httpx.Response:
     """POST a synthesized inbound to replica B's channel door; return the raw response."""
-    url = f"http://{stack.host}:{stack.port_b}{path}"
+    url = f"{stack.origin(stack.port_b)}{path}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.post(url, content=inbound.body, headers=inbound.headers)
 

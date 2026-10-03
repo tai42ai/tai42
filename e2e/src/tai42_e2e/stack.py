@@ -543,14 +543,14 @@ class TaiStack:
         if name.startswith("serve"):
             idx = 0 if name in ("serve", "serve-a") else 1
             port = self.app_ports[idx]
-            readiness.wait_http_ok(self, f"http://{self.host}:{port}/health", deadline, "app health")
+            readiness.wait_http_ok(self, f"{self.origin(port)}/health", deadline, "app health")
             # A respawned serve worker re-runs its boot self-resync gate on rejoin;
             # drain it (where the profile carries the probe) so a test acting right
             # after the restart does not race the gate, exactly as at boot.
             if child_env.needs_bus(self.config):
                 readiness.run_readiness_coro(readiness.drain_gate_coro(self, [port], deadline))
         elif name == "embed":
-            readiness.wait_http_ok(self, f"http://{self.host}:{self.app_ports[0]}/health", deadline, "app health")
+            readiness.wait_http_ok(self, f"{self.origin(self.app_ports[0])}/health", deadline, "app health")
             if child_env.needs_bus(self.config):
                 readiness.run_readiness_coro(readiness.drain_gate_coro(self, [self.app_ports[0]], deadline))
         elif name == "metrics":

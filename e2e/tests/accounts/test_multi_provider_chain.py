@@ -32,7 +32,7 @@ async def test_key_and_session_both_resolve(accounts_stack: TaiStack, uniq: Call
 
     # A session credential from the accounts provider, minted via an accepted invite.
     created = await invite_member(admin, email=f"{uniq('user')}@e2e.test", role="editor")
-    public = ApiClient(f"http://{stack.host}:{stack.port_a}")
+    public = ApiClient(stack.origin(stack.port_a))
     accepted = await public.post(
         "/api/login/invite/accept",
         json={"invite_token": created["invite_token"], "password": _PASSWORD, "password_confirm": _PASSWORD},
@@ -50,11 +50,7 @@ async def test_key_and_session_both_resolve(accounts_stack: TaiStack, uniq: Call
 
     # A credential no provider claims is a clean 401 (never an error), for both shapes.
     for garbage in (f"sk-{uniq('nope')}", f"tai-sess-{uniq('nope')}"):
-        denied = (
-            await ApiClient(f"http://{stack.host}:{stack.port_b}")
-            .with_token(garbage)
-            .request_raw("GET", "/api/system/kinds")
-        )
+        denied = await ApiClient(stack.origin(stack.port_b)).with_token(garbage).request_raw("GET", "/api/system/kinds")
         assert denied.status_code == 401, f"garbage token {garbage[:10]!r} must 401, got {denied.status_code}"
 
     # After logout on A, the session no longer authenticates on B.

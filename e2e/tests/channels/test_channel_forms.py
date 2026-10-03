@@ -120,7 +120,7 @@ async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
         assert button["text"] == "Fill form"
         callback_url = button["web_app"]["url"]
         assert "/api/interactions/callback/" in callback_url
-        assert callback_url.startswith(f"http://{stack.host}:{stack.port_b}")
+        assert callback_url.startswith(stack.origin(stack.port_b))
 
         # GET renders the schema as a form page (a GET never mutates state).
         page = await _get(callback_url)

@@ -148,7 +148,7 @@ async def _deliver(stack: TaiStack, topic: str, secret: bytes, event: dict[str, 
     # it (as Stripe sends), and the hook condition reads ``.type`` off the parsed dict. The
     # signature is over the raw bytes, unaffected by the header.
     headers = {**_sign(secret, body), "Content-Type": "application/json"}
-    url = f"http://{stack.host}:{stack.port_a}/universal_webhook/{topic}"
+    url = f"{stack.origin(stack.port_a)}/universal_webhook/{topic}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         return await client.post(url, content=body, headers=headers)
 
@@ -281,7 +281,7 @@ class _StreamCollector:
 async def _pending_interaction_id(stack: TaiStack, port: int, token: str, question: str) -> str | None:
     """The id of the pending interaction carrying ``question`` from the paged list door,
     or None while it has not yet persisted."""
-    url = f"http://{stack.host}:{port}/api/interactions"
+    url = f"{stack.origin(port)}/api/interactions"
     async with httpx.AsyncClient(timeout=5.0) as client:
         resp = await client.get(url, params={"page": 1, "pageSize": 200}, headers={"Authorization": f"Bearer {token}"})
         resp.raise_for_status()
@@ -310,7 +310,7 @@ async def test_stripe_payment_webhook_loop(
     # the answered terminal frame (fired much later, during the claim) is caught live; the
     # pending id itself is read from the paged list door.
     stream = _StreamCollector()
-    stream.start(f"http://{stack.host}:{stack.port_a}/api/interactions/stream", root_token)
+    stream.start(f"{stack.origin(stack.port_a)}/api/interactions/stream", root_token)
     try:
         # --- Item 1: the loop closes ---------------------------------------
         question = uniq("q")
