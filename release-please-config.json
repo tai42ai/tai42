@@ -19,8 +19,7 @@
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "skip-changelog": true,
-      "release-as": "7.5.0"
+      "skip-changelog": true
     },
     "core/cli": {
       "package-name": "tai42-cli",
@@ -64,8 +63,7 @@
           "path": "src/tai42_agents/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "8.4.0"
+      ]
     },
     "plugins/backend-arq": {
       "package-name": "tai42-backend-arq",
@@ -82,8 +80,7 @@
           "path": "src/tai42_backend_arq/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "4.3.0"
+      ]
     },
     "plugins/backend-celery": {
       "package-name": "tai42-backend-celery",
@@ -100,8 +97,7 @@
           "path": "src/tai42_backend_celery/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "4.2.0"
+      ]
     },
     "plugins/backend-rq": {
       "package-name": "tai42-backend-rq",
@@ -135,8 +131,7 @@
           "path": "src/tai42_channel_slack/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "4.4.0"
+      ]
     },
     "plugins/channel-telegram": {
       "package-name": "tai42-channel-telegram",
@@ -153,8 +148,7 @@
           "path": "src/tai42_channel_telegram/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "4.4.0"
+      ]
     },
     "plugins/channel-twilio": {
       "package-name": "tai42-channel-twilio",
@@ -171,8 +165,7 @@
           "path": "src/tai42_channel_twilio/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "5.3.0"
+      ]
     },
     "plugins/channel-web": {
       "package-name": "tai42-channel-web",
@@ -189,8 +182,7 @@
           "path": "src/tai42_channel_web/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "6.4.0"
+      ]
     },
     "plugins/channel-whatsapp": {
       "package-name": "tai42-channel-whatsapp",
@@ -207,8 +199,7 @@
           "path": "src/tai42_channel_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "6.4.0"
+      ]
     },
     "plugins/connector-atlassian": {
       "package-name": "tai42-connector-atlassian",
@@ -503,8 +494,7 @@
     "e2e": {
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
-      "skip-changelog": true,
-      "release-as": "16.5.0"
+      "skip-changelog": true
     }
   }
 }
