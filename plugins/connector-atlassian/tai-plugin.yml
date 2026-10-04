@@ -11,7 +11,7 @@ icon: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-atlassian
-contract: '>=16.0,<17'
+contract: '>=16.1,<17'
 categories:
   - connectors
 tags:
