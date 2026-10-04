@@ -5,8 +5,8 @@ allowBuilds:
   esbuild: true
 
 minimumReleaseAgeExclude:
-  - '@tai42/api-client@19.3.0'
-  - '@tai42/studio-sdk@19.3.0'
+  - '@tai42/api-client@20.0.0'
+  - '@tai42/studio-sdk@20.0.0'
 
 onlyBuiltDependencies:
   - esbuild
