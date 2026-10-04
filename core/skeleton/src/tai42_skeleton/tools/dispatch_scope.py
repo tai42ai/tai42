@@ -15,6 +15,7 @@ never inspects what a preset wraps — the platform stays agnostic to preset con
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
@@ -54,6 +55,9 @@ if TYPE_CHECKING:
     from tai42_contract.states import StateSubject
 
     from tai42_skeleton.app.server import TaiMCP
+
+
+logger = logging.getLogger(__name__)
 
 
 # The ``_meta`` key an MCP ``tools/call`` caller names its subject under.
@@ -299,8 +303,15 @@ class DispatchScopeMiddleware(Middleware):
         call_next: Callable[[MiddlewareContext[Any]], Awaitable[Any]],
     ) -> Any:
         """Enter the shared dispatch scope for the MCP ``tools/call``, then delegate to ``call_next``."""
+        from fastmcp.exceptions import ToolError
+        from fastmcp.tools.base import ToolResult
+        from mcp.types import TextContent
+        from tai42_contract.interactions import RunTerminalFailed
+
         from tai42_skeleton.access_control.user import request_identity
+        from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
         from tai42_skeleton.states.api_context import api_state_context, caller_execution_identity
+        from tai42_skeleton.tools.binding import ToolResultEncodingError, find_lone_surrogate
         from tai42_skeleton.tools.binding.result import _tool_result_value
 
         name = context.message.name
@@ -323,28 +334,66 @@ class DispatchScopeMiddleware(Middleware):
         # run-tool door gives a synchronous call.
         async with caller_execution_identity(user_id):
             with attribution, api_state_context(subject, user_id):
-                async with dispatch_scope(self._app, name, binding_args) as scope:
-                    policy = await self._app._tool_binding.resolve_retry_policy(name)
-                    result = await dispatch_with_retry(name, policy, lambda: call_next(context))
-                    # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) BEFORE
-                    # fastmcp serializes the ``ToolResult`` to the wire, so the ``tools/call`` answers
-                    # a loud, named tool error instead of the transport 500 that encode would throw.
-                    # Both the structured content and every content block's JSON-reduced form are
-                    # walked, since either carries the reduced return.
-                    _refuse_unencodable_mcp_result(name, result)
-                    # PARK recognition (explicit — never defaulted): a parked call returns
-                    # the reserved suspended-interaction marker in its structured content;
-                    # record ``park`` with its interaction id. A well-formed non-park result
-                    # records ``success``. A park that instead surfaced as a raised error is
-                    # recorded ``error`` by the chokepoint's exception path — a park is never
-                    # silently recorded as success.
-                    marker = read_suspended_interaction_marker(getattr(result, "structured_content", None))
-                    if marker is not None:
-                        scope.observe_park(marker["interaction_id"])
-                    else:
-                        # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
-                        # so the binding's update jq runs over the same value the in-process door
-                        # observes (its raw return) — the edge otherwise feeds the wrapper to jq,
-                        # which carries no tool field and is not even JSON-serializable.
-                        scope.observe(_tool_result_value(result))
-                    return result
+                try:
+                    async with dispatch_scope(self._app, name, binding_args) as scope:
+                        policy = await self._app._tool_binding.resolve_retry_policy(name)
+                        result = await dispatch_with_retry(name, policy, lambda: call_next(context))
+                        # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) BEFORE
+                        # fastmcp serializes the ``ToolResult`` to the wire, so the ``tools/call``
+                        # answers a loud, named tool error instead of the transport 500 that encode
+                        # would throw. Both the structured content and every content block's
+                        # JSON-reduced form are walked, since either carries the reduced return.
+                        _refuse_unencodable_mcp_result(name, result)
+                        # PARK recognition (explicit — never defaulted): a parked call returns
+                        # the reserved suspended-interaction marker in its structured content;
+                        # record ``park`` with its interaction id. A well-formed non-park result
+                        # records ``success``. A park that instead surfaced as a raised error is
+                        # recorded ``error`` by the chokepoint's exception path — a park is never
+                        # silently recorded as success.
+                        marker = read_suspended_interaction_marker(getattr(result, "structured_content", None))
+                        if marker is not None:
+                            scope.observe_park(marker["interaction_id"])
+                        else:
+                            # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
+                            # so the binding's update jq runs over the same value the in-process door
+                            # observes (its raw return) — the edge otherwise feeds the wrapper to jq,
+                            # which carries no tool field and is not even JSON-serializable.
+                            scope.observe(_tool_result_value(result))
+                        return result
+                except ToolError as exc:
+                    # A driver's FAILED terminal RAISES ``RunTerminalFailed`` in the tool body;
+                    # fastmcp's ``call_tool`` core wraps any body raise into a ``ToolError``
+                    # (``raise ToolError(...) from e``) BEFORE this middleware's ``call_next``
+                    # returns, so the terminal failure arrives here as a ``ToolError`` whose
+                    # ``__cause__`` is the ``RunTerminalFailed``. The CAUSE is read, never the
+                    # message: under ``mask_error_details`` the message is generic, but the chained
+                    # cause is preserved regardless. This ``except`` sits OUTSIDE ``dispatch_scope``
+                    # on purpose — the raise first unwinds the runs-index chokepoint, which records
+                    # the run's terminal as ``error``; only after that is the failure turned into a
+                    # delivered result here. Every other ``ToolError`` — a plain tool failure, or the
+                    # unencodable-result refusal raised just above — re-raises unchanged.
+                    cause = exc.__cause__
+                    if not isinstance(cause, RunTerminalFailed):
+                        raise
+                    outcome = cause.outcome
+                    # This is the STRUCTURED MCP edge, so the opaque outcome is delivered WHOLE as
+                    # structured data — never a key read out of it, never the capped text render. An
+                    # outcome a JSON encoder cannot render (a lone UTF-16 surrogate the contract's
+                    # plain-mapping promise forbids) is refused LOUDLY through the edge's OWN named
+                    # path — a ``ToolError`` naming the tool and the offending JSON path — before it
+                    # could reach the wire serialize as an unnamed transport error.
+                    offending_path = find_lone_surrogate(outcome)
+                    if offending_path is not None:
+                        logger.warning(
+                            "MCP tools/call: %r failed with an outcome that cannot be JSON-encoded at %s",
+                            name,
+                            offending_path,
+                        )
+                        raise ToolError(str(ToolResultEncodingError(name, offending_path))) from exc
+                    # The SERVER-SIDE record keeps the capped detail; only the caller delivery is whole.
+                    logger.exception("MCP tools/call %r failed on a terminal: %s", name, failed_outcome_detail(outcome))
+                    return ToolResult(
+                        content=[TextContent(type="text", text="tool run failed")],
+                        structured_content={"error": "tool run failed", "outcome": outcome},
+                        is_error=True,
+                    )
