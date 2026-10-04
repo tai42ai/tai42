@@ -298,3 +298,45 @@ def test_an_encodable_emoji_return_passes_through():
             assert await runnable() == {"emoji": "😀"}
 
     asyncio.run(run())
+
+
+def test_tool_body_failed_terminal_renders_the_whole_outcome_as_text():
+    # A driver's FAILED terminal RAISES ``RunTerminalFailed`` carrying the outcome WHOLE. The
+    # in-process agent tool door renders the whole opaque outcome as JSON TEXT on the
+    # ``ToolException`` (reading no key inside it), so the model reads the driver's own graceful
+    # surface — the deep nested marker, well past the 200-char record cap, present and untruncated —
+    # not the bare contract message the generic arm would collapse it to.
+    import json
+
+    from tai42_contract.interactions import RunTerminalFailed, failed_outcome_text
+
+    from tai42_skeleton.interactions.terminal_failure import FAILED_OUTCOME_DETAIL_LIMIT, failed_outcome_detail
+
+    outcome = {
+        "status": "error",
+        "result": {"on_error": [{"step": "retry", "note": "N" * 300}], "graceful": "DEEP_MARKER_PAST_200"},
+    }
+    # The marker genuinely sits past the record cap, so a capped repr could not carry it.
+    capped = failed_outcome_detail(outcome)
+    assert "DEEP_MARKER_PAST_200" not in capped
+    assert len(capped) <= len("tool run failed: ") + FAILED_OUTCOME_DETAIL_LIMIT + len("…(truncated)")
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def flow() -> str:
+                """A driver whose body raises a failed terminal carrying a whole outcome."""
+                raise RunTerminalFailed(outcome)
+
+            tool_obj = await app.tools.get_tool("flow")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+
+            with pytest.raises(ToolException) as caught:
+                await runnable()
+            # The ToolException carries the WHOLE outcome as JSON text (via the contract helper).
+            assert str(caught.value) == failed_outcome_text(outcome)
+            assert json.loads(str(caught.value)) == outcome
+            assert "DEEP_MARKER_PAST_200" in str(caught.value)
+
+    asyncio.run(run())

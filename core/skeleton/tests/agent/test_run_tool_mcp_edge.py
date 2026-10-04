@@ -325,3 +325,117 @@ def test_offloaded_sync_tool_outruns_cancellation_and_completes_in_background(se
     while time.monotonic() < deadline and not _budget_flag("blocking_sync_completions"):
         time.sleep(0.02)
     assert list(_budget_flag("blocking_sync_completions")) == ["blocking_sync_tool"]
+
+
+# -- the MCP tool-call edge: a driver's FAILED terminal ------------------------
+
+
+def test_mcp_edge_failed_terminal_delivers_the_outcome_whole_and_records_error(monkeypatch):
+    # A driver's FAILED terminal RAISES ``RunTerminalFailed`` in the tool body; fastmcp wraps the
+    # raise into a ``ToolError`` whose ``__cause__`` is that signal before this edge's ``call_next``
+    # returns. The edge delivers the opaque outcome WHOLE as structured data under ``outcome`` — the
+    # deep nested marker, well past the 200-char record cap, present and untruncated — with
+    # ``is_error`` set, and the runs-index records the run's terminal as ``error`` because the raise
+    # unwinds the chokepoint (OUTSIDE which the edge catches it) before it is turned into a result.
+    from tai42_contract.interactions import RunTerminalFailed
+
+    import tai42_skeleton.runs.chokepoint as chokepoint
+    from tai42_skeleton.interactions.terminal_failure import FAILED_OUTCOME_DETAIL_LIMIT, failed_outcome_detail
+
+    terminals: list[dict[str, Any]] = []
+
+    class _SpyStore:
+        async def insert_start(
+            self, run_id, preset_name, preset_version, *, trace_id, user_id, session_id, interaction_id, started_at
+        ):
+            pass
+
+        async def update_outcome(
+            self, run_id, outcome, ended_at, *, trace_id=None, interaction_id=None, resumed_interactions=None
+        ):
+            terminals.append({"outcome": outcome})
+
+    monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
+    monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: _SpyStore())
+
+    outcome = {
+        "status": "error",
+        "result": {"on_error": [{"step": "retry", "note": "N" * 300}], "graceful": "DEEP_MARKER_PAST_200"},
+    }
+    # The marker genuinely sits past the record cap, so a capped repr could not carry it.
+    capped = failed_outcome_detail(outcome)
+    assert "DEEP_MARKER_PAST_200" not in capped
+    assert len(capped) <= len("tool run failed: ") + FAILED_OUTCOME_DETAIL_LIMIT + len("…(truncated)")
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def flow():
+                """Raise a failed terminal carrying a whole opaque outcome."""
+                raise RunTerminalFailed(outcome)
+
+            await app.preset_manager.register("flow_preset", "flow", {}, [], "Flow preset")
+            try:
+                async with Client(app._fast_mcp) as client:
+                    result = await client.call_tool("flow_preset", {}, raise_on_error=False)
+            finally:
+                await app.preset_manager.remove("flow_preset")
+            assert result.is_error
+            assert result.structured_content is not None
+            # The whole nested outcome is delivered as data — deep marker present and untruncated.
+            assert result.structured_content["error"] == "tool run failed"
+            assert result.structured_content["outcome"] == outcome
+            assert result.structured_content["outcome"]["result"]["graceful"] == "DEEP_MARKER_PAST_200"
+
+    asyncio.run(run())
+    # The chokepoint recorded the terminal as ``error`` (the except sits OUTSIDE the scope).
+    assert [t["outcome"] for t in terminals] == ["error"]
+
+
+def test_mcp_edge_failed_terminal_unencodable_outcome_is_a_named_tool_error():
+    # A driver that broke the plain-JSON-mapping contract (a failed outcome holding a lone UTF-16
+    # surrogate no JSON encoder can render) is refused LOUDLY through the edge's OWN named path — a
+    # ``ToolError`` naming the tool and the offending JSON path — never put into structured content
+    # where the wire serialize would throw an unnamed transport error.
+    from tai42_contract.interactions import RunTerminalFailed
+
+    outcome = {"status": "error", "detail": f"lone-{chr(0xD83D)}"}
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def flow():
+                """Raise a failed terminal whose outcome cannot be JSON-encoded."""
+                raise RunTerminalFailed(outcome)
+
+            async with Client(app._fast_mcp) as client:
+                with pytest.raises(ToolError) as caught:
+                    await client.call_tool("flow", {})
+            message = str(caught.value)
+            assert "flow" in message
+            assert "$.detail" in message
+            assert "cannot be JSON-encoded" in message
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_other_tool_error_re_raises_unchanged():
+    # A plain tool failure (not a ``RunTerminalFailed``) still arrives as a ``ToolError``; the edge
+    # leaves it untouched — only a terminal failure is turned into a whole-outcome result.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def boom():
+                """Fail with a plain error."""
+                raise RuntimeError("kaboom-plain")
+
+            async with Client(app._fast_mcp) as client:
+                result = await client.call_tool("boom", {}, raise_on_error=False)
+            assert result.is_error
+            # The plain failure is NOT reshaped into the whole-outcome envelope.
+            assert result.structured_content is None or "outcome" not in (result.structured_content or {})
+
+    asyncio.run(run())

@@ -329,12 +329,16 @@ async def test_run_tool_raise_during_execution_is_500(monkeypatch: pytest.Monkey
     _assert_logged_server_side(caplog, "kaboom at 10.0.0.7:6379")
 
 
-async def test_run_tool_failed_terminal_surfaces_the_outcome_detail(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+async def test_run_tool_failed_terminal_delivers_the_outcome_whole_as_data(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
     # A driver's failed terminal RAISES ``RunTerminalFailed`` carrying its outcome WHOLE (never a
     # returned status-keyed value). This admin-fenced door is the one privileged live caller that
-    # keeps the full failure detail, so it surfaces the opaque payload WHOLE as the structured-500
-    # detail — recording it capped, never reading a key inside it — rather than collapsing it to the
-    # bare contract message. So the 500 body carries the driver's own graceful surface.
+    # delivers the opaque payload WHOLE — as DATA, under the contract's generic ``outcome`` field of
+    # the structured 500, never a key read out of it — while the SERVER-SIDE record keeps the capped
+    # detail. So the caller's 500 body is ``{"error": "<plain message>", "outcome": <the payload>}``.
+    import json
+
     from tai42_contract.interactions import RunTerminalFailed
 
     outcome = {"status": "error", "detail": "graceful-surface-GRACE123"}
@@ -342,8 +346,80 @@ async def test_run_tool_failed_terminal_surfaces_the_outcome_detail(monkeypatch:
     _install(monkeypatch, tools=tools)
     with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
         await tools_ops.run_tool("flow", {})
-    assert "graceful-surface-GRACE123" in caught.value.message
+    assert caught.value.status == 500
+    # The message is plain; the outcome rides WHOLE as data, untouched and equal to what was raised.
+    assert "graceful-surface-GRACE123" not in caught.value.message
+    assert caught.value.extra == {"outcome": outcome}
+    assert caught.value.extra["outcome"] is outcome
+    # The adapter emits ``{"error": …, **extra}``; the body carries the whole outcome and encodes.
+    body = {"error": caught.value.message, **caught.value.extra}
+    assert body["outcome"] == outcome
+    json.dumps(body).encode("utf-8")
+    # The server-side record still carries the capped detail (the 200 cap stays for what is logged).
     _assert_logged_server_side(caplog, "graceful-surface-GRACE123")
+
+
+async def test_run_tool_failed_terminal_delivers_a_large_nested_outcome_untruncated(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    # A real graceful outcome (a flow's on-error surface) is BOTH larger than the 200-char record cap
+    # AND nested: the marker sits well past where ``failed_outcome_detail`` would clip the recorded
+    # repr. The caller delivery must carry it WHOLE — the deep nested marker present and untruncated
+    # under ``outcome`` — proving the door delivers data, not a capped repr in the message.
+    import json
+
+    from tai42_contract.interactions import RunTerminalFailed
+
+    from tai42_skeleton.interactions.terminal_failure import FAILED_OUTCOME_DETAIL_LIMIT, failed_outcome_detail
+
+    outcome = {
+        "status": "error",
+        "result": {
+            "on_error": [{"step": "retry", "note": "N" * 300}],
+            "graceful": "DEEP_MARKER_PAST_200",
+        },
+    }
+    # The marker genuinely sits past the record cap, so a capped repr cannot carry it.
+    capped = failed_outcome_detail(outcome)
+    assert "DEEP_MARKER_PAST_200" not in capped
+    assert len(capped) <= len("tool run failed: ") + FAILED_OUTCOME_DETAIL_LIMIT + len("…(truncated)")
+
+    tools = _Tools({"flow"}, run_exc=RunTerminalFailed(outcome))
+    _install(monkeypatch, tools=tools)
+    with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
+        await tools_ops.run_tool("flow", {})
+    assert caught.value.status == 500
+    body = {"error": caught.value.message, **caught.value.extra}
+    # The deep nested marker is present and whole in the delivered body under ``outcome``.
+    assert body["outcome"]["result"]["graceful"] == "DEEP_MARKER_PAST_200"
+    assert body["outcome"] == outcome
+    assert "DEEP_MARKER_PAST_200" in json.dumps(body)
+
+
+async def test_run_tool_failed_terminal_unencodable_outcome_is_a_502_bad_tool_output(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    # A driver that broke the plain-JSON-mapping contract (an outcome holding a lone UTF-16 surrogate
+    # no JSON encoder can render) is refused LOUDLY through the SAME named path as an un-encodable
+    # result — a 502 naming the tool and the offending JSON path — never stringified past the encoder
+    # into the delivered body (which would re-introduce the transport 500 the guard exists to stop).
+    import json
+
+    from tai42_contract.interactions import RunTerminalFailed
+
+    from tai42_skeleton.operations.errors import UpstreamError
+
+    outcome = {"status": "error", "detail": f"lone-{chr(0xD83D)}"}
+    tools = _Tools({"flow"}, run_exc=RunTerminalFailed(outcome))
+    _install(monkeypatch, tools=tools)
+    with caplog.at_level(logging.WARNING, logger=tools_ops.logger.name), pytest.raises(UpstreamError) as excinfo:
+        await tools_ops.run_tool("flow", {})
+    assert excinfo.value.status == 502
+    assert excinfo.value.extra == {"tool": "flow", "path": "$.detail"}
+    assert "flow" in excinfo.value.message
+    assert "$.detail" in excinfo.value.message
+    # The mapped refusal's own body encodes cleanly — the un-encodable value never reaches the wire.
+    json.dumps({"error": excinfo.value.message, **excinfo.value.extra}).encode("utf-8")
 
 
 async def test_run_tool_resolve_unrelated_runtime_error_propagates(monkeypatch: pytest.MonkeyPatch, caplog) -> None:

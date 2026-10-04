@@ -1,10 +1,13 @@
-"""Render a RAISED ``RunTerminalFailed``'s opaque outcome as a bounded detail string.
+"""Render a RAISED ``RunTerminalFailed``'s opaque outcome as a bounded RECORDED detail string.
 
 A failed terminal RAISES :class:`~tai42_contract.interactions.RunTerminalFailed` carrying the
-driver's outcome as an OPAQUE payload. Whichever platform door owns that raise records the payload
-WHOLE through :func:`failed_outcome_detail`, never reading a key inside it — a conversation turn, the
-synchronous run-tool door, the delivery chokepoint. The render is capped so a large payload cannot
-bloat the recorded detail. No key is pulled out of the payload by name; it is reproduced as-is.
+driver's outcome as an OPAQUE payload. :func:`failed_outcome_detail` is for what a door RECORDS or
+LOGS about that failure: it reproduces the payload as-is, never reading a key inside it, CAPPED so a
+large payload cannot bloat the recorded detail. Its callers are the conversation turns (which record
+the capped detail and deliver the route's generic client-safe reply) and the synchronous run-tool
+door (which LOGS the capped detail — and, separately, delivers the outcome WHOLE to its one live
+caller as data, untruncated, never through this capped render). The delivery chokepoint delivers the
+outcome whole through its ladder and does not use this helper at all.
 """
 
 from __future__ import annotations
@@ -29,9 +32,11 @@ def capped_repr(value: object) -> str:
 
 
 def failed_outcome_detail(outcome: object) -> str:
-    """The internal detail for a RAISED :class:`RunTerminalFailed`, carrying its payload WHOLE.
+    """The internal recorded/logged detail for a RAISED :class:`RunTerminalFailed`, capped.
 
     The outcome is an OPAQUE payload the driver that failed wrote; the owning door records it as-is
-    (capped), never pulling ``error_kind`` / ``missing_results`` / ``session_id`` out by name.
+    (capped), never pulling ``error_kind`` / ``missing_results`` / ``session_id`` out by name. This
+    is the RECORDED detail only — a live caller the sync run-tool door serves is delivered the
+    outcome whole as data, never this capped render.
     """
     return f"tool run failed: {capped_repr(outcome)}"

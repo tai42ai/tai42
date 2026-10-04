@@ -29,7 +29,9 @@ from pydantic import BaseModel
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.interactions import (
     NestedParkOwnershipError,
+    RunTerminalFailed,
     SuspendedInteraction,
+    failed_outcome_text,
     resolve_park_adoption,
     suspended_interaction_marker,
 )
@@ -76,6 +78,14 @@ async def _as_structured_tool(
         # adapter's own machinery — which raises its own typed refusal — not the tool body.
         try:
             result = await app_tools.run_tool(preset.base_tool, {**preset.fixed_kwargs, **runtime})
+        except RunTerminalFailed as exc:
+            # The base tool's driver reached a FAILED terminal and RAISED this carrying the outcome
+            # WHOLE. The agent loop reads a tool failure as TEXT, so render the whole opaque outcome
+            # as JSON text (the contract helper, reading no key inside it, naming no engine) and carry
+            # it on the ``ToolException`` the recovery middleware turns into the model's error
+            # ``ToolMessage`` — so the model sees the driver's own graceful surface, not the bare
+            # contract message the generic arm below would collapse it to.
+            raise ToolException(failed_outcome_text(exc.outcome)) from exc
         except Exception as exc:
             logger.warning("preset tool %r (base tool %r) failed: %s", preset.name, preset.base_tool, exc, exc_info=exc)
             raise ToolException(f"Error calling tool {preset.name!r}: {exc}") from exc

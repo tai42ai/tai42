@@ -12,7 +12,9 @@ from fastmcp.tools.function_tool import FunctionTool
 from langchain_core.tools import StructuredTool, ToolException, tool
 from tai42_contract.interactions import (
     NestedParkOwnershipError,
+    RunTerminalFailed,
     SuspendedInteraction,
+    failed_outcome_text,
     resolve_park_adoption,
     suspended_interaction_marker,
 )
@@ -53,6 +55,32 @@ def _refuse_unencodable_client_result(tool_name: str, result: Any) -> None:
         offending_path = exc.path
     if offending_path is not None:
         raise ToolException(f"tool {tool_name!r} produced a result that cannot be JSON-encoded at {offending_path}")
+
+
+async def _invoke_tool_body(
+    target: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any], tool_name: str
+) -> Any:
+    """Invoke the tool BODY and map its OWN failure to a model-visible ``ToolException``.
+
+    A driver's FAILED terminal RAISES :class:`RunTerminalFailed` carrying the outcome WHOLE: the
+    agent loop reads a tool failure as TEXT, so the whole opaque outcome is rendered as JSON text
+    (the contract helper, reading no key inside it, naming no engine) onto the ``ToolException`` the
+    recovery middleware turns into the model's error ``ToolMessage`` — not the bare contract message
+    the generic arm would collapse it to. Any other body failure becomes the generic named tool
+    error. Only the body's own failure is caught here; ``CancelledError``/``BaseException`` pass
+    through untouched, and a caller's surrounding machinery (identity gate, park adoption, masking)
+    is never mislabeled as a tool that failed.
+    """
+    try:
+        result = target(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+    except RunTerminalFailed as exc:
+        raise ToolException(failed_outcome_text(exc.outcome)) from exc
+    except Exception as exc:
+        logger.warning("in-process tool %r failed: %s", tool_name, exc, exc_info=exc)
+        raise ToolException(f"Error calling tool {tool_name!r}: {exc}") from exc
+    return result
 
 
 class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
@@ -202,19 +230,12 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                     execution_identity, tool_obj.name, _named_call_arguments(target_sig, args, kwargs)
                 )
             with bridge_context(self._app.fastmcp):
-                # Only the tool BODY's own failure becomes a model-visible tool error; the
-                # machinery above (identity gate, live re-resolution, bridge setup) AND the
-                # park-adoption/masking below stay a raw abort. So the broad catch wraps the body
-                # invocation ALONE — a bug in the adoption check, marker build, or secret masking
-                # is not mislabeled as a tool that failed. CancelledError/BaseException pass
-                # through untouched.
-                try:
-                    result = target(*args, **kwargs)
-                    if inspect.isawaitable(result):
-                        result = await result
-                except Exception as exc:
-                    logger.warning("in-process tool %r failed: %s", tool_obj.name, exc, exc_info=exc)
-                    raise ToolException(f"Error calling tool {tool_obj.name!r}: {exc}") from exc
+                # Only the tool BODY's own failure becomes a model-visible tool error; the machinery
+                # above (identity gate, live re-resolution, bridge setup) AND the park-adoption/masking
+                # below stay a raw abort. So the body invocation + its error mapping live in
+                # ``_invoke_tool_body`` ALONE — a bug in the adoption check, marker build, or secret
+                # masking is not mislabeled as a tool that failed.
+                result = await _invoke_tool_body(target, args, kwargs, tool_obj.name)
                 if isinstance(result, SuspendedInteraction):
                     # An async ask parked the caller and returned this sentinel. Inside a
                     # graph the tool task must COMPLETE (so ask runs exactly once, never
