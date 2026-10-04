@@ -27,9 +27,12 @@ What each ``run_tool`` branch records: the three 500 branches — an
 :class:`~tai42_skeleton.tools.binding.UnknownToolError` naming a DIFFERENT tool than the
 one asked for (a dispatch failure inside the running tool's own body), a
 :class:`~tai42_contract.interactions.RunTerminalFailed` (a driver's FAILED terminal,
-whose opaque outcome this admin-fenced door surfaces WHOLE as the 500 detail via
-:func:`~tai42_skeleton.interactions.terminal_failure.failed_outcome_detail`, never reading
-a key inside it), and any other raise during execution — emit ``logger.exception`` (ERROR,
+whose opaque outcome this admin-fenced door delivers WHOLE to its caller as DATA under the
+``outcome`` field of the 500 — never reading a key inside it — while RECORDING a capped
+detail via :func:`~tai42_skeleton.interactions.terminal_failure.failed_outcome_detail`; an
+outcome a JSON encoder cannot render instead becomes a 502 naming the tool and the offending
+JSON path, the same named refusal as an un-encodable result), and any other raise during
+execution — emit ``logger.exception`` (ERROR,
 with the caught exception's traceback); the last falls back to the exception's CLASS name
 when the message is empty, so the envelope always names something. The 404 for a tool that
 resolved at lookup and then did not resolve at dispatch emits a ``logger.warning``, so an
@@ -71,7 +74,7 @@ from tai42_skeleton.operations.response_models_group_b import (
     ToolsSchemaMap,
     ToolTagListResponse,
 )
-from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError
+from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError, find_lone_surrogate
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
@@ -304,14 +307,33 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
         except RunTerminalFailed as exc:
             # A driver's FAILED terminal RAISES this carrying the failed outcome WHOLE (never a
             # returned status-keyed value) — the live receiver this door started owns the failure.
-            # This admin-fenced door is the one privileged live caller that keeps the FULL failure
-            # detail (it already reveals wrapped secrets above), so surface the opaque payload WHOLE
-            # as the structured-500 detail — recording it capped, never reading a key inside it —
-            # rather than letting the generic arm below collapse it to ``str(exc)`` (the bare
-            # contract message). So the 500 body carries the driver's own graceful surface.
+            # This admin-fenced door is the one privileged live caller that delivers the opaque
+            # payload WHOLE to its caller: not a capped repr in the message (which would truncate a
+            # real graceful surface past the record cap), but the payload itself as DATA under the
+            # contract's generic ``outcome`` field, so the adapter answers ``{"error": <plain
+            # message>, "outcome": <the payload>}`` — never reading a key inside it. The SERVER-SIDE
+            # record keeps the capped detail: the 200 cap stays for what is logged, only the caller
+            # delivery is whole.
             detail = failed_outcome_detail(exc.outcome)
             logger.exception("run-tool %r failed on a terminal: %s", tool_name, detail)
-            raise OperationFailedError(detail) from exc
+            # The contract guarantees the outcome is a plain JSON-serializable mapping; the one
+            # residual an encoder still rejects is a lone UTF-16 surrogate (json.dumps passes it, the
+            # utf-8 wire encode does not). A driver that broke the contract this way is a bad tool
+            # output: refuse it LOUDLY through the SAME named path as an un-encodable result — a 502
+            # naming the tool and the offending JSON path — never stringified past the encoder into
+            # the delivered body (which would re-introduce the transport 500 the guard exists to stop).
+            offending_path = find_lone_surrogate(exc.outcome)
+            if offending_path is not None:
+                logger.warning(
+                    "run-tool: %r failed with an outcome that cannot be JSON-encoded at %s",
+                    tool_name,
+                    offending_path,
+                )
+                raise UpstreamError(
+                    str(ToolResultEncodingError(tool_name, offending_path)),
+                    extra={"tool": tool_name, "path": offending_path},
+                ) from exc
+            raise OperationFailedError("tool run failed", extra={"outcome": exc.outcome}) from exc
         except OperationError:
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.
