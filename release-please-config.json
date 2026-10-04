@@ -7,7 +7,6 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
-      "release-as": "16.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
