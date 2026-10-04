@@ -51,12 +51,14 @@ def _bucket() -> str:
 
 
 def _checksum_kwargs() -> dict[str, str]:
-    """The ``ChecksumAlgorithm`` to send on writes that carry a request-body checksum.
+    """Send the configured ``ChecksumAlgorithm`` on ``delete_objects`` only.
 
-    botocore signs a CRC32 checksum on ``put_object`` and (always) ``delete_objects``;
-    an S3-compatible store that refuses CRC32 rejects the request. When
-    ``checksum_algorithm`` is set it is forwarded so the store receives an algorithm
-    it accepts; empty when unset, leaving botocore's default so AWS S3 is unchanged.
+    delete_objects is the one write the S3 API requires a request-body checksum on; botocore
+    defaults it to CRC32, and an S3-compatible store that refuses CRC32 rejects the delete, so a
+    set ``checksum_algorithm`` is forwarded to give the store one it accepts (empty when unset,
+    leaving botocore's default so AWS S3 is unchanged). ``put_object`` does not carry this — its
+    checksum is optional and governed by ``request_checksum_calculation`` — so an explicit
+    algorithm (which switches botocore to aws-chunked streaming) is never forced on an upload.
     """
     algorithm = s3_settings().checksum_algorithm
     return {"ChecksumAlgorithm": algorithm} if algorithm else {}
@@ -102,7 +104,11 @@ class S3Storage(Storage):
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
         """Upload ``data`` at ``path`` with an optional ``content_type``, refusing a flat-key-space collision."""
         bucket = _bucket()
-        put_kwargs: dict[str, Any] = {"Bucket": bucket, "Key": path, "Body": data, **_checksum_kwargs()}
+        # put_object does not require a request-body checksum (the S3 API marks it optional), and
+        # forcing an explicit ChecksumAlgorithm makes botocore stream a trailing checksum with
+        # aws-chunked transfer encoding, which not every S3-compatible store implements. The
+        # optional upload checksum is left to the client's request_checksum_calculation config.
+        put_kwargs: dict[str, Any] = {"Bucket": bucket, "Key": path, "Body": data}
         if content_type is not None:
             put_kwargs["ContentType"] = content_type
         async with tai42_app.clients.client_ctx(S3Client) as client:
