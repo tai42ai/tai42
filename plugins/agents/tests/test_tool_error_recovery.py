@@ -237,6 +237,48 @@ class TestToolErrorMiddleware:
         # Named for the tool the MODEL called (the preset), carrying the base tool's text.
         assert "Error calling tool 'my_preset': base tool down" in errors[0].content
 
+    def test_preset_base_tool_failed_terminal_renders_the_whole_outcome_as_text(
+        self, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+    ) -> None:
+        # A base tool's driver reaching a FAILED terminal RAISES ``RunTerminalFailed`` carrying the
+        # outcome WHOLE. The preset adapter renders the whole opaque outcome as JSON TEXT (the
+        # contract helper, reading no key inside it), so the model's error ``ToolMessage`` carries
+        # the driver's own graceful surface — the deep nested marker, past the 200-char record cap,
+        # present and untruncated — with an error status, not the bare contract message.
+        import json
+
+        from tai42_contract.interactions import RunTerminalFailed, failed_outcome_text
+
+        saver = InMemorySaver()
+        model = ScriptedChatModel([_tool_call("my_preset", "call_1"), AIMessage(content="recovered")])
+        _seams(monkeypatch, model, saver)
+        app_tools.client_tools["base"] = _raising_tool(RuntimeError("unused"), name="base")
+
+        outcome = {
+            "status": "error",
+            "result": {"on_error": [{"step": "retry", "note": "N" * 300}], "graceful": "DEEP_MARKER_PAST_200"},
+        }
+
+        def boom(**_kwargs: Any) -> Any:
+            raise RunTerminalFailed(outcome)
+
+        app_tools.tool_runners["base"] = boom
+        preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={})
+        (preset_tool,) = asyncio.run(resolve_tools(app_tools, [], [], [preset]))
+
+        result = asyncio.run(
+            bta.ainvoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-terminal"))
+        )
+        assert result.output == "recovered"
+        messages = asyncio.run(_state_messages(saver, model, "t-preset-terminal"))
+        errors = [m for m in messages if isinstance(m, ToolMessage) and m.status == "error"]
+        assert len(errors) == 1
+        assert errors[0].tool_call_id == "call_1"
+        # The whole outcome rides the error ToolMessage as JSON text — deep marker present, untruncated.
+        assert failed_outcome_text(outcome) in errors[0].content
+        assert "DEEP_MARKER_PAST_200" in errors[0].content
+        assert json.loads(failed_outcome_text(outcome)) == outcome
+
     def test_runtime_error_propagates_and_aborts_the_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A non-tool-logic failure is NOT masked: it propagates and aborts the run.
         model = ScriptedChatModel([_tool_call("failing", "call_1"), AIMessage(content="unreached")])
