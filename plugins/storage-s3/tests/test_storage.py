@@ -398,9 +398,12 @@ async def test_delete_dir_omits_checksum_algorithm_by_default(s3_client: Any) ->
     assert "ChecksumAlgorithm" not in kwargs
 
 
-async def test_upload_bytes_sends_configured_checksum_algorithm(
+async def test_upload_bytes_omits_checksum_algorithm_even_when_configured(
     s3_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # put_object does not require a request-body checksum; an explicit ChecksumAlgorithm would make
+    # botocore switch to aws-chunked streaming, which not every S3-compatible store implements. The
+    # configured algorithm rides delete_objects (which the API requires one on), never an upload.
     from tai42_storage_s3 import storage as storage_module
 
     monkeypatch.setattr(storage_module, "s3_settings", _settings_with_checksum("SHA256"))
@@ -409,7 +412,7 @@ async def test_upload_bytes_sends_configured_checksum_algorithm(
     await S3Storage().upload_bytes("pic.png", b"\x89PNG", content_type="image/png")
 
     _, kwargs = s3_client.put_object.call_args
-    assert kwargs["ChecksumAlgorithm"] == "SHA256"
+    assert "ChecksumAlgorithm" not in kwargs
 
 
 async def test_upload_bytes_omits_checksum_algorithm_by_default(s3_client: Any) -> None:
