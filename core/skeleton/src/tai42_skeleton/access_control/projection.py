@@ -243,18 +243,21 @@ async def _path_reachable(
     carve_out: frozenset[str],
     version: int,
     path: str,
+    method: str,
 ) -> bool:
-    """Whether ``path`` clears the route-resolution + scope-coverage gate or the carve-out.
+    """Whether ``(path, method)`` clears the route-resolution + scope-coverage gate or the carve-out.
 
     The carve-out is the authenticated-always-allowed one. This is the SAME decision
-    ``ResourceGuardMiddleware`` reaches, jq excluded (jq is a separate per-method pass).
+    ``ResourceGuardMiddleware`` reaches, jq excluded (jq is a separate per-method pass). The
+    ``method`` is threaded so the declared-protection tier resolves a registered authenticated
+    surface to the universal scope per method, keeping projection ⊆ gate exact.
     """
     # The carve-out is checked BEFORE resolution, exactly as the middleware does, so a
     # carve-out path that ALSO carries a route row is not under-shown by falling through
     # to a scope-coverage test the middleware never reaches.
     if path in carve_out:
         return True
-    ids = await verifier.resolve_resource_ids(path, policy_version=version)
+    ids = await verifier.resolve_resource_ids(path, method=method, policy_version=version)
     if ids:
         public = settings.public_resource_id
         if set(ids) == {public}:
@@ -545,9 +548,12 @@ async def _project_routes(
         # are represented ONLY via route_patterns (and the sub_mcp/agents lists).
         if "{" in meta.path:
             continue
-        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, meta.path):
-            continue
-        allowed = [method for method in meta.methods if await admits(meta.path, method)]
+        allowed = [
+            method
+            for method in meta.methods
+            if await _path_reachable(verifier, settings, scope_set, carve_out, version, meta.path, method)
+            and await admits(meta.path, method)
+        ]
         if allowed:
             routes.append(RouteEntry(path=meta.path, methods=sorted(allowed)))
             projected_pairs.update((method, meta.path) for method in allowed)
@@ -578,7 +584,7 @@ async def _project_route_patterns(
         if representative is None:
             logger.info("access_control: projection excluding non-sampleable route pattern %r", regex)
             continue
-        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, representative):
+        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, representative, "GET"):
             continue
         if not await admits(representative, "GET"):
             continue
@@ -605,7 +611,7 @@ async def _project_sub_mcp(
     for slug in sorted(sub_routes):
         config = sub_routes[slug]
         mount_root = f"{ROOT_PREFIX}/{slug}"
-        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, mount_root):
+        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, mount_root, "GET"):
             continue
         if not await admits(f"{mount_root}/", "GET"):
             continue
@@ -641,7 +647,7 @@ async def _project_agents(
     agents: list[str] = []
     for name in _all_agent_names():
         run_path = f"/api/agents/{name}/runs"
-        if await _path_reachable(verifier, settings, scope_set, carve_out, version, run_path) and await admits(
+        if await _path_reachable(verifier, settings, scope_set, carve_out, version, run_path, "POST") and await admits(
             run_path, "POST"
         ):
             agents.append(name)

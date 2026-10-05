@@ -57,15 +57,18 @@ if TYPE_CHECKING:
 def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
     """Record the streamable-http transport endpoint as a mounted, credential-gated surface.
 
-    The registry describes it instead of leaving its GETs to the Studio SPA
+    The registry describes it so the access-control scope layer recognises it as the
+    authenticated surface it is (the verifier's declared-protection tier resolves a served
+    transport method to the universal scope), rather than leaving its GETs to the Studio SPA
     catch-all (which matches every path and would charge MCP traffic to the public root
     family and audit it unauthenticated).
 
     A STATELESS deployment binds no GET on the endpoint — there is no session to stream
-    notifications from — so its GETs genuinely do fall through to the catch-all and stay
-    a public door. Statelessness alone decides the method set; naming the three methods
-    the protocol uses only under-claims anything else the endpoint answers, which stays
-    the catch-all's.
+    notifications from — so a GET to it is not a served surface: it is under ``/mcp`` (the
+    SPA-shell fallback excludes ``/mcp``) and no record claims it, so it resolves to nothing
+    and is admin-only (CASE A) / 404, never a public door. Statelessness alone decides the
+    method set; naming the methods the protocol uses only under-claims anything else the
+    endpoint answers, which stays the catch-all's.
     """
     methods = ["POST", "DELETE"] if stateless else ["GET", "POST", "DELETE"]
     route_registry.record_mounted(

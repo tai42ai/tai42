@@ -76,9 +76,11 @@ class TaiUser(AuthenticatedUser):
         # policy that is not an owned key — see :func:`is_admin_policy`). Computed
         # server-side by the auth backend from the resolved policy and stamped here, so
         # it cannot be forged by a provider claim. The resource guard reads it to admit a
-        # super-admin to a route with no configured row: a root identity is never gated
-        # by a missing route mapping (it can map the route anyway), so blocking it is a
-        # footgun, not security — while every non-admin identity still fails closed.
+        # super-admin to a path the application does not serve and no row maps (a registered
+        # authed route resolves to the universal scope and never reaches that carve-out): a
+        # root identity is never gated by a missing route (it can map one anyway, and it
+        # typically meets the router's 404), so blocking it is a footgun, not security —
+        # while every non-admin identity still fails closed there.
         self.is_admin = is_admin
 
     @property

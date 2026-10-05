@@ -126,13 +126,15 @@ async def check_spa_shell_public() -> None:
       match: templates are ordinary keys. The operational probes, the webhook ingress
       door, and the SPA shell catch-all itself are the app's acknowledged public GETs;
     * gated by AUTHZ (``authed=True``) AND visible to the fallback derivation — a CONCRETE
-      authed route is in the DERIVED reserved set (the shell fallback skips it, so an
-      unmapped request terminal-denies rather than being served the shell). A TEMPLATED
+      authed route is in the DERIVED reserved set (the shell fallback skips it). A TEMPLATED
       ``authed=True`` route is structurally NOT derivable into the concrete reserved set:
-      a concrete request matching its pattern with no route row would be served the public
-      shell, so the boot FAILS it (the author must ``/api``-prefix it — control-plane
-      excluded — or consciously acknowledge it), the same posture as the always-public
-      authed refusal;
+      the verifier's declared-protection tier now resolves such a route (matched per method)
+      to the universal scope BEFORE the shell fallback could fire, so it is protected at
+      runtime — but the boot still FAILS it (the author must ``/api``-prefix it —
+      control-plane excluded — or consciously acknowledge it) so the shell fallback's
+      concrete-only derivation is never the SOLE thing standing between a templated authed
+      GET and the public shell, the same belt-and-braces posture as the always-public authed
+      refusal;
     * ``authed=False`` and NOT acknowledged → the boot FAILS: a boot-log flag is not a
       control; a publicly declared non-API GET must be a consciously reviewed decision.
 
@@ -235,8 +237,9 @@ def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[
         if meta.authed:
             # Gated by authz ONLY if the fallback derivation can SEE it. A CONCRETE authed
             # route is in the derived reserved set (the shell skips it). A TEMPLATED authed
-            # route is structurally not derivable, so a concrete request matching its pattern
-            # with no route row would be served the public shell — the boot must refuse it.
+            # route is structurally not derivable; the declared-protection tier now protects
+            # such a route at runtime, but the boot still refuses it so the shell fallback's
+            # concrete-only derivation is never the sole protection (belt-and-braces).
             if templated or canonicalize_path(registered) not in derived:
                 audit.invisible_authed.append(registered)
         else:

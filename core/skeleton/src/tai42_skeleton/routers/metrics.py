@@ -12,12 +12,12 @@ a worker (for :func:`assert_multiproc_value_class`) before the app handle is bou
 a router module is imported at ``start()`` with the app bound, like every other
 route.
 
-Auth posture: ``authed=True`` — the scrape is governed by the operator's
-route→resource table rather than served unconditionally public. An
-operator maps ``/metrics`` to the resource its scrapers hold (or to the public
-marker for an internal-only network); an unmapped ``/metrics`` fails closed. The
-route is a concrete non-``/api`` GET, so it joins the derived reserved set and the
-SPA-shell fallback skips it.
+Auth posture: ``authed=True`` — a registered authenticated surface, so an
+unmapped ``/metrics`` resolves to the universal scope: a role-holder (which carries
+``*``) may scrape it, a scoped key may not. An operator maps ``/metrics`` to a named
+resource for scoped scrapers to hold, or to the public marker for an internal-only
+network. The route is a concrete non-``/api`` GET, so it joins the derived reserved
+set and the SPA-shell fallback skips it.
 """
 
 from __future__ import annotations

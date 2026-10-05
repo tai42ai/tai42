@@ -325,10 +325,14 @@ async def _resolve_pinned_resource_ids(
 ) -> list[str]:
     """Resolve route→resource ids through the edge's one memoized verifier.
 
-    Denies when no resource is configured; a read fault denies fail-closed.
+    The ``method`` is passed so the declared-protection tier resolves the pinned op's own
+    registered route (``_own_route`` already matched it for ``method``) to the universal scope
+    when the operator mapped it to no row — giving the tool edge the SAME answer as the HTTP
+    door instead of a fresh-deploy denial. Denies when no resource is configured (a path the
+    app does not serve); a read fault denies fail-closed.
     """
     try:
-        resource_ids = await verifier.resolve_resource_ids(path, policy_version=version)
+        resource_ids = await verifier.resolve_resource_ids(path, method=method, policy_version=version)
     except Exception as exc:
         logger.warning("authz: route resolution failed for %s — denying", path, exc_info=True)
         raise PermissionDeniedError("access denied") from exc

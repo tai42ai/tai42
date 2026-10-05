@@ -28,6 +28,15 @@ logger = logging.getLogger(__name__)
 UUID_PATTERN = re.compile(r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 DIGIT_PATTERN = re.compile(r"/\d+")
 
+#: The universal scope every seeded role carries (`admin`/`editor`/`viewer` all hold `["*"]`).
+#: The scope-coverage sites (`middleware._authorize_resolved`, the tool edge's
+#: `_assert_scope_covers`, the projection's `_path_reachable`) read it as "covers every
+#: resource id". The declared-protection tier answers it as the resource of a registered
+#: authenticated surface the operator mapped to no named scope, so a role-holder reaches that
+#: surface on a fresh deployment while a scoped key (which lacks `*`) still needs an operator
+#: row. One spelling for the resource-wildcard, shared with the coverage sites.
+UNIVERSAL_SCOPE = "*"
+
 
 def is_always_public_prefix(path: str, settings: AccessControlSettings) -> bool:
     """Whether the CANONICAL ``path`` is the pre-auth login surface that always resolves public.
@@ -240,7 +249,7 @@ class AccessControlVerifier(TokenVerifier):
         version = policy_version if policy_version is not None else await self._current_policy_version()
 
         found_ids = await self._accumulate_route_ids(path, version)
-        self._apply_public_fallbacks(path, method, found_ids)
+        self._apply_resolution_fallbacks(path, method, found_ids)
         return list(found_ids)
 
     def _reject_encoded_slash(self, path: str, method: str | None) -> bool:
@@ -354,11 +363,12 @@ class AccessControlVerifier(TokenVerifier):
 
         return found_ids
 
-    def _apply_public_fallbacks(self, path: str, method: str | None, found_ids: set[str]) -> None:
-        """Mutate ``found_ids`` with the reserved-prefix public drop and the two GET/HEAD public fallbacks.
+    def _apply_resolution_fallbacks(self, path: str, method: str | None, found_ids: set[str]) -> None:
+        """Mutate ``found_ids`` with the tiers below the route table, in precedence order.
 
-        The fallbacks are acknowledged-public, then the SPA-shell shell, each lowest precedence and
-        deny-wins.
+        After the operator-row accumulation: the reserved-prefix public drop, then (only when
+        nothing resolved) the declared-protection tier, the acknowledged-public GET/HEAD tier,
+        and the SPA-shell GET tier. Each lower tier is deny-wins and fires only on an empty set.
         """
         public = self.settings.public_resource_id
 
@@ -366,16 +376,51 @@ class AccessControlVerifier(TokenVerifier):
         # for a reserved-prefix path even if a route row or a dynamic pattern resolved
         # it, so the control plane can never be served unauthenticated regardless of
         # what the route table holds (a route row, a pattern whose template names a
-        # reserved url, or a public pattern that fullmatches a reserved path). An
-        # otherwise-unmapped reserved path then resolves to nothing and is denied.
+        # reserved url, or a public pattern that fullmatches a reserved path). The
+        # declared-protection tier below then resolves an otherwise-unmapped reserved
+        # AUTHED route to the universal scope — admin passes, editor/viewer are held out
+        # by the jq base-tier that runs BEFORE the resource guard, never by this layer.
         if public in found_ids and self._is_reserved_prefix(path):
             found_ids.discard(public)
+
+        # Declared-protection tier: a REGISTERED, AUTHENTICATED served surface the operator
+        # mapped to no named scope resolves to the universal scope, so a role-holder (which
+        # carries `*`) reaches it on a fresh deployment while a scoped key still needs an
+        # operator row. Sits AFTER the reserved-drop (a refused `/api/auth` public row then
+        # behaves as absent and the tier claims the route) and ABOVE the GET-only public
+        # fallbacks, which must not fire for a registered authed surface. A path the
+        # application does not serve resolves to nothing here and stays denied (CASE A,
+        # super-admin only) — the fail-closed rule keeps its meaning.
+        if not found_ids:
+            found_ids |= self._declared_protection_tier(path, method)
 
         if not found_ids and self._is_acknowledged_public_get(path, method):
             found_ids.add(public)
 
         if not found_ids and self._is_spa_shell_fallback(path, method):
             found_ids.add(public)
+
+    def _declared_protection_tier(self, path: str, method: str | None) -> set[str]:
+        """The universal scope for a registered authenticated served surface, else empty.
+
+        Reads the registry's declaration via :func:`resolve_served_surface` (handler routes AND
+        the mounted MCP/sub-MCP transports): an ``authed=True`` match answers ``{UNIVERSAL_SCOPE}``;
+        a public match, no match, a method-less lookup, or a malformed path answers empty (those
+        fall through to the public fallbacks or to the fail-closed deny). Imported at call time —
+        ``role_gate`` triggers the router-import universe this foundational module is imported
+        ahead of, mirroring ``_reject_encoded_slash``.
+        """
+        if method is None:
+            return set()
+        from tai42_skeleton.access_control.role_gate import resolve_served_surface
+
+        try:
+            meta = resolve_served_surface(path, method)
+        except MalformedPathError:
+            return set()
+        if meta is not None and meta.authed:
+            return {UNIVERSAL_SCOPE}
+        return set()
 
     def _is_acknowledged_public_get(self, path: str, method: str | None) -> bool:
         """Acknowledged-public tier (GET/HEAD, deny-wins, lowest precedence).
