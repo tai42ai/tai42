@@ -6339,7 +6339,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-s3"
-version = "1.2.8"
+version = "1.2.9"
 source = { editable = "plugins/storage-s3" }
 dependencies = [
     { name = "aioboto3" },
