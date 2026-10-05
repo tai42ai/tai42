@@ -1,10 +1,13 @@
 """The hooks router's auth boundary, pinned with access control ENABLED.
 
 The ``/api/hooks`` management doors are AUTHED (list/register/unregister carry
-and mutate hook config); the ``/universal_webhook/{topic}`` ingress is PUBLIC
-(external systems POST events to it with no Studio credential). This asserts the
-split: a management call with no credential is rejected, while the ingress is
-reachable unauthenticated.
+and mutate hook config); the ``/universal_webhook/{topic}`` ingress and the
+``/trigger/{token}`` door are PUBLIC BY DECLARATION (registered ``authed=False``),
+so external systems reach them with no Studio credential and no route-table pin.
+This asserts the split: a management call with no credential is rejected, while the
+ingress and trigger doors are reachable unauthenticated straight from their
+registration — a bound topic's verifier, not access control, is the ingress door's
+only lock.
 """
 
 from __future__ import annotations
@@ -38,13 +41,13 @@ pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWar
 # The credential the identity store admits in the credentialed client.
 _VALID_KEY = "trigger-caller-key"
 
-# tier 1: path -> template key. Management doors (hooks + trigger-links) map to one
-# protected template; the public webhook ingress and trigger-link door map to public.
+# tier 1: path -> template key. The management doors (hooks + trigger-links) map to one
+# protected template. The public webhook ingress and trigger doors carry NO pattern and NO
+# route row — they are public by their ``authed=False`` registration, which the verifier's
+# declared-public tier grants above the route table.
 _PATH_PATTERNS = {
     r"/api/hooks": "hooks-api",
     r"/api/hooks/.+": "hooks-api",
-    r"/universal_webhook/.+": "hooks-webhook",
-    r"/trigger/.+": "hooks-trigger",
 }
 
 
@@ -134,13 +137,7 @@ def boundary_client(monkeypatch):
     _wire_router(monkeypatch)
 
     ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
-    ac_fake = _AcFake(
-        {
-            "hooks-api": "hooks-api-protected",
-            "hooks-webhook": ac_settings.public_resource_id,
-            "hooks-trigger": ac_settings.public_resource_id,
-        }
-    )
+    ac_fake = _AcFake({"hooks-api": "hooks-api-protected"})
 
     @asynccontextmanager
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -194,8 +191,6 @@ def credentialed_client(monkeypatch, bound_app):
     )
     pg = FakeAccessControlPg()
     pg.add_route("hooks-api", "hooks-api-protected")
-    pg.add_route("hooks-webhook", ac_settings.public_resource_id)
-    pg.add_route("hooks-trigger", ac_settings.public_resource_id)
     # A non-admin holding the management doors' own resource scope, so any refusal is
     # the route's action class rather than the scope layer.
     pg.add_policy("u1", scopes=["hooks", "hooks-api-protected"])
@@ -245,6 +240,77 @@ def test_webhook_ingress_reachable_unauthenticated(boundary_client):
     assert resp.json() == {"status": "accepted", "topic": "events"}
 
 
+class _LockedManager(_Manager):
+    """A manager that binds the ``shared_secret`` verifier to the ``locked`` topic (every
+    other topic is unbound) and treats every delivery id as fresh."""
+
+    async def get_topic_verifier(self, topic: str) -> dict | None:
+        if topic == "locked":
+            return {
+                "verifier": "shared_secret",
+                "config": {"header": "X-Secret", "secret_env": "E2E_HOOK_SECRET", "id_header": "X-Id"},
+            }
+        return None
+
+    async def claim_webhook_delivery(self, topic: str, key: str, ttl_seconds: int) -> bool:
+        return True
+
+
+@pytest.fixture
+def locked_webhook_client(monkeypatch):
+    """The webhook ingress behind the real auth stack with a verifier-BOUND topic. Admission
+    is by declaration (no route row); the bound topic's real ``shared_secret`` verifier is the
+    door's only lock, reachable through ``tai42_app.webhook_verifiers``."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.webhooks.builtin.shared_secret import SharedSecretVerifier
+    from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
+
+    _wire_router(monkeypatch)
+    monkeypatch.setattr(router, "get_hooks_manager", lambda: _LockedManager())
+    monkeypatch.setenv("E2E_HOOK_SECRET", "s3cret")
+
+    registry = WebhookVerifierRegistry()
+    registry.register("shared_secret", SharedSecretVerifier())
+
+    class _WebhookApp:
+        webhook_verifiers = registry
+
+    ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
+    ac_fake = _AcFake({"hooks-api": "hooks-api-protected"})
+
+    @asynccontextmanager
+    async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield ac_fake
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
+    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
+    wire_store_from_route_strings(monkeypatch, ac_fake._strings)
+
+    with tai42_app.bound(_WebhookApp()):
+        app = Starlette(routes=_routes(), middleware=AuthAdapter(ac_settings).get_middleware())
+        yield TestClient(app)
+
+
+def test_unsigned_post_is_refused_by_the_topic_verifier_not_access_control(locked_webhook_client):
+    # The named proof: an UNSIGNED POST to a verifier-bound topic is admitted by declaration
+    # (no 403 "Forbidden: Route not configured" from access control) and then REFUSED by the
+    # topic's shared_secret verifier — 401 with the constant no-oracle message.
+    unsigned = locked_webhook_client.post("/universal_webhook/locked", json={"any": "payload"})
+    assert unsigned.status_code == 401
+    assert unsigned.json() == {"error": "webhook verification failed"}
+    # A correctly-headed POST passes the verifier and is accepted.
+    good = locked_webhook_client.post(
+        "/universal_webhook/locked", headers={"X-Secret": "s3cret", "X-Id": "abc"}, json={"any": "payload"}
+    )
+    assert good.status_code == 200
+    assert good.json() == {"status": "accepted", "topic": "locked"}
+    # An UNBOUND topic has no verifier, so the declared-public door accepts straight away.
+    unbound = locked_webhook_client.post("/universal_webhook/other", json={"any": "payload"})
+    assert unbound.status_code == 200
+    assert unbound.json() == {"status": "accepted", "topic": "other"}
+
+
 def test_create_trigger_link_rejected_without_auth(boundary_client):
     resp = boundary_client.post("/api/hooks/trigger-links", json={"topic": "t", "ttl_seconds": None})
     assert resp.status_code in (401, 403)
@@ -260,8 +326,16 @@ def test_delete_trigger_link_rejected_without_auth(boundary_client):
 
 def test_trigger_door_reachable_unauthenticated(boundary_client):
     # The public trigger-link door is reached (handler runs) with no credential —
-    # the route-table public stance, exactly like the webhook ingress door.
+    # public by its ``authed=False`` registration, exactly like the webhook ingress door.
     resp = boundary_client.get("/trigger/some-token")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "accepted"}
+
+
+def test_trigger_door_post_reachable_unauthenticated(boundary_client):
+    # The trigger door serves POST as well as GET, and POST is public by the same
+    # declaration — a curl POST reaches the handler with no credential.
+    resp = boundary_client.post("/trigger/some-token", json={"any": "payload"})
     assert resp.status_code == 200
     assert resp.json() == {"status": "accepted"}
 
@@ -328,7 +402,7 @@ def test_topic_verifier_routes_are_fenced_at_every_grant_level():
 
 
 def test_trigger_door_validates_a_presented_credential(boundary_client):
-    # The trigger door is route-table public (not always-public), so the auth layer
+    # The trigger door is declared-public (not always-public), so the auth layer
     # still validates any PRESENTED credential and 401s a garbage one — the correct,
     # consistent posture with universal_webhook (a presented credential is never
     # silently ignored on a scope-resolved public route).

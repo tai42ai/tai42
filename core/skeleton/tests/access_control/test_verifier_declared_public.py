@@ -128,3 +128,84 @@ async def test_authed_route_stays_gated_regardless_of_owner(monkeypatch) -> None
     _wire(monkeypatch, registry, FakeAccessControlPg())
     ids = await v.resolve_resource_ids("/api/core/thing", "POST")
     assert ids == []
+
+
+# -- Non-/api doors: the webhook and trigger ingress, public by declaration, every shape --
+
+
+def _ingress_registry() -> RouteRegistry:
+    registry = RouteRegistry()
+    # The two non-/api public ingress doors, each serving POST and GET.
+    _record(registry, "/universal_webhook/{topic}", ["POST", "GET"], public=True, owner=CORE_OWNER)
+    _record(registry, "/trigger/{token}", ["POST", "GET"], public=True, owner=CORE_OWNER)
+    return registry
+
+
+async def test_non_api_public_webhook_door_is_public_per_method(monkeypatch) -> None:
+    # ``spa_shell_public=False`` so the shell tier can admit nothing — any public id here is
+    # the declared-public tier granting a non-/api templated door by its declaration.
+    settings = AccessControlSettings(spa_shell_public=False)
+    v = AccessControlVerifier(settings, providers=[])
+    _wire(monkeypatch, _ingress_registry(), FakeAccessControlPg())
+    for method in ("POST", "GET", "HEAD"):
+        assert await v.resolve_resource_ids("/universal_webhook/events", method) == [settings.public_resource_id], (
+            method
+        )
+    # A method the door does not declare is not opened by the tier.
+    assert await v.resolve_resource_ids("/universal_webhook/events", "PUT") == []
+
+
+async def test_non_api_public_trigger_door_is_public_per_method(monkeypatch) -> None:
+    settings = AccessControlSettings(spa_shell_public=False)
+    v = AccessControlVerifier(settings, providers=[])
+    _wire(monkeypatch, _ingress_registry(), FakeAccessControlPg())
+    for method in ("POST", "GET"):
+        assert await v.resolve_resource_ids("/trigger/tok", method) == [settings.public_resource_id], method
+
+
+async def test_concrete_non_api_public_probe_needs_no_acknowledgment(monkeypatch) -> None:
+    # /health is public by its registration; the runtime no longer consults
+    # ``acknowledged_public_routes`` — an empty acknowledged list still serves it public.
+    settings = AccessControlSettings(spa_shell_public=False, acknowledged_public_routes=())
+    v = AccessControlVerifier(settings, providers=[])
+    registry = RouteRegistry()
+    _record(registry, "/health", ["GET"], public=True, owner=CORE_OWNER)
+    _wire(monkeypatch, registry, FakeAccessControlPg())
+    for method in ("GET", "HEAD"):
+        assert await v.resolve_resource_ids("/health", method) == [settings.public_resource_id], method
+
+
+async def test_protected_row_does_not_re_protect_a_declared_public_non_api_door(monkeypatch) -> None:
+    # Precedence: the declaration is authoritative above the route table, so a later
+    # protected row on the webhook door never re-protects it (the tier short-circuits).
+    settings = AccessControlSettings(spa_shell_public=False)
+    v = AccessControlVerifier(settings, providers=[])
+    pg = FakeAccessControlPg()
+    pg.add_route("/universal_webhook/events", "locked")
+    _wire(monkeypatch, _ingress_registry(), pg)
+    assert await v.resolve_resource_ids("/universal_webhook/events", "POST") == [settings.public_resource_id]
+
+
+async def test_authed_non_api_route_resolves_universal_scope(monkeypatch) -> None:
+    # A registered authed=True non-/api route with no row resolves to the universal scope via
+    # the declared-protection tier (a role-holder reaches it); the same path unregistered
+    # resolves to nothing. The declared-protection tier reads the role gate's served surface,
+    # so point that at the same registry and rebuild its index.
+    from tai42_skeleton.access_control import role_gate
+
+    settings = AccessControlSettings(spa_shell_public=False)
+    v = AccessControlVerifier(settings, providers=[])
+    registry = RouteRegistry()
+    _record(registry, "/inbound", ["POST"], public=False, owner=CORE_OWNER)
+    _wire(monkeypatch, registry, FakeAccessControlPg())
+    monkeypatch.setattr(role_gate, "load_all_routes", registry.routes)
+    role_gate.reset_route_index()
+    try:
+        assert await v.resolve_resource_ids("/inbound", "POST") == ["*"]
+        empty = RouteRegistry()
+        monkeypatch.setattr(verifier_module, "route_registry", empty)
+        monkeypatch.setattr(role_gate, "load_all_routes", empty.routes)
+        role_gate.reset_route_index()
+        assert await v.resolve_resource_ids("/inbound", "POST") == []
+    finally:
+        role_gate.reset_route_index()

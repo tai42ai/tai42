@@ -7,6 +7,11 @@ scope (AUTHED — an unauthenticated request is denied 401/403 before the handle
 runs) or the public resource id (PUBLIC — the handler is reached with no
 credential). The point is to pin the intended stance so a future accidental
 auth-flip is caught.
+
+A route DECLARED public at registration (``authed=False``) is public by its own
+declaration, which the verifier resolves ABOVE the route table — so a PUBLIC
+stance here matches that declaration, and an AUTHED stance only governs a route
+the application does not declare public.
 """
 
 from __future__ import annotations

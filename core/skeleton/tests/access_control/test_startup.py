@@ -349,9 +349,10 @@ async def test_spa_check_fails_on_templated_authed_route(monkeypatch: pytest.Mon
 
 
 async def test_spa_check_fails_on_unacknowledged_templated_public_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A TEMPLATED authed=False non-/api GET route (the webhook door) is no longer skipped:
-    # unacknowledged, it halts boot exactly like a concrete public-by-declaration route.
-    _bind_spa_check(monkeypatch, [_meta("/universal_webhook/{topic}", ("GET",), False)], derived=set())
+    # A TEMPLATED authed=False non-/api route (the webhook door, served POST and GET) is no
+    # longer skipped: unacknowledged, it halts boot exactly like a concrete public-by-declaration
+    # route — and now it is audited on every method, not its GET alone.
+    _bind_spa_check(monkeypatch, [_meta("/universal_webhook/{topic}", ("POST", "GET"), False)], derived=set())
     with pytest.raises(RuntimeError, match=r"/universal_webhook/\{topic\}"):
         await check_spa_shell_public()
 
@@ -361,7 +362,7 @@ async def test_spa_check_passes_acknowledged_templated_route(monkeypatch: pytest
     # CONSCIOUSLY and is printed in the acknowledged surface line.
     _bind_spa_check(
         monkeypatch,
-        [_meta("/universal_webhook/{topic}", ("GET",), False), _meta("/{spa_path:path}", ("GET",), False)],
+        [_meta("/universal_webhook/{topic}", ("POST", "GET"), False), _meta("/{spa_path:path}", ("GET",), False)],
         derived=set(),
         acknowledged=("/universal_webhook/{topic}", "/{spa_path:path}"),
     )
@@ -369,6 +370,30 @@ async def test_spa_check_passes_acknowledged_templated_route(monkeypatch: pytest
         await check_spa_shell_public()  # no raise
     assert "/universal_webhook/{topic}" in caplog.text
     assert "/{spa_path:path}" in caplog.text
+
+
+async def test_spa_check_fails_on_unacknowledged_post_only_public_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A POST-only authed=False non-/api route serves NO GET, so the old GET-only audit never
+    # saw it. The audit now covers every method: an unacknowledged public POST door halts boot
+    # the same conscious-review step the GET doors require, which is what keeps the boot gate
+    # from weakening when the declared-public tier opens public POST doors.
+    _bind_spa_check(monkeypatch, [_meta("/inbound", ("POST",), False)], derived=set())
+    with pytest.raises(RuntimeError, match="/inbound"):
+        await check_spa_shell_public()
+
+
+async def test_spa_check_passes_acknowledged_post_only_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same POST-only public door, acknowledged by its registered template, passes boot.
+    _bind_spa_check(monkeypatch, [_meta("/inbound", ("POST",), False)], derived=set(), acknowledged=("/inbound",))
+    await check_spa_shell_public()  # no raise
+
+
+async def test_spa_check_passes_a_post_only_authed_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A POST-only authed=True non-/api route serves no GET, so the GET-only shell fallback can
+    # never reach it; the declared-protection tier protects it at runtime. The audit does not
+    # fail it (the invisible-to-the-derivation bucket guards the GET-only shell fallback alone).
+    _bind_spa_check(monkeypatch, [_meta("/inbound", ("POST",), True)], derived=set())
+    await check_spa_shell_public()  # no raise
 
 
 async def test_spa_check_passes_on_offline_whole_package_surface() -> None:

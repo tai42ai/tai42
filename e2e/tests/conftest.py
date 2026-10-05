@@ -670,8 +670,8 @@ def stripe_stack(
     in as resources — the webhook-signing secret the test holds and signs with, the one
     bridge-callback secret both the door and the bridge read, and the FakeStripe origin the
     tools' ``STRIPE_API_BASE`` points at. Seeded BEFORE boot with a root ``*`` key and a
-    route table pinning the webhook ingress + callback door public (readiness probes are
-    denied until the table pins them public), exactly as ``bridge_stack``."""
+    route table; the webhook ingress, the callback door and the readiness probes are public
+    by their own ``authed=False`` declaration and need no row, exactly as ``bridge_stack``."""
     resource_kwargs = {
         "stripe_webhook_secret": secrets.token_hex(16),
         "bridge_callback_secret": secrets.token_hex(16),

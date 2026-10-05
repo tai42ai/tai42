@@ -2,7 +2,7 @@
 
 A route's shape is its sequence of segments with the literal text erased from
 every template position, so two routes that can match the SAME concrete request
-have overlapping shapes. The registry indexes every ``/api`` route by shape to
+have overlapping shapes. The registry indexes every handler route by shape to
 answer two questions with one algebra: does a newly registered route COLLIDE
 with an existing one of a different owner (at registration), and which registered
 route OWNS a concrete request path (in the verifier's declared-public tier).
@@ -71,6 +71,17 @@ def parse_shape(path: str) -> Shape:
         else:
             segments.append(Param())
     return tuple(segments)
+
+
+def is_fallback_shape(shape: Shape) -> bool:
+    """Whether ``shape`` is a bare rest-converter — a single ``{name:path}`` and nothing else.
+
+    A route of this shape (``/{name:path}``) claims no path of its own: its terminal
+    rest-converter overlaps EVERY request path, so it is a catch-all history fallback rather
+    than a route that owns a concrete surface. It therefore owns no shape and is left out of
+    the ownership index; the gate's fallback tier governs it.
+    """
+    return len(shape) == 1 and isinstance(shape[0], PathParam)
 
 
 def parse_concrete(path: str) -> Shape:

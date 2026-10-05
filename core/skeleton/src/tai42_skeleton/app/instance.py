@@ -230,12 +230,12 @@ def build_app() -> TaiMCP:
             # The always-public login surface is enumerated (visible at every boot) and
             # an accidental authed mount under it fails the boot closed.
             app.lifecycle.on_startup(check_always_public_routes)
-            # The SPA-shell public fallback surface is audited: the derived reserved set
-            # is printed, an unacknowledged public-by-declaration non-/api GET route fails
-            # the boot closed, and the control-plane terminal-deny invariant is confirmed.
-            # Also on reload: a reload can add an authed non-/api GET route while the
-            # HTTP-edge verifier outlives it, so a stale reserved set would serve that
-            # route the anonymous shell. The reset must run AFTER the reimport.
+            # The non-/api public route surface is audited on every method: the derived
+            # reserved set is printed, an unacknowledged public-by-declaration non-/api route
+            # (any method) fails the boot closed, and the control-plane terminal-deny
+            # invariant is confirmed. Also on reload: a reload can add an authed non-/api GET
+            # route while the HTTP-edge verifier outlives it, so a stale reserved set would
+            # serve that route the anonymous shell. The reset must run AFTER the reimport.
             app.lifecycle.on_startup(check_spa_shell_public)
             app.lifecycle.on_reload(check_spa_shell_public)
             app.lifecycle.on_reload(reset_registered_reserved_paths)

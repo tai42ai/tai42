@@ -25,11 +25,11 @@ def test_scopes_public_list(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/api/auth/public-routes"
-        return data_response(["/universal_webhook/events"])
+        return data_response(["/metrics"])
 
     result = run_cli(monkeypatch, handler, ["scopes", "public-list"], json_output=True)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == ["/universal_webhook/events"]
+    assert json.loads(result.output) == ["/metrics"]
 
 
 def test_scopes_public_pin_sends_url_and_pattern(monkeypatch: pytest.MonkeyPatch) -> None:

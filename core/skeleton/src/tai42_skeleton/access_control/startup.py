@@ -114,33 +114,38 @@ async def check_always_public_routes() -> None:
 
 
 async def check_spa_shell_public() -> None:
-    """Audit the non-``/api`` GET route surface against the SPA-shell public fallback.
+    """Audit the non-``/api`` route surface — every method — against the public-admission rules.
 
     Driven by the ROUTE REGISTRY, never a static list, and EXHAUSTIVE: it iterates EVERY
-    registered non-``/api``/non-``/mcp`` GET route — CONCRETE AND TEMPLATED — and never
-    silently skips one. Each such route must fall into exactly ONE bucket, or the boot
-    FAILS closed:
+    registered non-``/api``/non-``/mcp`` handler route — CONCRETE AND TEMPLATED, on EVERY
+    method — and never silently skips one. Each must fall into exactly ONE bucket, or the
+    boot FAILS closed:
 
     * consciously ACKNOWLEDGED public — its REGISTERED path (the template string for a
       templated route) is in ``acknowledged_public_routes``. This is a registry-level
-      match: templates are ordinary keys. The operational probes, the webhook ingress
-      door, and the SPA shell catch-all itself are the app's acknowledged public GETs;
-    * gated by AUTHZ (``authed=True``) AND visible to the fallback derivation — a CONCRETE
-      authed route is in the DERIVED reserved set (the shell fallback skips it). A TEMPLATED
-      ``authed=True`` route is structurally NOT derivable into the concrete reserved set:
-      the verifier's declared-protection tier now resolves such a route (matched per method)
-      to the universal scope BEFORE the shell fallback could fire, so it is protected at
-      runtime — but the boot still FAILS it (the author must ``/api``-prefix it —
-      control-plane excluded — or consciously acknowledge it) so the shell fallback's
-      concrete-only derivation is never the SOLE thing standing between a templated authed
-      GET and the public shell, the same belt-and-braces posture as the always-public authed
-      refusal;
-    * ``authed=False`` and NOT acknowledged → the boot FAILS: a boot-log flag is not a
-      control; a publicly declared non-API GET must be a consciously reviewed decision.
+      match: templates are ordinary keys. The operational probes, the webhook and trigger
+      ingress doors, and the SPA shell catch-all itself are the app's acknowledged public
+      routes;
+    * ``authed=True`` and visible to the GET-only shell fallback's derivation — a CONCRETE
+      authed GET route is in the DERIVED reserved set (the shell fallback skips it). A
+      TEMPLATED ``authed=True`` GET route is structurally NOT derivable into the concrete
+      reserved set: the verifier's declared-protection tier now resolves such a route
+      (matched per method) to the universal scope BEFORE the shell fallback could fire, so
+      it is protected at runtime — but the boot still FAILS it (the author must
+      ``/api``-prefix it — control-plane excluded — or consciously acknowledge it) so the
+      shell fallback's concrete-only derivation is never the SOLE thing standing between a
+      templated authed GET and the public shell, the same belt-and-braces posture as the
+      always-public authed refusal. An authed route that serves NO GET passes: the GET-only
+      shell can never reach it, and the declared-protection tier protects it at runtime;
+    * ``authed=False`` and NOT acknowledged → the boot FAILS on ANY method: a boot-log flag
+      is not a control; a publicly declared non-API door — a public GET page or a public
+      POST ingress — must be a consciously reviewed decision. This is what keeps the gate
+      from weakening when the verifier's declared-public tier opens public POST doors: such
+      a door exists only after a reviewer acknowledged it.
 
     ``/api``/``/mcp`` routes (concrete and templated alike) are excluded: ``serve_spa``
     404s them, so the shell tier can never reach them regardless of auth or templating. A
-    declared-public ``/api`` GET is granted by the verifier's owner-agnostic declared-public
+    declared-public ``/api`` route is granted by the verifier's owner-agnostic declared-public
     tier from its ``authed=False`` registration, never by this non-/api audit.
     The fallback state and the derived + acknowledged surfaces are printed so drift and the
     public-by-declaration vs shell-fallback split stay reviewable in ops logs. The audit's
@@ -185,7 +190,7 @@ async def check_spa_shell_public() -> None:
 
 @dataclass
 class _SpaShellAudit:
-    """The four buckets every registered non-/api GET route is sorted into by the SPA-shell audit.
+    """The four buckets every registered non-/api handler route is sorted into by the public-surface audit.
 
     Consciously acknowledged, acknowledged-yet-authed (a contradiction),
     authed-but-invisible-to-the-fallback, and public-by-declaration-yet-unacknowledged.
@@ -198,7 +203,7 @@ class _SpaShellAudit:
 
 
 def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[str]) -> _SpaShellAudit:
-    """Bucket every registered non-mounted, non-/api GET route against the SPA-shell fallback.
+    """Bucket every registered non-mounted, non-/api handler route (every method) against the rules.
 
     See :func:`check_spa_shell_public` for the rule each bucket encodes.
     """
@@ -207,11 +212,9 @@ def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[
 
     audit = _SpaShellAudit()
     for meta in route_registry.routes():
-        if "GET" not in meta.methods:
-            continue
         # A MOUNTED surface (an MCP transport, the sub-MCP mount) is never served by the
         # SPA shell — the mount matches first and answers behind its own credential gate
-        # — so it is outside this audit's subject: the handler GET surface.
+        # — so it is outside this audit's subject: the handler route surface.
         if meta.mounted:
             continue
         registered = meta.path
@@ -235,15 +238,21 @@ def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[
                 audit.acknowledged_but_authed.append(registered)
             continue
         if meta.authed:
-            # Gated by authz ONLY if the fallback derivation can SEE it. A CONCRETE authed
-            # route is in the derived reserved set (the shell skips it). A TEMPLATED authed
-            # route is structurally not derivable; the declared-protection tier now protects
-            # such a route at runtime, but the boot still refuses it so the shell fallback's
-            # concrete-only derivation is never the sole protection (belt-and-braces).
-            if templated or canonicalize_path(registered) not in derived:
+            # The invisible-to-the-derivation bucket guards the GET-only SPA-shell fallback,
+            # so it applies to GET-serving routes alone: a route that serves no GET can never
+            # reach the shell, and the declared-protection tier protects it at runtime. For a
+            # GET-serving authed route it is gated ONLY if the fallback derivation can SEE it.
+            # A CONCRETE authed route is in the derived reserved set (the shell skips it). A
+            # TEMPLATED authed route is structurally not derivable; the declared-protection
+            # tier now protects such a route at runtime, but the boot still refuses it so the
+            # shell fallback's concrete-only derivation is never the sole protection
+            # (belt-and-braces).
+            if "GET" in meta.methods and (templated or canonicalize_path(registered) not in derived):
                 audit.invisible_authed.append(registered)
         else:
-            # authed=False and not acknowledged: public by declaration with no conscious review.
+            # authed=False and not acknowledged: public by declaration with no conscious
+            # review — on ANY method. A public POST ingress door exists only after a reviewer
+            # acknowledged it, the same conscious step the public GET doors already require.
             audit.unacknowledged.append(registered)
     return audit
 

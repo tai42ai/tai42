@@ -135,12 +135,76 @@ def test_match_treats_a_braced_request_segment_as_a_literal_not_a_template() -> 
     assert templated.path == "/api/e2e-epsilon/{slug}"
 
 
-def test_non_api_and_mounted_routes_are_outside_the_shape_index() -> None:
+def test_mounted_routes_are_outside_the_shape_index() -> None:
     registry = RouteRegistry()
-    _record(registry, "/health", ["GET"], CORE_OWNER, public=True, authed=False)
+    # A mounted surface serves behind its own credential gate and is not a handler, so it
+    # is never indexed — ``match`` answers nothing for it.
     registry.record_mounted(path="/mcp/{path:path}", methods=["GET", "POST"], name="m", summary="mount")
-    assert registry.match("/health", "GET") is None
     assert registry.match("/mcp/x", "GET") is None
+
+
+def test_match_resolves_a_non_api_templated_route_per_served_method() -> None:
+    registry = RouteRegistry()
+    # A non-/api templated handler route (the webhook ingress door) is indexed like any
+    # other: ``match`` resolves it per served method, folding HEAD into GET.
+    _record(registry, "/universal_webhook/{topic}", ["POST", "GET"], CORE_OWNER, public=True, authed=False)
+    for method in ("POST", "GET", "HEAD"):
+        meta = registry.match("/universal_webhook/events", method)
+        assert meta is not None, method
+        assert meta.public is True
+        assert meta.path == "/universal_webhook/{topic}"
+    # A method the route does not serve resolves to nothing.
+    assert registry.match("/universal_webhook/events", "PUT") is None
+
+
+def test_match_resolves_a_concrete_non_api_route() -> None:
+    registry = RouteRegistry()
+    # A concrete non-/api handler route (a readiness probe) is indexed and resolves to its
+    # own metadata.
+    _record(registry, "/health", ["GET"], CORE_OWNER, public=True, authed=False)
+    meta = registry.match("/health", "GET")
+    assert meta is not None
+    assert meta.public is True
+    assert meta.path == "/health"
+
+
+def test_bare_rest_converter_fallback_is_not_indexed() -> None:
+    registry = RouteRegistry()
+    # The SPA history-fallback catch-all is a bare rest-converter: it claims no path of its
+    # own, so it owns no shape and is left to the gate's fallback tier.
+    _record(registry, "/{spa_path:path}", ["GET"], CORE_OWNER, public=True, authed=False)
+    assert registry.match("/agents", "GET") is None
+    # A plugin GET records beside it with no cross-owner collision — the fallback overlaps
+    # every GET path but, being unindexed, is never a collision partner.
+    _record(registry, "/api/acme/one/x", ["GET"], _PLUGIN_A, public=True, authed=False)
+    assert registry.match("/api/acme/one/x", "GET") is not None
+
+
+def test_api_shape_index_lists_non_api_core_entries_with_no_marketplace_collision() -> None:
+    from tai42_skeleton.marketplace.routes import ResolvedRoute, find_collisions, owned_routes_from_registry
+
+    registry = RouteRegistry()
+    _record(registry, "/universal_webhook/{topic}", ["POST", "GET"], CORE_OWNER, public=True, authed=False)
+    _record(registry, "/health", ["GET"], CORE_OWNER, public=True, authed=False)
+    indexed = {entry.meta.path for entry in registry.api_shape_index()}
+    assert "/universal_webhook/{topic}" in indexed
+    assert "/health" in indexed
+    # A candidate /api route checked against the non-/api core entries reports no collision:
+    # a core shape whose first literal is not ``api`` can never overlap an ``/api`` shape.
+    owned = owned_routes_from_registry(registry)
+    candidate = [
+        ResolvedRoute(
+            item="acme/one:web",
+            kind="web",
+            base="acme/one",
+            default_base="acme/one",
+            path="/hook",
+            full_path="/api/acme/one/hook",
+            methods=("POST",),
+            public=True,
+        )
+    ]
+    assert find_collisions(candidate, owned, exclude_ref=None) == []
 
 
 def test_match_prefers_the_more_specific_core_shape() -> None:

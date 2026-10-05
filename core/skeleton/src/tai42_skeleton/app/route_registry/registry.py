@@ -29,7 +29,7 @@ from tai42_skeleton.app.route_registry.route_action import (
     _success_media_types,
     derive_route_action,
 )
-from tai42_skeleton.app.route_shapes import collision, overlap, parse_concrete, parse_shape
+from tai42_skeleton.app.route_shapes import collision, is_fallback_shape, overlap, parse_concrete, parse_shape
 
 
 class RouteRegistry:
@@ -40,7 +40,7 @@ class RouteRegistry:
     idempotent), never accumulates duplicates.
 
     Alongside the append-only ``(path, methods)`` map the registry keeps a
-    generation-scoped SHAPE INDEX of every ``/api`` route by parsed shape + served
+    generation-scoped SHAPE INDEX of every handler route by parsed shape + served
     methods + owner. The index answers the cross-owner collision check at
     registration and the concrete-path ownership :meth:`match` the verifier's
     declared-public tier reads. Unlike ``_routes`` (a process-spine dedup map that
@@ -281,14 +281,17 @@ class RouteRegistry:
         return self._staged_shapes if self._staged_shapes is not None else self._committed_shapes
 
     def _record_shape(self, meta: RouteMetadata, method_key: tuple[str, ...]) -> None:
-        """Index one ``/api`` handler route by shape, raising on a cross-owner collision.
+        """Index one handler route by shape, raising on a cross-owner collision.
 
-        Mounted surfaces (their own credential gate) and non-``/api`` routes (governed by the SPA-shell
-        tier) are outside the ownership space.
+        Every handler route of any path shape is indexed so the ownership :meth:`match` answers
+        for it. Two kinds stay out: a MOUNTED surface (served behind the mount's own credential
+        gate, not a handler), and a BARE REST-CONVERTER fallback (``/{name:path}`` — see
+        :func:`is_fallback_shape`), which claims no path of its own and is governed by the
+        gate's fallback tier instead.
         """
-        if meta.mounted or not meta.path.startswith("/api/"):
-            return
         shape = parse_shape(meta.path)
+        if meta.mounted or is_fallback_shape(shape):
+            return
         served = self._served_methods(method_key)
         target = self._shape_target()
         for entry in target:
@@ -302,16 +305,19 @@ class RouteRegistry:
         target.append(_ShapeEntry(shape=shape, methods=served, meta=meta))
 
     def api_shape_index(self) -> list[_ShapeEntry]:
-        """The committed ``/api`` shape generation — each entry's parsed shape, served methods, and owning metadata.
+        """The committed shape generation — each entry's parsed shape, served methods, and owning metadata.
 
-        The marketplace install pre-flight and preview door read it to collision-check a candidate route
-        against exactly the ownership the live epoch serves (unlike :meth:`routes`, whose dedup map keeps
-        an uninstalled plugin's stale entry).
+        Covers EVERY indexed handler route, not just the ``/api`` surface the name records: a
+        non-``/api`` core route rides the same generation. The marketplace install pre-flight and
+        preview door read it to collision-check a candidate ``/api`` route against exactly the
+        ownership the live epoch serves (unlike :meth:`routes`, whose dedup map keeps an
+        uninstalled plugin's stale entry); a candidate ``/api`` shape can only overlap another
+        ``/api`` shape, so the non-``/api`` entries present here never collide with one.
         """
         return list(self._committed_shapes)
 
     def match(self, path: str, method: str) -> RouteMetadata | None:
-        """The registered ``/api`` route that OWNS the concrete request ``(path, method)``, or ``None``.
+        """The registered handler route that OWNS the concrete request ``(path, method)``, or ``None``.
 
         Deterministic: cross-owner shapes never overlap, so at most one owner matches; among a single
         owner's overlapping shapes the most specific (most literal segments) wins.

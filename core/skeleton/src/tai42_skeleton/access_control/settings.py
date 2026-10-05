@@ -132,9 +132,10 @@ class AccessControlSettings(TaiBaseSettings):
     # resolution, so the control plane stays authenticated regardless of what the route
     # table holds (a pinned row, a dynamic pattern, or a direct write). A leaked or
     # coerced operator key therefore cannot durably open the control plane (including the
-    # pin door and key minting) to unauthenticated callers. Ingress/sub-app routes that
-    # operators legitimately pin public (e.g. ``/universal_webhook/...``) live outside
-    # this set; extend it to reserve further prefixes.
+    # pin door and key minting) to unauthenticated callers. Routes an operator legitimately
+    # pins public — an authed registered route the operator chooses to open (e.g.
+    # ``/metrics``), or a path a mounted app serves that the registry does not describe —
+    # live outside this set; extend it to reserve further prefixes.
     reserved_public_pin_prefixes: tuple[str, ...] = ("/api/auth",)
 
     # The pre-auth login surface: url prefixes that are ALWAYS public. Resolution
@@ -179,17 +180,17 @@ class AccessControlSettings(TaiBaseSettings):
     # Every entry is validated absolute + canonical + non-``/api``-overlapping below.
     reserved_operational_supplement: tuple[str, ...] = ("/openapi.json",)
 
-    # The explicit, code-reviewed allowlist of ``authed=False`` non-``/api`` GET routes
-    # that are ALLOWED to be public by DECLARATION. Deny-by-default: an ``authed=False``
-    # non-``/api`` GET route NOT listed here FAILS boot (a boot-log flag is not a control;
-    # a reviewer must consciously add a path here before boot accepts it as a publicly
-    # declared non-API GET). Matched at REGISTRY level against each route's REGISTERED path,
-    # so a TEMPLATED public route is acknowledged by its template STRING (an ordinary key).
-    # The app's intentional public-by-declaration GET routes are so acknowledged by default:
-    # the operational probes (``/health``, ``/ready``), the webhook ingress
-    # door (``/universal_webhook/{topic}``), the trigger-link door (``/trigger/{token}``),
-    # and the SPA history-fallback catch-all (``/{spa_path:path}``) that IS the public
-    # shell. A NEW such route halts boot until a
+    # The explicit, code-reviewed allowlist of ``authed=False`` non-``/api`` routes, ANY
+    # method, that are ALLOWED to be public by DECLARATION. Deny-by-default: an
+    # ``authed=False`` non-``/api`` route NOT listed here FAILS boot (a boot-log flag is not
+    # a control; a reviewer must consciously add a path here before boot accepts it as a
+    # publicly declared non-API door — a public GET page or a public POST ingress alike).
+    # Matched at REGISTRY level against each route's REGISTERED path, so a TEMPLATED public
+    # route is acknowledged by its template STRING (an ordinary key). The app's intentional
+    # public-by-declaration routes are so acknowledged by default: the operational probes
+    # (``/health``, ``/ready``), the webhook ingress door (``/universal_webhook/{topic}``),
+    # the trigger-link door (``/trigger/{token}``), and the SPA history-fallback catch-all
+    # (``/{spa_path:path}``) that IS the public shell. A NEW such route halts boot until a
     # reviewer acknowledges it. Entries must be absolute, canonical, and never under
     # ``/api``/``/mcp`` (an acknowledged PUBLIC control-plane route is a contradiction).
     acknowledged_public_routes: tuple[str, ...] = (
