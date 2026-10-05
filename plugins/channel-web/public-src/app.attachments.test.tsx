@@ -69,9 +69,13 @@ describe('sending with an attachment', () => {
     await waitFor(() =>
       expect(screen.getByTestId('attach-item')).toHaveAttribute('data-status', 'ready'),
     );
-    // The tray thumbnail is the client data URL — the served url 404s pre-bind.
-    const thumb = document.querySelector('.tcw-attach-thumb') as HTMLImageElement;
-    await waitFor(() => expect(thumb.src).toMatch(/^data:/));
+    // The tray thumbnail is the client data URL — the served url 404s pre-bind. That
+    // data: URL lands from an async FileReader read that can resolve after the item
+    // reaches "ready", so the thumbnail is polled for inside waitFor until it appears.
+    await waitFor(() => {
+      const thumb = document.querySelector('.tcw-attach-thumb') as HTMLImageElement | null;
+      expect(thumb?.src).toMatch(/^data:/);
+    });
 
     await user.type(screen.getByLabelText('Message'), 'hello');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
