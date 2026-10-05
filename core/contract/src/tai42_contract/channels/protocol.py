@@ -125,6 +125,24 @@ class Channel(Protocol):
     start frame on ``True`` and a stop frame on ``False``. It is fire-and-forget,
     carries no reply, and raises :class:`ChannelDeliveryError` ONLY on a genuine send
     failure the caller logs, never for a transient it can ignore.
+
+    A channel that keeps medium-side state per delivered ask MAY also declare one OPTIONAL
+    method, ``withdraw(withdrawal)``, taking a
+    :class:`~tai42_contract.channels.ChannelWithdrawal` and returning ``None`` — the same
+    documented-member convention as ``deliver_ordered`` and ``validate_form_schema``, NOT a Protocol
+    method (so declaring it never tightens the runtime structural check and a channel that omits it
+    stays a valid ``Channel``; the platform reads it defensively with ``getattr(channel, "withdraw",
+    None)``). The platform fires it when it tears a delivered ask DOWN — a cancel, a thread or person
+    erase — so the channel RELEASES everything it reserved or cached for
+    ``withdrawal.interaction_id`` at delivery: the pending correlation and any per-interaction
+    sidecar. It MUST compare the stored interaction id and never drop a reservation another ask now
+    holds on the same address (a newer ask may already own the single slot). It MUST be idempotent
+    and a no-op when nothing is held (expired, already forwarded, never reserved — a link-answered
+    format reserves nothing). It raises :class:`ChannelDeliveryError` ONLY on a store fault the caller
+    should retry; it never raises for "nothing to release". It touches no medium-side message — the
+    question already sent stays in the chat, and a reply to it meets the inbound ladder's 404 path,
+    which remains the backstop. A channel that keeps no withdrawable state omits the member; absent =
+    nothing to release.
     """
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
