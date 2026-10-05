@@ -257,14 +257,18 @@ def _translate_update(
     if event["kind"] == _EVENT_SUBMITTED and not errors:
         return _completion(flow_token, properties, labels, partial, update.get("values") or {})
     if event["kind"] == _EVENT_PAGE_ADVANCED and not errors:
-        advanced = _advance_screen(screen, schema, pages, names, slots, values, options, partial, update)
+        advanced = _advance_screen(screen, schema, pages, names, labels, slots, values, options, partial, update)
         if advanced is not None:
             return advanced
-    return {"screen": screen, "data": _update_data(update, properties, names, slots)}
+    return {"screen": screen, "data": _update_data(update, properties, names, labels, slots)}
 
 
 def _update_data(
-    update: dict[str, Any], properties: dict[str, Any], names: dict[str, str], slots: dict[str, str]
+    update: dict[str, Any],
+    properties: dict[str, Any],
+    names: dict[str, str],
+    labels: dict[str, str],
+    slots: dict[str, str],
 ) -> dict[str, Any]:
     """The screen-``data`` keys a FORM UPDATE sets: field values, option lists, display slots, error message."""
     out: dict[str, Any] = {}
@@ -281,7 +285,7 @@ def _update_data(
             out[slots[slot]] = value
     errors = update.get("errors") or {}
     if errors:
-        out["error_message"] = "; ".join(f"{field}: {message}" for field, message in errors.items())
+        out["error_message"] = "; ".join(f"{labels.get(field, field)}: {message}" for field, message in errors.items())
     return out
 
 
@@ -312,6 +316,7 @@ def _advance_screen(
     schema: dict[str, Any],
     pages: list[dict[str, Any]] | None,
     names: dict[str, str],
+    labels: dict[str, str],
     slots: dict[str, str],
     values: dict[str, Any],
     options: dict[str, list[dict[str, Any]]],
@@ -346,5 +351,5 @@ def _advance_screen(
             data_out[f"{names[name]}__val"] = _init_value(ptype, merged_values[name])
         else:
             data_out[f"{names[name]}__val"] = [] if ptype == "array" else False if ptype == "boolean" else ""
-    data_out.update(_update_data(update, properties, names, slots))
+    data_out.update(_update_data(update, properties, names, labels, slots))
     return {"screen": next_screen, "data": data_out}
