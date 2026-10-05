@@ -60,12 +60,15 @@ class _FakeStates:
         self._record = record or {}
         self.applies: list[tuple[str, Any]] = []
 
-    def patch_onto(self, facet: Any) -> None:
-        facet.context = self.context
-        facet.read = self.read
-        facet.apply_template_jq = self.apply_template_jq
-        facet.apply = self.apply
-        facet.apply_batch = self.apply_batch
+    def patch_onto(self, facet: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The facet is the process app's single, long-lived ``_states_facet`` instance, so the
+        # fakes go on through monkeypatch and are lifted at teardown — a raw assignment would
+        # leave them on the shared facet and answer an unrelated later test's states door.
+        monkeypatch.setattr(facet, "context", self.context)
+        monkeypatch.setattr(facet, "read", self.read)
+        monkeypatch.setattr(facet, "apply_template_jq", self.apply_template_jq)
+        monkeypatch.setattr(facet, "apply", self.apply)
+        monkeypatch.setattr(facet, "apply_batch", self.apply_batch)
 
     def context(self):
         return None
@@ -206,7 +209,7 @@ async def test_in_process_park_defers_door_updates_to_the_real_terminal(monkeypa
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake_states.patch_onto(app._states_facet)
+            fake_states.patch_onto(app._states_facet, monkeypatch)
 
             deadline = datetime.now(UTC) + timedelta(hours=1)
 
@@ -266,7 +269,7 @@ async def test_mcp_edge_park_defers_door_updates_to_the_real_terminal(monkeypatc
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake_states.patch_onto(app._states_facet)
+            fake_states.patch_onto(app._states_facet, monkeypatch)
 
             deadline = datetime.now(UTC) + timedelta(hours=1)
 
@@ -377,7 +380,7 @@ async def test_reaper_redelivery_applies_the_deferred_binding(monkeypatch, fake_
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake_states.patch_onto(app._states_facet)
+            fake_states.patch_onto(app._states_facet, monkeypatch)
             monkeypatch.setattr(continuation_module, "_run_continuation", _terminal_stub({"ok": 9}))
             due = ContinuationDue(
                 interaction_id="rd1",
@@ -409,7 +412,7 @@ async def test_failed_terminal_applies_no_deferred_updates(monkeypatch, fake_red
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake_states.patch_onto(app._states_facet)
+            fake_states.patch_onto(app._states_facet, monkeypatch)
             monkeypatch.setattr(continuation_module, "_run_continuation", _raise_failed)
             due = ContinuationDue(
                 interaction_id="rf1",
@@ -492,7 +495,7 @@ async def test_re_park_carries_the_deferred_binding_to_the_final_terminal(monkey
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake_states.patch_onto(app._states_facet)
+            fake_states.patch_onto(app._states_facet, monkeypatch)
             binding = _door_binding()
             asked = {"again": False}
 
