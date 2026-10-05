@@ -5,7 +5,7 @@ import base64
 import logging
 import mimetypes
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, cast
@@ -415,8 +415,38 @@ class ResourceManager:
             raise AssertionError
         return {"type": "image_url", "image_url": {"url": _data_uri(data, mime)}}
 
+    def _evict_engine_cache(self, matches: Callable[[str], bool]) -> None:
+        """Drop every engine-cached dependency template whose name ``matches``.
+
+        ``{% include %}`` and ``{% extends %}`` resolve their target through the
+        loader into the engine's own template cache, keyed by name and separate
+        from the compiled-template cache this manager keys by id. The loader serves
+        stored text with no up-to-date signal, so a target re-uploaded under the
+        same name stays served from this cache until the process restarts unless its
+        entry is dropped when the source changes. Removing the matching entries here
+        makes the next render reload the new source. A top-level render compiles via
+        ``from_string`` and never populates this cache, so only dependency entries
+        are affected.
+
+        The engine cache is always present (independent of the compiled-template
+        cache), so this runs regardless of whether compiled caching is enabled.
+        """
+        cache = self._env.cache
+        if cache is None:
+            return
+        # The engine keys each entry ``(weakref.ref(loader), name)``; match on the
+        # name and delete the live entries that match.
+        for key in list(cache.keys()):
+            if matches(key[1]):
+                del cache[key]
+
     def clear_cache(self) -> None:
-        """Drop every compiled template from the cache (no-op when caching is off)."""
+        """Drop every compiled template and every engine-cached dependency.
+
+        The compiled-template clear is a no-op when that cache is off; the engine's
+        dependency cache (``{% include %}``/``{% extends %}`` targets) is always
+        present and is cleared whole, so no re-uploaded dependency is served stale.
+        """
         # ``_get_compiled_template`` is the alru_cache wrapper only when caching is
         # enabled; otherwise it's the bare method with no cache controls.
         cache_clear = getattr(self._get_compiled_template, "cache_clear", None)
@@ -424,19 +454,25 @@ class ResourceManager:
             cache_clear()
             self._cached_template_ids.clear()
             logger.info("ResourceManager cache cleared.")
+        if self._env.cache is not None:
+            self._env.cache.clear()
 
     def evict_compiled(self, template_id: str) -> None:
-        """Evict a single compiled template from the cache (no-op if caching is off).
+        """Evict a single template from the compiled cache and the engine cache.
 
         The public eviction seam: a store write replaces content the compiled cache
         keys by id, so both the local write paths and a fleet ``evict_template`` op
-        applied on a sibling worker drop the one stale key here. Idempotent — an
-        already-absent key is a no-op.
+        applied on a sibling worker drop the one stale key here. The engine-cached
+        include/extends target of the same name is dropped too, so a re-uploaded
+        dependency is reloaded on the next render. Idempotent — an already-absent
+        key is a no-op; the compiled-cache drop is a no-op when caching is off while
+        the engine-cache drop always runs.
         """
         invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
         if invalidate is not None:
             invalidate(template_id)
         self._cached_template_ids.discard(template_id)
+        self._evict_engine_cache(lambda name: name == template_id)
 
     def evict_dir(self, path: str) -> None:
         """Evict every compiled template under ``path/`` (no-op if caching is off).
@@ -451,12 +487,15 @@ class ResourceManager:
     def _evict_compiled_prefix(self, prefix: str) -> None:
         """Evict every compiled template whose id falls under ``prefix``.
 
-        Tracked ids that the cache has already dropped (TTL/LRU) are pruned in
-        the same pass, keeping the registry bounded by what is actually cached.
+        The engine-cached include/extends targets under the prefix are dropped too,
+        so a re-uploaded dependency is reloaded on the next render. Tracked ids that
+        the cache has already dropped (TTL/LRU) are pruned in the same pass, keeping
+        the registry bounded by what is actually cached.
         """
+        self._evict_engine_cache(lambda name: name.startswith(prefix))
         invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
         if invalidate is None:
-            # Caching disabled: nothing is cached, so nothing to track.
+            # Compiled-template caching disabled: nothing is tracked by id.
             self._cached_template_ids.clear()
             return
         contains = getattr(self._get_compiled_template, "cache_contains", None)
