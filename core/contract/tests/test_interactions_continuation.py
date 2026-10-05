@@ -24,7 +24,6 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
     PARK_COMPLETION_THREAD_KEY,
-    PARK_COMPLETION_WITHDRAWN,
     SUSPENDED_INTERACTION_MARKER_KEY,
     ChainedResume,
     NestedParkOwnershipError,
@@ -533,17 +532,6 @@ def test_a_repark_notice_renders_a_deadline_less_park_as_none():
         reset_chained_resume(completion)
     assert notice is not None
     assert notice[1]["expiry_at"] is None
-
-
-def test_the_withdrawn_terminal_is_exported_and_distinct():
-    # The quiet-close terminal: a third terminal value, distinct from the other two and from the
-    # one non-terminal status, so a reader can tell "took down on purpose" from "broke".
-    assert PARK_COMPLETION_WITHDRAWN == "withdrawn"
-    assert PARK_COMPLETION_WITHDRAWN not in {
-        PARK_COMPLETION_SUCCEEDED,
-        PARK_COMPLETION_FAILED,
-        PARK_COMPLETION_REPARKED,
-    }
 
 
 def test_attaching_a_claim_drops_it_from_the_ledger():

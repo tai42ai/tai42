@@ -45,7 +45,6 @@ from tai42_contract.channels.options import NOTIFICATION_OPTION_MAX_CHARS as NOT
 from tai42_contract.channels.options import NOTIFICATION_OPTIONS_MAX as NOTIFICATION_OPTIONS_MAX
 from tai42_contract.channels.protocol import Channel, notify_in_order
 from tai42_contract.channels.templates import ChannelTemplate
-from tai42_contract.channels.withdrawal import ChannelWithdrawal
 
 __all__ = [
     "NOTIFICATION_FOOTER_MAX_CHARS",
@@ -58,7 +57,6 @@ __all__ = [
     "ChannelInputError",
     "ChannelNotification",
     "ChannelTemplate",
-    "ChannelWithdrawal",
     "Correlation",
     "CorrelationStore",
     "InboundAnswerOutcome",
