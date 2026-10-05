@@ -390,3 +390,47 @@ async def test_page_advance_applies_reaction_options_and_defaults_unfilled_val(
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
     assert out["screen"] == "SCREEN_B"
     assert out["data"]["tier__ds"] == [{"id": "s", "title": "Silver"}]
+
+
+async def test_reaction_error_message_uses_the_field_title_not_the_key(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer", "title": "Quantity"}},
+        "required": ["qty"],
+    }
+    await cache_reaction_form(_TOKEN, schema, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {"errors": {"qty": "must be at least 1"}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "submitted", "qty": "0"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    # The guest reads the human label the field renders, not the raw schema key.
+    assert out["data"]["error_message"] == "Quantity: must be at least 1"
+
+
+async def test_reaction_error_message_falls_back_to_the_key_without_a_title(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer"}},
+        "required": ["qty"],
+    }
+    await cache_reaction_form(_TOKEN, schema, None, {}, {}, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {"errors": {"qty": "must be at least 1"}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "submitted", "qty": "0"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    # No title: the field renders under its key, and so does its error.
+    assert out["data"]["error_message"] == "qty: must be at least 1"
