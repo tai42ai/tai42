@@ -77,6 +77,8 @@ async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_delet
     interactions store is unconfigured. Idempotent — safe to re-run under a delete's retry. Returns
     the interaction ids reached.
     """
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN
+
     from tai42_skeleton.interactions.kill import kill_members
 
     settings = interactions_settings()
@@ -88,7 +90,9 @@ async def cancel_parks_for_thread(thread_id: str, *, reason: str = "thread_delet
     async with client_ctx(RedisClient, settings.redis) as conn:
         thread_members = await store.thread_park_members(conn, thread_id)
         members = [*thread_members, *await store.subject_members(conn, "thread", thread_id)]
-        reached = await kill_members(conn, store, members, reason=reason)
+        # A thread/route delete took the run down on purpose: WITHDRAWN, never FAILED — a FAILED here
+        # would mint a fresh error-line record INTO the thread being deleted.
+        reached = await kill_members(conn, store, members, reason=reason, terminal=PARK_COMPLETION_WITHDRAWN)
         # Reconcile the reverse index: the kill prune already dropped a pruned member, this drops an
         # orphan whose state had vanished, and a concurrently-added park keeps its member.
         await store.reconcile_thread_park_members(conn, thread_id, thread_members)
@@ -102,6 +106,8 @@ async def cancel_parks_for_person(person_id: str, *, reason: str = "person_erase
     ``(kind="person", key=person_id)``, so the erase kills across both to reach a park on any scope.
     Runs on one connection; idempotent under retry. Returns the interaction ids reached.
     """
+    from tai42_contract.interactions import PARK_COMPLETION_WITHDRAWN
+
     from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
     from tai42_skeleton.interactions.kill import kill_members
 
@@ -117,7 +123,8 @@ async def cancel_parks_for_person(person_id: str, *, reason: str = "person_erase
             *await store.subject_members(conn, "thread", thread_id),
             *await store.subject_members(conn, "person", person_id),
         ]
-        reached = await kill_members(conn, store, members, reason=reason)
+        # A person erase took the run down on purpose: WITHDRAWN, never FAILED.
+        reached = await kill_members(conn, store, members, reason=reason, terminal=PARK_COMPLETION_WITHDRAWN)
         await store.reconcile_thread_park_members(conn, thread_id, thread_members)
     return reached
 

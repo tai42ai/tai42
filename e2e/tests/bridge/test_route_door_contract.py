@@ -13,11 +13,12 @@ can park on): a route onto the caller-ask probe agent surfaces the run's caller 
 ``reply_expr`` (``$asks``) and resumes it through ``resume_expr`` on the next inbound (``$parked``
 bound) — the door-contract round trip. The tool legs run over ``bridge`` and cover a null start
 (nothing runs), ``start_expr`` + ``extras_expr`` reaching the run, and ``cancel_expr`` whole-chain
-killing a parked run (its FAILED delivered as the route's client-safe notice).
+killing a parked run (a WITHDRAWN quiet close — the run is torn down and the caller is told nothing).
 """
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 
 import pytest
@@ -215,7 +216,8 @@ async def test_tool_route_start_and_extras_expr_reach_the_run(
 async def test_tool_route_cancel_expr_kills_a_parked_run(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
     # A tool route whose target parks (capturing the door's completion binding). The first inbound
     # parks it silently; the cancel inbound's cancel_expr names $parked[0].id, whole-chain killing
-    # the run — the door delivers the run's single FAILED as the route's client-safe error notice.
+    # the run. A cancel WITHDRAWS the run — it is torn down, but a withdrawal is a quiet close, so
+    # the door delivers NO error notice (nothing is said to the caller).
     from ._bridge_support import ERROR_ANSWER_TEXT, wait_probe_record
 
     identity = uniq("dccancel-site").replace("_", "-")
@@ -252,11 +254,15 @@ async def test_tool_route_cancel_expr_kills_a_parked_run(bridge: BridgeHarness, 
     parked = await wait_probe_record(bridge, f"tool_target_park:{marker}", deadline=20.0)
     assert len(parked) == 1, parked
 
-    # Turn 2: cancel_expr names the parked id; the whole-chain kill delivers the run's FAILED as the
-    # route's uniform client-safe notice.
+    # Turn 2: cancel_expr names the parked id; the whole-chain kill WITHDRAWS the run — a quiet
+    # close, so the door delivers NO error notice to the caller. Wait a bounded window for a notice
+    # (none is coming — a withdrawal says nothing), then confirm from the replayed transcript that
+    # none was delivered.
     assert (await web.send(_CANCEL_WORD)).status_code == 200
-    delivered = await web.frames(until=_out_carrying(ERROR_ANSWER_TEXT), deadline=40.0)
-    out_texts = [d["text"] for e, d in delivered if e == "chat.message" and d["direction"] == "out"]
-    assert any(ERROR_ANSWER_TEXT in t for t in out_texts), (
-        f"the cancel did not deliver the FAILED notice, saw {out_texts!r}"
+    with contextlib.suppress(Exception):
+        await web.frames(until=_out_carrying(ERROR_ANSWER_TEXT), deadline=10.0)
+    replay = await web.frames()
+    out_texts = [d["text"] for e, d in replay if e == "chat.message" and d["direction"] == "out"]
+    assert not any(ERROR_ANSWER_TEXT in t for t in out_texts), (
+        f"a withdrawn cancel delivered an error notice: {out_texts!r}"
     )

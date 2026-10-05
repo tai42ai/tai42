@@ -326,12 +326,18 @@ class _StoreReads(_StoreKeys):
             fields = {serde.as_str(k): serde.as_str(v) for k, v in raw_state.items()}
             raw_delivery = fields.get("delivery")
             raw_subjects = fields.get("subjects")
+            # The ask's channel/recipient ride the stored request (destroyed by the prune MULTI), so
+            # read them here, BEFORE the kill prunes, onto the durable kill-due record — the kill
+            # withdraws the channel's reservation under them. The same parse ``state_from_raw`` does.
+            request = InteractionRequest.model_validate_json(fields["request"])
             return KillTarget(
                 kind="park" if fields.get("status") == "pending" else "running",
                 group_id=fields.get("group_id"),
                 delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+                channel=request.channel,
+                recipient=request.recipient,
             )
         raw_outcome = await cast(
             "Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.outcome_key(interaction_id))
@@ -416,9 +422,12 @@ class _StoreReads(_StoreKeys):
             reason=fields.get("reason", ""),
             attempts=int(fields["attempts"]),
             deadline_ms=int(fields["deadline_ms"]),
+            terminal=fields["terminal"],
             delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
             run_delivery_id=fields.get("run_delivery_id"),
             subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+            channel=fields.get("channel"),
+            recipient=fields.get("recipient"),
         )
 
     async def due_untaken_outcomes(self, r: Redis, now: datetime, horizon_seconds: int) -> list[str]:

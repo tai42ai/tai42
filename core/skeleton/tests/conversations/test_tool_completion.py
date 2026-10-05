@@ -6,7 +6,11 @@ import logging
 
 import pytest
 from tai42_contract.agent import Agent
-from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
+from tai42_contract.interactions import (
+    PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_SUCCEEDED,
+    PARK_COMPLETION_WITHDRAWN,
+)
 
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
@@ -156,6 +160,48 @@ async def test_deliver_tool_completion_non_success_delivers_error_notice(env, mo
     warnings = _completion_warnings(caplog, "e1")
     assert len(warnings) == 1
     assert "'failed'" in warnings[0]
+
+
+async def test_deliver_tool_completion_withdrawn_delivers_nothing_and_warns_nothing(env, monkeypatch, caplog):
+    # The platform took the run down on purpose (a cancel/erase): the tool completion delivers
+    # NOTHING — no record minted, no send, no thread-mode TTL refresh — and, being a recognized
+    # vocabulary value, is NOT warned about. Naturally idempotent (a redelivered fire re-returns None).
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await _fire_tool(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="wd1",
+            result={"result": {"reply": "MUST NOT be delivered"}},
+            status=PARK_COMPLETION_WITHDRAWN,
+        )
+    await _settle()
+    assert out == {"message_id": None}
+    assert await _store().get_record("wd1") is None
+    assert channel.sends == []
+    assert _completion_warnings(caplog, "wd1") == []
+
+
+async def test_deliver_agent_completion_withdrawn_delivers_nothing_and_warns_nothing(env, monkeypatch, caplog):
+    # The agent-route sibling: a WITHDRAWN terminal delivers nothing and warns nothing.
+    channel = FakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await _fire_agent(
+            thread_id="bridge:line:+15550002222",
+            completion_id="wda1",
+            result={"reply": "MUST NOT be delivered"},
+            status=PARK_COMPLETION_WITHDRAWN,
+        )
+    await _settle()
+    assert out == {"message_id": None}
+    assert await _store().get_record("wda1") is None
+    assert channel.sends == []
+    assert _completion_warnings(caplog, "wda1") == []
 
 
 async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(env, monkeypatch):

@@ -40,6 +40,7 @@ backend worker), so the module is ``backendless``."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable
 from typing import Any
@@ -247,7 +248,11 @@ async def _open_held_route_and_park(
 
 async def _assert_door_failed_once(web: WebChatClient, *, deadline: float = 40.0) -> None:
     """Wait until the killed run's client-safe FAILED notice is delivered into the transcript, and
-    assert it is delivered EXACTLY ONCE — the run's single door FAILED, never one per interaction."""
+    assert it is delivered EXACTLY ONCE — the run's single door FAILED, never one per interaction.
+
+    This is the EXPIRY/real-failure terminal (``PARK_COMPLETION_FAILED``): a lapsed deadline or a
+    broken run still tells the caller. A deliberate withdrawal (cancel / delete / erase) instead
+    closes quietly — see :func:`_assert_quiet_close`."""
     delivered = await web.frames(
         until=lambda event, data: (
             event == "chat.message" and data["direction"] == "out" and _ERROR_ANSWER_TEXT in data["text"]
@@ -260,6 +265,27 @@ async def _assert_door_failed_once(web: WebChatClient, *, deadline: float = 40.0
         if event == "chat.message" and data["direction"] == "out" and _ERROR_ANSWER_TEXT in data["text"]
     ]
     assert len(notices) == 1, f"the door FAILED must be delivered exactly once, saw {notices!r}"
+
+
+def _is_error_notice(event: str, data: dict) -> bool:
+    return event == "chat.message" and data["direction"] == "out" and _ERROR_ANSWER_TEXT in data["text"]
+
+
+async def _assert_quiet_close(web: WebChatClient, *, deadline: float = 10.0) -> None:
+    """A WITHDRAWN teardown — a cancel, a route/thread delete, or a person erase of a parked run —
+    is a QUIET close: the caller receives NO error notice and NO outcome (the run's terminal is
+    ``PARK_COMPLETION_WITHDRAWN``, which delivers nothing), while the run is still torn down.
+
+    Waits a bounded window for an error notice (there must be none), then confirms from the replayed
+    transcript that none was delivered. The run is already torn down by the time each caller reaches
+    here (its subject index / thread is gone), so the wait only ever confirms the silence."""
+    with contextlib.suppress(Exception):
+        # No notice is coming, so this wait times out (or the stream closes) — suppressed; the
+        # replay below is the authoritative check and still surfaces a real stream fault loudly.
+        await web.frames(until=_is_error_notice, deadline=deadline)
+    replay = await web.frames()
+    notices = [data["text"] for event, data in replay if _is_error_notice(event, data)]
+    assert notices == [], f"a withdrawn teardown must deliver no error notice, saw {notices!r}"
 
 
 @pytest.mark.needs(
@@ -286,7 +312,9 @@ async def test_thread_delete_tears_down_a_route_parked_caller_ask(
     await _api(stack, token).delete(f"/api/conversations/{route_name}/thread?{urlencode({'thread_id': thread_id})}")
 
     await _await_route_subject_cleared(stack, token, _thread_subject(subj))
-    await _assert_door_failed_once(web)
+    # A thread delete WITHDRAWS the parked run: it is torn down (subject cleared above) but the
+    # caller is told nothing — a quiet close, never the FAILED error notice.
+    await _assert_quiet_close(web)
 
 
 @pytest.mark.needs(
@@ -310,7 +338,8 @@ async def test_route_delete_tears_down_a_route_parked_caller_ask(
     await _api(stack, token).delete(f"/api/conversations/{route_name}")
 
     await _await_route_subject_cleared(stack, token, _thread_subject(subj))
-    await _assert_door_failed_once(web)
+    # A route delete WITHDRAWS the parked run: torn down, but the caller is told nothing.
+    await _assert_quiet_close(web)
 
 
 @pytest.mark.needs(
@@ -337,7 +366,8 @@ async def test_person_erase_tears_down_a_route_parked_caller_ask(
     await _api(stack, token).delete(f"/api/conversations/persons/{person_id}")
 
     await _await_route_subject_cleared(stack, token, _thread_subject(subj))
-    await _assert_door_failed_once(web)
+    # A person erase WITHDRAWS the parked run: torn down, but the caller is told nothing.
+    await _assert_quiet_close(web)
 
 
 # ---- route-door kills of an AGENT-driven caller ask, and a route-started user ask on expiry -----
@@ -451,11 +481,11 @@ async def test_thread_delete_leaves_no_agents_driver_state(
 
     await _api(stack, token).delete(f"/api/conversations/{route_name}/thread?{urlencode({'thread_id': thread_id})}")
 
-    # The whole-chain kill tears the agents driver's park index down and delivers the run's single
-    # FAILED to the door once; the forgotten thread no longer appears on the route.
-    await _assert_door_failed_once(web)
+    # The whole-chain kill tears the agents driver's park index down (the forgotten thread no longer
+    # appears on the route) and WITHDRAWS the run — a quiet close, so the caller is told nothing.
     listing = await _api(stack, token).get(f"/api/conversations/{route_name}/threads")
     assert thread_id not in [item["thread_id"] for item in listing["items"]], listing["items"]
+    await _assert_quiet_close(web)
 
 
 @pytest.mark.skipif(_REAL_LLM, reason="the agent turn runs on the scripted llm_stub; the real leg is on the creds host")
@@ -473,7 +503,7 @@ async def test_thread_delete_leaves_no_agents_driver_state(
     "setting:agent:tools_agent",
     "setting:tai42_e2e_fixtures.door_agent",
 )
-async def test_a_kill_at_a_nested_caller_ask_delivers_one_door_failed_keyed_by_completion(
+async def test_a_cancel_at_a_nested_caller_ask_closes_the_run_quietly(
     agent_route_park_stack: tuple[TaiStack, str], llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
     stack, token = agent_route_park_stack
@@ -503,11 +533,11 @@ async def test_a_kill_at_a_nested_caller_ask_delivers_one_door_failed_keyed_by_c
     assert (await web.send(uniq("nc-open"))).status_code == 200
     await web.frames(until=_out_carrying(question), deadline=60.0)
 
-    # A cancel inbound enters AT the nested caller ask (cancel_expr names its id): the kill reads the
-    # run's stored delivery address and delivers the run's single FAILED to the door once — keyed by
-    # the run's completion, never one per interaction.
+    # A cancel inbound enters AT the nested caller ask (cancel_expr names its id): the whole-chain
+    # kill WITHDRAWS the run — it is torn down, but a withdrawal is a quiet close, so the caller is
+    # told nothing (no FAILED error notice reaches the transcript).
     assert (await web.send(_CANCEL_WORD)).status_code == 200
-    await _assert_door_failed_once(web)
+    await _assert_quiet_close(web)
 
 
 @pytest.mark.needs(

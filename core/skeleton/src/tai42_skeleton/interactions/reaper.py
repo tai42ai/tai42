@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from redis.asyncio import Redis
-from tai42_contract.interactions import InteractionRequest, InteractionResponse
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, InteractionRequest, InteractionResponse
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -152,7 +152,15 @@ async def _reap_one_expired_park(
         # so no expiry event fires either. On a genuine expiry ``kill_park`` prunes the park, fires
         # the driver teardown and delivers the run's single FAILED, and the expiry event is emitted.
         result = await kill_park(
-            r, store, interaction_id, state.group_id, reason=_EXPIRED_REASON, act_on=KILL_ACT_ON_PENDING
+            r,
+            store,
+            interaction_id,
+            state.group_id,
+            reason=_EXPIRED_REASON,
+            act_on=KILL_ACT_ON_PENDING,
+            # A lapsed deadline is the run FAILING to complete — the person reads the uniform notice.
+            # Stated explicitly (never derived from the reason) so the one FAILED door is legible.
+            terminal=PARK_COMPLETION_FAILED,
         )
         if result != "pruned":
             return False
