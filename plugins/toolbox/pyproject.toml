@@ -62,7 +62,7 @@ dev = [
     "tai42-toolbox[http,prometheus,chain,embeddings,classifier,proxy]",
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.6",
+    "ruff>=0.16.10",
     "pyright>=1.1.389",
     "trustme>=1.1",             # loopback TLS certs for the HTTPS-proxy test path
     # The plugin-spec test parses tai-plugin.yml.

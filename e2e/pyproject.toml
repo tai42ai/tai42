@@ -125,7 +125,7 @@ tai42-e2e = "tai42_e2e.pytest_plugin"
 # Dev/CI-only, never in the wheel's Requires-Dist: the static gates plus the
 # studio leg's boot-time plugin prerequisite.
 dev = [
-    "ruff>=0.6",
+    "ruff>=0.16.10",
     "pyright>=1.1.389",
     # Splits the suite into balanced shards across the CI matrix's shard axis.
     "pytest-split>=0.10",
