@@ -66,7 +66,7 @@ llm = [
     "langchain>=1.2,<2",
     "langchain-core>=1.2,<2",
     "langchain-openai>=1.6.7",
-    "langgraph>=1.1,<2",
+    "langgraph>=1.2.12,<2",
     "langgraph-checkpoint>=4.2.0",
     "langgraph-checkpoint-redis>=0.5",
     # Imported directly by llm/checkpoint/checkpoint.py and llm/store/store.py:
