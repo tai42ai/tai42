@@ -187,48 +187,55 @@ def test_write_env_round_trips_dollar_values_without_interpolation(monkeypatch: 
     assert mgr.read_env() == values
 
 
-def test_write_env_rejects_value_that_cannot_round_trip(tmp_path) -> None:
-    """A value ending in a single backslash cannot be represented as a
-    double-quoted ``.env`` literal that the parser reads back — ``write_env``
-    raises ``ValueError`` naming the key and leaves any existing store untouched
-    instead of silently dropping that key (and every key after it) on reload."""
+def test_write_env_round_trips_a_backslash_ending_value_preserving_existing_store(tmp_path) -> None:
+    """A backslash-ending Windows-path value round-trips through the double-quoted
+    ``.env`` literal, so ``write_env`` succeeds: the value is read back byte-for-byte
+    and a pre-existing store key is preserved by the merge."""
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    # Pre-existing store that must survive the rejected write.
+    # Pre-existing store that the merge-write must preserve.
     mgr.write_env({"KEEP": "safe"})
-    before = (tmp_path / ".env").read_text(encoding="utf-8")
 
-    with pytest.raises(ValueError, match=r"WINPATH.*cannot be round-tripped"):
-        mgr.write_env({"WINPATH": "C:\\data\\"})
+    mgr.write_env({"WINPATH": "C:\\data\\"})
 
-    # The write did not happen: the store is byte-for-byte unchanged.
-    assert (tmp_path / ".env").read_text(encoding="utf-8") == before
-    assert mgr.read_env() == {"KEEP": "safe"}
+    assert mgr.read_env() == {"KEEP": "safe", "WINPATH": "C:\\data\\"}
 
 
-def test_write_env_rejects_value_that_cannot_round_trip_leaves_no_file(tmp_path) -> None:
-    """When there is no pre-existing store, a value that cannot round-trip raises
-    and no ``.env`` file is created."""
+def test_write_env_round_trips_a_backslash_ending_value(tmp_path) -> None:
+    """With no pre-existing store, a backslash-ending value writes the ``.env`` file
+    and reads back exactly."""
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    with pytest.raises(ValueError, match="cannot be round-tripped"):
-        mgr.write_env({"WINPATH": "C:\\data\\"})
-    assert not (tmp_path / ".env").exists()
+    mgr.write_env({"WINPATH": "C:\\data\\"})
+    assert (tmp_path / ".env").exists()
+    assert mgr.read_env() == {"WINPATH": "C:\\data\\"}
 
 
-def test_write_env_rejects_bad_value_in_last_position_via_sentinel(tmp_path) -> None:
-    """A value that cannot round-trip is caught even when it is the LAST key written
-    (its trailing backslash would otherwise pair with the closing quote only to be
-    exposed by the next appended key). The trailing sentinel binding exercises that
-    last position now, so the write raises whether the bad value is last or not."""
+def test_write_env_round_trips_a_backslash_ending_value_with_other_keys(tmp_path) -> None:
+    """A backslash-ending value round-trips in either key position — written last
+    (only the guard's trailing sentinel sits after it) or followed by another key —
+    so every key reads back exactly."""
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    # Bad value in the LAST position: only the appended sentinel sits after it, so
-    # the sentinel is what surfaces the fault.
-    with pytest.raises(ValueError, match=r"WINPATH.*cannot be round-tripped"):
-        mgr.write_env({"GOOD": "ok", "WINPATH": "C:\\data\\"})
-    assert not (tmp_path / ".env").exists()
+    # Backslash-ending value in the LAST position.
+    mgr.write_env({"GOOD": "ok", "WINPATH": "C:\\data\\"})
+    assert mgr.read_env() == {"GOOD": "ok", "WINPATH": "C:\\data\\"}
 
-    # Same bad value NOT last (a good key follows it) also raises.
+    # Same value NOT last (a good key follows it) also round-trips.
+    other = FileConfigManager(config_dir_path=str(tmp_path / "other"))
+    (tmp_path / "other").mkdir()
+    other.write_env({"WINPATH": "C:\\data\\", "GOOD": "ok"})
+    assert other.read_env() == {"WINPATH": "C:\\data\\", "GOOD": "ok"}
+
+
+def test_write_env_round_trip_guard_raises_on_a_value_that_does_not_parse_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The defensive round-trip guard fails loudly if a serialized value does not
+    parse back to itself. With the serializer forced to emit a literal that
+    ``dotenv_values`` reads back as a different string, ``write_env`` raises
+    ``ValueError`` naming the key and writes no file."""
+    monkeypatch.setattr(fm, "_dotenv_serialize_value", lambda value: '"not-the-value"')
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
     with pytest.raises(ValueError, match=r"WINPATH.*cannot be round-tripped"):
-        mgr.write_env({"WINPATH": "C:\\data\\", "GOOD": "ok"})
+        mgr.write_env({"WINPATH": "real-value"})
     assert not (tmp_path / ".env").exists()
 
 
@@ -323,13 +330,14 @@ def test_replace_env_rejects_malformed_key(tmp_path) -> None:
         mgr.replace_env({"BAD KEY": "1"})
 
 
-def test_replace_env_rejects_value_that_cannot_round_trip_leaves_no_file(tmp_path) -> None:
-    """A value the parser cannot round-trip fails loudly and writes nothing, so the
-    whole-map replace never lands a corrupt store."""
+def test_replace_env_round_trips_a_backslash_ending_value(tmp_path) -> None:
+    """A whole-map replace of a backslash-ending value writes the ``.env`` file and
+    reads back exactly, with only the replaced key stored."""
+    (tmp_path / ".env").write_text("DROP=gone\n", encoding="utf-8")
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    with pytest.raises(ValueError, match="cannot be round-tripped"):
-        mgr.replace_env({"WINPATH": "C:\\data\\"})
-    assert not (tmp_path / ".env").exists()
+    mgr.replace_env({"WINPATH": "C:\\data\\"})
+    # Whole-map replace: the prior key is gone and the new value reads back exactly.
+    assert mgr.read_env() == {"WINPATH": "C:\\data\\"}
 
 
 def test_replace_env_atomic_write_cleans_up_temp_on_replace_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

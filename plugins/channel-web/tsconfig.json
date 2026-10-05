@@ -9,6 +9,8 @@
     "jsx": "react-jsx",
     "useDefineForClassFields": true,
 
+    "types": ["node"],
+
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
@@ -22,9 +24,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
 
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["public-src/*"]
+      "@/*": ["./public-src/*"]
     },
 
     "noEmit": true

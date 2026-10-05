@@ -191,16 +191,15 @@ class FileConfigManager(ConfigManager):
             written = {k: v for k, v in merged.items() if v is not None and v != ""}
             lines = [f"{k}={_dotenv_serialize_value(v)}" for k, v in written.items()]
             content = "\n".join(lines) + ("\n" if lines else "")
-            # Re-parse the serialized content through the same parser as read_env
-            # (``dotenv_values`` with ``interpolate=False``, over a StringIO stream)
-            # and confirm every written key round-trips. python-dotenv exposes no
-            # double-quoted representation for some values (e.g. a value ending in an
-            # odd number of backslashes): its parser pairs the trailing backslash with
-            # the closing quote and drops that key AND every key after it. A key
-            # serialized last hides the fault until the next write appends a key after
-            # it, so the content is probed with a trailing sentinel binding to exercise
-            # that position now — any value that cannot round-trip fails loudly here
-            # rather than silently corrupting the store on a later reload.
+            # Defensive round-trip check: re-parse the serialized content through the
+            # same parser as read_env (``dotenv_values`` with ``interpolate=False``,
+            # over a StringIO stream) and confirm every written key parses back to the
+            # exact value written. A value that did not read back identically would
+            # silently drop that key AND every key after it on the next reload, so it
+            # is caught here and raised loudly instead. A value serialized last could
+            # hide such a fault until a later write appends a key after it, so the
+            # content is probed with a trailing sentinel binding to exercise that last
+            # position now.
             # The sentinel key is grown with ``_`` until it collides with no written
             # key, so a caller that legitimately writes a key literally named
             # ``_TAI_ENV_ROUNDTRIP_PROBE`` is not shadowed by the probe (dotenv is

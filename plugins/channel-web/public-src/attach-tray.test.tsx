@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, type Mock, vi } from 'vitest';
 
 import { AttachTray } from '@/attach-tray';
 import type { AttachItem } from '@/uploads';
@@ -31,9 +31,13 @@ function renderTray(
     onRetry?: (id: string) => void;
     disabled?: boolean;
   } = {},
-): { onRemove: ReturnType<typeof vi.fn>; onRetry: ReturnType<typeof vi.fn> } {
-  const onRemove = overrides.onRemove ? (overrides.onRemove as ReturnType<typeof vi.fn>) : vi.fn();
-  const onRetry = overrides.onRetry ? (overrides.onRetry as ReturnType<typeof vi.fn>) : vi.fn();
+): { onRemove: Mock<(id: string) => void>; onRetry: Mock<(id: string) => void> } {
+  const onRemove = overrides.onRemove
+    ? (overrides.onRemove as Mock<(id: string) => void>)
+    : vi.fn<(id: string) => void>();
+  const onRetry = overrides.onRetry
+    ? (overrides.onRetry as Mock<(id: string) => void>)
+    : vi.fn<(id: string) => void>();
   render(
     <AttachTray
       items={overrides.items ?? [item()]}
