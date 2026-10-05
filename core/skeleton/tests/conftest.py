@@ -61,6 +61,7 @@ import tai42_skeleton.versioning.store as versioning_store
 
 from ._fakes.advisory_locks import FakeAdvisoryLocks
 from ._fakes.interactions_redis import FakeRedis
+from ._module_identity import restore_states_module_identity
 from .runs.conftest import FakeRunIndexPg
 from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 from .versioning.conftest import FakeVersioningPg
@@ -374,3 +375,10 @@ def root_logger_restored():
         root.handlers[:] = handlers
         root.setLevel(level)
         reset_all_settings()
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    # Restore the states package's submodules to their canonical objects before every test, so
+    # an orphaned re-import left by an earlier suite's reload exercise cannot answer the states
+    # feature gate (which resolves through the parent package). Runs before the item's fixtures.
+    restore_states_module_identity()
