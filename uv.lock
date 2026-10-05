@@ -2431,7 +2431,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-checkpoint-redis"
-version = "0.5.1"
+version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langgraph-checkpoint" },
@@ -2439,9 +2439,9 @@ dependencies = [
     { name = "redis" },
     { name = "redisvl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/52/81/8a578f048e8ae3ff79cdd223b98158c8b23e3efc640281f3986b03bc8779/langgraph_checkpoint_redis-0.5.1.tar.gz", hash = "sha256:ea3696f7b78ec8380949961cd9b9767c373437ec0c6fcc56dfbab3bde4d78ff4", size = 119869, upload-time = "2026-07-14T17:46:45.176Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/40/8eb4cc6d4aeda603783e8abc7695c0791ffcea52dacc2b58b063f02ceb18/langgraph_checkpoint_redis-0.5.2.tar.gz", hash = "sha256:be67fd850b0799e99b10d2c3a2be2b0bda35c45ad0269e1414da30d9a9f97752", size = 120928, upload-time = "2026-08-20T09:05:20.183Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/71/e968397941d24d013a833e894731a3dadd5022e6bf3650b898efddf10a5b/langgraph_checkpoint_redis-0.5.1-py3-none-any.whl", hash = "sha256:9c9b1184fb98991d49ebed6a7b81ff05f2e994ee7d695bfb91410a9a512c178c", size = 131688, upload-time = "2026-07-14T17:46:43.723Z" },
+    { url = "https://files.pythonhosted.org/packages/83/4c/4b9524c4f451760765be72bac67c45bc3be25dfd126184fa101dffee1c33/langgraph_checkpoint_redis-0.5.2-py3-none-any.whl", hash = "sha256:9347b8806065377fdb72ab3fd94bae97b5c62d092807c0e3633796195a0d333a", size = 132614, upload-time = "2026-08-20T09:05:18.892Z" },
 ]
 
 [[package]]
@@ -5934,7 +5934,7 @@ requires-dist = [
     { name = "langgraph", marker = "extra == 'llm'", specifier = ">=1.2.12,<2" },
     { name = "langgraph-checkpoint", marker = "extra == 'llm'", specifier = ">=4.2.0" },
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.0.5" },
-    { name = "langgraph-checkpoint-redis", marker = "extra == 'llm'", specifier = ">=0.5" },
+    { name = "langgraph-checkpoint-redis", marker = "extra == 'llm'", specifier = ">=0.5.2" },
     { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph-checkpoint-sqlite'", specifier = ">=3.0.3" },
     { name = "mcp", specifier = ">=1" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'", specifier = ">=3.3.2" },
