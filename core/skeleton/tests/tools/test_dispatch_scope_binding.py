@@ -52,13 +52,16 @@ class _FakeStates:
         self.evals: list[str] = []
         self.applies: list[tuple[str, Any]] = []
 
-    def patch_onto(self, facet: Any) -> None:
-        facet.context = self.context
-        facet.read = self.read
-        facet.eval_template_jq = self.eval_template_jq
-        facet.apply_template_jq = self.apply_template_jq
-        facet.apply = self.apply
-        facet.apply_batch = self.apply_batch
+    def patch_onto(self, facet: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The facet is the process app's single, long-lived ``_states_facet`` instance, so the
+        # fakes go on through monkeypatch and are lifted at teardown — a raw assignment would
+        # leave them on the shared facet and answer an unrelated later test's states door.
+        monkeypatch.setattr(facet, "context", self.context)
+        monkeypatch.setattr(facet, "read", self.read)
+        monkeypatch.setattr(facet, "eval_template_jq", self.eval_template_jq)
+        monkeypatch.setattr(facet, "apply_template_jq", self.apply_template_jq)
+        monkeypatch.setattr(facet, "apply", self.apply)
+        monkeypatch.setattr(facet, "apply_batch", self.apply_batch)
 
     def context(self):
         return None
@@ -131,13 +134,13 @@ async def _register_preset(name: str, binding: StateBinding | None, seen: dict[s
     await app.preset_manager.register(name, "base", {}, [], "a preset", state_binding=binding, version=1)
 
 
-def test_door_and_preset_binding_merge_inject_before_and_update_after() -> None:
+def test_door_and_preset_binding_merge_inject_before_and_update_after(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
     fake = _FakeStates(record={"n": 1})
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
             preset_binding = StateBinding(
                 states=[
                     _attach(
@@ -181,13 +184,13 @@ def test_door_and_preset_binding_merge_inject_before_and_update_after() -> None:
     asyncio.run(run())
 
 
-def test_no_binding_dispatch_never_touches_the_states_facet() -> None:
+def test_no_binding_dispatch_never_touches_the_states_facet(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
     fake = _FakeStates()
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
             await _register_preset("p2", None, seen)
             result = await app.tools.run_tool("p2", {"x": 9})
             assert result == {"ok": 9}
@@ -199,7 +202,7 @@ def test_no_binding_dispatch_never_touches_the_states_facet() -> None:
     asyncio.run(run())
 
 
-def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
+def test_door_binding_applies_to_a_PLAIN_tool_target(monkeypatch: pytest.MonkeyPatch) -> None:
     # A door binding whose target is a plain tool (NOT a registered preset) still applies
     # at the outermost dispatch — injection before, update after.
     seen: dict[str, Any] = {}
@@ -207,7 +210,7 @@ def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
 
             @app.tools.tool(force=True)
             async def plain(x: int, injected: dict | None = None) -> dict:
@@ -234,7 +237,7 @@ def test_door_binding_applies_to_a_PLAIN_tool_target() -> None:
     asyncio.run(run())
 
 
-def test_nested_preset_dispatch_does_not_apply_its_own_binding() -> None:
+def test_nested_preset_dispatch_does_not_apply_its_own_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     # A preset's own binding fires only when it is the OUTERMOST dispatch. Dispatched as a
     # sub-tool (nested), it applies nothing — no double apply.
     seen: dict[str, Any] = {}
@@ -242,7 +245,7 @@ def test_nested_preset_dispatch_does_not_apply_its_own_binding() -> None:
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
             inner_binding = StateBinding(
                 states=[
                     _attach(updates=[StateUpdate(template_jq="inner_mark", adapter=TemplatedText(content="{v: .ok}"))])
@@ -294,7 +297,7 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
 
             @app.tools.tool(force=True)
             async def parker(x: int, injected: dict | None = None) -> SuspendedInteraction:
@@ -324,7 +327,7 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
     asyncio.run(run())
 
 
-def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
+def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     # LOW→loss: an MCP ``tools/call`` with NO ``arguments`` (the wire's absent → None) must
     # still deliver the binding's injections TO THE DISPATCH. The edge fires
     # ``context.message`` itself, so the injection target and the dispatched arguments are ONE
@@ -342,7 +345,7 @@ def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
             binding = StateBinding(
                 states=[
                     _attach(input_injections=[StateInjection(jq=TemplatedText(content="{n: .n}"), into="injected")])
@@ -370,7 +373,7 @@ def test_mcp_edge_injects_into_absent_arguments_reaching_the_dispatch() -> None:
     asyncio.run(run())
 
 
-def test_injections_run_even_when_arguments_is_None_one_invariant() -> None:
+def test_injections_run_even_when_arguments_is_None_one_invariant(monkeypatch: pytest.MonkeyPatch) -> None:
     # A dispatch that carried NO arguments (the MCP wire's ``None``) must not silently SKIP
     # the binding's injections while its updates still fire — injections and updates share ONE
     # guard, both engaged over ``{}`` when the door carried none.
@@ -379,7 +382,7 @@ def test_injections_run_even_when_arguments_is_None_one_invariant() -> None:
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
             binding = StateBinding(
                 states=[
                     _attach(
@@ -399,7 +402,7 @@ def test_injections_run_even_when_arguments_is_None_one_invariant() -> None:
     asyncio.run(run())
 
 
-def test_mcp_edge_binding_update_runs_over_the_tool_output_not_the_toolresult() -> None:
+def test_mcp_edge_binding_update_runs_over_the_tool_output_not_the_toolresult(monkeypatch: pytest.MonkeyPatch) -> None:
     # HIGH: at the MCP ``tools/call`` edge the binding's UPDATE jq must run over the tool's
     # reduced OUTPUT (the ``ToolResult``'s structured content), exactly as the in-process door
     # runs it over the raw return — not over the opaque ``ToolResult`` wrapper, whose top level
@@ -417,7 +420,7 @@ def test_mcp_edge_binding_update_runs_over_the_tool_output_not_the_toolresult() 
 
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            fake.patch_onto(app._states_facet)
+            fake.patch_onto(app._states_facet, monkeypatch)
             binding = StateBinding(
                 states=[
                     _attach(
