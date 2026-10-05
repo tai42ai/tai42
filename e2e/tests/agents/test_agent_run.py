@@ -154,16 +154,16 @@ async def test_agent_preset_over_agent_receives_the_engine_holder_per_call_kwarg
     # system/user messages and run config arrive per call. The preset transform fills every omitted
     # optional (``system_prompt`` among them) with its schema default, so the run must accept the
     # per-call ``system_message`` beside that null default. ``response_format`` forces structured
-    # output: the strategy binds a tool named for the schema ``title`` (``Answer``), the model
-    # answers by calling it, and the run returns the parsed payload.
+    # output: the native-capable mock model takes the provider-native plan, so each run answers
+    # with the JSON payload as its message content and returns the parsed object.
     name = uniq("holderkw")
     http_value = f"http-{uniq('answer')}"
     mcp_value = f"mcp-{uniq('answer')}"
     llm_stub.reset()
     llm_stub.script(
         [
-            {"tool_call": {"name": "Answer", "arguments": {"value": http_value}}},
-            {"tool_call": {"name": "Answer", "arguments": {"value": mcp_value}}},
+            {"content": json.dumps({"value": http_value})},
+            {"content": json.dumps({"value": mcp_value})},
         ]
     )
 

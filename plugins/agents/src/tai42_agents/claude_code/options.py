@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_kit.utils.data.json_schema_util import to_portable_schema
+
 from tai42_agents.claude_code.settings import ANTHROPIC_API_KEY_ENV, CLAUDE_CODE_OAUTH_TOKEN_ENV
 
 # The pinned-SDK ``permission_mode`` literal for auto-approve: the sandbox IS the boundary, so
@@ -119,7 +121,10 @@ def build_options_payload(
         "env_passthrough": list(secret_env_names),
     }
     if response_format is not None:
-        payload["output_format"] = {"type": "json_schema", "json_schema": response_format}
+        # The Claude Code runtime uses the same Anthropic structured-output grammar as the
+        # native chat path, so the authored schema is sent in its portable form (nullable
+        # type arrays rewritten to anyOf) rather than raw.
+        payload["output_format"] = {"type": "json_schema", "json_schema": to_portable_schema(response_format)}
     if max_budget_usd is not None:
         payload["max_budget_usd"] = max_budget_usd
     if model is not None:

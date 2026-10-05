@@ -279,7 +279,7 @@ def test_tools_agent_resume_delivers_a_legacy_ownerless_park_answer_end_to_end(
 
         # The parked ToolMessage carries the operator's ANSWER, read back off the shared checkpoint
         # — never a refusal error (which is what a dropped answer would leave).
-        graph = await base_mod._compile_tools_agent([ask.tool()], checkpoint_provider="redis")
+        graph, _ = await base_mod._compile_tools_agent([ask.tool()], checkpoint_provider="redis")
         state = await graph.aget_state({"configurable": {"thread_id": "t-legacy-e2e"}})
         by_call = {m.tool_call_id: m for m in state.values["messages"] if getattr(m, "tool_call_id", None)}
         assert by_call["c1"].content == "the answer"

@@ -23,6 +23,7 @@ from tai42_contract.sandbox import (
     SandboxStreamChunk,
     SandboxStreamExit,
 )
+from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents.claude_code.protocol import ProtocolError, ResultFrame, parse_up_frame
 
@@ -80,16 +81,23 @@ def map_event(event: dict[str, Any], text_parts: list[str]) -> StreamEvent | Non
     return None
 
 
-def terminal_event(frame: ResultFrame, text_parts: list[str]) -> StreamEvent:
+def terminal_event(frame: ResultFrame, text_parts: list[str], response_format: Any = None) -> StreamEvent:
     """The contract terminal for a result ``frame``; raises ``ProtocolError`` on a non-success reason.
 
     A structured result yields a :class:`StructuredFinal`, else the frame's text (or the joined
-    ``text_parts``) yields a :class:`MessageFinal`.
+    ``text_parts``) yields a :class:`MessageFinal`. When a ``response_format`` was requested the
+    structured result is validated against the authored schema with the same
+    :func:`~tai42_kit.llm.runtime.validate_structured_output` every other door uses, and a
+    non-conforming result raises loudly — the Claude Code runtime has no in-loop retry seam, so a
+    bad structured verdict is a hard, visible failure rather than a silent pass.
     """
     if frame.terminal_reason not in {"completed", "success"}:
         raise ProtocolError(f"runner terminated with reason {frame.terminal_reason!r} (subtype {frame.subtype!r})")
     if frame.is_structured and frame.result is not None:
-        return StructuredFinal(data=frame.result)
+        data = frame.result
+        if response_format is not None:
+            data = validate_structured_output(data, response_format)
+        return StructuredFinal(data=data)
     if isinstance(frame.result, str):
         return MessageFinal(text=frame.result)
     return MessageFinal(text="".join(text_parts))

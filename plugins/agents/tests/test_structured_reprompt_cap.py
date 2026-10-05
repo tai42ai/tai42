@@ -1,10 +1,12 @@
 """The structured-output re-prompt cap and the two typed, non-fatal run outcomes.
 
-Every case drives a REAL compiled ``create_agent`` graph (the retry rail langchain
-appends the re-prompt tool message on) with a scripted chat model, so the cap
-counter installed by :func:`~tai42_agents._internal.structured.as_tool_strategy`
-and the outcome each face surfaces are exercised through the true compile/invoke
-paths — no mock of the rail itself.
+Every case drives a REAL compiled ``create_agent`` graph with a scripted chat model
+and the platform ``StructuredOutputRailMiddleware`` appended by
+:func:`~tai42_agents._internal.structured.structured_output_stack`, so the per-run cap
+counter and the outcome each face surfaces are exercised through the true
+compile/invoke paths — no mock of the rail itself. The scripted model carries no
+profile, so the plan takes the tool tier (the bounded ``TypedDict`` parse is the
+in-node failure the rail re-prompts on).
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from tai42_contract.agent.events import RecursionLimitFinal, StructuredOutputUnr
 
 from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal.stream_events import aproject_agent_events
-from tai42_agents._internal.structured import as_tool_strategy
+from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult
 
 _SCHEMA = {
@@ -83,8 +85,9 @@ def _loop_tool() -> StructuredTool:
 
 
 def _compile(model: BaseChatModel, tools: list[StructuredTool], schema: Any) -> tuple[Any, Any]:
-    strategy = as_tool_strategy(schema)
-    graph = create_agent(model, tools=tools, checkpointer=InMemorySaver(), response_format=strategy)
+    strategy, rail = structured_output_stack(model, "openai", schema)
+    assert rail is not None
+    graph = create_agent(model, tools=tools, checkpointer=InMemorySaver(), response_format=strategy, middleware=[rail])
     return graph, strategy
 
 
@@ -248,10 +251,16 @@ def test_deep_agent_never_conforming_yields_outcome(monkeypatch: pytest.MonkeyPa
     model = _ScriptedModel([_answer_call("bad")])
     graph = asyncio.run(
         build_langchain_deep_agent(
-            llm=model, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], response_format=_SCHEMA
+            llm=model,
+            store=InMemoryStore(),
+            checkpointer=InMemorySaver(),
+            provider="openai",
+            tools=[],
+            response_format=_SCHEMA,
         )
     )
-    events = asyncio.run(_project(graph, as_tool_strategy(_SCHEMA), _SCHEMA, _run_config()))
+    strategy, _rail = structured_output_stack(model, "openai", _SCHEMA)
+    events = asyncio.run(_project(graph, strategy, _SCHEMA, _run_config()))
 
     assert isinstance(events[-1], StructuredOutputUnresolvedFinal)
     assert events[-1].attempts == 4
@@ -279,10 +288,9 @@ def test_refine_final_pass_outcome_passes_through_without_the_missing_structured
     from tai42_agents.refine_agent import agent as refine_mod
 
     agent = tai42_app.agents.get_agent("refine_agent")
-    monkeypatch.setattr(refine_mod, "as_tool_strategy", lambda response_format: None)
 
-    async def _fake_loop(**_kwargs: Any) -> tuple[Any, Any, Any]:
-        return object(), {}, {}
+    async def _fake_loop(**_kwargs: Any) -> tuple[Any, Any, Any, Any]:
+        return object(), {}, {}, None
 
     monkeypatch.setattr(refine_mod, "_run_refine_loop", _fake_loop)
 
@@ -304,9 +312,8 @@ def test_refine_loop_recursion_trip_yields_named_outcome(monkeypatch: pytest.Mon
     from tai42_agents.refine_agent import agent as refine_mod
 
     agent = tai42_app.agents.get_agent("refine_agent")
-    monkeypatch.setattr(refine_mod, "as_tool_strategy", lambda response_format: None)
 
-    async def _boom(**_kwargs: Any) -> tuple[Any, Any, Any]:
+    async def _boom(**_kwargs: Any) -> tuple[Any, Any, Any, Any]:
         raise GraphRecursionError("Recursion limit of 4 reached")
 
     monkeypatch.setattr(refine_mod, "_run_refine_loop", _boom)

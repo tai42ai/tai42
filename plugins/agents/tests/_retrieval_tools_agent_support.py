@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
 from langgraph.store.memory import InMemoryStore
@@ -105,35 +105,63 @@ class ScriptedChatModel(BaseChatModel):
 _RETRIEVAL_SCHEMA = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
 
 
-class _StructuredLLM:
-    """A stand-in chat model whose ``with_structured_output`` binds a schema and
-    returns a runner whose ``ainvoke`` yields a fixed structured payload."""
+class _NativeFake:
+    """A profiled finalization model: declares native structured output, records each
+    ``bind`` kwarg set, and answers scripted JSON text. ``with_structured_output`` must
+    never be called on it."""
 
-    def __init__(self, payload: Any) -> None:
-        self._payload = payload
+    profile = {"structured_output": True}  # noqa: RUF012
+
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = texts
+        self.calls = 0
+        self.bind_kwargs: list[dict[str, Any]] = []
         self.captured: dict[str, Any] = {}
+        self.with_structured_output_called = False
 
-    def with_structured_output(self, schema: Any, include_raw: bool = True) -> Any:
-        self.captured["schema"] = schema
-        self.captured["include_raw"] = include_raw
+    def bind(self, **kwargs: Any) -> Any:
+        self.bind_kwargs.append(kwargs)
         outer = self
 
         class _Runner:
-            async def ainvoke(self, messages: Any) -> Any:
+            async def ainvoke(self, messages: Any) -> AIMessage:
                 outer.captured["messages"] = messages
-                return outer._payload
+                index = min(outer.calls, len(outer._texts) - 1)
+                outer.calls += 1
+                return AIMessage(content=outer._texts[index])
 
         return _Runner()
 
+    def with_structured_output(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.with_structured_output_called = True
+        raise AssertionError("native plan must not call with_structured_output")
 
-class _BoomStructuredLLM:
-    """A structured llm whose finalization ``ainvoke`` raises, standing in for an
-    unparseable structured-output response that must propagate loudly."""
 
-    def with_structured_output(self, schema: Any, include_raw: bool = True) -> Any:
+class _ToolFake:
+    """An unprofiled finalization model: no native output, so the plan takes the tool
+    tier. ``with_structured_output(method='function_calling', include_raw=True)`` returns a
+    scripted ``{raw, parsed, parsing_error}`` per call."""
+
+    profile = None
+
+    def __init__(self, parsed_seq: list[Any]) -> None:
+        self._seq = parsed_seq
+        self.calls = 0
+        self.captured: dict[str, Any] = {}
+        self.with_structured_output_calls = 0
+
+    def with_structured_output(self, schema: Any, *, method: str | None = None, include_raw: bool = False) -> Any:
+        self.with_structured_output_calls += 1
+        outer = self
+
         class _Runner:
-            async def ainvoke(self, messages: Any) -> Any:
-                raise ValueError("model returned unparseable structured output")
+            async def ainvoke(self, messages: Any) -> dict[str, Any]:
+                outer.captured["messages"] = messages
+                index = min(outer.calls, len(outer._seq) - 1)
+                outer.calls += 1
+                parsed = outer._seq[index]
+                raw = AIMessage(content="", tool_calls=[{"id": "c", "name": "Answer", "args": parsed}])
+                return {"raw": raw, "parsed": parsed, "parsing_error": None}
 
         return _Runner()
 

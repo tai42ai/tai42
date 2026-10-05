@@ -155,6 +155,11 @@ class LLMSettings(TaiBaseSettings):
     top_p: float | None = None  # Optional sampling param (OpenAI, Anthropic)
     top_k: int | None = None  # Mistral (optional)
     n: int | None = None  # Optional: number of completions (OpenAI)
+    # The LangChain cross-provider reasoning-effort field (ChatAnthropic, ChatOpenAI,
+    # ChatXAI, ChatGoogleGenerativeAI all declare it). Dumped into the constructor
+    # kwargs like max_tokens/temperature; per-node llm_kwargs still override. A level
+    # the model does not declare is refused loudly at get_llm against its profile.
+    reasoning_effort: str | None = None
 
 
 class LLMProviderSettings(TaiBaseSettings):

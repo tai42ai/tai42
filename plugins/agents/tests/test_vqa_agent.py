@@ -16,12 +16,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import ValidationError
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageDelta, MessageFinal, RunUsage, StreamEvent
 from tai42_contract.app import tai42_app
-from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 import tai42_agents.vqa_agent as vqa
 from tai42_agents._internal.reject import reject_unhonored
@@ -205,52 +204,86 @@ def test_run_rejects_non_image_media_through_the_handle(fake_llm: None, resource
 
 
 _VQA_SCHEMA = {"title": "Answer", "type": "object", "properties": {"answer": {"type": "string"}}}
+_CONSTRAINED_SCHEMA = {
+    "title": "Answer",
+    "type": "object",
+    "properties": {"answer": {"type": "string", "minLength": 1}},
+    "required": ["answer"],
+}
 
 
-class _StructuredLLM:
-    """A stand-in chat model whose ``with_structured_output`` binds a schema and
-    returns a runner whose ``ainvoke`` yields a fixed structured payload; its
-    ``astream`` raises so a structured run never falls back to the token path."""
+class _NativeFake:
+    """A profiled fake: declares native structured output, records each ``bind`` kwarg set,
+    and answers scripted JSON text. ``with_structured_output`` must never be called on it."""
 
-    def __init__(self, payload: Any) -> None:
-        self._payload = payload
-        self.captured: dict[str, Any] = {}
+    profile = {"structured_output": True}  # noqa: RUF012
 
-    def with_structured_output(self, schema: Any, include_raw: bool = True) -> Any:
-        self.captured["schema"] = schema
-        self.captured["include_raw"] = include_raw
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = texts
+        self.calls = 0
+        self.bind_kwargs: list[dict[str, Any]] = []
+        self.with_structured_output_called = False
+
+    def bind(self, **kwargs: Any) -> Any:
+        self.bind_kwargs.append(kwargs)
         outer = self
 
         class _Runner:
-            async def ainvoke(self, messages: Any) -> Any:
-                outer.captured["messages"] = messages
-                return outer._payload
+            async def ainvoke(self, _messages: Any) -> Any:
+                index = min(outer.calls, len(outer._texts) - 1)
+                outer.calls += 1
+                return AIMessage(content=outer._texts[index])
 
         return _Runner()
 
-    def astream(self, _messages: object) -> Any:  # pragma: no cover - never reached on the structured path
-        raise AssertionError("structured path must not stream tokens")
+    def with_structured_output(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.with_structured_output_called = True
+        raise AssertionError("native plan must not call with_structured_output")
 
 
-def _install_structured_llm(monkeypatch: pytest.MonkeyPatch, llm: _StructuredLLM) -> None:
-    async def fake_get_llm(provider: str, **_kwargs: object) -> _StructuredLLM:
-        assert provider == "fake"
+class _ToolFake:
+    """An unprofiled fake: no native output, so the plan takes the tool tier.
+    ``with_structured_output(method='function_calling', include_raw=True)`` returns a scripted
+    ``{raw, parsed, parsing_error}`` per call."""
+
+    profile = None
+
+    def __init__(self, parsed_seq: list[Any]) -> None:
+        self._seq = parsed_seq
+        self.calls = 0
+        self.with_structured_output_calls = 0
+
+    def with_structured_output(self, schema: Any, *, method: str | None = None, include_raw: bool = False) -> Any:
+        self.with_structured_output_calls += 1
+        outer = self
+
+        class _Runner:
+            async def ainvoke(self, _messages: Any) -> dict[str, Any]:
+                index = min(outer.calls, len(outer._seq) - 1)
+                outer.calls += 1
+                parsed = outer._seq[index]
+                raw = AIMessage(content="", tool_calls=[{"id": "c", "name": "Answer", "args": parsed}])
+                return {"raw": raw, "parsed": parsed, "parsing_error": None}
+
+        return _Runner()
+
+
+def _install_llm(monkeypatch: pytest.MonkeyPatch, llm: Any, provider: str = "openai") -> None:
+    async def fake_get_llm(provider: str, **_kwargs: object) -> Any:
         return llm
 
     monkeypatch.setattr(vqa, "get_llm_async", fake_get_llm)
     monkeypatch.setattr(vqa, "llm_settings", lambda: _Settings())
-    monkeypatch.setattr(vqa, "llm_provider_settings", lambda: _ProviderSettings())
+    monkeypatch.setattr(vqa, "llm_provider_settings", lambda: SimpleNamespace(llm=provider))
 
 
-def test_astream_with_response_format_emits_one_structured_final(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a ``response_format`` set, the completion forces the structured output via
-    ``with_structured_output`` and emits exactly one :class:`StructuredFinal` (no
-    token deltas), passing the schema straight to the provider (converter off the
-    force path)."""
+def test_astream_native_binds_kwargs_and_emits_one_structured_final(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A native-capable model binds the kit's response_format kwargs (never
+    ``with_structured_output``) and the completion emits exactly one StructuredFinal."""
     from tai42_contract.agent.events import StructuredFinal
 
-    llm = _StructuredLLM({"answer": "a cat"})
-    _install_structured_llm(monkeypatch, llm)
+    llm = _NativeFake(['{"answer": "a cat"}'])
+    _install_llm(monkeypatch, llm)
 
     events = asyncio.run(
         _collect(VqaAgent().astream(image_url="http://img", query="describe", response_format=_VQA_SCHEMA))
@@ -259,17 +292,58 @@ def test_astream_with_response_format_emits_one_structured_final(monkeypatch: py
     final = events[0]
     assert isinstance(final, StructuredFinal)
     assert final.data == {"answer": "a cat"}
-    assert llm.captured["schema"] == _VQA_SCHEMA
-    assert llm.captured["include_raw"] is False
+    assert llm.bind_kwargs
+    assert "response_format" in llm.bind_kwargs[0]
+    assert llm.with_structured_output_called is False
 
 
-def test_run_with_response_format_returns_the_structured_object(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``run`` with a ``response_format`` drains its structured astream and returns the
-    structured object rather than text."""
-    llm = _StructuredLLM({"answer": "a cat"})
-    _install_structured_llm(monkeypatch, llm)
+def test_run_native_returns_the_structured_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    llm = _NativeFake(['{"answer": "a cat"}'])
+    _install_llm(monkeypatch, llm)
     result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_VQA_SCHEMA))
     assert result == {"answer": "a cat"}
+
+
+def test_native_nonconforming_then_conforming_succeeds_in_two_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    llm = _NativeFake(['{"answer": ""}', '{"answer": "ok"}'])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_CONSTRAINED_SCHEMA))
+    assert result == {"answer": "ok"}
+    assert llm.calls == 2
+
+
+def test_native_never_conforming_ends_on_unresolved_final(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_contract.agent.events import StructuredOutputUnresolvedFinal
+
+    llm = _NativeFake(['{"answer": ""}'])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_CONSTRAINED_SCHEMA))
+    assert isinstance(result, StructuredOutputUnresolvedFinal)
+
+
+def test_unprofiled_model_takes_the_tool_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    llm = _ToolFake([{"answer": "a cat"}])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_VQA_SCHEMA))
+    assert result == {"answer": "a cat"}
+    assert llm.with_structured_output_calls >= 1
+
+
+def test_tool_path_nonconforming_then_conforming_succeeds_in_two_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    llm = _ToolFake([{"answer": ""}, {"answer": "ok"}])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_CONSTRAINED_SCHEMA))
+    assert result == {"answer": "ok"}
+    assert llm.calls == 2
+
+
+def test_tool_path_never_conforming_ends_on_unresolved_final(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_contract.agent.events import StructuredOutputUnresolvedFinal
+
+    llm = _ToolFake([{"answer": ""}])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_CONSTRAINED_SCHEMA))
+    assert isinstance(result, StructuredOutputUnresolvedFinal)
 
 
 def test_run_response_format_without_title_raises_loudly(fake_llm: None) -> None:
@@ -288,50 +362,22 @@ def test_astream_response_format_without_title_raises_loudly(fake_llm: None) -> 
         )
 
 
-def test_run_response_format_unparseable_finalization_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unparseable structured-finalization output propagates the raise loudly —
-    never a silent text fallback."""
+def test_native_oversized_int_is_reprompted_then_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An integer past the platform int64 range is well-formed JSON but non-conforming:
+    the in-node int64 walk re-prompts it under the cap (it never aborts the serializer),
+    and a model that keeps returning it ends on the typed outcome."""
+    from tai42_contract.agent.events import StructuredOutputUnresolvedFinal
 
-    class _BoomLLM(_StructuredLLM):
-        def with_structured_output(self, schema: Any, include_raw: bool = True) -> Any:
-            class _Runner:
-                async def ainvoke(self, messages: Any) -> Any:
-                    raise ValueError("model returned unparseable structured output")
-
-            return _Runner()
-
-    _install_structured_llm(monkeypatch, _BoomLLM(None))
-    with pytest.raises(ValueError, match="unparseable structured output"):
-        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=_VQA_SCHEMA))
-
-
-def test_run_response_format_nonconforming_structured_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A structured payload violating a schema constraint keyword raises loudly
-    from the validation step instead of being returned."""
-    schema = {
-        "title": "Answer",
-        "type": "object",
-        "properties": {"answer": {"type": "string", "minLength": 1}},
-        "required": ["answer"],
-    }
-    _install_structured_llm(monkeypatch, _StructuredLLM({"answer": ""}))
-    with pytest.raises(JsonSchemaValidationError):
-        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=schema))
-
-
-def test_run_response_format_oversized_int_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The native ``with_structured_output`` door has no retry rail, so an integer
-    the model returns past the platform int64 range fails the validation step with
-    a loud typed error rather than aborting the serializer downstream."""
     schema = {
         "title": "Answer",
         "type": "object",
         "properties": {"count": {"type": "integer"}},
         "required": ["count"],
     }
-    _install_structured_llm(monkeypatch, _StructuredLLM({"count": 9223372036854775807 + 1}))
-    with pytest.raises(JsonSchemaValidationError):
-        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=schema))
+    llm = _NativeFake(['{"count": 9223372036854775808}'])
+    _install_llm(monkeypatch, llm)
+    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=schema))
+    assert isinstance(result, StructuredOutputUnresolvedFinal)
 
 
 # Every key in ``_UNHONORED_REASONS`` paired with a representative SET value: a

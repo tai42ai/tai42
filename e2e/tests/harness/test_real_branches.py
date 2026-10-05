@@ -58,7 +58,7 @@ def test_llm_env_mock_default_is_todays_stub_fill(monkeypatch: pytest.MonkeyPatc
     assert env == {
         "LLM_BASE_URL": "http://127.0.0.1:9config/v1",
         "LLM_API_KEY": "e2e-test",
-        "LLM_MODEL": "e2e-scripted",
+        "LLM_MODEL": "gpt-4o-mini",
         "EMBEDDING_BASE_URL": "http://127.0.0.1:9config/v1",
         "EMBEDDING_API_KEY": "e2e-test",
         "EMBEDDING_MODEL": "e2e-embed",

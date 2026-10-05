@@ -1,17 +1,18 @@
-"""``response_format`` title requirements + structured-output stream suppression.
+"""``response_format`` over the native structured-output plan, end to end.
 
-Two behaviors of the tools_agent structured-output path over the real stack:
+The mock leg runs provider ``openai`` / ``gpt-4o-mini``, which declares native structured
+output, so a tools_agent ``response_format`` run takes the native plan:
 
-* An untitled ``response_format`` is refused loudly. The top-level ``"title"`` is the
-  structured-output name the run forces; a dict schema lacking one — or a ``oneOf``
-  variant lacking a non-empty one — raises a ``ValueError`` surfaced to the caller
-  (an ``is_error`` MCP result), BEFORE any model round-trip.
-* A structured-output run's user-visible SSE stream carries NO synthetic
-  structured-output tool-call/result frame. Routing the ``response_format`` through the
-  tool-calling strategy makes the model emit a synthetic tool call carrying the payload;
-  that call and its echo are internal mechanics, so neither surfaces as a
-  ``tool_call_step``/``tool_result_step`` — the payload arrives exactly once as the
-  terminal ``structured_final``.
+* An untitled ``response_format`` is refused loudly BEFORE any model round-trip — the
+  top-level ``"title"`` is the structured-output name, and a dict schema (or a ``oneOf``
+  variant) lacking a non-empty one surfaces a ``ValueError`` as an ``is_error`` MCP result.
+* A native structured run binds the schema as ``response_format`` with NO forced
+  ``tool_choice``; the SSE stream carries no ``tool_call_step``/``tool_result_step`` and no
+  ``message_delta`` (the JSON payload is not streamed), just one terminal ``structured_final``.
+* A well-formed but schema-violating payload is re-prompted in-node up to the cap, then the
+  run ends on the typed ``structured_output_unresolved_final`` outcome.
+* With a stub that refuses a forced ``tool_choice``, the structured run still succeeds —
+  proof the native plan sends no forced choice.
 """
 
 from __future__ import annotations
@@ -95,21 +96,17 @@ async def _run_sse(stack: TaiStack, path: str, body: dict) -> list[dict]:
     return frames
 
 
-async def test_structured_output_stream_suppresses_synthetic_tool_frames(
+async def test_native_structured_run_sends_schema_not_forced_choice_and_streams_one_final(
     agents_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
-    """A structured-output run's SSE stream carries NO synthetic structured-output
-    tool-call/result frame — the payload arrives exactly once as the terminal
-    ``structured_final``. The model answers through the tool-calling strategy by
-    emitting a tool call named for the schema title; that call and its echo are
-    suppressed, so neither a ``tool_call_step`` nor a ``tool_result_step`` surfaces."""
+    """A native structured run binds the schema as ``response_format`` with no forced
+    ``tool_choice``; the SSE stream carries no synthetic tool frames and no ``message_delta``
+    (the JSON payload is not streamed), just one terminal ``structured_final``."""
     value = len(uniq("v")) + 7  # a deterministic integer payload
     schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
     llm_stub.reset()
-    # The structured-output tool the strategy binds is named for the schema title; the
-    # model answers by calling it with the structured payload (one round-trip, then the
-    # graph ends on the structured response).
-    llm_stub.script([{"tool_call": {"name": "Answer", "arguments": {"value": value}}}])
+    # Under the native plan the model answers with the JSON payload as its message content.
+    llm_stub.script([{"content": json.dumps({"value": value})}])
 
     frames = await _run_sse(
         agents_stack,
@@ -117,34 +114,31 @@ async def test_structured_output_stream_suppresses_synthetic_tool_frames(
         {"user_message": {"content": "answer with the value"}, "response_format": schema},
     )
     types = [frame.get("type") for frame in frames]
-    # The synthetic structured-output tool call/result never surface as user-visible steps.
-    assert "tool_call_step" not in types, f"the synthetic structured tool call leaked into the stream: {frames}"
-    assert "tool_result_step" not in types, f"the synthetic structured tool result leaked into the stream: {frames}"
-    # The structured payload arrives exactly once, as the terminal structured final.
+    assert "tool_call_step" not in types, f"a tool frame leaked into the native stream: {frames}"
+    assert "tool_result_step" not in types, f"a tool-result frame leaked into the native stream: {frames}"
+    assert "message_delta" not in types, f"the native plan must not stream the JSON payload: {frames}"
     finals = [frame for frame in frames if frame.get("type") == "structured_final"]
     assert len(finals) == 1, f"expected exactly one structured_final: {frames}"
     assert finals[0]["data"] == {"value": value}, finals
     assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
-    # Exactly one model round-trip: the single scripted structured tool call.
     assert len(llm_stub.requests) == 1, f"expected 1 LLM round-trip, saw {len(llm_stub.requests)}"
+    # The request carried the portable schema as response_format and bound NO forced tool choice.
+    request = llm_stub.requests[0]
+    sent_schema = request["response_format"]["json_schema"]["schema"]
+    assert sent_schema["properties"]["value"]["type"] == "integer", request
+    assert request.get("tool_choice") in (None, "auto", "none"), request
 
 
 @pytest.mark.needs("setting:TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP=3")
-async def test_structured_output_reprompt_cap_yields_the_typed_outcome(
-    agents_stack: TaiStack, llm_stub: LlmStub
-) -> None:
-    """A model that never produces schema-conforming structured output is re-prompted up to the
-    per-run cap, then the run ends with the typed, non-fatal ``structured_output_unresolved_final``
-    outcome — over the real stack — instead of looping to the recursion limit or failing generically.
-
-    The default cap is 3 re-prompts, so the run makes exactly cap + 1 = 4 model round-trips (each a
-    non-conforming structured tool call) before it gives up, and the terminal names that attempt
-    count and the schema."""
+async def test_native_reprompt_cap_yields_the_typed_outcome(agents_stack: TaiStack, llm_stub: LlmStub) -> None:
+    """A native run whose well-formed JSON never conforms (an int64-oversized integer) is
+    re-prompted in-node up to the per-run cap, then ends with the typed, non-fatal
+    ``structured_output_unresolved_final`` outcome — exactly cap + 1 = 4 round-trips, the second
+    request carrying the re-prompt as a user message."""
     schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}
     llm_stub.reset()
-    # Every turn calls the structured-output tool with a non-integer value, so the strategy's parse
-    # fails and the rail re-prompts; script cap + 1 turns so the cap is what stops the loop.
-    llm_stub.script([{"tool_call": {"name": "Answer", "arguments": {"value": "not-an-integer"}}} for _ in range(4)])
+    oversized = json.dumps({"value": 9223372036854775808})  # one past the platform int64 ceiling
+    llm_stub.script([{"content": oversized} for _ in range(4)])
 
     frames = await _run_sse(
         agents_stack,
@@ -154,9 +148,28 @@ async def test_structured_output_reprompt_cap_yields_the_typed_outcome(
     types = [frame.get("type") for frame in frames]
     outcome = [frame for frame in frames if frame.get("type") == "structured_output_unresolved_final"]
     assert len(outcome) == 1, f"expected the typed re-prompt-cap outcome: {frames}"
-    assert outcome[0]["schema_name"] == "Answer", outcome
     assert outcome[0]["attempts"] == 4, outcome
     assert "stream.error" not in types, f"the capped run must not surface a generic failure: {frames}"
     assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
-    # Exactly cap + 1 round-trips: the first non-conforming answer plus 3 re-prompts.
     assert len(llm_stub.requests) == 4, f"expected 4 LLM round-trips, saw {len(llm_stub.requests)}"
+    # The second request carries the re-prompt fed back as a user message.
+    second = llm_stub.requests[1]
+    assert any(message.get("role") == "user" for message in second["messages"][1:]), second
+
+
+async def test_native_structured_run_sends_no_forced_tool_choice(agents_stack: TaiStack, llm_stub: LlmStub) -> None:
+    """With the stub refusing any forced ``tool_choice``, a native structured run still
+    succeeds — proof the native plan sends no forced choice (a forced path would 400)."""
+    schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
+    llm_stub.reset()
+    llm_stub.refuse_forced_tool_choice()
+    llm_stub.script([{"content": json.dumps({"value": 11})}])
+
+    frames = await _run_sse(
+        agents_stack,
+        "/api/agents/tools_agent/runs",
+        {"user_message": {"content": "answer with the value"}, "response_format": schema},
+    )
+    finals = [frame for frame in frames if frame.get("type") == "structured_final"]
+    assert len(finals) == 1, f"the refusing stub rejected the run — a forced tool_choice was sent: {frames}"
+    assert finals[0]["data"] == {"value": 11}, finals

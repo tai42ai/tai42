@@ -39,9 +39,11 @@ from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, validate_structured_output
 from tai42_kit.llm.settings import embedding_settings, llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
+from tai42_kit.llm.structured import plan_structured_output
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
@@ -51,6 +53,7 @@ from tai42_agents._internal.reject import (
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.stream_events import aproject_agent_events
+from tai42_agents._internal.structured import ainvoke_structured
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
 from tai42_agents.retrieval_tools_agent.prompt import RETRIEVAL_SYSTEM_MESSAGE
 from tai42_agents.settings import agents_limits_settings
@@ -323,9 +326,19 @@ class RetrievalToolsAgent(Agent):
             )
         result_text = _terminal_result(terminal.text)
         if resolved_response_format is not None:
-            structured = await llm.with_structured_output(resolved_response_format, include_raw=False).ainvoke(
-                [HumanMessage(content=result_text)]
-            )
+            # The finalization pass forces the terminal result into the schema through the
+            # capability-negotiated plan (native-first, bounded tool tier second); a
+            # never-conforming payload ends on the typed outcome, not a raw raise.
+            provider = kwargs.get("llm_provider") or llm_provider_settings().llm
+            plan = plan_structured_output(llm, provider, resolved_response_format)
+            try:
+                structured = await ainvoke_structured(llm, plan, [HumanMessage(content=result_text)])
+            except RepromptCapError as exc:
+                outcome = outcome_for_drive_error(exc, None)
+                if outcome is None:
+                    raise
+                yield outcome
+                return
             yield StructuredFinal(data=validate_structured_output(structured, resolved_response_format))
             return
         yield MessageFinal(text=result_text)

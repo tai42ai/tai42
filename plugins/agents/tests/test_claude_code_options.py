@@ -74,6 +74,22 @@ def test_response_format_becomes_output_format() -> None:
     assert payload["output_format"] == {"type": "json_schema", "json_schema": schema}
 
 
+def test_response_format_is_sent_in_portable_form() -> None:
+    # The Claude Code runtime uses the same Anthropic grammar as the native chat path, so a
+    # nullable type array is rewritten to anyOf before it reaches the CLI (no raw list type).
+    from tai42_kit.utils.data.json_schema_util import to_portable_schema
+
+    schema = {
+        "title": "Ans",
+        "type": "object",
+        "properties": {"value": {"type": ["integer", "null"]}},
+        "required": ["value"],
+    }
+    payload = _payload(response_format=schema)
+    assert payload["output_format"]["json_schema"] == to_portable_schema(schema)
+    assert "anyOf" in payload["output_format"]["json_schema"]["properties"]["value"]
+
+
 def test_resume_and_session_id_are_mutually_exclusive() -> None:
     resumed = _payload(resume="sess-9")
     assert resumed["resume"] == "sess-9"

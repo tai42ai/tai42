@@ -89,15 +89,15 @@ def _install_fake_resolve(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, gra
     """Point the agent's ``_resolve_and_build`` at a scripted compiled graph, so
     ``run`` drains the fake through the shared streaming core with no live LLM."""
 
-    async def fake_resolve_and_build(**_: Any) -> _FakeCompiledGraph:
-        return graph
+    async def fake_resolve_and_build(**_: Any) -> tuple[_FakeCompiledGraph, Any]:
+        return graph, None
 
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
 
 
 def _install_fake_graph(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, graph: _CompiledGraphLike) -> None:
-    async def fake_build_agent(**kwargs: Any) -> tuple[_CompiledGraphLike, dict[str, Any]]:
-        return graph, {"configurable": {"thread_id": "t"}}
+    async def fake_build_agent(**kwargs: Any) -> tuple[_CompiledGraphLike, dict[str, Any], Any]:
+        return graph, {"configurable": {"thread_id": "t"}}, None
 
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
 

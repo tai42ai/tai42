@@ -132,14 +132,14 @@ def test_build_agent_forwards_inline_skills(monkeypatch: pytest.MonkeyPatch) -> 
 def test_build_agent_caps_recursion_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_build(monkeypatch, {})
     agent: Any = DeepAgent()
-    _, config = asyncio.run(agent._build_agent(**_build_kwargs(recursion_limit=4242)))
+    _, config, _ = asyncio.run(agent._build_agent(**_build_kwargs(recursion_limit=4242)))
     assert config["recursion_limit"] == 4242
 
 
 def test_build_agent_pins_resume_checkpoint_in_config(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_build(monkeypatch, {})
     agent: Any = DeepAgent()
-    _, config = asyncio.run(agent._build_agent(**_build_kwargs(resume_checkpoint_id="cp-7")))
+    _, config, _ = asyncio.run(agent._build_agent(**_build_kwargs(resume_checkpoint_id="cp-7")))
     assert config["configurable"]["checkpoint_id"] == "cp-7"
 
 
@@ -149,17 +149,18 @@ def test_build_agent_omits_thread_id_when_keyless(monkeypatch: pytest.MonkeyPatc
     key, so ``init_langgraph_config`` mints a fresh isolated one instead."""
     _patch_build(monkeypatch, {})
     agent: Any = DeepAgent()
-    _, config = asyncio.run(agent._build_agent(**_build_kwargs(thread_id=None)))
+    _, config, _ = asyncio.run(agent._build_agent(**_build_kwargs(thread_id=None)))
     assert "thread_id" not in config["configurable"]
 
 
 def test_pending_interrupts_reads_paused_snapshot() -> None:
+    from tai42_agents._internal.park import pending_interrupts
+
     class FakeAgent:
         async def aget_state(self, config: object) -> SimpleNamespace:
             return SimpleNamespace(interrupts=[SimpleNamespace(id="i-9", value={"q": "?"})])
 
-    agent: Any = DeepAgent()
-    (interrupt,) = asyncio.run(agent._pending_interrupts(FakeAgent(), {}))
+    (interrupt,) = asyncio.run(pending_interrupts(FakeAgent(), {}))
     assert (interrupt.interrupt_id, interrupt.payload) == ("i-9", {"q": "?"})
 
 
@@ -239,9 +240,9 @@ def test_run_drains_streaming_core_with_resolved_inputs(
     captured: dict[str, Any] = {}
     graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
 
-    async def fake_resolve_and_build(**kwargs: Any) -> _FakeCompiledGraph:
+    async def fake_resolve_and_build(**kwargs: Any) -> tuple[_FakeCompiledGraph, Any]:
         captured.update(kwargs)
-        return graph
+        return graph, None
 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
@@ -411,9 +412,9 @@ def test_run_honors_live_tools(monkeypatch: pytest.MonkeyPatch, app_tools: Any, 
 
     captured: dict[str, Any] = {}
 
-    async def fake_resolve_and_build(**kwargs: Any) -> _FakeCompiledGraph:
+    async def fake_resolve_and_build(**kwargs: Any) -> tuple[_FakeCompiledGraph, Any]:
         captured.update(kwargs)
-        return _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+        return _FakeCompiledGraph(_scripted_chunks(), interrupts=[]), None
 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
@@ -434,9 +435,9 @@ def test_run_dispatched_tools_are_delivery_scoped(
 
     captured: dict[str, Any] = {}
 
-    async def fake_resolve_and_build(**kwargs: Any) -> _FakeCompiledGraph:
+    async def fake_resolve_and_build(**kwargs: Any) -> tuple[_FakeCompiledGraph, Any]:
         captured.update(kwargs)
-        return _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+        return _FakeCompiledGraph(_scripted_chunks(), interrupts=[]), None
 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
@@ -452,9 +453,9 @@ def test_astream_dispatched_tools_are_delivery_scoped(monkeypatch: pytest.Monkey
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any]]:
+    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any], Any]:
         captured.update(kwargs)
-        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}
+        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}, None
 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)

@@ -174,6 +174,17 @@ def collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:
     return pending
 
 
+async def pending_interrupts(agent: Any, config: dict[str, Any]) -> list[InterruptFinal]:
+    """Read the top-level interrupts a paused graph is waiting on, as contract events.
+
+    An empty list means the run completed normally. A failure to read the snapshot
+    propagates — a paused run whose interrupt we cannot read would otherwise hang invisibly.
+    """
+    snapshot = await agent.aget_state(config)
+    interrupts = list(getattr(snapshot, "interrupts", None) or [])
+    return [InterruptFinal(interrupt_id=intr.id, payload=intr.value) for intr in interrupts]
+
+
 def _park_interactions(value: Any) -> dict[str, Any] | None:
     """The ``{interaction_id: expiry}`` map of a park interrupt's value, or ``None`` for a plain HITL interrupt.
 

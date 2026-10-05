@@ -32,8 +32,11 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
+from tai42_kit.llm.structured import plan_structured_output
 
+from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
+from tai42_agents._internal.structured import ainvoke_structured
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
 
@@ -191,7 +194,18 @@ class VqaAgent(Agent):
         message = await _vqa_message(image_url, query)
 
         if response_format is not None:
-            structured = await llm.with_structured_output(response_format, include_raw=False).ainvoke([message])
+            # The capability-negotiated plan routes native-first (grammar-enforced) or to
+            # the bounded tool tier; ``ainvoke_structured`` runs the capped re-prompt loop,
+            # ending a never-conforming run on the typed outcome instead of a raw raise.
+            plan = plan_structured_output(llm, provider, response_format)
+            try:
+                structured = await ainvoke_structured(llm, plan, [message])
+            except RepromptCapError as exc:
+                outcome = outcome_for_drive_error(exc, None)
+                if outcome is None:
+                    raise
+                yield outcome
+                return
             yield StructuredFinal(data=validate_structured_output(structured, response_format))
             return
 

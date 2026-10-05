@@ -49,7 +49,7 @@ from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_e
 from tai42_agents._internal.reject import reject_unhonored, resolve_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import aproject_agent_events
-from tai42_agents._internal.structured import as_tool_strategy
+from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents.refine_agent.prompt import (
     CRITIC_APPROVAL_MESSAGE,
     CRITIC_SYSTEM_MESSAGE,
@@ -123,6 +123,7 @@ async def _build_role_agent(
     provider: str,
     is_enabled_for_debug: bool,
     response_format: Any = None,
+    structured_rail: Any = None,
 ) -> Any:
     """Build one role's ``create_agent`` stack — the Evaluator, the Critic, or the structured final Evaluator.
 
@@ -134,21 +135,25 @@ async def _build_role_agent(
     written into the checkpointed thread. Under the server-wide cache default it is
     marked with ``provider``'s system-prompt cache breakpoint, which the rolling
     cache-mark middleware exempts, so the stable prefix stays cacheable across turns.
-    ``response_format`` forces the structured final answer on the final pass; ``None``
-    keeps the role text-shaped.
+    ``response_format`` forces the structured final answer on the final pass (``None``
+    keeps the role text-shaped); ``structured_rail``, when present, is appended
+    innermost so the final pass's payload is judged in-node under the per-run cap.
     """
+    middleware: list[Any] = [
+        SystemPurgeMiddleware(),
+        *await context_overflow_middlewares(system_prompt=system_prompt),
+        RollingCacheMarkMiddleware(),
+        _tool_error_middleware,
+    ]
+    if structured_rail is not None:
+        middleware.append(structured_rail)
     extra = {} if response_format is None else {"response_format": response_format}
     return create_agent(
         llm,
         tools=list(tools),
         system_prompt=build_system_message(system_prompt, default_system_cache_mark(provider)),
         checkpointer=checkpointer,
-        middleware=[
-            SystemPurgeMiddleware(),
-            *await context_overflow_middlewares(system_prompt=system_prompt),
-            RollingCacheMarkMiddleware(),
-            _tool_error_middleware,
-        ],
+        middleware=middleware,
         debug=is_enabled_for_debug,
         **extra,
     )
@@ -166,26 +171,25 @@ async def _run_refine_loop(
     critic_llm_kwargs: dict[str, Any] | None,
     evaluator_config: dict[str, Any] | None,
     critic_config: dict[str, Any] | None,
-    strategy: Any = None,
+    response_format: Any = None,
     user_content_kwargs: dict[str, Any] | None = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
     """Run the Evaluator↔Critic loop to approval.
 
-    Returns ``(final_agent, final_input, final_config)`` for the final approved
-    evaluator pass the caller streams.
+    Returns ``(final_agent, final_input, final_config, strategy)`` for the final
+    approved evaluator pass the caller streams; ``strategy`` is the minted
+    structured-output strategy the stream projection reads (``None`` when text-shaped).
 
     ``user_content_kwargs`` (e.g. ``cache_control``) carries content-block keys onto
     the evaluator's first user turn — the run's primary caller-supplied message —
     where it persists in the checkpointed history the final pass re-sends.
 
-    ``strategy`` is the already-wrapped structured-output ``ToolStrategy`` (or
-    ``None``); the caller wraps once and binds this same object into both the
-    structured final pass here and the stream projection, so the synthetic tool
-    names match by identity. Without one this is the loop's own evaluator resumed
-    on its checkpointed thread with a "Critic Approved." prompt. With one, the
-    final pass runs on a SECOND evaluator built with that strategy on a FRESH
-    thread, fed the negotiation history explicitly as input — never a checkpoint
-    resume of the text-shaped loop thread into the structured graph.
+    ``response_format`` (or ``None``): without one this is the loop's own evaluator
+    resumed on its checkpointed thread with a "Critic Approved." prompt. With one, the
+    final pass runs on a SECOND evaluator built with the capability-negotiated strategy
+    and re-prompt rail (keyed on the evaluator model) on a FRESH thread, fed the
+    negotiation history explicitly as input — never a checkpoint resume of the
+    text-shaped loop thread into the structured graph.
 
     Raises ``RuntimeError`` when the Critic returns no feedback or ``max_iterations``
     is reached without approval — an unapproved draft is never returned.
@@ -261,12 +265,15 @@ async def _run_refine_loop(
     else:
         raise RuntimeError(f"Max iterations ({max_iterations}) reached without critic approval")
 
-    if strategy is None:
-        return evaluator, _final_evaluator_input(), evaluator_config
+    if response_format is None:
+        return evaluator, _final_evaluator_input(), evaluator_config, None
 
     # Force the final answer into the schema without re-shaping the loop thread:
     # feed its negotiation history as input to a second, structured evaluator on a
-    # fresh thread (never a cross-topology resume).
+    # fresh thread (never a cross-topology resume). The strategy + rail are keyed on
+    # the evaluator model, and the same strategy object is bound into both the final
+    # pass and the stream projection.
+    strategy, structured_rail = structured_output_stack(evaluator_llm, evaluator_llm_provider, response_format)
     snapshot = await evaluator.aget_state(evaluator_config)
     history = list(snapshot.values.get("messages", []))
     structured_evaluator: Any = await _build_role_agent(
@@ -277,9 +284,10 @@ async def _run_refine_loop(
         provider=evaluator_llm_provider,
         is_enabled_for_debug=is_enabled_for_debug,
         response_format=strategy,
+        structured_rail=structured_rail,
     )
     final_input = {"messages": [*history, {"role": "user", "content": "Critic Approved."}]}
-    return structured_evaluator, final_input, init_langgraph_config(None)
+    return structured_evaluator, final_input, init_langgraph_config(None), strategy
 
 
 class RefineAgentInput(BaseModel):
@@ -401,16 +409,16 @@ class RefineAgent(Agent):
             "refine_agent.astream", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
         )
         response_format = await resolve_response_format("refine_agent", response_format)
-        # Wrap the schema ONCE and bind that same strategy into both the structured
-        # final pass and the projection, so the synthetic tool names match by identity.
-        strategy = as_tool_strategy(response_format)
         # Delivery-scoped: a tool this loop dispatches must not capture the completion binding
         # addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
         resolved_tools = scope_nested_dispatch_all(
             await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
         )
         try:
-            final_agent, final_input, final_config = await _run_refine_loop(
+            # The loop mints the structured-output strategy at the final evaluator pass
+            # (keyed on its model) and returns it; the same object is bound into both the
+            # final pass and the projection, so the synthetic tool names match by identity.
+            final_agent, final_input, final_config, strategy = await _run_refine_loop(
                 tools=resolved_tools,
                 evaluator_message=evaluator_message,
                 critic_message=critic_message,
@@ -422,7 +430,7 @@ class RefineAgent(Agent):
                 critic_llm_kwargs=critic_llm_kwargs,
                 evaluator_config=evaluator_langgraph_config,
                 critic_config=critic_langgraph_config,
-                strategy=strategy,
+                response_format=response_format,
                 user_content_kwargs=user_content_kwargs,
             )
         except GraphRecursionError as exc:

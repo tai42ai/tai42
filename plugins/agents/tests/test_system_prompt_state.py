@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -37,6 +37,20 @@ from tai42_contract.agent.events import StructuredFinal, ToolCallStep, ToolResul
 import tai42_agents._internal.stream_events as stream_events
 from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal.stream_events import _structured_tool_names, astream_tools_agent_events
+from tai42_agents._internal.structured import structured_output_stack
+
+
+def _tool_strategy(response_format: object) -> object:
+    """The strategy the compile seam binds for a profile-less (tool-tier) model."""
+    strategy, _rail = structured_output_stack(cast(BaseChatModel, _NoProfileModel()), "openai", response_format)
+    return strategy
+
+
+class _NoProfileModel:
+    """A profile-less stand-in so the plan takes the tool tier."""
+
+    profile = None
+    model_name = "fake-model"
 
 
 class RecordingChatModel(BaseChatModel):
@@ -108,7 +122,7 @@ def _config(thread_id: str) -> dict[str, Any]:
 async def _state_messages(thread_id: str) -> list[BaseMessage]:
     """Read a thread's checkpointed messages back through a freshly built agent over
     the same checkpointer."""
-    agent, _, config = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+    agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
     snapshot = await agent.aget_state(config)
     return snapshot.values.get("messages", []) if snapshot.values else []
 
@@ -183,7 +197,7 @@ class TestStoredSystemMessageIsPurged:
         async def seed() -> None:
             # Seed a thread whose stored history carries a system message ahead of
             # the conversation, written straight into the checkpoint.
-            agent, _, config = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-stale"))
+            agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-stale"))
             await agent.aupdate_state(
                 config,
                 {
@@ -260,22 +274,17 @@ class _Dog(BaseModel):
 
 
 class TestStructuredToolNamesDerivation:
-    """``_structured_tool_names`` derives the suppressed synthetic-tool name set by
-    routing ``response_format`` through the same ``as_tool_strategy`` wrap the graph
-    binds, so the names match langchain for every schema shape — including the
-    union/oneOf shapes that fan out into one tool per variant."""
+    """``_structured_tool_names`` reads the suppressed synthetic-tool name set off the
+    very strategy the graph bound: a tool-tier ``ToolStrategy`` exposes its schema-spec
+    names (one per variant for a oneOf), while the native ``ProviderStrategy`` and
+    ``None`` bind no synthetic tool and suppress nothing."""
 
     def test_pydantic_class_binds_its_name(self) -> None:
-        assert _structured_tool_names(_Cat) == frozenset({"_Cat"})
-
-    def test_union_of_models_suppresses_every_variant_name(self) -> None:
-        # A raw Python union binds one synthetic tool PER variant, so BOTH variant
-        # names must be suppressed (a single top-level name would leak the other).
-        assert _structured_tool_names(_Cat | _Dog) == frozenset({"_Cat", "_Dog"})
+        assert _structured_tool_names(_tool_strategy(_Cat)) == frozenset({"_Cat"})
 
     def test_titled_oneof_dict_suppresses_per_variant_titles_not_the_top(self) -> None:
-        # oneOf fans out the same way: the per-variant titles are the bound tool
-        # names, never the container's top-level title.
+        # oneOf fans out: the per-variant titles are the bound tool names, never the
+        # container's top-level title.
         schema = {
             "title": "Top",
             "oneOf": [
@@ -283,7 +292,7 @@ class TestStructuredToolNamesDerivation:
                 {"title": "B", "type": "object"},
             ],
         }
-        assert _structured_tool_names(schema) == frozenset({"A", "B"})
+        assert _structured_tool_names(_tool_strategy(schema)) == frozenset({"A", "B"})
 
     def test_explicit_multi_spec_tool_strategy_exposes_all_spec_names(self) -> None:
         assert _structured_tool_names(ToolStrategy(_Cat | _Dog)) == frozenset({"_Cat", "_Dog"})

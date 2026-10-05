@@ -64,7 +64,7 @@ from tai42_agents._internal.reject import (
 )
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import aproject_agent_events
-from tai42_agents._internal.structured import as_tool_strategy
+from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 from tai42_agents.langchain_deep_agent.park_identity import build_astream_park, build_rebuild_kwargs
 from tai42_agents.langchain_deep_agent.run_input import (
@@ -192,10 +192,6 @@ class DeepAgent(Agent):
         internal_subagents = await resolve_subagent_specs(subagents)
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
 
-        # Wrap the schema ONCE and bind that same strategy into both the graph and the
-        # projection, so the synthetic tool names match by identity.
-        strategy = as_tool_strategy(response_format)
-
         # HARD sandbox dependency: the scratch backend is durable, so a run requires a
         # provider — acquire the session BEFORE the graph compiles (the backend needs it), a
         # loud SandboxUnavailableError on a box with none. A threaded run reattaches its durable
@@ -206,13 +202,13 @@ class DeepAgent(Agent):
         async with DeepAgentSession.leased(thread_id=thread_id) as drive:
             suspended = False
             try:
-                agent = await self._resolve_and_build(
+                agent, strategy = await self._resolve_and_build(
                     tools=resolved_tools,
                     subagents=internal_subagents,
                     skills=skills,
                     inline_skills=coerced_inline_skills or None,
                     system_message=rendered_system,
-                    response_format=strategy,
+                    response_format=response_format,
                     interrupt_on=interrupt_on,
                     llm_provider=llm_provider,
                     checkpoint_provider=checkpoint_provider,
@@ -314,7 +310,7 @@ class DeepAgent(Agent):
         )
         config = build_run_config(langgraph_config, thread_id)
         require_thread_id("langchain_deep_agent.append_thread_messages", config)
-        agent = await self._resolve_and_build(
+        agent, _strategy = await self._resolve_and_build(
             tools=[],
             subagents=[],
             skills=None,
@@ -431,9 +427,6 @@ class DeepAgent(Agent):
         scoped_tools = scope_nested_dispatch_all([*tools, *client_tools])
         internal_subagents = [await _to_internal(spec) for spec in (subagents or [])]
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
-        # Wrap the schema ONCE and bind that same strategy into both the graph and the
-        # projection, so the synthetic tool names match by identity.
-        strategy = as_tool_strategy(response_format)
 
         # HARD sandbox dependency: acquire the durable session BEFORE compile and thread
         # it into the backend, a loud SandboxUnavailableError on a box with none. The workspace
@@ -445,13 +438,13 @@ class DeepAgent(Agent):
             saw_interrupt = False
             saw_suspended = False
             try:
-                agent, config = await self._build_agent(
+                agent, config, strategy = await self._build_agent(
                     tools=scoped_tools,
                     subagents=internal_subagents,
                     skills=skills,
                     inline_skills=coerced_inline_skills or None,
                     system_message=rendered_system,
-                    response_format=strategy,
+                    response_format=response_format,
                     interrupt_on=interrupt_on,
                     thread_id=thread_id,
                     resume_checkpoint_id=None,
@@ -579,10 +572,12 @@ class DeepAgent(Agent):
         store_provider: str | None,
         llm_kwargs: dict[str, Any] | None,
         session: SandboxSession | None = None,
-    ) -> Any:
+    ) -> tuple[Any, Any]:
         """Resolve the LLM / checkpointer / store from the registries and assemble the compiled deep agent.
 
-        The caller builds the run config separately.
+        The caller builds the run config separately. Returns ``(agent, strategy)`` —
+        the minted structured-output strategy (or ``None``) the projection suppresses
+        the synthetic tool frames by and reads the plan mode from.
 
         ``session`` is the acquired durable sandbox session threaded through to the backend:
         set on a run/astream drive (scratch on the workspace VOLUME via
@@ -591,6 +586,10 @@ class DeepAgent(Agent):
         """
         provider = llm_provider or llm_provider_settings().llm
         llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
+        # The graph mints its own strategy + rail inside the factory; this re-mints the
+        # equivalent strategy (titles are enforced, so names and mode match) for the
+        # projection to suppress the synthetic frames and detect the native plan.
+        strategy, _rail = structured_output_stack(llm, provider, response_format)
 
         cp_provider = checkpoint_provider or llm_provider_settings().checkpoint
         checkpointer = await checkpoint_registry().get_checkpointer(
@@ -606,10 +605,11 @@ class DeepAgent(Agent):
         mark = default_system_cache_mark(provider) if system_message else None
         system_prompt = build_system_message(system_message, mark) if mark else (system_message or None)
 
-        return await build_langchain_deep_agent(
+        agent = await build_langchain_deep_agent(
             llm=llm,
             store=store,
             checkpointer=checkpointer,
+            provider=provider,
             tools=tools,
             skills=skills or None,
             inline_skills=inline_skills or None,
@@ -619,6 +619,7 @@ class DeepAgent(Agent):
             subagents=subagents or None,
             session=session,
         )
+        return agent, strategy
 
     async def _build_agent(
         self,
@@ -639,18 +640,20 @@ class DeepAgent(Agent):
         recursion_limit: int | None,
         langgraph_config: dict[str, Any] | None = None,
         session: SandboxSession | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[Any, dict[str, Any], Any]:
         """Assemble the compiled deep agent and its run config for the streaming face.
 
         Wraps :meth:`_resolve_and_build` with the run config from :meth:`_run_config`,
         the same one the invoke face uses. The recursion cap bounds the TOP-LEVEL
         graph ONLY: each task-tool subagent runs its own graph bound by deepagents at
         9999, so the effective step budget is MULTIPLICATIVE across nesting depth.
+        Returns ``(agent, config, strategy)`` — the minted structured-output strategy
+        the projection reads.
 
         ``session`` is the acquired durable sandbox session the caller threads through to
         the backend (``None`` leaves the non-sandbox ``StateBackend`` default).
         """
-        agent = await self._resolve_and_build(
+        agent, strategy = await self._resolve_and_build(
             tools=tools,
             subagents=subagents,
             skills=skills,
@@ -665,7 +668,7 @@ class DeepAgent(Agent):
             session=session,
         )
         config = self._run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
-        return agent, config
+        return agent, config, strategy
 
     async def aresume_park(
         self,
@@ -701,7 +704,6 @@ class DeepAgent(Agent):
         validated = DeepAgentInput.model_validate(rebuild)
         response_format = validated.response_format
         interrupt_on = validated.interrupt_on
-        strategy = as_tool_strategy(response_format)
 
         client_tools = scope_nested_dispatch_all(
             await tai42_app.tools.get_client_tools(list(validated.tool_names)) if validated.tool_names else []
@@ -718,13 +720,13 @@ class DeepAgent(Agent):
         async with DeepAgentSession.leased(thread_id=thread_id, workspace_key=workspace_key) as drive:
             suspended = False
             try:
-                agent = await self._resolve_and_build(
+                agent, strategy = await self._resolve_and_build(
                     tools=client_tools,
                     subagents=internal_subagents,
                     skills=validated.skills,
                     inline_skills=coerced_inline_skills or None,
                     system_message=(validated.system_message.content or "") if validated.system_message else "",
-                    response_format=strategy,
+                    response_format=response_format,
                     interrupt_on=interrupt_on,
                     llm_provider=validated.llm_provider,
                     checkpoint_provider=validated.checkpoint_provider,
@@ -786,15 +788,3 @@ class DeepAgent(Agent):
             finally:
                 if not suspended:
                     await drive.scrub_credentials()
-
-    @staticmethod
-    async def _pending_interrupts(agent: Any, config: dict[str, Any]) -> list[InterruptFinal]:
-        """Read the interrupts a paused graph is waiting on, if any.
-
-        An empty list means the run completed normally. A failure to read the
-        snapshot propagates — a paused run whose interrupt we cannot read would
-        otherwise hang invisibly.
-        """
-        snapshot = await agent.aget_state(config)
-        interrupts = list(getattr(snapshot, "interrupts", None) or [])
-        return [InterruptFinal(interrupt_id=intr.id, payload=intr.value) for intr in interrupts]
