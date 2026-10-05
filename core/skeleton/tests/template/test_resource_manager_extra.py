@@ -607,3 +607,81 @@ async def test_delete_template_dir_prunes_ids_already_evicted_by_cache(monkeypat
     # A dir delete that matches neither id still prunes the stale "gone.j2".
     await manager.delete_template_dir("unrelated")
     assert manager._cached_template_ids == {"keep.j2"}
+
+
+# --- eviction frees the engine-cached {% include %}/{% extends %} targets ----
+
+
+async def test_reupload_of_included_resource_is_served_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-uploading an included resource must make the next render of its includer
+    reflect the new content.
+
+    ``{% include %}`` resolves its target through the loader into the engine's own
+    template cache, separate from the compiled-template cache this manager keys by
+    id. The upload seam evicts that engine entry too, so the includer no longer
+    serves the stale compiled include."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, _ = _manager({"a.j2": '{% include "b.j2" %}', "b.j2": "one"})
+    assert await manager.render_by_id("a.j2") == "one"
+
+    await manager.upload_template("b.j2", "two")
+    assert await manager.render_by_id("a.j2") == "two"
+
+
+async def test_reupload_of_extended_resource_is_served_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``{% extends %}`` resolves its parent through the same loader/engine cache,
+    so re-uploading the parent is served fresh on the child's next render."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, _ = _manager(
+        {
+            "child.j2": '{% extends "base.j2" %}{% block body %}C{% endblock %}',
+            "base.j2": "one[{% block body %}{% endblock %}]",
+        }
+    )
+    assert await manager.render_by_id("child.j2") == "one[C]"
+
+    await manager.upload_template("base.j2", "two[{% block body %}{% endblock %}]")
+    assert await manager.render_by_id("child.j2") == "two[C]"
+
+
+async def test_evict_dir_frees_engine_cached_includes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dir evict drops engine-cached include targets under the prefix, even when
+    the includer itself lies outside the prefix and stays compiled."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, store = _manager({"a.j2": '{% include "lib/b.j2" %}', "lib/b.j2": "one"})
+    assert await manager.render_by_id("a.j2") == "one"
+
+    # Change the included resource directly in the store, then evict its dir. The
+    # includer (a.j2) is outside the prefix, so it stays compiled in the manager
+    # cache; only the engine-cached dependency is freed.
+    store.items["lib/b.j2"] = "two"
+    manager.evict_dir("lib")
+    assert await manager.render_by_id("a.j2") == "two"
+
+
+async def test_clear_cache_frees_engine_cached_includes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full clear drops every engine-cached include target too, so a re-uploaded
+    dependency is served fresh afterwards."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, store = _manager({"a.j2": '{% include "b.j2" %}', "b.j2": "one"})
+    assert await manager.render_by_id("a.j2") == "one"
+
+    store.items["b.j2"] = "two"
+    manager.clear_cache()
+    assert await manager.render_by_id("a.j2") == "two"
+
+
+async def test_clear_cache_frees_engine_cache_even_when_compiled_cache_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine's dependency cache is always present, independent of the
+    compiled-template cache. A full clear frees it even when compiled caching is
+    disabled, so a re-uploaded include is served fresh."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=0, max_size=8))
+    manager, store = _manager({"a.j2": '{% include "b.j2" %}', "b.j2": "one"})
+    assert manager.get_cache_info() is None  # compiled caching disabled
+    assert await manager.render_by_id("a.j2") == "one"
+
+    store.items["b.j2"] = "two"
+    manager.clear_cache()
+    assert await manager.render_by_id("a.j2") == "two"

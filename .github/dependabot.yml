@@ -20,6 +20,12 @@ updates:
       npm:
         patterns:
           - "*"
+    # typescript-eslint has no TypeScript >=7 support yet (upstream tracking:
+    # https://github.com/typescript-eslint/typescript-eslint/issues/10940), so a
+    # TS 7 bump breaks the lint toolchain. Revisit when that support lands.
+    ignore:
+      - dependency-name: "typescript"
+        versions: [">=7"]
   - package-ecosystem: npm
     directory: /e2e/ui
     schedule:
