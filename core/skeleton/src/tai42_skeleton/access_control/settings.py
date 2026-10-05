@@ -152,8 +152,10 @@ class AccessControlSettings(TaiBaseSettings):
     # never-public and ``always_public_path_prefixes`` is public-regardless-of-table,
     # this is allowed-for-any-authenticated-identity-regardless-of-table: an
     # authenticated-always-allowed path is reachable for any authenticated caller even
-    # when no route row maps it, so an identity-introspection route works on a fresh
-    # deployment with zero rows. EXACT paths (not prefixes) so the set can never
+    # when no route row maps it — including a SCOPED key that holds no ``"*"`` and so
+    # would otherwise be denied the universal scope the declared-protection tier resolves
+    # this route to — so an identity-introspection route works for every authenticated
+    # identity on a fresh deployment. EXACT paths (not prefixes) so the set can never
     # accidentally swallow a future sibling route. The carve-out bypasses ONLY the
     # route-table check: the backend's jq enforcement runs BEFORE the guard middleware,
     # so a seeded-role jq condition still applies (the role carve-in in ``roles.py`` is

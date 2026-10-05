@@ -788,9 +788,11 @@ async def test_plugin_studio_asset_is_public(monkeypatch):
 
 
 async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeypatch, bound_app):
-    # The authed /api/plugins LIST is genuinely non-public and stays []: it carries no
-    # ``public`` declaration, matches no always-public pattern, and the declared-public
-    # tier's ``route_registry.match`` resolves it to the authed LIST route (not public).
+    # The authed /api/plugins LIST is genuinely non-public: it carries no ``public``
+    # declaration and matches no always-public pattern, so it is never granted the public
+    # id. With no operator row it resolves to the universal scope ``["*"]`` via the
+    # declared-protection tier — a registered authenticated surface a role-holder reaches,
+    # a scoped key does not — NOT the public id.
     #
     # The bare /api/plugins/{name}/studio (no asset) now resolves ['public'] via the
     # owner-agnostic declared-public tier: ``route_registry.match`` reports the CORE
@@ -805,7 +807,7 @@ async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeyp
     settings = AccessControlSettings()
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
-    assert await v.resolve_resource_ids("/api/plugins", method="GET") == []
+    assert await v.resolve_resource_ids("/api/plugins", method="GET") == ["*"]
     assert await v.resolve_resource_ids("/api/plugins/x/studio", method="GET") == [settings.public_resource_id]
 
 
@@ -855,3 +857,81 @@ async def test_always_public_pattern_runtime_reserved_drop_backstop(monkeypatch)
 def test_always_public_route_patterns_invalid_regex_raises():
     with pytest.raises(ValueError, match="not a valid regex"):
         AccessControlSettings(always_public_route_patterns=(r"/api/plugins/[unclosed",))
+
+
+# -- declared-protection tier: a registered authed route with no row → universal scope --
+
+
+async def test_registered_authed_route_with_no_rows_resolves_universal_scope(monkeypatch):
+    """A fresh deployment has an empty route table. A registered, AUTHENTICATED /api
+    route the operator mapped to no scope must resolve to the universal scope "*"
+    (which every role-holder carries), not to [] — [] fails closed for every identity
+    but the super-admin, which is the fresh-deploy bug. GET /api/tools is such a route
+    (authed=True). A SCOPED key then still needs an operator row (it lacks "*")."""
+    v = _verifier()
+    _wire(monkeypatch, FakeAccessControlPg(), FakeRedis())
+    assert await v.resolve_resource_ids("/api/tools", method="GET") == ["*"]
+
+
+async def test_declared_protection_tier_requires_a_method(monkeypatch):
+    """Method-less resolution (a websocket scope, a batch pre-read) keeps today's
+    behaviour: no method → the tier cannot read the served surface → []."""
+    v = _verifier()
+    _wire(monkeypatch, FakeAccessControlPg(), FakeRedis())
+    assert await v.resolve_resource_ids("/api/tools") == []
+
+
+async def test_unregistered_api_path_still_fails_closed(monkeypatch):
+    """A path the application does not serve resolves to [] — CASE A fail-closed keeps
+    its meaning (super-admin only); the tier claims only REGISTERED authed surfaces."""
+    v = _verifier()
+    _wire(monkeypatch, FakeAccessControlPg(), FakeRedis())
+    assert await v.resolve_resource_ids("/api/does-not-exist", method="GET") == []
+
+
+async def test_declared_protection_tier_claims_a_mounted_transport_from_the_registry(monkeypatch):
+    """A registered MOUNTED transport (an MCP/SSE/sub-MCP surface) the operator mapped to no
+    row resolves to the universal scope via the registry-derived mounted matcher. The matcher
+    is built from the LIVE registry pass, so a CONFIGURED (non-default) transport path is
+    covered with no hard-coded literal. A GET here would otherwise fall to the public SPA shell
+    (it is not under /api or /mcp); the tier claims it as an authenticated surface instead —
+    the signed-off transport tightening. A method the mount does not serve stays unresolved."""
+    from tai42_skeleton.access_control import role_gate
+    from tai42_skeleton.app.route_registry.registry import RouteRegistry
+
+    tmp = RouteRegistry()
+    tmp.record_mounted(path="/xport-sse", methods=["GET"], name="x-sse", summary="transport")
+    # A TEMPLATED sub-MCP mount (``/xport-app/{path:path}``) — a concrete GET beneath it must
+    # also win over the catch-all (the sub-MCP GET exposure the fix closes).
+    tmp.record_mounted(path="/xport-app/{path:path}", methods=["GET"], name="x-app", summary="sub-mcp")
+    sse_mount = next(m for m in tmp.routes() if m.path == "/xport-sse")
+    app_mount = next(m for m in tmp.routes() if m.path == "/xport-app/{path:path}")
+    # a mount is always an authenticated surface
+    assert sse_mount.mounted
+    assert sse_mount.authed
+    assert app_mount.mounted
+    assert app_mount.authed
+
+    # Include the REAL registry (which carries the public SPA catch-all ``/{spa_path:path}``
+    # that matches every GET path) ALONGSIDE the mounts — a mount must win over the
+    # catch-all, else a GET transport stays shell-public (the fresh-deploy transport bug).
+    real_routes = list(role_gate.load_all_routes())
+    assert any(m.public and "{" in m.path for m in real_routes), "expected the SPA catch-all in the registry"
+    monkeypatch.setattr(role_gate, "load_all_routes", lambda: [*real_routes, sse_mount, app_mount])
+    role_gate.reset_route_index()
+    try:
+        # The served-surface resolver returns the MOUNT, not the catch-all, for the GET.
+        served = role_gate.resolve_served_surface("/xport-sse", "GET")
+        assert served is not None
+        assert served.mounted
+        assert served.authed
+
+        v = _verifier()
+        _wire(monkeypatch, FakeAccessControlPg(), FakeRedis())
+        # Concrete mount and a concrete path beneath the templated mount both → universal scope.
+        assert await v.resolve_resource_ids("/xport-sse", method="GET") == ["*"]
+        assert await v.resolve_resource_ids("/xport-app/some/tool", method="GET") == ["*"]
+        # A method the mount does not serve is not a served surface → nothing (CASE A).
+        assert await v.resolve_resource_ids("/xport-sse", method="POST") == []
+    finally:
+        role_gate.reset_route_index()

@@ -164,14 +164,17 @@ class ResourceGuardMiddleware:
         CASE A (unknown route + super-admin carve-out), CASE B (public deny-wins), CASE C
         (protected/auth), CASE D (scope coverage).
         """
-        # CASE A: Unknown Route (403) — with a SUPER-ADMIN carve-out. A route with no
-        # configured resource fails closed for every ordinary identity, but the admin
-        # discriminator (a condition-free "*" policy that is not an owned key, stamped on
-        # the user by the auth backend) is admitted: a root identity is never gated by a
-        # missing route row — it can map the route anyway — so blocking it is a footgun,
-        # not security. Non-admins (owned keys, condition-bearing role-holders, scoped
-        # keys) still fall through to the deny. The jq enforcement already ran upstream,
-        # and an unauthenticated caller has no admin flag, so both remain denied.
+        # CASE A: Unknown Route (403) — with a SUPER-ADMIN carve-out. The resolution is
+        # empty only for a path the application does not SERVE: no registered route (a
+        # registered authenticated route resolves to the universal scope via the verifier's
+        # declared-protection tier, and a public one to the public id) and no operator row.
+        # Such a path fails closed for every ordinary identity, but the admin discriminator
+        # (a condition-free "*" policy that is not an owned key, stamped on the user by the
+        # auth backend) is admitted: a root identity is never gated by a missing route — it
+        # can map one anyway, and it typically meets the router's own 404 — so blocking it is
+        # a footgun, not security. Non-admins (owned keys, condition-bearing role-holders,
+        # scoped keys) still fall through to the deny. The jq enforcement already ran
+        # upstream, and an unauthenticated caller has no admin flag, so both remain denied.
         if not resource_ids:
             if user.is_authenticated and getattr(user, "is_admin", False):
                 await self._run_app_with_context(scope, receive, send, user)

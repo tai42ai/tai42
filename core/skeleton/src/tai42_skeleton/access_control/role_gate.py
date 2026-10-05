@@ -87,6 +87,15 @@ def grant_map_admits(meta: RouteMetadata, method: str, grants: RoleGrants) -> tu
 # routes, so the index never outlives the surface it describes.
 _concrete_index: dict[tuple[str, str], RouteMetadata] | None = None
 _templated_matchers: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] | None = None
+# The MOUNTED surfaces (MCP transports, the sub-MCP mount), indexed SEPARATELY from the
+# handler routes above so :func:`resolve_route_meta` — which feeds the per-tag LEVEL gate —
+# never sees a mount (a mount carries no feature tag; level-gating it would deny all protocol
+# traffic). :func:`resolve_served_surface` consults these alongside the handler index so the
+# scope layer can recognise a mounted transport as the authenticated surface the registry
+# declares it to be. Built from the same `load_all_routes()` pass, so the configured transport
+# paths are covered with no hard-coded `/mcp` / `/sse` / `/app` literal.
+_mounted_concrete: dict[tuple[str, str], RouteMetadata] | None = None
+_mounted_matchers: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] | None = None
 
 # A path-template segment (``{name}`` or ``{name:path}``) → its matching sub-pattern: a
 # plain segment matches one path segment; a ``:path`` segment matches the rest greedily.
@@ -114,32 +123,51 @@ def _served_methods(meta: RouteMetadata) -> frozenset[str]:
     return declared | {"HEAD"}
 
 
+def _index_entry(
+    meta: RouteMetadata,
+    concrete: dict[tuple[str, str], RouteMetadata],
+    templated: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]],
+) -> None:
+    """File ``meta`` into the concrete or templated structure under its SERVED methods.
+
+    Key/compile on the CANONICALIZED registered path so the index and the canonicalized
+    lookup decide on the identical form — a registered route can never fail to resolve
+    through a shape mismatch.
+    """
+    methods = _served_methods(meta)
+    canonical = canonicalize_path(meta.path)
+    if "{" in canonical:
+        templated.append((_template_to_regex(canonical), methods, meta))
+    else:
+        for method in methods:
+            concrete[canonical, method] = meta
+
+
 def _build_index() -> None:
-    global _concrete_index, _templated_matchers
+    global _concrete_index, _templated_matchers, _mounted_concrete, _mounted_matchers
     concrete: dict[tuple[str, str], RouteMetadata] = {}
     templated: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] = []
+    mounted_concrete: dict[tuple[str, str], RouteMetadata] = {}
+    mounted_templated: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] = []
     # ``load_all_routes`` ensures the enumeration universe is imported so the registry is
     # populated before the index builds — in a started process that is the deployment's
     # served router surface (so the index matches what is served); in a CLI/test process it
     # triggers the offline whole-package import.
     for meta in load_all_routes():
         # A MOUNTED surface (an MCP transport, the sub-MCP mount) is not a gated handler
-        # route: it carries no feature tags and its credential gate is the mount's own,
-        # so indexing it would level-gate protocol traffic against a tag no role can hold.
+        # route: it carries no feature tags and its credential gate is the mount's own, so
+        # the HANDLER index excludes it (indexing it would level-gate protocol traffic
+        # against a tag no role can hold). It is filed into the MOUNTED index instead, which
+        # only :func:`resolve_served_surface` reads, so the scope layer can recognise the
+        # transport as the authenticated surface the registry declares.
         if meta.mounted:
-            continue
-        methods = _served_methods(meta)
-        # Key/compile on the CANONICALIZED registered path so the index and the
-        # canonicalized lookup in ``resolve_route_meta`` decide on the identical form —
-        # a registered route can never fail to resolve through a shape mismatch.
-        canonical = canonicalize_path(meta.path)
-        if "{" in canonical:
-            templated.append((_template_to_regex(canonical), methods, meta))
+            _index_entry(meta, mounted_concrete, mounted_templated)
         else:
-            for method in methods:
-                concrete[canonical, method] = meta
+            _index_entry(meta, concrete, templated)
     _concrete_index = concrete
     _templated_matchers = templated
+    _mounted_concrete = mounted_concrete
+    _mounted_matchers = mounted_templated
 
 
 @register_settings_reset
@@ -152,9 +180,11 @@ def reset_route_index() -> None:
     fence at the request gate. The ``@register_settings_reset`` drop fires at the START of
     a reload, before the reimport, so it cannot close that window on its own.
     """
-    global _concrete_index, _templated_matchers
+    global _concrete_index, _templated_matchers, _mounted_concrete, _mounted_matchers
     _concrete_index = None
     _templated_matchers = None
+    _mounted_concrete = None
+    _mounted_matchers = None
 
 
 def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
@@ -192,6 +222,48 @@ def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
         if method in methods and pattern.fullmatch(canonical):
             return _fail_closed_on_encoded_slash(meta, canonical, carries_encoded_slash)
     return None
+
+
+def resolve_served_surface(path: str, method: str | None) -> RouteMetadata | None:
+    """The registered served surface a request ``(path, method)`` reaches — handler OR mount.
+
+    :func:`resolve_route_meta` answers handler routes only (and the per-tag LEVEL gate must keep
+    reading only those — a mount carries no tag). The scope layer, by contrast, needs to know
+    whether a path is a registered AUTHENTICATED surface at all, including the MCP transports and
+    the sub-MCP mount, so that an unmapped-but-registered authed surface resolves to the universal
+    scope rather than failing closed. So this falls back to the mounted index when no handler route
+    matches. Returns ``None`` for a path the application does not serve (handler or mount), or when
+    ``method`` is absent. The mounted index is built from the same registry pass as the handler
+    index, so a deployment's CONFIGURED transport paths are covered with no hard-coded literal.
+    """
+    handler = resolve_route_meta(path, method)
+    # A SPECIFIC authenticated handler route is authoritative and wins outright. But the
+    # Studio SPA catch-all (``/{spa_path:path}``, ``authed=False`` → ``public``) is a handler
+    # route that matches EVERY GET path as the dataless fallback shell, so a bare
+    # "handler-wins" would let it SHADOW a mounted transport (``/sse``, the sub-MCP
+    # ``/app/{path}``) and keep that transport public at the scope layer. So when the handler
+    # match is public (the shell, or any declared-public route), consult the mounted index
+    # first: a mount is a specific authenticated surface and must win over the catch-all. The
+    # public handler is returned only when no mount claims the path.
+    if handler is not None and not handler.public:
+        return handler
+    if method is None:
+        return None
+    if _mounted_concrete is None or _mounted_matchers is None:
+        _build_index()
+    if _mounted_concrete is None or _mounted_matchers is None:
+        raise AssertionError
+    try:
+        canonical = canonicalize_path(path)
+    except MalformedPathError:
+        return None
+    exact = _mounted_concrete.get((canonical, method))
+    if exact is not None:
+        return exact
+    for pattern, methods, meta in _mounted_matchers:
+        if method in methods and pattern.fullmatch(canonical):
+            return meta
+    return handler
 
 
 def _fail_closed_on_encoded_slash(meta: RouteMetadata, canonical: str, carries_encoded_slash: bool) -> RouteMetadata:

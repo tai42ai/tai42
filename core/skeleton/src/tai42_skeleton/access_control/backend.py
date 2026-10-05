@@ -223,7 +223,9 @@ class AccessControlAuthBackend(AuthenticationBackend):
         )
 
         # 6. Finalize with the effective scopes, stamping the admin discriminator so the
-        # resource guard can admit a super-admin to a not-yet-configured route. Admin is
+        # resource guard can admit a super-admin to a path the app does not serve and no row
+        # maps (a registered authed route resolves to the universal scope, not that carve-out).
+        # Admin is
         # computed on the EFFECTIVE (owner-attenuated) policy — the key's scopes capped by
         # the owner's and both conditions ``None`` — the SAME predicate the projection,
         # key management, and the fence exemption share, so the guard's verdict is

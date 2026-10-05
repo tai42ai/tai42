@@ -15,10 +15,12 @@ reach on their next request. Roles are stored under the generic
 :class:`~tai42_skeleton.presets.store.PresetStoreView`.
 
 **The seeded roles carry ``"*"`` scopes and differ by their base-tier jq + grant map:**
-routes are operator-mapped rows, so a seeded scope re-mapping of the route table would
-break every existing key on deployments that already scoped their routes. The base-tier
-jq needs no route-table surgery and works on any deployment; the enforcement engine
-carries ``.request.method``/``.request.path``.
+``"*"`` is the universal scope — it covers every registered route, including one the
+operator mapped to no row (the verifier's declared-protection tier resolves such a route
+to ``"*"``), so a role-holder reaches the surface on a fresh deployment while a scoped key
+still needs an operator row. The roles therefore need no route-table surgery and work on
+any deployment; a seeded scope re-mapping of the route table would instead break every
+existing scoped key. The base-tier jq carries ``.request.method``/``.request.path``.
 
 - ``admin``: unconditional ``["*"]``, ``allow_all`` — full control including
   access-control administration. Its per-tag pass is SKIPPED at enforcement; it is

@@ -146,10 +146,16 @@ def test_external_no_identity_denied():
         asyncio.run(check(CallerIdentity(user_id=None), meta, {}, settings=AccessControlSettings()))
 
 
-def test_unknown_route_denied(ac_env, bound_app):
+def test_registered_op_with_no_row_resolves_universal_scope(ac_env, bound_app):
+    # A registered operation the operator mapped to NO route row resolves to the universal
+    # scope at the tool edge, exactly as it does at the HTTP door: a wildcard-holder (any
+    # seeded role) is admitted, and a non-wildcard caller is denied for INSUFFICIENT SCOPE
+    # (not "route not configured" — the operation's route IS served, it is simply unmapped).
     reg = OperationRegistry()
-    meta = _op(reg)  # no route seeded in pg
-    with pytest.raises(PermissionDeniedError, match="no resource configured"):
+    meta = _op(reg)  # /api/things/wipe is a registered route; no pg row
+    ac_env.add_policy("root", scopes=["*"])
+    asyncio.run(check(CallerIdentity(user_id="root"), meta, {}, settings=AccessControlSettings()))  # no raise
+    with pytest.raises(PermissionDeniedError, match="insufficient scope"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=AccessControlSettings()))
 
 
