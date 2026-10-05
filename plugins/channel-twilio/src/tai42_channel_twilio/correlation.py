@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
+from redis.exceptions import WatchError
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_kit.clients.impl.redis import RedisClient
@@ -130,6 +131,50 @@ async def reserve_pending(
 async def release_pending(twilio_number: str, human_number: str) -> None:
     """Drop the reservation (the send failed — the human never received the question)."""
     await twilio_correlation_store.release_correlation(correlation_key(twilio_number, human_number))
+
+
+async def release_pending_for(twilio_number: str, human_number: str, interaction_id: str) -> bool:
+    """Drop the pair's reservation ONLY if it is held for ``interaction_id``; True when released.
+
+    The WITHDRAW seam (a cancel, a thread/person erase) frees the single pending slot so the next
+    ask to this number pair is accepted at once. An atomic compare-and-delete over the optimistic
+    ``WATCH key -> GET -> MULTI DEL -> EXEC`` pattern: the stored
+    :class:`~tai42_contract.channels.Correlation`'s ``interaction_id`` must EQUAL the argument before
+    the key is dropped, so a newer ask that already reserved the SAME pair is never released from
+    under — a concurrent reserve between the GET and the EXEC trips :class:`WatchError` and the
+    compare re-reads. A missing record, or one naming a different interaction, leaves the key
+    untouched and returns False. Idempotent and a no-op when nothing is held (expired, already
+    forwarded, never reserved — a tier-1/link-answered format reserves nothing). A redis fault
+    propagates to the caller.
+    """
+    pending_key = _pending_key(correlation_key(twilio_number, human_number))
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        return await _compare_and_release_pending(redis, pending_key, interaction_id)
+
+
+async def _compare_and_release_pending(redis: Any, pending_key: str, interaction_id: str) -> bool:
+    """Atomic ``WATCH/GET/MULTI/DEL`` compare-and-delete of ``pending_key`` for ``interaction_id``."""
+    async with redis.pipeline() as pipe:
+        while True:
+            try:
+                await pipe.watch(pending_key)
+                raw = cast("str | bytes | None", await pipe.get(pending_key))
+                if raw is None:
+                    await pipe.reset()
+                    return False
+                if Correlation.model_validate_json(raw).interaction_id != interaction_id:
+                    # The pair now holds a DIFFERENT ask's reservation (a newer one took the slot):
+                    # leave it untouched.
+                    await pipe.reset()
+                    return False
+                pipe.multi()
+                pipe.delete(pending_key)
+                await pipe.execute()
+            except WatchError:
+                # A concurrent reserve/release raced our compare: re-read and decide again.
+                continue
+            else:
+                return True
 
 
 async def already_seen(message_sid: str) -> bool:

@@ -7,6 +7,12 @@ Bridge a WhatsApp number carried by the Meta Cloud API to an agent, or deliver
 `ask` questions into it. Unlike Twilio, this channel sends interactive
 controls, media, and pre-approved templates.
 
+It holds **one pending question per `(phone_number_id, wa_id)` pair** so an inbound
+reply correlates to the exact ask. When that ask is **withdrawn** — cancelled, or its
+thread or person erased — the channel **releases that reservation immediately**, so the
+next ask to the same `wa_id` is accepted at once instead of being refused until the held
+reservation times out.
+
 ## Enable it
 
 ```yaml manifest.yml

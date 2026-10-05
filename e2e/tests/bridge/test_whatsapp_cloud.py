@@ -25,6 +25,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
     BRIDGE_WHATSAPP_CLIENT,
@@ -35,6 +36,7 @@ from tai42_e2e.manifests import (
 from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import (
+    ERROR_ANSWER_TEXT,
     WHATSAPP_INBOUND_PATH,
     BridgeHarness,
     cancel_and_join,
@@ -934,3 +936,75 @@ async def test_template_to_known_contact_recipient_succeeds(bridge: BridgeHarnes
     assert len(sends) == 1
     assert sends[0]["type"] == "template"
     assert sends[0]["to"] == wa_id
+
+
+async def _find_pending_interaction_id(bridge: BridgeHarness, question: str, *, deadline: float = 10.0) -> str:
+    """Poll the pending-interaction listing until an item matching ``question`` appears; return its id."""
+
+    async def probe() -> str | None:
+        listing = await bridge.api(port=bridge.stack.port_b).get("/api/interactions?page=1&pageSize=200")
+        for item in listing["data"]["items"]:
+            if question in json.dumps(item):
+                return item["interaction_id"]
+        return None
+
+    return await wait_for_async(
+        probe, deadline=deadline, message=f"pending interaction for {question!r} never appeared"
+    )
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_cancel_frees_the_pair_and_the_next_form_is_sent(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    # PF-FORMS-14 end to end: a form ask over whatsapp holds the pair's single pending slot; a
+    # second form to the SAME wa_id would be refused while it is held. Withdrawing the first
+    # through the REST cancel door releases the slot, so the next form is accepted and its Flow is
+    # sent — and the withdrawal says NOTHING to the guest (no error notice).
+    wa_id = _fresh_wa_id()
+    question_a = uniq("l14-form-a")
+    question_b = uniq("l14-form-b")
+
+    async def ask(question: str) -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _FORM_SCHEMA,
+                },
+            )
+        return result.data
+
+    ask_a = asyncio.create_task(ask(question_a))
+    ask_b: asyncio.Task[object] | None = None
+    try:
+        # Form A delivers its Flow and holds the single pending slot for this wa_id.
+        await wait_whatsapp_send(bridge.fake_whatsapp, question_a)
+        interaction_id = await _find_pending_interaction_id(bridge, question_a)
+
+        # The operator WITHDRAWS A through the REST cancel door; the teardown releases the pair.
+        cancelled = await bridge.api(port=bridge.stack.port_b).post(f"/api/interactions/{interaction_id}/cancel")
+        assert cancelled["status"] == "cancelled"
+
+        # Form B to the SAME wa_id is now accepted — a second Flow send lands (no
+        # PendingQuestionExistsError refusal), proving the slot was freed by the withdraw.
+        ask_b = asyncio.create_task(ask(question_b))
+        send_b = await wait_whatsapp_send(bridge.fake_whatsapp, question_b)
+        assert send_b["payload"]["interactive"]["type"] == "flow"
+
+        # The withdrawal told the guest NOTHING — no error notice was sent to this wa_id.
+        assert bridge.fake_whatsapp.sends_matching(ERROR_ANSWER_TEXT) == []
+    finally:
+        await cancel_and_join(ask_a)
+        if ask_b is not None:
+            await cancel_and_join(ask_b)

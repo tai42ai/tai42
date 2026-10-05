@@ -16,8 +16,10 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import ChannelWithdrawal
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_WITHDRAWN,
     AnswerFormat,
     InteractionRequest,
     ParkResumeUnauthorizedError,
@@ -26,6 +28,7 @@ from tai42_contract.interactions import (
 from tai42_contract.interactions import continuation as contract_continuation
 from tai42_contract.states import StateContext, SubjectCandidates
 
+from tai42_skeleton.channels.registry import ChannelRegistry
 from tai42_skeleton.interactions import authorization
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import kill as kill_module
@@ -103,6 +106,8 @@ async def _add_park(
     candidates: SubjectCandidates | None = None,
     to: str = "user",
     thread_id: str | None = None,
+    channel: str | None = None,
+    recipient: str | None = None,
 ) -> None:
     now = datetime.now(UTC)
     deadline = now + timedelta(hours=1)
@@ -123,6 +128,8 @@ async def _add_park(
         expiry_at=deadline,
         run_delivery_id=run_delivery_id,
         delivery=delivery,
+        channel=channel,
+        recipient=recipient,
     )
     await wired.store.add(
         wired.fake,
@@ -364,6 +371,7 @@ async def test_kill_due_redelivered_after_a_simulated_crash(wired, monkeypatch, 
             "reason": "cancelled",
             "attempts": "0",
             "deadline_ms": str(int(datetime.now(UTC).timestamp() * 1000) + 3_600_000),
+            "terminal": PARK_COMPLETION_FAILED,
             "delivery": '{"tool": "deliver_tool", "context": {"thread_id": "t1"}}',
             "run_delivery_id": "rd-6",
         },
@@ -394,6 +402,7 @@ async def test_kill_due_abandoned_past_the_deadline_emits_once_and_commits_no_fa
             "reason": "cancelled",
             "attempts": "3",
             "deadline_ms": str(int(datetime.now(UTC).timestamp() * 1000) - 1000),
+            "terminal": PARK_COMPLETION_FAILED,
             "run_delivery_id": "rd-7",
         },
     )
@@ -711,7 +720,7 @@ async def test_cancel_door_routes_to_kill_park(wired, monkeypatch):
     monkeypatch.setattr(ops, "interactions_settings", lambda: wired.settings)
     calls: list[str] = []
 
-    async def _spy(r, store, interaction_id, group_id, *, reason, act_on=None):
+    async def _spy(r, store, interaction_id, group_id, *, reason, act_on=None, terminal=None):
         calls.append(interaction_id)
         return "pruned"
 
@@ -719,6 +728,260 @@ async def test_cancel_door_routes_to_kill_park(wired, monkeypatch):
     await _add_park(wired, iid="cd", delivery=None, run_delivery_id="rd-cd")
     await ops.cancel_interaction("cd")
     assert calls == ["cd"]
+
+
+# --- the channel withdraw seam + the withdrawn terminal ----------------------------------
+
+
+class _StubChannel:
+    """A channel whose ``withdraw`` records onto a shared call ledger (optionally raising first)."""
+
+    def __init__(self, ledger: list[dict[str, Any]], *, fail_times: int = 0) -> None:
+        self._ledger = ledger
+        self.withdrawals: list[ChannelWithdrawal] = []
+        self._fail_times = fail_times
+        self._calls = 0
+
+    async def deliver(self, delivery: Any) -> None:
+        return None
+
+    async def notify(self, notification: Any) -> list[str]:
+        return []
+
+    async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
+        self._calls += 1
+        if self._calls <= self._fail_times:
+            raise RuntimeError("transient withdraw fault")
+        self.withdrawals.append(withdrawal)
+        self._ledger.append({"key": "__withdraw__", "interaction_id": withdrawal.interaction_id})
+
+
+class _NoWithdrawChannel:
+    """A registered channel that declares NO ``withdraw`` member (absent = nothing to release)."""
+
+    async def deliver(self, delivery: Any) -> None:
+        return None
+
+    async def notify(self, notification: Any) -> list[str]:
+        return []
+
+
+def _wire_tools_and_channels(monkeypatch, handlers: dict[str, Any]) -> tuple[_Tools, ChannelRegistry]:
+    tools = _Tools(handlers)
+    registry = ChannelRegistry()
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools, channels=registry))
+    return tools, registry
+
+
+async def test_kill_withdraws_the_channel_delivery_before_firing_the_terminal(wired, monkeypatch, kill_handlers):
+    tools, registry = _wire_tools_and_channels(monkeypatch, {"deliver_tool": lambda a: None})
+    stub = _StubChannel(tools.calls)
+    registry.register("stub", stub)
+    register_park_kill_handler(_recording_handler([]))
+    await _add_park(
+        wired,
+        iid="k1",
+        delivery=("deliver_tool", {"thread_id": "t1"}),
+        run_delivery_id="rd-1",
+        channel="stub",
+        recipient="r1",
+    )
+
+    await kill_park(wired.fake, wired.store, "k1", "kg", reason="cancelled")
+
+    # The stub's withdraw saw exactly one ChannelWithdrawal for this ask + recipient.
+    assert stub.withdrawals == [ChannelWithdrawal(interaction_id="k1", recipient="r1")]
+    # And its call PRECEDES the terminal fire (the pair is free before any terminal).
+    keys = [c["key"] for c in tools.calls]
+    assert keys.index("__withdraw__") < keys.index("deliver_tool")
+
+
+async def test_kill_of_a_run_less_park_withdraws_the_channel_delivery(wired, monkeypatch, kill_handlers):
+    # A run-less park (no run_delivery_id): a plain prune, then the channel reservation is withdrawn.
+    tools, registry = _wire_tools_and_channels(monkeypatch, {})
+    stub = _StubChannel(tools.calls)
+    registry.register("stub", stub)
+    now = datetime.now(UTC)
+    deadline = now + timedelta(hours=1)
+    request = InteractionRequest(
+        interaction_id="rl1",
+        group_id="kg",
+        question="?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=wired.store.reply_key("rl1"),
+        created_at=now,
+        timeout_at=deadline,
+        mode="sync",
+        channel="stub",
+        recipient="r9",
+    )
+    await wired.store.add(wired.fake, request, idle_ttl=86400)
+
+    result = await kill_park(wired.fake, wired.store, "rl1", "kg", reason="cancelled")
+
+    assert result == "pruned"
+    assert stub.withdrawals == [ChannelWithdrawal(interaction_id="rl1", recipient="r9")]
+
+
+async def test_kill_without_a_channel_or_without_the_member_withdraws_nothing(wired, monkeypatch, kill_handlers):
+    # channel=None: no channel reserved anything, so nothing is withdrawn and the terminal still fires.
+    tools, registry = _wire_tools_and_channels(monkeypatch, {"deliver_tool": lambda a: None})
+    stub = _StubChannel(tools.calls)
+    registry.register("stub", stub)
+    registry.register("bare", _NoWithdrawChannel())
+    register_park_kill_handler(_recording_handler([]))
+    await _add_park(wired, iid="nc", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-nc")
+
+    await kill_park(wired.fake, wired.store, "nc", "kg", reason="cancelled")
+
+    assert stub.withdrawals == []
+    assert any(c["key"] == "deliver_tool" for c in tools.calls)
+
+    # A registered channel that declares NO withdraw member: no raise, the terminal still delivers.
+    await _add_park(
+        wired,
+        iid="bm",
+        delivery=("deliver_tool", {"thread_id": "t1"}),
+        run_delivery_id="rd-bm",
+        channel="bare",
+        recipient="rb",
+    )
+    await kill_park(wired.fake, wired.store, "bm", "kg", reason="cancelled")
+    assert any(c["key"] == "deliver_tool" and c["arguments"]["completion_id"] == _cid("rd-bm") for c in tools.calls)
+
+
+async def test_withdraw_raise_keeps_the_kill_due_and_the_redelivery_withdraws_and_delivers_once(
+    wired, monkeypatch, kill_handlers
+):
+    tools, registry = _wire_tools_and_channels(monkeypatch, {"deliver_tool": lambda a: None})
+    stub = _StubChannel(tools.calls, fail_times=1)
+    registry.register("stub", stub)
+    register_park_kill_handler(_recording_handler([]))
+    await _add_park(
+        wired,
+        iid="wr",
+        delivery=("deliver_tool", {"thread_id": "t1"}),
+        run_delivery_id="rd-wr",
+        channel="stub",
+        recipient="rw",
+    )
+
+    # The first kill's withdraw raises: it propagates, the kill-due record is KEPT, no terminal fired.
+    with pytest.raises(RuntimeError):
+        await kill_park(wired.fake, wired.store, "wr", "kg", reason="cancelled")
+    assert await _kill_due_present(wired, "wr")
+    assert not any(c["key"] == "deliver_tool" for c in tools.calls)
+
+    # Advance the backoff window; the reaper's kill-due leg redelivers: the withdraw now succeeds, the
+    # terminal fires once, the record clears.
+    await wired.fake.zadd(wired.store.kill_due_index_key, {"wr": 0})
+    assert await reaper_module.redeliver_due_kills_once() == 1
+    assert stub.withdrawals == [ChannelWithdrawal(interaction_id="wr", recipient="rw")]
+    fires = [c for c in tools.calls if c["key"] == "deliver_tool"]
+    assert len(fires) == 1
+    assert not await _kill_due_present(wired, "wr")
+
+
+async def test_cancel_delivers_the_withdrawn_terminal(wired, monkeypatch, kill_handlers):
+    tools = _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
+    register_park_kill_handler(_recording_handler([]))
+    await _add_park(wired, iid="cw", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-cw")
+
+    await kill_park(wired.fake, wired.store, "cw", "kg", reason="cancelled", terminal=PARK_COMPLETION_WITHDRAWN)
+
+    fires = [c for c in tools.calls if c["key"] == "deliver_tool"]
+    assert len(fires) == 1
+    assert fires[0]["arguments"]["status"] == PARK_COMPLETION_WITHDRAWN
+
+
+async def test_withdrawn_receiver_less_kill_writes_no_waiting_outcome_but_leaves_the_subject_index(
+    wired, monkeypatch, kill_handlers
+):
+    # A receiver-less WITHDRAWN kill has NO outcome to take: no waiting outcome is written, but the
+    # subject index is left (so a whole-chain walk reaches nothing stale).
+    _wire_tools(monkeypatch, {})
+    register_park_kill_handler(_recording_handler([]))
+    candidates = SubjectCandidates(target_kind="agent", target_name="a", by_kind={"person": "pW"})
+    await _add_park(wired, iid="rlw", delivery=None, run_delivery_id="rd-rlw", candidates=candidates)
+
+    await kill_park(wired.fake, wired.store, "rlw", "kg", reason="cancelled", terminal=PARK_COMPLETION_WITHDRAWN)
+
+    # No waiting outcome keyed by the run (contrast the FAILED receiver-less kill, which writes one).
+    assert await wired.store.claim_outcome(wired.fake, _cid("rd-rlw")) is None
+
+
+async def test_cancel_door_passes_the_withdrawn_terminal(wired, monkeypatch):
+    from tai42_skeleton.operations import interactions as ops
+
+    monkeypatch.setattr(ops, "client_ctx", _fake_ctx(wired.fake))
+    monkeypatch.setattr(ops, "interactions_settings", lambda: wired.settings)
+    captured: list[str] = []
+
+    async def _spy(r, store, interaction_id, group_id, *, reason, act_on=None, terminal=PARK_COMPLETION_FAILED):
+        captured.append(terminal)
+        return "pruned"
+
+    monkeypatch.setattr(ops, "kill_park", _spy)
+    await _add_park(wired, iid="cdw", delivery=None, run_delivery_id="rd-cdw")
+    await ops.cancel_interaction("cdw")
+    assert captured == [PARK_COMPLETION_WITHDRAWN]
+
+
+async def test_visit_cancel_passes_the_withdrawn_terminal(wired, monkeypatch):
+    from tai42_skeleton.interactions import visit as visit_module
+
+    captured: list[str] = []
+
+    async def _spy(
+        r,
+        store,
+        interaction_id,
+        group_id,
+        *,
+        reason,
+        act_on=kill_module.KILL_ACT_ON_ANY,
+        terminal=PARK_COMPLETION_FAILED,
+    ):
+        captured.append(terminal)
+        return "pruned"
+
+    monkeypatch.setattr(visit_module, "kill_park", _spy)
+    parked = {"v1": {"group_id": "kg"}}
+    await visit_module._cancel_all(wired.store, wired.settings, ["v1"], parked)
+    assert captured == [PARK_COMPLETION_WITHDRAWN]
+
+
+async def test_cancel_parks_for_thread_and_person_pass_the_withdrawn_terminal(wired, monkeypatch, kill_handlers):
+    from tai42_skeleton.interactions import helper as helper_module
+
+    captured: list[str] = []
+
+    async def _spy(
+        r,
+        store,
+        interaction_id,
+        group_id,
+        *,
+        reason,
+        act_on=kill_module.KILL_ACT_ON_ANY,
+        terminal=PARK_COMPLETION_FAILED,
+    ):
+        captured.append(terminal)
+        return "pruned"
+
+    monkeypatch.setattr(kill_module, "kill_park", _spy)
+    await _add_park(
+        wired,
+        iid="td",
+        delivery=("deliver_tool", {"thread_id": "t1"}),
+        run_delivery_id="rd-td",
+        thread_id="bridge:chat:z",
+    )
+    await helper_module.cancel_parks_for_thread("bridge:chat:z", reason="thread_deleted")
+    person_c = SubjectCandidates(target_kind="agent", target_name="s", by_kind={"person": "pX2"})
+    await _add_park(wired, iid="pe", delivery=None, run_delivery_id="rd-pe", candidates=person_c)
+    await helper_module.cancel_parks_for_person("pX2")
+    assert captured == [PARK_COMPLETION_WITHDRAWN, PARK_COMPLETION_WITHDRAWN]
 
 
 async def test_cancel_parks_for_thread_kills_via_both_indices(wired, monkeypatch, kill_handlers):

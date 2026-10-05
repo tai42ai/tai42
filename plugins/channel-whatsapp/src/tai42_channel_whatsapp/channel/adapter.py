@@ -14,6 +14,7 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    ChannelWithdrawal,
 )
 
 from tai42_channel_whatsapp.channel.asks import _TIER1_FORMATS, _render_link, _send_question
@@ -24,7 +25,7 @@ from tai42_channel_whatsapp.channel.notifications import _send_notification
 from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
 from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
 from tai42_channel_whatsapp.client import mark_read_typing, send_message
-from tai42_channel_whatsapp.correlation import release_pending, reserve_pending
+from tai42_channel_whatsapp.correlation import release_pending, release_pending_for, reserve_pending
 from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
 
@@ -152,6 +153,44 @@ class WhatsAppChannel:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(phone_number_id=phone_number_id, wa_id=target)
             raise
+
+    async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
+        """Release the pair reservation (and any reacting-form sidecar) a delivered ask held.
+
+        The platform fires this when a channel-delivered ask is torn down (a cancel, a thread/person
+        erase), so the single pending slot for the pair frees at once instead of lingering until the
+        next inbound 404 or the reservation's TTL. ``recipient is None`` means the delivery named no
+        recipient — but ``deliver`` refuses a missing recipient before any reservation, so nothing
+        can be held: return. Otherwise the pair key is resolved under the SAME
+        ``phone_number_id`` the delivery reserved under, and
+        :func:`~tai42_channel_whatsapp.correlation.release_pending_for` drops the reservation ONLY
+        when it is still held for THIS interaction (a newer ask that took the pair is left
+        untouched) and always clears the per-interaction reacting-form sidecar. A tier-1/link ask
+        reserved nothing, so the compare simply misses. A redis fault is surfaced as a RETRYABLE
+        :class:`ChannelDeliveryError` so the kill outbox redelivers the withdrawal; it never raises
+        for "nothing to release".
+        """
+        if withdrawal.recipient is None:
+            return
+        settings = whatsapp_settings()
+        phone_number_id = require_delivery_setting(
+            settings.default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
+        )
+        try:
+            released = await release_pending_for(phone_number_id, withdrawal.recipient, withdrawal.interaction_id)
+        except ChannelDeliveryError:
+            raise
+        except Exception as exc:
+            raise ChannelDeliveryError(
+                f"withdraw of interaction {withdrawal.interaction_id} failed against the correlation store",
+                retryable=True,
+            ) from exc
+        logger.info(
+            "whatsapp: withdrew interaction %s for recipient %s (reservation released=%s)",
+            withdrawal.interaction_id,
+            withdrawal.recipient,
+            released,
+        )
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
         """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.

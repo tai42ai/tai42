@@ -8,10 +8,14 @@ tools reverse the thread and mint the resumed answer as a delivered record.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal, cast
 
 from tai42_contract.conversations import AnswerPart, ConversationRoute
-from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
+from tai42_contract.interactions import (
+    PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_SUCCEEDED,
+    PARK_COMPLETION_WITHDRAWN,
+)
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import cache
@@ -100,26 +104,33 @@ async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute,
     return route, client_address
 
 
-def _completion_succeeded(tool_name: str, completion_id: str, status: str | None) -> bool:
-    """Whether a completion fire's ``status`` names the clean-success terminal.
+def _terminal_kind(
+    tool_name: str, completion_id: str, status: str | None
+) -> Literal["succeeded", "withdrawn", "failed"]:
+    """Classify a completion fire's ``status`` into the delivery action it names.
 
     Also the one place a non-success fire is ANNOUNCED.
-    The shared contract vocabulary carries exactly two values: :data:`PARK_COMPLETION_SUCCEEDED`
-    (deliver the terminal ``result``) and :data:`PARK_COMPLETION_FAILED` (deliver the uniform
-    client-safe notice). Every other shape is non-success — an UNSTAMPED fire (``None``: a
-    resumer that predates the status field, or one that simply omits it) and an UNRECOGNIZED
-    value alike — because pushing an unknown terminal through the success path would deliver a
-    failure payload as if it were the answer.
+    The shared contract vocabulary carries three terminal values: :data:`PARK_COMPLETION_SUCCEEDED`
+    (``"succeeded"`` — deliver the terminal ``result``), :data:`PARK_COMPLETION_WITHDRAWN`
+    (``"withdrawn"`` — the platform took the run down on purpose, so deliver NOTHING; a recognized
+    value, NOT a skew) and :data:`PARK_COMPLETION_FAILED` (``"failed"`` — deliver the uniform
+    client-safe notice). Every OTHER shape maps to ``"failed"`` — an UNSTAMPED fire (``None``: a
+    resumer that predates the status field, or one that simply omits it) and an UNRECOGNIZED value
+    alike — because pushing an unknown terminal through the success path would deliver a failure
+    payload as if it were the answer.
 
-    Those two shapes are a version skew between the resumer and this delivery tool, and the skew
-    is otherwise INVISIBLE: the fire still returns a delivered record, so a whole fleet can
-    silently degrade every successful answer into an error notice with nothing anywhere to see
-    it. This warning is the only detection, so EVERY non-success fire — the explicit failure
+    Those two unreadable shapes are a version skew between the resumer and this delivery tool, and
+    the skew is otherwise INVISIBLE: the fire still returns a delivered record, so a whole fleet can
+    silently degrade every successful answer into an error notice with nothing anywhere to see it.
+    This warning is the only detection, so EVERY ``"failed"`` outcome — the explicit failure
     included — names the completion id and WHICH shape arrived: nothing distinguishes a degraded
-    fleet's records from a genuinely failing one's, so both have to be visible.
+    fleet's records from a genuinely failing one's, so both have to be visible. A ``"withdrawn"``
+    fire is recognized vocabulary and delivers nothing, so it is NEVER warned about.
     """
     if status == PARK_COMPLETION_SUCCEEDED:
-        return True
+        return "succeeded"
+    if status == PARK_COMPLETION_WITHDRAWN:
+        return "withdrawn"
     if status is None:
         reason = "it carried NO status (an unstamped fire — a resumer that predates the status field)"
     elif status == PARK_COMPLETION_FAILED:
@@ -134,7 +145,35 @@ def _completion_succeeded(tool_name: str, completion_id: str, status: str | None
         completion_id,
         reason,
     )
-    return False
+    return "failed"
+
+
+async def _classify_and_short_circuit(
+    tool_name: str, completion_id: str | None, status: str | None
+) -> tuple[Literal["succeeded", "withdrawn", "failed"], dict[str, str | None] | None]:
+    """Classify the terminal and return any early no-op exit the two completion tools share.
+
+    Both tools run, after their first-statement delivery-authorisation guard, the SAME preamble: a
+    blank ``completion_id`` is a loud bug (nothing can key delivery), a ``withdrawn`` terminal is a
+    quiet close that delivers NOTHING before any thread resolution/record/send, and a
+    ``completion_id`` whose durable record already committed is a benign redelivery no-op. Returns
+    ``(kind, early)``: a non-``None`` ``early`` is the result the caller must return at once, read
+    BEFORE any address guard so a re-drive of an already-delivered terminal takes the benign path
+    even when the second fire lost its address.
+    """
+    if not completion_id:
+        raise ValueError(f"{tool_name} requires a completion_id — it is the exactly-once delivery key")
+    kind = _terminal_kind(tool_name, completion_id, status)
+    if kind == "withdrawn":
+        # The platform took the run down on purpose — there is no outcome and nothing to say. Return
+        # BEFORE any record read, thread resolution or send: nothing is minted, nothing is sent, the
+        # thread-mode TTL is not refreshed. Naturally idempotent — a redelivered fire re-returns None.
+        return kind, {"message_id": None}
+    if await accessors._store().get_record(completion_id) is not None:
+        # A redelivered completion whose durable record already committed (a lease-lapse re-drive):
+        # the exactly-once point is passed, so this is a benign no-op.
+        return kind, {"message_id": completion_id}
+    return kind, None
 
 
 async def deliver_agent_completion(
@@ -154,15 +193,17 @@ async def deliver_agent_completion(
     hands it to the SAME delivery machine a produced answer takes — never appending to the
     agent's memory (the resumed run already recorded the answer in its own checkpoint).
 
-    ``status`` names the terminal outcome with the shared contract vocabulary, exactly as the
-    tool-route sibling :func:`deliver_tool_completion` reads it: :data:`PARK_COMPLETION_SUCCEEDED`
-    delivers ``result`` as the answer; every other shape — the explicit
-    :data:`PARK_COMPLETION_FAILED`, an UNSTAMPED fire (``None``), and an UNRECOGNIZED value
-    alike — is a non-success terminal (an agent route carries no error mapping) delivered as the
-    uniform client-safe notice, so a failed/stopped/aborted resume is never silently dropped and
-    a fire this tool cannot read never delivers a non-success payload as if it were the answer.
-    Both fail-safe shapes are a resumer/delivery version skew, so each is warned about by
-    :func:`_completion_succeeded` — that log is their only detection.
+    ``status`` names the terminal outcome with the shared three-value contract vocabulary, exactly
+    as the tool-route sibling :func:`deliver_tool_completion` reads it (:func:`_terminal_kind`):
+    :data:`PARK_COMPLETION_SUCCEEDED` delivers ``result`` as the answer;
+    :data:`PARK_COMPLETION_WITHDRAWN` means the platform took the run down on purpose, so NOTHING is
+    minted, sent or warned (it returns before any thread resolution); every OTHER shape — the
+    explicit :data:`PARK_COMPLETION_FAILED`, an UNSTAMPED fire (``None``), and an UNRECOGNIZED value
+    alike — is a failed terminal (an agent route carries no error mapping) delivered as the uniform
+    client-safe notice, so a failed/stopped/aborted resume is never silently dropped and a fire this
+    tool cannot read never delivers a non-success payload as if it were the answer. The two
+    unreadable shapes are a resumer/delivery version skew, so each is warned about by
+    :func:`_terminal_kind` — that log is their only detection.
 
     ``completion_id`` is the stable idempotency id of the resolved super-step: the delivery
     record is keyed by it, so a lease-lapse re-drive that fires the completion a second time
@@ -194,15 +235,11 @@ async def deliver_agent_completion(
     # Only the platform's own delivery-ladder fire may reach here: a call named at the run-tool door
     # or the MCP edge — or one with no completion id — is refused before any record read or mint.
     assert_delivery_authorized(completion_id)
-    if not completion_id:
-        raise ValueError("deliver_agent_completion requires a completion_id — it is the exactly-once delivery key")
-    existing = await accessors._store().get_record(completion_id)
-    if existing is not None:
-        # A redelivered completion for a super-step whose durable record already committed (a
-        # lease-lapse re-drive): the exactly-once point is passed, so this is a benign no-op.
-        # Read BEFORE the address guard, so a re-drive of an already-delivered super-step takes
-        # this benign path even when the second fire lost its address.
-        return {"message_id": completion_id}
+    kind, early = await _classify_and_short_circuit(COMPLETION_TOOL_NAME, completion_id, status)
+    if early is not None:
+        return early
+    # ``_classify_and_short_circuit`` raised on a blank id, so it is a real str from here.
+    completion_id = cast("str", completion_id)
     if not thread_id:
         # A fire whose completion binding carried no address: nothing can route it and no retry
         # ever will, so it is dropped LOUDLY rather than raising the retriable delivery error.
@@ -214,7 +251,7 @@ async def deliver_agent_completion(
         return {"message_id": None}
     route, client_address = await _resolve_completion_target(thread_id)
     answer_parts: list[AnswerPart] | None = None
-    if _completion_succeeded(COMPLETION_TOOL_NAME, completion_id, status):
+    if kind == "succeeded":
         # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
         # replies for an empty answer, so the client sees a consistent outcome either way — the
         # route's own ``error_reply_text`` when it carries one. It rides the operator record as
@@ -299,13 +336,15 @@ async def deliver_tool_completion(
     SAME mapping the live tool turn applied), and hands the reply to the SAME delivery machine a
     produced answer takes.
 
-    ``status`` names the terminal outcome with the shared contract vocabulary:
-    :data:`PARK_COMPLETION_SUCCEEDED` maps ``result`` via ``reply_expr``; every other shape —
-    the explicit :data:`PARK_COMPLETION_FAILED`, an UNSTAMPED fire (``None``), and an
-    UNRECOGNIZED value alike — is a non-success terminal (the route carries no error mapping)
+    ``status`` names the terminal outcome with the shared three-value contract vocabulary
+    (:func:`_terminal_kind`): :data:`PARK_COMPLETION_SUCCEEDED` maps ``result`` via ``reply_expr``;
+    :data:`PARK_COMPLETION_WITHDRAWN` means the platform took the run down on purpose, so NOTHING is
+    minted, sent or warned (it returns before any thread resolution); every OTHER shape — the
+    explicit :data:`PARK_COMPLETION_FAILED`, an UNSTAMPED fire (``None``), and an
+    UNRECOGNIZED value alike — is a failed terminal (the route carries no error mapping)
     delivered as the uniform client-safe notice, so a failed/stopped/aborted resume is never
     silently dropped and a fire this tool cannot read never pushes a non-success payload through
-    ``reply_expr``. EVERY non-success shape is warned about by :func:`_completion_succeeded` —
+    ``reply_expr``. EVERY failed shape is warned about by :func:`_terminal_kind` —
     that log is the only detection a resumer/delivery version skew has, since a degraded fire
     still returns a delivered record. An OMITTED ``status`` keeps this tool's published
     fail-safe default (:data:`PARK_COMPLETION_FAILED`), so it is reported as that terminal
@@ -350,15 +389,11 @@ async def deliver_tool_completion(
     # Only the platform's own delivery-ladder fire may reach here: a call named at the run-tool door
     # or the MCP edge — or one with no completion id — is refused before any record read or mint.
     assert_delivery_authorized(completion_id)
-    if not completion_id:
-        raise ValueError("deliver_tool_completion requires a completion_id — it is the exactly-once delivery key")
-    existing = await accessors._store().get_record(completion_id)
-    if existing is not None:
-        # A redelivered completion for a terminal whose durable record already committed: the
-        # exactly-once point is passed, so this is a benign no-op. Read BEFORE the address guard,
-        # so a re-fire of an already-delivered terminal takes this benign path even when the
-        # second fire lost its address.
-        return {"message_id": completion_id}
+    kind, early = await _classify_and_short_circuit(DELIVER_TOOL_COMPLETION_NAME, completion_id, status)
+    if early is not None:
+        return early
+    # ``_classify_and_short_circuit`` raised on a blank id, so it is a real str from here.
+    completion_id = cast("str", completion_id)
     if not delivery_thread_id:
         # A fire whose completion binding carried no address: nothing can route it and no retry
         # ever will, so it is dropped LOUDLY rather than raising the retriable delivery error.
@@ -380,7 +415,7 @@ async def deliver_tool_completion(
                 f"originating route {route_name!r} for parked thread {delivery_thread_id!r} no longer exists"
             )
         mapping_route = pinned
-    if _completion_succeeded(DELIVER_TOOL_COMPLETION_NAME, completion_id, status):
+    if kind == "succeeded":
         try:
             reply = await _tool_reply(
                 mapping_route, result, turn=await _rebuilt_turn(message_id, mapping_route), asks=[], parked=[]

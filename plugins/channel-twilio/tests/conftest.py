@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+from redis.exceptions import WatchError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
@@ -273,6 +274,62 @@ class FakeHttpx:
         return item
 
 
+class _FakePipeline:
+    """A minimal async redis pipeline for the optimistic ``WATCH -> GET -> MULTI DEL -> EXEC`` pattern.
+
+    Supports the exact surface the correlation store's compare-and-delete uses: ``watch`` (snapshots
+    the watched keys), an immediate ``get`` while watching, ``multi`` (switch to buffering), a queued
+    ``delete``, ``execute`` (raise :class:`WatchError` if a watched key changed since the snapshot,
+    else apply the queued ops), and ``reset``.
+    """
+
+    def __init__(self, redis: FakeRedis) -> None:
+        self._redis = redis
+        self._watched: dict[str, str | None] = {}
+        self._queued: list[str] = []
+        self._buffering = False
+
+    async def __aenter__(self) -> _FakePipeline:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        await self.reset()
+        return False
+
+    async def watch(self, *keys: str) -> bool:
+        for key in keys:
+            self._watched[key] = self._redis.store.get(key)
+        return True
+
+    def multi(self) -> None:
+        self._buffering = True
+
+    async def get(self, key: str) -> str | None:
+        return self._redis.store.get(key)
+
+    def delete(self, key: str) -> _FakePipeline:
+        if self._buffering:
+            self._queued.append(key)
+            return self
+        self._redis.ttls.pop(key, None)
+        self._redis.store.pop(key, None)
+        return self
+
+    async def execute(self) -> list[int]:
+        for key, snapshot in self._watched.items():
+            if self._redis.store.get(key) != snapshot:
+                await self.reset()
+                raise WatchError
+        results = [await self._redis.delete(key) for key in self._queued]
+        await self.reset()
+        return results
+
+    async def reset(self) -> None:
+        self._watched = {}
+        self._queued = []
+        self._buffering = False
+
+
 class FakeRedis:
     """In-memory stand-in for the async redis commands the correlation store uses."""
 
@@ -303,6 +360,9 @@ class FakeRedis:
 
     async def exists(self, key: str) -> int:
         return 1 if key in self.store else 0
+
+    def pipeline(self) -> _FakePipeline:
+        return _FakePipeline(self)
 
 
 @pytest.fixture

@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    PARK_COMPLETION_WITHDRAWN,
     AnswerFormat,
     InteractionResponse,
     ParkableRunFailedError,
@@ -289,7 +290,16 @@ async def _cancel_all(
         return list(cancel)
     async with client_ctx(RedisClient, settings.redis) as r:
         for iid in cancel:
-            await kill_park(r, store, iid, parked[iid].get("group_id") or "", reason="cancelled")
+            # A visit cancel (builtin ``cancel_parked`` tool, a route ``cancel_expr``, a hook/schedule
+            # visit) withdraws the ask on purpose: WITHDRAWN, so nothing is said to the person.
+            await kill_park(
+                r,
+                store,
+                iid,
+                parked[iid].get("group_id") or "",
+                reason="cancelled",
+                terminal=PARK_COMPLETION_WITHDRAWN,
+            )
     return list(cancel)
 
 

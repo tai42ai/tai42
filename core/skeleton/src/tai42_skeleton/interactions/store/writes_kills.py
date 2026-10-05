@@ -60,6 +60,9 @@ class _StoreKillWrites(_StoreWritesBase):
         run_delivery_id: str | None,
         subjects: dict[str, Any] | None,
         reason: str,
+        terminal: str,
+        channel: str | None,
+        recipient: str | None,
         kill_due_ttl: int,
         first_attempt_at_ms: int,
         deadline_ms: int,
@@ -81,8 +84,10 @@ class _StoreKillWrites(_StoreWritesBase):
           whole-chain walk has its live due record cleared and nothing redelivers into a run whose
           driver dropped its tombstones;
         * a durable kill-due record + its next-attempt index member are written, carrying the
-          killed run's copied ``delivery`` address, ``run_delivery_id`` and subject descriptor, so
-          the platform's FAILED delivery survives the prune and a crash-redelivery.
+          killed run's copied ``delivery`` address, ``run_delivery_id``, subject descriptor, the
+          door's chosen ``terminal`` status, and the ask's ``channel``/``recipient``, so the
+          platform's terminal delivery and its channel withdrawal survive the prune and a
+          crash-redelivery.
 
         ``act_on`` is the door's precondition — the resolved target states the kill may act on. The
         default (:data:`KILL_ACT_ON_ANY`) tears down a pending OR an already-resolved
@@ -103,9 +108,12 @@ class _StoreKillWrites(_StoreWritesBase):
         kill_mapping = records._kill_due_mapping(
             reason,
             deadline_ms,
+            terminal,
             json.dumps(delivery) if delivery is not None else None,
             run_delivery_id,
             json.dumps(subjects) if subjects is not None else None,
+            channel,
+            recipient,
         )
 
         async with r.pipeline() as pipe:

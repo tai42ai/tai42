@@ -172,8 +172,11 @@ class KillTarget:
     waiting result). ``group_id`` is the pending park's group (for the prune's count cleanup),
     ``None`` for the other kinds. ``delivery`` (the run's out-of-band address ``{tool, context}``),
     ``run_delivery_id`` and ``subjects`` (the descriptor) are the run's delivery identity the kill
-    copies onto its durable record and delivers its single FAILED under — ``None`` when the run
-    carried none (a receiver-less door, no subject).
+    copies onto its durable record and delivers its single terminal under — ``None`` when the run
+    carried none (a receiver-less door, no subject). ``channel`` / ``recipient`` are the ask's channel
+    name and delivery address, read off the surviving state hash's ``request`` so the kill can WITHDRAW
+    the channel's reservation; ``None`` for an inbox-only ask, and both ``None`` for the ``outcome``
+    kind and the due-record-only ``running`` kind (neither holds a channel reservation).
     """
 
     kind: Literal["park", "running", "outcome"]
@@ -181,6 +184,8 @@ class KillTarget:
     delivery: dict[str, Any] | None
     run_delivery_id: str | None
     subjects: dict[str, Any] | None
+    channel: str | None = None
+    recipient: str | None = None
 
 
 @dataclass(frozen=True)
@@ -188,45 +193,58 @@ class KillDue:
     """A durable kill-due record read back for redelivery — the whole-chain kill's outbox.
 
     Written in the kill's teardown MULTI and cleared only when every driver teardown returned
-    normally AND the platform's FAILED delivery for the killed run committed. Carries the killed
-    run's OWN copied ``delivery`` address and ``run_delivery_id`` (so the FAILED delivery and its
+    normally AND the platform's terminal delivery for the killed run committed. Carries the killed
+    run's OWN copied ``delivery`` address and ``run_delivery_id`` (so the terminal delivery and its
     dedup id survive the prune and a redelivery), the subject descriptor it subject-tracks a
-    receiver-less FAILED under, the removal ``reason``, and the hard ``deadline_ms`` past which the
-    reaper gives the kill up. It carries no consumer-specific data.
+    receiver-less terminal under, the removal ``reason``, the ``terminal`` status the door chose
+    (``failed``/``withdrawn``) so a redelivery delivers the SAME one, the ask's ``channel``/
+    ``recipient`` so a redelivery withdraws the SAME channel reservation, and the hard ``deadline_ms``
+    past which the reaper gives the kill up. It carries no consumer-specific data.
     """
 
     interaction_id: str
     reason: str
     attempts: int
     deadline_ms: int
+    terminal: str
     delivery: dict[str, Any] | None = None
     run_delivery_id: str | None = None
     subjects: dict[str, Any] | None = None
+    channel: str | None = None
+    recipient: str | None = None
 
 
 def _kill_due_mapping(
     reason: str,
     deadline_ms: int,
+    terminal: str,
     delivery: str | None = None,
     run_delivery_id: str | None = None,
     subjects: str | None = None,
+    channel: str | None = None,
+    recipient: str | None = None,
 ) -> dict[str, str]:
     """The kill-due record fields.
 
     The removal ``reason``, a zeroed attempt count, the hard ``deadline_ms`` (created + retention
-    horizon) past which the reaper gives the kill up, and — when the killed run carried them — the
-    run's ``delivery`` address (JSON), its ``run_delivery_id`` and its subject descriptor (JSON),
-    so a detached redelivery re-fires the driver teardown and delivers the run's single FAILED
-    without re-reading a state hash the kill already pruned. Written into the kill's teardown MULTI,
-    so the outbox enqueue commits atomically with the prune.
+    horizon) past which the reaper gives the kill up, the ``terminal`` status the door chose, and —
+    when the killed run carried them — the run's ``delivery`` address (JSON), its ``run_delivery_id``,
+    its subject descriptor (JSON), and the ask's ``channel``/``recipient``, so a detached redelivery
+    re-fires the driver teardown, withdraws the SAME channel reservation and delivers the SAME
+    terminal without re-reading a state hash the kill already pruned. Written into the kill's teardown
+    MULTI, so the outbox enqueue commits atomically with the prune.
     """
-    mapping = {"reason": reason, "attempts": "0", "deadline_ms": str(deadline_ms)}
+    mapping = {"reason": reason, "attempts": "0", "deadline_ms": str(deadline_ms), "terminal": terminal}
     if delivery is not None:
         mapping["delivery"] = delivery
     if run_delivery_id is not None:
         mapping["run_delivery_id"] = run_delivery_id
     if subjects is not None:
         mapping["subjects"] = subjects
+    if channel is not None:
+        mapping["channel"] = channel
+    if recipient is not None:
+        mapping["recipient"] = recipient
     return mapping
 
 

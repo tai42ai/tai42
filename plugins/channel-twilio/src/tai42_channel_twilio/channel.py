@@ -51,6 +51,7 @@ conversation, bypassing the allowlist.
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import UTC, datetime
 from typing import ClassVar
@@ -60,12 +61,15 @@ from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
+    ChannelWithdrawal,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.client import send_message
-from tai42_channel_twilio.correlation import release_pending, reserve_pending
+from tai42_channel_twilio.correlation import release_pending, release_pending_for, reserve_pending
 from tai42_channel_twilio.settings import TwilioSettings, require_delivery_setting, twilio_settings
+
+logger = logging.getLogger(__name__)
 
 # Tier-1 answer formats resolve via the callback link, not an SMS reply.
 _TIER1_FORMATS = frozenset({"confirm", "external"})
@@ -229,6 +233,48 @@ class TwilioChannel:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(twilio_number=from_number, human_number=target)
             raise
+
+    async def withdraw(self, withdrawal: ChannelWithdrawal) -> None:
+        """Release the number-pair reservation a delivered Tier-2 ask held.
+
+        The platform fires this when a channel-delivered ask is torn down (a cancel, a thread/person
+        erase), so the single pending slot for the number pair frees at once instead of lingering
+        until the next inbound 404 or the reservation's TTL. The reservation was keyed on the SAME
+        number pair ``deliver`` resolved, so the withdrawal resolves it the same way: an explicit
+        ``recipient`` keys verbatim (its allowlist was checked at delivery; the reservation key is the
+        number itself, so it is not re-checked here), and a ``None`` recipient went to the operator
+        default (``CHANNEL_TWILIO_DEFAULT_RECIPIENT``) exactly as ``deliver``'s ``_resolve_target``
+        sends it there — so that slot is freed too. With no recipient AND no configured default no
+        slot could ever have been reserved, so it is a clean no-op.
+        :func:`~tai42_channel_twilio.correlation.release_pending_for` then drops the reservation ONLY
+        when it is still held for THIS interaction (a newer ask that took the pair is left untouched);
+        a Tier-1/link ask reserved nothing, so the compare simply misses. A redis fault is surfaced as
+        a RETRYABLE :class:`ChannelDeliveryError` so the kill outbox redelivers the withdrawal; it
+        never raises for "nothing to release".
+        """
+        settings = twilio_settings()
+        # The pending slot was reserved under the number pair ``deliver`` resolved: an explicit
+        # recipient verbatim, else the operator default. Resolve the same key so the withdraw frees
+        # the right slot — including the default-recipient door, which carries ``recipient=None``.
+        target = withdrawal.recipient if withdrawal.recipient is not None else settings.default_recipient
+        if target is None:
+            return
+        from_number = require_delivery_setting(settings.from_number, "CHANNEL_TWILIO_FROM")
+        try:
+            released = await release_pending_for(from_number, target, withdrawal.interaction_id)
+        except ChannelDeliveryError:
+            raise
+        except Exception as exc:
+            raise ChannelDeliveryError(
+                f"withdraw of interaction {withdrawal.interaction_id} failed against the correlation store",
+                retryable=True,
+            ) from exc
+        logger.info(
+            "twilio: withdrew interaction %s for recipient %s (reservation released=%s)",
+            withdrawal.interaction_id,
+            target,
+            released,
+        )
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
         """Send one fire-and-forget message; raise ``ChannelDeliveryError`` on any failure.

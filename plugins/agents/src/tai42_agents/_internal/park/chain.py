@@ -70,6 +70,10 @@ def _terminal_succeeded(chain_token: str, completion_id: str | None, status: str
     the fire still resumes the run, so a whole fleet can silently degrade every successful
     outcome into an error. This warning is the only detection, so EVERY non-success fire — the
     explicit failure included — names the chained call and WHICH shape arrived.
+
+    ``PARK_COMPLETION_WITHDRAWN`` is a door-address terminal (the platform's quiet-close of a
+    cancelled/erased run) fired only by the kill ladder at a door's delivery address; this
+    cross-driver chain-delivery tool never receives it, so the two-value read here is complete.
     """
     if status == PARK_COMPLETION_SUCCEEDED:
         return True

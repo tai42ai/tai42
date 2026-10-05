@@ -167,3 +167,26 @@ async def test_tool_target_park_non_success_resume_delivers_the_error_notice(
     assert not any(_ABORT_ANSWER in text for text in out_texts), (
         f"the abort terminal leaked a mapped reply: {out_texts!r}"
     )
+
+
+async def test_tool_target_park_cancel_delivers_no_error_notice(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    # WITHDRAW path (PF-FORMS-15): the parked ask is CANCELLED through the REST door rather than
+    # answered. The kill ladder delivers the WITHDRAWN terminal, which delivers NOTHING — no error
+    # notice, no reply. Contrast the sibling non-success test, which pins that a REAL failure still
+    # delivers the uniform notice. (The resume continuation ``e2e_tool_target_deliver`` is NOT fired
+    # on a cancel — a cancel never resumes — so the only observable truth is the silent transcript.)
+    web = await _open_tool_target_web_visitor(bridge, uniq, "ttcancel")
+    marker = uniq("ttcancel-msg")
+    interaction_id = await _park_a_message(bridge, web, marker)
+
+    cancelled = await bridge.api(port=bridge.stack.port_a).post(f"/api/interactions/{interaction_id}/cancel")
+    assert cancelled["status"] == "cancelled"
+
+    # The transcript stays silent: a replay read shows ONLY the inbound message — the withdrawn
+    # terminal put nothing on the visitor's stream (neither the error notice nor a reply).
+    replay = await web.frames()
+    out_texts = [data["text"] for event, data in replay if event == "chat.message" and data["direction"] == "out"]
+    assert out_texts == [], f"a withdrawn ask delivered something to the guest: {out_texts!r}"
+    assert not any(ERROR_ANSWER_TEXT in text for text in out_texts)

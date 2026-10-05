@@ -1,24 +1,32 @@
 """The whole-chain kill: the one teardown seam every withdrawal door routes through.
 
-``kill_park`` tears a parked (or running) run down for good and delivers its single FAILED. It is
-the ONE seam the teardown doors share — the cancel door, the expiry reaper's ``on_expiry="kill"``
-branch, and the conversation thread/person/route deletes (through :func:`kill_parks_for_subject`)
-— so the whole-chain behavior is built once and every door reaches it.
+``kill_park`` tears a parked (or running) run down for good and delivers its single terminal — the
+status the DOOR chose (``failed`` for an expiry/break, ``withdrawn`` for a deliberate cancel or
+erase). It is the ONE seam the teardown doors share — the cancel door, the expiry reaper's
+``on_expiry="kill"`` branch, and the conversation thread/person/route deletes (through
+:func:`kill_parks_for_subject`) — so the whole-chain behavior is built once and every door reaches
+it.
 
 Per kill, in order:
 
 * the store teardown MULTI (``enqueue_kill``): a status-gated prune of the park, an UNCONDITIONAL
   clear of its continuation-due record + due-index member (so a buffered/answered sibling never
   redelivers into a torn-down run), and a durable kill-due record carrying the killed run's own
-  copied delivery identity — so the FAILED delivery survives a crash and the reaper redelivers;
+  copied delivery identity, the door's chosen terminal, and the ask's channel/recipient — so the
+  terminal delivery and the channel withdrawal survive a crash and the reaper redelivers;
 * the driver teardown fire (``fire_park_killed``) with the run-authorization context BOUND around
   it (``resume_origin`` = the killed interaction, the killed run's ``run_delivery_id`` re-established
   as the ambient), so a handler's cross-driver teardown notify authorizes on the shared delivery
   identity. A handler that RAISES propagates — the kill-due record is kept and the reaper redelivers;
-* the run's single FAILED delivered ONCE through the platform ladder (``_deliver_terminal``), keyed
-  by the run's ``completion_id`` off the copied ``delivery``/``run_delivery_id`` — the door FAILED
-  for a receiver-started run, else a ``failed`` waiting outcome on its subject, else a drop;
-* the kill-due record cleared only after both the teardown returned and the FAILED committed.
+* the channel withdraw (``withdraw_channel_delivery``): the delivering channel releases the slot it
+  reserved for the ask, BEFORE any terminal, so a door that cancels-then-asks finds the slot free
+  when the cancel returns;
+* the run's single terminal delivered ONCE through the platform ladder (``_deliver_terminal``), keyed
+  by the run's ``completion_id`` off the copied ``delivery``/``run_delivery_id`` — the door terminal
+  for a receiver-started run, else a waiting outcome on its subject (only for ``failed``; a
+  ``withdrawn`` run has no outcome), else a drop;
+* the kill-due record cleared only after the teardown returned, the withdraw ran, and the terminal
+  committed.
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ from tai42_contract.tools import RunDelivery, run_delivery
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.channels.withdraw import withdraw_channel_delivery
 from tai42_skeleton.interactions.continuation import _deliver_terminal
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import KILL_ACT_ON_ANY, InteractionStore, KillDue, PruneResult
@@ -74,25 +83,33 @@ async def _teardown_and_deliver(
     run_delivery_id: str | None,
     subjects: dict[str, Any] | None,
     reason: str,
+    terminal: str,
+    channel: str | None,
+    recipient: str | None,
 ) -> None:
-    """Fire the driver teardown, then deliver the killed run's single FAILED through the platform ladder.
+    """Fire the driver teardown, WITHDRAW the channel reservation, then deliver the run's single terminal.
 
-    Binds the run-authorization context around ``fire_park_killed`` (origin = the killed
-    interaction, ambient run-delivery = the killed run's identity) so a handler's cross-driver
-    teardown notify authorizes on the shared ``run_delivery_id``. A handler raise propagates (the
-    caller keeps the kill-due record for the reaper). The FAILED is keyed by the run's
-    ``completion_id`` off ``run_delivery_id``, so a kill entering at ANY interaction of the run
-    delivers once and any second fire dedupes.
+    Runs, in order: (1) ``fire_park_killed`` with the run-authorization context bound (origin = the
+    killed interaction, ambient run-delivery = the killed run's identity) so a handler's cross-driver
+    teardown notify authorizes on the shared ``run_delivery_id``; (2) ``withdraw_channel_delivery`` so
+    the channel frees the slot the delivered ask held — BEFORE any terminal, so a door that
+    cancels-then-asks finds the slot free when the cancel returns; (3) ``_deliver_terminal`` with the
+    door's chosen ``terminal`` status. A raise in (1) or (2) propagates exactly like a handler raise —
+    the caller keeps the kill-due record and the reaper redelivers all three idempotently (the
+    handlers by contract, the withdraw by its compare-and-delete, the terminal by ``completion_id``).
+    The terminal is keyed by the run's ``completion_id`` off ``run_delivery_id``, so a kill entering
+    at ANY interaction of the run delivers once and any second fire dedupes.
     """
     delivery_tuple = _delivery_tuple(delivery)
     bound: RunDelivery | None = RunDelivery(run_delivery_id, delivery_tuple) if run_delivery_id is not None else None
     with resume_origin(interaction_id), run_delivery(bound):
         await fire_park_killed(interaction_id, reason)
+    await withdraw_channel_delivery(channel=channel, recipient=recipient, interaction_id=interaction_id)
     await _deliver_terminal(
         store,
         interaction_id=interaction_id,
         outcome={_KILL_OUTCOME_KEY: reason},
-        status=PARK_COMPLETION_FAILED,
+        status=terminal,
         delivery=delivery_tuple,
         run_delivery_id=run_delivery_id,
         candidates=_candidates(subjects),
@@ -107,8 +124,9 @@ async def kill_park(
     *,
     reason: str,
     act_on: frozenset[str] = KILL_ACT_ON_ANY,
+    terminal: str = PARK_COMPLETION_FAILED,
 ) -> PruneResult:
-    """Tear ``interaction_id``'s run down whole-chain and deliver its single FAILED; return the store outcome.
+    """Tear ``interaction_id``'s run down whole-chain and deliver its single terminal; return the store outcome.
 
     ``"pruned"`` when a pending park was torn down (or a waiting outcome / running entry cleared),
     ``"answered"`` when only an already-answered sibling's continuation-due was cleared, ``"gone"``
@@ -123,9 +141,17 @@ async def kill_park(
     continuation owns the run — and reports ``"answered"``.
 
     A waiting outcome (a completed run's result) has no live run to tear down: it is simply dropped,
-    with no teardown fire and no FAILED. A run-less park (a sync question, or one that carried no
-    run-delivery context) is plainly pruned. Every other kind fires the driver teardown and delivers
-    the run's single FAILED once.
+    with no teardown fire and no terminal. A run-less park (a sync question, or one that carried no
+    run-delivery context) is pruned, then its channel reservation withdrawn. Every other kind fires
+    the driver teardown, withdraws the channel reservation, and delivers the run's single terminal
+    once.
+
+    ``terminal`` is the status the DOOR chose for the delivered terminal, never derived from the
+    ``reason`` string: :data:`~tai42_contract.interactions.PARK_COMPLETION_FAILED` (the default — the
+    run broke or lapsed, the person reads the uniform notice) or
+    :data:`~tai42_contract.interactions.PARK_COMPLETION_WITHDRAWN` (the platform took the run down on
+    purpose — a cancel or a thread/person erase — nothing is said to the person). It rides the
+    kill-due record so a redelivery delivers the same one.
     """
     target = await store.read_kill_target(r, interaction_id)
     if target is None:
@@ -136,8 +162,16 @@ async def kill_park(
         return "pruned"
     if target.run_delivery_id is None:
         # A sync question, or a park that carried no run-delivery context: there is no run to tear
-        # down whole-chain and no address to deliver a FAILED to. A plain status-gated prune.
-        return await store.prune_pending(r, interaction_id, group_id or target.group_id or "", reason=reason)
+        # down whole-chain and no terminal to deliver. A plain status-gated prune, then the channel
+        # reservation is withdrawn so a delivered ask frees its slot at once; a raise propagates
+        # loudly (there is no outbox for a run-less park — the inbound-404 path and the TTL are the
+        # backstop for a crash between the prune and the release).
+        result = await store.prune_pending(r, interaction_id, group_id or target.group_id or "", reason=reason)
+        if result == "pruned":
+            await withdraw_channel_delivery(
+                channel=target.channel, recipient=target.recipient, interaction_id=interaction_id
+            )
+        return result
 
     settings = interactions_settings()
     horizon = settings.idle_ttl_seconds
@@ -150,6 +184,9 @@ async def kill_park(
         run_delivery_id=target.run_delivery_id,
         subjects=target.subjects,
         reason=reason,
+        terminal=terminal,
+        channel=target.channel,
+        recipient=target.recipient,
         # A generous TTL backstop; the record's own ``deadline_ms`` (one horizon out) governs the
         # reaper's give-up while the record still stands, so ``run_delivery_id`` is readable then.
         kill_due_ttl=2 * horizon,
@@ -170,17 +207,21 @@ async def kill_park(
         run_delivery_id=target.run_delivery_id,
         subjects=target.subjects,
         reason=reason,
+        terminal=terminal,
+        channel=target.channel,
+        recipient=target.recipient,
     )
     await store.clear_kill_due(r, interaction_id)
     return result
 
 
 async def redeliver_kill(store: InteractionStore, due: KillDue) -> None:
-    """The reaper's kill-due redelivery: re-fire the driver teardown + the run's FAILED, then clear the record.
+    """The reaper's kill-due redelivery: re-fire the driver teardown + the channel withdraw + the terminal.
 
-    Reads the run's delivery identity off the durable kill-due record (the kill already pruned the
-    state), so it never re-reads a state hash. A handler raise propagates (the reaper's per-member
-    guard logs and leaves the record for the next backoff window); a clean pass clears the record.
+    Reads the run's delivery identity, chosen ``terminal`` and the ask's ``channel``/``recipient`` off
+    the durable kill-due record (the kill already pruned the state), so it never re-reads a state
+    hash. A handler or withdraw raise propagates (the reaper's per-member guard logs and leaves the
+    record for the next backoff window); a clean pass clears the record.
     """
     await _teardown_and_deliver(
         store,
@@ -189,17 +230,24 @@ async def redeliver_kill(store: InteractionStore, due: KillDue) -> None:
         run_delivery_id=due.run_delivery_id,
         subjects=due.subjects,
         reason=due.reason,
+        terminal=due.terminal,
+        channel=due.channel,
+        recipient=due.recipient,
     )
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         await store.clear_kill_due(r, due.interaction_id)
 
 
-async def kill_members(r: Redis, store: InteractionStore, members: list[str], *, reason: str) -> list[str]:
+async def kill_members(
+    r: Redis, store: InteractionStore, members: list[str], *, reason: str, terminal: str = PARK_COMPLETION_FAILED
+) -> list[str]:
     """Route each of ``members`` through :func:`kill_park` on the shared connection ``r``, de-duplicated.
 
-    The per-member fan-out a subject/thread teardown walk runs. Returns the ids that named something
-    live (a ``"gone"`` member — already torn down, or an orphan index entry — is skipped from the
-    result).
+    The per-member fan-out a subject/thread teardown walk runs. ``terminal`` is the status every
+    member's terminal is delivered with (a subject/thread/person erase passes
+    :data:`~tai42_contract.interactions.PARK_COMPLETION_WITHDRAWN`). Returns the ids that named
+    something live (a ``"gone"`` member — already torn down, or an orphan index entry — is skipped
+    from the result).
     """
     seen: set[str] = set()
     reached: list[str] = []
@@ -207,22 +255,24 @@ async def kill_members(r: Redis, store: InteractionStore, members: list[str], *,
         if member in seen:
             continue
         seen.add(member)
-        if await kill_park(r, store, member, None, reason=reason) != "gone":
+        if await kill_park(r, store, member, None, reason=reason, terminal=terminal) != "gone":
             reached.append(member)
     return reached
 
 
-async def kill_parks_for_subject(kind: str, key: str, *, reason: str) -> list[str]:
+async def kill_parks_for_subject(
+    kind: str, key: str, *, reason: str, terminal: str = PARK_COMPLETION_FAILED
+) -> list[str]:
     """Kill every park / running entry / waiting outcome addressed to ``(kind, key)`` across every scope.
 
     The subject-erase entry: it walks the subject index for ``(kind, key)`` — reaching parks on
     any scope the subject ever wrote under, not only a single thread index — and routes each member
-    through :func:`kill_park`. A no-op when the interactions store is unconfigured. Idempotent, so a
-    delete's own retry re-runs it cleanly. Returns the ids reached.
+    through :func:`kill_park` with the door's chosen ``terminal``. A no-op when the interactions store
+    is unconfigured. Idempotent, so a delete's own retry re-runs it cleanly. Returns the ids reached.
     """
     if not interactions_store_configured():
         return []
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
     async with client_ctx(RedisClient, settings.redis) as r:
-        return await kill_members(r, store, await store.subject_members(r, kind, key), reason=reason)
+        return await kill_members(r, store, await store.subject_members(r, kind, key), reason=reason, terminal=terminal)

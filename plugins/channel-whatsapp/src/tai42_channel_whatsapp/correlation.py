@@ -46,6 +46,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from redis.exceptions import WatchError
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_kit.clients.impl.redis import RedisClient
@@ -213,6 +214,58 @@ async def release_pending(phone_number_id: str, wa_id: str) -> None:
     """Drop the reservation (the send failed — the human never received the question)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.delete(_pending_key(phone_number_id, wa_id))
+
+
+async def release_pending_for(phone_number_id: str, wa_id: str, interaction_id: str) -> bool:
+    """Drop the pair's reservation ONLY if it is held for ``interaction_id``; True when released.
+
+    The WITHDRAW seam (a cancel, a thread/person erase) frees the single pending slot so the next
+    ask to this pair is accepted at once. An atomic compare-and-delete over the optimistic
+    ``WATCH key -> GET -> MULTI DEL -> EXEC`` pattern: the stored record's ``interaction_id`` must
+    EQUAL the argument before the key is dropped, so a newer ask that already reserved the SAME pair
+    is never released from under — a concurrent reserve between the GET and the EXEC trips
+    :class:`WatchError` and the compare re-reads. A missing record, or one naming a different
+    interaction, leaves the key untouched and returns False.
+
+    Regardless of the pair compare, the per-interaction reacting-form sidecar is dropped
+    unconditionally: it is keyed by the interaction id, so it can belong to no other ask, and the
+    data endpoint must stop serving a withdrawn reacting form (a later tap then meets the existing
+    "no longer valid flow token" miss path). The published-Flow cache and schema sidecar are
+    content-addressed and shared across asks, so they are left.
+
+    Idempotent and a no-op when nothing is held (expired, already forwarded, never reserved — a
+    tier-1/link-answered format reserves nothing). A redis fault propagates to the caller.
+    """
+    pending_key = _pending_key(phone_number_id, wa_id)
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        released = await _compare_and_release_pending(redis, pending_key, interaction_id)
+        await redis.delete(_reaction_form_key(interaction_id))
+    return released
+
+
+async def _compare_and_release_pending(redis: Any, pending_key: str, interaction_id: str) -> bool:
+    """Atomic ``WATCH/GET/MULTI/DEL`` compare-and-delete of ``pending_key`` for ``interaction_id``."""
+    async with redis.pipeline() as pipe:
+        while True:
+            try:
+                await pipe.watch(pending_key)
+                raw = await pipe.get(pending_key)
+                if raw is None:
+                    await pipe.reset()
+                    return False
+                if _decode_pending(raw).interaction_id != interaction_id:
+                    # The pair now holds a DIFFERENT ask's reservation (a newer one took the slot):
+                    # leave it untouched.
+                    await pipe.reset()
+                    return False
+                pipe.multi()
+                pipe.delete(pending_key)
+                await pipe.execute()
+            except WatchError:
+                # A concurrent reserve/release raced our compare: re-read and decide again.
+                continue
+            else:
+                return True
 
 
 def _decode_pending(raw: str | bytes) -> PendingQuestion:

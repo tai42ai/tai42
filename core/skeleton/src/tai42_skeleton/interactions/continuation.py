@@ -45,6 +45,7 @@ from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
+    PARK_COMPLETION_WITHDRAWN,
     CallerAskLanding,
     InteractionRequest,
     ResumeBuffered,
@@ -224,6 +225,13 @@ async def _deliver_terminal(
         if candidates is not None and candidates.by_kind:
             async with client_ctx(RedisClient, interactions_settings().redis) as r:
                 await store.leave_subject_index(r, interaction_id=interaction_id, candidates=candidates)
+        return
+    if candidates is not None and candidates.by_kind and status == PARK_COMPLETION_WITHDRAWN:
+        # A WITHDRAWN run has NO outcome to take — the platform took it down on purpose, nothing is
+        # said to the subject owner. Leave the run's membership on the subject index (a pending park's
+        # prune already left it; a running entry reached by a whole-chain walk needs this) and return.
+        async with client_ctx(RedisClient, interactions_settings().redis) as r:
+            await store.leave_subject_index(r, interaction_id=interaction_id, candidates=candidates)
         return
     if candidates is not None and candidates.by_kind:
         # No address, but a subject: park the terminal for whoever next runs on the subject. Its

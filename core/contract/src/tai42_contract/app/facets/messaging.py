@@ -188,7 +188,9 @@ class AppInteractions(Protocol):
         """Whole-chain kill every parked interaction named in ``ids`` on the current run's subject.
 
         Each id is torn down through the one teardown seam (its run and every run it linked above it
-        close for good, delivering FAILED once to a door that started it); returns a
+        close for good). A channel-delivered ask has its channel reservation released at once, and
+        the run's terminal is delivered ``withdrawn`` — the platform took the run down on purpose, so
+        nothing is said to the person. Returns a
         :class:`~tai42_contract.interactions.VisitOutcome` naming the ids cancelled. An id outside
         the run's own parked list raises :class:`~tai42_contract.interactions.ParkedEntryGoneError`
         with nothing cancelled.

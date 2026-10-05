@@ -7,11 +7,16 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification, ChannelWithdrawal
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.channel import TwilioChannel
-from tai42_channel_twilio.correlation import PendingQuestionExistsError
+from tai42_channel_twilio.correlation import (
+    PendingQuestionExistsError,
+    correlation_key,
+    reserve_pending,
+    twilio_correlation_store,
+)
 
 from .conftest import FakeHttpx, FakeRedis, make_delivery, response
 
@@ -674,3 +679,114 @@ async def test_notify_twilio_rejection_raises_delivery_error(fake_redis: FakeRed
         await TwilioChannel().notify(ChannelNotification(message="Heads up.", recipient="whatsapp:+15550000004"))
 
     assert not fake_redis.store  # still nothing reserved on failure
+
+
+# --- withdraw: free the single pending slot a torn-down ask held --------------------------
+
+_FROM = "+15550000001"
+_HUMAN = "+15550000003"
+# The operator default (CHANNEL_TWILIO_DEFAULT_RECIPIENT from the ``twilio_env`` fixture): the
+# pair a recipient-less ask reserves under and a recipient-less withdraw must free.
+_DEFAULT = "+15550000002"
+_CALLBACK = "https://app.example/api/interactions/callback/ticket-1"
+
+
+def _deadline(seconds: float = 300) -> datetime:
+    return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
+async def _held_pair(human: str) -> str | None:
+    corr = await twilio_correlation_store.get_correlation(correlation_key(_FROM, human))
+    return None if corr is None else corr.interaction_id
+
+
+async def _held(interaction_id: str) -> str | None:
+    return await _held_pair(_HUMAN)
+
+
+async def test_withdraw_frees_the_pair_so_a_second_ask_is_accepted(fake_redis: FakeRedis):
+    channel = TwilioChannel()
+    await reserve_pending(_FROM, _HUMAN, _CALLBACK, "A", _deadline())
+    # A second ask to the same number pair would be refused while A is held.
+    with pytest.raises(PendingQuestionExistsError):
+        await reserve_pending(_FROM, _HUMAN, _CALLBACK, "B", _deadline())
+
+    await channel.withdraw(ChannelWithdrawal(interaction_id="A", recipient=_HUMAN))
+
+    # Now B is accepted, and the pending record names B.
+    await reserve_pending(_FROM, _HUMAN, _CALLBACK, "B", _deadline())
+    assert await _held("B") == "B"
+
+
+async def test_withdraw_never_drops_another_asks_reservation(fake_redis: FakeRedis):
+    channel = TwilioChannel()
+    await reserve_pending(_FROM, _HUMAN, _CALLBACK, "A", _deadline())
+    await channel.withdraw(ChannelWithdrawal(interaction_id="X", recipient=_HUMAN))
+    assert await _held("A") == "A"
+
+
+async def test_withdraw_is_a_no_op_when_nothing_is_pending(fake_redis: FakeRedis):
+    channel = TwilioChannel()
+    await channel.withdraw(ChannelWithdrawal(interaction_id="A", recipient=_HUMAN))
+    assert await _held("A") is None
+
+
+async def test_withdraw_without_a_recipient_targets_the_default_pair_not_an_explicit_one(fake_redis: FakeRedis):
+    # A recipient-less withdraw resolves to the operator DEFAULT pair (exactly as a recipient-less
+    # deliver does), so an explicit-recipient reservation under a DIFFERENT pair is untouched.
+    channel = TwilioChannel()
+    await reserve_pending(_FROM, _HUMAN, _CALLBACK, "A", _deadline())
+    await channel.withdraw(ChannelWithdrawal(interaction_id="A"))
+    assert await _held_pair(_HUMAN) == "A"
+
+
+async def test_withdraw_without_a_recipient_frees_the_default_recipient_pair(fake_redis: FakeRedis):
+    # PF-FORMS-14 for the DEFAULT-recipient door: a Tier-2 ask with recipient omitted reserves the
+    # slot under (from_number, CHANNEL_TWILIO_DEFAULT_RECIPIENT); a withdraw carrying recipient=None
+    # (the request stored no recipient) must resolve that same default pair and free it, so a second
+    # default-recipient ask is accepted.
+    channel = TwilioChannel()
+    await reserve_pending(_FROM, _DEFAULT, _CALLBACK, "A", _deadline())
+    with pytest.raises(PendingQuestionExistsError):
+        await reserve_pending(_FROM, _DEFAULT, _CALLBACK, "B", _deadline())
+
+    await channel.withdraw(ChannelWithdrawal(interaction_id="A"))
+
+    assert await _held_pair(_DEFAULT) is None
+    await reserve_pending(_FROM, _DEFAULT, _CALLBACK, "B", _deadline())
+    assert await _held_pair(_DEFAULT) == "B"
+
+
+async def test_withdraw_without_a_recipient_and_no_default_is_a_clean_no_op(
+    fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+):
+    # No recipient AND no configured default: no slot could ever have been reserved, so the
+    # withdraw is a clean no-op (never a raise).
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.delenv("CHANNEL_TWILIO_DEFAULT_RECIPIENT")
+    reset_all_settings()
+    channel = TwilioChannel()
+    await channel.withdraw(ChannelWithdrawal(interaction_id="A"))
+    assert not fake_redis.store
+
+
+async def test_withdraw_store_fault_raises_a_retryable_delivery_error(fake_redis: FakeRedis, monkeypatch):
+    channel = TwilioChannel()
+    await reserve_pending(_FROM, _HUMAN, _CALLBACK, "A", _deadline())
+
+    class _BoomPipe:
+        async def __aenter__(self) -> _BoomPipe:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def watch(self, *keys: str) -> bool:
+            raise RuntimeError("redis is down")
+
+    monkeypatch.setattr(fake_redis, "pipeline", lambda: _BoomPipe())
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await channel.withdraw(ChannelWithdrawal(interaction_id="A", recipient=_HUMAN))
+    assert excinfo.value.retryable is True
