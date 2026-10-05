@@ -38,7 +38,7 @@ dependencies = [
     # BASE dependency, not an extra. Floors track the versions the agents are
     # developed against.
     "deepagents>=0.7.5",
-    "langgraph>=1.1.6",
+    "langgraph>=1.2.12",
     "langchain-core>=1.2.25",
     # The prebuilt agent constructor (``langchain.agents.create_agent``) the
     # tools agents build on. A distinct distribution from langchain-core, imported
