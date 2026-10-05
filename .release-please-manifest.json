@@ -23,7 +23,7 @@
   "plugins/sandbox-local": "1.3.5",
   "plugins/storage-github": "1.2.7",
   "plugins/storage-local": "1.2.7",
-  "plugins/storage-s3": "1.2.8",
+  "plugins/storage-s3": "1.2.9",
   "plugins/toolbox": "4.2.6",
   "plugins/tools-github": "1.1.7",
   "plugins/tools-stripe": "1.2.7",
