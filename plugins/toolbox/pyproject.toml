@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=16.2,<17",
     # Leaf helpers: settings machinery, the curl client, the jq compiler, and the
     # llm/embedding factories the extra-gated modules wire to.
-    "tai42-kit>=7.6,<8",
+    "tai42-kit>=7.7,<8",
     # Composed callables for the transformer extensions (batch, chain) present a
     # real, concrete signature via makefun.create_function.
     "makefun>=1.15",

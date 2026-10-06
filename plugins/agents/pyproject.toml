@@ -33,7 +33,7 @@ dependencies = [
     "tai42-contract>=16.2,<17",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
-    "tai42-kit>=7.6,<8",
+    "tai42-kit>=7.7,<8",
     # The agent runtime. Agents are this repo's purpose, so the runtime is a
     # BASE dependency, not an extra. Floors track the versions the agents are
     # developed against.
