@@ -51,11 +51,6 @@ dependencies = [
     # Settings base for the agent settings group (``SettingsConfigDict`` in
     # settings.py); declared directly rather than leaned on as a transitive.
     "pydantic-settings>=2.15.0",
-    # OpenTelemetry context reset when starting an independent monitoring trace
-    # (a run must not inherit spans/tags from a caller). Provides
-    # ``opentelemetry.context``; declared directly rather than leaned on as a
-    # transitive of the runtime.
-    "opentelemetry-api>=1.30",
     # Glob matching for the deep-agent skills backends (``wcmatch.glob.globmatch``
     # with ``BRACE | GLOBSTAR``). Imported directly, so declared here rather than
     # leaned on as a transitive of the runtime.
@@ -86,6 +81,10 @@ dev = [
     "fakeredis[lua]>=2.21",
     # The plugin-spec test parses tai-plugin.yml.
     "pyyaml>=6",
+    # Test-only: tests/test_config_util.py probes ``opentelemetry.context`` to prove a
+    # root run leaves a caller's ambient attribution untouched (the builder attaches no
+    # fresh context). The shipped package imports no OpenTelemetry; only this test does.
+    "opentelemetry-api>=1.30",
     # Test-only: the skeleton-boot e2e integration test (tests/test_skeleton_e2e.py)
     # boots the real tai42-skeleton app in-process to prove tools_agent registers,
     # reports spec_runnable, authors, and streams end-to-end through it. Resolved

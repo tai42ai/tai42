@@ -3,12 +3,11 @@
 Two complementary walks assert the same rule: every import root reachable from
 ``tai42_agents`` is on the allowlist. The rule (see the README): the shipped
 package imports ``tai42-contract`` + ``tai42-kit`` + the agent runtime (deepagents /
-langgraph / langchain-core / langchain / langchain-anthropic / pydantic /
-opentelemetry) and their dependency closure ONLY, plus the
-Python standard library. Anything else -- ``tai42-skeleton`` (which sits a layer
-above and must never be pulled in) or any package that is not a declared
-dependency of the shipped wheel -- is absent from the allowlist and fails the
-test loudly.
+langgraph / langchain-core / langchain / langchain-anthropic / pydantic) and their
+dependency closure ONLY, plus the Python standard library. Anything else --
+``tai42-skeleton`` (which sits a layer above and must never be pulled in) or any
+package that is not a declared dependency of the shipped wheel -- is absent from
+the allowlist and fails the test loudly.
 
 The runtime walk imports ``tai42_agents`` and every submodule in a fresh
 subprocess, then inspects ``sys.modules``. Running it in a subprocess that
@@ -76,7 +75,6 @@ ALLOWED_THIRD_PARTY = frozenset(
         "langgraph",
         "langgraph_sdk",
         "langsmith",
-        "opentelemetry",
         "orjson",
         "ormsgpack",
         "packaging",
