@@ -23,6 +23,7 @@ from tai42_contract.interactions import (
     get_resume_continuation_tool,
     suspended_interaction_marker,
 )
+from tests.conftest import fake_run_trace
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
@@ -165,8 +166,8 @@ def _wire_tools_build(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, sav
     monkeypatch.setattr(base_mod, "checkpoint_registry", lambda: _Registry(saver))
     monkeypatch.setattr(base_mod, "llm_provider_settings", _ProviderSettings)
     monkeypatch.setattr(base_mod, "llm_settings", _LlmSettings)
-    monkeypatch.setattr(base_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
-    monkeypatch.setattr(tools_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
+    monkeypatch.setattr(base_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(tools_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
     # build_park_identity resolves the checkpoint provider through the kit settings when the
     # caller passes none; here the caller pins "redis", but pin the driver's view too so the
     # durable-provider gate is deterministic.

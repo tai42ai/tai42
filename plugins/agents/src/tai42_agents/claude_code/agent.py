@@ -40,6 +40,7 @@ from tai42_contract.interactions import (
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import resolve_trace_context
 
 from tai42_agents._internal.park import (
     AGENT_RESUME_TOOL_NAME,
@@ -759,16 +760,20 @@ class ClaudeCodeAgent(Agent):
         )
 
     def _emit_usage(self, frame: ResultFrame, *, settings: ClaudeCodeSettings) -> None:
-        """Emit the SDK-reported usage/cost into the ACTIVE trace (its model calls bypass the platform LLM seam).
+        """Emit the SDK-reported usage/cost under the run's trace (its model calls bypass the platform LLM seam).
 
-        Guarded by ``current_trace_id`` and fail-safe by construction.
+        Resolves the run's trace lineage through the same seam the LLM-driven agents bind:
+        a run driven as a node JOINS the driver's trace (the ambient deposit), a STANDALONE
+        run mints its own root trace carrying this usage span — so the usage is recorded
+        either way, never dropped. Fail-safe by construction (``start_span`` catches + logs).
         """
         if frame.usage is None:
             return
         writer = tai42_app.monitoring.active.writer
-        if writer.current_trace_id() is None:
-            return
-        with writer.start_span(name=f"{AGENT_NAME}.generation", kind=SpanKind.LLM, model=settings.model) as span:
+        trace_context = resolve_trace_context()
+        with writer.start_span(
+            name=f"{AGENT_NAME}.generation", kind=SpanKind.LLM, trace_context=trace_context, model=settings.model
+        ) as span:
             span.update(usage_details=frame.usage)
 
 

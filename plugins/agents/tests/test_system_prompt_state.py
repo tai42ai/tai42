@@ -39,6 +39,8 @@ from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal.stream_events import _structured_tool_names, astream_tools_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 
+from .conftest import fake_run_trace
+
 
 def _tool_strategy(response_format: object) -> object:
     """The strategy the compile seam binds for a profile-less (tool-tier) model."""
@@ -105,13 +107,13 @@ def _seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemor
     # No context-overflow strategies in the test: keep the middleware list to the
     # system-purge / leading-user / tool-error middleware the factory attaches.
     monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=[]))
-    # The real config init wires the recording monitoring stub's non-callable
-    # callback sentinels, which the live graph would try to invoke; keep the
-    # caller's thread_id and nothing else.
+    # Stand in for the run-config builder with a deterministic trace keyed on the
+    # caller's thread_id, so this suite asserts on the thread without resolving a
+    # trace lineage or wiring a live backend's callbacks.
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: {"configurable": {"thread_id": config["configurable"]["thread_id"]}},
+        lambda config: fake_run_trace({"configurable": {"thread_id": config["configurable"]["thread_id"]}}),
     )
 
 

@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import pydantic
 from langchain.agents.structured_output import AutoStrategy, ProviderStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
 from tai42_kit.llm.models import native_structured_output_kwargs
 from tai42_kit.llm.runtime import validate_structured_output
@@ -109,7 +110,12 @@ def _native_json(message: AIMessage) -> Any:
     return json.loads(text)
 
 
-async def ainvoke_structured(llm: BaseChatModel, plan: StructuredOutputPlan, messages: Sequence[BaseMessage]) -> Any:
+async def ainvoke_structured(
+    llm: BaseChatModel,
+    plan: StructuredOutputPlan,
+    messages: Sequence[BaseMessage],
+    config: dict[str, Any] | None = None,
+) -> Any:
     """Force structured output from a single model call, re-prompting under the per-run cap.
 
     Native: bind the kit kwargs, invoke, parse the JSON text, validate. Tool: bind the
@@ -118,6 +124,10 @@ async def ainvoke_structured(llm: BaseChatModel, plan: StructuredOutputPlan, mes
     re-prompt loop (counter + feedback shapes) as the graph rail runs; past the cap it
     raises :class:`~tai42_agents._internal.outcomes.RepromptCapError`, which each
     single-shot face maps to a typed, non-fatal outcome.
+
+    ``config`` is the per-invoke run config carrying the run's monitoring callbacks; it is
+    threaded onto every model call so this single-shot door records under the run's trace,
+    exactly like the graph doors. ``None`` runs uninstrumented.
     """
     reprompt = build_reprompt_handler(agents_limits_settings().structured_output_reprompt_cap)
     conversation = list(messages)
@@ -126,7 +136,7 @@ async def ainvoke_structured(llm: BaseChatModel, plan: StructuredOutputPlan, mes
         if plan.mode == "native":
             assert plan.provider_schema is not None  # noqa: S101 (native plan invariant; keeps the kwargs call total)
             kwargs = native_structured_output_kwargs(plan.provider, plan.name, plan.provider_schema)
-            answer = await llm.bind(**kwargs).ainvoke(conversation)
+            answer = await llm.bind(**kwargs).ainvoke(conversation, cast(RunnableConfig | None, config))
             failure_message: AIMessage | None = answer if isinstance(answer, AIMessage) else None
             try:
                 return validate_structured_output(_native_json(answer), plan.validation_schema)
@@ -135,7 +145,7 @@ async def ainvoke_structured(llm: BaseChatModel, plan: StructuredOutputPlan, mes
         else:
             assert plan.bound_typed_dict is not None  # noqa: S101 (tool plan invariant; keeps the bind call total)
             bound = llm.with_structured_output(plan.bound_typed_dict, method="function_calling", include_raw=True)
-            result = await bound.ainvoke(conversation)
+            result = await bound.ainvoke(conversation, cast(RunnableConfig | None, config))
             raw = result.get("raw") if isinstance(result, dict) else None
             failure_message = raw if isinstance(raw, AIMessage) else None
             try:

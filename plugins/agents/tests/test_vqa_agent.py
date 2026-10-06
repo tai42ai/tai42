@@ -33,7 +33,7 @@ class _FakeLLM:
     usage is split across both chunks so an assertion on ``total_tokens`` passes
     only when the accumulator sums them (a keep-last accumulator would give 2)."""
 
-    async def astream(self, _messages: object) -> AsyncIterator[AIMessageChunk]:
+    async def astream(self, _messages: object, config: object = None) -> AsyncIterator[AIMessageChunk]:
         yield AIMessageChunk(
             content="Hel",
             usage_metadata={"input_tokens": 3, "output_tokens": 0, "total_tokens": 3},
@@ -77,7 +77,7 @@ class _ScriptedLLM:
     def __init__(self, chunks: list[AIMessageChunk]) -> None:
         self._chunks = chunks
 
-    async def astream(self, _messages: object) -> AsyncIterator[AIMessageChunk]:
+    async def astream(self, _messages: object, config: object = None) -> AsyncIterator[AIMessageChunk]:
         for chunk in self._chunks:
             yield chunk
 
@@ -229,7 +229,7 @@ class _NativeFake:
         outer = self
 
         class _Runner:
-            async def ainvoke(self, _messages: Any) -> Any:
+            async def ainvoke(self, _messages: Any, _config: object = None) -> Any:
                 index = min(outer.calls, len(outer._texts) - 1)
                 outer.calls += 1
                 return AIMessage(content=outer._texts[index])
@@ -258,7 +258,7 @@ class _ToolFake:
         outer = self
 
         class _Runner:
-            async def ainvoke(self, _messages: Any) -> dict[str, Any]:
+            async def ainvoke(self, _messages: Any, _config: object = None) -> dict[str, Any]:
                 index = min(outer.calls, len(outer._seq) - 1)
                 outer.calls += 1
                 parsed = outer._seq[index]

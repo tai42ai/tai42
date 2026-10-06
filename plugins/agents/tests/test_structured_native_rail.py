@@ -42,6 +42,8 @@ from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 
+from .conftest import fake_run_trace
+
 _INT_SCHEMA = {
     "title": "TurnIntake",
     "type": "object",
@@ -195,7 +197,9 @@ def _patch_invoke_seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, c
     monkeypatch.setattr(bta, "context_overflow_middlewares", _no_overflow)
     monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
     monkeypatch.setattr(
-        bta, "init_langgraph_config", lambda config: {"configurable": {"thread_id": "t"}, "recursion_limit": 50}
+        bta,
+        "init_langgraph_config",
+        lambda config: fake_run_trace({"configurable": {"thread_id": "t"}, "recursion_limit": 50}),
     )
 
 

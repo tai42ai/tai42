@@ -25,6 +25,8 @@ from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware
 from tai42_agents._internal.usage import CallUsage
 
+from .conftest import fake_run_trace
+
 
 def _tool(name: str) -> StructuredTool:
     async def _run(**_: Any) -> str:
@@ -59,7 +61,9 @@ def _patch_seams(
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
     monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=["mw"]))
     monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: level == "DEBUG"))
-    monkeypatch.setattr(bta, "init_langgraph_config", lambda config: {"configurable": {"thread_id": "t"}})
+    monkeypatch.setattr(
+        bta, "init_langgraph_config", lambda config: fake_run_trace({"configurable": {"thread_id": "t"}})
+    )
 
     fake_agent = MagicMock()
     fake_agent.ainvoke = AsyncMock(return_value=state if state is not None else {"messages": []})

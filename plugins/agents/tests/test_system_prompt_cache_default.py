@@ -27,6 +27,8 @@ from tai42_agents.retrieval_tools_agent import agent as retrieval_mod
 from tai42_agents.settings import AgentsLimitsSettings
 from tai42_agents.voting_agent import agent as voting_mod
 
+from .conftest import fake_run_trace
+
 _MARK = {"cache_control": {"type": "ephemeral"}}
 
 
@@ -274,7 +276,7 @@ def test_retrieval_never_marks_its_system_prompt(monkeypatch: pytest.MonkeyPatch
         lambda: SimpleNamespace(get_checkpointer=AsyncMock(return_value="cp")),
     )
     monkeypatch.setattr(retrieval_mod, "_repair_dangling_tool_calls", AsyncMock())
-    monkeypatch.setattr(retrieval_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
+    monkeypatch.setattr(retrieval_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
 
     agent = retrieval_mod.RetrievalToolsAgent()
     asyncio.run(agent._build(system_message=TemplatedText(content="rag"), user_message=TemplatedText(content="q")))

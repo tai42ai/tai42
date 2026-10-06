@@ -31,6 +31,8 @@ from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult
 
+from .conftest import fake_run_trace
+
 _SCHEMA = {
     "title": "Answer",
     "type": "object",
@@ -198,7 +200,7 @@ def _patch_invoke_seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, r
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: {"configurable": {"thread_id": "t"}, "recursion_limit": recursion_limit},
+        lambda config: fake_run_trace({"configurable": {"thread_id": "t"}, "recursion_limit": recursion_limit}),
     )
 
 

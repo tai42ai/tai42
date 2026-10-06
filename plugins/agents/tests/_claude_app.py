@@ -41,8 +41,8 @@ class _Span:
 
 
 class RecordingWriter:
-    """A minimal ``MonitoringWriter`` for the usage-emission test: a settable ``trace_id`` and a
-    ``start_span`` that records the span's amended fields (``usage_details``)."""
+    """A minimal ``MonitoringWriter`` for the usage-emission test: records each span's
+    ``trace_context`` and amended fields (``usage_details``) opened through ``start_span``."""
 
     def __init__(self) -> None:
         self.trace_id: str | None = None
@@ -53,8 +53,10 @@ class RecordingWriter:
         return self.trace_id
 
     @contextlib.contextmanager
-    def start_span(self, *, name: str, kind: SpanKind, model: str | None = None, **_: Any) -> Any:
-        record: dict[str, Any] = {"name": name, "kind": kind, "model": model}
+    def start_span(
+        self, *, name: str, kind: SpanKind, trace_context: Any = None, model: str | None = None, **_: Any
+    ) -> Any:
+        record: dict[str, Any] = {"name": name, "kind": kind, "model": model, "trace_context": trace_context}
         self.spans.append(record)
         yield _Span(record)
 

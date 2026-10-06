@@ -21,6 +21,8 @@ from tai42_contract.agent import (
     Agent,
     StreamEvent,
 )
+from tai42_kit.llm import RunTrace
+from tests.conftest import fake_run_trace
 
 import tai42_agents.refine_agent.agent as agent_mod
 
@@ -131,8 +133,8 @@ def _patch_loop(monkeypatch: pytest.MonkeyPatch, agents: list[FakeAgent]) -> Cre
     monkeypatch.setattr(agent_mod, "llm_provider_settings", lambda: _ProviderSettings())
     monkeypatch.setattr(agent_mod, "llm_settings", lambda: _LlmSettings())
 
-    def _init_config(config: dict[str, Any] | None) -> dict[str, Any]:
-        return config or {"configurable": {"thread_id": "t"}}
+    def _init_config(config: dict[str, Any] | None) -> RunTrace:
+        return fake_run_trace(config or {"configurable": {"thread_id": "t"}})
 
     monkeypatch.setattr(agent_mod, "init_langgraph_config", _init_config)
     return recorder
@@ -250,6 +252,8 @@ def _patch_loop_real(
     monkeypatch.setattr(agent_mod, "llm_settings", lambda: _LlmSettings())
     # Keep the caller's thread_id so the two runs land on the same checkpointed thread.
     monkeypatch.setattr(
-        agent_mod, "init_langgraph_config", lambda config: config or {"configurable": {"thread_id": "t"}}
+        agent_mod,
+        "init_langgraph_config",
+        lambda config: fake_run_trace(config or {"configurable": {"thread_id": "t"}}),
     )
     return created

@@ -714,7 +714,9 @@ class ToolsAgent(Agent):
             system_message=(validated.system_message.content or "") if validated.system_message else "",
             system_content_kwargs=validated.system_content_kwargs,
         )
-        config = init_langgraph_config(build_run_config(validated.langgraph_config, thread_id, None, recursion_limit))
+        config = init_langgraph_config(
+            build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)
+        ).config
         await _repair_dangling_tool_calls(agent, config)
         snapshot = await agent.aget_state(config, subgraphs=True)
         pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}
