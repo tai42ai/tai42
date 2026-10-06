@@ -1,6 +1,6 @@
 {
   "core/contract": "16.2.0",
-  "core/kit": "7.6.1",
+  "core/kit": "7.7.0",
   "core/cli": "13.1.1",
   "core/skeleton": "22.1.1",
   "plugins/accounts-postgres": "4.0.3",
