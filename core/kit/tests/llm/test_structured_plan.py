@@ -38,6 +38,72 @@ def _llm(profile: dict[str, Any] | None) -> BaseChatModel:
 _SCHEMA = {"title": "Answer", "type": "object", "properties": {"value": {"type": ["integer", "null"]}}}
 _MAP_SCHEMA = {"title": "Map", "type": "object", "additionalProperties": {"type": "integer"}}
 
+# A schema holding a MIXED type-less enum (null plus string ids) inside an array's items, beside a
+# nullable type-array — the shape the splitter builds once a card/line/booking is shown. A native
+# grammar binder cannot carry a type-less enum without inflating it into an anyOf union, so this
+# schema is "not natively representable" and is carried by the tool tier with the authored shape.
+_MIXED_ENUM_SCHEMA = {
+    "title": "Split",
+    "type": "object",
+    "properties": {
+        "talk": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"enum": [None, "id-a", "id-b", "id-c"]},
+                    "want": {"type": ["string", "null"]},
+                },
+                "required": ["id"],
+            },
+        }
+    },
+    "required": ["talk"],
+}
+
+
+def test_tool_tier_carries_a_mixed_type_less_enum_schema_unchanged() -> None:
+    # Native is declared, bindable, forced choice allowed; but the mixed type-less enum is not
+    # natively representable (no value-preserving minimal adaptation gives it a type), so the plan
+    # is the tool tier and the schema it validates against is the authored one, unchanged.
+    plan = plan_structured_output(_llm({"structured_output": True}), "anthropic", _MIXED_ENUM_SCHEMA)
+    assert plan.mode == "tool"
+    assert plan.validation_schema is _MIXED_ENUM_SCHEMA
+
+
+def test_loud_error_when_mixed_enum_and_forced_choice_refused() -> None:
+    # Not natively carried and the model refuses forced tool choice: refused loudly before any
+    # request, naming the provider and the construct neither tier can carry.
+    with pytest.raises(StructuredOutputUnsupportedError) as excinfo:
+        plan_structured_output(_llm({"structured_output": True, "tool_choice": False}), "anthropic", _MIXED_ENUM_SCHEMA)
+    message = str(excinfo.value)
+    assert "anthropic" in message
+    assert "enum" in message.lower()
+    assert excinfo.value.provider == "anthropic"
+
+
+def test_native_minimally_adapts_without_wrapping_an_enum() -> None:
+    # A representable schema (nullable type-array + single-type type-less enum) stays native: the
+    # type-array becomes an anyOf, the single-type enum gets its type, and NO enum is wrapped in an
+    # anyOf — the enum value sets are preserved exactly.
+    schema = {
+        "title": "R",
+        "type": "object",
+        "properties": {
+            "status": {"enum": ["open", "closed"]},
+            "n": {"type": ["integer", "null"]},
+        },
+        "required": ["status"],
+    }
+    plan = plan_structured_output(_llm({"structured_output": True}), "anthropic", schema)
+    assert plan.mode == "native"
+    assert plan.provider_schema is not None
+    status = plan.provider_schema["properties"]["status"]
+    assert status.get("type") == "string"
+    assert status["enum"] == ["open", "closed"]
+    assert "anyOf" not in status
+    assert "anyOf" in plan.provider_schema["properties"]["n"]
+
 
 def test_native_when_declared_bindable_and_representable() -> None:
     plan = plan_structured_output(_llm({"structured_output": True}), "openai", _SCHEMA)

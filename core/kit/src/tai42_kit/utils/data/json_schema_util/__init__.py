@@ -19,7 +19,9 @@ from tai42_kit.utils.data.json_schema_util.int_bounds import (
 )
 from tai42_kit.utils.data.json_schema_util.portable import (
     NonPortableSchemaError,
+    adapt_native_schema,
     check_native_representable,
+    native_representability_reason,
     to_portable_schema,
 )
 from tai42_kit.utils.data.json_schema_util.pydantic_model import json_schema_to_pydantic_model
@@ -39,12 +41,14 @@ __all__ = [
     "InvalidJsonSchemaError",
     "JsonSchemaValidationError",
     "NonPortableSchemaError",
+    "adapt_native_schema",
     "check_json_schema",
     "check_native_representable",
     "find_oversized_int",
     "inject_int64_bounds",
     "json_schema_to_pydantic_model",
     "json_schema_to_typed_dict",
+    "native_representability_reason",
     "to_portable_schema",
     "validate_against_json_schema",
 ]
