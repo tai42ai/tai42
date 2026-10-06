@@ -212,7 +212,7 @@ async def _handle_notify_form_reply(
     rides beside it through the bridge's ``form`` seam, and ``params`` carry any
     message-level referral/reply-context entries.
     """
-    schema_hash = flow_token[len(_NOTIFY_FORM_TOKEN_PREFIX) :].partition(":")[0]
+    schema_hash, form_tag = _parse_notify_form_token(flow_token)
     waba_id = whatsapp_settings().waba_id
     cached = await get_cached_flow_form(waba_id, schema_hash) if waba_id else None
     if cached is None:
@@ -227,8 +227,28 @@ async def _handle_notify_form_reply(
         schema, labels = cached
         form = _coerce_form_answer(response, schema, labels)
     await _bridge_inbound(
-        phone_number_id, wa_id, render_form_text(form, schema), wamid, form=form, params=params or None
+        phone_number_id,
+        wa_id,
+        render_form_text(form, schema),
+        wamid,
+        form=form,
+        params=params or None,
+        form_tag=form_tag,
     )
+
+
+def _parse_notify_form_token(flow_token: str) -> tuple[str, str | None]:
+    """The schema hash and OPTIONAL caller-set form tag carried by a notify-form flow token.
+
+    The token is ``tai42-nf:{schema_hash}:{nonce}[:{form_tag}]`` — the hash is the first segment
+    after the ``tai42-nf:`` prefix, the nonce the second, and the caller-set tag (charset excludes
+    ``:``, so always one segment) the OPTIONAL 4th. A 3-segment token (no tag) returns ``None`` for
+    the tag; the tag is read back verbatim, never interpreted.
+    """
+    parts = flow_token[len(_NOTIFY_FORM_TOKEN_PREFIX) :].split(":")
+    schema_hash = parts[0]
+    form_tag = parts[2] if len(parts) >= 3 else None
+    return schema_hash, form_tag
 
 
 def _door_error_line(retry_reason: str | None) -> str:

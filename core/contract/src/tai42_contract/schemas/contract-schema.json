@@ -1145,6 +1145,10 @@
                 "name": "form"
               },
               {
+                "gloss": "the caller-set opaque per-send form tag, present only when the submission carried one",
+                "name": "form_tag"
+              },
+              {
                 "gloss": "inbound media the participant sent, present only when the inbound carried some",
                 "name": "attachments"
               },
@@ -1153,7 +1157,7 @@
                 "name": "location"
               },
               {
-                "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/attachments/location when that message carried them)",
+                "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message carried them)",
                 "name": "messages"
               },
               {
@@ -1548,6 +1552,10 @@
                 "name": "form"
               },
               {
+                "gloss": "the caller-set opaque per-send form tag, present only when the submission carried one",
+                "name": "form_tag"
+              },
+              {
                 "gloss": "inbound media the participant sent, present only when the inbound carried some",
                 "name": "attachments"
               },
@@ -1556,7 +1564,7 @@
                 "name": "location"
               },
               {
-                "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/attachments/location when that message carried them)",
+                "gloss": "overlap deliver=all: the batch carried into this turn, in acceptance order, each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message carried them)",
                 "name": "messages"
               },
               {

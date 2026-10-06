@@ -17,7 +17,14 @@ from tai42_contract.channels.options import (
     check_sections,
 )
 from tai42_contract.channels.templates import ChannelTemplate
-from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem, check_media_list
+from tai42_contract.interactions.models import (
+    FormData,
+    FormPage,
+    LocationElement,
+    MediaItem,
+    check_form_tag,
+    check_media_list,
+)
 
 # Generous abuse bound on a notification's message text — not a UX limit; channels may
 # impose tighter limits. Caps what persists into replayed transcript streams.
@@ -126,6 +133,11 @@ with warnings.catch_warnings():
         # The form's step layout over ``schema``, present only on a form send: each
         # :class:`FormPage` names the top-level properties shown on one step.
         pages: list[FormPage] | None = None
+        # Caller-set opaque per-send correlation for a form send: the channel carries it with
+        # the form and hands it back BESIDE the submission on accept. The platform never
+        # interprets it, only bounds it (:func:`check_form_tag`); rides ONLY a form send
+        # (``schema`` present). None -> no tag.
+        form_tag: str | None = None
 
         @field_validator("message")
         @classmethod
@@ -192,6 +204,15 @@ with warnings.catch_warnings():
                 raise ValueError("schema must be a non-empty dict when present")
             return value
 
+        @field_validator("form_tag")
+        @classmethod
+        def _form_tag_bounded(cls, value: str | None) -> str | None:
+            # None means no tag; a present tag is bounded as pure transport. The platform never
+            # interprets the value and the error names the bound, never the value.
+            if value is not None:
+                check_form_tag(value)
+            return value
+
         @model_validator(mode="after")
         def _check_composition(self) -> ChannelNotification:
             # The shared cross-field interactive-composition rules, so this carrier and AnswerPart
@@ -222,4 +243,6 @@ with warnings.catch_warnings():
                     raise ValueError("a notification with no schema carries no form data")
                 if self.pages is not None:
                     raise ValueError("a notification with no schema carries no form pages")
+                if self.form_tag is not None:
+                    raise ValueError("a notification with no schema carries no form tag")
             return self

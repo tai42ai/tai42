@@ -621,6 +621,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         attachments: "list[MediaItem] | None" = None,
         location: "LocationElement | None" = None,
         locale: str | None = None,
+        form_tag: str | None = None,
     ) -> str:
         from tai42_skeleton.conversations import accept
 
@@ -636,6 +637,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             attachments=attachments,
             location=location,
             locale=locale,
+            form_tag=form_tag,
         )
 
     async def _conversation_record_delivery_status(

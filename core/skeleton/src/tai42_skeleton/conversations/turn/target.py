@@ -43,6 +43,7 @@ async def _target_outcome(
     person: Person | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> _ToolOutcome:
@@ -50,7 +51,8 @@ async def _target_outcome(
 
     An agent run is always answered/error. The single dispatch both the plain and the
     multichannel paths route ordinary text to. ``person``, ``params``, ``form`` (the structured
-    inbound submission), ``attachments`` (the participant's media) and ``location`` reach only the tool
+    inbound submission), ``form_tag`` (the caller-set opaque per-send tag that rode back with it),
+    ``attachments`` (the participant's media) and ``location`` reach only the tool
     payload; the agent branch ignores them all — an agent target reads the rendered TEXT
     only, so a form-/media-unaware agent still sees the whole turn.
 
@@ -88,6 +90,7 @@ async def _target_outcome(
                     person,
                     params,
                     form,
+                    form_tag,
                     attachments,
                     location,
                     record=intake,
@@ -103,6 +106,7 @@ async def _target_outcome(
                 person=person,
                 params=params,
                 form=form,
+                form_tag=form_tag,
                 attachments=attachments,
                 location=location,
             )
@@ -177,6 +181,7 @@ async def _resolve_turn_record(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> tuple[ConversationRecord, str | None]:
@@ -207,14 +212,25 @@ async def _resolve_turn_record(
     """
     if intake.inbound_kind == "event":
         person = await _resolve_event_person(route, intake, multichannel)
-        return _outcome_record(intake, await _target_outcome(route, intake, text, batch, person, params, form)), None
+        return (
+            _outcome_record(intake, await _target_outcome(route, intake, text, batch, person, params, form, form_tag)),
+            None,
+        )
 
     if multichannel is None:
         return (
             _outcome_record(
                 intake,
                 await _target_outcome(
-                    route, intake, text, batch, params=params, form=form, attachments=attachments, location=location
+                    route,
+                    intake,
+                    text,
+                    batch,
+                    params=params,
+                    form=form,
+                    form_tag=form_tag,
+                    attachments=attachments,
+                    location=location,
                 ),
             ),
             None,
@@ -226,7 +242,9 @@ async def _resolve_turn_record(
     greeting_code = await pairing._mint_and_owe_greeting(multichannel, intake.thread_id) if created else None
     action = classify(text)
     if isinstance(action, Passthrough):
-        outcome = await _target_outcome(route, intake, text, batch, person, params, form, attachments, location)
+        outcome = await _target_outcome(
+            route, intake, text, batch, person, params, form, form_tag, attachments, location
+        )
     else:
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
         # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
@@ -245,6 +263,7 @@ async def _complete_turn(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> ConversationRecord:
@@ -264,6 +283,7 @@ async def _complete_turn(
         multichannel=multichannel,
         params=params,
         form=form,
+        form_tag=form_tag,
         attachments=attachments,
         location=location,
     )

@@ -205,3 +205,29 @@ def test_blank_inbound_text_error_is_a_value_error():
     from tai42_contract.conversations import BlankInboundTextError
 
     assert issubclass(BlankInboundTextError, ValueError)
+
+
+def test_conversation_message_carries_a_form_tag_beside_a_form():
+    from tai42_contract.conversations.inbound import ConversationMessage
+
+    message = ConversationMessage(external_user_id="u1", text="size: L", form={"size": "L"}, form_tag="ref-42")
+    assert message.form_tag == "ref-42"
+    assert ConversationMessage(external_user_id="u1", text="size: L", form={"size": "L"}).form_tag is None
+
+
+def test_conversation_message_form_tag_requires_a_form():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations.inbound import ConversationMessage
+
+    with pytest.raises(ValidationError, match="form_tag rides a form submission"):
+        ConversationMessage(external_user_id="u1", text="hi", form_tag="ref-42")
+
+
+def test_conversation_message_form_tag_is_bounded():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations.inbound import ConversationMessage
+
+    with pytest.raises(ValidationError, match="form_tag must be 1 to"):
+        ConversationMessage(external_user_id="u1", text="size: L", form={"size": "L"}, form_tag="has:colon")

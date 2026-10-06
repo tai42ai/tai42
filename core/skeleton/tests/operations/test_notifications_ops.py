@@ -147,6 +147,7 @@ async def test_notify_user_forwards_arguments_and_confirms(monkeypatch: pytest.M
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         )
     ]
@@ -179,6 +180,7 @@ async def test_notify_user_defaults_forwarded_and_maps_valueerror(monkeypatch: p
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         )
     ]
@@ -286,6 +288,7 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         ),
         (
@@ -304,8 +307,41 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         ),
+    ]
+
+
+async def test_notify_user_forwards_schema_and_form_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A form send's schema and its caller-set opaque per-send tag are forwarded verbatim to the
+    # channels helper.
+    helper = _RecordingHelper()
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+    schema = {"type": "object", "properties": {"size": {"type": "string"}}}
+
+    await notifications_ops.notify_user("fill this in", channel="whatsapp", schema=schema, form_tag="ref-42")
+
+    assert helper.calls == [
+        (
+            ("fill this in",),
+            {
+                "channel": "whatsapp",
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
+                "schema": schema,
+                "data": None,
+                "pages": None,
+                "form_tag": "ref-42",
+            },
+        )
     ]
 
 
@@ -404,6 +440,7 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         )
     ]
@@ -435,6 +472,7 @@ async def test_notify_user_forwards_schema(monkeypatch: pytest.MonkeyPatch) -> N
                 "schema": schema,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         )
     ]
@@ -470,6 +508,7 @@ async def test_notify_user_forwards_full_vocabulary(monkeypatch: pytest.MonkeyPa
                 "schema": None,
                 "data": None,
                 "pages": None,
+                "form_tag": None,
             },
         )
     ]
@@ -503,6 +542,7 @@ async def test_notify_user_forwards_form_data_and_pages(monkeypatch: pytest.Monk
                 "schema": schema,
                 "data": data,
                 "pages": pages,
+                "form_tag": None,
             },
         )
     ]

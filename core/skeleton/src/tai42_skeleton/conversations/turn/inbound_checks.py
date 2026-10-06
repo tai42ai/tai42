@@ -10,6 +10,7 @@ from typing import Any
 
 from tai42_contract.conversations import validate_inbound_form
 from tai42_contract.interactions import LocationElement, MediaItem, check_media_list
+from tai42_contract.interactions.models import check_form_tag
 
 
 def _checked_params(params: dict[str, str] | None) -> dict[str, str] | None:
@@ -40,6 +41,23 @@ def _checked_form(form: dict[str, Any] | None) -> dict[str, Any] | None:
     if form is None:
         return None
     return validate_inbound_form(form)
+
+
+def _checked_form_tag(form_tag: str | None, *, form: dict[str, Any] | None) -> str | None:
+    """Bound a caller-set per-send ``form_tag`` and refuse it without a ``form``, at the seam.
+
+    The channel-neutral return seam: every door that carries a submitted tag back runs this
+    BEFORE any state is written. A present tag is bounded as pure transport
+    (:func:`check_form_tag`, the error naming the bound, never the value) and REQUIRES a
+    ``form`` — a tag naming a submission that is not there is refused loudly, mirroring the
+    contract's ``ConversationMessage`` validator. ``None`` passes through.
+    """
+    if form_tag is None:
+        return None
+    check_form_tag(form_tag)
+    if form is None:
+        raise ValueError("form_tag rides a form submission (requires form)")
+    return form_tag
 
 
 def _checked_attachments(attachments: list[MediaItem] | None) -> list[MediaItem] | None:

@@ -16,7 +16,10 @@ class FormRecord:
 
     Holds the transcript pair the card was appended to (what binds a submission to the
     conversation it was sent into), the form's answer schema (the server-trusted source of the
-    rendered labels), and the card's prompt message.
+    rendered labels), the card's prompt message, and the caller-set opaque per-send
+    ``form_tag`` the notification carried (``None`` when none) — server-side, never in the
+    browser-facing frame, so it round-trips to the bridge on submit without the client ever
+    seeing or supplying it.
 
     Stored under ``channel:web:form:{token}`` with a TTL of the transcript TTL: the
     card lives in the replay buffer, so its answerability ages out with it. The
@@ -28,6 +31,7 @@ class FormRecord:
     address: str
     schema: dict[str, Any]
     message: str
+    form_tag: str | None = None
 
 
 def _form_key(token: str) -> str:
@@ -49,6 +53,7 @@ async def store_form_record(record: FormRecord) -> str:
             "address": record.address,
             "schema": record.schema,
             "message": record.message,
+            "form_tag": record.form_tag,
         }
     )
     async with _redis() as redis:
@@ -68,5 +73,9 @@ async def read_form_record(token: str) -> FormRecord | None:
         return None
     data = json.loads(raw)
     return FormRecord(
-        identity=data["identity"], address=data["address"], schema=data["schema"], message=data["message"]
+        identity=data["identity"],
+        address=data["address"],
+        schema=data["schema"],
+        message=data["message"],
+        form_tag=data["form_tag"],
     )

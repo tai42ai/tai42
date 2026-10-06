@@ -126,6 +126,7 @@ async def send_conversation_message(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     locale: str | None = None,
+    form_tag: str | None = None,
 ) -> dict[str, str]:
     """Send a message to a conversation route from inside a run, under the deployment's own identity.
 
@@ -147,6 +148,8 @@ async def send_conversation_message(
         attachments: Structured media sent with ``text`` (image/document/video/audio).
         location: A geographic point shared with ``text``.
         locale: The end user's BCP 47 language tag (e.g. ``he-IL``); ``None`` supplies none.
+        form_tag: The caller-set opaque per-send form tag echoed back with ``form``; requires
+            ``form`` and is bounded but never interpreted by the platform.
 
     Returns:
         The accepted receipt ``{"message_id", "thread_id"}``.
@@ -173,6 +176,7 @@ async def send_conversation_message(
         attachments=attachments,
         location=location,
         locale=locale,
+        form_tag=form_tag,
         client_connected=_never_connected,
     )
     return {"message_id": result.message_id, "thread_id": result.thread_id}

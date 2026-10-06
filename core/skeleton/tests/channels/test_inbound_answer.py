@@ -141,6 +141,7 @@ def wired(monkeypatch):
         attachments=None,
         location=None,
         locale=None,
+        form_tag=None,
     ):
         accept_calls.append(
             SimpleNamespace(

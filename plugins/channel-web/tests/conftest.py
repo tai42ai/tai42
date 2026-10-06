@@ -130,6 +130,7 @@ class _StubConversations:
         form: dict[str, Any] | None = None,
         attachments: list[MediaItem] | None = None,
         locale: str | None = None,
+        form_tag: str | None = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -143,6 +144,7 @@ class _StubConversations:
                 "form": form,
                 "attachments": attachments,
                 "locale": locale,
+                "form_tag": form_tag,
             }
         )
         if self.accept_error is not None:

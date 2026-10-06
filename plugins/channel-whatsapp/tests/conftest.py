@@ -169,6 +169,7 @@ class _StubConversations:
         form: dict[str, Any] | None = None,
         attachments: list[Any] | None = None,
         location: Any = None,
+        form_tag: str | None = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -182,6 +183,7 @@ class _StubConversations:
                 "form": form,
                 "attachments": attachments,
                 "location": location,
+                "form_tag": form_tag,
             }
         )
         if self.accept_error is not None:

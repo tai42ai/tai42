@@ -423,3 +423,40 @@ def test_form_pages_with_review_page_cover_the_input_properties():
         ]
     )
     assert req.answer_format is AnswerFormat.FORM
+
+
+def test_form_tag_bound_accepts_unreserved_set_and_full_length():
+    from tai42_contract.interactions.models import FORM_TAG_MAX_CHARS, check_form_tag
+
+    tag = "AZaz09-._~"
+    assert check_form_tag(tag) == tag
+    at_cap = "a" * FORM_TAG_MAX_CHARS
+    assert check_form_tag(at_cap) == at_cap
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "has space", "with:colon", "slash/here", "emoji\U0001f600"])
+def test_form_tag_bound_refuses_blank_and_reserved_chars(bad: str):
+    from tai42_contract.interactions.models import check_form_tag
+
+    with pytest.raises(ValueError, match="form_tag must be 1 to"):
+        check_form_tag(bad)
+
+
+def test_form_tag_bound_refuses_over_length_and_never_names_the_value():
+    from tai42_contract.interactions.models import FORM_TAG_MAX_CHARS, check_form_tag
+
+    secret = "s" * (FORM_TAG_MAX_CHARS + 1)
+    with pytest.raises(ValueError, match="form_tag must be 1 to") as excinfo:
+        check_form_tag(secret)
+    # The error names the BOUND, never the (opaque, possibly sensitive) value.
+    assert str(FORM_TAG_MAX_CHARS) in str(excinfo.value)
+    assert secret not in str(excinfo.value)
+
+
+def test_form_tag_colon_excluded_so_it_rides_a_colon_token_as_one_segment():
+    from tai42_contract.interactions.models import FORM_TAG_RE
+
+    # ``:`` is excluded so a channel packing the tag into a colon-delimited token keeps it one
+    # segment; the unreserved separators are admitted.
+    assert FORM_TAG_RE.fullmatch("order.42-rev_1~b") is not None
+    assert FORM_TAG_RE.fullmatch("a:b") is None

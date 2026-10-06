@@ -106,10 +106,21 @@ def test_operator_record_still_requires_non_blank_answer():
         _record(origin="operator", inbound_text="", caller_principal="op-1", answer="  ")
 
 
+def test_operator_record_refuses_an_inbound_form_tag():
+    with pytest.raises(ValueError, match="operator record carries no inbound_form_tag"):
+        _record(origin="operator", inbound_text="", caller_principal="op-1", inbound_form_tag="ref-42")
+
+
 def test_caller_view_publishes_origin():
     view = _record(origin="operator", inbound_text="", caller_principal="op-1").caller_view()
     assert view["origin"] == "operator"
     assert view["inbound_text"] == ""
+
+
+def test_caller_view_publishes_the_inbound_form_tag():
+    view = _record(inbound_form={"size": "M"}, inbound_form_tag="ref-42").caller_view()
+    assert view["inbound_form"] == {"size": "M"}
+    assert view["inbound_form_tag"] == "ref-42"
 
 
 def test_client_address_accepts_a_long_legitimate_value():

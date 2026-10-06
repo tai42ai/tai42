@@ -20,6 +20,7 @@ from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_attachments,
     _checked_form,
+    _checked_form_tag,
     _checked_location,
     _checked_params,
 )
@@ -53,6 +54,7 @@ async def accept(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     locale: str | None = None,
+    form_tag: str | None = None,
 ) -> str:
     """Accept one inbound channel message, persist-and-deliver its answer, and return its ``message_id``.
 
@@ -80,6 +82,12 @@ async def accept(
     untrusted) BEFORE any state is written, and stored on the record's ``inbound_form``
     beside the text (shed records included).
 
+    ``form_tag`` is the caller-set opaque per-send tag the platform handed out with the form
+    this submission answers, carried back beside ``form``. It is bounded and REQUIRES ``form``
+    (``_checked_form_tag``) BEFORE any state is written, stored on the record's
+    ``inbound_form_tag`` (shed records included), and surfaced to a tool target's payload under
+    the stable ``form_tag`` key only when present.
+
     ``attachments`` (the participant's structured media) and ``location`` (a geographic point the participant
     shared) ride WITH the text the same way — validated here (the shared media list-level caps; a
     ``LocationElement`` is self-validating) BEFORE any state is written, stored on the record's
@@ -92,6 +100,7 @@ async def accept(
     """
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
+    checked_form_tag = _checked_form_tag(form_tag, form=checked_form)
     checked_attachments = _checked_attachments(attachments)
     checked_location = _checked_location(location)
     checked_locale = normalize_optional_locale(locale)
@@ -134,6 +143,7 @@ async def accept(
             text=text,
             provider_message_id=provider_message_id,
             form=checked_form,
+            form_tag=checked_form_tag,
             attachments=checked_attachments,
             location=checked_location,
         )
@@ -148,6 +158,7 @@ async def accept(
             text=text,
             provider_message_id=provider_message_id,
             form=checked_form,
+            form_tag=checked_form_tag,
             attachments=checked_attachments,
             location=checked_location,
         )
@@ -164,6 +175,7 @@ async def accept(
         multichannel=multichannel,
         params=checked_params,
         form=checked_form,
+        form_tag=checked_form_tag,
         attachments=checked_attachments,
         location=checked_location,
         locale=checked_locale,
@@ -183,6 +195,7 @@ async def _accept_for_turn(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     locale: str | None = None,
@@ -206,6 +219,7 @@ async def _accept_for_turn(
         provider_message_id=provider_message_id,
         inbound_text=text,
         inbound_form=form,
+        inbound_form_tag=form_tag,
         inbound_attachments=attachments,
         inbound_location=location,
         inbound_locale=locale,
@@ -242,6 +256,7 @@ async def _accept_for_turn(
         multichannel=multichannel,
         params=params,
         form=form,
+        form_tag=form_tag,
         attachments=attachments,
         location=location,
     )
@@ -259,6 +274,7 @@ async def _shed_with_reply(
     text: str,
     provider_message_id: str,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> str:
@@ -279,6 +295,7 @@ async def _shed_with_reply(
         provider_message_id=provider_message_id,
         inbound_text=text,
         inbound_form=form,
+        inbound_form_tag=form_tag,
         inbound_attachments=attachments,
         inbound_location=location,
         delivery_status=DeliveryStatus.ACCEPTED,
@@ -319,6 +336,7 @@ async def _shed_silently(
     text: str,
     provider_message_id: str,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> str:
@@ -336,6 +354,7 @@ async def _shed_silently(
         provider_message_id=provider_message_id,
         inbound_text=text,
         inbound_form=form,
+        inbound_form_tag=form_tag,
         inbound_attachments=attachments,
         inbound_location=location,
         delivery_status=DeliveryStatus.SHED,

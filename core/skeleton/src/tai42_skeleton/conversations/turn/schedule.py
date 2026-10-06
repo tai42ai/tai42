@@ -41,6 +41,7 @@ async def _schedule_turn(
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> asyncio.Task[ConversationRecord]:
@@ -80,6 +81,7 @@ async def _schedule_turn(
                             multichannel=multichannel,
                             params=params,
                             form=form,
+                            form_tag=form_tag,
                             attachments=attachments,
                             location=location,
                         )
@@ -100,6 +102,7 @@ async def _schedule_turn(
                     multichannel=multichannel,
                     params=params,
                     form=form,
+                    form_tag=form_tag,
                     attachments=attachments,
                     location=location,
                 )

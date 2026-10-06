@@ -61,10 +61,13 @@ class _Engine:
         attachments=None,
         location=None,
         locale=None,
+        form_tag=None,
         *,
         client_connected,
     ):
-        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale))
+        self.calls.append(
+            (route_name, external_user_id, text, caller_principal, wait_seconds, params, form, locale, form_tag)
+        )
         if self._raises is not None:
             raise self._raises
         return self._result or ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None)
@@ -234,6 +237,26 @@ def test_an_absent_form_reaches_the_engine_as_none(monkeypatch):
     client = _client(monkeypatch, engine)
     _post(client)
     assert engine.calls[0][6] is None
+
+
+def test_a_form_tag_body_field_threads_through_to_the_engine(monkeypatch):
+    # ConversationMessage.form_tag (the caller-set opaque per-send tag) rides the body beside the
+    # form and reaches the engine as the ``form_tag`` argument.
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(
+        _PATH,
+        json={"external_user_id": "u-7", "text": "name: Alice", "form": {"name": "Alice"}, "form_tag": "ref-42"},
+    )
+    assert response.status_code == 202
+    assert engine.calls[0][8] == "ref-42"
+
+
+def test_an_absent_form_tag_reaches_the_engine_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    _post(client)
+    assert engine.calls[0][8] is None
 
 
 def test_a_non_object_form_is_a_400(monkeypatch):

@@ -378,6 +378,7 @@ class AppConversations(Protocol):
         attachments: list[MediaItem] | None = None,
         location: LocationElement | None = None,
         locale: str | None = None,
+        form_tag: str | None = None,
     ) -> str:
         """Accept one inbound channel message, persist it, and return its ``message_id`` (a uuid4).
 
@@ -427,6 +428,13 @@ class AppConversations(Protocol):
         state templates never select a language. It seeds a first-contact person's stored
         locale and, absent a stored operator override, is the turn's resolved locale;
         ``None`` means the channel supplied none (no silent default to any language).
+
+        ``form_tag`` is the caller-set opaque per-send correlation the platform handed out with
+        the form this submission answers, carried back by the channel and delivered to a tool
+        target's payload under the stable ``form_tag`` key BESIDE ``form`` (present only when the
+        inbound carried one). It REQUIRES ``form`` — a tag without a submission is refused — and
+        the platform bounds it as transport (:func:`~tai42_contract.interactions.models.check_form_tag`)
+        but never interprets the value. ``None`` means the channel carried none.
         """
         ...
 

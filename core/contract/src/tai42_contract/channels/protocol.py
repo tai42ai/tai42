@@ -40,7 +40,12 @@ class Channel(Protocol):
     that reads only the plain fields can never silently drop the extra content.
     A channel that does not advertise ``supports_form_delivery`` never receives
     a ``form`` delivery, and one that does not advertise
-    ``supports_form_notifications`` never receives a ``schema`` notification.
+    ``supports_form_notifications`` never receives a ``schema`` notification. A
+    channel that advertises ``supports_form_notifications`` MUST, when a form
+    notification carries a ``form_tag``, carry that opaque per-send tag with the
+    form on its own medium (never into the published form artefact) and hand it
+    back on the participant's submission as ``accept(form_tag=...)`` — the tag
+    rides the form's gate, so it needs no capability flag of its own.
     ``supports_form_reaction`` is the delivery-side flag for a REACTING form (one
     whose ask names a ``reaction_tool`` and carries ``reactions`` triggers): the
     ``ask`` helper, having already confirmed ``supports_form_delivery``, refuses a

@@ -190,6 +190,7 @@ async def _bridge_inbound_message(
     blank_message: str,
     attachment_ids: list[str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
 ) -> Response:
     """Bridge one participant message into its web conversation and append the visitor's own frame.
 
@@ -238,6 +239,7 @@ async def _bridge_inbound_message(
                 attachments=[item.item for item in bound] or None,
                 locale=_inbound_locale(request),
                 form=form,
+                form_tag=form_tag,
             )
         except BlankInboundTextError:
             return _error(blank_message, 400)
@@ -393,4 +395,7 @@ async def web_form_submit(request: Request) -> Response:
         registration.params or None,
         "form values render to a blank message",
         form=body.values,
+        # The caller-set opaque per-send tag rides the SERVER-side record, never the client
+        # body — a client-supplied form_tag is not a FormSubmissionBody field and is ignored.
+        form_tag=record.form_tag,
     )

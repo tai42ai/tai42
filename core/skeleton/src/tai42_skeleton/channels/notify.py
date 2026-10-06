@@ -293,6 +293,7 @@ async def notify_user(
     schema: dict[str, Any] | None = None,
     data: FormData | dict[str, Any] | None = None,
     pages: list[FormPage] | list[dict[str, Any]] | None = None,
+    form_tag: str | None = None,
 ) -> list[str]:
     """Notify a human of ``message``, fire-and-forget.
 
@@ -376,6 +377,15 @@ async def notify_user(
     named channel they thread onto the ``ChannelNotification`` the channel receives, and an
     ``audience``-addressed send stores them on the in-app feed record too (feed parity).
 
+    ``form_tag`` is the caller-set opaque per-send correlation for the form: the channel carries
+    it with the form and hands it back BESIDE the submission on accept. It rides ONLY a form send,
+    so it is refused loudly (a ``ValueError`` → 400) without a ``schema`` — on the internal sink
+    (``channel=None``, where a schema is already refused) and on a named channel alike, by the
+    ``ChannelNotification`` presence rule. The platform never interprets the value, only bounds it.
+    On a named channel it threads onto the ``ChannelNotification`` the channel receives; it is NOT
+    written to the in-app feed record — the feed has no submission door, so a tag there would
+    correlate nothing.
+
     The notification carries no ``sender_identity`` — that field is the conversation
     bridge's — so the channel sends from its own configured identity.
 
@@ -458,6 +468,7 @@ async def notify_user(
             footer=footer,
             data=data,
             pages=pages,
+            form_tag=form_tag,
         )
         await _record_feed(sink_notification, audience)
         return []
@@ -500,6 +511,7 @@ async def notify_user(
         schema=schema,
         data=data,
         pages=pages,
+        form_tag=form_tag,
     )
     # An addressed notification lands in the identity's in-app feed even on the
     # channel path, matching ``ask`` (which always persists). After the clamp a

@@ -587,6 +587,7 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "attachments",
         "location",
         "locale",
+        "form_tag",
     ]
     assert inspect.iscoroutinefunction(AppConversations.record_delivery_status)
     assert list(inspect.signature(AppConversations.record_delivery_status).parameters) == [

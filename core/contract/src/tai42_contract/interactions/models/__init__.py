@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
+    FORM_TAG_MAX_CHARS,
+    FORM_TAG_RE,
     DisplayBlock,
     FormData,
     FormOption,
@@ -21,6 +23,7 @@ from tai42_contract.interactions.models.forms import (
     check_form_data,
     check_form_pages,
     check_form_reactions,
+    check_form_tag,
 )
 from tai42_contract.interactions.models.location import (
     LOCATION_ADDRESS_MAX_CHARS,
@@ -60,6 +63,8 @@ from tai42_contract.interactions.models.response import (
 
 __all__ = [
     "FILE_MEDIA_KINDS",
+    "FORM_TAG_MAX_CHARS",
+    "FORM_TAG_RE",
     "LOCAL_HTTP_HOSTS",
     "LOCATION_ADDRESS_MAX_CHARS",
     "LOCATION_NAME_MAX_CHARS",
@@ -93,6 +98,7 @@ __all__ = [
     "check_form_data",
     "check_form_pages",
     "check_form_reactions",
+    "check_form_tag",
     "check_media_list",
     "served_media_id",
     "validate_action_url",

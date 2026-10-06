@@ -22,7 +22,7 @@ import httpx
 import pytest
 from tai42_contract.interactions.models import FormData, FormOption, FormPage, FormReactions
 
-from tai42_channel_whatsapp.channel import WhatsAppChannel
+from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX, WhatsAppChannel
 from tai42_channel_whatsapp.flows import build_form_flow
 
 from .conftest import (
@@ -216,6 +216,53 @@ async def test_published_reacting_flow_carries_no_guest_identifier(
     create_body = json.loads(artefact)
     assert create_body["endpoint_uri"] == "https://app.example/api/channels/whatsapp/flow-data"
     assert json.loads(create_body["flow_json"])["data_api_version"] == "3.0"
+
+
+async def test_notify_two_different_form_tags_publish_one_flow(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A caller-set per-send form_tag is NOT part of the published artefact's key: two notifies of
+    # the SAME form carrying DIFFERENT tags resolve one cached Flow id, so create_flow runs ONCE.
+    from tai42_contract.channels import ChannelNotification
+
+    fake_httpx.responses.append(_flow_created("flow-nf"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.ONE"))
+    fake_httpx.responses.append(_accepted("wamid.TWO"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(message="Fill this.", recipient=ALLOWED_A, schema=_SCHEMA, form_tag="tag-a")
+    )
+    await WhatsAppChannel().notify(
+        ChannelNotification(message="Fill this.", recipient=ALLOWED_B, schema=_SCHEMA, form_tag="tag-b")
+    )
+
+    urls = [call["url"] for call in fake_httpx.calls]
+    assert urls.count(_FLOWS_URL) == 1
+    assert urls == [_FLOWS_URL, "https://graph.facebook.com/v23.0/flow-nf/publish", _MESSAGES_URL, _MESSAGES_URL]
+
+
+async def test_notify_form_tag_rides_the_token_not_the_published_flow(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The caller-set per-send tag is opaque correlation, not form content: it must ride the send's
+    # flow token (its 4th segment) and NEVER appear in the published Flow artefact.
+    from tai42_contract.channels import ChannelNotification
+
+    fake_httpx.responses.append(_flow_created("flow-nf"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.NF"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(message="Fill this.", recipient=ALLOWED_A, schema=_SCHEMA, form_tag="corr-xyzzy")
+    )
+
+    artefact = _published_artefact(fake_httpx)
+    assert "corr-xyzzy" not in artefact  # the tag is not baked into the published Flow
+    # The tag rides the send's flow token as its 4th ``:``-delimited segment.
+    token = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_token"]
+    assert token.startswith(_NOTIFY_FORM_TOKEN_PREFIX)
+    segments = token.split(":")
+    assert len(segments) == 4
+    assert segments[3] == "corr-xyzzy"
 
 
 async def test_published_flow_with_prefill_and_options_carries_no_guest_identifier(

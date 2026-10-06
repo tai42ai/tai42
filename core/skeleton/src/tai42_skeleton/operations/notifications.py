@@ -43,7 +43,7 @@ from tai42_contract.channels import (
     check_interactive_composition,
     check_sections,
 )
-from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem
+from tai42_contract.interactions.models import FormData, FormPage, LocationElement, MediaItem, check_form_tag
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
 from tai42_skeleton.channels.notifications_sink import read_notifications
@@ -186,6 +186,17 @@ with warnings.catch_warnings():
                 "is a 400."
             ),
         )
+        # Appended last so no earlier field's position moves (the release API gate treats a moved
+        # field as breaking).
+        form_tag: str | None = Field(
+            default=None,
+            description=(
+                "Optional caller-set opaque per-send form tag the channel carries with the form and hands "
+                "back on submit. Rides ONLY a form send — present without schema is a 400. Bounded as "
+                "transport (an out-of-charset or over-length tag is a 400) but never interpreted; not written "
+                "to the in-app feed record."
+            ),
+        )
 
         # The new rich fields reuse AnswerPart's/ChannelNotification's SAME field validators, so
         # the operator send surface bounds each shape identically to the flow answer path — never
@@ -204,6 +215,16 @@ with warnings.catch_warnings():
         @classmethod
         def _header_valid(cls, value: MediaItem | None) -> MediaItem | None:
             return check_header(value)
+
+        @field_validator("form_tag")
+        @classmethod
+        def _form_tag_bounded(cls, value: str | None) -> str | None:
+            # Mirrors ChannelNotification: None means no tag; a present tag is bounded as pure
+            # transport, the error naming the bound, never the value. The requires-schema rule is
+            # the helper's ChannelNotification construction (mapped to a 400).
+            if value is not None:
+                check_form_tag(value)
+            return value
 
         @model_validator(mode="after")
         def _check_composition(self) -> NotifyUser:
@@ -269,6 +290,7 @@ async def notify_user(
     footer: str | None = None,
     data: FormData | None = None,
     pages: list[FormPage] | None = None,
+    form_tag: str | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.
 
@@ -324,6 +346,11 @@ async def notify_user(
     runs — a prefill against an unknown/ill-typed property, a per-send option list on a
     non-string property, or a page that omits/duplicates/misnames a property is a 400.
 
+    ``form_tag`` is the caller-set opaque per-send correlation the channel carries with the form
+    and hands back on submit. It rides ONLY a form send: present without ``schema`` is a 400. The
+    platform bounds it (an out-of-charset or over-length tag is a 400) but never interprets it,
+    and it is not written to the in-app feed record.
+
     ``audience`` addresses the in-app record to an identity's feed; it is honored
     even when a channel also delivers the message (channel push AND in-app record).
     ``sender_identity`` is the sending identity a channel message leaves FROM, which the
@@ -355,6 +382,7 @@ async def notify_user(
             schema=schema,
             data=data,
             pages=pages,
+            form_tag=form_tag,
         )
     except SenderIdentityNotAllowedError as exc:
         raise BadRequestError(str(exc)) from exc

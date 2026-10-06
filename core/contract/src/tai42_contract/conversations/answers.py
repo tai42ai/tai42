@@ -26,6 +26,7 @@ from tai42_contract.interactions.models import (
     MediaItem,
     check_form_data,
     check_form_pages,
+    check_form_tag,
     check_media_list,
 )
 
@@ -102,6 +103,11 @@ with warnings.catch_warnings():
         # Stepped-form layout over ``schema``: each :class:`FormPage` names the top-level
         # properties on one step; ride ONLY a form part. Absent ``pages`` means one page.
         pages: list[FormPage] | None = None
+        # Caller-set opaque per-send correlation for a form part: the channel carries it with
+        # the form and hands it back BESIDE the submission on accept. The platform never
+        # interprets it, only bounds it (:func:`check_form_tag`); rides ONLY a form part
+        # (``schema`` present). None -> no tag.
+        form_tag: str | None = None
 
         @field_validator("message")
         @classmethod
@@ -151,6 +157,15 @@ with warnings.catch_warnings():
                 raise ValueError("schema must be a non-empty dict when present")
             return value
 
+        @field_validator("form_tag")
+        @classmethod
+        def _form_tag_bounded(cls, value: str | None) -> str | None:
+            # Mirrors ChannelNotification: None means no tag; a present tag is bounded as pure
+            # transport, the error naming the bound, never the value.
+            if value is not None:
+                check_form_tag(value)
+            return value
+
         @model_validator(mode="after")
         def _check_composition(self) -> AnswerPart:
             # The SAME shared cross-field rules ChannelNotification enforces, so the flow-message
@@ -183,6 +198,8 @@ with warnings.catch_warnings():
                     raise ValueError("data rides a form part (a part with a schema) only")
                 if self.pages is not None:
                     raise ValueError("pages ride a form part (a part with a schema) only")
+                if self.form_tag is not None:
+                    raise ValueError("form_tag rides a form part (a part with a schema) only")
                 return self
             if self.data is not None:
                 check_form_data(self.schema, self.data)

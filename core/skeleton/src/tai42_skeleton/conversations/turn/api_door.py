@@ -20,6 +20,7 @@ from tai42_skeleton.conversations.turn.errors import ConversationRouteResolution
 from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_attachments,
     _checked_form,
+    _checked_form_tag,
     _checked_location,
     _checked_params,
 )
@@ -40,6 +41,7 @@ async def submit_api_message(
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     locale: str | None = None,
+    form_tag: str | None = None,
     *,
     client_connected: Callable[[], Awaitable[bool]],
 ) -> ApiSubmitResult:
@@ -74,9 +76,15 @@ async def submit_api_message(
     record + payload semantics — validated defensively here, stored on the record's
     ``inbound_attachments``/``inbound_location``, and surfaced to a tool target's payload under
     the stable ``attachments``/``location`` keys only when present.
+
+    ``form_tag`` (``ConversationMessage.form_tag``) is the caller-set opaque per-send tag echoed
+    back WITH a form submission under the SAME posture: bounded and refused without a ``form``
+    here (``_checked_form_tag``), stored on the record's ``inbound_form_tag``, and surfaced to a
+    tool target's payload under the stable ``form_tag`` key only when present.
     """
     checked_params = _checked_params(params)
     checked_form = _checked_form(form)
+    checked_form_tag = _checked_form_tag(form_tag, form=checked_form)
     checked_attachments = _checked_attachments(attachments)
     checked_location = _checked_location(location)
     checked_locale = normalize_optional_locale(locale)
@@ -115,6 +123,7 @@ async def submit_api_message(
         provider_message_id=None,
         inbound_text=text,
         inbound_form=checked_form,
+        inbound_form_tag=checked_form_tag,
         inbound_attachments=checked_attachments,
         inbound_location=checked_location,
         inbound_locale=checked_locale,
@@ -137,6 +146,7 @@ async def submit_api_message(
         multichannel=multichannel,
         params=checked_params,
         form=checked_form,
+        form_tag=checked_form_tag,
         attachments=checked_attachments,
         location=checked_location,
     )
