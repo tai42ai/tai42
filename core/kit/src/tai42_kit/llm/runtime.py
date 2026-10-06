@@ -108,30 +108,36 @@ def build_user_output(state: dict[str, Any]) -> str:
 def validate_structured_output(structured: Any, response_format: Any) -> Any:
     """Validate a produced structured output against the ``response_format`` that forced it.
 
-    Every produced value is first walked UNCONDITIONALLY for an integer outside
-    the platform int64 range (a pydantic instance is model-dumped to JSON-native
-    types first): such an integer cannot be represented as a signed 64-bit
-    integer — the platform structured-output ceiling — so it is rejected here
-    with a
-    :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError`
-    naming the path — closing the native ``with_structured_output`` doors (which
-    have no retry rail) whatever the ``response_format`` shape. Then, by shape:
+    The produced value is first reduced to the JSON-native form the model actually
+    produced: a pydantic instance (the shape the tool tier parses its bound model to)
+    is dumped keeping ONLY the fields the model set — so an optional property the model
+    omitted stays absent rather than surfacing as an explicit ``null``, and a
+    ``datetime`` field becomes its ISO string — while a value that is already a dict is
+    used as-is. That form is walked UNCONDITIONALLY for an integer outside the platform
+    int64 range: such an integer cannot be represented as a signed 64-bit integer — the
+    platform structured-output ceiling — so it is rejected here with a
+    :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError` naming the
+    path — closing the native ``with_structured_output`` doors (which have no retry rail)
+    whatever the ``response_format`` shape. Then, by shape:
 
-    * a pydantic model class → ``model_validate`` the produced value and return
-      the validated instance;
-    * a JSON-Schema ``dict`` → validate the raw value (a pydantic instance is
-      dumped to JSON-native types first, so e.g. a ``datetime`` field validates
-      as its ISO string) with the faithful draft-2020-12 validator — every
-      constraint keyword enforced, plus the platform int64 range injected onto
-      every integer node — and return the value as produced;
-    * anything else (e.g. a langchain response strategy) → returned as produced.
+    * a pydantic model class → ``model_validate`` that produced form and return the
+      validated instance (the model-omitted fields fall back to the class defaults);
+    * a JSON-Schema ``dict`` → validate the produced form with the faithful
+      draft-2020-12 validator — every constraint keyword enforced, plus the platform
+      int64 range injected onto every integer node — and return it, so a dict-authored
+      schema always yields a plain ``dict`` whether the tool tier produced a pydantic
+      instance or a raw dict;
+    * anything else (e.g. a langchain union of models / response strategy) → the value
+      is returned exactly as produced.
 
     A value that does not match raises loudly (``pydantic.ValidationError`` /
     :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError`) —
     never a silent pass-through of a non-conforming object.
     """
-    probe = structured.model_dump(mode="json") if isinstance(structured, BaseModel) else structured
-    overflow = find_oversized_int(probe, minimum=INT64_MIN, maximum=INT64_MAX)
+    emitted = (
+        structured.model_dump(mode="json", exclude_unset=True) if isinstance(structured, BaseModel) else structured
+    )
+    overflow = find_oversized_int(emitted, minimum=INT64_MIN, maximum=INT64_MAX)
     if overflow is not None:
         path, value = overflow
         raise JsonSchemaValidationError(
@@ -141,10 +147,10 @@ def validate_structured_output(structured: Any, response_format: Any) -> Any:
             offending_value=value,
         )
     if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return response_format.model_validate(structured)
+        return response_format.model_validate(emitted)
     if isinstance(response_format, dict):
-        validate_against_json_schema(probe, inject_int64_bounds(response_format))
-        return structured
+        validate_against_json_schema(emitted, inject_int64_bounds(response_format))
+        return emitted
     return structured
 
 

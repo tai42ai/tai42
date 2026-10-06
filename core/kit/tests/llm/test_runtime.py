@@ -25,6 +25,8 @@ from tai42_kit.utils.data.json_schema_util import (
     INT64_MAX,
     InvalidJsonSchemaError,
     JsonSchemaValidationError,
+    inject_int64_bounds,
+    json_schema_to_pydantic_model,
 )
 
 
@@ -179,11 +181,25 @@ def test_dict_schema_mismatch_raises():
         extract_structured_output({"structured_response": _INVALID}, response_format=_SCHEMA)
 
 
-def test_dict_schema_validates_basemodel_value_via_dump():
-    """A produced pydantic instance is dumped to raw JSON before jsonschema
-    validation, so the dict-schema path accepts either shape."""
+def test_dict_schema_emits_a_basemodel_value_as_a_plain_dict():
+    """A produced pydantic instance (the shape the tool tier parses to) is dumped to
+    JSON-native types for a dict-authored schema, so the extracted value is a plain dict —
+    the shape a dict schema promises its consumers — not the model instance."""
     out = extract_structured_output({"structured_response": _Person(name="ada", age=36)}, response_format=_SCHEMA)
-    assert isinstance(out, _Person)
+    assert out == {"name": "ada", "age": 36}
+    assert not isinstance(out, _Person)
+
+
+def test_dict_schema_keeps_an_omitted_optional_absent_not_null():
+    """The tool tier binds a pydantic model whose optional fields default to None; an
+    optional property the model omits must stay ABSENT in the emitted dict, never surfacing
+    as an explicit ``null`` that the authored (optional, non-nullable) schema would reject."""
+    schema = {"title": "Opt", "type": "object", "properties": {"s": {"type": "string"}}}
+    model_cls = json_schema_to_pydantic_model(inject_int64_bounds(schema), model_name="Opt")
+    omitted = model_cls.model_validate({})
+    assert validate_structured_output(omitted, schema) == {}
+    present = model_cls.model_validate({"s": "hi"})
+    assert validate_structured_output(present, schema) == {"s": "hi"}
 
 
 def test_pydantic_model_validates_and_coerces():
@@ -237,7 +253,8 @@ def test_dict_schema_dumps_basemodel_to_json_native_types():
     }
     event = _Event(name="launch", at=datetime(2026, 1, 1, 12, 0, 0))
     out = validate_structured_output(event, schema)
-    assert isinstance(out, _Event)
+    assert out == {"name": "launch", "at": "2026-01-01T12:00:00"}
+    assert not isinstance(out, _Event)
 
 
 def test_validate_value_invalid_schema_raises():
@@ -286,3 +303,39 @@ def test_validate_basemodel_conforming_value_reinflates_to_class():
     out = validate_structured_output({"n": 5}, _Big)
     assert isinstance(out, _Big)
     assert out.n == 5
+
+
+def test_dict_schema_rejects_oversized_int_in_a_pydantic_instance():
+    # The tool tier parses its bound model to a pydantic instance; validated against a
+    # dict-authored schema it is still walked for an integer outside the platform int64
+    # range, so an oversized integer raises rather than being emitted as a dict.
+    over = INT64_MAX + 1
+    schema = {"title": "Big", "type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+    with pytest.raises(JsonSchemaValidationError) as exc:
+        validate_structured_output(_Big(n=over), schema)
+    assert exc.value.offending_value == over
+
+
+def test_dict_schema_emits_conforming_pydantic_instance_as_a_plain_dict():
+    # A conforming pydantic instance against a dict schema yields the plain JSON-native
+    # dict the consumer expects, not the instance.
+    schema = {"title": "Big", "type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+    out = validate_structured_output(_Big(n=5), schema)
+    assert out == {"n": 5}
+    assert not isinstance(out, _Big)
+
+
+def test_pydantic_class_validates_a_generated_model_instance_via_produced_fields():
+    # The tool tier parses its bound (generated) model to an instance that is a DIFFERENT
+    # type from the authored class; validating it against the authored class re-inflates the
+    # class from the fields the model set, the omitted optional falling back to the class
+    # default — never a cross-type model_validate failure.
+    class _Payload(BaseModel):
+        value: int
+        note: str = "default"
+
+    generated = json_schema_to_pydantic_model(inject_int64_bounds(_Payload.model_json_schema()), model_name="_Payload")
+    out = validate_structured_output(generated.model_validate({"value": 7}), _Payload)
+    assert isinstance(out, _Payload)
+    assert out.value == 7
+    assert out.note == "default"

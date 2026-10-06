@@ -59,7 +59,12 @@ def _handle_allof_schema(
         return Any
 
     config = ConfigDict(from_attributes=True)
-    model = create_model(model_name, __base__=tuple(base_models), __module__="pydantic_generated", __config__=config)
+    model = create_model(
+        schema.get("title") or model_name,
+        __base__=tuple(base_models),
+        __module__="pydantic_generated",
+        __config__=config,
+    )
 
     model.__doc__ = schema.get("description", "")
     return model
@@ -255,8 +260,17 @@ def _handle_object_schema(
             prop_name, prop_schema, required, model_name, parent_models, max_depth, _depth
         )
 
+    # An object node is named by its ``title`` when present (falling back to the
+    # positional model name), so a union/``oneOf`` of titled variants binds to tool specs
+    # whose names match the variant titles — mirroring the TypedDict converter.
     config = ConfigDict(from_attributes=True, extra=_object_extra_policy(additional_props, has_additional))
-    model = create_model(model_name, __base__=BaseModel, __module__="pydantic_generated", __config__=config, **fields)
+    model = create_model(
+        schema.get("title") or model_name,
+        __base__=BaseModel,
+        __module__="pydantic_generated",
+        __config__=config,
+        **fields,
+    )
 
     if is_top_level:
         types_namespace = dict(parent_models)
@@ -340,7 +354,8 @@ def json_schema_to_pydantic_model(
 ) -> Any:
     """Convert a JSON Schema into a pydantic model class (or the type annotation for a non-object schema).
 
-    ``model_name`` names the generated model; ``max_depth`` bounds nesting and raises when exceeded.
+    An object node is named by its ``title`` when present, falling back to ``model_name``;
+    ``max_depth`` bounds nesting and raises when exceeded.
     """
     if _depth > max_depth:
         raise ValueError(f"JSON schema nesting exceeds max_depth={max_depth} (at {model_name!r})")

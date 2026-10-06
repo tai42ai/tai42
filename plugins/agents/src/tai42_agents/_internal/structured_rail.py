@@ -103,11 +103,18 @@ class StructuredOutputRailMiddleware(AgentMiddleware):
                     # An interim tool-calling turn, or no structured format: nothing to judge.
                     return response
                 try:
-                    validate_structured_output(response.structured_response, self._validation_schema)
+                    normalized = validate_structured_output(response.structured_response, self._validation_schema)
                 except _VALIDATION_ERRORS as caught:
                     failure_message = _last_ai_message(response.result)
                     exc = caught
                 else:
+                    # Store exactly what the shared validator normalizes to, so graph state
+                    # matches the single-shot door: a dict-authored schema yields a plain dict
+                    # (the tool tier's pydantic instance dumped to its JSON-native form, keeping
+                    # only the fields the model set — an omitted optional stays absent rather than
+                    # a schema-breaking ``null``), while a pydantic-class schema keeps its
+                    # validated instance.
+                    response.structured_response = normalized
                     return response
             # Raises RepromptCapError past the cap; otherwise returns the feedback text.
             text = self._reprompt(exc)
