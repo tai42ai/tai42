@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=16.2,<17",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=7.6,<8",
+    "tai42-kit[redis]>=7.7,<8",
     # Imported directly (transport error types).
     "httpx>=0.28",
     # Imported directly by inbound.py (Request/Response handler types).
