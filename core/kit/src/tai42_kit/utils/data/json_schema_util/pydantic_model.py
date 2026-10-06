@@ -21,6 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from tai42_kit.utils.data.json_schema_util.constraints import _map_json_type, _value_constraint_metadata
 
 reserved_words = set(keyword.kwlist) | set(dir(builtins))
+# Pydantic BaseModel attributes/methods a field name must not shadow: a field named one of
+# these warns (e.g. ``schema``) or raises (a protected ``model_`` method like ``model_dump``)
+# at model creation, so the sanitizer suffixes such a name just as it does a keyword/builtin.
+_basemodel_attrs = frozenset(dir(BaseModel))
 
 
 def _handle_ref_schema(schema: dict[str, Any], parent_models: dict[str, type]) -> Any:
@@ -58,7 +62,7 @@ def _handle_allof_schema(
     if not base_models:
         return Any
 
-    config = ConfigDict(from_attributes=True)
+    config = ConfigDict(from_attributes=True, protected_namespaces=())
     model = create_model(
         schema.get("title") or model_name,
         __base__=tuple(base_models),
@@ -129,7 +133,10 @@ def _sanitize_field_name(prop_name: str) -> str:
     """Return a pydantic-legal field name for a JSON property key.
 
     Strips a leading ``$``, rewrites ``-``/``@``/non-alnum runs, letter-prefixes a digit/underscore
-    start, and suffixes a reserved word so it never shadows a builtin or keyword.
+    start, and suffixes a reserved word so it never shadows a builtin, a keyword, or a pydantic
+    ``BaseModel`` attribute/method (e.g. ``schema``, ``model_dump``) — the latter two would otherwise
+    warn or raise at model creation. The original JSON key is kept as the field's alias, so the
+    sanitized name round-trips back to it.
     """
     sanitized_name = prop_name
     sanitized_name = sanitized_name.removeprefix("$")
@@ -140,7 +147,7 @@ def _sanitize_field_name(prop_name: str) -> str:
     # prefix those with a letter; the alias keeps the original JSON key.
     if sanitized_name and (sanitized_name[0].isdigit() or sanitized_name[0] == "_"):
         sanitized_name = "field_" + sanitized_name
-    while sanitized_name in reserved_words or keyword.iskeyword(sanitized_name):
+    while sanitized_name in reserved_words or sanitized_name in _basemodel_attrs or keyword.iskeyword(sanitized_name):
         sanitized_name += "_"
     return sanitized_name
 
@@ -263,7 +270,13 @@ def _handle_object_schema(
     # An object node is named by its ``title`` when present (falling back to the
     # positional model name), so a union/``oneOf`` of titled variants binds to tool specs
     # whose names match the variant titles — mirroring the TypedDict converter.
-    config = ConfigDict(from_attributes=True, extra=_object_extra_policy(additional_props, has_additional))
+    # ``protected_namespaces=()`` so a property sanitized into the ``model_`` namespace
+    # (e.g. ``model_dump`` -> ``model_dump_``) builds without a spurious namespace warning.
+    config = ConfigDict(
+        from_attributes=True,
+        extra=_object_extra_policy(additional_props, has_additional),
+        protected_namespaces=(),
+    )
     model = create_model(
         schema.get("title") or model_name,
         __base__=BaseModel,

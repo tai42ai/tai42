@@ -112,8 +112,11 @@ def validate_structured_output(structured: Any, response_format: Any) -> Any:
     produced: a pydantic instance (the shape the tool tier parses its bound model to)
     is dumped keeping ONLY the fields the model set — so an optional property the model
     omitted stays absent rather than surfacing as an explicit ``null``, and a
-    ``datetime`` field becomes its ISO string — while a value that is already a dict is
-    used as-is. That form is walked UNCONDITIONALLY for an integer outside the platform
+    ``datetime`` field becomes its ISO string — and under each field's alias, so a
+    property whose authored name the bound model had to sanitize to a legal field name
+    (a python keyword or builtin, a ``$``/``@``/``-`` key) reduces back to its AUTHORED
+    key — while a value that is already a dict is used as-is. That form is walked
+    UNCONDITIONALLY for an integer outside the platform
     int64 range: such an integer cannot be represented as a signed 64-bit integer — the
     platform structured-output ceiling — so it is rejected here with a
     :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError` naming the
@@ -135,7 +138,9 @@ def validate_structured_output(structured: Any, response_format: Any) -> Any:
     never a silent pass-through of a non-conforming object.
     """
     emitted = (
-        structured.model_dump(mode="json", exclude_unset=True) if isinstance(structured, BaseModel) else structured
+        structured.model_dump(mode="json", exclude_unset=True, by_alias=True)
+        if isinstance(structured, BaseModel)
+        else structured
     )
     overflow = find_oversized_int(emitted, minimum=INT64_MIN, maximum=INT64_MAX)
     if overflow is not None:

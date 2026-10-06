@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 pytest.importorskip("langgraph")
 
@@ -323,6 +323,76 @@ def test_dict_schema_emits_conforming_pydantic_instance_as_a_plain_dict():
     out = validate_structured_output(_Big(n=5), schema)
     assert out == {"n": 5}
     assert not isinstance(out, _Big)
+
+
+# --- a sanitized property name round-trips to its authored key -----------------
+# The tool tier binds a generated pydantic model whose fields are sanitized to legal
+# python identifiers (a keyword, a builtin, a ``$``/``@``/``-`` key), the original JSON
+# key kept as the field's alias. The produced instance must reduce back to the AUTHORED
+# keys when validated against the authored schema — the authored schema reaches the model
+# and comes back unchanged, property names included — never the internal field names.
+
+_SANITIZED_SCHEMA = {
+    "title": "Want",
+    "type": "object",
+    "properties": {
+        "from": {"type": "string"},  # python keyword
+        "class": {"type": "string"},  # python keyword
+        "id": {"type": "string"},  # shadows a builtin
+        "type": {"type": "string"},  # shadows a builtin
+        "schema": {"type": "string"},  # shadows a pydantic BaseModel attribute
+        "model_dump": {"type": "string"},  # shadows a pydantic BaseModel method (protected namespace)
+        "a-b": {"type": "string"},  # not a legal identifier
+        "@type": {"type": "string"},  # ``@`` rewritten
+        "$ref": {"type": "string"},  # leading ``$`` stripped
+        "query": {"type": "string"},  # needs no sanitizing
+    },
+    "required": ["from", "class", "id", "type", "schema", "model_dump", "a-b", "@type", "$ref", "query"],
+}
+_SANITIZED_VALUE = {
+    "from": "a",
+    "class": "b",
+    "id": "c",
+    "type": "d",
+    "schema": "e",
+    "model_dump": "f",
+    "a-b": "g",
+    "@type": "h",
+    "$ref": "i",
+    "query": "j",
+}
+
+
+def test_dict_schema_round_trips_a_sanitized_property_name_to_its_authored_key():
+    model_cls = json_schema_to_pydantic_model(inject_int64_bounds(_SANITIZED_SCHEMA), model_name="Want")
+    produced = model_cls.model_validate(_SANITIZED_VALUE)
+    out = validate_structured_output(produced, _SANITIZED_SCHEMA)
+    assert out == _SANITIZED_VALUE
+    assert isinstance(out, dict)
+
+
+def test_dict_schema_omitted_optional_with_a_sanitized_name_stays_absent():
+    # An optional sanitized-name property the model omits stays ABSENT under its authored
+    # key, never surfacing as an explicit ``null`` the authored schema would reject.
+    schema = {"title": "Opt", "type": "object", "properties": {"from": {"type": "string"}}}
+    model_cls = json_schema_to_pydantic_model(inject_int64_bounds(schema), model_name="Opt")
+    assert validate_structured_output(model_cls.model_validate({}), schema) == {}
+    assert validate_structured_output(model_cls.model_validate({"from": "x"}), schema) == {"from": "x"}
+
+
+def test_pydantic_class_round_trips_an_aliased_field_to_its_authored_key():
+    # A pydantic-class response_format whose field aliases a keyword wire key: the tool tier
+    # binds the generated model (keyed by the field name, aliased to the wire key), and the
+    # validator re-inflates the authored class from the authored wire key.
+    class _Keyworded(BaseModel):
+        from_: str = Field(alias="from")
+
+    generated = json_schema_to_pydantic_model(
+        inject_int64_bounds(_Keyworded.model_json_schema()), model_name="_Keyworded"
+    )
+    out = validate_structured_output(generated.model_validate({"from": "here"}), _Keyworded)
+    assert isinstance(out, _Keyworded)
+    assert out.from_ == "here"
 
 
 def test_pydantic_class_validates_a_generated_model_instance_via_produced_fields():
