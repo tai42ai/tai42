@@ -18,6 +18,9 @@ grammar cannot carry falls to the tool tier on the same provider:
   so it takes the tool tier: the kit binds a pydantic model and forces function-calling, an
   optional property the model omits stays absent in the one terminal ``structured_final``, and
   the request carries a forced ``tool_choice``.
+* A tool-tier schema whose property name is a python keyword (``from``) or shadows a builtin
+  (``id``) round-trips to its authored key — the sanitized bound-model field reduces back under
+  the authored name in the terminal ``structured_final``.
 """
 
 from __future__ import annotations
@@ -217,3 +220,40 @@ async def test_tool_tier_structured_run_handles_an_optional_field(agents_stack: 
     # The tool tier forces the function call: the request binds a forced ``tool_choice``
     # (a concrete tool selection), never the native plan's absent / "auto" / "none".
     assert llm_stub.requests[-1].get("tool_choice") not in (None, "auto", "none"), llm_stub.requests[-1]
+
+
+async def test_tool_tier_structured_run_round_trips_a_keyword_property_name(
+    agents_stack: TaiStack, llm_stub: LlmStub
+) -> None:
+    """A tool-tier schema whose property name is a python keyword (``from``) or shadows a
+    builtin (``id``) round-trips to its AUTHORED key. The tool tier binds a pydantic model
+    whose fields are sanitized to legal identifiers (``from`` -> ``from_``), the authored key
+    kept as each field's alias; the terminal ``structured_final`` must carry the authored
+    property names, never the sanitized field names, so the run does not fail validation."""
+    # ``labels`` is a map object (forces the tool tier); ``from``/``id`` are the sanitized names.
+    schema = {
+        "title": "T",
+        "type": "object",
+        "properties": {
+            "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+            "from": {"type": "string"},
+            "id": {"type": "string"},
+        },
+        "required": ["labels", "from", "id"],
+    }
+    llm_stub.reset()
+    # The model answers under the AUTHORED wire keys, which is what the bound tool schema
+    # advertises (the generated model's JSON schema uses each field's alias).
+    llm_stub.script([{"tool_call": {"name": "T", "arguments": {"labels": {"k": "v"}, "from": "A", "id": "X"}}}])
+
+    frames = await _run_sse(
+        agents_stack,
+        "/api/agents/tools_agent/runs",
+        {"user_message": {"content": "answer with a keyword-named field"}, "response_format": schema},
+    )
+    types = [frame.get("type") for frame in frames]
+    assert "stream.error" not in types, f"the keyword-property run must not surface a failure: {frames}"
+    finals = [frame for frame in frames if frame.get("type") == "structured_final"]
+    assert len(finals) == 1, f"expected exactly one structured_final: {frames}"
+    assert finals[0]["data"] == {"labels": {"k": "v"}, "from": "A", "id": "X"}, finals
+    assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
