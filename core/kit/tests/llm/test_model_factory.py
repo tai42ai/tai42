@@ -339,7 +339,9 @@ def _sample_request():
 
 
 @pytest.mark.parametrize(("provider", "module_name", "class_name"), _CLASSIFIER_PROVIDERS)
-def test_build_classifier_composes_pipeline_and_validates_request(monkeypatch, provider, module_name, class_name):
+def test_build_classifier_composes_pipeline_and_validates_request(
+    monkeypatch, provider, module_name, class_name, noop_monitoring
+):
     state = _install_fake_typesafe(monkeypatch, module_name, class_name)
     built = classifier._build_classifier(provider, model="jev-latest")
 
@@ -365,7 +367,9 @@ def test_build_classifier_composes_pipeline_and_validates_request(monkeypatch, p
 
 
 @pytest.mark.parametrize(("provider", "module_name", "class_name"), _CLASSIFIER_PROVIDERS)
-def test_build_classifier_pipeline_works_through_ainvoke(monkeypatch, provider, module_name, class_name):
+def test_build_classifier_pipeline_works_through_ainvoke(
+    monkeypatch, provider, module_name, class_name, noop_monitoring
+):
     _install_fake_typesafe(monkeypatch, module_name, class_name)
     built = classifier._build_classifier(provider, model="jev-latest")
 
@@ -375,7 +379,9 @@ def test_build_classifier_pipeline_works_through_ainvoke(monkeypatch, provider, 
 
 
 @pytest.mark.parametrize(("provider", "module_name", "class_name"), _CLASSIFIER_PROVIDERS)
-def test_build_classifier_malformed_question_raises_loudly(monkeypatch, provider, module_name, class_name):
+def test_build_classifier_malformed_question_raises_loudly(
+    monkeypatch, provider, module_name, class_name, noop_monitoring
+):
     from pydantic import ValidationError
 
     _install_fake_typesafe(monkeypatch, module_name, class_name)

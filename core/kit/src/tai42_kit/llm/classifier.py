@@ -18,12 +18,15 @@ be read and constructed without any provider package installed.
 
 import asyncio
 from functools import lru_cache
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
-from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
+from tai42_contract.app import tai42_app
+from tai42_contract.monitoring import MonitoringLevel, SpanKind
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
+from tai42_kit.llm.run_trace import resolve_trace_context
 
 QuestionContent = str | dict[str, JsonValue] | list[JsonValue]
 """Instruction text or structured content the classifier judges against: free text, a JSON object, or a JSON array."""
@@ -134,6 +137,71 @@ def _cached_classifier(provider: str, kwargs_key: KwargsCacheKey) -> Runnable[Cl
     return _build_classifier(provider, **unwrap_secret_kwargs(kwargs_key.kwargs))
 
 
+def _usage_details(usage: ClassifyUsage) -> dict[str, int] | None:
+    """The response's token counts as a neutral usage map, or ``None`` when none were reported."""
+    details: dict[str, int] = {}
+    if usage.input_tokens is not None:
+        details["input"] = usage.input_tokens
+    if usage.output_tokens is not None:
+        details["output"] = usage.output_tokens
+    return details or None
+
+
+def _recording_classifier(
+    pipeline: Runnable[ClassifyRequest, ClassifyResponse],
+) -> Runnable[ClassifyRequest, ClassifyResponse]:
+    """Wrap ``pipeline`` so every classifier call is recorded to monitoring as a MODEL call.
+
+    A classifier is its own model kind, not a chat model, so its call never fires the
+    chat-model callbacks the monitoring backend records a generation from. This seam opens
+    one generation span around the whole provider pipeline (request adapter, vendor call,
+    response adapter) and records, from the kit's own :class:`ClassifyResponse`, the model
+    id, the token usage, and the provider request id; the span's duration is the call's
+    latency. The span joins the run's one trace through :func:`resolve_trace_context` (the
+    invoke config's explicit lineage, else the run's ambient deposit, else a fresh root for a
+    standalone call) — the same lineage rule every feature's model calls follow. Emission
+    goes through the contract writer, which is fail-safe; a provider failure records the span
+    as an error and propagates unchanged, never swallowed. The inner pipeline still runs under
+    the caller's config, so its framework step record is unaffected.
+
+    The added work is one lineage resolve and one span open/update per call — constant and
+    dominated by the provider's network round trip, so the hot path carries no avoidable cost.
+    """
+
+    def _record(response: ClassifyResponse, span: Any) -> None:
+        span.update(
+            model=response.model,
+            usage_details=_usage_details(response.usage),
+            metadata={"request_id": response.request_id} if response.request_id is not None else None,
+        )
+
+    def invoke(request: ClassifyRequest, config: RunnableConfig | None = None) -> ClassifyResponse:
+        writer = tai42_app.monitoring.active.writer
+        context = resolve_trace_context(dict(config) if config is not None else None)
+        with writer.start_span(name="classifier", kind=SpanKind.LLM, trace_context=context) as span:
+            try:
+                response = pipeline.invoke(request, config)
+            except Exception as exc:
+                span.update(level=MonitoringLevel.ERROR, status_message=str(exc))
+                raise
+            _record(response, span)
+            return response
+
+    async def ainvoke(request: ClassifyRequest, config: RunnableConfig | None = None) -> ClassifyResponse:
+        writer = tai42_app.monitoring.active.writer
+        context = resolve_trace_context(dict(config) if config is not None else None)
+        with writer.start_span(name="classifier", kind=SpanKind.LLM, trace_context=context) as span:
+            try:
+                response = await pipeline.ainvoke(request, config)
+            except Exception as exc:
+                span.update(level=MonitoringLevel.ERROR, status_message=str(exc))
+                raise
+            _record(response, span)
+            return response
+
+    return RunnableLambda(invoke, afunc=ainvoke, name="classifier")
+
+
 def _build_classifier(provider: str, **kwargs) -> Runnable[ClassifyRequest, ClassifyResponse]:
     match provider:
         case "typesafe":
@@ -162,6 +230,9 @@ def _build_classifier(provider: str, **kwargs) -> Runnable[ClassifyRequest, Clas
             def _to_kit_response(response: ClassifierResponse) -> ClassifyResponse:
                 return ClassifyResponse.model_validate(response.model_dump(mode="json"))
 
-            return RunnableLambda(_to_vendor_request) | TypeSafeClassifier(**kwargs) | RunnableLambda(_to_kit_response)
+            pipeline = (
+                RunnableLambda(_to_vendor_request) | TypeSafeClassifier(**kwargs) | RunnableLambda(_to_kit_response)
+            )
+            return _recording_classifier(pipeline)
 
     raise ValueError(f"Unsupported classifier provider: '{provider}'")
