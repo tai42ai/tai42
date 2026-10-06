@@ -7,7 +7,7 @@ and the projection share:
 
 * the strategy handed to ``create_agent(response_format=…)`` — a :class:`NativeStrategy`
   (provider-native grammar, no forced tool choice) under the native plan, or a
-  ``ToolStrategy`` over the int64-bounded ``TypedDict`` under the tool plan (built with
+  ``ToolStrategy`` over the int64-bounded pydantic model under the tool plan (built with
   ``handle_errors=False`` so LangChain's own rail steps aside and the platform rail owns
   the retry);
 * the :class:`~tai42_agents._internal.structured_rail.StructuredOutputRailMiddleware`
@@ -119,7 +119,7 @@ async def ainvoke_structured(
     """Force structured output from a single model call, re-prompting under the per-run cap.
 
     Native: bind the kit kwargs, invoke, parse the JSON text, validate. Tool: bind the
-    int64-bounded ``TypedDict`` via ``with_structured_output`` (function-calling), invoke,
+    int64-bounded pydantic model via ``with_structured_output`` (function-calling), invoke,
     validate the parsed value. On a malformed / non-conforming payload the SAME capped
     re-prompt loop (counter + feedback shapes) as the graph rail runs; past the cap it
     raises :class:`~tai42_agents._internal.outcomes.RepromptCapError`, which each

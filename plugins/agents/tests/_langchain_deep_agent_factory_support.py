@@ -27,12 +27,14 @@ _INT64_OVERFLOW = 2**63
 
 def _assert_bound_to_model(strategy: ToolStrategy[Any], model: type[BaseModel]) -> None:
     """A subagent whose response_format was ``model`` emits a bounded ToolStrategy:
-    its schema (validated exactly as the tool-calling parse does, via a pydantic
-    ``TypeAdapter``) accepts a conforming value, rejects an oversized int under the
-    int64 bound, and binds under the model's name so structured tool-name stream
-    suppression still matches."""
+    its schema is a pydantic model (validated exactly as the tool-calling parse does,
+    via a ``TypeAdapter``) that parses a conforming value to an instance, rejects an
+    oversized int under the int64 bound, and binds under the model's name so structured
+    tool-name stream suppression still matches."""
     adapter = TypeAdapter(strategy.schema)
-    assert adapter.validate_python({"x": 1}) == {"x": 1}
+    parsed: Any = adapter.validate_python({"x": 1})
+    assert isinstance(parsed, BaseModel)
+    assert parsed.model_dump()["x"] == 1
     with pytest.raises(ValidationError):
         adapter.validate_python({"x": _INT64_OVERFLOW})
     assert getattr(strategy.schema, "__name__", None) == model.__name__

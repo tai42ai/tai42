@@ -14,6 +14,7 @@ from typing import Any, cast
 
 import pytest
 from langchain_core.language_models import BaseChatModel
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel
 
 from tai42_kit.llm.models import native_structured_output_kwargs, supports_native_structured_output
@@ -22,6 +23,7 @@ from tai42_kit.llm.structured import (
     StructuredOutputUnsupportedError,
     plan_structured_output,
 )
+from tai42_kit.utils.data.json_schema_util import inject_int64_bounds, json_schema_to_pydantic_model
 
 
 class _Fake:
@@ -249,14 +251,15 @@ class _RecNode(BaseModel):
 
 def test_anthropic_recursive_schema_named_reason_and_tool_tier() -> None:
     # A recursive schema ($ref cycle): refused loudly naming it when forced choice is refused, and
-    # carried by the tool tier (the model class itself, since a TypedDict tree cannot express a cycle)
+    # carried by the tool tier (a pydantic model expressing the cycle through forward references)
     # when forced choice is allowed.
     with pytest.raises(StructuredOutputUnsupportedError) as excinfo:
         plan_structured_output(_llm({"structured_output": True, "tool_choice": False}), "anthropic", _RecNode)
     assert "recursive schema" in str(excinfo.value)
     plan = plan_structured_output(_llm({"structured_output": True}), "anthropic", _RecNode)
     assert plan.mode == "tool"
-    assert plan.bound_typed_dict is _RecNode
+    assert isinstance(plan.bound_typed_dict, type)
+    assert issubclass(plan.bound_typed_dict, BaseModel)
 
 
 _SIXTEEN_UNION = {
@@ -340,7 +343,30 @@ def test_native_when_declared_bindable_and_representable() -> None:
 def test_tool_when_native_not_declared_and_forced_choice_allowed() -> None:
     plan = plan_structured_output(_llm({}), "openai", _SCHEMA)
     assert plan.mode == "tool"
-    assert plan.bound_typed_dict is not None
+    assert isinstance(plan.bound_typed_dict, type)
+    assert issubclass(plan.bound_typed_dict, BaseModel)
+
+
+_OPTIONAL_SCHEMA = {"title": "Opt", "type": "object", "properties": {"s": {"type": "string"}}}
+_NESTED_OPTIONAL_SCHEMA = {
+    "title": "Nested",
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "integer"}}}}},
+}
+
+
+@pytest.mark.parametrize("schema", [_OPTIONAL_SCHEMA, _NESTED_OPTIONAL_SCHEMA])
+def test_tool_tier_binds_a_pydantic_model_convertible_to_an_openai_tool(schema: dict[str, Any]) -> None:
+    # The tool tier binds a pydantic BaseModel (not a TypedDict), which langchain's
+    # tool-calling path converts to an OpenAI tool natively. A schema whose properties are
+    # all optional (no ``required``) must convert and bind cleanly through that path.
+    plan = plan_structured_output(_llm({}), "openai", schema)
+    assert plan.mode == "tool"
+    assert isinstance(plan.bound_typed_dict, type)
+    assert issubclass(plan.bound_typed_dict, BaseModel)
+    # The exact shape langchain receives for the single-shot bind, and the bound model itself.
+    convert_to_openai_tool(json_schema_to_pydantic_model(inject_int64_bounds(schema), model_name=schema["title"]))
+    convert_to_openai_tool(plan.bound_typed_dict)
 
 
 def test_tool_when_provider_has_no_native_binding() -> None:

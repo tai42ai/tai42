@@ -204,16 +204,18 @@ class TestBuildAgentAndInput:
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
         asyncio.run(bta._build_agent_and_input("sys", ["hi"], [], response_format=schema))
         # The fake model carries no profile, so the plan takes the tool tier: the raw schema
-        # dict is bound as an int64-tightened TypedDict ToolStrategy (handle_errors=False — the
-        # platform rail owns the retry) whose parse round-trips a value to the dict shape while
-        # enforcing the injected int64 bound, and the rail is the innermost middleware.
-        from pydantic import TypeAdapter, ValidationError
+        # dict is bound as an int64-tightened pydantic-model ToolStrategy (handle_errors=False —
+        # the platform rail owns the retry) whose parse yields an instance while enforcing the
+        # injected int64 bound, and the rail is the innermost middleware.
+        from pydantic import BaseModel, TypeAdapter, ValidationError
 
         threaded = captured["create"]["response_format"]
         assert isinstance(threaded, ToolStrategy)
         assert threaded.handle_errors is False
         adapter = TypeAdapter(threaded.schema)
-        assert adapter.validate_python({"value": 7}) == {"value": 7}
+        parsed = adapter.validate_python({"value": 7})
+        assert isinstance(parsed, BaseModel)
+        assert parsed.model_dump()["value"] == 7
         with pytest.raises(ValidationError):
             adapter.validate_python({"value": 9223372036854775807 + 1})
         assert isinstance(captured["create"]["middleware"][-1], StructuredOutputRailMiddleware)

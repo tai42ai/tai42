@@ -11,10 +11,9 @@ provider over the shape :func:`~tai42_kit.llm.models.shape_native_schema` produc
 * ``native`` — the model declares native structured output, the kit has a binding
   for the provider, and the schema is representable. Grammar-enforced; the one path a
   model that refuses forced tool calls offers.
-* ``tool`` — the second tier: today's bounded-``TypedDict`` tool-calling mechanics,
-  taken when the model declares no native structured output (or the schema is not
-  representable, or the kit has no native binding) and the model allows forced tool
-  choice.
+* ``tool`` — the second tier: bounded pydantic-model tool-calling mechanics, taken when
+  the model declares no native structured output (or the schema is not representable, or
+  the kit has no native binding) and the model allows forced tool choice.
 * neither — refused loudly at compile with :class:`StructuredOutputUnsupportedError`,
   naming both missing capabilities, before any model call.
 
@@ -38,7 +37,7 @@ from tai42_kit.llm.models import (
 )
 from tai42_kit.utils.data.json_schema_util import (
     inject_int64_bounds,
-    json_schema_to_typed_dict,
+    json_schema_to_pydantic_model,
 )
 
 
@@ -71,7 +70,7 @@ class StructuredOutputPlan:
     the authored schema verbatim where the provider binds it directly, otherwise the
     minimally-adapted native form. ``validation_schema`` is the ORIGINAL authored dict or pydantic
     class — what every door keeps validating produced output against, unchanged.
-    ``bound_typed_dict`` is the int64-tightened ``TypedDict`` shape the tool tier binds
+    ``bound_typed_dict`` is the int64-tightened pydantic model the tool tier binds
     (tool mode only).
     """
 
@@ -101,14 +100,17 @@ def _schema_dict_and_name(response_format: Any) -> tuple[dict[str, Any], str, An
 
 
 def _bounded_typed_dict(schema_dict: dict[str, Any], name: str, validation_schema: Any) -> Any:
-    """The int64-tightened ``TypedDict`` tool shape, or the pydantic class for a recursive model.
+    """The int64-tightened pydantic model the tool tier binds, or the authored class as a fallback.
 
-    A recursive model has no ``TypedDict``-tree form (the converter raises); the class
-    itself is bound then, and its oversized-int door is closed by the rail's / the
-    downstream ``validate_structured_output`` int64 walk.
+    A pydantic ``BaseModel`` class is what LangChain's tool-calling path handles natively
+    (``convert_to_openai_tool`` / ``PydanticToolsParser``), so the injected int64 bounds
+    ride on every integer value site and the parsed value is validated on the way out. If
+    the converter cannot express the schema (it raises ``ValueError``) and the authored
+    schema is itself a pydantic class, that class is bound instead; its oversized-int door
+    is still closed by the downstream ``validate_structured_output`` int64 walk.
     """
     try:
-        return json_schema_to_typed_dict(inject_int64_bounds(schema_dict), name=name)
+        return json_schema_to_pydantic_model(inject_int64_bounds(schema_dict), model_name=name)
     except ValueError:
         if isinstance(validation_schema, type) and issubclass(validation_schema, BaseModel):
             return validation_schema

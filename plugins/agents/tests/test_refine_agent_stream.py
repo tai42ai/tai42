@@ -133,11 +133,13 @@ def test_run_with_response_format_forces_final_answer_on_a_fresh_thread(
     assert recorder.response_formats[:2] == [None, None]
     structured_format = recorder.response_formats[2]
     assert isinstance(structured_format, ToolStrategy)
-    # The schema is pinned as a TypedDict whose parse round-trips a value back to
-    # the raw-schema dict shape (int64 bounds injected on the way).
-    from pydantic import TypeAdapter
+    # The schema is pinned as a pydantic model whose parse yields an instance (int64
+    # bounds injected on the way).
+    from pydantic import BaseModel, TypeAdapter
 
-    assert TypeAdapter(structured_format.schema).validate_python({"answer": "x"}) == {"answer": "x"}
+    parsed = TypeAdapter(structured_format.schema).validate_python({"answer": "x"})
+    assert isinstance(parsed, BaseModel)
+    assert parsed.model_dump()["answer"] == "x"
     # The loop's evaluator (not the structured graph) is read via aget_state twice —
     # once by the turn-start repair before the loop, once to read history for the
     # structured pass — and the structured pass is a DISTINCT graph (no cross-topology
