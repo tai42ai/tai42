@@ -1,7 +1,8 @@
 """``response_format`` over the native structured-output plan, end to end.
 
 The mock leg runs provider ``openai`` / ``gpt-4o-mini``, which declares native structured
-output, so a tools_agent ``response_format`` run takes the native plan:
+output, so a representable ``response_format`` takes the native plan; a schema the native
+grammar cannot carry falls to the tool tier on the same provider:
 
 * An untitled ``response_format`` is refused loudly BEFORE any model round-trip — the
   top-level ``"title"`` is the structured-output name, and a dict schema (or a ``oneOf``
@@ -13,6 +14,10 @@ output, so a tools_agent ``response_format`` run takes the native plan:
   run ends on the typed ``structured_output_unresolved_final`` outcome.
 * With a stub that refuses a forced ``tool_choice``, the structured run still succeeds —
   proof the native plan sends no forced choice.
+* A map-object schema (schema-valued ``additionalProperties``) is not natively representable,
+  so it takes the tool tier: the kit binds a pydantic model and forces function-calling, an
+  optional property the model omits stays absent in the one terminal ``structured_final``, and
+  the request carries a forced ``tool_choice``.
 """
 
 from __future__ import annotations
@@ -173,3 +178,42 @@ async def test_native_structured_run_sends_no_forced_tool_choice(agents_stack: T
     finals = [frame for frame in frames if frame.get("type") == "structured_final"]
     assert len(finals) == 1, f"the refusing stub rejected the run — a forced tool_choice was sent: {frames}"
     assert finals[0]["data"] == {"value": 11}, finals
+
+
+async def test_tool_tier_structured_run_handles_an_optional_field(agents_stack: TaiStack, llm_stub: LlmStub) -> None:
+    """A schema the native grammar cannot carry — a map object (schema-valued
+    ``additionalProperties``) — routes to the tool tier, which binds a pydantic model and
+    forces function-calling. With an optional property the model omits, the run produces one
+    terminal ``structured_final`` whose data carries only the fields the model set (the
+    omitted optional stays absent, not an explicit ``null``), and the request bound a forced
+    ``tool_choice`` — the lever that distinguishes the tool tier from the native tier."""
+    # ``labels`` is a map object (forces the tool tier); ``note`` is an optional property
+    # (not in ``required``), omitted by the scripted tool call to prove it stays absent.
+    schema = {
+        "title": "T",
+        "type": "object",
+        "properties": {
+            "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+            "note": {"type": "string"},
+        },
+        "required": ["labels"],
+    }
+    llm_stub.reset()
+    # The tool tier uses function-calling, so the model answers with a tool call whose name
+    # is the structured-output name (the schema ``title``), not message content.
+    llm_stub.script([{"tool_call": {"name": "T", "arguments": {"labels": {"k": "v"}}}}])
+
+    frames = await _run_sse(
+        agents_stack,
+        "/api/agents/tools_agent/runs",
+        {"user_message": {"content": "answer with labels"}, "response_format": schema},
+    )
+    types = [frame.get("type") for frame in frames]
+    assert "stream.error" not in types, f"the tool-tier run must not surface a failure: {frames}"
+    finals = [frame for frame in frames if frame.get("type") == "structured_final"]
+    assert len(finals) == 1, f"expected exactly one structured_final: {frames}"
+    assert finals[0]["data"] == {"labels": {"k": "v"}}, finals
+    assert types[-1] == "stream.end", f"the stream did not terminate cleanly: {frames}"
+    # The tool tier forces the function call: the request binds a forced ``tool_choice``
+    # (a concrete tool selection), never the native plan's absent / "auto" / "none".
+    assert llm_stub.requests[-1].get("tool_choice") not in (None, "auto", "none"), llm_stub.requests[-1]
