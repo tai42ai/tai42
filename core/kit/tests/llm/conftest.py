@@ -1,12 +1,48 @@
-"""Shared helpers for the checkpoint/store redis-injection suites.
+"""Shared helpers and fixtures for the LLM test suites.
 
 The checkpoint saver and the LLM store are built the same way — the kit resolves
 a URL, builds the redis client itself and injects it — so both suites assert
 against the same two things: where an injected client points, and how many times
-it is closed.
+it is closed. The ``noop_monitoring`` fixture binds an app whose monitoring writer
+is a fail-safe no-op, so a test that invokes a classifier (which records every call
+as a model call) has the monitoring facet available without asserting on it.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
+from tai42_contract.app import tai42_app
+
+
+class _NoopSpan:
+    @property
+    def id(self) -> str:
+        return "noop-span"
+
+    def update(self, **_: Any) -> None:
+        pass
+
+    def set_trace_metadata(self, **_: Any) -> None:
+        pass
+
+
+class _NoopMonitoringWriter:
+    """A monitoring writer whose ``start_span`` yields a no-op span handle."""
+
+    @contextmanager
+    def start_span(self, **_: Any) -> Iterator[_NoopSpan]:
+        yield _NoopSpan()
+
+
+@pytest.fixture
+def noop_monitoring() -> Iterator[None]:
+    """Bind an app exposing a no-op monitoring writer for the test's duration."""
+    app = SimpleNamespace(monitoring=SimpleNamespace(active=SimpleNamespace(writer=_NoopMonitoringWriter())))
+    with tai42_app.bound(app):
+        yield
 
 
 def client_target(client: Any) -> str:

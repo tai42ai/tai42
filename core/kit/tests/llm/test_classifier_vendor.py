@@ -119,7 +119,7 @@ def test_vendor_constructor_rejects_unknown_keyword():
         get_classifier("typesafe", api_key="sk-test", not_a_field="x")
 
 
-def test_composition_round_trips_through_invoke_and_ainvoke():
+def test_composition_round_trips_through_invoke_and_ainvoke(noop_monitoring):
     classifier._cached_classifier.cache_clear()
     built = get_classifier("typesafe", api_key="sk-test", **_mock_clients())
 
@@ -138,7 +138,7 @@ def test_composition_round_trips_through_invoke_and_ainvoke():
         assert response.request_id == "req-vendor"
 
 
-def test_unsupported_root_state_raises_vendor_type_error():
+def test_unsupported_root_state_raises_vendor_type_error(noop_monitoring):
     classifier._cached_classifier.cache_clear()
     built = get_classifier("typesafe", api_key="sk-test", **_mock_clients())
 
