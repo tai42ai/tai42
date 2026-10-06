@@ -115,7 +115,12 @@ def pin_public_route(
 ) -> None:
     """Pin a URL public (optionally with a dynamic match pattern).
 
-    Example: ``tai scopes public-pin /universal_webhook/events``
+    The pin is for a route that does NOT declare itself public — an authed registered route
+    an operator chooses to open (e.g. ``/metrics``), or a path a mounted app serves that the
+    registry does not describe. A route declared public at registration needs no pin, and a
+    pin never re-protects a declared-public route.
+
+    Example: ``tai scopes public-pin /metrics``
     """
     ctx_obj = app_context(ctx)
     body: dict = {"url": url}
@@ -131,7 +136,7 @@ def pin_public_route(
 def unpin_public_route(ctx: typer.Context, url: Annotated[str, typer.Argument(help="URL to unpin.")]) -> None:
     """Unpin a public URL.
 
-    Example: ``tai scopes public-unpin /universal_webhook/events``
+    Example: ``tai scopes public-unpin /metrics``
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:

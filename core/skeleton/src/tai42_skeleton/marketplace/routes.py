@@ -151,9 +151,11 @@ def resolved_routes(spec: PluginSpec, mounts: Mapping[str, str]) -> list[Resolve
 
 
 def owned_routes_from_registry(registry: Any) -> list[OwnedRoute]:
-    """The live registry's committed ``/api`` shape generation as :class:`OwnedRoute` rows.
+    """The live registry's committed shape generation as :class:`OwnedRoute` rows.
 
-    The ownership set a candidate is checked against.
+    The ownership set a candidate is checked against. A candidate ``/api`` route can only
+    overlap another ``/api`` shape, so the non-``/api`` core entries also present here never
+    collide with one — they ride the same generation.
     """
     result: list[OwnedRoute] = []
     for entry in registry.api_shape_index():

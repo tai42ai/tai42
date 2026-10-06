@@ -131,20 +131,19 @@ STUDIO_RESOURCE_ID = "studio"
 def seed_studio_routes(resources: StackResources) -> None:
     """Seed the browser-e2e studio stack's tier-two route→resource table the
     ``STUDIO_PATH_PATTERNS`` templates resolve through — ``studio_authed`` → the ``studio``
-    resource, the public SPA/asset templates → the public marker, and the readiness probes
-    pinned public. The interactions callback and served-media doors need no row: the
-    verifier's declared-public tier publics them from their ``authed=False`` registration.
+    resource, the public SPA/asset templates → the public marker, and ``/metrics`` (an authed
+    route the operator opens) pinned public. The readiness probes ``/health``/``/ready``, the
+    interactions callback, and the served-media doors need no row: they register
+    ``authed=False`` and the verifier's declared-public tier publics them from that registration.
 
-    The unseeded setup stack seeds only these rows (no owner or key): readiness's ``/health``
-    probe and the public ``/login`` + ``/api/setup`` doors then answer while ``needs_setup``
-    stays true, and the owner's key minted through the setup door authorizes ``studio_authed``
-    once it exists."""
+    The unseeded setup stack seeds only these rows (no owner or key): the ``/health`` probe is
+    public by declaration and the public ``/login`` + ``/api/setup`` doors answer while
+    ``needs_setup`` stays true, and the owner's key minted through the setup door authorizes
+    ``studio_authed`` once it exists."""
     seed_route_rows(
         resources,
         [
-            ("/health", "public", None),
             ("/metrics", "public", None),
-            ("/ready", "public", None),
             ("studio_authed", STUDIO_RESOURCE_ID, None),
             ("public_spa", "public", None),
             ("public_assets", "public", None),
@@ -167,16 +166,15 @@ def seed_bootstrap_key(infra: Infra, resources: StackResources) -> str:
     (enforcement denies any route with no scope mapping) and the ``e2e-all`` scope is
     mintable for keys the tests provision. Returns the raw root token."""
     raw = seed_owner_and_key(infra, resources, owner_id="e2e-owner", key_id="e2e-root", scopes=["*"])
-    # Enforcement denies any route with no scope mapping, so seed the route table: pin the
-    # readiness probes (/health, /metrics) public, and map every other path to "e2e-all"
-    # via a negative-lookahead pattern that never captures the two public probes (deny-wins
-    # would otherwise re-protect them).
+    # Enforcement denies any route with no scope mapping, so seed the route table: pin
+    # ``/metrics`` (an authed route the operator opens) public, and map every other path to
+    # "e2e-all" via a negative-lookahead pattern that never captures it (deny-wins would
+    # otherwise re-protect it). ``/health`` is public by its own declaration and needs no row.
     seed_route_rows(
         resources,
         [
-            ("/health", "public", None),
             ("/metrics", "public", None),
-            ("e2e-all-routes", "e2e-all", r"^/(?!health$)(?!metrics$).*$"),
+            ("e2e-all-routes", "e2e-all", r"^/(?!metrics$).*$"),
         ],
     )
     return raw
@@ -189,16 +187,15 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
     The channel inbound/status doors carry their OWN signature auth (Twilio HMAC, Meta
     X-Hub-Signature-256), so they must resolve to ``public`` or the access-control guard
     would 403 them before the plugin's signature check runs. Every other path maps to the
-    ``e2e-all`` scope the root satisfies and the tests mint keys against; the readiness
-    probes stay public so boot's readiness wait is not itself denied. Returns the raw root
+    ``e2e-all`` scope the root satisfies and the tests mint keys against; ``/metrics`` (an
+    authed route the operator opens) is pinned public, and the readiness probes are public by
+    their own declaration so boot's readiness wait is not itself denied. Returns the raw root
     token."""
     raw = seed_owner_and_key(infra, resources, owner_id="bridge-owner", key_id="bridge-root", scopes=["*"])
     seed_route_rows(
         resources,
         [
-            ("/health", "public", None),
             ("/metrics", "public", None),
-            ("/ready", "public", None),
             # Every channel webhook door (twilio inbound/status, whatsapp inbound) and the web
             # channel's PUBLIC chat doors: unauthenticated at the platform edge, authenticated
             # by the provider signature or the visitor's session cookie.
@@ -208,17 +205,16 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
             # across tiers, so the path resolving to BOTH ids stays protected — an unauthed
             # caller is refused, the operator (root) is admitted.
             ("bridge-web-gates", "e2e-all", r"^/api/channels/web/gates(?:/.*)?$"),
-            # The interactions callback and served-media doors need no row: both register
-            # ``authed=False``, so the verifier's declared-public tier publics them straight
-            # from the route registration (the protected catch-all below may cover them; the
-            # declared-public tier short-circuits above the route table).
+            # The readiness probes, the interactions callback and the served-media doors need
+            # no row: all register ``authed=False``, so the verifier's declared-public tier
+            # publics them straight from the route registration, above the route table.
             # Everything else (the authed conversation-route CRUD, the message door, key
-            # mint, schedules) → e2e-all, excluding the public channel shapes so deny-wins
-            # never re-protects them.
+            # mint, schedules) → e2e-all, excluding ``/metrics`` (its own public row) and the
+            # public channel shapes so deny-wins never re-protects them.
             (
                 "bridge-protected",
                 "e2e-all",
-                r"^/(?!health$)(?!metrics$)(?!ready$)(?!api/channels/).*$",
+                r"^/(?!metrics$)(?!api/channels/).*$",
             ),
         ],
     )
@@ -230,35 +226,29 @@ def seed_stripe_authz(infra: Infra, resources: StackResources) -> str:
     route table that pins the unauthenticated payment doors public.
 
     The Stripe webhook ingress is unauthenticated by nature — it carries no platform API
-    key (the topic's ``stripe`` verifier checks its signature) — so it must resolve to
-    ``public`` or the access-control guard would 403 it before the signature check runs. It
-    is a non-/api door, so it needs this row; the interactions callback and served-media
-    doors are ``authed=False`` /api routes the verifier's declared-public tier publics from
-    their registration, so they need none. Every other path — ``/mcp`` included — maps to the
-    ``e2e-all`` scope the root satisfies; the readiness probes stay public so boot's
-    readiness wait is not itself denied. The webhook shape is excluded from the protected
-    catch-all so deny-wins never re-protects it. Returns the raw root token."""
+    key (the topic's ``stripe`` verifier checks its signature). It needs NO row: the webhook
+    door registers ``authed=False``, so the verifier's declared-public tier publics it
+    straight from its registration (whatever its path shape), and a route row could not
+    re-protect it anyway — the declaration is authoritative above the route table. The
+    interactions callback and served-media doors are public by the same declaration. Every
+    other path — ``/mcp`` included — maps to the ``e2e-all`` scope the root satisfies;
+    ``/metrics`` (an authed route the operator opens) is pinned public, and the readiness
+    probes are public by their own declaration so boot's readiness wait is not itself denied.
+    Returns the raw root token."""
     raw = seed_owner_and_key(infra, resources, owner_id="stripe-owner", key_id="stripe-root", scopes=["*"])
     seed_route_rows(
         resources,
         [
-            ("/health", "public", None),
             ("/metrics", "public", None),
-            ("/ready", "public", None),
-            # The Stripe webhook ingress: unauthenticated at the platform edge, authenticated
-            # by the topic's stripe-signature verifier. A non-/api door, so the verifier's
-            # declared-public tier does not reach it — it needs this public row.
-            ("stripe-webhook", "public", r"^/universal_webhook/.*$"),
-            # The interactions callback and served-media doors need no row: both register
-            # ``authed=False``, so the verifier's declared-public tier publics them straight
-            # from the route registration (the protected catch-all below may cover them; the
-            # declared-public tier short-circuits above the route table).
-            # Everything else (the verifier bind, hook register, preset create, the MCP edge)
-            # → e2e-all, excluding the webhook shape so deny-wins never re-protects it.
+            # The webhook ingress, readiness probes, interactions callback and served-media
+            # doors need no row: all register ``authed=False`` and resolve public by
+            # declaration, above the route table. Everything else (the verifier bind, hook
+            # register, preset create, the MCP edge) → e2e-all, excluding ``/metrics`` (its
+            # own public row) so deny-wins never re-protects it.
             (
                 "stripe-protected",
                 "e2e-all",
-                r"^/(?!health$)(?!metrics$)(?!ready$)(?!universal_webhook/).*$",
+                r"^/(?!metrics$).*$",
             ),
         ],
     )
@@ -276,23 +266,24 @@ def seed_projection_authz(infra: Infra, resources: StackResources) -> tuple[str,
     route (e.g. ``/api/config/reload``) maps to ``e2e-all`` — which the limited key
     LACKS. So the limited key authenticates and dispatches, then the tool-edge authz
     check denies the specific projected op with a ``PermissionDeniedError``-backed
-    ``ToolError``; the root key's ``*`` satisfies both and is allowed. The readiness
-    probes stay public so boot's readiness wait is not itself denied."""
+    ``ToolError``; the root key's ``*`` satisfies both and is allowed. ``/metrics`` (an authed
+    route the operator opens) is pinned public, and the readiness probes are public by their
+    own declaration so boot's readiness wait is not itself denied."""
     root = seed_owner_and_key(infra, resources, owner_id="proj-owner", key_id="proj-root", scopes=["*"])
     limited = seed_owner_and_key(infra, resources, owner_id="proj-owner", key_id="proj-limited", scopes=["mcp-access"])
     seed_route_rows(
         resources,
         [
-            ("/health", "public", None),
             ("/metrics", "public", None),
-            ("/ready", "public", None),
             # The MCP transport endpoint itself: reachable by a key carrying
             # ``mcp-access`` (the limited key) or ``*`` (root). The exact row wins for
             # ``/mcp``; the protected pattern below excludes it so ``/mcp`` resolves to
             # this scope alone (not also ``e2e-all``, which deny-wins would apply).
             ("/mcp", "mcp-access", None),
-            # Every OTHER path (a projected op's synthesized route included) → e2e-all.
-            ("proj-protected", "e2e-all", r"^/(?!health$)(?!metrics$)(?!ready$)(?!mcp$).*$"),
+            # Every OTHER path (a projected op's synthesized route included) → e2e-all,
+            # excluding ``/metrics`` (its own public row) and ``/mcp``. The readiness probes
+            # are public by declaration and need no row.
+            ("proj-protected", "e2e-all", r"^/(?!metrics$)(?!mcp$).*$"),
         ],
     )
     return root, limited
@@ -307,12 +298,13 @@ def seed_admin_bypass_authz(infra: Infra, resources: StackResources) -> tuple[st
     admits on an unmapped route. ``scoped`` carries ONLY ``bypass-probe`` (a non-``*`` scope),
     so it is never admin.
 
-    Unlike the other auth seeds, this table has NO catch-all pattern: it pins the readiness
-    probes public and maps one real route (``/api/manifest``) to ``bypass-probe``, but
-    deliberately leaves ``/api/tools`` (a real authenticated GET) with no row. So
-    ``/api/tools`` resolves to no resource and hits the middleware's CASE A: the admin
+    Unlike the other auth seeds, this table has NO catch-all pattern: it pins ``/metrics`` (an
+    authed route the operator opens) public and maps one real route (``/api/manifest``) to
+    ``bypass-probe``, but deliberately leaves ``/api/tools`` (a real authenticated GET) with no
+    row. So ``/api/tools`` resolves to no resource and hits the middleware's CASE A: the admin
     discriminator is admitted by the super-admin carve-out, while the scoped key is denied
-    ``Forbidden: Route not configured``. A catch-all would hide CASE A, so it is omitted."""
+    ``Forbidden: Route not configured``. A catch-all would hide CASE A, so it is omitted. The
+    readiness probes are public by their own declaration and need no row."""
     admin = seed_owner_and_key(infra, resources, owner_id="bypass-owner", key_id="bypass-admin", scopes=["*"])
     scoped = seed_owner_and_key(
         infra, resources, owner_id="bypass-owner", key_id="bypass-scoped", scopes=["bypass-probe"]
@@ -320,9 +312,7 @@ def seed_admin_bypass_authz(infra: Infra, resources: StackResources) -> tuple[st
     seed_route_rows(
         resources,
         [
-            ("/health", "public", None),
             ("/metrics", "public", None),
-            ("/ready", "public", None),
             # The one explicitly-mapped real route the scoped key is authorized for, so a
             # non-admin denial on the UNMAPPED /api/tools is provably CASE A (not-configured),
             # not a blanket scope denial. A pure in-process read, needs no backend worker.

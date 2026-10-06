@@ -86,10 +86,10 @@ class _RaisingVerifier(AccessControlVerifier):
         raise RuntimeError("redis down")
 
 
-def _http_scope(path="/x", user=None, auth=None) -> dict:
+def _http_scope(path="/x", user=None, auth=None, method="GET") -> dict:
     scope = {
         "type": "http",
-        "method": "GET",
+        "method": method,
         "path": path,
         "query_string": b"",
         "headers": [],
@@ -609,6 +609,35 @@ async def test_studio_asset_served_unauthenticated_despite_protected_row(monkeyp
     assert _status(sent) == 200
 
 
+async def test_webhook_post_reachable_unauthenticated(monkeypatch):
+    # The public webhook ingress door is served (200) to an unauthenticated POST by its own
+    # declaration — no route row. Its only lock is a topic verifier binding, not the gate.
+    from tai42_skeleton.app.route_registry import load_all_routes
+
+    load_all_routes()  # the webhook door must be in the registry the declared-public tier reads
+    mw = _real_guard(monkeypatch, FakeAccessControlPg())
+    sent = await _drive(
+        mw,
+        _http_scope(
+            path="/universal_webhook/events", user=UnauthenticatedUser(), auth=AuthCredentials(), method="POST"
+        ),
+    )
+    assert _status(sent) == 200
+
+
+async def test_unregistered_post_terminal_denies(monkeypatch, caplog):
+    # An unauthenticated POST to a path the app does not serve resolves to nothing and
+    # terminal-denies 403 with the route-unconfigured reason — never silently admitted.
+    mw = _real_guard(monkeypatch, FakeAccessControlPg())
+    with caplog.at_level(logging.INFO):
+        sent = await _drive(
+            mw,
+            _http_scope(path="/not-registered", user=UnauthenticatedUser(), auth=AuthCredentials(), method="POST"),
+        )
+    assert _status(sent) == 403
+    assert _one_reject(caplog).group("reason") == "route-unconfigured"
+
+
 async def test_h4_terminal_deny_unmatched_control_plane(monkeypatch):
     # H4: an UNMATCHED /api or /mcp path terminal-denies (JSON 401/403), NEVER the shell.
     mw = _real_guard(monkeypatch, FakeAccessControlPg())
@@ -641,38 +670,47 @@ async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
 
     always_public = settings.always_public_path_prefixes
     for meta in load_all_routes():
-        if "GET" not in meta.methods:
+        # A mounted transport serves behind its own credential gate, not as a handler door;
+        # it is covered by the declared-protection/mount tier, not this public-surface walk.
+        if meta.mounted:
             continue
-        path = concretize(meta.path)
-        # The always-public login surface is legitimately public; skip it.
-        if any(under_prefix(path, prefix) for prefix in always_public):
-            continue
-        sent = await _drive(mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials()))
-        status = _status(sent)
-        if meta.public or matches_always_public_route_pattern(path, settings):
-            # A DECLARED-PUBLIC door is served public by design even though it sits under
-            # /api: the interactions callback and served-media doors declare
-            # ``public=True`` (registered ``authed=False``), and the verifier's
-            # owner-agnostic declared-public tier grants them the public id by that
-            # declaration regardless of owner; the plugin studio bundles resolve public
-            # via the always-public route pattern. Carving these out is NOT a weakening —
-            # the deny invariant below still holds for every NON-public /api route.
-            assert status == 200, f"declared-public door {path} not served public: {status}"
-        elif under_prefix(path, "/api") or under_prefix(path, "/mcp"):
-            # THE security invariant: every NON-public control-plane GET route
-            # terminal-denies an unauthenticated caller — never the shell, never data.
-            # No non-public /api route is reachable unauthenticated.
-            assert status in (401, 403), f"control-plane {path} leaked unauthenticated: {status}"
-        else:
-            # Non-/api routes either serve the public shell or deny — never a 5xx leak.
-            assert status in (200, 401, 403), f"unexpected {status} for {path}"
+        # Walk EVERY declared method of every route, not GET alone: a public POST ingress
+        # door must be served public, and an authed non-/api non-GET route must deny (the
+        # GET-only shell fallback can never reach it).
+        for method in meta.methods:
+            path = concretize(meta.path)
+            # The always-public login surface is legitimately public; skip it.
+            if any(under_prefix(path, prefix) for prefix in always_public):
+                continue
+            sent = await _drive(
+                mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials(), method=method)
+            )
+            status = _status(sent)
+            if meta.public or matches_always_public_route_pattern(path, settings):
+                # A DECLARED-PUBLIC door is served public by design, whatever its path shape or
+                # method: the interactions callback and served-media /api doors, the readiness
+                # probes, and the webhook/trigger ingress doors all register ``authed=False``,
+                # and the verifier's owner-agnostic declared-public tier grants them the public
+                # id by that declaration; the plugin studio bundles resolve public via the
+                # always-public route pattern. Carving these out is NOT a weakening — the deny
+                # invariant below still holds for every NON-public route.
+                assert status == 200, f"declared-public door {method} {path} not served public: {status}"
+            elif under_prefix(path, "/api") or under_prefix(path, "/mcp"):
+                # THE security invariant: every NON-public control-plane route terminal-denies an
+                # unauthenticated caller — never the shell, never data, on any method.
+                assert status in (401, 403), f"control-plane {method} {path} leaked unauthenticated: {status}"
+            elif method in ("GET", "HEAD"):
+                # A non-/api authed GET either serves the public shell or denies — never a 5xx leak.
+                assert status in (200, 401, 403), f"unexpected {status} for {method} {path}"
+            else:
+                # A non-/api authed NON-GET route has no shell fallback, so it must deny.
+                assert status in (401, 403), f"authed non-/api {method} {path} not denied: {status}"
 
-    # The operational probes are served PUBLIC (200) unauthenticated by their own
-    # route-level acknowledgement (``acknowledged_public_routes``) — the app owns its
-    # access declaration, so a fresh access-control-on deployment answers /health, /ready
-    # without a key and without an always-public prefix workaround. They are not
-    # served the SPA shell (they resolve via the acknowledged tier, not the shell fallback);
-    # both reach the downstream 200 here.
+    # The operational probes are served PUBLIC (200) unauthenticated by their own route
+    # declaration (``authed=False``) — the app owns its access declaration, so a fresh
+    # access-control-on deployment answers /health, /ready without a key and without an
+    # always-public prefix workaround. They are not served the SPA shell (they resolve via
+    # the declared-public tier, not the shell fallback); both reach the downstream 200 here.
     for path in ("/health", "/ready"):
         sent = await _drive(mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials()))
         assert _status(sent) == 200

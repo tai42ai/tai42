@@ -308,21 +308,24 @@ class AccessControlVerifier(TokenVerifier):
         if matches_always_public_route_pattern(path, self.settings) and not self._is_reserved_prefix(path):
             return self.settings.public_resource_id
 
-        # Declared-public route tier (per-method, deny-safe): a request that resolves
-        # to a registered route DECLARED public — ``authed=False`` at registration,
-        # whatever its owner (a core native/operator route such as the interactions
-        # callback and served-media doors, or a plugin route whose tai-plugin.yml
-        # declared it) — answers UNAUTHENTICATED with no per-deployment route row or
-        # pattern. Per-method by construction: a sibling method not declared public
-        # produces no match and falls through to the normal gate below. Sits below the
-        # always-public prefix/pattern tiers and ABOVE the route-table store lookup: the
-        # code-side declaration IS the source of truth, so no row is ever written to
-        # ``access_control_routes`` for it and an operator's later protected pin never
-        # gets consulted (the tier short-circuits). The control plane can never enter
-        # it: the mount-map build refuses a public route under any reserved prefix, and
-        # ``_is_reserved_prefix`` drops it here too. ``match`` indexes ``/api`` shapes
-        # only, so a public non-/api door (webhook/trigger/health/SPA) is granted by the
-        # acknowledged/prefix/shell tiers below instead, never here.
+        # Declared-public route tier (per-method, deny-safe, every path shape): a request
+        # that resolves to a registered route DECLARED public — ``authed=False`` at
+        # registration, whatever its owner (a core native/operator route such as the
+        # interactions callback, the served-media doors, the readiness probes, or the
+        # webhook/trigger ingress doors; or a plugin route whose tai-plugin.yml declared
+        # it) — answers UNAUTHENTICATED with no per-deployment route row or pattern. The
+        # route's path shape is immaterial: ``/api`` or not, concrete or templated,
+        # ``match`` reads the registry's index of every handler route. Per-method by
+        # construction: a sibling method not declared public produces no match and falls
+        # through to the normal gate below. Sits below the always-public prefix/pattern
+        # tiers and ABOVE the route-table store lookup: the code-side declaration IS the
+        # source of truth, so no row is ever written to ``access_control_routes`` for it
+        # and an operator's later protected pin never gets consulted (the tier
+        # short-circuits). The control plane can never enter it: the mount-map build
+        # refuses a public route under any reserved prefix, and ``_is_reserved_prefix``
+        # drops it here too. The one handler route ``match`` does not answer for is the
+        # bare rest-converter fallback (the SPA shell catch-all), which owns no shape and
+        # is granted by the shell-fallback tier below instead.
         if method is not None and not self._is_reserved_prefix(path):
             matched = route_registry.match(path, method)
             if matched is not None and matched.public:
@@ -367,8 +370,8 @@ class AccessControlVerifier(TokenVerifier):
         """Mutate ``found_ids`` with the tiers below the route table, in precedence order.
 
         After the operator-row accumulation: the reserved-prefix public drop, then (only when
-        nothing resolved) the declared-protection tier, the acknowledged-public GET/HEAD tier,
-        and the SPA-shell GET tier. Each lower tier is deny-wins and fires only on an empty set.
+        nothing resolved) the declared-protection tier and the SPA-shell GET tier. Each lower
+        tier is deny-wins and fires only on an empty set.
         """
         public = self.settings.public_resource_id
 
@@ -387,15 +390,12 @@ class AccessControlVerifier(TokenVerifier):
         # mapped to no named scope resolves to the universal scope, so a role-holder (which
         # carries `*`) reaches it on a fresh deployment while a scoped key still needs an
         # operator row. Sits AFTER the reserved-drop (a refused `/api/auth` public row then
-        # behaves as absent and the tier claims the route) and ABOVE the GET-only public
-        # fallbacks, which must not fire for a registered authed surface. A path the
+        # behaves as absent and the tier claims the route) and ABOVE the SPA-shell GET
+        # fallback, which must not fire for a registered authed surface. A path the
         # application does not serve resolves to nothing here and stays denied (CASE A,
         # super-admin only) — the fail-closed rule keeps its meaning.
         if not found_ids:
             found_ids |= self._declared_protection_tier(path, method)
-
-        if not found_ids and self._is_acknowledged_public_get(path, method):
-            found_ids.add(public)
 
         if not found_ids and self._is_spa_shell_fallback(path, method):
             found_ids.add(public)
@@ -421,23 +421,6 @@ class AccessControlVerifier(TokenVerifier):
         if meta is not None and meta.authed:
             return {UNIVERSAL_SCOPE}
         return set()
-
-    def _is_acknowledged_public_get(self, path: str, method: str | None) -> bool:
-        """Acknowledged-public tier (GET/HEAD, deny-wins, lowest precedence).
-
-        A GET/HEAD to a concrete registered non-/api route in ``acknowledged_public_routes``
-        resolves public, so the app serves /health,/ready by their own route-level declaration
-        without an always-public prefix. HEAD rides with GET (a public GET route must answer
-        HEAD probes). The control plane can never enter it: the registered set and the
-        acknowledged validation both exclude /api,/mcp, and ``_is_reserved_prefix`` drops
-        any reserved path.
-        """
-        return (
-            method in ("GET", "HEAD")
-            and path in registered_reserved_get_paths_cached()
-            and path in self.settings.acknowledged_public_routes
-            and not self._is_reserved_prefix(path)
-        )
 
     def _is_spa_shell_fallback(self, path: str, method: str | None) -> bool:
         """SPA-shell public fallback (GET-only, last tier).

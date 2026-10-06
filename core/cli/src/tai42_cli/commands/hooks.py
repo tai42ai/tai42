@@ -174,8 +174,8 @@ def create_trigger_link(
     Exactly ONE of ``--ttl SECONDS`` or ``--permanent`` is required — expiry is an explicit
     choice. ``--require-api-key`` also demands an authenticated caller, enforced only where
     access control is ENABLED; it does not touch the topic's own
-    ``/universal_webhook/{topic}`` door, which stays reachable by anyone who knows the
-    topic name wherever the deployment maps it public. ``--params`` merges BELOW each fired
+    ``/universal_webhook/{topic}`` door, which stays public by its own route declaration —
+    a verifier binding is its only lock. ``--params`` merges BELOW each fired
     hook's static tool_kwargs, so a link never restates a pinned argument. The token is
     shown ONCE, in the printed absolute URL; the link is MULTI-use and revocable by name
     (``tai hooks delete-trigger-link NAME``). Regenerate = revoke + create.

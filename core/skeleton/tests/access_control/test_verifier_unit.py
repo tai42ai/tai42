@@ -12,6 +12,8 @@ guard denies the request loudly instead of silently.
 from __future__ import annotations
 
 import pytest
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 
@@ -19,8 +21,38 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
+from tai42_skeleton.app.route_registry import RouteRegistry
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+
+async def _probe_handler(request: Request) -> Response:
+    """A plain handler for registry fixtures."""
+    return JSONResponse({"data": {}})
+
+
+def _build_registry(*entries: tuple[str, list[str], bool]) -> RouteRegistry:
+    """A registry carrying each ``(path, methods, public)`` entry as a handler route.
+
+    ``public`` records the route ``authed=False`` (declared public); otherwise ``authed=True``.
+    """
+    registry = RouteRegistry()
+    for path, methods, public in entries:
+        registry.record(
+            path=path,
+            methods=methods,
+            name=None,
+            handler=_probe_handler,
+            summary="s",
+            tags=["t"],
+            authed=not public,
+            action=None if public else "read",
+            request_model=None,
+            response_model=None,
+            no_body_reason="test fixture: response body not under test",
+            public=public,
+        )
+    return registry
 
 
 class _Provider(IdentityProvider):
@@ -497,13 +529,22 @@ async def test_spa_fallback_only_fires_for_get(monkeypatch):
 
 
 async def test_spa_fallback_skips_registered_operational_routes(monkeypatch):
-    # /health, /ready are registered non-/api GET routes → in the DERIVED
-    # reserved set → the SPA-shell fallback skips them (they never gain the public id from
-    # the shell tier). They ARE served public by the SEPARATE acknowledged-public tier (see
-    # test_acknowledged_probe_is_public_without_always_public_entry); to prove the shell
-    # tier itself does not open them, turn the acknowledged tier off by clearing the
-    # acknowledgement — with no acknowledgement and no route row they resolve to nothing.
-    settings = AccessControlSettings(acknowledged_public_routes=("/{spa_path:path}",))
+    # The SPA-shell fallback never opens a REGISTERED route: a GET to a registered non-/api
+    # route is in the DERIVED reserved set, so the shell tier skips it. Proven with a
+    # NON-PUBLIC fake registry — /health, /ready are registered AUTHED, so the declared-public
+    # tier does not fire either — and with no route row they resolve to nothing, which is only
+    # possible if the shell tier refused to open a registered path.
+    from types import SimpleNamespace
+
+    fake_routes = [
+        SimpleNamespace(path="/health", methods=("GET",), mounted=False),
+        SimpleNamespace(path="/ready", methods=("GET",), mounted=False),
+    ]
+    monkeypatch.setattr(verifier_module, "load_all_routes", lambda: fake_routes)
+    monkeypatch.setattr(
+        verifier_module, "route_registry", _build_registry(("/health", ["GET"], False), ("/ready", ["GET"], False))
+    )
+    settings = AccessControlSettings()
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
     for path in ("/health", "/ready"):
@@ -651,43 +692,48 @@ async def test_h1_malformed_paths_denied(monkeypatch):
         assert await v.resolve_resource_ids(bad, method="GET") == []
 
 
-# -- Acknowledged-public tier: registered probes served public by their own declaration --
+# -- Declared-public tier: registered probes and doors served public by their declaration --
 #
-# A GET to a CONCRETE registered non-/api, non-/mcp route listed in
-# ``acknowledged_public_routes`` resolves public even with NO always-public entry for it,
-# so a fresh access-control-on deployment serves /health, /ready without a 403.
-# Deny wins, the tier is scoped to acknowledged routes only, and the control plane can
-# never enter it.
+# A request to a registered non-/api route DECLARED public (``authed=False``) resolves public
+# straight from its registration — per served method, with NO always-public entry and NO route
+# row — so a fresh access-control-on deployment serves /health, /ready without a 403.
+# ``acknowledged_public_routes`` is a BOOT sign-off; the runtime no longer consults it. The
+# declaration is authoritative above the route table, and the control plane can never enter it.
 
 
-async def test_acknowledged_probe_is_public_without_always_public_entry(monkeypatch):
-    # Regression for the 403: /health and /ready are registered non-/api GET routes that
-    # are acknowledged-public by default. With NO always-public prefix covering them and NO
-    # route row, they resolve to exactly [public] instead of denying.
+async def test_declared_public_probe_is_public(monkeypatch):
+    # /health and /ready are registered non-/api public GET routes. With NO always-public
+    # prefix covering them and NO route row, they resolve to exactly [public] by declaration.
     settings = AccessControlSettings()
-    # Prove they are NOT covered by an always-public prefix — the acknowledged tier is what
+    # Prove they are NOT covered by an always-public prefix — the declaration is what
     # resolves them to public, not an always-public short-circuit.
     assert not any(p in ("/health", "/ready") for p in settings.always_public_path_prefixes)
+    monkeypatch.setattr(
+        verifier_module, "route_registry", _build_registry(("/health", ["GET"], True), ("/ready", ["GET"], True))
+    )
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
     for path in ("/health", "/ready"):
         assert await v.resolve_resource_ids(path, method="GET") == [settings.public_resource_id]
 
 
-async def test_acknowledged_probe_canonicalizes_trailing_slash(monkeypatch):
+async def test_declared_public_probe_canonicalizes_trailing_slash(monkeypatch):
     # The tier keys on the single canonical path: a trailing-slash probe (/health/) is
     # canonicalized to /health and still resolves public, so a proxy or client that appends
     # a slash does not fall through to a 403.
     settings = AccessControlSettings()
+    monkeypatch.setattr(verifier_module, "route_registry", _build_registry(("/health", ["GET"], True)))
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
     assert await v.resolve_resource_ids("/health/", method="GET") == [settings.public_resource_id]
 
 
-async def test_acknowledged_probe_serves_get_and_head_not_other_methods(monkeypatch):
-    # GET and HEAD open a public probe (HEAD is GET without a body, so a HEAD healthcheck is
-    # not denied); a mutating or unspecified method never does.
+async def test_declared_public_probe_serves_get_and_head_not_other_methods(monkeypatch):
+    # GET and HEAD open a public probe (HEAD rides with GET by construction, so a HEAD
+    # healthcheck is not denied); a method the route does not declare, or an unspecified
+    # method, never does.
     settings = AccessControlSettings()
+    monkeypatch.setattr(verifier_module, "route_registry", _build_registry(("/health", ["GET"], True)))
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
     assert await v.resolve_resource_ids("/health", method="GET") == [settings.public_resource_id]
@@ -697,44 +743,36 @@ async def test_acknowledged_probe_serves_get_and_head_not_other_methods(monkeypa
     assert await v.resolve_resource_ids("/health") == []
 
 
-async def test_acknowledged_probe_deny_wins_over_protected_route_row(monkeypatch):
-    # Deny wins / lowest precedence: an operator who pins /health to a protected scope in
-    # the route table OVERRIDES the acknowledged-public tier — the tier fires only when the
-    # route table resolved NOTHING, so the pinned scope is what resolves.
+async def test_declared_public_wins_over_a_protected_route_row(monkeypatch):
+    # The declaration is authoritative ABOVE the route table: a declared-public route a later
+    # operator pinned to a protected scope still resolves public — a row no longer re-protects
+    # a declared-public route of any path shape (the declaration short-circuits above the table).
     settings = AccessControlSettings()
+    monkeypatch.setattr(verifier_module, "route_registry", _build_registry(("/health", ["GET"], True)))
     pg = FakeAccessControlPg()
     pg.add_route("/health", "ops-only")
     _wire(monkeypatch, pg)
     v = _verifier(settings)
-    assert await v.resolve_resource_ids("/health", method="GET") == ["ops-only"]
+    assert await v.resolve_resource_ids("/health", method="GET") == [settings.public_resource_id]
 
 
-async def test_acknowledged_tier_scoped_to_acknowledged_not_all_gets(monkeypatch):
-    # The tier keys off ACKNOWLEDGED membership, not mere registration: a registered
-    # non-/api GET route that is NOT in ``acknowledged_public_routes`` still resolves to
-    # nothing (403) — the tier is not a blanket public-GET for every registered route.
-    from types import SimpleNamespace
-
-    # A newly registered concrete GET route that is deliberately NOT acknowledged.
-    fake_routes = [SimpleNamespace(path="/internal-probe", methods=("GET",), mounted=False)]
-    monkeypatch.setattr(verifier_module, "load_all_routes", lambda: fake_routes)
+async def test_declared_public_grant_does_not_need_acknowledgment(monkeypatch):
+    # Acknowledgment is a BOOT sign-off, not a runtime gate: a registered public GET resolves
+    # public by its declaration even when the path is not in ``acknowledged_public_routes``.
     settings = AccessControlSettings()
     assert "/internal-probe" not in settings.acknowledged_public_routes
+    monkeypatch.setattr(verifier_module, "route_registry", _build_registry(("/internal-probe", ["GET"], True)))
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
-    # Registered → the SPA-shell fallback skips it; not acknowledged → the new tier skips
-    # it too. It resolves to nothing and is denied downstream.
-    assert await v.resolve_resource_ids("/internal-probe", method="GET") == []
+    assert await v.resolve_resource_ids("/internal-probe", method="GET") == [settings.public_resource_id]
 
 
-async def test_acknowledged_tier_requires_actual_registration(monkeypatch):
-    # An acknowledged path that is NOT a registered concrete route does not gain public
-    # from this tier: the tier requires membership in the DERIVED registered set, so a
-    # stale/aspirational acknowledgement cannot open a path the app does not serve. The
-    # SPA-shell fallback is turned OFF so nothing else can mask the result — the ONLY tier
-    # that could serve /health here is the acknowledged tier, and without registration it
-    # must not.
-    monkeypatch.setattr(verifier_module, "load_all_routes", list)  # empty registry
+async def test_unregistered_path_is_not_public_even_if_acknowledged(monkeypatch):
+    # An acknowledged path that is NOT a registered route does not gain public: ``match``
+    # finds no route and, with the SPA-shell fallback OFF so nothing masks the result, an
+    # acknowledged-but-unregistered /health resolves to nothing.
+    monkeypatch.setattr(verifier_module, "route_registry", RouteRegistry())  # empty registry
+    monkeypatch.setattr(verifier_module, "load_all_routes", list)
     settings = AccessControlSettings(spa_shell_public=False)
     assert "/health" in settings.acknowledged_public_routes
     _wire(monkeypatch, FakeAccessControlPg())
@@ -744,29 +782,20 @@ async def test_acknowledged_tier_requires_actual_registration(monkeypatch):
 
 def test_acknowledged_public_routes_forbids_api_mcp_entries():
     # Invariant (b): the control plane / an /api or /mcp path can NEVER be acknowledged
-    # public — settings construction rejects it, so no such entry can ever reach the tier.
+    # public — settings construction rejects it, so no such entry can ever reach the boot audit.
     for bad in ("/api/secret", "/api/auth/keys", "/mcp/tool"):
         with pytest.raises(ValueError, match="acknowledged_public_routes"):
             AccessControlSettings(acknowledged_public_routes=("/health", bad))
 
 
-async def test_acknowledged_tier_reserved_prefix_never_public(monkeypatch):
-    # Belt-and-suspenders runtime guard for invariant (b): even if a reserved-prefix path
-    # were somehow both registered and acknowledged, ``_is_reserved_prefix`` keeps it gated.
-    # Construct a settings whose reserved set marks a NON-/api registered path reserved, then
-    # acknowledge that same path — the reserved guard must still deny it.
-    from types import SimpleNamespace
-
-    fake_routes = [SimpleNamespace(path="/control", methods=("GET",), mounted=False)]
-    monkeypatch.setattr(verifier_module, "load_all_routes", lambda: fake_routes)
-    settings = AccessControlSettings(
-        reserved_public_pin_prefixes=("/api/auth", "/control"),
-        acknowledged_public_routes=("/health", "/ready", "/control"),
-    )
+async def test_declared_public_tier_reserved_prefix_never_public(monkeypatch):
+    # Belt-and-suspenders runtime guard for invariant (b): even a registered public route
+    # under a reserved prefix is dropped by the tier's ``_is_reserved_prefix`` guard. Mark a
+    # NON-/api registered public path reserved — the reserved guard must still deny it.
+    settings = AccessControlSettings(reserved_public_pin_prefixes=("/api/auth", "/control"))
+    monkeypatch.setattr(verifier_module, "route_registry", _build_registry(("/control", ["GET"], True)))
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
-    # Registered + acknowledged, but reserved → the tier's ``_is_reserved_prefix`` guard
-    # drops it: it resolves to nothing and is denied.
     assert await v.resolve_resource_ids("/control", method="GET") == []
 
 
