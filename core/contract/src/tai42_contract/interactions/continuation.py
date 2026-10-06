@@ -68,7 +68,6 @@ __all__ = [
     "PARK_COMPLETION_REPARKED",
     "PARK_COMPLETION_SUCCEEDED",
     "PARK_COMPLETION_THREAD_KEY",
-    "PARK_COMPLETION_WITHDRAWN",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "ChainedResume",
     "NestedParkOwnershipError",
@@ -354,24 +353,14 @@ EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
 #
 # where ``bound_context`` is the :func:`set_park_completion` context (opaque to the contract),
 # ``result`` is the run's terminal outcome value, ``completion_id`` is the stable idempotency
-# id of the resolved terminal, and ``status`` is one of the three terminal constants below.
+# id of the resolved terminal, and ``status`` is one of the two constants below.
 # ``PARK_COMPLETION_SUCCEEDED`` names a clean-success terminal whose ``result`` the delivery
-# tool maps back to the caller; ``PARK_COMPLETION_FAILED`` names a terminal that BROKE or lapsed
-# (failed/stopped/aborted/errored/expired) the delivery tool surfaces as its uniform notice;
-# ``PARK_COMPLETION_WITHDRAWN`` names a run the platform deliberately TOOK DOWN (cancelled, or its
-# thread/person erased) — there is NO outcome and NOTHING to say to the person, so the receiver
-# releases whatever it holds for the run and delivers nothing. Only the platform's own kill ladder
-# ever fires ``WITHDRAWN``; a driver's own terminal is always ``SUCCEEDED`` or ``FAILED``. A delivery
-# tool treats ``FAILED`` as the fail-safe default, so an unstamped fire never pushes a non-success
-# payload through the success mapping.
+# tool maps back to the caller; ``PARK_COMPLETION_FAILED`` names ANY non-success terminal
+# (failed/stopped/aborted/errored) the delivery tool surfaces as its uniform notice. A
+# delivery tool treats ``FAILED`` as the fail-safe default, so an unstamped fire never pushes
+# a non-success payload through the success mapping.
 PARK_COMPLETION_SUCCEEDED: Final[str] = "succeeded"
 PARK_COMPLETION_FAILED: Final[str] = "failed"
-
-# The quiet-close terminal: the platform deliberately took the run down (a cancel, a thread or
-# person erase), so there is NO outcome and NOTHING to say to the person. A receiver releases
-# whatever it holds for the run and delivers nothing — distinct from ``FAILED``, which tells the
-# person the run broke. Fired ONLY by the platform's kill ladder, never by a driver's own terminal.
-PARK_COMPLETION_WITHDRAWN: Final[str] = "withdrawn"
 
 # The one NON-terminal status in the vocabulary: the parked run did not finish, it raised a
 # NEW ask under this same completion binding. The fire carries the new ``expiry_at`` in place
