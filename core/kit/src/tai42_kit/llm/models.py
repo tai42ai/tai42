@@ -1,13 +1,28 @@
 """Provider-keyed construction of LangChain chat models."""
 
 import asyncio
+import copy
 from functools import lru_cache
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
-from tai42_kit.utils.data.json_schema_util import adapt_native_schema
+from tai42_kit.utils.data.json_schema_util import (
+    adapt_native_schema,
+    count_optional_properties,
+    count_union_or_type_array_nodes,
+    find_ref_cycle,
+    has_array_constraint,
+    has_complex_enum_member,
+    has_external_ref,
+    has_numeric_constraint,
+    has_open_additional_properties,
+    has_ref_with_allof,
+    has_string_length_or_pattern,
+    iter_schema_nodes,
+    native_representability_reason,
+)
 
 
 async def get_llm_async(provider: str, **kwargs) -> BaseChatModel:
@@ -104,9 +119,9 @@ def supports_native_structured_output(provider: str) -> bool:
     """Whether the kit can bind ``provider``'s native structured-output grammar.
 
     The ``match`` mirrors :func:`_build_llm`'s so a provider name never leaves this
-    module and an unknown provider is refused loudly. ``anthropic``/``openai``/``xai``
-    take the OpenAI-shaped ``response_format`` kwarg (converted by ``langchain-anthropic``,
-    consumed by ``langchain-openai`` and its ``ChatXAI`` subclass); ``google`` takes its
+    module and an unknown provider is refused loudly. ``anthropic`` binds through its
+    ``output_config``; ``openai``/``xai`` take the OpenAI-shaped ``response_format`` kwarg
+    (consumed by ``langchain-openai`` and its ``ChatXAI`` subclass); ``google`` takes its
     own ``response_json_schema`` kwarg. ``mistral``/``ollama``/``huggingface`` have no
     verified native binding here, so they return ``False`` and take the tool tier —
     explicit, never a silent inert bind.
@@ -120,20 +135,24 @@ def supports_native_structured_output(provider: str) -> bool:
 
 
 def shape_native_schema(provider: str, schema: dict[str, Any]) -> dict[str, Any]:
-    """The native adaptations to apply to ``schema`` before building ``provider``'s native kwargs.
+    """The schema to send to ``provider``'s native grammar: the shape its binder carries.
 
-    Every provider with a native binding (the ones :func:`supports_native_structured_output`
-    returns ``True`` for) takes the minimal, value-preserving adaptations
-    (:func:`~tai42_kit.utils.data.json_schema_util.adapt_native_schema`): a nullable/multi
-    ``"type"`` array becomes an ``anyOf`` of single-type members, a single-type type-less
-    ``enum``/``const`` gets its type, and a mixed type-less ``enum`` is left bare (reported
-    non-representable, never inflated). The ``match`` mirrors :func:`_build_llm`'s so a
-    provider name never leaves this module. A provider with no native binding (and an
-    unknown one) raises loudly — the caller gates on
+    ``anthropic`` binds the authored schema DIRECTLY and VERBATIM, so it is returned as a
+    by-value copy with its content UNCHANGED (its native binder carries the full authored
+    shape, judged against its own documented contract — a distinct object, never a rewrite).
+    ``openai``/``xai``/``google`` take the minimal, value-preserving
+    adaptations (:func:`~tai42_kit.utils.data.json_schema_util.adapt_native_schema`): a
+    nullable/multi ``"type"`` array becomes an ``anyOf`` of single-type members, a
+    single-type type-less ``enum``/``const`` gets its type, and a mixed type-less ``enum``
+    is left bare (reported non-representable, never inflated). The ``match`` mirrors
+    :func:`_build_llm`'s so a provider name never leaves this module. A provider with no
+    native binding (and an unknown one) raises loudly — the caller gates on
     :func:`supports_native_structured_output` first.
     """
     match provider:
-        case "anthropic" | "openai" | "xai" | "google":
+        case "anthropic":
+            return copy.deepcopy(schema)
+        case "openai" | "xai" | "google":
             return adapt_native_schema(schema)
         case "mistral" | "ollama" | "huggingface":
             raise ValueError(f"provider '{provider}' has no native structured-output binding")
@@ -143,17 +162,88 @@ def shape_native_schema(provider: str, schema: dict[str, Any]) -> dict[str, Any]
 def native_structured_output_kwargs(provider: str, name: str, schema: dict[str, Any]) -> dict[str, Any]:
     """The constructor-bind kwargs that force ``provider``'s native structured output for ``schema``.
 
-    ``schema`` is the portable form (what the provider receives); ``name`` is the
-    structured-output name. The ``match`` mirrors :func:`_build_llm`'s. A provider
-    with no native binding (and an unknown one) raises loudly — the caller gates on
-    :func:`supports_native_structured_output` first, so reaching a non-native
-    provider here is a bug, never a silent no-op bind.
+    ``schema`` is the shape :func:`shape_native_schema` produced for the provider (what the
+    provider receives); ``name`` is the structured-output name. ``anthropic`` binds the
+    schema directly and verbatim through its ``output_config``; ``openai``/``xai`` take the
+    OpenAI-shaped ``response_format`` with the named ``json_schema``; ``google`` takes its own
+    ``response_json_schema``. The ``match`` mirrors :func:`_build_llm`'s. A provider with no
+    native binding (and an unknown one) raises loudly — the caller gates on
+    :func:`supports_native_structured_output` first, so reaching a non-native provider here is
+    a bug, never a silent no-op bind.
     """
     match provider:
-        case "anthropic" | "openai" | "xai":
+        case "anthropic":
+            return {"output_config": {"format": {"type": "json_schema", "schema": schema}}}
+        case "openai" | "xai":
             return {"response_format": {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}}
         case "google":
             return {"response_mime_type": "application/json", "response_json_schema": schema}
+        case "mistral" | "ollama" | "huggingface":
+            raise ValueError(f"provider '{provider}' has no native structured-output binding")
+    raise ValueError(f"Unsupported chat model provider: '{provider}'")
+
+
+#: The per-node constructs Anthropic's documented structured-output contract does not
+#: support, paired with the vendor-neutral reason that names each (a JSON path is appended).
+_ANTHROPIC_UNSUPPORTED_NODE_CONSTRUCTS = (
+    (has_external_ref, "an external $ref"),
+    (has_ref_with_allof, "allOf combined with $ref"),
+    (has_numeric_constraint, "a numeric constraint"),
+    (has_string_length_or_pattern, "a string constraint"),
+    (has_array_constraint, "an array constraint"),
+    (has_complex_enum_member, "a complex type as an enum member"),
+    (has_open_additional_properties, "an object with additionalProperties not false"),
+)
+#: Documented counted limits a schema must not exceed on its own (the internal grammar-size
+#: limit is not pre-checkable and is left to the vendor's call-time error).
+_ANTHROPIC_MAX_UNION_OR_TYPE_ARRAY_PARAMS = 16
+_ANTHROPIC_MAX_OPTIONAL_PARAMS = 24
+
+
+def _anthropic_representability_reason(schema: dict[str, Any]) -> str | None:
+    """Why ``schema`` is outside Anthropic's documented structured-output contract, or ``None``.
+
+    Returns a vendor-neutral description with a JSON path of the FIRST failing construct or
+    counted limit. Checks, in order: a recursive schema (a ``$ref`` cycle); then, per node in
+    document order, an external ``$ref``, ``allOf`` combined with ``$ref``, a numeric
+    constraint, a string length/``pattern`` constraint, an array constraint beyond a
+    ``minItems`` of 0 or 1, a complex type as an ``enum`` member, and an object opening its
+    ``additionalProperties``; then the counted limits — more than 16 parameters using
+    ``anyOf`` or type arrays, and more than 24 optional parameters. Everything the contract
+    allows is carried: plain enums (including null members), type arrays, ``anyOf``, local
+    non-cyclic ``$ref``/``$defs``, ``const``, ``required``, ``additionalProperties: false``,
+    documented string ``format`` and a ``minItems`` of 0 or 1.
+    """
+    cycle_path = find_ref_cycle(schema)
+    if cycle_path is not None:
+        return f"a recursive schema at {cycle_path}"
+    for node, path in iter_schema_nodes(schema):
+        for check, label in _ANTHROPIC_UNSUPPORTED_NODE_CONSTRUCTS:
+            if check(node):
+                return f"{label} at {path}"
+    if count_union_or_type_array_nodes(schema) > _ANTHROPIC_MAX_UNION_OR_TYPE_ARRAY_PARAMS:
+        return f"more than {_ANTHROPIC_MAX_UNION_OR_TYPE_ARRAY_PARAMS} parameters using anyOf or type arrays"
+    if count_optional_properties(schema) > _ANTHROPIC_MAX_OPTIONAL_PARAMS:
+        return f"more than {_ANTHROPIC_MAX_OPTIONAL_PARAMS} optional parameters"
+    return None
+
+
+def native_representability_reason_for_provider(provider: str, schema: dict[str, Any]) -> str | None:
+    """Why ``schema`` is not representable by ``provider``'s native grammar, or ``None`` if it is.
+
+    ``anthropic`` is judged against its own documented structured-output contract
+    (:func:`_anthropic_representability_reason`), since its binder carries the authored schema
+    verbatim; ``openai``/``xai``/``google`` are judged by the generic native-grammar check
+    (:func:`~tai42_kit.utils.data.json_schema_util.native_representability_reason`) over the
+    shaped schema. The ``match`` mirrors :func:`_build_llm`'s so a provider name never leaves
+    this module. A provider with no native binding (and an unknown one) raises loudly — the
+    caller gates on :func:`supports_native_structured_output` first.
+    """
+    match provider:
+        case "anthropic":
+            return _anthropic_representability_reason(schema)
+        case "openai" | "xai" | "google":
+            return native_representability_reason(schema)
         case "mistral" | "ollama" | "huggingface":
             raise ValueError(f"provider '{provider}' has no native structured-output binding")
     raise ValueError(f"Unsupported chat model provider: '{provider}'")

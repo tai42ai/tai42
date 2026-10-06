@@ -4,8 +4,9 @@ One decision, made once per compiled run at the seam where the model object is
 known, from three generic inputs: the model's declared capabilities (``llm.profile``,
 provider-populated), the provider binding the kit can make
 (:func:`~tai42_kit.llm.models.supports_native_structured_output`), and whether the
-authored schema is representable by the native grammars (after the minimal, value-
-preserving native adaptations).
+schema the provider receives is representable by that provider's native grammar
+(:func:`~tai42_kit.llm.models.native_representability_reason_for_provider` — judged per
+provider over the shape :func:`~tai42_kit.llm.models.shape_native_schema` produced).
 
 * ``native`` — the model declares native structured output, the kit has a binding
   for the provider, and the schema is representable. Grammar-enforced; the one path a
@@ -30,12 +31,14 @@ from typing import Any, Literal
 from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel
 
-from tai42_kit.llm.models import shape_native_schema, supports_native_structured_output
+from tai42_kit.llm.models import (
+    native_representability_reason_for_provider,
+    shape_native_schema,
+    supports_native_structured_output,
+)
 from tai42_kit.utils.data.json_schema_util import (
-    check_native_representable,
     inject_int64_bounds,
     json_schema_to_typed_dict,
-    native_representability_reason,
 )
 
 
@@ -64,8 +67,9 @@ class StructuredOutputPlan:
 
     ``mode`` selects native vs tool. ``name`` is the schema title / class name (the
     structured-output name). ``provider`` is the resolved LLM provider (for the native
-    bind kwargs). ``provider_schema`` is the minimally-adapted native form the provider
-    receives (native mode only). ``validation_schema`` is the ORIGINAL authored dict or pydantic
+    bind kwargs). ``provider_schema`` is the shape the provider receives (native mode only):
+    the authored schema verbatim where the provider binds it directly, otherwise the
+    minimally-adapted native form. ``validation_schema`` is the ORIGINAL authored dict or pydantic
     class — what every door keeps validating produced output against, unchanged.
     ``bound_typed_dict`` is the int64-tightened ``TypedDict`` shape the tool tier binds
     (tool mode only).
@@ -130,12 +134,12 @@ def plan_structured_output(llm: BaseChatModel, provider: str, response_format: A
     forced_allowed = profile.get("tool_choice") is not False  # absent == unknown == allowed
 
     shaped_schema: dict[str, Any] | None = None
-    representable = False
+    nonrepresentable_reason: str | None = None
     if native_declared and native_bindable:
         shaped_schema = shape_native_schema(provider, schema_dict)
-        representable = check_native_representable(shaped_schema)
+        nonrepresentable_reason = native_representability_reason_for_provider(provider, shaped_schema)
 
-    if native_declared and native_bindable and representable:
+    if native_declared and native_bindable and nonrepresentable_reason is None:
         return StructuredOutputPlan(
             mode="native",
             name=name,
@@ -158,10 +162,9 @@ def plan_structured_output(llm: BaseChatModel, provider: str, response_format: A
     elif not native_bindable:
         native_reason = "the platform has no native binding for its provider"
     else:
-        construct = native_representability_reason(shaped_schema) if shaped_schema is not None else None
         native_reason = "its schema is not natively representable"
-        if construct is not None:
-            native_reason += f": {construct}"
+        if nonrepresentable_reason is not None:
+            native_reason += f": {nonrepresentable_reason}"
     reasons = [native_reason, "and it refuses forced tool choice"]
     model_label = (
         getattr(llm, "model_name", None) or getattr(llm, "model", None) or getattr(llm, "model_id", "") or "model"

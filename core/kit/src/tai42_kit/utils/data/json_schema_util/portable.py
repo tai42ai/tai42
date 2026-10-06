@@ -26,6 +26,15 @@ the first construct that is not: a map object (``additionalProperties`` that is 
 schema), because every native grammar closes objects; or a bare type-less node (no
 ``type``, no combinator and no ``$ref``, such as a mixed type-less ``enum`` left bare
 by :func:`adapt_native_schema`), because a native grammar needs a concrete carrier.
+
+For a caller judging a schema against a specific grammar's own documented contract,
+:func:`iter_schema_nodes` walks every node with its JSON path, :func:`find_ref_cycle`
+reports a recursive ``$ref``, the ``has_*`` predicates test one node for a single
+construct (an external ``$ref``, ``allOf`` with ``$ref``, a numeric constraint, a string
+length/pattern, an array constraint, a complex ``enum`` member, an open
+``additionalProperties``), and :func:`count_union_or_type_array_nodes` /
+:func:`count_optional_properties` tally the whole tree. The caller composes them and owns
+the named reasons; these report generic schema facts and name no grammar.
 """
 
 from __future__ import annotations
@@ -344,3 +353,179 @@ def native_representability_reason(schema: dict[str, Any]) -> str | None:
     $.properties.talk.items.properties.id"``) for a loud caller-facing error. Vendor-free.
     """
     return _nonrepresentable_reason(schema, "$")
+
+
+def iter_schema_nodes(schema: Any, path: str = "$") -> Iterator[tuple[dict[str, Any], str]]:
+    """Yield every schema node (each ``dict``) in ``schema`` with its JSON path, document order.
+
+    Walks the standard schema-valued positions — ``properties``, ``patternProperties``,
+    ``$defs``, ``prefixItems``, ``anyOf``/``oneOf``/``allOf``, ``items``, ``contains``,
+    ``propertyNames`` and ``additionalProperties`` (when a schema node) — without following
+    ``$ref`` (a reference target is reached through its own definition), so a reference cycle
+    never loops the walk. A non-dict value yields nothing.
+    """
+    if not isinstance(schema, dict):
+        return
+    yield schema, path
+    for keyword in _SCHEMA_MAP_VALUED:
+        mapping = schema.get(keyword)
+        if isinstance(mapping, dict):
+            for name, sub in mapping.items():
+                yield from iter_schema_nodes(sub, f"{path}.{keyword}.{name}")
+    for keyword in (*_SCHEMA_LIST_VALUED, "anyOf", "oneOf", "allOf"):
+        members = schema.get(keyword)
+        if isinstance(members, list):
+            for index, sub in enumerate(members):
+                yield from iter_schema_nodes(sub, f"{path}.{keyword}[{index}]")
+    for keyword in _SCHEMA_VALUED:
+        sub = schema.get(keyword)
+        if isinstance(sub, dict):
+            yield from iter_schema_nodes(sub, f"{path}.{keyword}")
+
+
+def has_external_ref(node: dict[str, Any]) -> bool:
+    """Whether ``node`` carries a ``$ref`` whose target is not a local pointer (not ``#...``)."""
+    ref = node.get("$ref")
+    return isinstance(ref, str) and not ref.startswith("#")
+
+
+def has_ref_with_allof(node: dict[str, Any]) -> bool:
+    """Whether ``node`` combines ``allOf`` with a sibling ``$ref`` in the same node."""
+    return "allOf" in node and "$ref" in node
+
+
+def has_numeric_constraint(node: dict[str, Any]) -> bool:
+    """Whether ``node`` carries any numeric range or step constraint keyword."""
+    return any(keyword in node for keyword in _NUMBER_KEYWORDS)
+
+
+def has_string_length_or_pattern(node: dict[str, Any]) -> bool:
+    """Whether ``node`` carries a string length or ``pattern`` constraint.
+
+    A string ``format`` is an annotation, not a length/pattern constraint, and is not
+    reported here.
+    """
+    return "minLength" in node or "maxLength" in node or "pattern" in node
+
+
+def has_array_constraint(node: dict[str, Any]) -> bool:
+    """Whether ``node`` carries an array size or content constraint beyond a ``minItems`` of 0 or 1.
+
+    ``maxItems``, ``uniqueItems``, ``contains``/``minContains``/``maxContains`` and a
+    ``minItems`` of 2 or more are constraints; a ``minItems`` of 0 or 1 is the trivial /
+    singleton bound and is not.
+    """
+    if any(keyword in node for keyword in ("maxItems", "uniqueItems", "contains", "minContains", "maxContains")):
+        return True
+    min_items = node.get("minItems")
+    return isinstance(min_items, int) and not isinstance(min_items, bool) and min_items > 1
+
+
+def has_complex_enum_member(node: dict[str, Any]) -> bool:
+    """Whether ``node``'s ``enum`` holds a member that is a complex type (an object or an array)."""
+    enum = node.get("enum")
+    if not isinstance(enum, list):
+        return False
+    return any(isinstance(member, (dict, list)) for member in enum)
+
+
+def has_open_additional_properties(node: dict[str, Any]) -> bool:
+    """Whether ``node`` is an object that does not close itself with ``additionalProperties: false``.
+
+    An object node — one whose ``type`` is ``"object"`` or that carries ``properties`` — is
+    reported unless its ``additionalProperties`` is exactly ``False`` (an omitted, a ``True`` or
+    a schema-valued ``additionalProperties`` all report). A non-object node is never reported.
+    """
+    if node.get("type") != "object" and "properties" not in node:
+        return False
+    return node.get("additionalProperties") is not False
+
+
+def count_union_or_type_array_nodes(schema: dict[str, Any]) -> int:
+    """How many schema nodes in the whole tree carry an ``anyOf`` or a list-valued ``type``.
+
+    Each node is counted once (a node with both an ``anyOf`` and a type array counts once).
+    """
+    return sum(1 for node, _ in iter_schema_nodes(schema) if "anyOf" in node or isinstance(node.get("type"), list))
+
+
+def count_optional_properties(schema: dict[str, Any]) -> int:
+    """How many declared properties in the whole tree are absent from their object's ``required``."""
+    total = 0
+    for node, _ in iter_schema_nodes(schema):
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            required = node.get("required")
+            required_names = set(required) if isinstance(required, list) else set()
+            total += sum(1 for name in properties if name not in required_names)
+    return total
+
+
+def _resolve_local_ref(root: dict[str, Any], ref: str) -> tuple[Any, str] | None:
+    """Resolve a local ``$ref`` (``#/...``) against ``root`` to its ``(node, JSON path)``, or ``None``.
+
+    Follows the JSON-pointer tokens (unescaping ``~1``/``~0``) through object keys and array
+    indices. A pointer that does not resolve to a present node returns ``None``.
+    """
+    if not ref.startswith("#"):
+        return None
+    pointer = ref[1:].lstrip("/")
+    if pointer == "":
+        return root, "$"
+    node: Any = root
+    doc_path = "$"
+    for raw_token in pointer.split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and token in node:
+            node = node[token]
+            doc_path = f"{doc_path}.{token}"
+        elif isinstance(node, list):
+            try:
+                index = int(token)
+            except ValueError:
+                return None
+            if not 0 <= index < len(node):
+                return None
+            node = node[index]
+            doc_path = f"{doc_path}[{index}]"
+        else:
+            return None
+    return node, doc_path
+
+
+def _local_refs_in(node: dict[str, Any]) -> Iterator[str]:
+    """Every local ``$ref`` string found in ``node`` and its subtree (without following refs)."""
+    for sub, _ in iter_schema_nodes(node):
+        ref = sub.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#"):
+            yield ref
+
+
+def find_ref_cycle(schema: dict[str, Any]) -> str | None:
+    """The JSON path of a reference target reached through a ``$ref`` cycle, or ``None``.
+
+    Resolves each local ``$ref`` (``#/...``) against ``schema`` and reports the path of the
+    first target reachable from itself — a recursive schema. External references (not
+    ``#/...``) are not followed.
+    """
+
+    def follow(ref: str, seen: frozenset[str]) -> str | None:
+        resolved = _resolve_local_ref(schema, ref)
+        if resolved is None:
+            return None
+        target, target_path = resolved
+        if ref in seen:
+            return target_path
+        if not isinstance(target, dict):
+            return None
+        for child_ref in _local_refs_in(target):
+            found = follow(child_ref, seen | {ref})
+            if found is not None:
+                return found
+        return None
+
+    for ref in _local_refs_in(schema):
+        found = follow(ref, frozenset())
+        if found is not None:
+            return found
+    return None
