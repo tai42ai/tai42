@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
+from tai42_kit.utils.data.json_schema_util import adapt_native_schema
 
 
 async def get_llm_async(provider: str, **kwargs) -> BaseChatModel:
@@ -115,6 +116,27 @@ def supports_native_structured_output(provider: str) -> bool:
             return True
         case "mistral" | "ollama" | "huggingface":
             return False
+    raise ValueError(f"Unsupported chat model provider: '{provider}'")
+
+
+def shape_native_schema(provider: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """The native adaptations to apply to ``schema`` before building ``provider``'s native kwargs.
+
+    Every provider with a native binding (the ones :func:`supports_native_structured_output`
+    returns ``True`` for) takes the minimal, value-preserving adaptations
+    (:func:`~tai42_kit.utils.data.json_schema_util.adapt_native_schema`): a nullable/multi
+    ``"type"`` array becomes an ``anyOf`` of single-type members, a single-type type-less
+    ``enum``/``const`` gets its type, and a mixed type-less ``enum`` is left bare (reported
+    non-representable, never inflated). The ``match`` mirrors :func:`_build_llm`'s so a
+    provider name never leaves this module. A provider with no native binding (and an
+    unknown one) raises loudly — the caller gates on
+    :func:`supports_native_structured_output` first.
+    """
+    match provider:
+        case "anthropic" | "openai" | "xai" | "google":
+            return adapt_native_schema(schema)
+        case "mistral" | "ollama" | "huggingface":
+            raise ValueError(f"provider '{provider}' has no native structured-output binding")
     raise ValueError(f"Unsupported chat model provider: '{provider}'")
 
 

@@ -19,7 +19,9 @@ import pytest
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     NonPortableSchemaError,
+    adapt_native_schema,
     check_native_representable,
+    native_representability_reason,
     to_portable_schema,
     validate_against_json_schema,
 )
@@ -147,6 +149,129 @@ def test_map_additional_properties_is_not_representable() -> None:
     assert check_native_representable(map_schema) is False
     # A plain closed object (no schema-valued additionalProperties) is representable.
     assert check_native_representable(to_portable_schema(_turn_intake_schema())) is True
+
+
+_MIXED_ENUM_SCHEMA: dict[str, Any] = {
+    "title": "Split",
+    "type": "object",
+    "properties": {
+        "talk": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"enum": [None, "id-a", "id-b"]},
+                    "want": {"type": ["string", "null"]},
+                },
+                "required": ["id"],
+            },
+        }
+    },
+    "required": ["talk"],
+}
+
+
+def test_adapt_leaves_a_mixed_type_less_enum_bare() -> None:
+    adapted = adapt_native_schema(_MIXED_ENUM_SCHEMA)
+    id_node = adapted["properties"]["talk"]["items"]["properties"]["id"]
+    # No value-preserving minimal adaptation gives a mixed enum a single type: it is left
+    # unchanged — same enum value set, no type, no anyOf inflation.
+    assert id_node == {"enum": [None, "id-a", "id-b"]}
+    assert "type" not in id_node
+    assert "anyOf" not in id_node
+
+
+def test_adapt_gives_a_single_type_enum_its_type_without_wrapping() -> None:
+    adapted = adapt_native_schema({"title": "S", "enum": ["open", "closed"]})
+    assert adapted["type"] == "string"
+    assert adapted["enum"] == ["open", "closed"]
+    assert "anyOf" not in adapted
+
+
+def test_adapt_turns_a_nullable_type_array_into_anyof() -> None:
+    adapted = adapt_native_schema({"title": "N", "type": ["integer", "null"], "minimum": 0})
+    assert "type" not in adapted
+    assert "anyOf" in adapted
+    assert {member["type"] for member in adapted["anyOf"]} == {"integer", "null"}
+    integer_member = next(member for member in adapted["anyOf"] if member["type"] == "integer")
+    assert integer_member["minimum"] == 0
+
+
+_ADAPT_CORPUS: list[dict[str, Any]] = [
+    {"talk": [{"id": None, "want": "x"}]},
+    {"talk": [{"id": "id-a", "want": None}]},
+    {"talk": [{"id": "id-b"}]},
+    # Non-conforming:
+    {"talk": [{"id": "not-a-member"}]},  # enum violation
+    {"talk": [{"want": "x"}]},  # missing required 'id'
+    {"talk": [{"id": 1}]},  # enum member-type violation
+    {},  # missing required 'talk'
+]
+
+
+@pytest.mark.parametrize("instance", _ADAPT_CORPUS)
+def test_adapt_preserves_validation(instance: Any) -> None:
+    adapted = adapt_native_schema(_MIXED_ENUM_SCHEMA)
+    assert _rejects(_MIXED_ENUM_SCHEMA, instance) == _rejects(adapted, instance), instance
+
+
+@pytest.mark.parametrize(
+    ("schema", "accepted", "rejected"),
+    [
+        # A typed const keeps the const, not just the type.
+        ({"type": "string", "const": "a"}, ["a"], ["b", ""]),
+        # A type array whose enum covers only one listed type must not widen the uncovered type.
+        ({"type": ["string", "integer"], "enum": ["a", "b"]}, ["a", "b"], [7, "c"]),
+        # A type array with a const keeps only the const.
+        ({"type": ["string", "integer"], "const": "a"}, ["a"], [7, "b"]),
+        # A nullable enum carries each type's own members faithfully.
+        ({"type": ["string", "null"], "enum": ["a", None]}, ["a", None], ["b", 1]),
+    ],
+)
+def test_adapt_preserves_const_and_partial_enum_value_sets(
+    schema: dict[str, Any], accepted: list[Any], rejected: list[Any]
+) -> None:
+    adapted = adapt_native_schema(schema)
+    for value in accepted:
+        assert not _rejects(schema, value), (schema, value)
+        assert not _rejects(adapted, value), (schema, value)
+    for value in rejected:
+        assert _rejects(schema, value), (schema, value)
+        assert _rejects(adapted, value), (schema, value)
+
+
+def test_adapt_drops_an_uncovered_type_array_branch() -> None:
+    # The integer branch carries no value of its type, so it is not emitted — a branch with no
+    # partitioned value would otherwise accept any integer, widening the schema.
+    adapted = adapt_native_schema({"type": ["string", "integer"], "enum": ["a", "b"]})
+    assert adapted["anyOf"] == [{"type": "string", "enum": ["a", "b"]}]
+
+
+def test_adapt_keeps_a_typed_const() -> None:
+    assert adapt_native_schema({"type": "string", "const": "a"}) == {"type": "string", "const": "a"}
+
+
+def test_adapt_leaves_a_type_less_node_bare_for_representability_to_catch() -> None:
+    # adapt_native_schema does not raise on a node with nothing to infer a type from; it
+    # leaves it bare so check_native_representable reports it (the tool tier carries it).
+    adapted = adapt_native_schema({"title": "Bad", "type": "object", "properties": {"mystery": {}}})
+    assert adapted["properties"]["mystery"] == {}
+    assert check_native_representable(adapted) is False
+
+
+def test_bare_mixed_enum_is_not_representable_and_is_named() -> None:
+    adapted = adapt_native_schema(_MIXED_ENUM_SCHEMA)
+    assert check_native_representable(adapted) is False
+    reason = native_representability_reason(adapted)
+    assert reason is not None
+    assert "enum" in reason
+    assert "$.properties.talk.items.properties.id" in reason
+
+
+def test_fully_typed_schema_is_representable() -> None:
+    adapted = adapt_native_schema(_turn_intake_schema())
+    assert check_native_representable(adapted) is True
+    assert native_representability_reason(adapted) is None
 
 
 def test_anthropic_transform_accepts_the_portable_form() -> None:
