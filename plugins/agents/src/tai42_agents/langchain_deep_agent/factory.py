@@ -31,12 +31,12 @@ from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
-from tai42_kit.llm.settings import llm_settings
+from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 
 from tai42_agents._internal.park import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents._internal.render import render_message
-from tai42_agents._internal.structured import as_tool_strategy
+from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents.langchain_deep_agent.backend import SKILLS_ROOT, build_backend
 from tai42_agents.langchain_deep_agent.sandbox_backend import build_sandbox_backend
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
@@ -238,6 +238,7 @@ async def _resolve_subagent(
     spec: ResolvedSubAgentSpec,
     *,
     llm: BaseChatModel | None = None,
+    provider: str | None = None,
     tools: list[StructuredTool] | None = None,
     store: BaseStore | None = None,
     backend: Any | None = None,
@@ -247,10 +248,13 @@ async def _resolve_subagent(
     Only the keys the caller set are emitted, so deepagents applies its own
     inheritance for the rest (parent model, tools, ``interrupt_on``).
 
-    ``llm`` / ``tools`` / ``store`` / ``backend`` (the main agent's resolved pieces)
-    are required only when ``spec.subagents`` is non-empty: nested subagents are
-    compiled into their own deep agents and attached through a
-    :class:`SubAgentMiddleware`, since deepagents' inheritance covers one level only.
+    ``llm`` / ``provider`` / ``tools`` / ``store`` / ``backend`` (the main agent's
+    resolved pieces) seed a subagent that inherits them. ``store``/``backend`` are
+    required only when ``spec.subagents`` is non-empty (nested subagents are compiled
+    into their own deep agents and attached through a :class:`SubAgentMiddleware`,
+    since deepagents' inheritance covers one level only); ``llm``/``provider`` are
+    required whenever the subagent forces a ``response_format`` and declares no model
+    of its own, since the structured-output plan is decided against the bound model.
     """
     sub: SubAgent = {
         "name": spec.name,
@@ -267,13 +271,25 @@ async def _resolve_subagent(
         sub["skills"] = skills
     if spec.interrupt_on:
         sub["interrupt_on"] = spec.interrupt_on
-    if spec.response_format is not None:
-        sub["response_format"] = as_tool_strategy(spec.response_format)
+    # The subagent runs on its own model when it declares one, else it inherits the
+    # main agent's; the structured-output plan is decided against whichever that is.
+    sub_llm = llm
+    sub_provider = provider
     if spec.llm_provider:
-        sub["model"] = await get_llm_async(
+        sub_provider = spec.llm_provider
+        sub_llm = await get_llm_async(
             provider=spec.llm_provider,
             **llm_settings().with_fallbacks(spec.llm_kwargs or {}),
         )
+        sub["model"] = sub_llm
+    structured_rail: Any = None
+    if spec.response_format is not None:
+        if sub_llm is None or sub_provider is None:
+            raise ValueError(
+                f"subagent {spec.name!r} forces a response_format — resolving it requires the bound model and provider."
+            )
+        strategy, structured_rail = structured_output_stack(sub_llm, sub_provider, spec.response_format)
+        sub["response_format"] = strategy
     # Every subagent stack carries the park hook (async ask parks the subagent's own
     # graph) and merges the shared tool-error middleware onto its own tool node
     # (deepagents forwards spec ``middleware`` to the subagent's create_agent), so a
@@ -287,11 +303,13 @@ async def _resolve_subagent(
                 f"the main agent's llm, store and backend."
             )
         parent_tools = list(spec.tools) or list(tools or [])
+        parent_provider = sub_provider if spec.llm_provider else provider
         nested = await asyncio.gather(
             *(
                 _compile_nested_subagent(
                     child,
                     parent_model=parent_model,
+                    parent_provider=parent_provider,
                     parent_tools=parent_tools,
                     store=store,
                     backend=backend,
@@ -301,6 +319,9 @@ async def _resolve_subagent(
         )
         sub_middleware.append(SubAgentMiddleware(backend=backend, subagents=list(nested)))
     sub_middleware.append(_tool_error_middleware)
+    # Innermost: the structured-output rail judges this subagent's payloads in-node.
+    if structured_rail is not None:
+        sub_middleware.append(structured_rail)
     sub["middleware"] = sub_middleware
     return sub
 
@@ -309,6 +330,7 @@ async def _compile_nested_subagent(
     child: ResolvedSubAgentSpec,
     *,
     parent_model: Any,
+    parent_provider: str | None,
     parent_tools: list[StructuredTool],
     store: BaseStore,
     backend: Any,
@@ -317,15 +339,29 @@ async def _compile_nested_subagent(
 
     The child is built as its own deep agent (full default middleware stack plus its
     skills) and handed to the parent's ``SubAgentMiddleware`` as a runnable. Model
-    and tools inherit the parent's unless the child sets its own.
+    and tools inherit the parent's unless the child sets its own; the structured-output
+    plan is decided against whichever model is bound.
     """
     model = parent_model
+    provider = parent_provider
     if child.llm_provider:
+        provider = child.llm_provider
         model = await get_llm_async(
             provider=child.llm_provider,
             **llm_settings().with_fallbacks(child.llm_kwargs or {}),
         )
     child_skills = _skills_with_inline(child.skills, child.inline_skills)
+    strategy: Any = None
+    structured_rail: Any = None
+    if child.response_format is not None:
+        if provider is None:
+            raise ValueError(
+                f"nested subagent {child.name!r} forces a response_format — resolving it requires its provider."
+            )
+        strategy, structured_rail = structured_output_stack(model, provider, child.response_format)
+    middleware: list[Any] = [_async_park_middleware, _tool_error_middleware]
+    if structured_rail is not None:
+        middleware.append(structured_rail)
     runnable = create_deep_agent(
         model=model,
         tools=list(child.tools) or parent_tools,
@@ -334,11 +370,11 @@ async def _compile_nested_subagent(
         backend=backend,
         store=store,
         interrupt_on=child.interrupt_on,
-        response_format=as_tool_strategy(child.response_format),
+        response_format=strategy,
         # Same park hook + tool-error visibility on the nested subagent's own tool node
         # and on its own auto-added general-purpose subagent, which inherits the child's
         # skills.
-        middleware=[_async_park_middleware, _tool_error_middleware],
+        middleware=middleware,
         subagents=[_general_purpose_subagent(child_skills)],
     )
     return {"name": child.name, "description": child.description, "runnable": runnable}
@@ -349,6 +385,7 @@ async def build_langchain_deep_agent(
     llm: BaseChatModel,
     store: BaseStore,
     checkpointer: BaseCheckpointSaver,
+    provider: str | None = None,
     tools: list[StructuredTool] | None = None,
     subagents: list[ResolvedSubAgentSpec] | None = None,
     skills: list[str] | None = None,
@@ -361,6 +398,8 @@ async def build_langchain_deep_agent(
     """Assemble a compiled deep agent over the composite backend.
 
     ``llm``, ``store`` and ``checkpointer`` are the resolved registry resources.
+    ``provider`` is the LLM provider ``llm`` was built for — the structured-output
+    plan is keyed on it; it defaults to the configured LLM provider when omitted.
     ``subagents`` are declarative specs resolved to deepagents ``SubAgent`` dicts; a
     spec may carry one level of nested ``subagents``. ``skills`` are source paths
     under :data:`tai42_agents.langchain_deep_agent.backend.SKILLS_ROOT`.
@@ -375,15 +414,17 @@ async def build_langchain_deep_agent(
     exempts, so the mark stays stable across turns).
 
     ``response_format`` (a pydantic model or langchain response strategy) makes the
-    agent return a validated structured object in ``state['structured_response']``;
-    a raw schema is routed through the tool-calling strategy so structured output
-    never depends on provider-native support. ``None`` keeps free-form text.
+    agent return a validated structured object in ``state['structured_response']``
+    through the capability-negotiated plan (native grammar first, bounded tool-calling
+    second), with the per-run re-prompt rail appended innermost. ``None`` keeps
+    free-form text.
 
     ``session`` is the acquired durable sandbox session for a run/astream drive: when set the
     scratch backend is a :class:`~tai42_agents.langchain_deep_agent.sandbox_backend.SandboxSessionBackend`
     over the workspace VOLUME; when ``None`` (the append path) it stays the non-sandbox
     ``StateBackend`` — the hard sandbox dependency lives at the run/astream door, not here.
     """
+    provider = provider or llm_provider_settings().llm
     subagent_specs = list(subagents or [])
     _validate(tools or [], subagent_specs, skills)
 
@@ -394,8 +435,12 @@ async def build_langchain_deep_agent(
         else build_backend(inline_skill_contents or None)
     )
     resolved = await asyncio.gather(
-        *(_resolve_subagent(spec, llm=llm, tools=tools or [], store=store, backend=backend) for spec in subagent_specs)
+        *(
+            _resolve_subagent(spec, llm=llm, provider=provider, tools=tools or [], store=store, backend=backend)
+            for spec in subagent_specs
+        )
     )
+    strategy, structured_rail = structured_output_stack(llm, provider, response_format)
     main_skills = _skills_with_inline(skills, inline_skills)
     resolved_subagents: list[SubAgent | CompiledSubAgent] = list(resolved)
     # deepagents auto-adds a general-purpose subagent when the caller supplies none;
@@ -404,6 +449,17 @@ async def build_langchain_deep_agent(
     # general-purpose subagent already gets it via _resolve_subagent).
     if not any(sub.get("name") == GENERAL_PURPOSE_SUBAGENT["name"] for sub in resolved_subagents):
         resolved_subagents.insert(0, _general_purpose_subagent(main_skills))
+
+    main_middleware: list[Any] = [
+        _async_park_middleware,
+        SystemPurgeMiddleware(),
+        LeadingUserMiddleware(),
+        RollingCacheMarkMiddleware(),
+        _tool_error_middleware,
+    ]
+    if structured_rail is not None:
+        # Innermost: the structured-output rail judges the main agent's payloads in-node.
+        main_middleware.append(structured_rail)
 
     return create_deep_agent(
         model=llm,
@@ -415,7 +471,7 @@ async def build_langchain_deep_agent(
         checkpointer=checkpointer,
         store=store,
         interrupt_on=interrupt_on,
-        response_format=as_tool_strategy(response_format),
+        response_format=strategy,
         # The park hook leads: it is the loop's sole before_model hook, so it is the
         # first per-step hook and recognizes an async-ask park before any compacting
         # hook (all of which compact through wrap_model_call, skipped on a park
@@ -426,11 +482,6 @@ async def build_langchain_deep_agent(
         # The rolling-cache-mark middleware keeps a per-turn-marked thread to one cache
         # breakpoint at the call. A tool-logic failure surfaces to the model as an error
         # ToolMessage rather than aborting the run; every other exception stays a loud abort.
-        middleware=[
-            _async_park_middleware,
-            SystemPurgeMiddleware(),
-            LeadingUserMiddleware(),
-            RollingCacheMarkMiddleware(),
-            _tool_error_middleware,
-        ],
+        # The structured-output rail, when present, is appended innermost (see above).
+        middleware=main_middleware,
     )

@@ -108,7 +108,12 @@ def _llm_env(res: StackResources) -> dict[str, str]:
     elif res.llm_base_url is not None:
         env["LLM_BASE_URL"] = res.llm_base_url
         env["LLM_API_KEY"] = "e2e-test"
-        env["LLM_MODEL"] = "e2e-scripted"
+        # The stub ignores the model, but the SUT builds its chat model from this id and the
+        # provider package's capability profile is keyed on it: a native-capable id
+        # (``gpt-4o-mini`` declares ``structured_output``) is what makes the structured-output
+        # plan exercise the provider-native path over the stub, rather than a profile-less
+        # sentinel that would only ever reach the tool tier.
+        env["LLM_MODEL"] = "gpt-4o-mini"
     if switch.is_real("embeddings"):
         provider = real_embedding_provider(os.environ)
         env["LLM_PROVIDER_EMBEDDING"] = provider.provider

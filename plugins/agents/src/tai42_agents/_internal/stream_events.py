@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
-from langchain.agents.structured_output import ToolStrategy
+from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
@@ -56,7 +56,6 @@ from tai42_kit.llm.runtime import validate_structured_output
 from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
-from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
 
@@ -71,17 +70,15 @@ def _channel_value(value: Any) -> Any:
 def _structured_tool_names(strategy: Any) -> frozenset[str]:
     """The name(s) of the synthetic tool a structured-output ``strategy`` binds.
 
-    ``strategy`` is the very ``ToolStrategy`` the graph was compiled with, so
-    ``as_tool_strategy`` is an identity pass-through here and the derived names
-    are exactly the schema-spec names langchain routes the synthetic tool call
-    by: a dict or schema class binds one spec, a Python union or a JSON-Schema
-    ``oneOf`` fans out into one spec per variant. Because it is the SAME object
-    the graph bound, the names match by identity — not by re-deriving them, which
-    for an untitled variant would mint a fresh random ``response_format_<hex>``.
-    A ``ProviderStrategy`` (provider-native routing) and ``None`` (no format
+    ``strategy`` is the very strategy object the graph was compiled with, so the
+    derived names are exactly the schema-spec names langchain routes the synthetic
+    tool call by: a dict or schema class binds one spec, a Python union or a
+    JSON-Schema ``oneOf`` fans out into one spec per variant. Because it is the SAME
+    object the graph bound, the names match by identity — not by re-deriving them,
+    which for an untitled variant would mint a fresh random ``response_format_<hex>``.
+    The native ``ProviderStrategy`` (provider-native routing) and ``None`` (no format
     requested) bind no synthetic tool, so no name is suppressed.
     """
-    strategy = as_tool_strategy(strategy)
     if isinstance(strategy, ToolStrategy):
         return frozenset(spec.name for spec in strategy.schema_specs)
     return frozenset()
@@ -158,12 +155,11 @@ async def astream_tools_agent_events(
     Cancellation (``asyncio.CancelledError``) propagates out unchanged so the
     caller can do its own abort bookkeeping.
     """
-    # Wrap the structured-output schema ONCE and bind that same strategy object into
-    # both the graph and the projection: the synthetic tool the graph binds and the
-    # names the projection suppresses derive from one object, so an untitled ``oneOf``
-    # variant's random name matches by identity rather than re-derivation.
-    strategy = as_tool_strategy(response_format)
-    agent, messages, config = await _build_agent_and_input(
+    # The compile seam mints the structured-output strategy ONCE and returns it; that
+    # same object is bound into both the graph and the projection, so the synthetic
+    # tool the graph binds and the names the projection suppresses derive from one
+    # object — an untitled ``oneOf`` variant's random name matches by identity.
+    agent, messages, config, strategy = await _build_agent_and_input(
         system_message,
         user_message,
         tools,
@@ -173,7 +169,7 @@ async def astream_tools_agent_events(
         config,
         system_content_kwargs=system_content_kwargs,
         user_content_kwargs=user_content_kwargs,
-        response_format=strategy,
+        response_format=response_format,
     )
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = Command(resume=resume) if resume is not None else messages
@@ -317,8 +313,13 @@ class _Projection:
     fallback final), and the latest structured-output payload seen on the updates channel.
     """
 
-    def __init__(self, structured_tools: frozenset[str]) -> None:
+    def __init__(self, structured_tools: frozenset[str], native: bool = False) -> None:
         self.structured_tools = structured_tools
+        # Under the native plan the final AIMessage text IS the JSON payload, carried
+        # as the single validated StructuredFinal; its token deltas and assembled
+        # MessageFinal are suppressed (symmetric to the tool plan's synthetic-frame
+        # suppression), so an SSE consumer never sees raw JSON deltas.
+        self.native = native
         self.dedup = _ToolCallDedup()
         self.answer_parts: list[str] = []
         self.last_update_text = ""
@@ -351,7 +352,7 @@ def _terminal_events(projection: _Projection, response_format: Any) -> Iterator[
     and, when a structured response was produced, the validated :class:`StructuredFinal`.
     """
     final_text = "".join(projection.answer_parts).strip() or projection.last_update_text.strip()
-    if final_text:
+    if final_text and not projection.native:
         yield MessageFinal(text=final_text)
     if projection.structured_response is not None:
         data = projection.structured_response
@@ -394,7 +395,8 @@ async def aproject_agent_events(
     # come from the strategy object the graph bound (identity, not re-derivation);
     # a caller that did not thread it falls back to the raw schema.
     projection = _Projection(
-        _structured_tool_names(structured_strategy if structured_strategy is not None else response_format)
+        _structured_tool_names(structured_strategy if structured_strategy is not None else response_format),
+        native=isinstance(structured_strategy, ProviderStrategy),
     )
 
     try:
@@ -403,7 +405,7 @@ async def aproject_agent_events(
 
             if mode == "messages":
                 delta = _message_delta_text(chunk)
-                if delta:
+                if delta and not projection.native:
                     projection.answer_parts.append(delta)
                     yield MessageDelta(text=delta)
                 continue

@@ -55,6 +55,10 @@ class LlmStub:
         self.port = port if port is not None else allocate_port()
         self._queue: deque[dict[str, Any]] = deque()
         self._requests: list[dict[str, Any]] = []
+        # When set, a completion carrying a FORCED ``tool_choice`` is answered with the
+        # vendor's 400 instead of a scripted turn — the refusing-model leg that proves the
+        # native structured-output plan sends no forced choice.
+        self._refuse_forced_tool_choice = False
         # Per-completion delay and in-flight high-water mark for observing turn concurrency.
         # Mutated only on the stub's single-threaded serving loop, so no lock is needed.
         self._response_delay_seconds = 0.0
@@ -89,6 +93,15 @@ class LlmStub:
         self._response_delay_seconds = 0.0
         self._in_flight_completions = 0
         self._max_in_flight_completions = 0
+        self._refuse_forced_tool_choice = False
+
+    def refuse_forced_tool_choice(self) -> None:
+        """Answer the vendor's 400 to any completion that binds a forced ``tool_choice``.
+
+        A structured-output run that still succeeds with this on proves no forced choice
+        reached the wire (the native plan), reproducing a refusing model's behaviour.
+        """
+        self._refuse_forced_tool_choice = True
 
     @property
     def requests(self) -> list[dict[str, Any]]:
@@ -118,6 +131,14 @@ class LlmStub:
         self._max_in_flight_completions = max(self._max_in_flight_completions, self._in_flight_completions)
         try:
             self._requests.append(body)
+            choice = body.get("tool_choice")
+            if self._refuse_forced_tool_choice and choice not in (None, "auto", "none"):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {"message": 'tool_choice: type "tool" and "any" are not supported for this model.'}
+                    },
+                )
             try:
                 turn = self._next_turn()
             except _UnscriptedError:

@@ -40,6 +40,7 @@ from tai42_agents._internal.park.drive import (
     park_continuation,
     park_drive,
     park_step_binding,
+    pending_interrupts,
 )
 from tai42_agents._internal.park.lease import (
     LEASE_HEADROOM_SECONDS,
@@ -77,6 +78,7 @@ __all__ = [
     "park_continuation",
     "park_drive",
     "park_step_binding",
+    "pending_interrupts",
     "persist_park",
     "register_agent_resume_tool",
     "register_chained_park_tool",

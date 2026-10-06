@@ -127,9 +127,9 @@ def test_append_thread_messages_acquires_no_sandbox(monkeypatch: pytest.MonkeyPa
     _sandboxes().provider = None
     captured: dict[str, Any] = {}
 
-    async def fake_resolve_and_build(**kwargs: Any) -> object:
+    async def fake_resolve_and_build(**kwargs: Any) -> tuple[object, Any]:
         captured.update(kwargs)
-        return object()
+        return object(), None
 
     async def fake_awrite(agent: object, config: dict[str, Any], messages: list[Any]) -> None:
         captured["wrote"] = messages

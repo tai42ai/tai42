@@ -1,76 +1,149 @@
-"""Deterministic structured-output routing for graph factories."""
+"""Bind the kit's structured-output plan to LangChain for a compiled run.
+
+:func:`structured_output_stack` is the ONE seam every compile path calls after the
+model is resolved. It asks the kit for the capability-negotiated
+:class:`~tai42_kit.llm.structured.StructuredOutputPlan` and mints the pair the graph
+and the projection share:
+
+* the strategy handed to ``create_agent(response_format=…)`` — a :class:`NativeStrategy`
+  (provider-native grammar, no forced tool choice) under the native plan, or a
+  ``ToolStrategy`` over the int64-bounded ``TypedDict`` under the tool plan (built with
+  ``handle_errors=False`` so LangChain's own rail steps aside and the platform rail owns
+  the retry);
+* the :class:`~tai42_agents._internal.structured_rail.StructuredOutputRailMiddleware`
+  appended to the graph's middleware list, which validates every structured payload
+  in-node against the authored schema and re-prompts under the per-run cap.
+
+:func:`ainvoke_structured` runs the identical capped loop without a graph for the
+single-shot doors, so every door ends on the same :class:`RepromptCapError` past the cap.
+"""
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from typing import Any
 
+import pydantic
 from langchain.agents.structured_output import AutoStrategy, ProviderStrategy, ToolStrategy
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
-from tai42_kit.utils.data.json_schema_util import inject_int64_bounds, json_schema_to_typed_dict
+from tai42_kit.llm.models import native_structured_output_kwargs
+from tai42_kit.llm.runtime import validate_structured_output
+from tai42_kit.llm.structured import StructuredOutputPlan, plan_structured_output
+from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal.outcomes import build_reprompt_handler
+from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware, reprompt_feedback
 from tai42_agents.settings import agents_limits_settings
 
+#: A produced value that is well-formed but does not conform to the authored schema.
+_VALIDATION_ERRORS = (JsonSchemaValidationError, pydantic.ValidationError)
 
-def _bounded_schema(schema: dict[str, Any]) -> Any:
-    """Tighten a raw JSON-Schema ``response_format`` to the int64 range and pin it to an enforced ``TypedDict`` shape.
 
-    A raw JSON-Schema dict is otherwise handed to the tool-calling strategy
-    unvalidated — langchain returns the tool args as-is — so an out-of-range
-    integer flows straight into ``structured_response`` and aborts the checkpoint
-    serializer. Injecting int64 bounds and converting to a ``TypedDict`` makes the
-    strategy's pydantic parse reject that integer, which the strategy's
-    ``handle_errors`` retry rail turns into a re-prompt; a conforming value still
-    round-trips to the same nested-``dict`` shape the raw schema yielded.
+class NativeStrategy(ProviderStrategy):
+    """A ``ProviderStrategy`` whose model kwargs are the kit's provider-native binding.
+
+    The factory's ``isinstance(..., ProviderStrategy)`` branch binds :meth:`to_model_kwargs`
+    with the tools (no forced ``tool_choice``) and parses the final text turn with the
+    ``ProviderStrategyBinding``; a dict schema parses to a plain dict, which the rail then
+    validates faithfully against the ORIGINAL authored schema.
     """
-    return json_schema_to_typed_dict(inject_int64_bounds(schema), name=schema.get("title") or "Response")
+
+    def __init__(self, plan: StructuredOutputPlan) -> None:
+        """Build from a native plan: the portable schema drives parsing, the kit kwargs the bind."""
+        if plan.provider_schema is None:
+            raise ValueError("NativeStrategy requires a native plan with a provider_schema")
+        super().__init__(plan.provider_schema)
+        self._kwargs = native_structured_output_kwargs(plan.provider, plan.name, plan.provider_schema)
+
+    def to_model_kwargs(self) -> dict[str, Any]:
+        """The kit's provider-native bind kwargs (what the provider receives)."""
+        return self._kwargs
 
 
-def as_tool_strategy(response_format: Any) -> Any:
-    """Wrap a schema ``response_format`` in an explicit ``ToolStrategy``.
+def structured_output_stack(
+    llm: BaseChatModel, provider: str, response_format: Any
+) -> tuple[Any, StructuredOutputRailMiddleware | None]:
+    """Mint the ``(strategy, rail)`` for a compiled run from the authored ``response_format``.
 
-    A raw schema (JSON-Schema dict or pydantic class) handed to a graph factory
-    is auto-routed: models flagged with native structured output get the
-    provider-native path, which rejects moderately complex schemas. Wrapping in
-    ``ToolStrategy`` pins the tool-calling path — uniform across providers, with
-    far higher schema limits — while populating the same ``structured_response``
-    state channel. An ``AutoStrategy`` is that same auto-routing spelled as an
-    object, so its schema is pinned identically. ``None`` (no structured output)
-    and an explicit ``ToolStrategy``/``ProviderStrategy`` pass through unchanged.
-
-    A raw JSON-Schema dict, and a pydantic ``BaseModel`` class (routed through its
-    JSON schema), are additionally tightened to the platform int64 range (see
-    :func:`_bounded_schema`) so an oversized integer is a retryable parse failure
-    rather than a serializer crash. Both faces re-validate against the ORIGINAL
-    class downstream (``validate_structured_output``'s BaseModel branch re-inflates
-    the parsed dict), so the ``.structured``/result contract is preserved. A
-    recursive model — which a ``TypedDict`` tree cannot express — keeps the class
-    itself; its oversized-int door is then closed by ``validate_structured_output``'s
-    unconditional int64 walk instead.
-
-    Every ``ToolStrategy`` built here carries a fresh per-run ``handle_errors``
-    counter (:func:`~tai42_agents._internal.outcomes.build_reprompt_handler`): it
-    re-prompts a non-conforming response exactly as the default rail does until the
-    ``structured_output_reprompt_cap`` limit, then raises
-    :class:`~tai42_agents._internal.outcomes.RepromptCapError` so the loop cannot
-    run away to the recursion limit. This is the ONE seam every face builds its
-    strategy through, and a strategy is built per compiled run, so the count is
-    scoped to a single run. An explicit ``ToolStrategy``/``ProviderStrategy`` passed
-    in already carries its own error handling and is returned unchanged (the
-    identity pass-through the streaming projection re-wraps its own strategy with).
+    ``None`` (no structured output) and an explicit ``ToolStrategy``/``ProviderStrategy``
+    pass through with no rail — the caller's own routing and error handling stand. A raw
+    JSON-Schema dict, a pydantic class, or an ``AutoStrategy`` wrapping one is planned by
+    the kit and bound here; the rail validates and re-prompts for both tiers.
     """
     if response_format is None or isinstance(response_format, (ToolStrategy, ProviderStrategy)):
-        return response_format
-    handle_errors = build_reprompt_handler(agents_limits_settings().structured_output_reprompt_cap)
+        return response_format, None
     schema = response_format.schema if isinstance(response_format, AutoStrategy) else response_format
-    if isinstance(schema, dict):
-        return ToolStrategy(_bounded_schema(schema), handle_errors=handle_errors)
-    if isinstance(schema, type) and issubclass(schema, BaseModel):
-        try:
-            return ToolStrategy(_bounded_schema(schema.model_json_schema()), handle_errors=handle_errors)
-        except ValueError:
-            # A recursive model has no TypedDict-tree form; keep the class itself
-            # (it binds the tool under the class name) and let the downstream
-            # unconditional int64 walk fail loudly on an oversized integer.
-            return ToolStrategy(schema, handle_errors=handle_errors)
-    return ToolStrategy(schema, handle_errors=handle_errors)
+    cap = agents_limits_settings().structured_output_reprompt_cap
+    if not isinstance(schema, dict) and not (isinstance(schema, type) and issubclass(schema, BaseModel)):
+        # A langchain schema shape the capability plan does not model (a Python union of
+        # models, a TypedDict, a dataclass): bind it to the tool tier as-is. The rail
+        # validates the produced value against it (the int64 walk applies to every value),
+        # and re-prompts a non-conforming payload under the per-run cap.
+        return ToolStrategy(schema, handle_errors=False), StructuredOutputRailMiddleware(schema, cap)
+    plan = plan_structured_output(llm, provider, schema)
+    if plan.mode == "native":
+        strategy: Any = NativeStrategy(plan)
+    else:
+        assert plan.bound_typed_dict is not None  # noqa: S101 (tool plan invariant; keeps the ToolStrategy call total)
+        strategy = ToolStrategy(plan.bound_typed_dict, handle_errors=False)
+    rail = StructuredOutputRailMiddleware(plan.validation_schema, cap)
+    return strategy, rail
+
+
+def _native_json(message: AIMessage) -> Any:
+    """Parse the JSON payload out of a native structured-output ``AIMessage`` (raises on malformed JSON)."""
+    content = message.content
+    if isinstance(content, str):
+        text = content
+    else:
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
+                parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        text = "".join(parts)
+    return json.loads(text)
+
+
+async def ainvoke_structured(llm: BaseChatModel, plan: StructuredOutputPlan, messages: Sequence[BaseMessage]) -> Any:
+    """Force structured output from a single model call, re-prompting under the per-run cap.
+
+    Native: bind the kit kwargs, invoke, parse the JSON text, validate. Tool: bind the
+    int64-bounded ``TypedDict`` via ``with_structured_output`` (function-calling), invoke,
+    validate the parsed value. On a malformed / non-conforming payload the SAME capped
+    re-prompt loop (counter + feedback shapes) as the graph rail runs; past the cap it
+    raises :class:`~tai42_agents._internal.outcomes.RepromptCapError`, which each
+    single-shot face maps to a typed, non-fatal outcome.
+    """
+    reprompt = build_reprompt_handler(agents_limits_settings().structured_output_reprompt_cap)
+    conversation = list(messages)
+    while True:
+        exc: Exception
+        if plan.mode == "native":
+            assert plan.provider_schema is not None  # noqa: S101 (native plan invariant; keeps the kwargs call total)
+            kwargs = native_structured_output_kwargs(plan.provider, plan.name, plan.provider_schema)
+            answer = await llm.bind(**kwargs).ainvoke(conversation)
+            failure_message: AIMessage | None = answer if isinstance(answer, AIMessage) else None
+            try:
+                return validate_structured_output(_native_json(answer), plan.validation_schema)
+            except (json.JSONDecodeError, ValueError, *_VALIDATION_ERRORS) as caught:
+                exc = caught
+        else:
+            assert plan.bound_typed_dict is not None  # noqa: S101 (tool plan invariant; keeps the bind call total)
+            bound = llm.with_structured_output(plan.bound_typed_dict, method="function_calling", include_raw=True)
+            result = await bound.ainvoke(conversation)
+            raw = result.get("raw") if isinstance(result, dict) else None
+            failure_message = raw if isinstance(raw, AIMessage) else None
+            try:
+                if isinstance(result, dict) and result.get("parsing_error") is not None:
+                    raise result["parsing_error"]
+                parsed = result.get("parsed") if isinstance(result, dict) else result
+                return validate_structured_output(parsed, plan.validation_schema)
+            except (ValueError, *_VALIDATION_ERRORS) as caught:
+                exc = caught
+        text = reprompt(exc)  # raises RepromptCapError past the cap
+        conversation = [*conversation, *reprompt_feedback(failure_message, text)]

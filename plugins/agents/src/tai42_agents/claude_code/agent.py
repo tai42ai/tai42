@@ -547,7 +547,12 @@ class ClaudeCodeAgent(Agent):
                 yield pair
         elif isinstance(frame, ResultFrame):
             event = await self._on_result_frame(
-                frame, session=session, settings=settings, text_parts=text_parts, terminal_key=terminal_key
+                frame,
+                session=session,
+                settings=settings,
+                text_parts=text_parts,
+                terminal_key=terminal_key,
+                response_format=options_snapshot.get("response_format"),
             )
             yield event, False
         elif isinstance(frame, FatalFrame):
@@ -605,14 +610,17 @@ class ClaudeCodeAgent(Agent):
         settings: ClaudeCodeSettings,
         text_parts: list[str],
         terminal_key: str | None,
+        response_format: Any = None,
     ) -> StreamEvent:
         """Emit the SDK usage and build the terminal event.
 
         In a resume drive (``terminal_key`` set) the durable terminal record is persisted BEFORE the
         caller reports it, so a crash after this point lets a redelivery re-produce the SAME output.
+        A requested ``response_format`` validates the structured result against the authored schema,
+        raising loudly on a non-conforming verdict (the CLI runtime has no in-loop retry seam).
         """
         self._emit_usage(frame, settings=settings)
-        event = terminal_event(frame, text_parts)
+        event = terminal_event(frame, text_parts, response_format)
         if terminal_key is not None:
             await persist_terminal_record(session, terminal_key, frame, event)
         return event

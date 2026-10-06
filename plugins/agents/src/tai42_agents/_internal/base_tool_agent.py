@@ -36,7 +36,7 @@ from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_
 from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
-from tai42_agents._internal.structured import as_tool_strategy
+from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage, aggregate_usage
 
 # One shared, stateless park hook leading the tools-agent stack, so an async
@@ -75,7 +75,7 @@ async def _compile_tools_agent(
     response_format: Any = None,
     system_message: str = "",
     system_content_kwargs: dict[str, Any] | None = None,
-) -> Any:
+) -> tuple[Any, Any]:
     """Resolve the model and checkpointer and compile the tools agent graph.
 
     The build every face shares, up to compile — no model invocation happens here.
@@ -83,7 +83,10 @@ async def _compile_tools_agent(
     defaults), the checkpointer from the checkpoint registry (so every caller
     resolving the same ``checkpoint_provider`` reaches the same saver), and the
     system-purge, context-overflow, leading-user, rolling-cache-mark and
-    tool-error middleware are attached.
+    tool-error middleware are attached. Returns ``(agent, strategy)`` — the minted
+    structured-output strategy (or ``None``) the projection suppresses the synthetic
+    tool frames by, so every face binds one strategy object into both the graph and
+    the projection.
 
     ``system_message`` becomes the graph's per-run ``system_prompt``, applied at
     the model-call boundary on every turn and never written into checkpointed
@@ -100,6 +103,7 @@ async def _compile_tools_agent(
     """
     llm_provider = llm_provider or llm_provider_settings().llm
     llm = await get_llm_async(provider=llm_provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
+    strategy, structured_rail = structured_output_stack(llm, llm_provider, response_format)
 
     checkpoint_provider = checkpoint_provider or llm_provider_settings().checkpoint
     checkpointer = await checkpoint_registry().get_checkpointer(
@@ -117,26 +121,33 @@ async def _compile_tools_agent(
     # The per-run system prompt is shared with the context-overflow middlewares so
     # the trimming budget covers the full outgoing request, prompt included.
     system_prompt = build_system_message(system_message, system_content_kwargs)
-    return create_agent(
+    middleware = [
+        # The park hook leads: it is the loop's first before_model hook, so it
+        # recognizes an async-ask park before any message-compacting hook (which
+        # compact through wrap_model_call, skipped on a park super-step) could
+        # evict its marked ToolMessage.
+        _async_park_middleware,
+        SystemPurgeMiddleware(),
+        *await context_overflow_middlewares(system_prompt=system_prompt),
+        LeadingUserMiddleware(),
+        RollingCacheMarkMiddleware(),
+        _tool_error_middleware,
+    ]
+    if structured_rail is not None:
+        # Innermost wrap_model_call: its handler is the model execution that parses
+        # the structured output, so a non-conforming payload is judged and re-prompted
+        # in-node under the per-run cap.
+        middleware.append(structured_rail)
+    agent = create_agent(
         llm,
         tools=tools,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
-        middleware=[
-            # The park hook leads: it is the loop's first before_model hook, so it
-            # recognizes an async-ask park before any message-compacting hook (which
-            # compact through wrap_model_call, skipped on a park super-step) could
-            # evict its marked ToolMessage.
-            _async_park_middleware,
-            SystemPurgeMiddleware(),
-            *await context_overflow_middlewares(system_prompt=system_prompt),
-            LeadingUserMiddleware(),
-            RollingCacheMarkMiddleware(),
-            _tool_error_middleware,
-        ],
+        middleware=middleware,
         debug=logging_settings().is_enabled_for("DEBUG"),
-        response_format=as_tool_strategy(response_format),
+        response_format=strategy,
     )
+    return agent, strategy
 
 
 async def _build_agent_and_input(
@@ -150,7 +161,7 @@ async def _build_agent_and_input(
     system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
     """Compile the tools agent, build its input messages and run config, and ready the thread.
 
     Wraps :func:`_compile_tools_agent` with the input build and the turn-start
@@ -160,9 +171,11 @@ async def _build_agent_and_input(
     ``system_prompt`` — the input carries only the user messages, so thread state
     stays system-free. ``system_content_kwargs`` / ``user_content_kwargs`` (e.g.
     ``cache_control``) carry content-block keys onto the system message and the last
-    user message respectively. Returns ``(agent, messages, config)``.
+    user message respectively. Returns ``(agent, messages, config, strategy)`` — the
+    minted structured-output strategy the projection suppresses the synthetic tool
+    frames by.
     """
-    agent = await _compile_tools_agent(
+    agent, strategy = await _compile_tools_agent(
         tools,
         llm_provider=llm_provider,
         checkpoint_provider=checkpoint_provider,
@@ -175,7 +188,7 @@ async def _build_agent_and_input(
     config = init_langgraph_config(config)
     messages = build_agent_input(*user_message, user_content_kwargs=user_content_kwargs)
     await _repair_dangling_tool_calls(agent, config)
-    return agent, messages, config
+    return agent, messages, config, strategy
 
 
 async def aappend_tools_agent_messages(
@@ -192,7 +205,7 @@ async def aappend_tools_agent_messages(
     ``START`` node. No tool set is needed — the checkpoint write is
     tool-independent — so the graph compiles with an empty tool set.
     """
-    agent = await _compile_tools_agent(
+    agent, _strategy = await _compile_tools_agent(
         [],
         llm_provider=llm_provider,
         checkpoint_provider=checkpoint_provider,
@@ -230,7 +243,7 @@ async def ainvoke_tools_agent(
     instead of an answer. ``resume`` drives ``Command(resume=...)`` — answering a
     prior park — in place of a fresh user turn.
     """
-    agent, messages, config = await _build_agent_and_input(
+    agent, messages, config, _strategy = await _build_agent_and_input(
         system_message,
         user_message,
         tools,
@@ -295,7 +308,7 @@ async def astream_tools_agent(
     The caller decodes the channel shapes. A ``response_format`` forces structured output onto
     the ``structured_response`` state channel.
     """
-    agent, messages, config = await _build_agent_and_input(
+    agent, messages, config, _strategy = await _build_agent_and_input(
         system_message,
         user_message,
         tools,

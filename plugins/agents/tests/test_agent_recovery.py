@@ -408,7 +408,12 @@ class TestDeepAgentRecovery:
         )
         asyncio.run(
             fac._compile_nested_subagent(
-                child, parent_model="LLM", parent_tools=[], store=InMemoryStore(), backend=object()
+                child,
+                parent_model="LLM",
+                parent_provider=None,
+                parent_tools=[],
+                store=InMemoryStore(),
+                backend=object(),
             )
         )
         gp = [s for s in captured["subagents"] if s.get("name") == "general-purpose"]

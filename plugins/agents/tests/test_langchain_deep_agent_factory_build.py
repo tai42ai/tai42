@@ -160,7 +160,7 @@ def test_resolve_subagent_emits_response_format() -> None:
         x: int
 
     spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(content="p"), response_format=M)
-    sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
+    sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec, llm=_FAKE_LLM, provider="openai")))
     # The schema is pinned to the tool-calling strategy, never provider-dependent
     # auto-routing.
     assert isinstance(sub["response_format"], ToolStrategy)
@@ -249,7 +249,12 @@ def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypat
     )
     asyncio.run(
         factory._compile_nested_subagent(
-            child, parent_model=_FAKE_LLM, parent_tools=[], store=InMemoryStore(), backend=object()
+            child,
+            parent_model=_FAKE_LLM,
+            parent_provider="openai",
+            parent_tools=[],
+            store=InMemoryStore(),
+            backend=object(),
         )
     )
     # The nested leaf's schema is pinned to the tool-calling strategy, never
@@ -364,7 +369,12 @@ def test_nested_general_purpose_subagent_inherits_child_skill_sources(monkeypatc
     )
     asyncio.run(
         factory._compile_nested_subagent(
-            child, parent_model=_FAKE_LLM, parent_tools=[], store=InMemoryStore(), backend=object()
+            child,
+            parent_model=_FAKE_LLM,
+            parent_provider="openai",
+            parent_tools=[],
+            store=InMemoryStore(),
+            backend=object(),
         )
     )
     (gp,) = [s for s in calls[-1]["subagents"] if s["name"] == "general-purpose"]

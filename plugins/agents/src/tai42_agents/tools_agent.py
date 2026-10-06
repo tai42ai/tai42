@@ -705,7 +705,7 @@ class ToolsAgent(Agent):
         resolved_tools = await resolve_tools(
             tai42_app.tools, list(validated.tool_names), [], list(validated.presets or [])
         )
-        agent = await _compile_tools_agent(
+        agent, _strategy = await _compile_tools_agent(
             resolved_tools,
             llm_provider=validated.llm_provider,
             checkpoint_provider=validated.checkpoint_provider,

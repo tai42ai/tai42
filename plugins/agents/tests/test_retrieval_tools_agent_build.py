@@ -18,13 +18,12 @@ from tai42_contract.agent import (
     StructuredFinal,
 )
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 from tests._retrieval_tools_agent_support import (
     _RETRIEVAL_SCHEMA,
-    _BoomStructuredLLM,
     _collect,
+    _NativeFake,
     _patch_build_seams,
-    _StructuredLLM,
+    _ToolFake,
 )
 
 from tai42_agents._internal.reject import reject_unhonored
@@ -333,11 +332,11 @@ class TestAstreamAndRun:
         assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"))) == "the answer"
 
     def test_astream_with_response_format_emits_one_structured_final(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # With a response_format set, the terminal result is forced into the schema
-        # by a structured finalization pass over the resolved llm: the run ends with
-        # exactly one StructuredFinal (carrying the validated object) and NO text
-        # MessageFinal, and the schema is passed straight to the provider.
-        llm = _StructuredLLM({"value": 7})
+        # With a response_format set, the terminal result is forced into the schema by a
+        # structured finalization pass over the resolved llm. A native-capable model binds
+        # the kit's response_format kwargs (never with_structured_output) and the run ends
+        # with exactly one StructuredFinal (the validated object) and NO text MessageFinal.
+        llm = _NativeFake(['{"value": 7}'])
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
 
@@ -349,18 +348,28 @@ class TestAstreamAndRun:
         assert len(finals) == 1
         assert finals[0].data == {"value": 7}
         assert not any(isinstance(e, MessageFinal) for e in events)
-        assert llm.captured["schema"] == _RETRIEVAL_SCHEMA
-        assert llm.captured["include_raw"] is False
+        assert llm.bind_kwargs
+        assert "response_format" in llm.bind_kwargs[0]
+        assert llm.with_structured_output_called is False
         # The finalization message carries the terminal envelope's plain-text result.
         assert llm.captured["messages"][0].content == "the answer"
 
     def test_run_with_response_format_returns_the_structured_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        llm = _StructuredLLM({"value": 7})
+        llm = _NativeFake(['{"value": 7}'])
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
         assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_RETRIEVAL_SCHEMA)) == {
             "value": 7
         }
+
+    def test_unprofiled_finalizer_takes_the_tool_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        llm = _ToolFake([{"value": 7}])
+        self._script(monkeypatch, [self._final("the answer")], llm=llm)
+        agent = RetrievalToolsAgent()
+        assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_RETRIEVAL_SCHEMA)) == {
+            "value": 7
+        }
+        assert llm.with_structured_output_calls >= 1
 
     def test_run_response_format_without_title_raises_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._script(monkeypatch, [self._final("the answer")])
@@ -379,29 +388,39 @@ class TestAstreamAndRun:
                 _collect(agent.astream(user_message=TemplatedText(content="hi"), response_format={"type": "object"}))
             )
 
-    def test_run_response_format_unparseable_finalization_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # An unparseable structured-finalization output propagates the raise loudly —
-        # never silence, never a text fallback.
-        llm = _BoomStructuredLLM()
-        self._script(monkeypatch, [self._final("the answer")], llm=llm)
-        agent = RetrievalToolsAgent()
-        with pytest.raises(ValueError, match="unparseable structured output"):
-            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=_RETRIEVAL_SCHEMA))
-
-    def test_run_response_format_nonconforming_structured_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A finalization payload violating a schema constraint keyword (minimum)
-        # raises loudly from the validation step instead of being returned.
+    def test_run_response_format_nonconforming_then_conforming_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A finalization payload violating a schema constraint keyword is re-prompted
+        # in-node; the second, conforming answer is returned.
         schema = {
             "title": "Answer",
             "type": "object",
             "properties": {"value": {"type": "integer", "minimum": 0}},
             "required": ["value"],
         }
-        llm = _StructuredLLM({"value": -1})
+        llm = _NativeFake(['{"value": -1}', '{"value": 3}'])
         self._script(monkeypatch, [self._final("the answer")], llm=llm)
         agent = RetrievalToolsAgent()
-        with pytest.raises(JsonSchemaValidationError):
-            asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=schema))
+        assert asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=schema)) == {"value": 3}
+        assert llm.calls == 2
+
+    def test_run_response_format_never_conforming_ends_on_unresolved_final(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A finalization that never conforms ends on the typed outcome from the face,
+        # never a raw raise.
+        from tai42_contract.agent.events import StructuredOutputUnresolvedFinal
+
+        schema = {
+            "title": "Answer",
+            "type": "object",
+            "properties": {"value": {"type": "integer", "minimum": 0}},
+            "required": ["value"],
+        }
+        llm = _NativeFake(['{"value": -1}'])
+        self._script(monkeypatch, [self._final("the answer")], llm=llm)
+        agent = RetrievalToolsAgent()
+        result = asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format=schema))
+        assert isinstance(result, StructuredOutputUnresolvedFinal)
 
 
 class TestInputModel:
