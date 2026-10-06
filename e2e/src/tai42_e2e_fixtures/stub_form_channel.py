@@ -49,6 +49,7 @@ class _StubFormChannel:
                 "schema": notification.schema,
                 "data": notification.data.model_dump(mode="json") if notification.data is not None else None,
                 "pages": [p.model_dump(mode="json") for p in notification.pages] if notification.pages else None,
+                "form_tag": notification.form_tag,
             }
         )
         key = f"e2e:rec:notify_form:{notification.recipient}"

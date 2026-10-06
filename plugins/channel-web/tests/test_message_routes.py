@@ -837,10 +837,17 @@ def _seed_form(
     address: str = VISITOR_ID,
     schema: dict | None = None,
     message: str = "Fill this in",
+    form_tag: str | None = None,
 ) -> None:
     """Seed one form token record exactly as the notify path writes it."""
     fake.store[f"channel:web:form:{token}"] = json.dumps(
-        {"identity": identity, "address": address, "schema": schema or _ROUTE_FORM_SCHEMA, "message": message}
+        {
+            "identity": identity,
+            "address": address,
+            "schema": schema or _ROUTE_FORM_SCHEMA,
+            "message": message,
+            "form_tag": form_tag,
+        }
     )
 
 
@@ -886,6 +893,32 @@ async def test_forms_bridges_values_with_rendered_text_and_appends_inbound(
     assert len(call["provider_message_id"]) == 32
     payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
     assert payload == {"id": "turn-77", "direction": "in", "text": "Name: Ada\nage: 42", "ts": payload["ts"]}
+
+
+async def test_forms_round_trip_the_stored_form_tag_to_accept(web_env, stub_app, registered_session: FakeRedis):
+    # The caller-set opaque per-send tag the notify path stored on the record rides back to the
+    # bridge on submit, beside the form — so the submission carries the correlation.
+    stub_app.conversations.accept_result = "turn-77"
+    _seed_form(registered_session, form_tag="ref-42")
+
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+
+    assert resp.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    assert call["form_tag"] == "ref-42"
+
+
+async def test_forms_ignore_a_client_body_form_tag(web_env, stub_app, registered_session: FakeRedis):
+    # The tag rides the SERVER-side record only: a client-supplied form_tag in the body is not a
+    # FormSubmissionBody field and is ignored — the record's value (here none) is what reaches accept.
+    stub_app.conversations.accept_result = "turn-77"
+    _seed_form(registered_session)
+
+    resp = await _handler(stub_app, _FORMS)(_form_request(extra_body={"form_tag": "client-forged"}))
+
+    assert resp.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    assert call["form_tag"] is None
 
 
 async def test_forms_schema_violating_values_still_land_in_form(web_env, stub_app, registered_session: FakeRedis):

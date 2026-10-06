@@ -558,9 +558,28 @@ async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
             "form": {"note": "ship it", "qty": 7, "amount": 3.5, "agree": True},
             "attachments": None,
             "location": None,
+            # A 3-segment token carries no tag.
+            "form_tag": None,
         }
     ]
     assert _SEEN_KEY in fake_redis.store
+
+
+async def test_notify_form_reply_returns_the_caller_set_form_tag(
+    waba_env, handler, stub_app, channels, fake_redis: FakeRedis
+):
+    # A 4-segment token (prefix:hash:nonce:tag) hands the caller-set opaque tag back to the
+    # bridge beside the form, so the submission round-trips the correlation.
+    _seed_schema_cache(fake_redis)
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    token = f"{_NF_PREFIX}{schema_hash}:cafef00d:ref-42"
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": token, "note": "ship it"})))
+
+    assert result.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    assert call["form"] == {"note": "ship it"}
+    assert call["form_tag"] == "ref-42"
 
 
 async def test_notify_form_reply_cache_miss_degrades_to_raw_values(

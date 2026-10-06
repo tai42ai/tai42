@@ -115,12 +115,15 @@ async def _bridge_inbound(
     params: dict[str, str] | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
+    form_tag: str | None = None,
 ) -> None:
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim);
     ``form`` is an ask-less form submission's structured copy, riding beside its
-    rendered ``text``; ``params`` are the channel's opaque entry-params (reply ids,
+    rendered ``text``; ``form_tag`` is the caller-set opaque per-send tag the notify-form
+    token carried back, handed to the bridge beside ``form`` (the platform bounds it,
+    never interprets it); ``params`` are the channel's opaque entry-params (reply ids,
     referral, reply-to context, media identity — see the ``params`` vocabulary block)
     forwarded verbatim to the tool target's payload. ``attachments`` (typed participant media) and
     ``location`` (a shared geographic point) are the structured inbound content that lands on
@@ -157,6 +160,7 @@ async def _bridge_inbound(
             form=form,
             attachments=attachments,
             location=location,
+            form_tag=form_tag,
         )
     except BlankInboundTextError as exc:
         logger.warning("blank whatsapp inbound %s dropped: %s", wamid, exc)

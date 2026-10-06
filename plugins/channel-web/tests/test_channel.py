@@ -747,8 +747,21 @@ async def test_notify_schema_appends_form_card_and_writes_token_record(fake_redi
         "address": VISITOR_ID,
         "schema": _FORM_SCHEMA,
         "message": "Fill this in",
+        # No caller-set tag on this send: stored as null, never absent.
+        "form_tag": None,
     }
     assert fake_redis.ttls[f"channel:web:form:{token}"] == 30 * 86400
+
+
+async def test_notify_schema_stores_the_form_tag_on_the_record_not_the_frame(fake_redis: FakeRedis):
+    # The caller-set opaque per-send tag is kept server-side on the submission record so it
+    # round-trips on submit; the browser-facing chat.form frame NEVER carries it.
+    await WebChannel().notify(make_notification(message="Fill this in", schema=_FORM_SCHEMA, form_tag="ref-42"))
+
+    payload = _only_form_entry(fake_redis)
+    assert "form_tag" not in payload  # the frame the browser reads never carries the tag
+    _token, record = _only_form_record(fake_redis)
+    assert record["form_tag"] == "ref-42"  # the server-side record carries it for the submit round-trip
 
 
 async def test_notify_ask_less_form_card_is_unbroken_by_the_new_optional_fields(fake_redis: FakeRedis):

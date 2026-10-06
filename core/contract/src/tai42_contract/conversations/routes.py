@@ -112,6 +112,10 @@ class ConversationRouteCreate(ParkableDoorMixin):
                         ("params", "non-empty entry params, nested under this key"),
                         ("form", "a structured form submission, present only when the inbound carried one"),
                         (
+                            "form_tag",
+                            "the caller-set opaque per-send form tag, present only when the submission carried one",
+                        ),
+                        (
                             "attachments",
                             "inbound media the participant sent, present only when the inbound carried some",
                         ),
@@ -122,7 +126,8 @@ class ConversationRouteCreate(ParkableDoorMixin):
                         (
                             "messages",
                             "overlap deliver=all: the batch carried into this turn, in acceptance order, "
-                            "each {id, text, accepted_at} (+ form/attachments/location when that message carried them)",
+                            "each {id, text, accepted_at} (+ form/form_tag/attachments/location when that message "
+                            "carried them)",
                         ),
                         (
                             "superseded",

@@ -309,6 +309,12 @@ async def _send_form_notification(
     reserved: the token — minted in the ``tai42-nf:`` namespace as prefix + schema
     hash + a random suffix — routes the reply, not the pair, so any number of forms
     may be outstanding and a pending ask on the same pair is never touched.
+
+    A caller-set ``form_tag`` rides the token as a 4th ``:``-delimited segment
+    (``tai42-nf:{hash}:{nonce}:{form_tag}``) when set — its charset excludes ``:`` so it
+    stays one segment. It NEVER enters the published Flow artefact, the schema hash, the
+    cached flow id or the send's data, so it triggers no republish and leaves the artefact
+    guest-data-free; the reply side reads it straight back off the returned token.
     """
     if notification.schema is None:  # dispatch guard; notify() branches on the field
         raise ChannelDeliveryError("form notification is missing its schema")
@@ -329,6 +335,10 @@ async def _send_form_notification(
     # payload-label reverse map rides with the schema so the reply decodes to schema keys.
     await cache_flow_form(waba_id, schema_hash, notification.schema, _reverse_payload_labels(notification.schema))
     flow_token = f"{_NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
+    if notification.form_tag is not None:
+        # The caller-set tag rides as the 4th token segment; it never touches the Flow
+        # artefact, the hash or the send data, so no republish and no guest data in the artefact.
+        flow_token = f"{flow_token}:{notification.form_tag}"
     sent.append(
         await send_flow(
             phone_number_id=phone_number_id,

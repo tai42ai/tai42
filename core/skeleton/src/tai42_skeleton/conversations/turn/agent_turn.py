@@ -214,6 +214,7 @@ async def _run_agent_turn(
     person: Person | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
 ) -> _ToolOutcome:
@@ -256,6 +257,7 @@ async def _run_agent_turn(
         person=person,
         params=params,
         form=form,
+        form_tag=form_tag,
         attachments=attachments,
         location=location,
     )

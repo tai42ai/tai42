@@ -461,7 +461,16 @@ class WebChannel:
             # resolves its token. A record whose frame then failed to land is unreadable
             # (the token never left the server) and ages out on its own TTL.
             token = await store_form_record(
-                FormRecord(identity=identity, address=address, schema=notification.schema, message=notification.message)
+                FormRecord(
+                    identity=identity,
+                    address=address,
+                    schema=notification.schema,
+                    message=notification.message,
+                    # The caller-set opaque per-send tag is kept server-side on the record so it
+                    # round-trips to the bridge on submit; it NEVER enters the chat.form frame
+                    # below, so the browser never sees or supplies it.
+                    form_tag=notification.form_tag,
+                )
             )
             async with transcript_order(identity, address):
                 entry_id = await append_form(

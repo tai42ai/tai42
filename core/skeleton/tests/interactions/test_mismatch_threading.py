@@ -137,6 +137,7 @@ def wired(monkeypatch, fake_client_ctx):
         attachments=None,
         location=None,
         locale=None,
+        form_tag=None,
     ):
         accept_calls.append(SimpleNamespace(client_address=client_address, text=text))
         return "bridged-msg-1"

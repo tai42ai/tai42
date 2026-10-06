@@ -379,3 +379,29 @@ def test_conversation_answer_blank_answer_without_parts_is_refused():
 
     with pytest.raises(ValidationError, match="blank text must carry media-only parts"):
         ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="")
+
+
+def test_answer_part_carries_a_form_tag_on_a_form_part():
+    from tai42_contract.conversations import AnswerPart
+
+    part = AnswerPart(message="tell us your size", schema=_part_form_schema(), form_tag="ref-42")
+    assert part.form_tag == "ref-42"
+    assert AnswerPart(message="hi", schema=_part_form_schema()).form_tag is None
+
+
+def test_answer_part_form_tag_rides_a_form_part_only():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations import AnswerPart
+
+    with pytest.raises(ValidationError, match="form_tag rides a form part"):
+        AnswerPart(message="hi", form_tag="ref-42")
+
+
+def test_answer_part_form_tag_is_bounded():
+    from pydantic import ValidationError
+
+    from tai42_contract.conversations import AnswerPart
+
+    with pytest.raises(ValidationError, match="form_tag must be 1 to"):
+        AnswerPart(message="hi", schema=_part_form_schema(), form_tag="has:colon")

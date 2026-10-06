@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from tai42_contract.conversations.inbound_form import validate_bounded_object, validate_inbound_form
 from tai42_contract.entry_params import validate_entry_params
-from tai42_contract.interactions.models import LocationElement, MediaItem, check_media_list
+from tai42_contract.interactions.models import LocationElement, MediaItem, check_form_tag, check_media_list
 from tai42_contract.locale import normalize_optional_locale
 
 
@@ -83,6 +83,16 @@ class ConversationMessage(BaseModel):
             "means none supplied (no silent default)."
         ),
     )
+    form_tag: str | None = Field(
+        default=None,
+        description=(
+            "The caller-set opaque per-send ``form_tag`` the platform handed out with the form "
+            "this submission answers, echoed back BESIDE ``form``. It rides ONLY a form "
+            "submission (requires ``form``); the platform never interprets it, only bounds it "
+            "as transport. The door accepts the echo under the same trust posture as ``form`` — "
+            "the platform cannot verify the echo corresponds to a send. ``null`` means none."
+        ),
+    )
 
     @field_validator("external_user_id", "text")
     @classmethod
@@ -120,6 +130,23 @@ class ConversationMessage(BaseModel):
     @classmethod
     def _canonical_locale(cls, value: str | None) -> str | None:
         return normalize_optional_locale(value)
+
+    @field_validator("form_tag")
+    @classmethod
+    def _check_form_tag(cls, value: str | None) -> str | None:
+        # None means no tag; a present tag is bounded as pure transport, the error naming the
+        # bound, never the value.
+        if value is not None:
+            check_form_tag(value)
+        return value
+
+    @model_validator(mode="after")
+    def _form_tag_requires_form(self) -> ConversationMessage:
+        # The tag correlates a FORM submission; without a ``form`` it names a submission that is
+        # not there, so it is refused loudly rather than carried on a plain message.
+        if self.form_tag is not None and self.form is None:
+            raise ValueError("form_tag rides a form submission (requires form)")
+        return self
 
 
 # An event ``kind`` is a namespaced identifier-like label (e.g. ``provider.update``): the

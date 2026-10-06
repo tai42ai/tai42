@@ -34,6 +34,7 @@ def _new_record(
     origin: Literal["client", "operator"] = "client",
     operator_send: bool = False,
     inbound_form: dict[str, Any] | None = None,
+    inbound_form_tag: str | None = None,
     inbound_attachments: list[MediaItem] | None = None,
     inbound_location: LocationElement | None = None,
     inbound_locale: str | None = None,
@@ -46,7 +47,8 @@ def _new_record(
     That state is ``accepted``, ``pending_delivery`` or ``shed``. ``inbound_text`` is the message
     verbatim, durable from here so the record reads as a turn of a conversation and not
     only as its answer; ``inbound_form`` is the structured submission that rode WITH it
-    (an ask-less form's answers), and ``inbound_attachments``/``inbound_location`` are the media
+    (an ask-less form's answers), ``inbound_form_tag`` the caller-set opaque per-send tag that
+    rode back with that submission, and ``inbound_attachments``/``inbound_location`` are the media
     and location the participant sent with it — all stored beside the text, ``None`` for an ordinary
     text-only inbound. A ``client`` api-door record MUST name the authenticated caller its
     thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
@@ -80,6 +82,7 @@ def _new_record(
         provider_message_id=provider_message_id,
         inbound_text=inbound_text,
         inbound_form=inbound_form,
+        inbound_form_tag=inbound_form_tag,
         inbound_attachments=inbound_attachments,
         inbound_location=inbound_location,
         inbound_locale=inbound_locale,

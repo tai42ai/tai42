@@ -58,8 +58,9 @@ _whatsapp_mock_leg = pytest.mark.skipif(
 
 # The payload map a form-recording tool route uses: keyed by the submission's own
 # ``topic`` value (each leg sends a unique marker there), recording the rendered
-# message text AND the structured form (serialized — ``e2e_record`` takes a string).
-_FORM_PAYLOAD_EXPR = "{key: .form.topic, value: ({message: .message, form: .form} | tojson)}"
+# message text, the structured form AND the caller-set per-send ``form_tag`` (serialized —
+# ``e2e_record`` takes a string). ``form_tag`` is null unless the notify set one.
+_FORM_PAYLOAD_EXPR = "{key: .form.topic, value: ({message: .message, form: .form, form_tag: .form_tag} | tojson)}"
 
 # One generic answer schema per surface (client-agnostic field names). ``count`` /
 # ``amount`` are integers: a WhatsApp Flow returns every input as a STRING, so the
@@ -195,8 +196,10 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
 
     prompt = uniq("l27-web-prompt")
     image_url = f"https://cdn.example.com/{uniq('l27-web-img')}.jpg"
+    form_tag = uniq("l27-web-tag")
     # The agent-initiated form notify names the visitor pair as the composite recipient,
-    # exactly as the media/options notifies do.
+    # exactly as the media/options notifies do; it also sets a caller-set per-send form_tag
+    # the web channel keeps server-side and round-trips on every submit.
     await bridge.api().post(
         "/api/notifications",
         json={
@@ -205,6 +208,7 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
             "recipient": web.recipient,
             "schema": _WEB_SCHEMA,
             "media": [{"kind": "image", "url": image_url, "caption": "figure"}],
+            "form_tag": form_tag,
         },
     )
 
@@ -234,14 +238,18 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
     first_turn = await _recorded_form_turn(bridge, first_marker)
     assert first_turn["form"] == {"topic": first_marker, "count": 4}
     assert first_turn["message"] == f"Topic: {first_marker}\nCount: 4"
+    # The caller-set per-send tag the notify named rode the server-side record and reaches the
+    # tool payload beside the form — the browser never saw it, yet the submission round-trips it.
+    assert first_turn["form_tag"] == form_tag
 
     # RESUBMIT: the record is read, never claimed — the second submission is its own
-    # second participant turn.
+    # second participant turn, and the SAME tag rides it (the record is not consumed).
     second_marker = uniq("l27-web-b")
     resubmitted = await _post_form(bridge, token, {"topic": second_marker, "count": 5}, cookies=web.cookies)
     assert resubmitted.status_code == 200, resubmitted.text
     second_turn = await _recorded_form_turn(bridge, second_marker)
     assert second_turn["form"] == {"topic": second_marker, "count": 5}
+    assert second_turn["form_tag"] == form_tag
 
     # A FOREIGN session's POST and a never-minted token answer the ONE uniform 404 —
     # same status, same body, no token/ownership oracle.
@@ -334,6 +342,7 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
     await _form_record_route(bridge, uniq, channel="whatsapp", identity=identity)
     wa_id = _fresh_wa_id()
     prompt = uniq("l27-wa-prompt")
+    form_tag = uniq("l27-wa-tag")
 
     await bridge.api().post(
         "/api/notifications",
@@ -342,6 +351,7 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
             "channel": "whatsapp",
             "recipient": wa_id,
             "schema": _whatsapp_schema("flow-and-coerce"),
+            "form_tag": form_tag,
         },
     )
 
@@ -356,6 +366,8 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
     assert bridge.fake_whatsapp.published_flows == [bridge.fake_whatsapp.flows[0]["id"]]
     flow_token = interactive["action"]["parameters"]["flow_token"]
     assert flow_token.startswith("tai42-nf:")
+    # The caller-set tag rides the token as its 4th ``:``-delimited segment, not the Flow.
+    assert flow_token.split(":") == ["tai42-nf", *flow_token.split(":")[1:3], form_tag]
     assert _stack_redis_get(bridge, _whatsapp_pending_key(BRIDGE_WHATSAPP_PHONE_ID, wa_id)) is None
 
     # The signed completed-Flow reply carrying that token enters the conversation as a
@@ -372,6 +384,8 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
     turn = await _recorded_form_turn(bridge, marker)
     assert turn["form"] == {"topic": marker, "amount": 4}
     assert turn["message"] == f"Topic: {marker}\nAmount: 4"
+    # The tag the Flow token carried round-trips to the tool payload beside the coerced form.
+    assert turn["form_tag"] == form_tag
 
 
 @_whatsapp_mock_leg

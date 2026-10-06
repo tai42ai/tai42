@@ -116,6 +116,7 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "form": None,  # a plain text message carries no structured form
             "attachments": None,
             "location": None,
+            "form_tag": None,
         }
     ]
     assert _SEEN_KEY in fake_redis.store
@@ -175,6 +176,7 @@ async def test_expired_question_reply_reaches_bridge(handler, stub_app, fake_red
             "form": None,
             "attachments": None,
             "location": None,
+            "form_tag": None,
         }
     ]
 
@@ -319,6 +321,7 @@ async def test_stale_tap_restores_pending_and_bridges_title(
             "form": None,
             "attachments": None,
             "location": None,
+            "form_tag": None,
         }
     ]
     assert _SEEN_KEY in fake_redis.store

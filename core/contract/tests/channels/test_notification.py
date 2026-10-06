@@ -241,3 +241,30 @@ def test_notification_schema_may_combine_with_media():
     notification = ChannelNotification(message="pick from the chart", media=[_image_item()], schema=_form_schema())
     assert notification.media == [_image_item()]
     assert notification.schema == _form_schema()
+
+
+def test_notification_carries_a_form_tag_on_a_form_send():
+    from tai42_contract.channels import ChannelNotification
+
+    notification = ChannelNotification(message="tell us your size", schema=_form_schema(), form_tag="ref-42")
+    assert notification.form_tag == "ref-42"
+    # Absent by default, even on a form send.
+    assert ChannelNotification(message="hi", schema=_form_schema()).form_tag is None
+
+
+def test_notification_form_tag_rides_a_form_send_only():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="no schema carries no form tag"):
+        ChannelNotification(message="hi", form_tag="ref-42")
+
+
+def test_notification_form_tag_is_bounded():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="form_tag must be 1 to"):
+        ChannelNotification(message="hi", schema=_form_schema(), form_tag="has:colon")

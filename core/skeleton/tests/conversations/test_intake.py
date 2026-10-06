@@ -543,3 +543,157 @@ async def test_media_params_surface_on_target_payload(env, monkeypatch):
     assert tools.calls[0]["arguments"]["params"] == media_params
     record = await _store().get_record(message_id)
     assert record is not None
+
+
+async def test_accept_with_form_tag_stamps_the_record_and_the_tool_payload(env, monkeypatch):
+    # The caller-set opaque per-send tag rides back WITH the submission: the record stores it
+    # beside inbound_form, both read doors publish it, and a tool target's jq payload gains a
+    # "form_tag" key the route's start_expr can map.
+    channel = FakeChannel()
+    route = _tool_channel_route(start_expr="{msg: .message, form: .form, tag: .form_tag}")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Alice",
+        "PID1",
+        form=_FORM,
+        form_tag="ref-42",
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"msg": "name: Alice", "form": _FORM, "tag": "ref-42"}
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_form_tag == "ref-42"
+    assert record.view()["inbound_form_tag"] == "ref-42"
+    assert record.caller_view()["inbound_form_tag"] == "ref-42"
+
+
+async def test_accept_without_form_tag_keeps_the_payload_byte_identical(env, monkeypatch):
+    # A tag-less form submission emits NO "form_tag" key at all.
+    channel = FakeChannel()
+    route = _tool_channel_route(start_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice", "PID1", form=_FORM
+    )
+    await _settle()
+
+    assert "form_tag" not in tools.calls[0]["arguments"]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_form_tag is None
+    assert record.caller_view()["inbound_form_tag"] is None
+
+
+async def test_accept_form_tag_requires_a_form_before_any_state(env, monkeypatch):
+    # A tag naming a submission that is not there is refused loudly BEFORE any record or claim.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+
+    with pytest.raises(ValueError, match="form_tag rides a form submission"):
+        await turn_module.accept(
+            "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", form_tag="ref-42"
+        )
+    await _settle()
+    assert await _store().get_inbound_owner("twilio", "PID1") is None
+
+
+async def test_accept_form_tag_bound_is_enforced_before_any_state(env, monkeypatch):
+    # An out-of-charset tag (a reserved ``:``) is refused at the seam before any state.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+
+    with pytest.raises(ValueError, match="form_tag must be 1 to"):
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "name: Alice",
+            "PID1",
+            form=_FORM,
+            form_tag="has:colon",
+        )
+    await _settle()
+    assert await _store().get_inbound_owner("twilio", "PID1") is None
+
+
+async def test_shed_records_carry_the_inbound_form_tag(env, monkeypatch):
+    # Both shed shapes stamp the form tag beside the submission, so a rate-capped tagged
+    # submission still reads back complete from the record.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+    store = _store()
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await _settle()
+    shed_with_reply = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Alice",
+        "PID2",
+        form={"name": "Alice"},
+        form_tag="tag-a",
+    )
+    await _settle()
+    shed_silent = await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "name: Bob",
+        "PID3",
+        form={"name": "Bob"},
+        form_tag="tag-b",
+    )
+    await _settle()
+
+    replied = await store.get_record(shed_with_reply)
+    assert replied is not None
+    assert replied.inbound_form_tag == "tag-a"
+    silent = await store.get_record(shed_silent)
+    assert silent is not None
+    assert silent.delivery_status is DeliveryStatus.SHED
+    assert silent.inbound_form_tag == "tag-b"
+
+
+async def test_api_submit_with_form_tag_stamps_the_record_and_the_tool_payload(env, monkeypatch):
+    # The api door twin: ConversationMessage.form_tag threads through submit_api_message with
+    # the same record + payload semantics the channel door has.
+    route = _tool_api_route(start_expr="{msg: .message, form: .form, tag: .form_tag}")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    result = await turn_module.submit_api_message(
+        "tool-api",
+        "u-7",
+        "name: Alice",
+        "caller",
+        2,
+        form={"name": "Alice"},
+        form_tag="ref-42",
+        client_connected=_connected,
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"msg": "name: Alice", "form": {"name": "Alice"}, "tag": "ref-42"}
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.inbound_form_tag == "ref-42"
+    assert record.caller_view()["inbound_form_tag"] == "ref-42"

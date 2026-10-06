@@ -144,6 +144,12 @@ class ConversationRecord(BaseModel):
     # promise. ``None`` for a text-only inbound and for every ``operator`` record (an
     # operator send answers, it does not submit).
     inbound_form: dict[str, Any] | None = None
+    # The caller-set opaque per-send ``form_tag`` the platform handed out with the form this
+    # submission answers, carried back by the channel beside ``inbound_form`` and surfaced to a
+    # tool target's payload under the stable ``form_tag`` key. Bounded as transport, never
+    # interpreted. ``None`` when the submission carried none, for a text-only inbound, and for
+    # every ``operator`` record (an operator send answers, it does not submit).
+    inbound_form_tag: str | None = None
     # Structured media the participant sent WITH the inbound text (image/document/video/audio) and a
     # geographic point the participant shared — the inbound counterparts of an answer's media/location,
     # stored beside the text as machine-consumable content. Both surface to a tool target's payload
@@ -321,6 +327,8 @@ class ConversationRecord(BaseModel):
             raise ValueError("an operator record carries no inbound_text (must be '')")
         if self.inbound_form is not None:
             raise ValueError("an operator record carries no inbound_form (it answers, it does not submit)")
+        if self.inbound_form_tag is not None:
+            raise ValueError("an operator record carries no inbound_form_tag (it answers, it does not submit)")
         if self.inbound_attachments is not None or self.inbound_location is not None:
             raise ValueError(
                 "an operator record carries no inbound attachments/location (it answers, it does not submit)"
@@ -373,9 +381,9 @@ class ConversationRecord(BaseModel):
         allow-list, so a newly added field stays withheld
         until deliberately published here. ``error`` and the delivery bookkeeping are
         withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text``,
-        ``inbound_form``, ``inbound_attachments``, ``inbound_location``, ``inbound_kind``,
-        ``inbound_event`` and ``submitted_by`` are published: they are the message (and the
-        structured submission / media / location / event) this caller sent.
+        ``inbound_form``, ``inbound_form_tag``, ``inbound_attachments``, ``inbound_location``,
+        ``inbound_kind``, ``inbound_event`` and ``submitted_by`` are published: they are the
+        message (and the structured submission / tag / media / location / event) this caller sent.
         """
         return self.model_dump(
             mode="json",
@@ -389,6 +397,7 @@ class ConversationRecord(BaseModel):
                 "origin",
                 "inbound_text",
                 "inbound_form",
+                "inbound_form_tag",
                 "inbound_attachments",
                 "inbound_location",
                 "inbound_kind",

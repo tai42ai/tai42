@@ -801,6 +801,62 @@ async def test_channel_send_with_audience_records_form_data_and_pages_on_feed(re
     assert own[0]["pages"] == [page.model_dump(mode="json") for page in _FORM_PAGES]
 
 
+async def test_notify_threads_form_tag_to_a_capable_channel(register_channel):
+    # A form notification carrying a caller-set opaque per-send tag reaches the channel's
+    # notify with form_tag on its ChannelNotification, so the channel carries it with the form.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, form_tag="ref-42")
+
+    assert channel.notifications == [
+        ChannelNotification(message="fill this in", schema=_FORM_SCHEMA, form_tag="ref-42")
+    ]
+
+
+async def test_form_tag_without_schema_on_channel_raises(register_channel):
+    # form_tag rides ONLY a form send: on a named channel with no schema the ChannelNotification
+    # presence rule refuses it loudly (→ 400), never a silent drop, before the send.
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValueError, match="no schema carries no form tag"):
+        await notify_user("hi", channel="rich", form_tag="ref-42")
+    assert channel.notifications == []
+
+
+async def test_form_tag_bound_is_enforced_before_the_send(register_channel):
+    # An out-of-charset tag (a reserved ``:``) is refused by the bound (→ 400) before the send.
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValueError, match="form_tag must be 1 to"):
+        await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, form_tag="has:colon")
+    assert channel.notifications == []
+
+
+async def test_form_tag_on_the_sink_path_is_refused(sink_redis):
+    # The sink path carries no schema (a form needs a channel), so a form_tag there hits the
+    # contract's presence rule and raises loudly (→ 400) — no phantom feed entry.
+    with pytest.raises(ValueError, match="no schema carries no form tag"):
+        await notify_user("hi", form_tag="ref-42")
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_form_tag_is_not_written_to_the_in_app_feed(register_channel, sink_redis):
+    # The channel carries the tag, but the in-app feed has no submission door, so a tag there
+    # would correlate nothing: an audience-addressed form send stores the schema on the feed
+    # but NOT the form_tag.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, form_tag="ref-42", audience="alice")
+
+    assert channel.notifications == [
+        ChannelNotification(message="fill this in", schema=_FORM_SCHEMA, form_tag="ref-42")
+    ]
+    own = await notifications_sink.read_notifications(audience="alice")
+    assert len(own) == 1
+    assert own[0]["schema"] == _FORM_SCHEMA
+    assert "form_tag" not in own[0]
+
+
 # -- data: image substitution: stored by reference, absolute url minted here -----
 
 

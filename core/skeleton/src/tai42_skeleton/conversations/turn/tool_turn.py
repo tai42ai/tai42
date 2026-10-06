@@ -59,14 +59,16 @@ def _overlap_message_entries(records: list[ConversationRecord]) -> list[dict[str
     """The ``{id, text, accepted_at}`` payload entries for a batch's records, media/form when carried.
 
     Each record contributes its id, verbatim inbound text and acceptance moment, plus its
-    ``form`` / ``attachments`` / ``location`` when it carried them — the shape the ``messages``
-    and ``superseded`` payload keys share under ``deliver="all"``.
+    ``form`` / ``form_tag`` / ``attachments`` / ``location`` when it carried them — the shape the
+    ``messages`` and ``superseded`` payload keys share under ``deliver="all"``.
     """
     entries: list[dict[str, object]] = []
     for r in records:
         entry: dict[str, object] = {"id": r.message_id, "text": r.inbound_text, "accepted_at": r.created_at}
         if r.inbound_form is not None:
             entry["form"] = r.inbound_form
+        if r.inbound_form_tag is not None:
+            entry["form_tag"] = r.inbound_form_tag
         if r.inbound_attachments is not None:
             entry["attachments"] = [a.model_dump(mode="json") for a in r.inbound_attachments]
         if r.inbound_location is not None:
@@ -86,12 +88,13 @@ def _tool_payload(
     person: Person | None,
     params: dict[str, str] | None,
     form: dict[str, Any] | None,
+    form_tag: str | None,
     attachments: list[MediaItem] | None,
     location: LocationElement | None,
 ) -> dict[str, object]:
     """Assemble the dispatch payload dict for a tool turn.
 
-    Carries the message/sender/event/person/params/form/attachments/location
+    Carries the message/sender/event/person/params/form/form_tag/attachments/location
     fields plus the generic ``turn`` block. An event turn nulls
     ``message``/``sender`` and carries its structured ``event``; the person and
     the optional structured fields ride only when present. Under ``deliver="all"``
@@ -122,6 +125,8 @@ def _tool_payload(
         payload["params"] = params
     if form is not None:
         payload["form"] = form
+    if form_tag is not None:
+        payload["form_tag"] = form_tag
     if attachments is not None:
         payload["attachments"] = [a.model_dump(mode="json") for a in attachments]
     if location is not None:
@@ -243,6 +248,7 @@ async def _run_tool_turn(
     person: Person | None = None,
     params: dict[str, str] | None = None,
     form: dict[str, Any] | None = None,
+    form_tag: str | None = None,
     attachments: list[MediaItem] | None = None,
     location: LocationElement | None = None,
     *,
@@ -266,7 +272,9 @@ async def _run_tool_turn(
     ``form`` key ONLY when the inbound carried one, so an existing ``start_expr`` over a
     form-less inbound sees a byte-identical payload; the default no-``start_expr`` kwargs
     stay the fixed ``{message, sender, turn}`` either way — a route maps the form deliberately or
-    not at all. Structured inbound ``attachments`` (the participant's media, as JSON ``MediaItem``
+    not at all. The caller-set opaque ``form_tag`` that rode back with that submission rides the
+    payload under a ``form_tag`` key beside ``form``, present under the SAME rule — ONLY when the
+    submission carried one. Structured inbound ``attachments`` (the participant's media, as JSON ``MediaItem``
     objects) and a ``location`` (a JSON ``LocationElement``) ride the payload under those stable
     keys under the SAME rule — present ONLY when the inbound carried them, so a media-/location-
     unaware route sees a byte-identical payload and still reads the whole turn as ``message``.
@@ -300,6 +308,7 @@ async def _run_tool_turn(
         person=person,
         params=params,
         form=form,
+        form_tag=form_tag,
         attachments=attachments,
         location=location,
     )

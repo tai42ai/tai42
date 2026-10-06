@@ -10,11 +10,40 @@ coverage with unique display slots, and reaction triggers that name real fields/
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 _SCALAR_FORM_TYPES = ("string", "boolean", "integer", "number")
+
+#: Abuse bound on a caller-set per-send ``form_tag`` — an opaque correlation the caller
+#: attaches to a form notification and the platform hands back on submit, never interprets.
+#: It is a short transport value every form channel embeds VERBATIM in its own carry (a
+#: WhatsApp flow-token segment, a web form record, an in-band answer part), so it is bounded,
+#: not a free body.
+FORM_TAG_MAX_CHARS = 64
+#: A ``form_tag`` is drawn ONLY from the RFC3986 unreserved set (``A-Z a-z 0-9 - . _ ~``) and
+#: is 1..``FORM_TAG_MAX_CHARS`` characters. The set excludes ``:`` so a channel that packs the
+#: tag into a colon-delimited token (the WhatsApp flow token) keeps it a single segment.
+FORM_TAG_RE = re.compile(rf"^[A-Za-z0-9_.~-]{{1,{FORM_TAG_MAX_CHARS}}}$")
+
+
+def check_form_tag(value: str) -> str:
+    """Validate a caller-set opaque per-send ``form_tag`` and return it unchanged.
+
+    The platform NEVER interprets the value; it only bounds the transport so every channel
+    embeds the tag verbatim in its carry. A tag is non-blank, at most ``FORM_TAG_MAX_CHARS``
+    characters, and drawn only from the RFC3986 unreserved set (``A-Z a-z 0-9 - . _ ~`` —
+    excludes ``:``). Raises ``ValueError`` naming the BOUND, never the value (the value is
+    opaque and may be sensitive).
+    """
+    if not FORM_TAG_RE.fullmatch(value):
+        raise ValueError(
+            f"form_tag must be 1 to {FORM_TAG_MAX_CHARS} characters from the RFC3986 unreserved "
+            f"set (A-Z a-z 0-9 and - . _ ~)"
+        )
+    return value
 
 
 class FormOption(BaseModel):

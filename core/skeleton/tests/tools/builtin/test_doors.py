@@ -302,6 +302,7 @@ class _Recorder:
         attachments=None,
         location=None,
         locale=None,
+        form_tag=None,
         *,
         client_connected,
     ):

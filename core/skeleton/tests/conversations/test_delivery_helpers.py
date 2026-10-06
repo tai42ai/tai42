@@ -153,6 +153,17 @@ def test_part_notification_form_prefill_rides_the_final_chunk():
     assert last.pages[0].fields == ["name"]
 
 
+def test_part_notification_form_tag_rides_the_final_chunk_only():
+    # A form part's caller-set opaque per-send tag reaches the form send on the FINAL chunk
+    # beside its schema; an earlier chunk of a multi-chunk part carries neither.
+    part = AnswerPart(message="fill this in", schema=_FORM_SCHEMA, form_tag="ref-42")
+    record = _channel_record()
+    early = _part_notification(part, "fill th", record, final=False)
+    assert early.form_tag is None
+    last = _part_notification(part, "is in", record, final=True)
+    assert last.form_tag == "ref-42"
+
+
 def test_reply_part_bad_prefill_is_refused_loudly():
     # A flow's tool reply array whose form part carries a prefill value that fails the
     # schema is refused at the parse seam, so a partly filled form is never stored or sent.

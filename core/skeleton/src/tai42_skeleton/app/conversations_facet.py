@@ -42,6 +42,7 @@ class ConversationsFacet:
         attachments: list[MediaItem] | None = None,
         location: LocationElement | None = None,
         locale: str | None = None,
+        form_tag: str | None = None,
     ) -> str:
         """Turn a received message into an agent turn and return the new message's id."""
         return await self._app._conversation_accept(
@@ -56,6 +57,7 @@ class ConversationsFacet:
             attachments=attachments,
             location=location,
             locale=locale,
+            form_tag=form_tag,
         )
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:

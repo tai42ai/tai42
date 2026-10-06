@@ -695,7 +695,9 @@ def _msg_record(message_id: str, created_at: float, text: str, door: str = "chan
 def test_the_tool_payload_carries_messages_and_superseded_under_deliver_all():
     route = _tool_route(OverlapPolicy(deliver="all"), start_expr=".")
     lead = _msg_record("m2", 2.0, "two")
-    follower = _msg_record("m3", 3.0, "three")
+    follower = _msg_record("m3", 3.0, "three").model_copy(
+        update={"inbound_form": {"size": "M"}, "inbound_form_tag": "ref-3"}
+    )
     dropped = _msg_record("m1", 1.0, "one")
     batch = overlap_module.Batch(lead=lead, members=[lead, follower], superseded=[dropped])
 
@@ -709,13 +711,15 @@ def test_the_tool_payload_carries_messages_and_superseded_under_deliver_all():
         person=None,
         params=None,
         form=None,
+        form_tag=None,
         attachments=None,
         location=None,
     )
     assert payload["message"] == "one\n\ntwo\n\nthree"
+    # A batch member's own form_tag rides its entry beside its form, only when it carried one.
     assert payload["messages"] == [
         {"id": "m2", "text": "two", "accepted_at": 2.0},
-        {"id": "m3", "text": "three", "accepted_at": 3.0},
+        {"id": "m3", "text": "three", "accepted_at": 3.0, "form": {"size": "M"}, "form_tag": "ref-3"},
     ]
     assert payload["superseded"] == [{"id": "m1", "text": "one", "accepted_at": 1.0}]
 
@@ -735,6 +739,7 @@ def test_the_tool_payload_is_byte_identical_under_deliver_one():
         person=None,
         params=None,
         form=None,
+        form_tag=None,
         attachments=None,
         location=None,
     )

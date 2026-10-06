@@ -484,6 +484,40 @@ async def test_notify_form_cache_miss_creates_publishes_then_sends(
     assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-new"
 
 
+async def test_notify_form_tag_rides_the_token_as_the_fourth_segment(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A caller-set form_tag is appended as the token's 4th ``:``-delimited segment
+    # (prefix:hash:nonce:tag); it rides the token only, never the Flow or the cache key.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    ids = await WhatsAppChannel().notify(_form_notification(form_tag="ref-42"))
+
+    assert ids == ["wamid.FLOW"]
+    token = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_token"]
+    segments = token.split(":")
+    assert len(segments) == 4  # prefix, hash, nonce, tag
+    assert f"{segments[0]}:" == _NF_PREFIX
+    assert segments[1] == schema_hash
+    assert segments[3] == "ref-42"
+
+
+async def test_notify_form_without_a_tag_mints_a_three_segment_token(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A tag-less notify-form token stays prefix:hash:nonce — no empty 4th segment.
+    _, schema_hash = build_form_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    await WhatsAppChannel().notify(_form_notification())
+
+    token = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_token"]
+    assert len(token.split(":")) == 3
+
+
 async def test_notify_form_token_disjoint_from_ask_flow_tokens(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # Both directions of the namespace fence: an ask's flow token is its interaction id
     # verbatim (no prefix), a notification's is always prefixed — and two notifications

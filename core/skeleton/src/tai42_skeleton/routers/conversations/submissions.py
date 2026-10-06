@@ -192,6 +192,7 @@ async def send_conversation_message(request: Request) -> Response:
             attachments=message.attachments,
             location=message.location,
             locale=message.locale,
+            form_tag=message.form_tag,
             client_connected=_client_connected(request),
         )
     except Exception as exc:
