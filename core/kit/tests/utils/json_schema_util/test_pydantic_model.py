@@ -240,9 +240,10 @@ def test_property_name_sanitized_with_alias():
         {"type": "object", "properties": {"$schema": {"type": "string"}}, "required": ["$schema"]},
         "Sani",
     )
-    # The leading '$' is stripped for the python field name; the alias keeps the
-    # original wire name so validation/round-trip uses "$schema".
-    assert "schema" in model.model_fields
+    # The leading '$' is stripped for the python field name; the stripped 'schema' shadows a
+    # pydantic BaseModel attribute so it is suffixed to 'schema_'. The alias keeps the original
+    # wire name so validation/round-trip uses "$schema".
+    assert "schema_" in model.model_fields
     inst = model.model_validate({"$schema": "v"})
     assert inst.model_dump(by_alias=True)["$schema"] == "v"
 
@@ -256,6 +257,32 @@ def test_property_name_reserved_word_gets_underscore_alias():
     assert "class_" in model.model_fields
     inst = model.model_validate({"class": "c"})
     assert inst.model_dump(by_alias=True)["class"] == "c"
+
+
+def test_property_name_shadowing_a_basemodel_attribute_gets_underscore_alias():
+    # 'schema'/'copy'/'json' are pydantic BaseModel attributes; a field named one of them
+    # warns (and under warnings-as-error, fails) at model creation. They are reserved like
+    # keywords and builtins, so the field is suffixed and the alias preserves the wire name.
+    model = build(
+        {"type": "object", "properties": {"schema": {"type": "string"}}, "required": ["schema"]},
+        "ShadowAttr",
+    )
+    assert "schema_" in model.model_fields
+    inst = model.model_validate({"schema": "v"})
+    assert inst.model_dump(by_alias=True)["schema"] == "v"
+
+
+def test_property_name_in_the_protected_model_namespace_builds_and_round_trips():
+    # 'model_dump' is a protected pydantic method name; a bare field named it RAISES at model
+    # creation. It is suffixed to 'model_dump_' (still in the 'model_' namespace, but not a real
+    # member), which the generated model's ``protected_namespaces=()`` config admits.
+    model = build(
+        {"type": "object", "properties": {"model_dump": {"type": "string"}}, "required": ["model_dump"]},
+        "Protected",
+    )
+    assert "model_dump_" in model.model_fields
+    inst = model.model_validate({"model_dump": "v"})
+    assert inst.model_dump(by_alias=True)["model_dump"] == "v"
 
 
 def test_digit_first_property_name_builds_and_round_trips():

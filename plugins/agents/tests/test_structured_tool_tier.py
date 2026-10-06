@@ -38,6 +38,16 @@ from tai42_agents._internal.structured import ainvoke_structured, structured_out
 from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware
 
 _OPTIONAL_SCHEMA = {"title": "Opt", "type": "object", "properties": {"s": {"type": "string"}}}
+# A schema whose property names are a python keyword (``from``) and a builtin shadow
+# (``id``): the generated bound model sanitizes them to legal field names and keeps the
+# authored key as each field's alias. The value the consumer receives must carry the
+# AUTHORED keys, never the sanitized field names.
+_KEYWORD_SCHEMA = {
+    "title": "Kw",
+    "type": "object",
+    "properties": {"from": {"type": "string"}, "id": {"type": "string"}},
+    "required": ["from", "id"],
+}
 _NESTED_OPTIONAL_SCHEMA = {
     "title": "Nested",
     "type": "object",
@@ -111,6 +121,12 @@ def test_single_shot_omitted_optional_stays_absent(monkeypatch: pytest.MonkeyPat
     assert out == {}
 
 
+def test_single_shot_keyword_property_round_trips_to_the_authored_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, 3)
+    out = _single_shot(_ToolCallModel([{"from": "A", "id": "X"}]), _KEYWORD_SCHEMA)
+    assert out == {"from": "A", "id": "X"}
+
+
 def test_single_shot_nested_optional_array(monkeypatch: pytest.MonkeyPatch) -> None:
     _cap(monkeypatch, 3)
     out = _single_shot(_ToolCallModel([{"items": [{"x": 1}, {}]}]), _NESTED_OPTIONAL_SCHEMA)
@@ -149,6 +165,11 @@ def test_graph_optional_field_binds_a_pydantic_model_and_yields_a_dict(monkeypat
     response = out["structured_response"]
     assert response == {"s": "hi"}
     assert isinstance(response, dict)
+
+
+def test_graph_keyword_property_round_trips_to_the_authored_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, _strategy = _run_graph(monkeypatch, _ToolCallModel([{"from": "A", "id": "X"}]), _KEYWORD_SCHEMA)
+    assert out["structured_response"] == {"from": "A", "id": "X"}
 
 
 def test_graph_omitted_optional_stays_absent(monkeypatch: pytest.MonkeyPatch) -> None:
