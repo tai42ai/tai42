@@ -3,14 +3,18 @@
 * :func:`build_run_config` overlays a run's memory keys (``thread_id``,
   ``resume_checkpoint_id``) and ``recursion_limit`` onto the caller's
   ``langgraph_config`` base.
-* :func:`init_langgraph_config` ensures a ``thread_id``, wires the active
-  monitoring backend's trace callbacks (``tai42_app.monitoring.active``), and
-  resets the OpenTelemetry context when starting a parent-less trace.
+* :func:`init_langgraph_config` ensures a ``thread_id`` and a ``recursion_limit``,
+  then delegates to the kit's :func:`~tai42_kit.llm.bind_run_trace` to resolve the
+  run's trace lineage and append the active monitoring backend's callbacks, returning
+  the :class:`~tai42_kit.llm.RunTrace` whose ``config`` the graph is invoked with.
+* :func:`with_run_trace_lineage` threads a resolved trace context onto a base config so
+  a FEATURE run that drives several sub-runs (an evaluator/critic loop, parallel voters
+  plus a judge) binds ONE lineage at its entry and nests every sub-run under it.
 
-Both treat the caller's config as read-only, copying the mapping, its
+Both builders treat the caller's config as read-only, copying the mapping, its
 ``configurable``, and its ``callbacks`` by value so one base config can feed many
-parallel invocations without colliding on ``thread_id`` or accumulating each
-other's callbacks.
+parallel invocations without colliding on ``thread_id`` or accumulating each other's
+callbacks.
 """
 
 from __future__ import annotations
@@ -18,10 +22,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from opentelemetry import context as otel_context
-from opentelemetry.context import Context
-from tai42_contract.app import tai42_app
-from tai42_contract.monitoring import TraceContext, get_ambient_trace_context
+from tai42_contract.monitoring import TraceContext
+from tai42_kit.llm import RunTrace, bind_run_trace
 
 from tai42_agents.settings import agents_limits_settings
 
@@ -54,46 +56,48 @@ def build_run_config(
     return config
 
 
-def init_langgraph_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    session_id = str(uuid.uuid4())
+def init_langgraph_config(config: dict[str, Any] | None = None) -> RunTrace:
+    """Ensure a ``thread_id`` + ``recursion_limit``, then bind the run's trace and callbacks.
+
+    Overlays the langgraph-shaped concerns this package owns — a fresh ``thread_id`` for
+    a keyless run, the settings-default ``recursion_limit`` (a positive ceiling, so no
+    top-level graph runs uncapped; a caller-supplied value, ``0`` included, wins) — onto
+    a by-value copy of the caller's config, then returns
+    :func:`~tai42_kit.llm.bind_run_trace`'s :class:`~tai42_kit.llm.RunTrace`. The kit
+    resolves the trace lineage and appends the active backend's monitoring callbacks; the
+    caller runs the graph with the returned ``RunTrace.config``.
+
+    The ``recursion_limit`` bounds the top-level graph only — each deep-agent task-tool
+    subagent runs its own graph under deepagents' own bound.
+    """
     source = config or {}
     new_config = dict(source)
     configurable = dict(source.get("configurable", {}))
     new_config["configurable"] = configurable
 
     if "thread_id" not in configurable:
-        configurable["thread_id"] = session_id
+        configurable["thread_id"] = str(uuid.uuid4())
 
-    # A run that pins no step bound gets the settings default, so the top-level
-    # graph honors a positive ceiling; a caller-supplied ``recursion_limit`` (0
-    # included) is left to win. This bounds the top-level graph only — each
-    # deep-agent task-tool subagent runs its own graph under deepagents' own bound
-    # (9999).
     if "recursion_limit" not in new_config:
         new_config["recursion_limit"] = agents_limits_settings().default_recursion_limit
 
-    # Trace-lineage precedence: an EXPLICITLY propagated context (the caller pinned
-    # `monitoring_trace_id`, e.g. an agent invoked directly by a monitored driver) wins;
-    # else the AMBIENT deposit a driver left when it drives this agent as a node — so the
-    # agent's spans JOIN the driver's trace instead of orphaning into a fresh one; else a
-    # freshly minted root trace (the standalone default, byte-identical to before).
-    trace_id = configurable.get("monitoring_trace_id")
-    parent_span_id = configurable.get("monitoring_parent_span_id")
-    if not trace_id:
-        ambient = get_ambient_trace_context()
-        if ambient is not None and ambient.trace_id:
-            trace_id = ambient.trace_id
-            if parent_span_id is None:
-                parent_span_id = ambient.parent_span_id
-        else:
-            trace_id = str(uuid.uuid4()).replace("-", "")
-    ctx = TraceContext(trace_id=trace_id, parent_span_id=parent_span_id)
-    callbacks = tai42_app.monitoring.active.writer.get_monitoring_callbacks(ctx)
+    return bind_run_trace(new_config)
 
-    # Independent trace (no parent): reset OTel context so this flow doesn't
-    # inherit spans or tags from a caller.
-    if not parent_span_id:
-        otel_context.attach(Context())
 
-    new_config["callbacks"] = [*source.get("callbacks", []), *callbacks]
+def with_run_trace_lineage(config: dict[str, Any] | None, context: TraceContext) -> dict[str, Any]:
+    """Thread a resolved trace ``context`` onto a by-value copy of ``config``'s ``configurable``.
+
+    Sets ``monitoring_trace_id`` (and ``monitoring_parent_span_id`` when the context
+    carries an anchor) so the sub-run this config drives JOINS ``context``'s trace rather
+    than minting its own root. A FEATURE run that drives several sub-runs resolves ONE
+    lineage at its entry (:func:`~tai42_kit.llm.resolve_trace_context`) and derives each
+    sub-run's config through here, so every sub-run nests under the one run trace. The
+    caller's mapping and its ``configurable`` are left untouched.
+    """
+    new_config = dict(config or {})
+    configurable = dict(new_config.get("configurable", {}))
+    configurable["monitoring_trace_id"] = context.trace_id
+    if context.parent_span_id is not None:
+        configurable["monitoring_parent_span_id"] = context.parent_span_id
+    new_config["configurable"] = configurable
     return new_config

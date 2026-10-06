@@ -17,6 +17,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
+from tests.conftest import fake_run_trace
 
 from tai42_agents.retrieval_tools_agent import agent as ragent
 from tai42_agents.retrieval_tools_agent.agent import (
@@ -124,7 +125,7 @@ class _NativeFake:
         outer = self
 
         class _Runner:
-            async def ainvoke(self, messages: Any) -> AIMessage:
+            async def ainvoke(self, messages: Any, _config: object = None) -> AIMessage:
                 outer.captured["messages"] = messages
                 index = min(outer.calls, len(outer._texts) - 1)
                 outer.calls += 1
@@ -155,7 +156,7 @@ class _ToolFake:
         outer = self
 
         class _Runner:
-            async def ainvoke(self, messages: Any) -> dict[str, Any]:
+            async def ainvoke(self, messages: Any, _config: object = None) -> dict[str, Any]:
                 outer.captured["messages"] = messages
                 index = min(outer.calls, len(outer._seq) - 1)
                 outer.calls += 1
@@ -257,6 +258,8 @@ def _patch_build_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return compiled
 
     monkeypatch.setattr(ragent, "RetrievalToolsGraph", FakeGraph)
-    monkeypatch.setattr(ragent, "init_langgraph_config", lambda config: {"configurable": {"thread_id": "t"}})
+    monkeypatch.setattr(
+        ragent, "init_langgraph_config", lambda config: fake_run_trace({"configurable": {"thread_id": "t"}})
+    )
     _embedding_dims_cache.clear()
     return captured

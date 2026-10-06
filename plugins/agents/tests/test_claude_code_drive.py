@@ -185,7 +185,6 @@ def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.Monke
     _settings(monkeypatch, model="claude-x")
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     writer = RecordingWriter()
-    writer.trace_id = "trace-1"
     _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
     assert len(writer.spans) == 1
     span = writer.spans[0]
@@ -196,12 +195,40 @@ def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.Monke
     assert writer.update_current_calls == []
 
 
-def test_usage_not_emitted_without_active_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    _settings(monkeypatch)
+def test_standalone_run_mints_a_root_trace_carrying_the_usage_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A standalone run has no ambient trace carrier, so the usage span roots a freshly
+    # minted root trace rather than being dropped: the model calls happen in the sandbox
+    # and bypass the platform LLM seam, so this is the only record of the run's usage.
+    _settings(monkeypatch, model="claude-x")
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
-    writer = RecordingWriter()  # trace_id stays None
+    writer = RecordingWriter()  # trace_id stays None: no active trace, no ambient carrier
     _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
-    assert writer.spans == []
+    assert len(writer.spans) == 1
+    span = writer.spans[0]
+    assert span["kind"] == SpanKind.LLM
+    assert span["usage_details"] == {"input_tokens": 3, "output_tokens": 5}
+    # A root trace context is minted (a 32-hex id, no parent span), so the span is its root.
+    ctx = span["trace_context"]
+    assert ctx is not None
+    assert ctx.trace_id is not None
+    assert len(ctx.trace_id) == 32
+    assert ctx.parent_span_id is None
+
+
+def test_usage_span_joins_the_ambient_trace_when_driven_as_a_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Driven as a node under a monitored driver, the run JOINS the driver's trace: the
+    # ambient deposit resolves the lineage, so the usage span nests under the SAME trace.
+    from tai42_contract.monitoring import TraceContext, ambient_trace_context
+
+    _settings(monkeypatch, model="claude-x")
+    monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
+    writer = RecordingWriter()
+    with ambient_trace_context(TraceContext(trace_id="driver-trace", parent_span_id="driver-span")):
+        _run(build_local_app(writer=writer), user_message=TemplatedText(content="hi"))
+    assert len(writer.spans) == 1
+    ctx = writer.spans[0]["trace_context"]
+    assert ctx.trace_id == "driver-trace"
+    assert ctx.parent_span_id == "driver-span"
 
 
 def test_async_ask_on_ephemeral_run_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

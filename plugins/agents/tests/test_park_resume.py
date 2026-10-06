@@ -48,6 +48,8 @@ from tai42_agents._internal.park.errors import (
 from tai42_agents.langchain_deep_agent import agent as agent_mod
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
+from .conftest import fake_run_trace
+
 
 class ScriptedChatModel(BaseChatModel):
     _responses: list[BaseMessage] = PrivateAttr(default_factory=list)
@@ -441,7 +443,7 @@ def _wire_real_build(
     monkeypatch.setattr(agent_mod, "llm_settings", _LlmSettings)
     # The recording app's monitoring writer hands back string callback sentinels; keep
     # them out of the run config (the config already carries the pinned thread_id).
-    monkeypatch.setattr(agent_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
+    monkeypatch.setattr(agent_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
 
 
 def test_full_park_resume_cycle_runs_ask_once_and_clears_index(

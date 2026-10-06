@@ -44,7 +44,7 @@ class _NativeFake:
         outer = self
 
         class _Runner:
-            async def ainvoke(self, _messages: Any) -> AIMessage:
+            async def ainvoke(self, _messages: Any, _config: object = None) -> AIMessage:
                 index = min(outer.calls, len(outer._texts) - 1)
                 outer.calls += 1
                 return AIMessage(content=outer._texts[index])

@@ -55,6 +55,8 @@ from tai42_agents._internal.park import capability as cap
 from tai42_agents._internal.park import index as idx
 from tai42_agents.langchain_deep_agent import agent as deep_mod
 
+from .conftest import fake_run_trace
+
 _COMPLETION_TOOL = "conversation_deliver"
 _THREAD = "bridge:acme:alice"
 _CONTEXT = {"thread_id": _THREAD}
@@ -131,8 +133,8 @@ def _wire(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemory
     monkeypatch.setattr(base_mod, "checkpoint_registry", lambda: _Registry(saver))
     monkeypatch.setattr(base_mod, "llm_provider_settings", _ProviderSettings)
     monkeypatch.setattr(base_mod, "llm_settings", _LlmSettings)
-    monkeypatch.setattr(base_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
-    monkeypatch.setattr(tools_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
+    monkeypatch.setattr(base_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(tools_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
     monkeypatch.setattr(cap, "llm_provider_settings", _ProviderSettings)
 
 
@@ -257,7 +259,7 @@ def test_nested_tool_captures_a_chain_on_the_deep_agent_resume_drive(
     monkeypatch.setattr(deep_mod, "store_registry", lambda: _Registry(store))
     monkeypatch.setattr(deep_mod, "llm_provider_settings", _ProviderSettings)
     monkeypatch.setattr(deep_mod, "llm_settings", _LlmSettings)
-    monkeypatch.setattr(deep_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
+    monkeypatch.setattr(deep_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
     monkeypatch.setattr(cap, "llm_provider_settings", _ProviderSettings)
 
     app_tools.client_tools["peek"] = nested.tool()

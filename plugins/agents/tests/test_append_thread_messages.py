@@ -92,16 +92,6 @@ class ScriptedChatModel(BaseChatModel):
         return self
 
 
-def _strip_callbacks(config: dict[str, Any]) -> dict[str, Any]:
-    """A minimal ``init_langgraph_config`` stand-in: keep the thread_id and any
-    recursion bound, drop the recording monitoring stub's non-callable callbacks a
-    live graph would otherwise try to invoke."""
-    out: dict[str, Any] = {"configurable": {"thread_id": config["configurable"]["thread_id"]}}
-    if "recursion_limit" in config:
-        out["recursion_limit"] = config["recursion_limit"]
-    return out
-
-
 def _thread(thread_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": thread_id}}
 
@@ -166,7 +156,6 @@ class TestToolsAgentAppend:
         monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
         monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=[]))
-        monkeypatch.setattr(bta, "init_langgraph_config", _strip_callbacks)
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
             return model
@@ -308,7 +297,6 @@ class TestDeepAgentAppend:
             ),
         )
         monkeypatch.setattr(dagent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
-        monkeypatch.setattr(dagent, "init_langgraph_config", _strip_callbacks)
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
             return model
@@ -399,7 +387,6 @@ class TestRetrievalAgentAppend:
         )
         monkeypatch.setattr(ragent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(ragent, "embedding_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
-        monkeypatch.setattr(ragent, "init_langgraph_config", _strip_callbacks)
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
             return model

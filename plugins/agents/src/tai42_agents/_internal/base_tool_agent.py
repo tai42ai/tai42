@@ -185,7 +185,7 @@ async def _build_agent_and_input(
         system_content_kwargs=system_content_kwargs,
     )
 
-    config = init_langgraph_config(config)
+    config = init_langgraph_config(config).config
     messages = build_agent_input(*user_message, user_content_kwargs=user_content_kwargs)
     await _repair_dangling_tool_calls(agent, config)
     return agent, messages, config, strategy

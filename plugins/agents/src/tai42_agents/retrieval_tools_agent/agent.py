@@ -255,7 +255,7 @@ class RetrievalToolsAgent(Agent):
             system_prompt=system_prompt,
         ).abuild()
 
-        config = init_langgraph_config(config)
+        config = init_langgraph_config(config).config
         messages = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
         # The single spot both faces (run drains astream) build through, so a thread
         # poisoned by an aborted turn is repaired here before the run.
@@ -332,7 +332,7 @@ class RetrievalToolsAgent(Agent):
             provider = kwargs.get("llm_provider") or llm_provider_settings().llm
             plan = plan_structured_output(llm, provider, resolved_response_format)
             try:
-                structured = await ainvoke_structured(llm, plan, [HumanMessage(content=result_text)])
+                structured = await ainvoke_structured(llm, plan, [HumanMessage(content=result_text)], config=config)
             except RepromptCapError as exc:
                 outcome = outcome_for_drive_error(exc, None)
                 if outcome is None:

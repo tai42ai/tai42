@@ -21,14 +21,16 @@ With a ``response_format`` set, the completion emits exactly one
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageDelta, MessageFinal, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import bind_run_trace
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
@@ -193,13 +195,19 @@ class VqaAgent(Agent):
 
         message = await _vqa_message(image_url, query)
 
+        # This agent calls the model directly (no graph), so it binds the run's trace here
+        # and threads the per-invoke config onto each model call — the single-shot
+        # structured door and the streaming text door alike — so both record under the
+        # run's trace through the same seam the graph agents reach.
+        trace = bind_run_trace()
+
         if response_format is not None:
             # The capability-negotiated plan routes native-first (grammar-enforced) or to
             # the bounded tool tier; ``ainvoke_structured`` runs the capped re-prompt loop,
             # ending a never-conforming run on the typed outcome instead of a raw raise.
             plan = plan_structured_output(llm, provider, response_format)
             try:
-                structured = await ainvoke_structured(llm, plan, [message])
+                structured = await ainvoke_structured(llm, plan, [message], config=trace.config)
             except RepromptCapError as exc:
                 outcome = outcome_for_drive_error(exc, None)
                 if outcome is None:
@@ -211,7 +219,7 @@ class VqaAgent(Agent):
 
         parts: list[str] = []
         accumulated: Any = None
-        async for chunk in llm.astream([message]):
+        async for chunk in llm.astream([message], config=cast(RunnableConfig, trace.config)):
             accumulated = chunk if accumulated is None else accumulated + chunk
             text = text_of(chunk)
             if text:

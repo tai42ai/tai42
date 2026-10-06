@@ -36,6 +36,8 @@ from tai42_agents.langchain_deep_agent.agent import DeepAgent
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
+from .conftest import fake_run_trace
+
 # ===========================================================================
 # DeepAgent build path
 # ===========================================================================
@@ -76,7 +78,7 @@ def _patch_build(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> N
     monkeypatch.setattr(agent_mod, "store_registry", _FakeRegistry)
     monkeypatch.setattr(agent_mod, "llm_provider_settings", _FakeProviderSettings)
     monkeypatch.setattr(agent_mod, "llm_settings", _FakeLlmSettings)
-    monkeypatch.setattr(agent_mod, "init_langgraph_config", lambda config=None: dict(config or {}))
+    monkeypatch.setattr(agent_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
 
 
 def _build_kwargs(**overrides: Any) -> dict[str, Any]:

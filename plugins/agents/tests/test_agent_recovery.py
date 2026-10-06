@@ -85,16 +85,6 @@ def _status(result: str, status: str = "success") -> AIMessage:
     return AIMessage(content=json.dumps({"status": status, "message": "m", "result": result}))
 
 
-def _strip_callbacks(config: dict[str, Any]) -> dict[str, Any]:
-    """A minimal ``init_langgraph_config`` stand-in: keep the thread_id and any
-    recursion bound, drop the recording monitoring stub's non-callable callbacks the
-    live graph would otherwise try to invoke."""
-    out: dict[str, Any] = {"configurable": {"thread_id": config["configurable"]["thread_id"]}}
-    if "recursion_limit" in config:
-        out["recursion_limit"] = config["recursion_limit"]
-    return out
-
-
 def _thread(thread_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": thread_id}}
 
@@ -135,7 +125,6 @@ class TestDeepAgentRecovery:
         monkeypatch.setattr(dagent, "get_llm_async", get_llm)
         monkeypatch.setattr(dagent, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=get_checkpointer))
         monkeypatch.setattr(dagent, "store_registry", lambda: SimpleNamespace(get_store=get_store))
-        monkeypatch.setattr(dagent, "init_langgraph_config", _strip_callbacks)
 
     async def _graph(self, saver: InMemorySaver, store: InMemoryStore, model: BaseChatModel) -> Any:
         from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
@@ -447,7 +436,6 @@ class TestRefineAgentRecovery:
 
         monkeypatch.setattr(fagent, "get_llm_async", get_llm)
         monkeypatch.setattr(fagent, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=get_checkpointer))
-        monkeypatch.setattr(fagent, "init_langgraph_config", _strip_callbacks)
 
     def _approval(self) -> str:
         from tai42_agents.refine_agent.prompt import CRITIC_APPROVAL_MESSAGE
@@ -561,7 +549,6 @@ class TestRetrievalAgentRecovery:
         monkeypatch.setattr(ragent, "get_embedding_async", get_embedding)
         monkeypatch.setattr(ragent, "store_registry", lambda: SimpleNamespace(get_store=get_store))
         monkeypatch.setattr(ragent, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=get_checkpointer))
-        monkeypatch.setattr(ragent, "init_langgraph_config", _strip_callbacks)
 
     def test_repair_heals_through_run_face(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph

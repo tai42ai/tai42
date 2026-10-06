@@ -24,9 +24,11 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, RunUsage, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import resolve_trace_context
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
+from tai42_agents._internal.config_util import with_run_trace_lineage
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents._internal.render import render_message
@@ -275,6 +277,14 @@ class VotingAgent(Agent):
             await tai42_app.tools.get_client_tools(voter_tools) if voter_tools else []
         )
 
+        # One trace per voting run: resolve the run's lineage once (the judge config is the
+        # lead role's carrier), then derive the voter and judge configs from it so every
+        # voter and the judge nest under the ONE run trace rather than each minting a fresh
+        # root. Each voter still gets its own thread_id and callbacks.
+        run_context = resolve_trace_context(judge_langgraph_config)
+        voter_config = with_run_trace_lineage(voter_langgraph_config, run_context)
+        judge_config = with_run_trace_lineage(judge_langgraph_config, run_context)
+
         user_messages, voters_info, judge_llm_provider, judge_llm_kwargs = await _run_voters(
             judge_message,
             voter_message,
@@ -283,7 +293,7 @@ class VotingAgent(Agent):
             voters,
             resolved_voter_tools,
             checkpoint_provider,
-            voter_langgraph_config,
+            voter_config,
         )
 
         judge_verdict = ""
@@ -295,7 +305,7 @@ class VotingAgent(Agent):
             llm_provider=judge_llm_provider,
             checkpoint_provider=checkpoint_provider,
             llm_kwargs=judge_llm_kwargs,
-            config=judge_langgraph_config,
+            config=judge_config,
             user_content_kwargs=user_content_kwargs,
         ):
             if isinstance(event, MessageFinal):

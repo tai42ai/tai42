@@ -32,6 +32,7 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import resolve_trace_context
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
@@ -42,7 +43,7 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.config_util import init_langgraph_config, with_run_trace_lineage
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.outcomes import outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
@@ -230,8 +231,13 @@ async def _run_refine_loop(
         is_enabled_for_debug=is_enabled_for_debug,
     )
 
-    evaluator_config = init_langgraph_config(evaluator_config)
-    critic_config = init_langgraph_config(critic_config)
+    # One trace per refine run: resolve the run's lineage once (the evaluator config is the
+    # lead role's carrier), then derive every role's config from it so the evaluator, the
+    # critic, and the final structured pass all nest under the ONE run trace rather than
+    # each minting a fresh root. Each role still gets its own thread_id and callbacks.
+    run_context = resolve_trace_context(evaluator_config)
+    evaluator_config = init_langgraph_config(with_run_trace_lineage(evaluator_config, run_context)).config
+    critic_config = init_langgraph_config(with_run_trace_lineage(critic_config, run_context)).config
     # The two role graphs run on their own checkpointed threads; repair either if an
     # aborted prior turn left it with dangling tool_calls before the loop resumes it.
     await _repair_dangling_tool_calls(evaluator, evaluator_config)
@@ -287,7 +293,8 @@ async def _run_refine_loop(
         structured_rail=structured_rail,
     )
     final_input = {"messages": [*history, {"role": "user", "content": "Critic Approved."}]}
-    return structured_evaluator, final_input, init_langgraph_config(None), strategy
+    final_config = init_langgraph_config(with_run_trace_lineage(None, run_context)).config
+    return structured_evaluator, final_input, final_config, strategy
 
 
 class RefineAgentInput(BaseModel):

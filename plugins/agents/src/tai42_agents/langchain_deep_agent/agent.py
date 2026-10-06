@@ -350,7 +350,7 @@ class DeepAgent(Agent):
         """
         return init_langgraph_config(
             config=build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
-        )
+        ).config
 
     async def astream(
         self,

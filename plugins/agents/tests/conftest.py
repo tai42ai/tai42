@@ -42,6 +42,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.tools import StructuredTool
 from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
@@ -49,6 +50,7 @@ from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import RunTrace
 from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
@@ -78,19 +80,44 @@ class RecordingAgents:
         return agent
 
 
-CALLBACKS: list[str] = ["callback-a", "callback-b"]
+class RecordingCallbackHandler(BaseCallbackHandler):
+    """A real LangChain callback handler bound to one run's trace id.
+
+    Records into the writer the trace id each model call fires under, so a test proves a
+    feature's model call reached the monitoring seam under the run's resolved trace. Being
+    a genuine ``BaseCallbackHandler`` (not a sentinel), it rides a live graph/LLM run's
+    config unharmed — no call site has to strip it.
+    """
+
+    def __init__(self, writer: RecordingMonitoringWriter, trace_id: str | None) -> None:
+        self._writer = writer
+        self._trace_id = trace_id
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+        self._writer.chat_model_starts.append(self._trace_id)
 
 
 class RecordingMonitoringWriter:
-    """A ``MonitoringWriter`` stub: records each ``TraceContext`` it is asked for
-    and hands back a fixed copy of the callback sentinels."""
+    """A ``MonitoringWriter`` stub: records each ``TraceContext`` it is asked for and hands
+    back real callback handlers that record the trace id each model call fires under."""
 
     def __init__(self) -> None:
         self.contexts: list[TraceContext] = []
+        self.chat_model_starts: list[str | None] = []
 
-    def get_monitoring_callbacks(self, ctx: TraceContext) -> list[str]:
+    def get_monitoring_callbacks(self, ctx: TraceContext) -> list[object]:
         self.contexts.append(ctx)
-        return list(CALLBACKS)
+        return [RecordingCallbackHandler(self, ctx.trace_id)]
+
+
+def fake_run_trace(config: dict[str, Any] | None = None) -> RunTrace:
+    """A deterministic :class:`~tai42_kit.llm.RunTrace` for a test that stubs ``init_langgraph_config``.
+
+    Wraps the given run config under a fixed ``"t"`` trace id, so a test double can
+    stand in for ``init_langgraph_config`` with the return type the callers consume
+    (``.config``) without resolving a lineage or touching a live backend.
+    """
+    return RunTrace(context=TraceContext(trace_id="t"), config=dict(config or {}))
 
 
 class RecordingMonitoring:
