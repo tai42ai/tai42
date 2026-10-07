@@ -3,7 +3,9 @@
 import asyncio
 import inspect
 
+import mcp.types
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.data import tool_has_error
 
 import tai42_toolbox.extensions.cache as cache_module
 from tai42_toolbox._internal.extensions import cache_store
@@ -79,6 +81,50 @@ def test_hit_miss_and_expiry(monkeypatch):
         clock["now"] = 1020.0
         assert await cached("hi", exp=10) == "HI"
         assert calls == 2
+
+    asyncio.run(scenario())
+
+
+def test_error_result_is_not_cached_and_is_returned(monkeypatch):
+    # A failed tool arrives as an MCP ``isError`` result (the platform returns it, it does not
+    # raise). It must NOT be cached: a re-send within the TTL must RE-EXECUTE (the tool may be
+    # back), and the error is returned loudly on the failing call, never swallowed.
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(cache_store.time, "monotonic", lambda: clock["now"])
+
+    calls = 0
+
+    async def backing(text: str) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return mcp.types.CallToolResult(
+                isError=True, content=[mcp.types.TextContent(type="text", text="upstream unavailable")]
+            )
+        return {"ok": text}
+
+    cached = cache(backing, "backing", "desc")
+
+    async def scenario() -> None:
+        nonlocal calls
+        # First call errors: the error result is returned (loud), not swallowed.
+        first = await cached("hi", exp=30)
+        assert calls == 1
+        assert tool_has_error(first)
+
+        # Re-send within the TTL: the error was not stored, so the backing re-executes
+        # (the tool has recovered) and the success result is returned.
+        clock["now"] = 1005.0
+        second = await cached("hi", exp=30)
+        assert calls == 2
+        assert not tool_has_error(second)
+        assert second == {"ok": "hi"}
+
+        # The recovered success IS cached: a third call within its TTL does not recompute.
+        clock["now"] = 1010.0
+        third = await cached("hi", exp=30)
+        assert calls == 2
+        assert third == {"ok": "hi"}
 
     asyncio.run(scenario())
 
