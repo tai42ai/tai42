@@ -135,7 +135,9 @@ enforced at the single answer facet, so the submitted answer is always the two
 date values, never a combined object. A page's **display blocks** (heading/body/
 image, each static or a reaction-filled slot) render ahead of its inputs, a
 **review** page shows a generic readback of the entered values, and a field with
-a `visibleWhen` predicate is shown/hidden by a client-side `If`. The Flow is
+a `visibleWhen` predicate is shown/hidden by client-side `If`s — one per value
+when it is shown for several of a controlling field's values (a single `If`
+condition cannot test membership), each under a distinct per-case name. The Flow is
 created and published once per distinct answer schema
 (cached by a schema hash under `CHANNEL_WHATSAPP_WABA_ID`) and reused; the
 completed form returns as an `nfm_reply`, its values coerced to the schema's

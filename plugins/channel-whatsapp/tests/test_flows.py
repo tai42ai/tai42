@@ -967,7 +967,9 @@ def test_visible_when_equals_wraps_the_control_in_an_if():
     assert conditional["then"][0]["name"] == "detail"
 
 
-def test_visible_when_in_builds_an_or_condition():
+def test_visible_when_in_renders_sibling_ifs_per_value_never_an_or():
+    # Meta refuses ``A == 'x' || A == 'y'`` ("Wrong positioning of operator '||'"). A field shown for
+    # several values renders one ``If`` per value, each holding its own uniquely-named control.
     schema = {
         "type": "object",
         "properties": {
@@ -975,9 +977,153 @@ def test_visible_when_in_builds_an_or_condition():
             "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
         },
     }
-    children = _screen_children(build_form_flow(schema)[0])
-    conditional = next(child for child in children if child.get("type") == "If")
-    assert conditional["condition"] == "${form.role} == 'a' || ${form.role} == 'b'"
+    flow_json = build_form_flow(schema)[0]
+    assert "||" not in json.dumps(flow_json)
+    ifs = [c for c in _screen_children(flow_json) if c.get("type") == "If"]
+    assert [c["condition"] for c in ifs] == ["${form.role} == 'a'", "${form.role} == 'b'"]
+    assert [c["then"][0]["name"] for c in ifs] == ["detail__a", "detail__b"]
+    _assert_only_identifier_safe_wire_names(flow_json)
+
+
+def test_visible_when_in_coalesces_the_split_answer_in_the_completion_payload():
+    # The per-case controls carry one answer under the field's own label: a backtick concatenation of
+    # both variant refs (mutually exclusive cases, so at most one is non-empty).
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "title": "Detail", "visibleWhen": {"field": "role", "in": ["a", "b"]}},
+        },
+    }
+    payload = _screen_children(build_form_flow(schema)[0])[-1]["on-click-action"]["payload"]
+    assert payload["Detail"] == "`${form.detail__a}${form.detail__b}`"
+    assert payload["role"] == "${form.role}"  # an unsplit field keeps its plain single reference
+
+
+def test_visible_when_single_value_in_stays_one_plain_if():
+    # A single-entry ``in`` is one value: one ``If``, the control keeps its plain name (no suffix) —
+    # byte-identical to an ``equals`` predicate, no needless split.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a"]}},
+        },
+    }
+    ifs = [c for c in _screen_children(build_form_flow(schema)[0]) if c.get("type") == "If"]
+    assert len(ifs) == 1
+    assert ifs[0]["condition"] == "${form.role} == 'a'"
+    assert ifs[0]["then"][0]["name"] == "detail"
+
+
+def test_visible_when_chained_dependent_nests_under_its_controllers_case():
+    # A field shown on a MULTI-VALUE field renders nested ``If`` per case (no ``||``), both uniquely
+    # named; each answer coalesces across cases under its own completion label.
+    schema = {
+        "type": "object",
+        "properties": {
+            "pick": {"type": "string"},
+            "extra": {
+                "type": "string",
+                "title": "Extra",
+                "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]},
+            },
+            "extra_note": {
+                "type": "string",
+                "title": "Extra note",
+                "visibleWhen": {"field": "extra", "equals": "other"},
+            },
+        },
+    }
+    flow_json = build_form_flow(schema)[0]
+    assert "||" not in json.dumps(flow_json)
+    children = _screen_children(flow_json)
+    extra_ifs = [c for c in children if c.get("type") == "If" and c["then"][0].get("name", "").startswith("extra__")]
+    assert [c["condition"] for c in extra_ifs] == ["${form.pick} == 'alpha'", "${form.pick} == 'beta'"]
+    nested = [c for c in children if c.get("type") == "If" and c["then"][0].get("type") == "If"]
+    assert len(nested) == 2
+    assert nested[0]["condition"] == "${form.pick} == 'alpha'"
+    inner = nested[0]["then"][0]
+    assert inner["condition"] == "${form.extra__alpha} == 'other'"
+    assert inner["then"][0]["name"] == "extra_note__alpha"
+    payload = children[-1]["on-click-action"]["payload"]
+    assert payload["Extra"] == "`${form.extra__alpha}${form.extra__beta}`"
+    assert payload["Extra note"] == "`${form.extra_note__alpha}${form.extra_note__beta}`"
+    _assert_only_identifier_safe_wire_names(flow_json)
+
+
+def test_visible_when_in_over_an_earlier_screen_controller_reads_the_coalesced_carrier():
+    # A multi-value controller on an EARLIER screen is read from its single coalesced ``__val`` carrier,
+    # so the dependent is one If per value with no controller suffix.
+    schema = {
+        "type": "object",
+        "properties": {
+            "pick": {"type": "string"},
+            "extra": {"type": "string", "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]}},
+        },
+    }
+    pages = [
+        {"title": "First", "fields": ["pick"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["extra"], "kind": "input", "display": []},
+    ]
+    ifs = [c for c in _screen_children(build_form_flow(schema, pages)[0], 1) if c.get("type") == "If"]
+    assert [c["condition"] for c in ifs] == [
+        "${data.pick__val} == 'alpha'",
+        "${data.pick__val} == 'beta'",
+    ]
+    assert [c["then"][0]["name"] for c in ifs] == ["extra__alpha", "extra__beta"]
+
+
+def test_visible_when_multi_value_on_a_boolean_or_array_field_is_refused():
+    # A split field's answer coalesces as a backtick string concatenation (string-only). A boolean or
+    # array field shown for several values cannot coalesce to one typed value — refused loudly, never
+    # rendered into Meta-refused (boolean) or value-losing (array) Flow JSON.
+    for field_type, extra in (("boolean", {}), ("array", {"items": {"type": "string", "enum": ["x", "y"]}})):
+        schema = {
+            "type": "object",
+            "properties": {
+                "pick": {"type": "string"},
+                "opt": {"type": field_type, "visibleWhen": {"field": "pick", "in": ["alpha", "beta"]}, **extra},
+            },
+        }
+        with pytest.raises(ChannelInputError, match="cannot coalesce to one typed value"):
+            build_form_flow(schema, option_fields={"opt"})
+
+
+def test_visible_when_chain_deeper_than_meta_nesting_is_refused():
+    # Meta nests at most three ``If``; a dependency chain deeper than that raises, never emits bad JSON.
+    props: dict = {"a": {"type": "string"}}
+    prev = "a"
+    for i in range(1, 5):  # a<-b<-c<-d<-e : e's chain is four deep
+        key = chr(ord("a") + i)
+        props[key] = {"type": "string", "visibleWhen": {"field": prev, "in": ["x", "y"]}}
+        prev = key
+    with pytest.raises(ChannelInputError, match="nests at most"):
+        build_form_flow({"type": "object", "properties": props})
+
+
+def test_visible_when_in_values_colliding_to_one_case_name_is_refused():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": ["a!", "a?"]}},
+        },
+    }
+    with pytest.raises(ChannelInputError, match="collide"):
+        build_form_flow(schema)
+
+
+def test_visible_when_empty_in_is_refused():
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "detail": {"type": "string", "visibleWhen": {"field": "role", "in": []}},
+        },
+    }
+    with pytest.raises(ChannelInputError, match="names no value"):
+        build_form_flow(schema)
 
 
 def test_visible_when_not_empty_condition():

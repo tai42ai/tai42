@@ -84,7 +84,6 @@ from tai42_contract.channels import ChannelInputError
 from tai42_channel_whatsapp.flows_components import (
     _RESERVED_PROPERTY,
     RADIO_OPTION_THRESHOLD,
-    _apply_visibility,
     _choice_options_enum,
     _display_component_list,
     _dynamic_component,
@@ -97,7 +96,10 @@ from tai42_channel_whatsapp.flows_components import (
     _valid_iso_date,
     _value_type_decl,
     component_names,
+    emit_field_variants,
+    form_ref,
     payload_labels,
+    screen_field_variants,
 )
 
 __all__ = [
@@ -330,11 +332,13 @@ def _reaction_event_payload(
     this_fields: list[str],
     earlier_fields: list[str],
     names: dict[str, str],
+    variants: dict[str, list[tuple[str, list[str]]]],
 ) -> dict[str, str]:
     """A ``data_exchange`` action payload: the event markers plus the values filled so far.
 
     The event kind rides ``tai42_event``; a field/page trigger its ``tai42_field``/``tai42_page``
-    marker. Each known value is keyed by its SCHEMA NAME (this screen's through ``${form.<cname>}``,
+    marker. Each known value is keyed by its SCHEMA NAME (this screen's through its coalesced
+    ``form_ref`` — a single control, or a backtick concatenation of a split field's variants —
     earlier ones through their ``__val`` carrier), so the data endpoint hands the react facet
     partial values keyed exactly as the stored schema. Later (unfilled) fields are omitted.
     """
@@ -342,14 +346,19 @@ def _reaction_event_payload(
     if marker_key is not None and marker_value is not None:
         payload[marker_key] = marker_value
     for name in this_fields:
-        payload[name] = f"${{form.{names[name]}}}"
+        payload[name] = form_ref(name, variants[name], names)
     for name in earlier_fields:
         payload[name] = f"${{data.{names[name]}__val}}"
     return payload
 
 
 def _attach_field_reaction(
-    component: dict[str, Any], name: str, this_fields: list[str], earlier_fields: list[str], names: dict[str, str]
+    component: dict[str, Any],
+    name: str,
+    this_fields: list[str],
+    earlier_fields: list[str],
+    names: dict[str, str],
+    variants: dict[str, list[tuple[str, list[str]]]],
 ) -> dict[str, Any]:
     """Attach a ``field_changed`` ``data_exchange`` action to a selectable control, or raise.
 
@@ -360,7 +369,7 @@ def _attach_field_reaction(
     action = {
         "name": "data_exchange",
         "payload": _reaction_event_payload(
-            _EVENT_FIELD_CHANGED, _REACTION_FIELD_KEY, name, this_fields, earlier_fields, names
+            _EVENT_FIELD_CHANGED, _REACTION_FIELD_KEY, name, this_fields, earlier_fields, names, variants
         ),
     }
     ctype = component["type"]
@@ -396,12 +405,19 @@ def _screen_data_model(
     return data_model
 
 
-def _terminal_footer(this_fields: list[str], earlier_fields: list[str], spec: _RenderSpec) -> dict[str, Any]:
+def _terminal_footer(
+    this_fields: list[str],
+    earlier_fields: list[str],
+    spec: _RenderSpec,
+    variants: dict[str, list[tuple[str, list[str]]]],
+) -> dict[str, Any]:
     # The terminal screen's Footer. A reacting form whose submission is reaction-checked fires a
     # ``submitted`` data_exchange (the data endpoint accepts or refuses, then completes); a static
     # form completes directly with the flat union of every field, keyed by human-readable label.
     if spec.submitted:
-        payload = _reaction_event_payload(_EVENT_SUBMITTED, None, None, this_fields, earlier_fields, spec.names)
+        payload = _reaction_event_payload(
+            _EVENT_SUBMITTED, None, None, this_fields, earlier_fields, spec.names, variants
+        )
         return {
             "type": "Footer",
             "label": _FOOTER_LABEL,
@@ -409,7 +425,7 @@ def _terminal_footer(this_fields: list[str], earlier_fields: list[str], spec: _R
         }
     payload = {
         spec.labels[name]: (
-            f"${{form.{spec.names[name]}}}" if name in this_fields else f"${{data.{spec.names[name]}__val}}"
+            form_ref(name, variants[name], spec.names) if name in this_fields else f"${{data.{spec.names[name]}__val}}"
         )
         for name in spec.properties
     }
@@ -424,6 +440,7 @@ def _step_footer(
     earlier_fields: list[str],
     spec: _RenderSpec,
     routing_model: dict[str, list[str]],
+    variants: dict[str, list[tuple[str, list[str]]]],
 ) -> dict[str, Any]:
     # A non-terminal screen's Footer. A page whose advance is reaction-triggered fires a
     # ``page_advanced`` data_exchange (the data endpoint applies the reaction and names the next
@@ -434,7 +451,7 @@ def _step_footer(
     routing_model[screen_id] = [next_screen]
     if page_title in spec.page_advanced:
         payload = _reaction_event_payload(
-            _EVENT_PAGE_ADVANCED, _REACTION_PAGE_KEY, page_title, this_fields, earlier_fields, spec.names
+            _EVENT_PAGE_ADVANCED, _REACTION_PAGE_KEY, page_title, this_fields, earlier_fields, spec.names, variants
         )
         return {
             "type": "Footer",
@@ -447,7 +464,7 @@ def _step_footer(
     for name in earlier_fields:
         forward[f"{spec.names[name]}__val"] = f"${{data.{spec.names[name]}__val}}"
     for name in this_fields:
-        forward[f"{spec.names[name]}__val"] = f"${{form.{spec.names[name]}}}"
+        forward[f"{spec.names[name]}__val"] = form_ref(name, variants[name], spec.names)
     return {
         "type": "Footer",
         "label": _CONTINUE_LABEL,
@@ -467,8 +484,11 @@ def _build_form_screen(
     """One Flow screen for a page: its display blocks, field components, review readback, and footer.
 
     Display blocks render in declared order ahead of the inputs; a reacting field carries a
-    ``data_exchange`` action; a ``visibleWhen`` field is wrapped in a client-side ``If``; a review
-    page adds the generic value readback. The footer records any transition in ``routing_model``.
+    ``data_exchange`` action; a ``visibleWhen`` field renders under client-side ``If``s — one per
+    matching value when shown for several (Meta's ``||`` refuses a disjunction of equality
+    comparisons), each case uniquely named and its answer coalesced back under the field's own name
+    (:func:`screen_field_variants`, :func:`emit_field_variants`, :func:`form_ref`); a review page adds
+    the generic value readback. The footer records any transition in ``routing_model``.
     """
     this_fields = fields_by_screen[index]
     later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
@@ -481,6 +501,7 @@ def _build_form_screen(
         if isinstance(slot, str):
             data_model[spec.slots[slot]] = {"type": "string", "__example__": ""}
 
+    variants = screen_field_variants(this_fields, earlier_fields, spec.properties, spec.names)
     display_blocks = _display_component_list(page, spec.slots)
     components: list[dict[str, Any]] = []
     for name in this_fields:
@@ -488,13 +509,13 @@ def _build_form_screen(
             name, spec.properties[name], name in spec.required, spec.option_fields, spec.names
         )
         if name in spec.field_changed:
-            component = _attach_field_reaction(component, name, this_fields, earlier_fields, spec.names)
-        components.append(_apply_visibility(component, spec.properties[name], this_fields, earlier_fields, spec.names))
+            component = _attach_field_reaction(component, name, this_fields, earlier_fields, spec.names, variants)
+        components.extend(emit_field_variants(component, variants[name]))
     readback = _review_readback(spec) if page.get("kind") == "review" else []
     footer = (
-        _terminal_footer(this_fields, earlier_fields, spec)
+        _terminal_footer(this_fields, earlier_fields, spec, variants)
         if is_terminal
-        else _step_footer(index, page_title, this_fields, later_fields, earlier_fields, spec, routing_model)
+        else _step_footer(index, page_title, this_fields, later_fields, earlier_fields, spec, routing_model, variants)
     )
 
     screen: dict[str, Any] = {
@@ -566,7 +587,8 @@ def build_form_flow(
     date field with platform constraints a bounded ``CalendarPicker``, a plain date a bare
     ``DatePicker``; any other string a ``TextInput``. A page's ``display`` blocks render ahead
     of its inputs, a ``review`` page adds a generic value readback, and a ``visibleWhen``
-    field is wrapped in a client-side ``If``.
+    field renders under client-side ``If``s — one per matching value when shown for several, each
+    uniquely named with its answer coalesced back under the field's own name.
 
     ``reactions`` (optional, a :class:`FormReactions` dump) makes the Flow ENDPOINT-DRIVEN: it
     carries ``data_api_version`` + a ``routing_model`` and the reacting fields/pages/submission
