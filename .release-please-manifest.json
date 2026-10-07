@@ -2,7 +2,7 @@
   "core/contract": "16.2.0",
   "core/kit": "7.7.3",
   "core/cli": "13.1.1",
-  "core/skeleton": "22.1.2",
+  "core/skeleton": "22.1.3",
   "plugins/accounts-postgres": "4.0.4",
   "plugins/agents": "8.5.4",
   "plugins/backend-arq": "4.3.4",
