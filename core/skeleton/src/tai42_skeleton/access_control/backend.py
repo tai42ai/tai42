@@ -13,7 +13,7 @@ from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
 # manager via this interface.
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path, strip_root_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import DenialCause
 from tai42_skeleton.access_control.role_grants import role_level_decision
@@ -208,8 +208,16 @@ class AccessControlAuthBackend(AuthenticationBackend):
 
         authorized = await self._resolve_authorized_policy(access_token, user_id)
 
+        # The request path the jq fence reasons on: the live target with only a mounted
+        # ``root_path`` prefix removed, so a deployment served under a mount prefix feeds the
+        # fence ``/api/auth/...`` — the shape its ``startswith`` clauses match — not the
+        # prefixed ``/<mount>/api/auth/...``. The same strip the resource guard's carve-out
+        # applies, so the two agree on the path a role condition sees.
+        request_path = strip_root_path(conn.url.path, conn.scope.get("root_path", ""))
+
         await self._enforce_conditions(
-            conn,
+            request_path,
+            conn.scope.get("method"),
             user_id,
             access_token,
             authorized.policy,
@@ -290,7 +298,8 @@ class AccessControlAuthBackend(AuthenticationBackend):
 
     async def _enforce_conditions(
         self,
-        conn,
+        request_path: str,
+        method: str | None,
         user_id: str,
         access_token,
         policy: AccessPolicy,
@@ -298,14 +307,15 @@ class AccessControlAuthBackend(AuthenticationBackend):
         dynamic_context: dict[str, Any],
         resolved_scopes: list[str],
     ) -> None:
-        # 4. Build Unified Context (with the effective, owner-attenuated scopes)
+        # 4. Build Unified Context (with the effective, owner-attenuated scopes). ``request_path``
+        # is the caller-supplied root-stripped path — the jq fence never re-derives it per door.
         context = JqAuthContext(
             sub=user_id,
             scopes=resolved_scopes,
             identity=access_token.claims,
             policy=policy.policy_data,
             context=dynamic_context,
-            request={"method": conn.scope.get("method"), "path": conn.url.path},
+            request={"method": method, "path": request_path},
             system={"time": time.time()},
         )
 
@@ -333,7 +343,7 @@ class AccessControlAuthBackend(AuthenticationBackend):
                     identity=access_token.claims,
                     policy=owner_policy.policy_data,
                     context=dynamic_context,
-                    request={"method": conn.scope.get("method"), "path": conn.url.path},
+                    request={"method": method, "path": request_path},
                     system={"time": time.time()},
                 )
                 owner_condition = await tai42_app.storage.resource_manager.render_templated_text(owner_policy.condition)

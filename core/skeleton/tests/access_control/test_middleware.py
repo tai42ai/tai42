@@ -86,11 +86,13 @@ class _RaisingVerifier(AccessControlVerifier):
         raise RuntimeError("redis down")
 
 
-def _http_scope(path="/x", user=None, auth=None, method="GET") -> dict:
+def _http_scope(path="/x", user=None, auth=None, method="GET", root_path="") -> dict:
     scope = {
         "type": "http",
         "method": method,
         "path": path,
+        "raw_path": path.encode("ascii"),
+        "root_path": root_path,
         "query_string": b"",
         "headers": [],
     }
@@ -558,6 +560,24 @@ async def test_carve_out_is_exact_matching_the_jq_fence():
     await enforcer.enforce({"request": {"path": "/api/auth/me", "method": "GET"}}, editor_jq())
     with pytest.raises(AuthenticationError):
         await enforcer.enforce({"request": {"path": "/api/auth/me/", "method": "GET"}}, editor_jq())
+
+
+async def test_carve_out_membership_is_root_path_stripped():
+    # Under a mount prefix the carve-out membership test must reason on the ROOT-STRIPPED
+    # path, exactly as the companion jq fence does: an authenticated caller to
+    # ``/mnt/api/auth/me`` is the ``/api/auth/me`` carve-out and reaches the app — a
+    # prefix-kept check would miss it and fall through to resolution (here unmapped → 403).
+    captured: dict = {}
+    spy = _SpyResolveVerifier()
+    mw = ResourceGuardMiddleware(_make_app(captured), spy, PUBLIC_ID, ("/api/auth/me",))
+    scope = _http_scope(
+        path="/mnt/api/auth/me", user=_authed_user("u1"), auth=AuthCredentials(["read"]), root_path="/mnt"
+    )
+    sent = await _drive(mw, scope)
+    assert _status(sent) == 200
+    assert captured["called"] is True
+    # Resolution is never consulted — the carve-out decided it on the stripped path.
+    assert spy.calls == []
 
 
 async def test_no_carve_out_configured_leaves_path_to_resolution():
