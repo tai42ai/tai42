@@ -22,7 +22,7 @@ from tai42_skeleton.access_control.backend import (
     effective_scopes,
 )
 from tai42_skeleton.access_control.path_canon import canonicalize_path
-from tai42_skeleton.access_control.roles import editor_jq
+from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.access_control.verifier import is_always_public_prefix
@@ -83,13 +83,18 @@ class _SpyVerifier:
         return AccessToken(token=token, client_id="u", scopes=[], claims={})
 
 
-def _conn(headers: dict[str, str] | None = None, path="/x", method="GET") -> Request:
+def _conn(headers: dict[str, str] | None = None, path="/x", method="GET", root_path="") -> Request:
     raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    # ``path`` is the full ASGI target as the server receives it — under a mount prefix
+    # it still carries that prefix, with ``root_path`` naming the prefix (exactly what
+    # uvicorn and the test client set). ``raw_path`` mirrors ``path`` as the server sends it.
     return Request(
         {
             "type": "http",
             "method": method,
             "path": path,
+            "raw_path": path.encode("ascii"),
+            "root_path": root_path,
             "query_string": b"",
             "headers": raw,
         }
@@ -393,6 +398,63 @@ async def test_owned_key_owner_editor_role_denied_on_admin_area(monkeypatch, bou
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
     with pytest.raises(AuthorizationError):
         await backend.authenticate(_conn({"X-Api-Key": "k"}, path="/api/auth/public-routes"))
+
+
+async def test_editor_key_denied_on_public_routes_baseline(monkeypatch, bound_app, store_pg):
+    # Baseline (no mount prefix): the editor ceiling fences the access-control admin area,
+    # so an editor key is denied POST /api/auth/public-routes (it cannot pin routes public).
+    settings = AccessControlSettings()
+    store_pg.add_policy("ed", scopes=["*"], condition={"content": editor_jq()})
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
+    backend = _backend(_FakeVerifier({"tok": "ed"}), settings)
+    with pytest.raises(AuthorizationError):
+        await backend.authenticate(
+            _conn({"Authorization": "Bearer tok"}, path="/api/auth/public-routes", method="POST")
+        )
+
+
+async def test_editor_key_denied_on_public_routes_under_root_path(monkeypatch, bound_app, store_pg):
+    # Under a mount prefix (root_path="/mnt") the request still routes to
+    # ``/api/auth/public-routes``, but the jq auth context's ``request.path`` must be the
+    # ROOT-STRIPPED path — otherwise the ceiling's ``startswith("/api/auth")`` fence misses
+    # ``/mnt/api/auth/public-routes``, admits the editor, and the pin route (which carries no
+    # admin check of its own) lets an editor key pin routes public.
+    settings = AccessControlSettings()
+    store_pg.add_policy("ed", scopes=["*"], condition={"content": editor_jq()})
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
+    backend = _backend(_FakeVerifier({"tok": "ed"}), settings)
+    with pytest.raises(AuthorizationError):
+        await backend.authenticate(
+            _conn(
+                {"Authorization": "Bearer tok"},
+                path="/mnt/api/auth/public-routes",
+                method="POST",
+                root_path="/mnt",
+            )
+        )
+
+
+async def test_role_read_fence_holds_under_root_path(monkeypatch, bound_app, store_pg):
+    # Same root cause on the READ fence: under a mount prefix a GET to an access-control
+    # admin route the role does not carve in (here ``/api/auth/public-routes``) must stay
+    # denied — the editor and viewer ceilings both gate reads of ``/api/auth`` via the
+    # root-stripped path. (The viewer's write-carve already blocks writes regardless; this
+    # guards the read side both roles share.)
+    settings = AccessControlSettings()
+    for role, jq in (("ed", editor_jq()), ("vw", viewer_jq())):
+        store_pg.add_policy(role, scopes=["*"], condition={"content": jq})
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
+    for role in ("ed", "vw"):
+        backend = _backend(_FakeVerifier({"tok": role}), settings)
+        with pytest.raises(AuthorizationError):
+            await backend.authenticate(
+                _conn(
+                    {"Authorization": "Bearer tok"},
+                    path="/mnt/api/auth/public-routes",
+                    method="GET",
+                    root_path="/mnt",
+                )
+            )
 
 
 async def test_owner_condition_sees_owner_scopes_not_attenuated(monkeypatch, bound_app, store_pg):

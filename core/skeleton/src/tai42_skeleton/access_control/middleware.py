@@ -14,7 +14,7 @@ from tai42_contract.access_control.context import (
     set_request_user_id,
 )
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path, strip_root_path
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
     reset_request_identity_claims,
@@ -88,13 +88,15 @@ class ResourceGuardMiddleware:
         # We build an HTTPConnection (works for both http and websocket scopes)
         # purely for URL/path helpers; we don't pass it to the app.
         conn = HTTPConnection(scope)
-        # The exact request path (decoded, un-normalized) for the carve-out membership test
-        # and its jq-fence parity — never trailing-slash/dot-normalized (see the carve-out
-        # comment below). Route/resource RESOLUTION instead reasons on the canonical form
-        # derived from the RAW target, where a record ``{key}``'s encoded slash stays ONE
-        # segment — the SAME form the router matches — so the record doors resolve to their
-        # protected resource rather than falling to the public SPA catch-all.
-        path_to_check = conn.url.path
+        # The request path (decoded, un-normalized) for the carve-out membership test and its
+        # jq-fence parity — only a mounted ``root_path`` prefix is removed, so a deployment
+        # served under a mount prefix still matches the carve-out; never trailing-slash/dot-
+        # normalized (see the carve-out comment below), the SAME shape the backend jq fence
+        # reasons on. Route/resource RESOLUTION instead reasons on the canonical form derived
+        # from the RAW target, where a record ``{key}``'s encoded slash stays ONE segment —
+        # the SAME form the router matches — so the record doors resolve to their protected
+        # resource rather than falling to the public SPA catch-all.
+        path_to_check = strip_root_path(conn.url.path, scope.get("root_path", ""))
         try:
             canonical_path = request_canonical_path(scope)
         except MalformedPathError:
