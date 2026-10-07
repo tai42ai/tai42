@@ -5484,7 +5484,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "6.5.2"
+version = "6.5.3"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "cryptography" },
