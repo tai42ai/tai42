@@ -349,7 +349,11 @@ async def test_lost_slot_remints_a_new_life(
 async def test_teardown_deliberate_releases_claim_and_deletes_presence(
     wire_bus_client: None, server: fakeredis.FakeServer
 ) -> None:
-    bus = make_bus()
+    # A long claim TTL so the slot survives to the deliberate release: this test runs no
+    # heartbeat, and the presence delete is gated on the claim release succeeding — under
+    # the default sub-second TTL the unrenewed claim can lapse before teardown, miss the
+    # release, and leave the presence row. In a live worker the heartbeat holds the claim.
+    bus = make_bus(heartbeat_ttl=5.0)
     client = aioredis.FakeRedis(server=server, decode_responses=True)
     try:
         await bus._establish_identity(client)
