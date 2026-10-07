@@ -12,7 +12,7 @@ import inspect
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
-from tai42_kit.utils.data import makefun_func_name
+from tai42_kit.utils.data import makefun_func_name, tool_has_error
 
 from tai42_toolbox._internal.extensions.cache_store import MISS, CacheStore, compute_key
 from tai42_toolbox._internal.extensions.signature import with_added_params
@@ -46,7 +46,13 @@ def cache(func, name, description):
                 else:
                     result = func(*args, **kwargs)
 
-                store.write(key, result, exp)
+                # Only a successful result is memoized. A failed tool is handed back as an MCP
+                # ``isError`` result (the platform returns it, it does not raise), and caching it
+                # would re-serve a stale failure for the key's lifetime even once the tool is back —
+                # so an error result is returned to the caller but never stored, and the next
+                # identical call re-executes.
+                if not tool_has_error(result):
+                    store.write(key, result, exp)
                 return result
         finally:
             store.drop_lock(key)
