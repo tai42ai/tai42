@@ -6383,7 +6383,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "4.2.8"
+version = "4.2.9"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
