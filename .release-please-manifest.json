@@ -24,7 +24,7 @@
   "plugins/storage-github": "1.2.9",
   "plugins/storage-local": "1.2.9",
   "plugins/storage-s3": "1.2.11",
-  "plugins/toolbox": "4.2.8",
+  "plugins/toolbox": "4.2.9",
   "plugins/tools-github": "1.1.9",
   "plugins/tools-stripe": "1.2.9",
   "plugins/tools-twilio": "1.1.9",
