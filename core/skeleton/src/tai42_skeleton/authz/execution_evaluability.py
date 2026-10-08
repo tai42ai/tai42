@@ -9,11 +9,10 @@ the authoritative assertion still runs at the fire, on the text rendered then.
 from __future__ import annotations
 
 from jinja2 import TemplateError
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
-from tai42_contract.app import tai42_app
 
-from tai42_skeleton.access_control.policy import PolicyEnforcer
+from tai42_skeleton.access_control.policy import render_condition
+from tai42_skeleton.access_control.standing import Standing
 from tai42_skeleton.authz.token_free import TokenFreeConditionError, assert_token_free_evaluable
 from tai42_skeleton.template import TemplateNotFoundError
 
@@ -48,7 +47,7 @@ async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -
         # case — it is configured and still goes through the render.
         return
     try:
-        condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
+        condition = (await render_condition(policy.condition)).text
     except (ValueError, TemplateError, TemplateNotFoundError) as exc:
         raise ExecutionConditionError(
             f"the policy condition of {principal!r} does not render ({exc}), so it cannot be shown evaluable "
@@ -65,8 +64,8 @@ async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -
         ) from exc
 
 
-async def assert_execution_key_evaluable(enforcer: PolicyEnforcer, execution_key: str) -> None:
-    """Assert that a record naming ``execution_key`` can actually fire under it.
+async def assert_execution_key_evaluable(standing: Standing) -> None:
+    """Assert that a record naming the key ``standing`` resolved can actually fire under it.
 
     A fire presents no credential, so its jq context carries only the identity claim
     readable from the store. The key's condition — and, when the key is owned, its
@@ -75,18 +74,14 @@ async def assert_execution_key_evaluable(enforcer: PolicyEnforcer, execution_key
     and the principal it belongs to — otherwise; each write surface maps that to its own
     typed refusal.
 
-    Both conditions are read through the CALLER's ``enforcer`` against ONE already-read
-    store version, so the pair answers from a single cache generation.
+    ``standing`` is the key's, resolved by the authority assertion that must run first, so
+    both conditions are the ones its single store version read and the owner is the one the
+    key's stored policy names.
 
     Early rejection only — the authoritative assertion runs at the fire, on the text
     rendered then. Callers must already have established that access control is enabled;
     this does not check.
     """
-    version = await enforcer.current_policy_version()
-    policy = await enforcer.get_policy_at(execution_key, version)
-    await _assert_condition_evaluable(policy, principal=execution_key)
-
-    owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-    if owner is not None:
-        owner_policy = await enforcer.get_policy_at(owner, version)
-        await _assert_condition_evaluable(owner_policy, principal=owner)
+    await _assert_condition_evaluable(standing.policy, principal=standing.principal)
+    if standing.owner is not None and standing.owner_policy is not None:
+        await _assert_condition_evaluable(standing.owner_policy, principal=standing.owner)

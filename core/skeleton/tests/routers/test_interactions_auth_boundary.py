@@ -19,6 +19,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -99,7 +100,7 @@ def boundary_client(monkeypatch):
     async def version_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield _VersionRedis()
 
-    monkeypatch.setattr(verifier_module, "client_ctx", version_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", version_ctx)
     # The declared-public tier reads the route registry; seed it with the interactions
     # doors so the public grant flows from their registration. The authed doors resolve
     # to nothing (gated) against an empty policy store.

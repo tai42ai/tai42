@@ -18,7 +18,7 @@ def _prefix_overlaps(a: str, b: str) -> bool:
     True when they are equal or one is nested under the other (a path-segment
     ancestor of the other).
     """
-    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+    return under_prefix(a, b) or under_prefix(b, a)
 
 
 class AccessControlRedisSettings(RedisConnectionSettings):
@@ -273,7 +273,7 @@ class AccessControlSettings(TaiBaseSettings):
                     f"authenticated_always_allowed_paths entry {path!r} must be an absolute path starting with '/'"
                 )
             for always in self.always_public_path_prefixes:
-                if path == always or path.startswith(f"{always}/"):
+                if under_prefix(path, always):
                     raise ValueError(
                         f"authenticated_always_allowed_paths entry {path!r} falls under always-public prefix "
                         f"{always!r} — a path cannot be both public-anonymous and authenticated-only"
@@ -338,6 +338,18 @@ class AccessControlSettings(TaiBaseSettings):
             )
 
     def _compile_path_patterns(self) -> None:
+        # A template is looked up by exact url in the route table, whose urls are canonical,
+        # so a non-canonical template could never match: it is refused here, loudly.
+        for template in self.path_patterns.values():
+            try:
+                canonical = canonicalize_path(template)
+            except MalformedPathError as exc:
+                raise ValueError(f"path_patterns template {template!r} is malformed: {exc}") from exc
+            if canonical != template:
+                raise ValueError(
+                    f"path_patterns template {template!r} is not canonical (it canonicalizes to {canonical!r}) "
+                    "— supply the canonical form"
+                )
         if self.path_patterns:
             self.compiled_patterns = [
                 (re.compile(pattern), template) for pattern, template in self.path_patterns.items()

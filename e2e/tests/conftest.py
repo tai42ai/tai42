@@ -49,6 +49,7 @@ from tai42_e2e.manifests import (
     build_deep_agent_durable_stack,
     build_default_router_stack,
     build_door_schedule_stack,
+    build_embed_prefix_stack,
     build_embed_stack,
     build_extensions_stack,
     build_media_bridge_no_store_stack,
@@ -70,6 +71,7 @@ from tai42_e2e.manifests import (
     build_seams_stack,
     build_setup_stack,
     build_shipped_connectors_stack,
+    build_sse_auth_stack,
     build_stripe_stack,
     build_web_media_expiry_stack,
     build_web_media_no_store_stack,
@@ -268,6 +270,19 @@ def embed_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Itera
     """The embed deployment shape: a user-owned uvicorn process serving a host
     FastAPI app that mounts ``create_app()``, plus one backend-worker sibling."""
     yield from _boot(infra, tmp_path_factory.mktemp("embed"), build_embed_stack)
+
+
+@pytest.fixture(scope="module")
+def embed_prefix_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The embed host serving the tai app under ``/mnt`` with access control ON and the seeded
+    root key: every request reaches the app with ``root_path="/mnt"``."""
+    yield from _boot(infra, tmp_path_factory.mktemp("embed-prefix"), build_embed_prefix_stack, seed_auth=True)
+
+
+@pytest.fixture(scope="module")
+def sse_auth_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """``tai serve --transport sse`` with access control ON and the seeded root key."""
+    yield from _boot(infra, tmp_path_factory.mktemp("sse-auth"), build_sse_auth_stack, seed_auth=True)
 
 
 @pytest.fixture(scope="module")

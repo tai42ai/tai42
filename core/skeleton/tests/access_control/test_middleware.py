@@ -10,18 +10,19 @@ import re
 
 import pytest
 from fastmcp.server.auth import AccessToken
-from starlette.authentication import AuthCredentials, AuthenticationError, UnauthenticatedUser
+from starlette.authentication import AuthCredentials, UnauthenticatedUser
 from starlette.types import ASGIApp
 from tai42_contract.access_control.context import caller_may_read_secrets, get_current_user_id
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.middleware import (
     DisabledAccessControlSecretCapabilityMiddleware,
     ResourceGuardMiddleware,
 )
-from tai42_skeleton.access_control.policy import PolicyEnforcer
+from tai42_skeleton.access_control.path_canon import canonicalize_path
+from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
 from tai42_skeleton.access_control.roles import editor_jq
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.user import TaiUser
@@ -473,7 +474,7 @@ async def test_public_and_protected_route_denies_unauthenticated_end_to_end(monk
     pg.add_route("/mixed", PUBLIC_ID)
     pg.add_route("/protected-template", "protected", pattern=r"^/mixed$")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     real_verifier = AccessControlVerifier(settings, providers=[_NoIdentityProvider()])
     mw = ResourceGuardMiddleware(_make_app({}), real_verifier, PUBLIC_ID)
     scope = _http_scope(path="/mixed", user=UnauthenticatedUser(), auth=AuthCredentials())
@@ -537,34 +538,27 @@ async def test_carve_out_is_exact_path_not_prefix():
     assert _status(sent) == 403
 
 
-async def test_carve_out_is_exact_matching_the_jq_fence():
-    # The carve-out membership test uses the EXACT request path (no trailing-slash
-    # normalization) so it admits exactly the shape the companion role jq fence admits:
-    # ``/api/auth/me`` exact is carved, but ``/api/auth/me/`` is NOT — it falls through to
-    # resolution (here unmapped → 403), mirroring editor_jq()'s exact-match, so the two never
-    # disagree on the trailing-slash variant — a normalizing carve-out would admit
-    # ``/api/auth/me/`` here (200) yet the jq fence denies it (403).
-    captured: dict = {}
-    mw = ResourceGuardMiddleware(_make_app(captured), _FakeVerifier([]), PUBLIC_ID, ("/api/auth/me",))
-    exact = _http_scope(path="/api/auth/me", user=_authed_user(), auth=AuthCredentials(["read"]))
-    assert _status(await _drive(mw, exact)) == 200
-    assert captured["called"] is True
+async def test_carve_out_matches_the_jq_fence_on_the_canonical_path():
+    # The carve-out membership and the backend's jq fence read ONE path — the canonical
+    # one — so every spelling of a carved path is decided alike on both sides: the
+    # trailing-slash ``/api/auth/me/`` is ``/api/auth/me``, admitted by the carve-out AND by
+    # the editor fence (the router then answers its own redirect).
+    for spelling in ("/api/auth/me", "/api/auth/me/", "/api//auth/./me"):
+        captured: dict = {}
+        mw = ResourceGuardMiddleware(_make_app(captured), _FakeVerifier([]), PUBLIC_ID, ("/api/auth/me",))
+        scope = _http_scope(path=spelling, user=_authed_user(), auth=AuthCredentials(["read"]))
+        assert _status(await _drive(mw, scope)) == 200, spelling
+        assert captured["called"] is True
 
-    mw2 = ResourceGuardMiddleware(_make_app({}), _FakeVerifier([]), PUBLIC_ID, ("/api/auth/me",))
-    slashed = _http_scope(path="/api/auth/me/", user=_authed_user(), auth=AuthCredentials(["read"]))
-    assert _status(await _drive(mw2, slashed)) == 403
-
-    # jq parity: the editor fence admits the exact path and denies the trailing-slash one,
-    # exactly as the carve-out now does.
+    # jq parity: the editor fence admits the canonical path every spelling reduces to.
     enforcer = PolicyEnforcer(AccessControlSettings())
-    await enforcer.enforce({"request": {"path": "/api/auth/me", "method": "GET"}}, editor_jq())
-    with pytest.raises(AuthenticationError):
-        await enforcer.enforce({"request": {"path": "/api/auth/me/", "method": "GET"}}, editor_jq())
+    rendered = RenderedCondition(editor_jq(), configured=True)
+    await enforcer.enforce({"request": {"path": canonicalize_path("/api/auth/me/"), "method": "GET"}}, rendered)
 
 
 async def test_carve_out_membership_is_root_path_stripped():
-    # Under a mount prefix the carve-out membership test must reason on the ROOT-STRIPPED
-    # path, exactly as the companion jq fence does: an authenticated caller to
+    # Under a mount prefix the carve-out membership test reasons on the canonical,
+    # ROOT-STRIPPED path, exactly as the companion jq fence does: an authenticated caller to
     # ``/mnt/api/auth/me`` is the ``/api/auth/me`` carve-out and reaches the app — a
     # prefix-kept check would miss it and fall through to resolution (here unmapped → 403).
     captured: dict = {}
@@ -597,7 +591,7 @@ def _real_guard(monkeypatch, pg: FakeAccessControlPg, settings: AccessControlSet
     ``pg`` is seeded. Drives real classification (canonicalization, fallback, exclusions)."""
     settings = settings or AccessControlSettings()
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     verifier = AccessControlVerifier(settings, providers=[_NoIdentityProvider()])
     return ResourceGuardMiddleware(_make_app({}), verifier, PUBLIC_ID)
 

@@ -85,6 +85,35 @@ def seed_owner_and_key(
     return raw
 
 
+def seed_editor_key(infra: Infra, resources: StackResources, *, owner_id: str, key_id: str) -> str:
+    """Seed an owner principal holding the seeded ``editor`` role and its ``*``-scope key.
+
+    The owner's policy carries what ``roles.apply_role(owner, "editor")`` writes: the editor
+    base-tier jq ceiling as its condition and the ``editor`` role pointer in ``policy_data``;
+    the key inherits both through its owner. Writes rows only, so it may run before or after
+    boot (the role template itself is seeded at boot). Returns the raw ``sk-...`` token.
+    """
+    from tai42_contract.template import TemplatedText
+    from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY, editor_jq
+
+    raw = seed_owner_and_key(infra, resources, owner_id=owner_id, key_id=key_id, scopes=["*"])
+    condition = TemplatedText(content=editor_jq()).model_dump()
+    with psycopg.connect(
+        host=resources.pg_host,
+        port=resources.pg_port,
+        user=resources.pg_user,
+        password=resources.pg_password,
+        dbname=resources.pg_db,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE access_control_policies SET condition = %s, policy_data = %s WHERE user_id = %s",
+                (Json(condition), Json({ROLE_POINTER_KEY: "editor"}), owner_id),
+            )
+        conn.commit()
+    return raw
+
+
 def seed_route_rows(resources: StackResources, rows: Sequence[tuple[str, str, str | None]]) -> None:
     """Upsert ``(url, scope_id, pattern)`` rows into the Postgres route store the
     access-control verifier reads. ``pattern`` is a regex for a dynamic mapping or
@@ -118,9 +147,9 @@ def seed_route_rows(resources: StackResources, rows: Sequence[tuple[str, str, st
 # Dropping the explicit callback/media entries from this published map (they moved to the
 # declared-public tier) is a BREAKING change to this exported constant, so it ships as a major.
 STUDIO_PATH_PATTERNS: dict[str, str] = {
-    r"/api/(?!plugins/[^/]+/studio/).*": "studio_authed",
-    r"/(?!api(?:/|$)).*": "public_spa",
-    r"/api/plugins/[^/]+/studio/.*": "public_assets",
+    r"/api/(?!plugins/[^/]+/studio/).*": "/studio_authed",
+    r"/(?!api(?:/|$)).*": "/public_spa",
+    r"/api/plugins/[^/]+/studio/.*": "/public_assets",
 }
 
 # The single protected resource id the Studio's ``*``-scope key is authorized
@@ -144,9 +173,9 @@ def seed_studio_routes(resources: StackResources) -> None:
         resources,
         [
             ("/metrics", "public", None),
-            ("studio_authed", STUDIO_RESOURCE_ID, None),
-            ("public_spa", "public", None),
-            ("public_assets", "public", None),
+            ("/studio_authed", STUDIO_RESOURCE_ID, None),
+            ("/public_spa", "public", None),
+            ("/public_assets", "public", None),
         ],
     )
 
@@ -174,7 +203,7 @@ def seed_bootstrap_key(infra: Infra, resources: StackResources) -> str:
         resources,
         [
             ("/metrics", "public", None),
-            ("e2e-all-routes", "e2e-all", r"^/(?!metrics$).*$"),
+            ("/e2e-all-routes", "e2e-all", r"^/(?!metrics$).*$"),
         ],
     )
     return raw
@@ -199,12 +228,12 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
             # Every channel webhook door (twilio inbound/status, whatsapp inbound) and the web
             # channel's PUBLIC chat doors: unauthenticated at the platform edge, authenticated
             # by the provider signature or the visitor's session cookie.
-            ("bridge-channels", "public", r"^/api/channels/.*$"),
+            ("/bridge-channels", "public", r"^/api/channels/.*$"),
             # The web entry-gate MANAGEMENT doors are authed (platform api key): pin them to
             # e2e-all so the blanket public channel rule above does not open them. Deny wins
             # across tiers, so the path resolving to BOTH ids stays protected — an unauthed
             # caller is refused, the operator (root) is admitted.
-            ("bridge-web-gates", "e2e-all", r"^/api/channels/web/gates(?:/.*)?$"),
+            ("/bridge-web-gates", "e2e-all", r"^/api/channels/web/gates(?:/.*)?$"),
             # The readiness probes, the interactions callback and the served-media doors need
             # no row: all register ``authed=False``, so the verifier's declared-public tier
             # publics them straight from the route registration, above the route table.
@@ -212,7 +241,7 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
             # mint, schedules) → e2e-all, excluding ``/metrics`` (its own public row) and the
             # public channel shapes so deny-wins never re-protects them.
             (
-                "bridge-protected",
+                "/bridge-protected",
                 "e2e-all",
                 r"^/(?!metrics$)(?!api/channels/).*$",
             ),
@@ -246,7 +275,7 @@ def seed_stripe_authz(infra: Infra, resources: StackResources) -> str:
             # register, preset create, the MCP edge) → e2e-all, excluding ``/metrics`` (its
             # own public row) so deny-wins never re-protects it.
             (
-                "stripe-protected",
+                "/stripe-protected",
                 "e2e-all",
                 r"^/(?!metrics$).*$",
             ),
@@ -283,7 +312,7 @@ def seed_projection_authz(infra: Infra, resources: StackResources) -> tuple[str,
             # Every OTHER path (a projected op's synthesized route included) → e2e-all,
             # excluding ``/metrics`` (its own public row) and ``/mcp``. The readiness probes
             # are public by declaration and need no row.
-            ("proj-protected", "e2e-all", r"^/(?!metrics$)(?!mcp$).*$"),
+            ("/proj-protected", "e2e-all", r"^/(?!metrics$)(?!mcp$).*$"),
         ],
     )
     return root, limited

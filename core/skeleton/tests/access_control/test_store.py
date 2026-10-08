@@ -43,10 +43,44 @@ async def test_public_route_excluded_from_scope_enumeration(pg: FakeAccessContro
     assert await STORE().get_all_route_mappings() == {"/a": "scope-a", "/open": PUBLIC}
 
 
-async def test_add_url_normalizes_trailing_slash(pg: FakeAccessControlPg) -> None:
-    await STORE().add_url_to_scope("scope-a", "/a/")
-    assert pg.route("/a") is not None
-    assert await STORE().fetch_route("/a") == "scope-a"
+@pytest.mark.parametrize(
+    ("written", "stored"),
+    [
+        ("/a/", "/a"),
+        ("/a%20b", "/a b"),
+        ("//a//b", "/a/b"),
+        ("/a/./b", "/a/b"),
+        ("/a/x/../b", "/a/b"),
+    ],
+)
+async def test_add_url_stores_the_canonical_form(pg: FakeAccessControlPg, written: str, stored: str) -> None:
+    await STORE().add_url_to_scope("scope-a", written)
+    assert [row["url"] for row in pg.routes] == [stored]
+    assert await STORE().fetch_route(stored) == "scope-a"
+
+
+@pytest.mark.parametrize("url", ["/a%00b", "/a\\b"])
+async def test_route_writers_refuse_a_url_with_no_canonical_form(pg: FakeAccessControlPg, url: str) -> None:
+    from tai42_skeleton.access_control.path_canon import MalformedPathError
+
+    with pytest.raises(MalformedPathError):
+        await STORE().add_url_to_scope("scope-a", url)
+    with pytest.raises(MalformedPathError):
+        await STORE().pin_route_public(url)
+    with pytest.raises(MalformedPathError):
+        await STORE().remove_url_from_scope(url)
+    with pytest.raises(MalformedPathError):
+        await STORE().unpin_public_route(url)
+    assert pg.routes == []
+
+
+async def test_remove_and_unpin_address_a_row_by_any_spelling_of_its_canonical_url(pg: FakeAccessControlPg) -> None:
+    await STORE().add_url_to_scope("scope-a", "/a/b")
+    existed, _ = await STORE().remove_url_from_scope("/a/./b/")
+    assert existed is True
+    await STORE().pin_route_public("/open")
+    assert await STORE().unpin_public_route("//open/") is True
+    assert pg.routes == []
 
 
 async def test_add_url_with_pattern_registers_dynamic_pattern(pg: FakeAccessControlPg) -> None:
@@ -143,10 +177,20 @@ async def test_pin_route_public_with_pattern_registers_it(pg: FakeAccessControlP
     assert await STORE().fetch_dynamic_patterns() == {r"/events/\d+": "/events/{id}"}
 
 
-async def test_pin_route_public_normalizes_trailing_slash(pg: FakeAccessControlPg) -> None:
-    await STORE().pin_route_public("/open/")
-    assert pg.route("/open") is not None
-    assert await STORE().get_public_route_pins() == ["/open"]
+async def test_pin_route_public_stores_the_canonical_form(pg: FakeAccessControlPg) -> None:
+    await STORE().pin_route_public("//open/./x/")
+    assert pg.route("/open/x") is not None
+    assert await STORE().get_public_route_pins() == ["/open/x"]
+
+
+async def test_pin_route_public_rejects_a_reserved_prefix_reached_through_dot_segments(
+    pg: FakeAccessControlPg,
+) -> None:
+    # The reserved-prefix test runs on the canonical url, so a spelling that only resolves
+    # under the control plane after its dot segments are removed is refused too.
+    with pytest.raises(ValueError, match="reserved"):
+        await STORE().pin_route_public("/api/x/../auth/api-keys")
+    assert pg.routes == []
 
 
 async def test_pin_route_public_rejects_reserved_management_prefix(pg: FakeAccessControlPg) -> None:

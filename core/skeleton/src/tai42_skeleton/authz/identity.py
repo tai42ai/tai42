@@ -44,8 +44,8 @@ class CallerIdentity:
 
     ``claims`` on an authenticated request is the caller's verified token claims,
     carried from the same guard binding, so the tool-edge check builds its jq context
-    with the SAME ``.identity.*`` the HTTP backend uses AND reads the owner reference
-    (under ``OWNER_USER_ID_CLAIM``) that drives the owner second-pass enforce. A
+    with the SAME ``.identity.*`` the HTTP backend uses, and asserts the owner reference
+    (under ``OWNER_USER_ID_CLAIM``) equals the owner the caller's stored policy names. A
     background fire presents no token and carries a SYNTHETIC claim set from the key's
     stored ``policy_data`` — the owner reference alone, or ``{}`` when ownerless.
     ``None`` means no caller was bound (read as an empty identity) or a gate-off fire.

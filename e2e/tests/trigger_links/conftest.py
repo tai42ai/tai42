@@ -87,8 +87,8 @@ def _seed_trigger_links_auth(infra: Infra, resources: StackResources) -> str:
     seed_route_rows(
         resources,
         [
-            ("trigger-public", "public", r"^/trigger/.*$"),
-            ("e2e-all-routes", "e2e-all", r"^/(?!health$)(?!metrics$)(?!trigger/).*$"),
+            ("/trigger-public", "public", r"^/trigger/.*$"),
+            ("/e2e-all-routes", "e2e-all", r"^/(?!health$)(?!metrics$)(?!trigger/).*$"),
         ],
     )
     return raw

@@ -1,4 +1,4 @@
-"""Access-control contract: identity, policy/context models, and the ``Verifier`` / ``PolicyEnforcer`` protocols."""
+"""Access-control contract: identity, policy/context models, and the ``Verifier`` protocol."""
 
 from __future__ import annotations
 
@@ -19,18 +19,19 @@ from tai42_contract.access_control.identity import (
     IdentityProviderSettings,
 )
 from tai42_contract.access_control.models import (
+    UNIVERSAL_SCOPE,
     AccessPolicy,
     IdentityRecord,
     JqAuthContext,
     Principal,
     RoleDefinition,
 )
-from tai42_contract.access_control.policy import PolicyEnforcer
 from tai42_contract.access_control.verifier import Verifier
 
 __all__ = [
     "KEY_FINGERPRINT_CLAIM",
     "OWNER_USER_ID_CLAIM",
+    "UNIVERSAL_SCOPE",
     "AccessPolicy",
     "ApiKeyIdentityProvider",
     "AuthIdentity",
@@ -38,7 +39,6 @@ __all__ = [
     "IdentityProviderSettings",
     "IdentityRecord",
     "JqAuthContext",
-    "PolicyEnforcer",
     "Principal",
     "RoleDefinition",
     "Verifier",

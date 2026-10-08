@@ -4,7 +4,6 @@ import logging
 from datetime import UTC, datetime
 
 from starlette.authentication import AuthCredentials, UnauthenticatedUser
-from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 from tai42_contract.access_control.context import (
@@ -14,7 +13,8 @@ from tai42_contract.access_control.context import (
     set_request_user_id,
 )
 
-from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path, strip_root_path
+from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
     reset_request_identity_claims,
@@ -58,9 +58,10 @@ class ResourceGuardMiddleware:
       the public resource id unconditionally), surfacing here as CASE B.
     * AUTHENTICATED-ALWAYS-ALLOWED (``authenticated_always_allowed_paths``) — allowed for
       ANY authenticated identity regardless of the table. This is the one family THIS
-      middleware decides: an exact-path member is checked BEFORE table resolution, so it
-      is reachable even with no route row; an unauthenticated caller is denied 401. The
-      backend's jq enforcement already ran upstream, so a role condition still gates it.
+      middleware decides: a member — matched on the canonical request path — is checked
+      BEFORE table resolution, so it is reachable even with no route row; an
+      unauthenticated caller is denied 401. The backend's jq enforcement already ran
+      upstream on the same canonical path, so a role condition still gates it.
     """
 
     def __init__(
@@ -84,19 +85,11 @@ class ResourceGuardMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # 2. Resolve Route -> Resource IDs
-        # We build an HTTPConnection (works for both http and websocket scopes)
-        # purely for URL/path helpers; we don't pass it to the app.
-        conn = HTTPConnection(scope)
-        # The request path (decoded, un-normalized) for the carve-out membership test and its
-        # jq-fence parity — only a mounted ``root_path`` prefix is removed, so a deployment
-        # served under a mount prefix still matches the carve-out; never trailing-slash/dot-
-        # normalized (see the carve-out comment below), the SAME shape the backend jq fence
-        # reasons on. Route/resource RESOLUTION instead reasons on the canonical form derived
-        # from the RAW target, where a record ``{key}``'s encoded slash stays ONE segment —
-        # the SAME form the router matches — so the record doors resolve to their protected
-        # resource rather than falling to the public SPA catch-all.
-        path_to_check = strip_root_path(conn.url.path, scope.get("root_path", ""))
+        # 2. Resolve Route -> Resource IDs.
+        # Every decision here reasons on the canonical form derived from the RAW target with
+        # any mounted ``root_path`` removed: a record ``{key}``'s encoded slash stays ONE
+        # segment — the SAME form the router matches — and it is the SAME ``.request.path`` the
+        # backend's jq fence read, so the carve-out and the fence agree on every spelling.
         try:
             canonical_path = request_canonical_path(scope)
         except MalformedPathError:
@@ -111,20 +104,18 @@ class ResourceGuardMiddleware:
         user = scope.get("user", UnauthenticatedUser())
         auth = scope.get("auth", AuthCredentials())
 
-        # AUTHENTICATED-ALWAYS-ALLOWED carve-out: an EXACT-path member is reachable by
-        # ANY authenticated identity regardless of the route table. Checked BEFORE table
-        # resolution (CASE A below) so the path is reachable even with no route row; the
-        # backend's jq enforcement already ran upstream, so a role condition still gates
-        # it. An unauthenticated caller is denied 401 exactly like a protected route.
-        # The membership test uses the RAW request path (no trailing-slash normalization)
-        # so it admits exactly the path shape the companion role jq fence admits — an
-        # exact-match string — and a ``/api/auth/me/`` variant is denied on both sides
-        # rather than admitted here but 403'd by the fence.
-        if path_to_check in self.authenticated_always_allowed_paths:
+        # AUTHENTICATED-ALWAYS-ALLOWED carve-out: a member is reachable by ANY authenticated
+        # identity regardless of the route table. Checked BEFORE table resolution (CASE A
+        # below) so the path is reachable even with no route row; the backend's jq
+        # enforcement already ran upstream on the same canonical path, so a role condition
+        # still gates it and the two sides admit the same spellings (``/api/auth/me/`` is
+        # ``/api/auth/me`` on both). An unauthenticated caller is denied 401 exactly like a
+        # protected route.
+        if canonical_path in self.authenticated_always_allowed_paths:
             if not user.is_authenticated:
                 logger.warning(
                     "access_control: denied %s — unauthenticated request to an authenticated-always-allowed route; %s",
-                    path_to_check,
+                    canonical_path,
                     _DISABLE_HINT,
                 )
                 await self._deny(scope, receive, send, 401, "Authentication required")
@@ -143,13 +134,13 @@ class ResourceGuardMiddleware:
         except Exception:
             logger.exception(
                 "access_control: route resolution failed for %s — denying; %s",
-                path_to_check,
+                canonical_path,
                 _DISABLE_HINT,
             )
             await self._deny(scope, receive, send, 403, "Forbidden: Route not configured", _REASON_RESOLVE_ERROR)
             return
 
-        await self._authorize_resolved(scope, receive, send, resource_ids, user, auth, path_to_check)
+        await self._authorize_resolved(scope, receive, send, resource_ids, user, auth, canonical_path)
 
     async def _authorize_resolved(
         self,
@@ -159,7 +150,7 @@ class ResourceGuardMiddleware:
         resource_ids: list[str],
         user,
         auth,
-        path_to_check: str,
+        canonical_path: str,
     ):
         """Decide a resolved resource-id set and run the app on success.
 
@@ -183,7 +174,7 @@ class ResourceGuardMiddleware:
                 return
             logger.warning(
                 "access_control: denied %s — no resource is configured for this route; %s",
-                path_to_check,
+                canonical_path,
                 _DISABLE_HINT,
             )
             await self._deny(scope, receive, send, 403, "Forbidden: Route not configured", _REASON_ROUTE_UNCONFIGURED)
@@ -196,9 +187,7 @@ class ResourceGuardMiddleware:
         # settings-level always-public pattern tier (an authoritative door like the plugin
         # studio-asset route) resolves the public id ALONE for it — that decision lives in
         # ``resolve_resource_ids``, and this statement stays true for the id set it hands us.
-        is_public = set(resource_ids) == {self.public_id}
-
-        if is_public:
+        if is_public_only(resource_ids, self.public_id):
             # Public route logic: Allow, but set context if user exists
             await self._run_app_with_context(scope, receive, send, user)
             return
@@ -207,7 +196,7 @@ class ResourceGuardMiddleware:
         if not user.is_authenticated:
             logger.warning(
                 "access_control: denied %s — unauthenticated request to a protected route; %s",
-                path_to_check,
+                canonical_path,
                 _DISABLE_HINT,
             )
             await self._deny(scope, receive, send, 401, "Authentication required")
@@ -219,19 +208,15 @@ class ResourceGuardMiddleware:
         # requirement); a wildcard scope satisfies all. Requiring all — not any —
         # stops a broad tier's scope from opening a route that a more-specific
         # tier restricted to a stronger scope.
-        user_scopes = auth.scopes
-        protected_ids = [rid for rid in resource_ids if rid != self.public_id]
-        has_permission = "*" in user_scopes or all(rid in user_scopes for rid in protected_ids)
-
-        if not has_permission:
+        if not scopes_cover(resource_ids, auth.scopes, self.public_id):
             # Log which scopes were required server-side, but never echo the
             # resource names back to the caller — that discloses the protected
             # resource layout to an authenticated-but-unauthorized user.
             logger.warning(
                 "access_control: user %s denied; required all of %s for %s; %s",
                 user.token.client_id,
-                protected_ids,
-                path_to_check,
+                [rid for rid in resource_ids if rid != self.public_id],
+                canonical_path,
                 _DISABLE_HINT,
             )
             await self._deny(scope, receive, send, 403, "Forbidden", _REASON_SCOPE_MISS)

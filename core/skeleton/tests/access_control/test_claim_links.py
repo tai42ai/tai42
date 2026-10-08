@@ -4,7 +4,9 @@ the concurrent-burn race, and the no-secret-in-logs pin.
 
 The verifier chain resolves through a fake ``ApiKeyIdentityProvider`` registered as
 ``redis`` (the default ``auth_providers`` name); the store rides the AC conftest's
-``FakeRedis`` behind the module's ``client_ctx`` seam.
+``FakeRedis`` behind the module's ``client_ctx`` seam. Every resolved key's standing is
+read from the fake policy store, each key's stored owner equal to the owner its identity
+claims.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ from tai42_kit.access_control import registry
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.access_control import claim_links
+from tai42_skeleton.access_control import policy as policy_module
+from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.claim_links import (
     ClaimLinkError,
     create_claim_link,
@@ -26,7 +30,30 @@ from tai42_skeleton.access_control.claim_links import (
 )
 from tai42_skeleton.access_control.settings import access_control_settings
 
-from .conftest import FakeRedis, make_client_ctx
+from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+# Every resolvable identity's stored owner, as the mint dual-homes it (``None`` = ownerless).
+_STORED_OWNERS: dict[str, str | None] = {
+    "alice": "alice",
+    "dev1": "alice",
+    "bob": "bob",
+    "k1": "pete",
+    "k2": "pete",
+    "orphan": None,
+    "ext-user": None,
+}
+
+
+@pytest.fixture(autouse=True)
+def policies(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
+    """Every principal a test resolves stands: a policy row carrying its stored owner."""
+    pg = FakeAccessControlPg()
+    for user_id, owner in _STORED_OWNERS.items():
+        pg.add_policy(user_id, scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: owner} if owner else {})
+    pg.add_policy("pete", scopes=["*"])
+    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
+    return pg
 
 
 class _FakeProvider(ApiKeyIdentityProvider):

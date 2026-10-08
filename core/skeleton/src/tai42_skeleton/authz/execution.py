@@ -6,8 +6,9 @@ fire; every policy writer bumps that version, so any authority reduction on the 
 owner lands on the very next fire.
 
 * :func:`build_execution_identity` / :func:`assert_key_carries_authority` — the tokenless
-  analogue of the HTTP auth backend's policy stage, with the owner taken from the key's
-  stored ``policy_data`` rather than a token claim.
+  analogue of the HTTP auth backend's standing stage (the same
+  :func:`~tai42_skeleton.access_control.standing.resolve_standing`), with the owner taken
+  from the key's stored ``policy_data`` and no credential to compare it against.
 * :func:`bind_execution_identity` — the ONE set/``finally``-reset of the contextvar.
 * :class:`ExecutionKeyScan` — batches the record-level bind gate (authority plus the
   token-free-evaluable rule of :mod:`tai42_skeleton.authz.execution_evaluability`) over a
@@ -34,10 +35,16 @@ from tai42_contract.access_control import (
 from tai42_contract.access_control.models import AccessPolicy
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, policy_is_empty
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer
 from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.settings import access_control_settings
-from tai42_skeleton.access_control.user import is_admin_policy
+from tai42_skeleton.access_control.standing import (
+    Standing,
+    StandingDenied,
+    StandingDenyReason,
+    _fingerprint_matches,
+    resolve_standing,
+)
 from tai42_skeleton.authz.check import _authorize_pinned_route, check
 from tai42_skeleton.authz.execution_evaluability import ExecutionConditionError, assert_execution_key_evaluable
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
@@ -71,16 +78,18 @@ async def build_execution_identity(execution_key: str, *, bound_fingerprint: str
         # the secret fence is open — the same value the gate-off request edge binds.
         return CallerIdentity(user_id=execution_key, is_admin=True)
 
-    owner = await assert_key_carries_authority(
+    standing = await assert_key_carries_authority(
         policy_enforcer(settings), execution_key, bound_fingerprint=bound_fingerprint
     )
-    claims = {} if owner is None else {OWNER_USER_ID_CLAIM: owner}
+    claims = {} if standing.owner is None else {OWNER_USER_ID_CLAIM: standing.owner}
     # The admin verdict for the KEY the fire runs AS, read live from its own (owner-capped)
-    # grants — the SAME discriminator the HTTP edge stamps. It rides on the identity so the
-    # isolation seam and the secret fence read one verdict rather than each re-deriving it.
-    is_admin = await resolve_execution_key_secret_capability(execution_key)
+    # grants — the SAME discriminator the HTTP edge stamps, so a fire and an authenticated
+    # request classify a key identically. It is also the fire's secret-read capability: a
+    # NON-admin execution key reads ``False`` even when an admin triggered the fire (the
+    # escalation guard). It rides on the identity so the isolation seam and the secret fence
+    # read one verdict rather than each re-deriving it.
     return CallerIdentity(
-        user_id=execution_key, claims=claims, is_admin=is_admin, execution_key_fingerprint=bound_fingerprint
+        user_id=execution_key, claims=claims, is_admin=standing.is_admin, execution_key_fingerprint=bound_fingerprint
     )
 
 
@@ -108,41 +117,39 @@ def _authority_refusal(execution_key: str, principal: str, defect: str) -> Execu
     return ExecutionKeyAuthorityError(f"access denied: {subject} {defect}", principal=principal, defect=defect)
 
 
+# The defect phrase each standing refusal names, on the principal it is about.
+_STANDING_DEFECTS = {
+    StandingDenyReason.NO_POLICY: "has no policy",
+    StandingDenyReason.DISABLED: "is disabled",
+    StandingDenyReason.FINGERPRINT_MISMATCH: "no longer matches the bound key identity",
+    StandingDenyReason.OWNER_MISMATCH: "does not carry the owner its credential claims",
+    StandingDenyReason.OWNER_DISABLED: "is disabled",
+    StandingDenyReason.OWNER_NO_POLICY: "has no policy",
+}
+
+
+def execution_key_refusal(execution_key: str, denied: StandingDenied) -> ExecutionKeyAuthorityError:
+    """The :class:`ExecutionKeyAuthorityError` a standing refusal of ``execution_key`` answers, naming its subject."""
+    return _authority_refusal(execution_key, denied.subject, _STANDING_DEFECTS[denied.reason])
+
+
 def assert_policy_matches_fingerprint(policy: AccessPolicy, execution_key: str, *, bound_fingerprint: str) -> None:
     """Assert the LIVE ``policy`` of ``execution_key`` still carries the per-mint fingerprint the binding anchored to.
 
-    Raises :class:`ExecutionKeyAuthorityError` otherwise. A ``user_id`` is
-    reusable across a revoke+remint; the fingerprint is not, so the reminted key
-    never inherits the old record's authority. The ONE spelling of this
-    equality — every seam branch routes through it.
-
-    A FINGERPRINT-LESS principal (an account user — never minted, so no per-mint
-    identity exists) binds with ``bound_fingerprint == ""`` and matches a live policy
-    that carries NO fingerprint: there is no mint identity to anchor, and the
-    authority checks around this equality (policy exists, not disabled) remain the
-    refusal surface. Every other combination stays fail-closed: a MINTED key's
-    stored fingerprint never matches ``""`` (a gate-off-era record cannot bind a
-    minted key once the gate is on), and a bound fingerprint never matches a policy
-    that has since lost or changed its own. Account ids are never re-minted
-    (``usr-<random>`` per create), so a fingerprint-less park cannot be replayed
-    onto a recreated principal — the deleted id's policy stays gone.
-
-    KNOWN POSTURE: a minted key whose stored ``policy_data`` fingerprint was
-    stripped or emptied (store corruption, or an admin-only policy edit) reads as
-    fingerprint-less here and binds on the EPHEMERAL rebuild seam; durable
-    fire records captured a real fingerprint at write time and still refuse it.
+    Raises :class:`ExecutionKeyAuthorityError` otherwise. The equality is
+    :func:`~tai42_skeleton.access_control.standing.resolve_standing`'s, the one every door
+    reads a fire's bound key identity through.
     """
-    stored = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
-    if bound_fingerprint == "" and stored is None:
-        return
-    if stored != bound_fingerprint:
-        raise _authority_refusal(execution_key, execution_key, "no longer matches the bound key identity")
+    if not _fingerprint_matches(policy, bound_fingerprint):
+        raise _authority_refusal(
+            execution_key, execution_key, _STANDING_DEFECTS[StandingDenyReason.FINGERPRINT_MISMATCH]
+        )
 
 
 async def assert_key_carries_authority(
     enforcer: PolicyEnforcer, execution_key: str, *, bound_fingerprint: str
-) -> str | None:
-    """Assert ``execution_key`` can carry authority at all and answer its owner reference (``None`` if unowned).
+) -> Standing:
+    """Assert ``execution_key`` can carry authority at all and answer its standing.
 
     Also asserts it is still the SAME minted key the binding named. Raises
     :class:`ExecutionKeyAuthorityError` for a key with no stored policy, a disabled
@@ -152,53 +159,15 @@ async def assert_key_carries_authority(
     re-assert liveness the per-call decision never re-reads.
 
     Key and owner grants are read against ONE already-read store version, so both answer
-    from the same cache generation.
+    from the same cache generation; the owner is the one the key's STORED policy names.
     """
     version = await enforcer.current_policy_version()
-    policy = await enforcer.get_policy_at(execution_key, version)
-    if policy_is_empty(policy):
-        raise _authority_refusal(execution_key, execution_key, "has no policy")
-    if policy.policy_data.get("disabled") is True:
-        raise _authority_refusal(execution_key, execution_key, "is disabled")
-    assert_policy_matches_fingerprint(policy, execution_key, bound_fingerprint=bound_fingerprint)
-
-    owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-    if owner is None:
-        return None
-
-    owner_policy = await enforcer.get_policy_at(owner, version)
-    if owner_policy.policy_data.get("disabled") is True:
-        raise _authority_refusal(execution_key, owner, "is disabled")
-    if policy_is_empty(owner_policy):
-        raise _authority_refusal(execution_key, owner, "has no policy")
-
-    return owner
-
-
-async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
-    """The secret-read capability a fire bound to ``execution_key`` runs with.
-
-    The ADMIN status of the KEY's OWN stored policy, read live at the fire. The
-    capability equals the admin status of the identity the fire RUNS AS, never the
-    triggerer's request-scope value — so a NON-admin execution key reads ``False`` even
-    when an admin triggered the fire (the escalation guard), and an admin execution key
-    reads ``True``. Gate off -> ``True``: every principal is then the synthetic admin,
-    with no fence to fail closed on.
-
-    Gate on -> :func:`~tai42_skeleton.access_control.user.is_admin_policy` on the key's
-    EFFECTIVE (owner-attenuated) policy, read at the same version as the owner's — the SAME
-    admin discriminator the HTTP auth backend stamps, so a fire and an authenticated
-    request classify a key identically.
-    """
-    settings = access_control_settings()
-    if not settings.enable:
-        return True
-    enforcer = policy_enforcer(settings)
-    version = await enforcer.current_policy_version()
-    policy = await enforcer.get_policy_at(execution_key, version)
-    owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-    owner_policy = await enforcer.get_policy_at(owner, version) if owner is not None else None
-    return is_admin_policy(policy, owner_policy)
+    try:
+        return await resolve_standing(
+            enforcer, execution_key, version=version, verified_claims=None, bound_fingerprint=bound_fingerprint
+        )
+    except StandingDenied as denied:
+        raise execution_key_refusal(execution_key, denied) from denied
 
 
 @asynccontextmanager
@@ -218,7 +187,7 @@ async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str)
 
     The secret-read capability (the ``action=secret`` admin fence) is rebound for the fire
     too, NEVER carried across the execution-identity switch: it is the ADMIN status of the
-    firing execution KEY's own live policy (:func:`resolve_execution_key_secret_capability`),
+    firing execution KEY's own live policy (the built identity's ``is_admin``),
     so an admin-owned schedule/hook fire clears the fence while a non-admin key's fire is
     refused a host-secret-exposing primitive even when an admin triggered it. Restored in
     the ``finally`` so the triggering request's own capability is unchanged after the fire.
@@ -322,9 +291,10 @@ class ExecutionKeyScan:
         try:
             # Authority first: a key with no policy row has no condition, so the evaluable
             # question would pass vacuously and admit a record every fire then dies on.
-            enforcer = policy_enforcer(settings)
-            await assert_key_carries_authority(enforcer, execution_key, bound_fingerprint=bound_fingerprint)
-            await assert_execution_key_evaluable(enforcer, execution_key)
+            standing = await assert_key_carries_authority(
+                policy_enforcer(settings), execution_key, bound_fingerprint=bound_fingerprint
+            )
+            await assert_execution_key_evaluable(standing)
         except (ExecutionKeyAuthorityError, ExecutionConditionError) as exc:
             self._verdict[key] = exc
             raise
@@ -408,13 +378,14 @@ async def authorize_execution_agent_run(
     if user_id is None:
         raise PermissionDeniedError("access denied: no caller identity for an agent run")
 
-    path = f"/api/agents/{agent_name}/runs"
+    run_door = f"/api/agents/{agent_name}/runs"
     method = "POST"
     try:
-        route = resolve_route_meta(canonicalize_path(path), method)
+        path = canonicalize_path(run_door)
+        route = resolve_route_meta(path, method)
     except MalformedPathError as exc:
         raise PermissionDeniedError(
-            f"access denied: {method} {path} is not a well-formed path for an agent run"
+            f"access denied: {method} {run_door} is not a well-formed path for an agent run"
         ) from exc
     if route is None:
         raise PermissionDeniedError(f"access denied: {method} {path} does not resolve to a registered route")

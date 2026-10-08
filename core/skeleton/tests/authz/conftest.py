@@ -11,7 +11,6 @@ from starlette.responses import Response
 
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.app.route_registry import RouteAction, route_registry
 
@@ -124,6 +123,5 @@ def ac_env(monkeypatch):
     pg = FakeAccessControlPg()
     redis = FakeRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     return pg

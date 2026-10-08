@@ -13,8 +13,10 @@ from tai42_e2e.manifests.auth import (
     build_accounts_fresh_stack,
     build_accounts_stack,
     build_auth_stack,
+    build_embed_prefix_stack,
     build_owned_keys_stack,
     build_setup_stack,
+    build_sse_auth_stack,
 )
 from tai42_e2e.manifests.bridge import (
     BRIDGE_MAX_CONCURRENT_TURNS,
@@ -204,6 +206,7 @@ __all__ = [
     "build_deep_agent_durable_stack",
     "build_default_router_stack",
     "build_door_schedule_stack",
+    "build_embed_prefix_stack",
     "build_embed_stack",
     "build_extensions_stack",
     "build_marketplace_authz_stack",
@@ -235,6 +238,7 @@ __all__ = [
     "build_seams_stack",
     "build_setup_stack",
     "build_shipped_connectors_stack",
+    "build_sse_auth_stack",
     "build_stripe_stack",
     "build_studio_setup_stack",
     "build_studio_stack",

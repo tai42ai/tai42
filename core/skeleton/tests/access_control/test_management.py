@@ -649,3 +649,163 @@ async def test_failed_version_bump_raises(pg: FakeAccessControlPg, provider: _Sp
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
     with pytest.raises(RuntimeError, match="redis down"):
         await management.bump_policy_version()
+
+
+# -- writers invalidate the policy cache ---------------------------------------
+
+
+@pytest.fixture
+def bumps(monkeypatch) -> list[int]:
+    """Count every policy-version bump a management writer makes."""
+    seen: list[int] = []
+
+    async def _bump() -> int:
+        seen.append(1)
+        return len(seen)
+
+    monkeypatch.setattr(management, "bump_policy_version", _bump)
+    return seen
+
+
+async def test_add_url_to_scope_bumps_once(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    await management.add_url_to_scope("scope-a", "/a")
+    assert bumps == [1]
+
+
+async def test_remove_url_from_scope_bumps_once_when_it_existed(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    await management.add_url_to_scope("scope-a", "/a")
+    bumps.clear()
+    existed, _ = await management.remove_url_from_scope("/a")
+    assert existed is True
+    assert bumps == [1]
+
+
+async def test_remove_url_from_scope_does_not_bump_on_a_no_op(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    existed, _ = await management.remove_url_from_scope("/never-mapped")
+    assert existed is False
+    assert bumps == []
+
+
+async def test_remove_scope_bumps_once_when_something_was_deleted(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    await management.add_url_to_scope("scope-a", "/a")
+    bumps.clear()
+    deleted, _ = await management.remove_scope("scope-a")
+    assert deleted > 0
+    assert bumps == [1]
+
+
+async def test_remove_scope_does_not_bump_on_a_no_op(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    deleted, _ = await management.remove_scope("scope-ghost")
+    assert deleted == 0
+    assert bumps == []
+
+
+async def test_pin_route_public_bumps_once(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    await management.pin_route_public("/open")
+    assert bumps == [1]
+
+
+async def test_pin_route_public_refused_does_not_bump(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    reserved = S.reserved_public_pin_prefixes[0]
+    with pytest.raises(ValueError, match="reserved"):
+        await management.pin_route_public(f"{reserved}/x")
+    assert bumps == []
+
+
+async def test_unpin_public_route_bumps_only_when_it_was_pinned(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    assert await management.unpin_public_route("/open") is False
+    assert bumps == []
+    await management.pin_route_public("/open")
+    bumps.clear()
+    assert await management.unpin_public_route("/open") is True
+    assert bumps == [1]
+
+
+async def test_restore_policy_body_bumps_only_when_restored(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bumps: list[int]
+) -> None:
+    assert await management.restore_policy_body("ghost", {"scopes": [], "policy_data": {}, "condition": None}) is None
+    assert bumps == []
+    _, body, _ = await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    bumps.clear()
+    assert await management.restore_policy_body("u1", body) is not None
+    assert bumps == [1]
+
+
+async def test_add_user_api_key_bumps_once_after_the_policy_write(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bumps: list[int]
+) -> None:
+    await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    assert bumps == [1]
+
+
+async def test_add_user_api_key_refused_does_not_bump(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bumps: list[int]
+) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        await management.add_user_api_key("u1", "d", ["scope-ghost"], owner_user_id=OWNER)
+    assert bumps == []
+
+
+async def test_edit_user_payload_bumps_once_and_not_for_an_unknown_user(
+    pg: FakeAccessControlPg, provider: _SpyProvider, bumps: list[int]
+) -> None:
+    assert await management.edit_user_payload("ghost", scopes=[]) is None
+    assert bumps == []
+    await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    bumps.clear()
+    assert await management.edit_user_payload("u1", condition=None) is not None
+    assert bumps == [1]
+
+
+async def test_revoke_bumps_immediately_inside_a_batch(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis, bumps: list[int]
+) -> None:
+    await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    bumps.clear()
+    async with management.policy_write_batch():
+        await management.revoke_api_key("u1")
+        # The revoke's fail-closed order needs its bump now, not at the batch's end.
+        assert bumps == [1]
+    assert bumps == [1]
+
+
+async def test_policy_write_batch_bumps_once_for_many_writes(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    async with management.policy_write_batch():
+        await management.add_url_to_scope("scope-a", "/a")
+        await management.add_url_to_scope("scope-b", "/b")
+        await management.pin_route_public("/open")
+        assert bumps == []
+    assert bumps == [1]
+
+
+async def test_policy_write_batch_without_a_change_does_not_bump(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    async with management.policy_write_batch():
+        await management.unpin_public_route("/never-pinned")
+    assert bumps == []
+
+
+async def test_policy_write_batch_bumps_when_the_body_raises(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    async def _restore_that_raises() -> None:
+        async with management.policy_write_batch():
+            await management.add_url_to_scope("scope-a", "/a")
+            raise RuntimeError("mid-restore")
+
+    with pytest.raises(RuntimeError, match="mid-restore"):
+        await _restore_that_raises()
+    # What was written before the raise is still invalidated.
+    assert bumps == [1]
+
+
+async def test_policy_write_batch_is_not_reentrant(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    async with management.policy_write_batch():
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            async with management.policy_write_batch():
+                pass
+
+
+async def test_writes_after_a_batch_bump_on_their_own(pg: FakeAccessControlPg, bumps: list[int]) -> None:
+    async with management.policy_write_batch():
+        await management.add_url_to_scope("scope-a", "/a")
+    await management.add_url_to_scope("scope-b", "/b")
+    assert bumps == [1, 1]

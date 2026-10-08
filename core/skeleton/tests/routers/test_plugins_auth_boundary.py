@@ -20,7 +20,7 @@ from tai42_kit.registry import StagedSlot
 
 import tai42_skeleton.plugins.registry as reg
 import tai42_skeleton.routers.plugins as router
-from tai42_skeleton.access_control import verifier as verifier_module
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.plugins.registry import build_registry, set_current_registry
@@ -30,9 +30,9 @@ from ._auth_boundary import wire_store_from_route_strings
 # tier 1: path -> template key. The SPA matcher is deliberately BROAD (``/.*``) —
 # it also matches ``/api/plugins``, so this doubles as the prefix-collision pin.
 _PATH_PATTERNS = {
-    r"/api/plugins": "studio-registry",
-    r"/api/plugins/[^/]+/studio/.+": "studio-asset",
-    r"/.*": "studio-spa",
+    r"/api/plugins": "/studio-registry",
+    r"/api/plugins/[^/]+/studio/.+": "/studio-asset",
+    r"/.*": "/studio-spa",
 }
 
 
@@ -84,9 +84,9 @@ def boundary_client(tmp_path, monkeypatch):
     ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
     ac_fake = _AcFake(
         {
-            "studio-registry": "studio-registry-protected",
-            "studio-asset": ac_settings.public_resource_id,
-            "studio-spa": ac_settings.public_resource_id,
+            "/studio-registry": "studio-registry-protected",
+            "/studio-asset": ac_settings.public_resource_id,
+            "/studio-spa": ac_settings.public_resource_id,
         }
     )
 
@@ -94,7 +94,7 @@ def boundary_client(tmp_path, monkeypatch):
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield ac_fake
 
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", ac_ctx)
     wire_store_from_route_strings(monkeypatch, ac_fake._strings)
 
     routes = [

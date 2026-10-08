@@ -18,7 +18,6 @@ from tai42_contract.hooks import HookParams
 
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
 from tai42_skeleton.authz.execution_identity import get_execution_identity
@@ -184,7 +183,6 @@ async def test_a_fire_whose_key_no_longer_exists_is_refused_and_isolated(
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
 
     manager = _manager()
@@ -224,7 +222,6 @@ async def test_a_revoke_remint_of_the_execution_key_is_denied_not_run_as_admin(
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
 
     manager = _manager()

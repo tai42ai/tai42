@@ -26,7 +26,6 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -98,7 +97,6 @@ def ac(monkeypatch) -> FakeAccessControlPg:
     pg = FakeAccessControlPg()
     redis = ACFakeRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", ac_make_client_ctx(redis))
     monkeypatch.setattr(management, "client_ctx", ac_make_client_ctx(redis))
     role_grants_module.reset_role_grants_cache()
@@ -216,7 +214,6 @@ async def test_an_owned_key_whose_owners_scopes_were_narrowed_is_refused(
         # attenuation live and is refused — exactly where the HTTP door refuses it.
         owner = ac.policy("owner1")
         owner["scopes"] = ["unrelated"]
-        # Every policy writer bumps the version the enforcer's policy cache is keyed on.
         await management.bump_policy_version()
         with pytest.raises(PermissionDeniedError):
             await doors.send_conversation_message("chat", "u-7", "hi again")
@@ -329,12 +326,11 @@ async def test_the_http_door_and_the_tool_reach_the_same_verdict(ac, bound_app, 
             }
         }
     )
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", ac_make_client_ctx(redis))
     monkeypatch.setattr(provider_module, "client_ctx", ac_make_client_ctx(redis))
     ac.add_route("/api/conversations/chat/messages", "conv-x")
     ac.add_route("/api/conversations/locked/messages", "conv-y")
-    _seed_key(ac, "runner", ["conv-x"])
+    _seed_key(ac, "runner", ["conv-x"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     ac.add_policy("owner1", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-owner1"})
 
     recorder = _Recorder()

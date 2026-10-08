@@ -36,7 +36,6 @@ from tai42_skeleton.access_control import claim_links as claim_links_module
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.policy_store import AcPolicyStore
 from tai42_skeleton.access_control.settings import access_control_settings
@@ -100,15 +99,16 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Fakes:
     through the real enforcement code."""
     pg = FakeAccessControlPg()
     # The admin caller every mint defaults its owner to (see ``_admin_caller``) is a
-    # principal — every api key belongs to one.
+    # principal holding its admin policy — every api key belongs to one, and a key whose
+    # owner has no policy carries no authority.
     pg.add_principal("test-admin", kind="human", display_name="Test Admin")
+    pg.add_policy("test-admin", scopes=["*"])
     redis = FakeRedis(strings={}, hashes={})
     rctx = make_client_ctx(redis)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(management, "client_ctx", rctx)
     monkeypatch.setattr(provider_module, "client_ctx", rctx)
     monkeypatch.setattr(policy_module, "client_ctx", rctx)
-    monkeypatch.setattr(verifier_module, "client_ctx", rctx)
     monkeypatch.setattr(claim_links_module, "client_ctx", rctx)
     return _Fakes(pg, redis)
 
@@ -578,15 +578,15 @@ async def test_scope_edit_visible_to_warm_cache_after_version_bump(store: _Fakes
     # Warm the per-worker cache at the current version.
     assert (await enforcer.get_policy("u1")).scopes == ["scope-a"]
 
-    # Edit the policy in the store WITHOUT bumping the version: the warm cache
+    # Edit the policy straight in the store, WITHOUT bumping the version: the warm cache
     # still serves the stale scopes (proves the cache is actually warm).
-    await management.edit_user_payload("u1", "d", ["scope-a", "scope-b"])
+    await store_module.access_control_store().update_policy_fields("u1", {"scopes": ["scope-a", "scope-b"]})
     assert (await enforcer.get_policy("u1")).scopes == ["scope-a"]
 
-    # Bump the version (what the mutating routes do) → cross-worker cache miss,
+    # The management writer bumps the version after its write → cross-worker cache miss,
     # the edit is visible immediately without waiting out the ttl.
-    await management.bump_policy_version()
-    assert set((await enforcer.get_policy("u1")).scopes) == {"scope-a", "scope-b"}
+    await management.edit_user_payload("u1", scopes=["scope-b"])
+    assert (await enforcer.get_policy("u1")).scopes == ["scope-b"]
 
 
 # -- AC-policy versioning (store-first write-through + history + rollback) ----
@@ -997,8 +997,9 @@ async def test_validate_condition_infra_error_propagates_as_500(bound_app: Any) 
 async def test_validate_condition_never_persists(store: _Fakes, bound_app: Any) -> None:
     # Compiling/evaluating a condition must never write any store — a broken
     # condition can never reach enforcement from the validate path.
+    policies_before = [dict(row) for row in store.pg.policies]
     await api_keys.validate_condition(_req(body={"condition": _cond(".policy.limit")}))
-    assert store.pg.policies == []
+    assert store.pg.policies == policies_before
     assert store.pg.routes == []
     assert store.redis._hashes == {}
     assert store.redis._strings == {}

@@ -317,7 +317,7 @@ def test_unregistered_path_passes_through(monkeypatch):
 
 
 @pytest.mark.usefixtures("_transport_surface")
-@pytest.mark.parametrize("path", ["/mcp", "/sse", "/messages/x", "/app/alpha"])
+@pytest.mark.parametrize("path", ["/mcp", "/sse", "/messages", "/messages/x", "/app/alpha"])
 def test_a_mounted_transport_surface_is_never_the_public_catch_all(monkeypatch, path: str):
     # The SPA catch-all matches EVERY GET, the mounted transport paths included — so
     # without their own records the limiter would charge credential-gated MCP traffic to

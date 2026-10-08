@@ -121,8 +121,6 @@ async def pin_public_route(url: str, pattern: str | None) -> dict[str, str]:
         # A url under a reserved management prefix cannot be pinned public — the
         # control plane must not be usable to de-authenticate itself.
         raise BadRequestError(str(exc)) from exc
-    # Bump AFTER the write so the version-keyed enforcer route cache re-reads the pin.
-    await management.bump_policy_version()
     return {"url": url}
 
 
@@ -139,7 +137,11 @@ async def unpin_public_route(url: str) -> dict[str, str]:
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:
         raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
-    if not await management.unpin_public_route(url):
+    try:
+        unpinned = await management.unpin_public_route(url)
+    except ValueError as exc:
+        # A malformed url names no route row; the writer refuses it rather than guessing a form.
+        raise BadRequestError(str(exc)) from exc
+    if not unpinned:
         raise NotFoundError(f"url is not pinned public: {url!r}")
-    await management.bump_policy_version()
     return {"url": url}

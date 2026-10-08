@@ -19,12 +19,11 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.backend import (
     AccessControlAuthBackend,
     AuthorizationError,
-    effective_scopes,
 )
 from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tai42_skeleton.access_control.user import TaiUser
+from tai42_skeleton.access_control.user import TaiUser, effective_scopes
 from tai42_skeleton.access_control.verifier import is_always_public_prefix
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -219,7 +218,7 @@ async def test_credential_for_a_principal_with_no_policy_is_denied(monkeypatch, 
         await backend.authenticate(_conn({"Authorization": "Bearer ghost"}))
 
 
-async def test_authenticate_fails_closed_when_live_context_unavailable(monkeypatch, caplog):
+async def test_authenticate_fails_closed_when_live_context_unavailable(monkeypatch, caplog, store_pg):
     """A live-context outage must deny, not authenticate against empty data. The
     fetch error is wrapped into a clean ``AuthorizationError`` (a fail-closed deny
     the AuthenticationMiddleware renders as 403) rather than leaking out as a raw
@@ -229,6 +228,7 @@ async def test_authenticate_fails_closed_when_live_context_unavailable(monkeypat
     must never reach the caller — while the full detail is logged server-side.
     """
     settings = AccessControlSettings()
+    store_pg.add_policy("u1", scopes=["res-a"])
     fake = FakeRedis(raise_hgetall=RuntimeError("redis down"))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(fake))
     backend = _backend(_FakeVerifier({"good": "u1"}), settings)
@@ -306,7 +306,7 @@ def test_effective_scopes_star_key_collapses_to_owner():
 
 async def test_owned_key_scopes_intersect_owner(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a", "b"])
+    store_pg.add_policy("key1", scopes=["a", "b"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     store_pg.add_policy("owner1", scopes=["b", "c"])
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -317,7 +317,7 @@ async def test_owned_key_scopes_intersect_owner(monkeypatch, bound_app, store_pg
 
 async def test_owned_key_star_collapses_to_owner_scopes(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["*"])
+    store_pg.add_policy("key1", scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     store_pg.add_policy("owner1", scopes=["read"])
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -327,7 +327,7 @@ async def test_owned_key_star_collapses_to_owner_scopes(monkeypatch, bound_app, 
 
 async def test_owned_key_denied_when_owner_disabled(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"])
+    store_pg.add_policy("key1", scopes=["a"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     store_pg.add_policy("owner1", scopes=["a"], policy_data={"disabled": True})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -337,7 +337,7 @@ async def test_owned_key_denied_when_owner_disabled(monkeypatch, bound_app, stor
 
 async def test_owned_key_denied_when_owner_policy_empty(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"])
+    store_pg.add_policy("key1", scopes=["a"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     # No owner policy row → empty AccessPolicy() default → deny.
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -356,7 +356,7 @@ async def test_direct_disabled_principal_denied(monkeypatch, bound_app, store_pg
 
 async def test_owned_key_owner_condition_denies_while_key_passes(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"])  # no key condition
+    store_pg.add_policy("key1", scopes=["a"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})  # no key condition
     store_pg.add_policy("owner1", scopes=["a"], condition={"content": '.request.path == "/never"'})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -366,7 +366,12 @@ async def test_owned_key_owner_condition_denies_while_key_passes(monkeypatch, bo
 
 async def test_owned_key_both_conditions_pass_allows(monkeypatch, bound_app, store_pg):
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"], condition={"content": '.request.path == "/x"'})
+    store_pg.add_policy(
+        "key1",
+        scopes=["a"],
+        policy_data={OWNER_USER_ID_CLAIM: "owner1"},
+        condition={"content": '.request.path == "/x"'},
+    )
     store_pg.add_policy("owner1", scopes=["a"], condition={"content": '.request.path == "/x"'})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -380,7 +385,7 @@ async def test_owned_key_owner_editor_role_reaches_me(monkeypatch, bound_app, st
     # owner-condition second pass admits the capability-projection route via its carve-in,
     # so a scoped delegated key can still introspect its own capabilities.
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"])  # no key condition
+    store_pg.add_policy("key1", scopes=["a"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})  # no key condition
     store_pg.add_policy("owner1", scopes=["*"], condition={"content": editor_jq()})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -392,7 +397,7 @@ async def test_owned_key_owner_editor_role_denied_on_admin_area(monkeypatch, bou
     # The mirror: the same owner editor_jq() still fences the access-control admin area, so
     # the owned key is denied a non-carved /api/auth route (the owner second pass denies).
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a"])
+    store_pg.add_policy("key1", scopes=["a"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     store_pg.add_policy("owner1", scopes=["*"], condition={"content": editor_jq()})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -462,7 +467,7 @@ async def test_owner_condition_sees_owner_scopes_not_attenuated(monkeypatch, bou
     # The key's scopes attenuate to key∩owner (3), so the condition passes ONLY if the
     # owner-condition pass is judged against the OWNER's scopes, not the attenuated set.
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a", "b", "c"])  # no key condition
+    store_pg.add_policy("key1", scopes=["a", "b", "c"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})  # no key condition
     store_pg.add_policy("owner1", scopes=["a", "b", "c", "d", "e"], condition={"content": "(.scopes | length) == 5"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)
@@ -477,7 +482,7 @@ async def test_owner_condition_denies_when_gated_on_attenuated_length(monkeypatc
     # owner-condition pass now sees the OWNER's 5 scopes, it evaluates false and DENIES —
     # proving the pass is not judged against the attenuated set (which would have passed).
     settings = AccessControlSettings()
-    store_pg.add_policy("key1", scopes=["a", "b", "c"])
+    store_pg.add_policy("key1", scopes=["a", "b", "c"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     store_pg.add_policy("owner1", scopes=["a", "b", "c", "d", "e"], condition={"content": "(.scopes | length) == 3"})
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
     backend = _backend(_OwnedKeyVerifier("key1", "owner1"), settings)

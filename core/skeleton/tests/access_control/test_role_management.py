@@ -916,3 +916,49 @@ async def test_modify_grants_records_edit_audit(mem, pg, redis_mgmt, monkeypatch
     assert edit["actor"] == "root"
     assert edit["before"]["grants"] == {a: "read"}
     assert edit["after"]["grants"] == {b: "write"}
+
+
+# -- role_write_transaction: one bump after commit ----------------------------
+
+
+def _version(redis: FakeRedis) -> int:
+    return int(redis._strings.get("ac:policy_version", "0"))
+
+
+async def test_role_write_transaction_bumps_once_after_commit(mem, pg, redis_mgmt):
+    from tai42_skeleton.access_control.roles import role_write_transaction
+
+    before = _version(redis_mgmt)
+    async with role_write_transaction() as tx:
+        # Inside the body nothing is invalidated yet: the write is not committed.
+        assert tx is not None
+        assert _version(redis_mgmt) == before
+    assert _version(redis_mgmt) == before + 1
+
+
+async def test_role_write_transaction_does_not_bump_on_rollback(mem, pg, redis_mgmt):
+    from tai42_skeleton.access_control.roles import role_write_transaction
+
+    before = _version(redis_mgmt)
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with role_write_transaction():
+            raise RuntimeError("body failed")
+    assert _version(redis_mgmt) == before
+
+
+async def test_every_role_definition_writer_bumps_exactly_once(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    tag = _grantable_tag()
+
+    v = _version(redis_mgmt)
+    await roles_ops.create_role("ops", "x", "editor", {})
+    assert _version(redis_mgmt) == v + 1
+    await roles_ops.update_role("ops", None, "y")
+    assert _version(redis_mgmt) == v + 2
+    await roles_ops.modify_role_grants("ops", upsert={tag: "read"})
+    assert _version(redis_mgmt) == v + 3
+    await roles_ops.rollback_role("ops", 1)
+    assert _version(redis_mgmt) == v + 4
+    await roles_ops.delete_role("ops")
+    assert _version(redis_mgmt) == v + 5

@@ -7,6 +7,7 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -61,7 +62,7 @@ def _plugin_registry() -> RouteRegistry:
 def _wire(monkeypatch, registry: RouteRegistry, pg: FakeAccessControlPg) -> None:
     monkeypatch.setattr(verifier_module, "route_registry", registry)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(FakeRedis()))
 
 
 async def test_declared_public_route_resolves_public_anonymously(monkeypatch) -> None:

@@ -17,6 +17,7 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app.responses import OpaqueJson
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
@@ -89,7 +90,7 @@ def _verifier(monkeypatch: pytest.MonkeyPatch) -> AccessControlVerifier:
     assert settings.compiled_patterns == []
     monkeypatch.setattr(verifier_module, "route_registry", _registry())
     monkeypatch.setattr(verifier_module, "access_control_store", _EmptyStore)
-    monkeypatch.setattr(verifier_module, "client_ctx", _null_redis)
+    monkeypatch.setattr(policy_module, "client_ctx", _null_redis)
     # The isolated registry surfaces no non-/api GET routes, so the reserved-set memo is empty.
     monkeypatch.setattr(verifier_module, "registered_reserved_get_paths_cached", frozenset)
     return AccessControlVerifier(settings, providers=[])

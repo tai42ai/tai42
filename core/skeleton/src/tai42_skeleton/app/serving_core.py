@@ -80,11 +80,13 @@ def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
 
 
 def record_sse_surface(sse_path: str, message_path: str) -> None:
-    """Record the SSE transport's two surfaces as mounted, credential-gated ones.
+    """Record the SSE transport's surfaces as mounted, credential-gated ones.
 
     See :func:`record_streamable_http_surface`: the ``GET`` event stream, and the message
-    endpoint, which is a Starlette ``Mount`` and therefore serves everything BENEATH its
-    prefix — the client posts to ``<prefix>/?session_id=...`` — never the bare prefix.
+    endpoint, a Starlette ``Mount`` that serves everything beneath its prefix — the client
+    posts to ``<prefix>?session_id=...`` or ``<prefix>/?session_id=...``. The bare prefix is
+    recorded too: the canonical path every access-control decision reads drops the trailing
+    slash, so both spellings reduce to it.
     """
     route_registry.record_mounted(
         path=sse_path,
@@ -92,8 +94,15 @@ def record_sse_surface(sse_path: str, message_path: str) -> None:
         name="mcp_sse_stream",
         summary="MCP SSE transport event stream",
     )
+    prefix = message_path.rstrip("/")
     route_registry.record_mounted(
-        path=f"{message_path.rstrip('/')}/{{path:path}}",
+        path=prefix,
+        methods=MOUNT_METHODS,
+        name="mcp_sse_messages_prefix",
+        summary="MCP SSE transport message endpoint",
+    )
+    route_registry.record_mounted(
+        path=f"{prefix}/{{path:path}}",
         methods=MOUNT_METHODS,
         name="mcp_sse_messages",
         summary="MCP SSE transport message endpoint",

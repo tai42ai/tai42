@@ -113,11 +113,9 @@ async def create_api_key(
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     # Store-first: ``add_user_api_key`` has written the policy to the enforced store
-    # (the authority) and returned the exact body it committed. Bump the
-    # cache-invalidation key immediately so enforcement follows, then record that body
-    # as durable PG history. A store failure above raised before this, so neither the
-    # bump nor the history is touched.
-    await management.bump_policy_version()
+    # (the authority), invalidated the policy cache, and returned the exact body it
+    # committed; record that body as durable PG history. A store failure above raised
+    # before this, so the history is not touched.
     await _pkg._record_policy_version(user_id, committed_body)
     return {"api_key": raw_key, "key_fingerprint": key_fingerprint}
 
@@ -153,10 +151,9 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         raise BadRequestError(str(exc)) from exc
     if not updated:
         raise NotFoundError(f"user not found: {user_id!r}")
-    # Store-first: the edit has landed in the enforced store and returned the exact
-    # committed body. Bump the cache key immediately so enforcement follows, then
-    # record that body as a new PG version (see ``_record_policy_version``).
-    await management.bump_policy_version()
+    # Store-first: the edit has landed in the enforced store (which invalidated the policy
+    # cache) and returned the exact committed body; record it as a new PG version (see
+    # ``_record_policy_version``).
     await _pkg._record_policy_version(user_id, updated)
     return {"user_id": user_id, "updated": True}
 
@@ -214,15 +211,14 @@ async def modify_api_key_scopes(
     removed = set(remove)
     new = [scope for scope in stored_scopes if scope not in removed] + add
     # Store-first, byte-parallel to ``edit_api_key``: the edit lands in the enforced store
-    # and returns the committed body, then the cache bump so enforcement follows, then the
-    # durable version record (incl. the ``updated`` None → 404 re-check).
+    # (invalidating the policy cache) and returns the committed body, then the durable
+    # version record (incl. the ``updated`` None → 404 re-check).
     try:
         updated = await management.edit_user_payload(user_id=user_id, scopes=new)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     if not updated:
         raise NotFoundError(f"user not found: {user_id!r}")
-    await management.bump_policy_version()
     await _pkg._record_policy_version(user_id, updated)
     return {"user_id": user_id, "updated": True, "scopes": new}
 

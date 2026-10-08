@@ -62,8 +62,8 @@ async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
     """Re-point the enforced policy to a prior version.
 
     Store-first: the target version body is read from the history, written to the enforced store
-    (the authority) FIRST; on that success the cache-invalidation key is bumped immediately so
-    enforcement follows, then the durable history pointer is advanced. Admin-only: a non-admin
+    (the authority) FIRST — the writer invalidates the policy cache — then the durable history
+    pointer is advanced. Admin-only: a non-admin
     caller is denied 403 so it can never roll back another user's (or its own) enforced policy.
     404 if the version is absent or the user has no live key.
     """
@@ -91,13 +91,12 @@ async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
     except DocumentVersionNotFoundError as exc:
         raise NotFoundError(f"user {user_id!r} has no policy version {version}") from exc
 
-    # Store-first, then the cache bump, then the history pointer.
+    # Store-first (the writer invalidates the policy cache), then the history pointer.
     try:
         restored = await management.restore_policy_body(user_id, target.body)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     if not restored:
         raise NotFoundError(f"user not found: {user_id!r}")
-    await management.bump_policy_version()
     await store.rollback(user_id, version)
     return {"user_id": user_id, "active_version": version}

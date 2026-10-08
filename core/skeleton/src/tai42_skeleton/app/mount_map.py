@@ -34,11 +34,20 @@ from dataclasses import dataclass, field
 from tai42_contract.plugins import PluginItem, PluginItemKind, PluginSpec, RouteDecl
 from tai42_kit.plugins import PLUGIN_SPEC_FILENAME, parse_plugin_spec
 
-from tai42_skeleton.access_control.path_canon import canonicalize_path
+from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
 
 # The item kinds whose module registers HTTP routes: a router always declares
 # routes, a channel optionally does. Every other kind never mounts a route.
 _ROUTE_CARRYING_KINDS = frozenset({PluginItemKind.CHANNEL, PluginItemKind.ROUTER})
+
+
+def resolved_api_path(base: str, path: str) -> str:
+    """The absolute served path of a declared relative ``path`` mounted at ``base``.
+
+    The fixed ``/api/`` root (only an item's mount base is remappable), the mount ``base``,
+    then the declared path.
+    """
+    return f"/api/{base}{path}"
 
 
 class MountMapError(RuntimeError):
@@ -71,11 +80,8 @@ class MountBinding:
     forbidden: bool = False
 
     def resolved_path(self, path: str) -> str:
-        """The absolute served path of a declared relative ``path``.
-
-        The fixed ``/api/`` root, the mount ``base``, then the declared path.
-        """
-        return f"/api/{self.base}{path}"
+        """The absolute served path of a declared relative ``path`` under this binding's mount ``base``."""
+        return resolved_api_path(self.base, path)
 
     def find_route(self, path: str, methods: frozenset[str]) -> RouteDecl | None:
         """The declared row matching ``path`` with EXACTLY ``methods``, or ``None``."""
@@ -228,7 +234,7 @@ def _reject_reserved_public_routes(mapping: Mapping[str, MountBinding], reserved
             # as the runtime verifier judges it — a base carrying a ``..`` cannot dodge
             # the reserved prefix by resolving under it only after normalization.
             resolved = canonicalize_path(binding.resolved_path(route.path))
-            if any(resolved == prefix or resolved.startswith(f"{prefix}/") for prefix in reserved_prefixes):
+            if any(under_prefix(resolved, prefix) for prefix in reserved_prefixes):
                 offenders.append(f"{binding.owner_ref}:{binding.item_name} {resolved}")
     if offenders:
         raise MountMapError(

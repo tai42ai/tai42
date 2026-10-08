@@ -35,7 +35,10 @@ def _gate_on(monkeypatch: pytest.MonkeyPatch, *, caller_id: str | None, policies
         def __init__(self, _settings) -> None:
             pass
 
-        async def get_policy(self, user_id: str) -> AccessPolicy:
+        async def current_policy_version(self) -> int:
+            return 0
+
+        async def get_policy_at(self, user_id: str, version: int) -> AccessPolicy:
             return policies.get(user_id, AccessPolicy(scopes=[]))
 
     monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
@@ -78,12 +81,15 @@ async def test_execution_identity_admin_classification_reads_its_own_policy(monk
 
 
 async def test_execution_identity_owned_key_is_never_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An owned key reads admin from its raw scopes, but the owner-claim conjunct denies
-    # it the admin path on the fire path as on the request path.
+    # An owned key reads admin from its raw scopes, but its non-admin owner's condition
+    # denies it the admin path on the fire path as on the request path.
     _gate_on(
         monkeypatch,
         caller_id=None,
-        policies={"k-exec": AccessPolicy(scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "alice"})},
+        policies={
+            "k-exec": AccessPolicy(scopes=["*"], policy_data={OWNER_USER_ID_CLAIM: "alice"}),
+            "alice": AccessPolicy(scopes=["*"], condition=TemplatedText(content="true")),
+        },
     )
     async with _fire_as("k-exec"):
         caller = await authority.resolve_caller()

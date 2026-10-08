@@ -20,6 +20,7 @@ from starlette.types import ASGIApp
 from tai42_contract.sub_mcp import RouteConfig
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
+from tai42_skeleton.access_control.path_canon import under_prefix
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.settings.audit_log import audit_log_settings
@@ -624,7 +625,7 @@ class SubMcpAppRouter:
 
         # Check if we are actually under the mount path. Segment-exact: "/apple"
         # is NOT under "/app".
-        under_mount = original_path == mount_clean or original_path.startswith(mount_clean + "/")
+        under_mount = under_prefix(original_path, mount_clean)
         path_suffix = original_path if not under_mount else original_path[len(mount_clean) :]
 
         # Extract slug from suffix: "/slug/..."

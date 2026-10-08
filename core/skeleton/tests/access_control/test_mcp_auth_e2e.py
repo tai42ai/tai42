@@ -18,13 +18,13 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Mount
 from starlette.testclient import TestClient
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 
@@ -67,11 +67,10 @@ def _client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     )
     pg = FakeAccessControlPg()
     pg.add_route("/mcp", _MCP_SCOPE)
-    pg.add_policy("u1", scopes=[_MCP_SCOPE])
+    pg.add_policy("u1", scopes=[_MCP_SCOPE], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     # The owner principal's policy caps the key at request time (a ["*"] owner caps nothing).
     pg.add_policy("owner1", scopes=["*"])
     ctx = make_client_ctx(fake)
-    monkeypatch.setattr(verifier_module, "client_ctx", ctx)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))

@@ -420,11 +420,15 @@ class TaiStack:
         """The origin of an app port (default: the primary one)."""
         return f"http://{self.host}:{port or self.port_a}"
 
+    def base_url(self, port: int | None = None) -> str:
+        """The URL the tai app is served at on an app port: its origin plus the stack's path prefix."""
+        return f"{self.origin(port)}{self.config.path_prefix}"
+
     def mcp(self, port: int | None = None, path: str = "/mcp", *, auth: str | None = None) -> McpClient:
-        return McpClient(f"{self.origin(port)}{path}", auth=auth)
+        return McpClient(f"{self.base_url(port)}{path}", auth=auth)
 
     def api(self, port: int | None = None) -> ApiClient:
-        return ApiClient(self.origin(port), auth_token=self.auth_token)
+        return ApiClient(self.base_url(port), auth_token=self.auth_token)
 
     def scrape(self) -> Scrape:
         """Scrape the standalone metrics server (the multiproc reader)."""
@@ -433,7 +437,7 @@ class TaiStack:
 
     def app_scrape(self, port: int | None = None) -> Scrape:
         """Scrape a serve worker's in-app ``/metrics`` route."""
-        return scrape(f"{self.origin(port)}/metrics")
+        return scrape(f"{self.base_url(port)}/metrics")
 
     def census(self) -> list[BusWorker]:
         """The live fleet currently on the app-owned worker bus — every subscribed
@@ -543,14 +547,14 @@ class TaiStack:
         if name.startswith("serve"):
             idx = 0 if name in ("serve", "serve-a") else 1
             port = self.app_ports[idx]
-            readiness.wait_http_ok(self, f"{self.origin(port)}/health", deadline, "app health")
+            readiness.wait_http_ok(self, f"{self.base_url(port)}/health", deadline, "app health")
             # A respawned serve worker re-runs its boot self-resync gate on rejoin;
             # drain it (where the profile carries the probe) so a test acting right
             # after the restart does not race the gate, exactly as at boot.
             if child_env.needs_bus(self.config):
                 readiness.run_readiness_coro(readiness.drain_gate_coro(self, [port], deadline))
         elif name == "embed":
-            readiness.wait_http_ok(self, f"{self.origin(self.app_ports[0])}/health", deadline, "app health")
+            readiness.wait_http_ok(self, f"{self.base_url(self.app_ports[0])}/health", deadline, "app health")
             if child_env.needs_bus(self.config):
                 readiness.run_readiness_coro(readiness.drain_gate_coro(self, [self.app_ports[0]], deadline))
         elif name == "metrics":

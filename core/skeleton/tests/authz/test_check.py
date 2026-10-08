@@ -154,6 +154,7 @@ def test_registered_op_with_no_row_resolves_universal_scope(ac_env, bound_app):
     reg = OperationRegistry()
     meta = _op(reg)  # /api/things/wipe is a registered route; no pg row
     ac_env.add_policy("root", scopes=["*"])
+    ac_env.add_policy("alice", scopes=["things"])
     asyncio.run(check(CallerIdentity(user_id="root"), meta, {}, settings=AccessControlSettings()))  # no raise
     with pytest.raises(PermissionDeniedError, match="insufficient scope"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=AccessControlSettings()))
@@ -162,6 +163,7 @@ def test_registered_op_with_no_row_resolves_universal_scope(ac_env, bound_app):
 def test_public_route_allowed(ac_env, bound_app):
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", settings.public_resource_id)
+    ac_env.add_policy("alice", scopes=["other"])
     reg = OperationRegistry()
     meta = _op(reg)
     asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))  # no raise
@@ -171,7 +173,7 @@ def test_scoped_caller_allowed_unscoped_denied(ac_env, bound_app):
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
     ac_env.add_policy("alice", scopes=["things"])
-    ac_env.add_policy("bob", scopes=[])
+    ac_env.add_policy("bob", scopes=["other"])
     reg = OperationRegistry()
     meta = _op(reg)
 
@@ -716,7 +718,9 @@ def test_owned_key_attenuation_parity_http_mcp(ac_env, bound_app):
         # the key's OWN (unattenuated) policy scopes. Proves the test is non-vacuous —
         # the write op would be ALLOWED over MCP without the owner-attenuation carry.
         try:
-            await check(CallerIdentity(user_id="key1"), op_meta, {}, settings=settings)
+            await check(
+                CallerIdentity(user_id="key1", claims={OWNER_USER_ID_CLAIM: "owner1"}), op_meta, {}, settings=settings
+            )
             return True
         except PermissionDeniedError:
             return False
@@ -804,9 +808,9 @@ def test_owned_key_owner_condition_parity_http_mcp(ac_env, bound_app):
         return reached["v"]
 
     async def no_claims_mcp_allows(op_meta) -> bool:
-        # The pre-fix behavior: effective scopes carried, but NO claims → the owner
-        # reference never surfaces, so the owner condition is never enforced. Proves
-        # the test is non-vacuous — write would be ALLOWED over MCP (out-permitting HTTP).
+        # Effective scopes carried, but NO claims: the owner the key's STORED policy names
+        # still drives the owner pass, and a caller whose claims do not carry that owner is
+        # refused outright — a missing claim can never skip the owner's condition.
         try:
             await check(
                 CallerIdentity(user_id="key1", effective_scopes=("read", "write"), claims=None),
@@ -835,9 +839,8 @@ def test_owned_key_owner_condition_parity_http_mcp(ac_env, bound_app):
     # The owner condition PERMITS read: allowed on BOTH edges (parity).
     assert http_read is True
     assert mcp_read is True
-    # Non-vacuous: without the claims carry (owner reference) the MCP edge would have
-    # ALLOWED write — the owner-condition gap the second-pass enforce closes.
-    assert no_claims_write is True
+    # Without the claims carry the edge refuses (the stored owner is not the claimed one).
+    assert no_claims_write is False
 
 
 def test_owned_key_denied_when_owner_disabled(ac_env, bound_app):
@@ -845,7 +848,7 @@ def test_owned_key_denied_when_owner_disabled(ac_env, bound_app):
     whose owner is DISABLED is denied at the tool edge (before the scope check)."""
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
-    ac_env.add_policy("key1", scopes=["things"])
+    ac_env.add_policy("key1", scopes=["things"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     ac_env.add_policy("owner1", scopes=["things"], policy_data={"disabled": True})
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
@@ -859,7 +862,7 @@ def test_owned_key_denied_when_owner_has_no_policy(ac_env, bound_app):
     whose owner has NO policy (no scopes, no condition) is denied at the tool edge."""
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
-    ac_env.add_policy("key1", scopes=["things"])
+    ac_env.add_policy("key1", scopes=["things"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     ac_env.add_policy("owner1", scopes=[])
     reg = OperationRegistry()
     meta = _op(reg, method="POST")
@@ -1029,7 +1032,7 @@ def test_always_public_operation_short_circuits_every_policy_layer(ac_env, bound
         return dict.fromkeys(grantable_feature_tags(), "write")
 
     monkeypatch.setattr(role_grants_module, "resolve_role_grants", _max_grants)
-    ac_env.add_policy("viewer1", scopes=[], policy_data={ROLE_POINTER_KEY: "editor"})
+    ac_env.add_policy("viewer1", scopes=[], policy_data={ROLE_POINTER_KEY: "editor"}, condition={"content": "true"})
     identity = CallerIdentity(user_id="viewer1", effective_scopes=())
 
     async def run():

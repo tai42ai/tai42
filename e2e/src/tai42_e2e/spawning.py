@@ -116,6 +116,8 @@ def spawn_serve_fleet(stack: TaiStack, tai: str, manifest_path: Path, family_dir
         # round-trip are exercised).
         if workers > 1:
             argv.append("--stateless-http")
+        if stack.config.transport != "http":
+            argv.extend(["--transport", stack.config.transport])
         cwd_override = stack.config.cwd_overrides.get(name)
         cwd = Path(cwd_override) if cwd_override else stack._config_dir
         spawn(
@@ -132,7 +134,7 @@ def spawn_serve_fleet(stack: TaiStack, tai: str, manifest_path: Path, family_dir
 
 def spawn_embed_host(stack: TaiStack, family_dir: str) -> None:
     """Spawn the user-owned embed host: ``uvicorn`` serving the host FastAPI
-    app in ``tai42_e2e_fixtures.embed_main`` that mounts ``create_app()``. One process
+    app the stack names (``embed_app``) that mounts ``create_app()``. One process
     on the single app port; the clean child env carries no ``PROMETHEUS_MULTIPROC_DIR``,
     so the mounted app comes up in in-process metrics mode — the surface the embed
     suite scrapes."""
@@ -142,7 +144,7 @@ def spawn_embed_host(stack: TaiStack, family_dir: str) -> None:
     cwd = Path(cwd_override) if cwd_override else stack._config_dir
     argv = [
         uvicorn_bin(),
-        "tai42_e2e_fixtures.embed_main:app",
+        stack.config.embed_app,
         "--host",
         stack.host,
         "--port",

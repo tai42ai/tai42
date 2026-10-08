@@ -26,10 +26,10 @@ immutable through the edit surface (re-mint to change ownership). With the gate 
 caller is treated as admin (nothing to attenuate against).
 
 Every mutation bumps the policy version so a running worker's policy cache re-reads
-the edit instead of serving a stale copy. Each policy write is ordered
-enforced-store first (the ``management`` write lands, then the cache-buster bump,
-then the durable PG version history) so enforcement is current the instant the
-authority changes even if the audit write then fails.
+the edit instead of serving a stale copy. Each policy write is ordered enforced-store
+first, the cache-buster bump inside the management writer, then the durable PG version
+history written by the door — so enforcement is current the instant the authority
+changes even if the audit write then fails.
 
 The test-double seam symbols ``resolve_caller``, ``ac_policy_store``,
 ``build_projection``, ``access_control_settings`` and ``_record_policy_version`` are

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.access_control import UNIVERSAL_SCOPE
+
 import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import management
 from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError
@@ -18,7 +20,7 @@ def _check_scope_subset(caller: Caller, scopes: list[str]) -> None:
 
     Raises ``BadRequestError`` naming the offending scopes.
     """
-    if "*" in caller.policy.scopes:
+    if UNIVERSAL_SCOPE in caller.policy.scopes:
         return
     excess = sorted(set(scopes) - set(caller.policy.scopes))
     if excess:

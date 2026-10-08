@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 from tai42_kit.logging import logging_settings, setup_logging
 
+from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.setup_gate import ensure_setup_token
 from tai42_skeleton.access_control.startup import (
@@ -14,6 +15,7 @@ from tai42_skeleton.access_control.startup import (
     check_fenced_routes_resolvable,
     check_raw_path_routes_resolvable,
     check_route_actions,
+    check_route_rows_canonical,
     check_spa_shell_public,
     declare_gate_state_to_kit,
     probe_identity_provider,
@@ -32,10 +34,16 @@ from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
 from tai42_skeleton.marketplace.advisories import start_advisories_poll, stop_advisories_poll
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
 from tai42_skeleton.states.db import assert_states_schema_applied
+from tai42_skeleton.sub_mcp import service as sub_mcp_service
 
 logger = logging.getLogger(__name__)
 
 _app: TaiMCP | None = None
+
+
+async def _invalidate_policy_cache() -> None:
+    """The mount-change listener: drop every cached policy decision and capability projection."""
+    await management.bump_policy_version()
 
 
 def connectors_in_use() -> bool:
@@ -247,6 +255,9 @@ def build_app() -> TaiMCP:
             # The control-plane role templates (admin/editor/viewer) are seeded before
             # traffic, so a bootstrap ``apply_role`` can never KeyError on a fresh deploy.
             app.lifecycle.on_startup(seed_roles)
+            # The route table is read once per epoch build: a row stored in a form no request
+            # path reduces to fails the boot loudly (reset the access-control store).
+            app.lifecycle.on_startup(check_route_rows_canonical)
             # The setup token is fixed once (SET NX on the shared AC Redis) and logged once
             # by the winner while no principal exists, so a fresh deployment can initialize
             # itself through the public POST /api/setup door. Runs after the providers are
@@ -347,6 +358,10 @@ def build_app() -> TaiMCP:
         # Registered LAST in the startup order: a re-driven conversation turn may call a
         # preset or a sub-MCP tool rehydrated above.
         _register_feature_lifecycles(app)
+        # A mount is a reachable surface, so a mount change must invalidate cached
+        # capability projections exactly as a route-table edit does: the sub-MCP write
+        # chokepoint notifies this listener after every durable mount change.
+        sub_mcp_service.on_mount_changed(_invalidate_policy_cache)
         # Preset create/save/rollback/delete fan out on the worker bus
         # (``reload_tool``/``remove_tool`` with ``kind="preset"``); each subscribed
         # worker dispatches the op through this reloader so the fleet converges.

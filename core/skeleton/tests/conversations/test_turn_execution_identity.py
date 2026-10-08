@@ -23,7 +23,6 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.route_registry import route_registry
@@ -146,7 +145,6 @@ def ac(monkeypatch) -> FakeAccessControlPg:
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
     reset_route_index()
@@ -348,8 +346,8 @@ async def test_descoping_the_key_denies_the_next_turn(ac, store, monkeypatch):
         policy = ac.policy("k-run")
         policy["scopes"] = [_KEPT_SCOPE]
         version_key = access_control_settings().policy_version_key
-        store_module_redis = verifier_module.client_ctx
-        # The verifier and policy enforcer share the fake redis; bump the version counter.
+        store_module_redis = policy_module.client_ctx
+        # Every version read goes through the policy enforcer's redis; bump the version counter.
         async with store_module_redis(None) as r:  # type: ignore[misc]
             await r.set(version_key, "2")
 

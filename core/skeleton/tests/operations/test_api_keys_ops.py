@@ -139,18 +139,15 @@ def _install_scope_store(monkeypatch, stored_body):
         return stored_body
 
     async def _edit(*, user_id, scopes):
+        # The management writer invalidates the policy cache itself; the door never bumps.
         captured["scopes"] = scopes
         return {**stored_body, "scopes": scopes}
-
-    async def _bump():
-        return 1
 
     async def _record(_user_id, _body):
         captured["recorded"] = _body
 
     monkeypatch.setattr(management, "get_policy_body", _body)
     monkeypatch.setattr(management, "edit_user_payload", _edit)
-    monkeypatch.setattr(management, "bump_policy_version", _bump)
     monkeypatch.setattr(ops, "_record_policy_version", _record)
     return captured
 
@@ -278,6 +275,23 @@ async def test_edit_and_revoke_disabled_refuse(monkeypatch):
     with pytest.raises(NotSupportedError) as revoke_exc:
         await ops.revoke_api_key("u")
     assert revoke_exc.value.extra["code"] == "access-control-disabled"
+
+
+@pytest.mark.parametrize("url", ["/a\\b", "/a%00b", "/a%01b"])
+async def test_route_writers_refuse_a_malformed_url_with_bad_request(monkeypatch, url):
+    # The route-table writers store the canonical url; a url with no canonical form names
+    # no row, so every route door answers 400 before the store is touched.
+    monkeypatch.setattr(ops, "access_control_settings", lambda: AccessControlSettings(enable=True))
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+
+    with pytest.raises(BadRequestError, match="path"):
+        await ops.add_scope_url("s", url, None)
+    with pytest.raises(BadRequestError, match="path"):
+        await ops.remove_scope_url(url)
+    with pytest.raises(BadRequestError, match="path"):
+        await ops.pin_public_route(url, None)
+    with pytest.raises(BadRequestError, match="path"):
+        await ops.unpin_public_route(url)
 
 
 async def test_residual_mutations_disabled_refuse(monkeypatch):

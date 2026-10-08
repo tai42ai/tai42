@@ -4,12 +4,16 @@ import asyncio
 import json
 import threading
 from asyncio import AbstractEventLoop
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 from weakref import WeakKeyDictionary
 
 from async_lru import alru_cache
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control.models import AccessPolicy
+from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, hgetall
 from tai42_kit.settings import register_settings_reset
@@ -32,6 +36,34 @@ class PolicyEvaluationError(Exception):
     (``backend``/``authz``) catches broad ``Exception`` and so still fails closed on
     it.
     """
+
+
+@dataclass(frozen=True)
+class RenderedCondition:
+    """A policy condition as enforcement evaluates it: the rendered jq ``text`` and whether one was ``configured``.
+
+    ``configured`` is known from the policy, never from the text: a configured condition that
+    renders empty must still deny, not read as "no condition".
+    """
+
+    text: str
+    configured: bool
+
+
+class ConditionVerdict(StrEnum):
+    """What a rendered condition answers for one jq context."""
+
+    ALLOW = "allow"
+    DENY = "deny"
+    RENDERED_EMPTY = "rendered_empty"
+
+
+async def render_condition(condition: TemplatedText | None) -> RenderedCondition:
+    """The one render-plus-configured preamble; render errors propagate as themselves."""
+    if condition is None:
+        return RenderedCondition(text="", configured=False)
+    text = await tai42_app.storage.resource_manager.render_templated_text(condition)
+    return RenderedCondition(text=text, configured=True)
 
 
 def policy_is_empty(policy: AccessPolicy) -> bool:
@@ -69,7 +101,7 @@ class PolicyEnforcer:
         bumps that version, so the stale per-worker cache entry is bypassed on the
         next read without waiting out the ttl.
         """
-        return await self.get_policy_at(user_id, await self._current_policy_version())
+        return await self.get_policy_at(user_id, await self.current_policy_version())
 
     async def get_policy_at(self, user_id: str, version: int) -> AccessPolicy:
         """Fetch policy for a specific user at an ALREADY-READ ``version``.
@@ -88,18 +120,14 @@ class PolicyEnforcer:
         return await self._fetch_policy(user_id, version)
 
     async def current_policy_version(self) -> int:
-        """The current policy version (a cheap single-key GET).
+        """The current policy version (a cheap single-key GET) — the one version read every cache keys on.
 
-        The cache key the LIVE per-tag grant resolution mixes in, so a role edit's version bump
-        busts it. A backend error fails closed by RAISING (surfaces as a clean deny).
+        The policy cache here, the route/pattern caches of the verifier, the role-grant cache and
+        the capability projection all key on it, so a writer's bump busts them together. A
+        backend error fails closed by RAISING (surfaces as a clean deny), never a silent default:
+        a fixed version would pin every cache to one slot and serve stale policy for the ttl. A
+        successful read with no key yet is version 0.
         """
-        return await self._current_policy_version()
-
-    async def _current_policy_version(self) -> int:
-        # A backend error here must fail closed by RAISING (surfaces out of
-        # ``authenticate`` as a clean deny), never a silent default: swallowing it
-        # to a fixed version would pin the whole cache to one slot and serve stale
-        # policy for the ttl. A successful read with no key yet is version 0.
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await r.get(self.settings.policy_version_key)
         return int(raw) if raw is not None else 0
@@ -151,44 +179,35 @@ class PolicyEnforcer:
             raw = await hgetall(r, context_key)
         return {field: json.loads(value) for field, value in raw.items()}
 
-    async def get_auth_data(self, user_id: str) -> tuple[AccessPolicy, dict[str, Any]]:
-        """Fetch a user's policy and live context together."""
-        policy = await self.get_policy(user_id)
-        context = await self.get_live_context(user_id)
-        return policy, context
+    @staticmethod
+    async def evaluate(context: dict[str, Any], rendered: RenderedCondition) -> ConditionVerdict:
+        """ALLOW when not configured or jq emits exactly True; DENY otherwise; RENDERED_EMPTY when configured and empty.
 
-    async def enforce(self, context: dict[str, Any], expression: str | None, *, condition_configured: bool = False):
-        """Evaluate the policy condition against ``context``, raising ``AuthenticationError`` on deny."""
-        if not expression:
-            # Distinguish "no condition configured" from "a condition was
-            # configured but rendered to empty". When a condition WAS configured
-            # (e.g. a jinja ``{% if %}`` whose branch is false, or an undefined
-            # var) yet renders to an empty string, treating it as "no condition"
-            # would fail open: the caller gets allowed against a condition that
-            # never actually passed. So a configured-but-empty condition DENIES;
-            # only a genuinely absent condition is a no-op allow.
-            if condition_configured:
-                raise AuthenticationError("Policy violation: configured condition rendered empty")
-            return
+        jq/timeout errors propagate unwrapped. The evaluation runs off-loop under a wall-clock
+        budget (``JQ_TIMEOUT_SECONDS``) so a hostile/buggy expression cannot block the loop.
+        """
+        if not rendered.text:
+            return ConditionVerdict.RENDERED_EMPTY if rendered.configured else ConditionVerdict.ALLOW
+        result = await run_jq_first(rendered.text, context)
+        return ConditionVerdict.ALLOW if result is True else ConditionVerdict.DENY
 
+    async def enforce(self, context: dict[str, Any], rendered: RenderedCondition) -> None:
+        """Evaluate ``rendered`` against ``context``, raising ``AuthenticationError`` on a deny.
+
+        DENY → ``AuthenticationError("Policy violation")``; RENDERED_EMPTY →
+        ``AuthenticationError("Policy violation: configured condition rendered empty")`` (an empty
+        render of a configured condition never fails open); any evaluation fault →
+        :class:`PolicyEvaluationError`, a distinct type so a build-time caller lets it propagate
+        loudly while the runtime gate's broad ``except`` still fails closed on it.
+        """
         try:
-            # Evaluated off-loop under a wall-clock budget (JQ_TIMEOUT_SECONDS) so a
-            # hostile/buggy policy expression cannot block the auth path's loop.
-            result = await run_jq_first(expression, context)
-
-            if result is not True:
-                raise AuthenticationError("Policy violation")  # noqa: TRY301 deny raised in-try so the AuthenticationError branch re-raises it distinctly from an infra fault
-
-        except AuthenticationError:
-            # A genuine policy DENY — re-raise as-is so callers can distinguish it from
-            # an infrastructure fault below.
-            raise
+            verdict = await self.evaluate(context, rendered)
         except Exception as e:
-            # An infrastructure/evaluation fault (jq timeout, render/eval error) — a
-            # DISTINCT type so a build-time caller lets it propagate loudly rather than
-            # swallowing it as a deny, while the runtime gate's broad ``except`` still
-            # fails closed on it.
             raise PolicyEvaluationError(f"Policy error: {e!s}") from e
+        if verdict is ConditionVerdict.DENY:
+            raise AuthenticationError("Policy violation")
+        if verdict is ConditionVerdict.RENDERED_EMPTY:
+            raise AuthenticationError("Policy violation: configured condition rendered empty")
 
 
 # One enforcer per running loop: its policy cache (async-lru) binds to the first loop that
