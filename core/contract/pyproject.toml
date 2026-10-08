@@ -98,7 +98,9 @@ testpaths = ["tests"]
 source = ["tai42_contract"]
 
 [tool.coverage.report]
+# fail_under is compared to the total rounded to `precision` decimals.
 fail_under = 97
+precision = 2
 
 [tool.pyright]
 include = ["src", "tests"]
