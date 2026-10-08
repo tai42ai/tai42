@@ -10,6 +10,7 @@ from tai42_contract.conversations import ConversationTargetKind
 from tai42_contract.states.errors import StateNotFoundError
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
+from tai42_skeleton.states.service.catalog import CatalogSnapshot
 from tai42_skeleton.states.store import PostgresStatesStore
 
 from .conftest import FakeStatesPg
@@ -34,20 +35,24 @@ def _subj(key="t1", kind="thread", tk: ConversationTargetKind = "agent", tn="a")
     return StateSubject(target_kind=tk, target_name=tn, kind=kind, key=key)
 
 
-async def test_restore_records_validates_and_audits(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_restore_records_validates_and_audits(
+    pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot
+) -> None:
     pg.seed_declaration("alerts")
     rows = [
         {"target_kind": "agent", "target_name": "a", "subject_kind": "thread", "subject_key": "t1", "data": {"n": 1}},
         {"target_kind": "agent", "target_name": "a", "subject_kind": "thread", "subject_key": "t2", "data": {"n": 2}},
     ]
-    await store.restore_records("alerts", rows, origin=_ORIGIN, validate_doc=_ok)
+    await store.restore_records("alerts", rows, origin=_ORIGIN, catalog=catalog)
     assert (await store.read_record("alerts", _subj(key="t1")))[0] == {"n": 1}
     assert len([w for w in pg.writes if w["paths"] == [[]]]) == 2
 
 
-async def test_restore_records_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_restore_records_undeclared_raises(
+    pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot
+) -> None:
     with pytest.raises(StateNotFoundError):
-        await store.restore_records("nope", [], origin=_ORIGIN, validate_doc=_ok)
+        await store.restore_records("nope", [], origin=_ORIGIN, catalog=catalog)
 
 
 async def test_restore_aliases_upserts(pg: FakeStatesPg, store: PostgresStatesStore) -> None:

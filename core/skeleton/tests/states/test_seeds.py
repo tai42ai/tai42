@@ -26,6 +26,11 @@ class _FakeSeedStore:
         self.present.add(name)
 
 
+async def _dump(doc: StateTemplateDocument) -> dict[str, Any]:
+    """A pass-through ``prepare``: the seed's own dump (the service's validated write is tested on the service)."""
+    return doc.model_dump(by_alias=True, exclude_none=True)
+
+
 def test_registry_registers_and_lists() -> None:
     reg = StateTemplateSeedRegistry()
     a = StateTemplateDocument(name="a")
@@ -52,7 +57,7 @@ def test_registry_reset_clears() -> None:
 async def test_apply_seeds_creates_absent_and_stamps_hash() -> None:
     store = _FakeSeedStore()
     doc = StateTemplateDocument(name="shipped")
-    await apply_template_seeds(store, seeds=[doc])  # type: ignore[arg-type]
+    await apply_template_seeds(store, seeds=[doc], prepare=_dump)  # type: ignore[arg-type]
     assert len(store.upserts) == 1
     name, body, shipped_hash = store.upserts[0]
     assert name == "shipped"
@@ -63,13 +68,13 @@ async def test_apply_seeds_creates_absent_and_stamps_hash() -> None:
 
 async def test_apply_seeds_leaves_present_untouched() -> None:
     store = _FakeSeedStore(present={"already"})
-    await apply_template_seeds(store, seeds=[StateTemplateDocument(name="already")])  # type: ignore[arg-type]
+    await apply_template_seeds(store, seeds=[StateTemplateDocument(name="already")], prepare=_dump)  # type: ignore[arg-type]
     assert store.upserts == []  # idempotent — a present name is skipped
 
 
 async def test_apply_seeds_hash_is_content_stable() -> None:
     doc = StateTemplateDocument(name="m")
     s1, s2 = _FakeSeedStore(), _FakeSeedStore()
-    await apply_template_seeds(s1, seeds=[doc])  # type: ignore[arg-type]
-    await apply_template_seeds(s2, seeds=[doc])  # type: ignore[arg-type]
+    await apply_template_seeds(s1, seeds=[doc], prepare=_dump)  # type: ignore[arg-type]
+    await apply_template_seeds(s2, seeds=[doc], prepare=_dump)  # type: ignore[arg-type]
     assert s1.upserts[0][2] == s2.upserts[0][2]  # the same body hashes identically

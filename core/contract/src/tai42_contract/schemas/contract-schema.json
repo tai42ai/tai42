@@ -287,6 +287,35 @@
       "title": "StateInjection",
       "type": "object"
     },
+    "StateRegimeRule": {
+      "additionalProperties": false,
+      "description": "One write-regime rule: a ``path`` (object keys and the ``\"*\"`` wildcard; ``[]`` is the root) and its ``regime``.\n\nAn undeclared path is ``free``.",
+      "properties": {
+        "path": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Path",
+          "type": "array"
+        },
+        "regime": {
+          "enum": [
+            "single",
+            "composing",
+            "free"
+          ],
+          "title": "Regime",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "regime"
+      ],
+      "title": "StateRegimeRule",
+      "type": "object"
+    },
     "StateTemplateDeclarations": {
       "additionalProperties": false,
       "description": "The ``declarations`` section of a state-template document.\n\nThe JSON ``schema`` (wire key ``schema``, attribute ``schema_``) of the static values an\nattachment stores, and an OPTIONAL ``check`` — a :class:`~tai42_contract.template.TemplatedText`\ncarrying a jq predicate over those values. Structural validation (the check's jq, the schema's\nshape) lives at the store; this model pins the served wire shape.\n\nThe wire key ``schema`` is the attribute ``schema_`` (alias) because a ``schema`` field\nwould shadow ``BaseModel.schema``.",
@@ -369,6 +398,25 @@
       "title": "StateTemplateJq",
       "type": "object"
     },
+    "StateTemplateParameter": {
+      "additionalProperties": false,
+      "description": "One fillable template parameter: its value ``schema`` and an OPTIONAL ``default``.\n\n``has_default`` tells an absent default from an explicit ``null`` one; the wire shape omits\n``default`` when none was given.",
+      "properties": {
+        "default": {
+          "title": "Default"
+        },
+        "schema": {
+          "additionalProperties": true,
+          "title": "Schema",
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "title": "StateTemplateParameter",
+      "type": "object"
+    },
     "StateTemplateReconcile": {
       "additionalProperties": false,
       "description": "The ``reconcile`` section of a state-template document.\n\nThree jq programs the store runs to settle a state's OPEN records on a declarations edit —\n``orphans`` names the items a record subtree orphans against the new declarations,\n``resolutions`` names the not-done resolutions a close may name, and ``close`` returns the op\nbatch that closes one orphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline\n``content`` or a stored ``id``).",
@@ -389,6 +437,19 @@
         "resolutions"
       ],
       "title": "StateTemplateReconcile",
+      "type": "object"
+    },
+    "StateTemplateTrace": {
+      "additionalProperties": false,
+      "description": "The trace switch: when ``enabled``, every write under an attachment of the template stamps ``_trace``.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "StateTemplateTrace",
       "type": "object"
     },
     "StateUpdate": {
@@ -2521,8 +2582,7 @@
           "anyOf": [
             {
               "items": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/$defs/StateRegimeRule"
               },
               "type": "array"
             },
@@ -2677,7 +2737,9 @@
           "type": "string"
         },
         "parameters": {
-          "additionalProperties": true,
+          "additionalProperties": {
+            "$ref": "#/$defs/StateTemplateParameter"
+          },
           "title": "Parameters",
           "type": "object"
         },
@@ -2694,8 +2756,7 @@
         },
         "regimes": {
           "items": {
-            "additionalProperties": true,
-            "type": "object"
+            "$ref": "#/$defs/StateRegimeRule"
           },
           "title": "Regimes",
           "type": "array"
@@ -2728,9 +2789,7 @@
           "title": "Template Jq"
         },
         "trace": {
-          "additionalProperties": true,
-          "title": "Trace",
-          "type": "object"
+          "$ref": "#/$defs/StateTemplateTrace"
         }
       },
       "required": [

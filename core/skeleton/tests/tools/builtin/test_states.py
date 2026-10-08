@@ -59,6 +59,22 @@ class _FakeStore:
     async def get_declaration(self, name: str) -> dict[str, Any] | None:
         return self.declarations.get(name)
 
+    async def declaration_version(self, name: str) -> int | None:
+        return 1 if name in self.declarations else None
+
+    async def declaration_scalars(self, name: str, *, conn: Any = None) -> tuple[int, list[str], str] | None:
+        decl = self.declarations.get(name)
+        if decl is None:
+            return None
+        return 1, list(decl["subject_kinds"]), decl["default_subject_kind"]
+
+    async def read_state_catalog_rows(self, state: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        decl = self.declarations.get(state)
+        return (None, []) if decl is None else ({"version": 1, **decl}, [])
+
+    async def read_state_entry_rows(self, cur: Any, state: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        return self.declarations[state].get("effective_schema") or {"type": "object"}, []
+
     async def list_attachments_for_state(self, state: str) -> list[dict[str, Any]]:
         return [row for (attached_state, _module), row in self.attachments.items() if attached_state == state]
 
@@ -68,12 +84,20 @@ class _FakeStore:
             return None
         return {"data": row["data"], "seq": row["seq"], "canonical_subject": subject, "folded_from": []}
 
-    async def replace(self, state, subject, data, *, origin, validate_doc, conn=None) -> None:
+    async def replace(
+        self, state, subject, data, *, origin, catalog, validate_subject_in_txn, validate=True, conn=None
+    ) -> None:
+        decl = self.declarations.get(state)
+        if decl is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        await validate_subject_in_txn(list(decl["subject_kinds"]))
         self._seq += 1
         self.records[self._key(state, subject)] = {"data": dict(data), "seq": self._seq}
         self._append_write(state, subject, origin, [[]])
 
-    async def apply_ops(self, state, subject, ops, *, op_id, origin, validate_doc, validate_subject_in_txn, conn=None):
+    async def apply_ops(
+        self, state, subject, ops, *, op_id, origin, catalog, validate_subject_in_txn, validate=True, conn=None
+    ):
         decl = self.declarations.get(state)
         if decl is None:
             raise StateNotFoundError(f"no state declared as {state!r}")

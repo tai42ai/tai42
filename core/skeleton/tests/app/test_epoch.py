@@ -62,22 +62,9 @@ def _reset_epoch_state() -> Iterator[None]:
     """Reset the process serving generation between tests. The client epoch is a
     monotonic process counter (never reset), so assertions compare relative flips.
 
-    These tests drive ``build_and_swap_epoch`` with INJECTED no-op ``rebuild`` seams,
-    so its ``begin/commit_staging_all`` would promote an EMPTY staged generation and
-    wipe the committed generation registries for later suites — snapshot and restore
-    the committed generation globals around each test."""
-    from tai42_kit.access_control import registry as identity_registry
-    from tai42_kit.accounts import registry as accounts_registry
-
-    from tai42_skeleton.connectors.providers import registry as connector_registry
-    from tai42_skeleton.operations.registry import operation_registry
-
-    saved = {
-        "connector": dict(connector_registry._GENERATION.committed()),
-        "identity": dict(identity_registry._PROVIDERS._generation.committed()),
-        "accounts": dict(accounts_registry._PROVIDERS._generation.committed()),
-        "operation": dict(operation_registry._generation.committed()),
-    }
+    These tests drive ``build_and_swap_epoch`` with INJECTED no-op ``rebuild`` seams, so
+    a successful build promotes EMPTY generations over the per-generation registries;
+    the suite-wide ``_preserve_generation_globals`` fixture restores them after each test."""
     for name in ("_current", "_serving_slot", "_retiring_epoch"):
         setattr(epoch_mod, name, None)
     epoch_mod._loaded_env_keys = set()
@@ -87,18 +74,6 @@ def _reset_epoch_state() -> Iterator[None]:
         for name in ("_current", "_serving_slot", "_retiring_epoch", "_building_epoch"):
             setattr(epoch_mod, name, None)
         epoch_mod._loaded_env_keys = set()
-        connector_registry._GENERATION.abort()
-        connector_registry._GENERATION.committed().clear()
-        connector_registry._GENERATION.committed().update(saved["connector"])
-        identity_registry._PROVIDERS._generation.abort()
-        identity_registry._PROVIDERS._generation.committed().clear()
-        identity_registry._PROVIDERS._generation.committed().update(saved["identity"])
-        accounts_registry._PROVIDERS._generation.abort()
-        accounts_registry._PROVIDERS._generation.committed().clear()
-        accounts_registry._PROVIDERS._generation.committed().update(saved["accounts"])
-        operation_registry._generation.abort()
-        operation_registry._generation.committed().clear()
-        operation_registry._generation.committed().update(saved["operation"])
 
 
 def _install_boot(name: str = "boot-app") -> dict:

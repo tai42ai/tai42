@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 from tai42_contract.states.models import StateTemplateDocument
 
@@ -51,16 +52,22 @@ def _canonical_hash(body: dict) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-async def apply_template_seeds(store: PostgresStatesStore, *, seeds: Iterable[StateTemplateDocument]) -> None:
+async def apply_template_seeds(
+    store: PostgresStatesStore,
+    *,
+    seeds: Iterable[StateTemplateDocument],
+    prepare: Callable[[StateTemplateDocument], Awaitable[dict[str, Any]]],
+) -> None:
     """Write each shipped default template that is absent from the store, stamping its canonical body hash.
 
-    The canonical body hash is stamped as ``shipped_hash``. Idempotent — a present name is
-    left untouched.
+    ``prepare`` validates a seed exactly as a template upload is validated and returns the body to
+    store (a seed that does not validate raises, naming it). The canonical body hash is stamped as
+    ``shipped_hash``. Idempotent — a present name is left untouched.
     """
     for doc in seeds:
         if await store.get_template(doc.name) is not None:
             continue
-        body = doc.model_dump(by_alias=True)
+        body = await prepare(doc)
         await store.upsert_template(doc.name, body, _canonical_hash(body))
         logger.info("state-template seed %r: created", doc.name)
 

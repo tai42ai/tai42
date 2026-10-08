@@ -146,7 +146,7 @@ async def test_skip_reconcilers_runs_validators_but_not_reconcilers(svc: StatesS
     await svc.put_declaration(_STATE)
     calls: list[str] = []
 
-    async def _validator(template_doc, declarations, effective):
+    async def _validator(state, template_doc, declarations, effective):
         calls.append("validator")
 
     async def _reconciler(ctx):
@@ -265,7 +265,7 @@ async def test_reconciler_runs_after_the_validator(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     order: list[str] = []
 
-    async def _validator(template_doc, declarations, effective):
+    async def _validator(state, template_doc, declarations, effective):
         order.append("validator")
 
     async def _reconciler(ctx):

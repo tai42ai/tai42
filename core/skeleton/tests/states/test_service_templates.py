@@ -67,7 +67,7 @@ async def test_put_template_replace_refused_when_a_validator_now_rejects(svc: St
     await svc.put_template(_template_doc("m"), replace=False)
     await svc.attach("alerts", "m", AttachBody(path=["sub"]))
 
-    async def refusing(doc, declarations, effective) -> None:
+    async def refusing(state, doc, declarations, effective) -> None:
         raise TemplateValidationError("no longer valid on this attach")
 
     svc.register_attach_validator(refusing)

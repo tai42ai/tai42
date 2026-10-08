@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import SchemaValidationError, ValueValidationError
 
 from tai42_skeleton.states.schema import _validate_document, _validate_schema
@@ -95,7 +96,7 @@ def test_validate_document_reports_unresolvable_ref() -> None:
     # error, never an opaque referencing exception.
     schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}}
     with pytest.raises(ValueValidationError):
-        _validate_document(schema, {"a": 1})
+        _validate_document(Draft202012Validator(schema), {"a": 1})
 
 
 def test_page_limit_clamps_and_refuses() -> None:

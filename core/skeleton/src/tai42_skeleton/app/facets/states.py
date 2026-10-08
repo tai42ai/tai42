@@ -18,6 +18,8 @@ if TYPE_CHECKING:
         AttachValidator,
         ConsumerLister,
         ConsumerRow,
+        RenderedAttachment,
+        RenderedStateTemplate,
         StateBatchWrite,
         StateContext,
         StateDeclaration,
@@ -100,6 +102,18 @@ class StatesFacet(_Facet):
     async def delete_template(self, name: str) -> None:
         """Remove the state-template document named ``name``."""
         return await self._app._states_service.delete_template(name)
+
+    async def get_rendered_template(self, name: str) -> RenderedStateTemplate | None:
+        """The stored template ``name`` rendered (every body as jq text, input programs ordered), or ``None``."""
+        return await self._app._states_service.get_rendered_template(name)
+
+    async def rendered_attachments(self, state: str) -> list[RenderedAttachment]:
+        """Every attachment on ``state`` with its rendered template; refuses an undeclared state."""
+        return await self._app._states_service.rendered_attachments(state)
+
+    async def render_template(self, doc: StateTemplateDocument) -> RenderedStateTemplate:
+        """Render a candidate template document that is not stored (``version`` ``"candidate"``)."""
+        return await self._app._states_service.render_template(doc)
 
     # -- attachments --
     async def list_attachments(self, state: str | None = None, *, template: str | None = None) -> list[dict[str, Any]]:

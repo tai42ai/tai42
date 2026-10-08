@@ -180,6 +180,9 @@ EXPECTED_FACADE = {
     "get_template",
     "put_template",
     "delete_template",
+    "get_rendered_template",
+    "rendered_attachments",
+    "render_template",
     "list_attachments",
     "attach",
     "update_attachment_declarations",
@@ -305,11 +308,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 142 (sub-protocol, member) pairs over 138 distinct names — ``store`` is exposed
+    # 145 (sub-protocol, member) pairs over 141 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 138, f"union={len(union)}"
-    assert total == 142 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 141, f"union={len(union)}"
+    assert total == 145 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():

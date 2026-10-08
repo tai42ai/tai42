@@ -104,21 +104,9 @@ def _orchestrate_spy(
 
 @pytest.fixture
 def _epoch_state() -> Iterator[None]:
-    """Reset the epoch spine globals and snapshot the per-generation registries the
-    build's ``begin/abort_staging_all`` touch, so a REAL ``build_and_swap_epoch`` failure
-    path runs in isolation and leaves later suites untouched (mirrors ``tests/app``)."""
-    from tai42_kit.access_control import registry as identity_registry
-    from tai42_kit.accounts import registry as accounts_registry
-
-    from tai42_skeleton.connectors.providers import registry as connector_registry
-    from tai42_skeleton.operations.registry import operation_registry
-
-    saved = {
-        "connector": dict(connector_registry._GENERATION.committed()),
-        "identity": dict(identity_registry._PROVIDERS._generation.committed()),
-        "accounts": dict(accounts_registry._PROVIDERS._generation.committed()),
-        "operation": dict(operation_registry._generation.committed()),
-    }
+    """Reset the epoch spine globals so a REAL ``build_and_swap_epoch`` failure path runs
+    in isolation; the suite-wide ``_preserve_generation_globals`` fixture restores the
+    per-generation registries the build stages."""
     loaded_before = set(epoch_mod._loaded_env_keys)
     try:
         yield
@@ -126,18 +114,6 @@ def _epoch_state() -> Iterator[None]:
         for name in ("_current", "_serving_slot", "_retiring_epoch", "_building_epoch"):
             setattr(epoch_mod, name, None)
         epoch_mod._loaded_env_keys = loaded_before
-        connector_registry._GENERATION.abort()
-        connector_registry._GENERATION.committed().clear()
-        connector_registry._GENERATION.committed().update(saved["connector"])
-        identity_registry._PROVIDERS._generation.abort()
-        identity_registry._PROVIDERS._generation.committed().clear()
-        identity_registry._PROVIDERS._generation.committed().update(saved["identity"])
-        accounts_registry._PROVIDERS._generation.abort()
-        accounts_registry._PROVIDERS._generation.committed().clear()
-        accounts_registry._PROVIDERS._generation.committed().update(saved["accounts"])
-        operation_registry._generation.abort()
-        operation_registry._generation.committed().clear()
-        operation_registry._generation.committed().update(saved["operation"])
 
 
 class _BuildBoomError(RuntimeError):

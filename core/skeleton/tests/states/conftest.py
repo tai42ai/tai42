@@ -8,6 +8,8 @@ EXACT SQL by normalized text, monkeypatched in over the pooled ``client_ctx`` so
 store runs against it with no live database. It is faithful to the Postgres semantics the
 store leans on:
 
+* every result set is a deep copy taken when the statement runs, so a row a reader holds is
+  a snapshot that later writes never change in place;
 * ``transaction()`` snapshots every table on enter and RESTORES them on an exception (a
   real rollback), so a partial-failure write leaves no orphan;
 * a statement that RAISES inside a transaction ABORTS it exactly as Postgres does — every
@@ -40,6 +42,7 @@ from psycopg.types.json import Jsonb
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.states.store as store_module
+from tai42_skeleton.states.service.catalog import CatalogSnapshot
 from tai42_skeleton.states.store import PostgresStatesStore
 
 _BASE_TIME = datetime(2024, 1, 1, tzinfo=UTC)
@@ -53,6 +56,7 @@ _DECL_COLS = (
     "default_subject_kind",
     "retention_days",
     "updated_at",
+    "version",
 )
 
 
@@ -85,16 +89,21 @@ class _FakeTxn:
         self._conn = conn
         self._pg = conn._pg
         self._snapshot: dict[str, Any] | None = None
+        self._outer = False
 
     async def __aenter__(self) -> _FakeTxn:
+        # A nested block is a SAVEPOINT: its exit restores the enclosing block's state.
+        self._outer = self._conn.in_transaction
         self._snapshot = self._pg.snapshot()
         self._conn.in_transaction = True
+        self._pg.savepoints += int(self._outer)
+        self._pg.transactions += int(not self._outer)
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
         if exc_type is not None and self._snapshot is not None:
             self._pg.restore(self._snapshot)
-        self._conn.in_transaction = False
+        self._conn.in_transaction = self._outer
         self._conn.aborted = False
         return False
 
@@ -134,6 +143,10 @@ class _FakeCursor:
         if handler is None:
             raise AssertionError(f"unhandled SQL in fake: {norm!r}")
         handler(self, pg, norm, params)
+        # A result set is a snapshot taken when the statement runs: a row a caller holds never
+        # changes under it when a later statement writes the stored row.
+        self._one = copy.deepcopy(self._one)
+        self._all = copy.deepcopy(self._all)
 
     async def fetchone(self) -> Any:
         return self._one
@@ -182,8 +195,15 @@ class FakeStatesPg:
         self.applied_ops: dict[str, datetime] = {}  # op_id -> applied_at
         self.writes: list[dict[str, Any]] = []
         self.executed: list[tuple[str, Any]] = []
+        self.locked: list[list[str]] = []
+        self.attachment_joins = 0
+        self.savepoints = 0
+        self.transactions = 0
         self._clock = 0
         self._write_id = 0
+        # ``state_catalog_versions``: a sequence is not transactional, so a rollback (``restore``)
+        # never rewinds it.
+        self._catalog_version = 0
 
     # -- clock + ids ---------------------------------------------------------
     def tick(self) -> datetime:
@@ -196,6 +216,11 @@ class FakeStatesPg:
     def next_write_id(self) -> int:
         self._write_id += 1
         return self._write_id
+
+    def next_catalog_version(self) -> int:
+        """``nextval('state_catalog_versions')``: the version every catalog row write takes."""
+        self._catalog_version += 1
+        return self._catalog_version
 
     # -- snapshot / restore --------------------------------------------------
     def snapshot(self) -> dict[str, Any]:
@@ -242,6 +267,7 @@ class FakeStatesPg:
             "default_subject_kind": default_subject_kind,
             "retention_days": retention_days,
             "updated_at": self.tick(),
+            "version": self.next_catalog_version(),
         }
 
     def seed_record(
@@ -298,16 +324,45 @@ def _match(norm: str):
 # -- declarations ------------------------------------------------------------
 @_on(
     r"SELECT name, description, schema, effective_schema, subject_kinds, default_subject_kind, retention_days, "
-    r"updated_at FROM state_declarations WHERE name = %s$"
+    r"updated_at, version FROM state_declarations WHERE name = %s( FOR SHARE)?$"
 )
 def _get_decl(cur, pg, norm, params):
     (name,) = params
     cur._one = pg.declarations.get(name)
 
 
+@_on(r"SELECT version FROM state_declarations WHERE name = %s$")
+def _decl_version(cur, pg, norm, params):
+    (name,) = params
+    row = pg.declarations.get(name)
+    cur._one = None if row is None else {"version": row["version"]}
+
+
+@_on(r"SELECT version, subject_kinds, default_subject_kind FROM state_declarations WHERE name = %s$")
+def _decl_scalars(cur, pg, norm, params):
+    (name,) = params
+    row = pg.declarations.get(name)
+    cur._one = (
+        None
+        if row is None
+        else {
+            "version": row["version"],
+            "subject_kinds": list(row["subject_kinds"]),
+            "default_subject_kind": row["default_subject_kind"],
+        }
+    )
+
+
+@_on(r"SELECT name FROM state_declarations WHERE name = ANY\(%s\) ORDER BY name FOR UPDATE$")
+def _lock_decls(cur, pg, norm, params):
+    (names,) = params
+    pg.locked.append(list(names))
+    cur._all = [{"name": n} for n in sorted(names) if n in pg.declarations]
+
+
 @_on(
     r"SELECT name, description, schema, effective_schema, subject_kinds, default_subject_kind, retention_days, "
-    r"updated_at FROM state_declarations ORDER BY name$"
+    r"updated_at, version FROM state_declarations ORDER BY name$"
 )
 def _list_decl(cur, pg, norm, params):
     cur._all = [pg.declarations[n] for n in sorted(pg.declarations)]
@@ -327,9 +382,10 @@ def _upsert_declaration(pg, params):
         "updated_at": pg.now(),
     }
     if row is None:
-        pg.declarations[name] = values
+        pg.declarations[name] = {**values, "version": pg.next_catalog_version()}
     else:
         row.update(values)
+        row["version"] = pg.next_catalog_version()
 
 
 @_on(
@@ -362,36 +418,30 @@ def _lock_decl_name(cur, pg, norm, params):
     cur._one = {"name": name} if name in pg.declarations else None
 
 
-@_on(r"SELECT effective_schema FROM state_declarations WHERE name = %s FOR (SHARE|UPDATE)$")
+@_on(r"SELECT effective_schema FROM state_declarations WHERE name = %s( FOR (SHARE|UPDATE))?$")
 def _lock_effective_schema(cur, pg, norm, params):
     (name,) = params
     row = pg.declarations.get(name)
     cur._one = None if row is None else {"effective_schema": row["effective_schema"]}
 
 
-@_on(r"SELECT effective_schema, subject_kinds, updated_at FROM state_declarations WHERE name = %s FOR SHARE$")
+@_on(r"SELECT version, subject_kinds FROM state_declarations WHERE name = %s FOR (SHARE|UPDATE)$")
 def _lock_apply_declaration(cur, pg, norm, params):
-    # ``apply_ops``'s enriched FOR SHARE read: the effective schema (validation), the declared
-    # subject kinds (in-txn admission) and updated_at (the attachments-cache version).
+    # A write path's locked declaration read: the version (the entry key) and the declared
+    # subject kinds (in-txn admission).
     (name,) = params
     row = pg.declarations.get(name)
-    cur._one = (
-        None
-        if row is None
-        else {
-            "effective_schema": row["effective_schema"],
-            "subject_kinds": list(row["subject_kinds"]),
-            "updated_at": row["updated_at"],
-        }
-    )
+    cur._one = None if row is None else {"version": row["version"], "subject_kinds": list(row["subject_kinds"])}
 
 
 @_on(
-    r"SELECT m\.template, m\.path, mo\.body FROM state_attachments m JOIN state_templates mo ON mo\.name = m\.template "
-    r"WHERE m\.state = %s$"
+    r"SELECT m\.template, m\.path, m\.parameters, m\.declarations, mo\.version AS template_version, mo\.body "
+    r"FROM state_attachments m JOIN state_templates mo ON mo\.name = m\.template WHERE m\.state = %s "
+    r"ORDER BY m\.template$"
 )
 def _apply_attach_rows(cur, pg, norm, params):
     (state,) = params
+    pg.attachment_joins += 1
     rows = []
     for (s, template), attach in pg.attachments.items():
         if s != state:
@@ -399,7 +449,16 @@ def _apply_attach_rows(cur, pg, norm, params):
         tpl = pg.templates.get(template)
         if tpl is None:
             continue
-        rows.append({"template": template, "path": attach["path"], "body": tpl["body"]})
+        rows.append(
+            {
+                "template": template,
+                "path": attach["path"],
+                "parameters": attach["parameters"],
+                "declarations": attach["declarations"],
+                "template_version": tpl["version"],
+                "body": tpl["body"],
+            }
+        )
     rows.sort(key=lambda r: r["template"])
     cur._all = rows
 
@@ -464,13 +523,20 @@ def _field_stats_keys(cur, pg, norm, params):
 
 
 # -- templates -----------------------------------------------------------------
-@_on(r"SELECT name, body, shipped_hash, updated_at FROM state_templates WHERE name = %s$")
+@_on(r"SELECT name, body, shipped_hash, updated_at, version FROM state_templates WHERE name = %s$")
 def _get_template(cur, pg, norm, params):
     (name,) = params
     cur._one = pg.templates.get(name)
 
 
-@_on(r"SELECT name, body, shipped_hash, updated_at FROM state_templates ORDER BY name$")
+@_on(r"SELECT version FROM state_templates WHERE name = %s$")
+def _template_version(cur, pg, norm, params):
+    (name,) = params
+    row = pg.templates.get(name)
+    cur._one = None if row is None else {"version": row["version"]}
+
+
+@_on(r"SELECT name, body, shipped_hash, updated_at, version FROM state_templates ORDER BY name$")
 def _list_templates(cur, pg, norm, params):
     cur._all = [pg.templates[n] for n in sorted(pg.templates)]
 
@@ -489,9 +555,10 @@ def _upsert_template(cur, pg, norm, params):
     row = pg.templates.get(name)
     values = {"name": name, "body": _unwrap(body), "shipped_hash": shipped_hash, "updated_at": pg.now()}
     if row is None:
-        pg.templates[name] = values
+        pg.templates[name] = {**values, "version": pg.next_catalog_version()}
     else:
         row.update(values)
+        row["version"] = pg.next_catalog_version()
 
 
 @_on(r"DELETE FROM state_templates WHERE name = %s$")
@@ -585,13 +652,17 @@ def _delete_attach(cur, pg, norm, params):
     cur.rowcount = 1 if pg.attachments.pop((state, template), None) is not None else 0
 
 
-@_on(r"UPDATE state_declarations SET effective_schema = %s, updated_at = now\(\) WHERE name = %s$")
+@_on(
+    r"UPDATE state_declarations SET effective_schema = %s, updated_at = now\(\), "
+    r"version = nextval\('state_catalog_versions'\) WHERE name = %s$"
+)
 def _update_effective_schema(cur, pg, norm, params):
     effective, name = params
     row = pg.declarations.get(name)
     if row is not None:
         row["effective_schema"] = _unwrap(effective)
         row["updated_at"] = pg.now()
+        row["version"] = pg.next_catalog_version()
         cur.rowcount = 1
 
 
@@ -1106,6 +1177,12 @@ def pg(monkeypatch: pytest.MonkeyPatch) -> FakeStatesPg:
 
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
     return fake
+
+
+@pytest.fixture
+def catalog(store: PostgresStatesStore) -> CatalogSnapshot:
+    """The version-keyed entry source a store write path validates and applies with."""
+    return CatalogSnapshot(store)
 
 
 @pytest.fixture

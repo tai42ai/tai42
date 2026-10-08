@@ -7,12 +7,12 @@ feature is off. The feature gate reads ``states_store_configured`` THROUGH the
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING
 
 from tai42_contract.states.errors import StatesNotConfiguredError
 
 from tai42_skeleton.states.service.attachments import _AttachmentMixin
+from tai42_skeleton.states.service.catalog import CatalogSnapshot
 from tai42_skeleton.states.service.declarations import _DeclarationMixin
 from tai42_skeleton.states.service.provenance import _ProvenanceMixin
 from tai42_skeleton.states.service.reconcile import _ReconcileMixin
@@ -23,6 +23,7 @@ from tai42_skeleton.states.service.registries import (
     StatesAttachValidatorRegistry,
     StatesConsumerListerRegistry,
 )
+from tai42_skeleton.states.service.rendered import RenderedTemplates
 from tai42_skeleton.states.service.template_jq import _TemplateJqMixin
 from tai42_skeleton.states.service.templates import _TemplateMixin
 from tai42_skeleton.states.service.unit import _UnitMixin
@@ -30,7 +31,6 @@ from tai42_skeleton.states.store import PostgresStatesStore
 
 if TYPE_CHECKING:
     from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
-    from tai42_skeleton.states.templates import StateTemplate
 
 
 class StatesService(
@@ -46,11 +46,9 @@ class StatesService(
 ):
     """The one validate + apply layer.
 
-    Holds a store and the consumer-owned registries; every method refuses loudly while the
-    feature is off.
+    Holds a store, the consumer-owned registries, the version-keyed catalog snapshot and the
+    rendered-template cache; every method refuses loudly while the feature is off.
     """
-
-    _TEMPLATE_CACHE_MAX: ClassVar[int] = 256
 
     def __init__(
         self,
@@ -69,7 +67,8 @@ class StatesService(
         self._attach_reconcilers = attach_reconcilers or StatesAttachReconcilerRegistry()
         self._consumer_listers = consumer_listers or StatesConsumerListerRegistry()
         self._seeds = seeds or StateTemplateSeedRegistry()
-        self._template_cache: OrderedDict[tuple[str, Any], StateTemplate] = OrderedDict()
+        self._catalog = CatalogSnapshot(self._store)
+        self._rendered_cache = RenderedTemplates()
         # The platform's own template-document reconciler: it settles a state's open records
         # against a declarations edit through the template's ``reconcile`` contract. A no-op
         # for a first attach or a template that declares no ``reconcile``, so it is always on.

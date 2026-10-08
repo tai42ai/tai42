@@ -22,7 +22,7 @@ from tai42_kit.db import apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.states.db import STATES_COMPONENT, states_entry
-from tai42_skeleton.states.schema import _validate_document
+from tai42_skeleton.states.service.catalog import CatalogSnapshot
 from tai42_skeleton.states.store import PostgresStatesStore, make_cursor
 from tai42_skeleton.states.templates import compose_effective_schema, validate_template
 
@@ -113,7 +113,7 @@ async def test_apply_read_writes_and_trace(real_store: tuple[PostgresStatesStore
         [{"op": "set_by_key", "path": ["a", "items"], "key_field": "id", "value": {"id": 1}}],
         op_id=op_id,
         origin=_ORIGIN,
-        validate_doc=_validate_document,
+        catalog=CatalogSnapshot(store),
         validate_subject_in_txn=_admit,
     )
     assert applied
@@ -134,7 +134,7 @@ async def test_apply_read_writes_and_trace(real_store: tuple[PostgresStatesStore
 
     # a replayed op-id does not re-apply
     replay = await store.apply_ops(
-        state, subject, [], op_id=op_id, origin=_ORIGIN, validate_doc=_validate_document, validate_subject_in_txn=_admit
+        state, subject, [], op_id=op_id, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
     )
     assert replay[0] is False
 
@@ -183,7 +183,7 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
         [{"op": "set_by_key", "path": ["a", "items"], "key_field": "id", "value": {"id": 1}}],
         op_id=f"op-1:{state}",
         origin=origin,
-        validate_doc=_validate_document,
+        catalog=CatalogSnapshot(store),
         validate_subject_in_txn=_admit,
     )
     assert applied
@@ -224,7 +224,7 @@ async def test_composing_shape_refused(real_store: tuple[PostgresStatesStore, st
             [{"op": "set", "path": ["a", "items"], "value": []}],
             op_id=None,
             origin=_ORIGIN,
-            validate_doc=_validate_document,
+            catalog=CatalogSnapshot(store),
             validate_subject_in_txn=_admit,
         )
 
@@ -238,9 +238,13 @@ async def test_fold_switch_lands_old_key_on_survivor_and_search(
     s1 = StateSubject(target_kind="agent", target_name="a", kind="thread", key="old")
     s2 = StateSubject(target_kind="agent", target_name="a", kind="thread", key="new")
     # the survivor holds its OWN record before the fold — ``switch`` keeps it and drops s1
-    await store.replace(state, s2, {"n": 2}, origin=_ORIGIN, validate_doc=_validate_document)
-    await store.replace(state, s1, {"n": 1}, origin=_ORIGIN, validate_doc=_validate_document)
-    await store.fold_subject(state, s1, s2, "switch", origin=_ORIGIN, validate_doc=_validate_document)
+    await store.replace(
+        state, s2, {"n": 2}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
+    )
+    await store.replace(
+        state, s1, {"n": 1}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
+    )
+    await store.fold_subject(state, s1, s2, "switch", origin=_ORIGIN, catalog=CatalogSnapshot(store))
     # a read via the OLD key lands on the surviving record (the survivor's data, its subject)
     view = await store.read_record_view(state, s1)
     assert view is not None
@@ -261,9 +265,18 @@ async def test_fold_merge_moves_absent_members(real_store: tuple[PostgresStatesS
     await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
     s1 = StateSubject(target_kind="agent", target_name="a", kind="thread", key="old")
     s2 = StateSubject(target_kind="agent", target_name="a", kind="thread", key="new")
-    await store.replace(state, s1, {"x": "from-old", "y": "old-loses"}, origin=_ORIGIN, validate_doc=_validate_document)
-    await store.replace(state, s2, {"y": "new-wins"}, origin=_ORIGIN, validate_doc=_validate_document)
-    report = await store.fold_subject(state, s1, s2, "merge", origin=_ORIGIN, validate_doc=_validate_document)
+    await store.replace(
+        state,
+        s1,
+        {"x": "from-old", "y": "old-loses"},
+        origin=_ORIGIN,
+        catalog=CatalogSnapshot(store),
+        validate_subject_in_txn=_admit,
+    )
+    await store.replace(
+        state, s2, {"y": "new-wins"}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
+    )
+    report = await store.fold_subject(state, s1, s2, "merge", origin=_ORIGIN, catalog=CatalogSnapshot(store))
     # only the member the survivor LACKED moves; the survivor wins the shared member
     assert report["merged_members"] == ["x"]
     merged = {"x": "from-old", "y": "new-wins"}
@@ -281,9 +294,11 @@ async def test_fold_switch_into_empty_survivor_leaves_no_record(
     await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
     s1 = StateSubject(target_kind="agent", target_name="a", kind="thread", key="old")
     s2 = StateSubject(target_kind="agent", target_name="a", kind="thread", key="new")
-    await store.replace(state, s1, {"n": 1}, origin=_ORIGIN, validate_doc=_validate_document)
+    await store.replace(
+        state, s1, {"n": 1}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
+    )
     # switch into a survivor that has NO record: s1's record is dropped and none is created
-    await store.fold_subject(state, s1, s2, "switch", origin=_ORIGIN, validate_doc=_validate_document)
+    await store.fold_subject(state, s1, s2, "switch", origin=_ORIGIN, catalog=CatalogSnapshot(store))
     assert (await store.read_record(state, s1))[0] is None
     assert (await store.read_record(state, s2))[0] is None
     assert await store.list_subjects(state, kind=None, limit=10, cursor=None) == []
@@ -299,8 +314,12 @@ async def test_list_and_search_page_over_full_subject_identity(
     # dropped. With page size 1 every row must be walked exactly once.
     sa = StateSubject(target_kind="agent", target_name="a", kind="thread", key="same")
     sb = StateSubject(target_kind="agent", target_name="b", kind="thread", key="same")
-    await store.replace(state, sa, {"n": 1}, origin=_ORIGIN, validate_doc=_validate_document)
-    await store.replace(state, sb, {"n": 2}, origin=_ORIGIN, validate_doc=_validate_document)
+    await store.replace(
+        state, sa, {"n": 1}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
+    )
+    await store.replace(
+        state, sb, {"n": 2}, origin=_ORIGIN, catalog=CatalogSnapshot(store), validate_subject_in_txn=_admit
+    )
 
     def _next(rows: list[dict]) -> str:
         last = rows[-1]
@@ -347,7 +366,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
         [{"op": "set", "path": ["n"], "value": 1}],
         op_id=None,
         origin=_ORIGIN,
-        validate_doc=_validate_document,
+        catalog=CatalogSnapshot(store),
         validate_subject_in_txn=_admit,
     )
 
@@ -362,7 +381,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
                 [{"op": "set", "path": ["n"], "value": 9}],
                 op_id=None,
                 origin=_ORIGIN,
-                validate_doc=_validate_document,
+                catalog=CatalogSnapshot(store),
                 validate_subject_in_txn=_admit,
                 conn=conn,
             )
@@ -384,7 +403,7 @@ async def test_threaded_conn_makes_the_record_write_and_the_attach_atomic(
             [{"op": "set", "path": ["n"], "value": 9}],
             op_id=None,
             origin=_ORIGIN,
-            validate_doc=_validate_document,
+            catalog=CatalogSnapshot(store),
             validate_subject_in_txn=_admit,
             conn=conn,
         )
@@ -410,7 +429,7 @@ async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
         [{"op": "set", "path": ["n"], "value": 1}],
         op_id=None,
         origin=_ORIGIN,
-        validate_doc=_validate_document,
+        catalog=CatalogSnapshot(store),
         validate_subject_in_txn=_admit,
     )
 
@@ -421,7 +440,7 @@ async def test_a_read_on_the_threaded_conn_sees_an_in_flight_write(
             [{"op": "set", "path": ["n"], "value": 9}],
             op_id=None,
             origin=_ORIGIN,
-            validate_doc=_validate_document,
+            catalog=CatalogSnapshot(store),
             validate_subject_in_txn=_admit,
             conn=conn,
         )
@@ -473,7 +492,7 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
         [{"op": "set_by_key", "path": ["entries"], "key_field": "id", "value": {"id": 1}}],
         op_id=None,
         origin=_ORIGIN,
-        validate_doc=_validate_document,
+        catalog=CatalogSnapshot(store),
         validate_subject_in_txn=_admit,
     )
 
@@ -485,7 +504,7 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
                 [{"op": "set", "path": ["entries"], "value": [{"id": 1, "closed": True}]}],
                 op_id=None,
                 origin=_ORIGIN,
-                validate_doc=_validate_document,
+                catalog=CatalogSnapshot(store),
                 validate_subject_in_txn=_admit,
                 conn=conn,
             )
@@ -496,9 +515,90 @@ async def test_a_keyed_op_on_the_threaded_conn_closes_a_composing_record(
             [{"op": "set_by_key", "path": ["entries"], "key_field": "id", "value": {"id": 1, "closed": True}}],
             op_id=None,
             origin=_ORIGIN,
-            validate_doc=_validate_document,
+            catalog=CatalogSnapshot(store),
             validate_subject_in_txn=_admit,
             conn=conn,
         )
     read, _seq = await store.read_record(state, subject)
     assert read == {"entries": [{"id": 1, "closed": True}]}
+
+
+async def test_a_template_replace_and_its_declaration_bumps_land_together(
+    real_store: tuple[PostgresStatesStore, str],
+) -> None:
+    store, state = real_store
+    template = state + "_m"
+    schema = {"type": "object", "properties": {"a": {"type": "object"}}}
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    await store.upsert_template(template, {"kind": "state-template", "name": template, "schema": {}}, None)
+    await store.upsert_attachment(state, template, ["a"], {}, {}, effective_schema=schema)
+    template_before, declaration_before = await store.template_version(template), await store.declaration_version(state)
+    assert template_before is not None
+    assert declaration_before is not None
+    before = (template_before, declaration_before)
+    async with store.begin() as conn:
+        await store.lock_declarations([state], conn=conn)
+        await store.upsert_template(
+            template, {"kind": "state-template", "name": template, "schema": {"x": 1}}, None, conn=conn
+        )
+        await store.update_attachment_parameters(state, template, {"p": 1}, effective_schema=schema, conn=conn)
+        # A concurrent reader on its own connection sees neither change until the commit.
+        assert (await store.template_version(template), await store.declaration_version(state)) == before
+    template_after, declaration_after = await store.template_version(template), await store.declaration_version(state)
+    assert template_after is not None
+    assert declaration_after is not None
+    assert template_after > template_before
+    assert declaration_after > declaration_before
+
+
+async def test_a_deleted_and_recreated_row_never_repeats_its_version(
+    real_store: tuple[PostgresStatesStore, str],
+) -> None:
+    store, state = real_store
+    template = state + "_m"
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    await store.upsert_template(template, {"kind": "state-template", "name": template, "schema": {}}, None)
+    declaration_first, template_first = await store.declaration_version(state), await store.template_version(template)
+    assert declaration_first is not None
+    assert template_first is not None
+    assert await store.delete_declaration(state)
+    assert await store.delete_template(template)
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    await store.upsert_template(template, {"kind": "state-template", "name": template, "schema": {}}, None)
+    declaration_again, template_again = await store.declaration_version(state), await store.template_version(template)
+    assert declaration_again is not None
+    assert template_again is not None
+    assert declaration_again > declaration_first
+    assert template_again > template_first
+
+
+async def test_a_projected_write_lands_only_on_an_unmoved_base(real_store: tuple[PostgresStatesStore, str]) -> None:
+    from tai42_skeleton.states.store.writes import ProjectedWrite
+
+    store, state = real_store
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    await store.upsert_declaration(state, "", schema, ["thread"], "thread", None, effective_schema=schema)
+    subject = StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")
+    version = await store.declaration_version(state)
+    assert version is not None
+    write = ProjectedWrite(op_id=f"cas-1:{state}", paths=[["n"]], origin=_ORIGIN, ledger=True, row=True)
+    async with store.begin() as conn:
+        landed, seq = await store.write_projected(
+            state, subject, version=version, base_seq=None, document={"n": 1}, writes=[write], conn=conn
+        )
+    assert landed is True
+    view = await store.read_record_view(state, subject)
+    assert view is not None
+    assert view["data"] == {"n": 1}
+    assert view["seq"] == seq
+    stale = ProjectedWrite(op_id=f"cas-2:{state}", paths=[["n"]], origin=_ORIGIN, ledger=True, row=True)
+    async with store.begin() as conn:
+        moved = await store.write_projected(
+            state, subject, version=version, base_seq=None, document={"n": 2}, writes=[stale], conn=conn
+        )
+    assert moved == (False, None)
+    view = await store.read_record_view(state, subject)
+    assert view is not None
+    assert view["data"] == {"n": 1}
+    assert not await store.op_applied(f"cas-2:{state}")  # the savepoint rolled the ledger insert back

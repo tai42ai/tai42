@@ -20,13 +20,14 @@ from typing import Any
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.states import StateAttach, StateBinding, StateUpdate
-from tai42_contract.states.errors import RegimeViolationError, ValueValidationError
+from tai42_contract.states.errors import RegimeViolationError, SubjectRefusedError, ValueValidationError
 from tai42_contract.states.models import (
     AttachBody,
     StateBatchWrite,
     StateDeclaration,
     StateSubject,
     StateTemplateDocument,
+    StateUnitClosedError,
     WriteOrigin,
 )
 from tai42_contract.template import TemplatedText
@@ -323,16 +324,23 @@ async def test_stage_empty_ops_is_not_applied(svc: StatesService) -> None:
         assert result[0].applied is False
 
 
-async def test_a_closed_unit_refuses_further_use(svc: StatesService) -> None:
+@pytest.mark.parametrize("close", ["commit", "discard"])
+async def test_a_closed_unit_raises_the_typed_closed_error(svc: StatesService, close: str) -> None:
     await svc.put_declaration(_decl())
     async with svc.open_unit() as unit:
         await unit.stage([_write(_subject(), [_set("n", 1)])])
-        await unit.commit()
-        with pytest.raises(RuntimeError, match="already committed or discarded"):
+        await getattr(unit, close)()
+        message = "this unit of work is already committed or discarded"
+        with pytest.raises(StateUnitClosedError, match=message):
             await unit.stage([_write(_subject(), [_set("n", 2)])])
-        with pytest.raises(RuntimeError, match="already committed or discarded"):
+        with pytest.raises(StateUnitClosedError, match=message):
+            await unit.stage_replace("notes", _subject(), {"n": 2}, _ORIGIN)
+        with pytest.raises(StateUnitClosedError, match=message):
+            async with unit.savepoint():
+                pass
+        with pytest.raises(StateUnitClosedError, match=message):
             await unit.commit()
-        with pytest.raises(RuntimeError, match="already committed or discarded"):
+        with pytest.raises(StateUnitClosedError, match=message):
             await unit.discard()
 
 
@@ -501,3 +509,306 @@ async def test_binding_updates_commit_lands_through_the_unit(svc: StatesService)
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"n": 7}
+
+
+# -- once-per-batch validation and the compare-and-set commit -------------------------------------------
+
+
+class _Counter:
+    def __init__(self) -> None:
+        self.stage = 0
+        self.commit = 0
+        self.committing = False
+
+
+@pytest.fixture
+def validations(monkeypatch: pytest.MonkeyPatch) -> _Counter:
+    """Count every whole-document validation, split stage / commit by the commit window."""
+    from tai42_skeleton.states.service import unit as unit_mod
+    from tai42_skeleton.states.store import writes as writes_mod
+
+    counter = _Counter()
+    real = unit_mod._validate_document
+
+    def counted(*args: Any, **kwargs: Any) -> None:
+        if counter.committing:
+            counter.commit += 1
+        else:
+            counter.stage += 1
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(unit_mod, "_validate_document", counted)
+    monkeypatch.setattr(writes_mod, "_validate_document", counted)
+    return counter
+
+
+@pytest.fixture
+def cas(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record each compare-and-set subject write's outcome (``True`` landed, ``False`` replayed)."""
+    outcomes: list[bool] = []
+    real = svc._store.write_projected
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        landed, seq = await real(*args, **kwargs)
+        outcomes.append(landed)
+        return landed, seq
+
+    monkeypatch.setattr(svc._store, "write_projected", spy)
+    return outcomes
+
+
+async def _commit(unit: Any, counter: _Counter | None = None) -> Any:
+    if counter is not None:
+        counter.committing = True
+    try:
+        return await unit.commit()
+    finally:
+        if counter is not None:
+            counter.committing = False
+
+
+async def test_a_refused_batch_leaves_nothing_of_itself_staged(svc: StatesService, pg: FakeStatesPg) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject(), [_set("note", "kept")])])
+        with pytest.raises(ValueValidationError):
+            await unit.stage(
+                [
+                    _write(_subject(), [_set("n", 1)], op_id="first"),
+                    _write(_subject("t2"), [_set("n", "not-an-integer")]),
+                ]
+            )
+        view = await svc.read("notes", _subject())
+        assert view is not None
+        assert view.data == {"note": "kept"}  # the refused batch's first item is not staged
+        assert await svc.read("notes", _subject("t2")) is None
+        result = await unit.commit()
+    assert len(result.results) == 1
+    # The refused batch's op_id was released with it: a later stage of it applies.
+    async with svc.open_unit() as later:
+        staged = await later.stage([_write(_subject(), [_set("n", 1)], op_id="first")])
+        assert staged[0].applied is True
+        await later.discard()
+
+
+async def test_stage_validates_once_per_touched_subject(svc: StatesService, validations: _Counter) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage(
+            [
+                _write(_subject("t1"), [_set("n", 1)]),
+                _write(_subject("t1"), [_set("note", "a")]),
+                _write(_subject("t1"), [_set("n", 2)]),
+                _write(_subject("t2"), [_set("n", 3)]),
+            ]
+        )
+        assert validations.stage == 2
+        await unit.stage([_write(_subject("t1"), [_set("n", 4)])])
+        assert validations.stage == 3
+        await unit.discard()
+
+
+async def test_the_refusal_names_the_state_and_subject_not_the_item(svc: StatesService) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        with pytest.raises(
+            ValueValidationError,
+            match=r"state 'notes' subject agent/a/thread/t1: record invalid under the state schema at \$\.n",
+        ):
+            await unit.stage([_write(_subject(), [_set("n", "x")])])
+        await unit.discard()
+
+
+async def test_a_batch_whose_final_document_is_valid_is_accepted(svc: StatesService) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        staged = await unit.stage([_write(_subject(), [_set("n", "intermediate")]), _write(_subject(), [_set("n", 2)])])
+        assert staged[1].data == {"n": 2}
+        await unit.commit()
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 2}
+
+
+async def test_an_unmoved_commit_writes_the_projection_with_no_validation(
+    svc: StatesService, pg: FakeStatesPg, validations: _Counter, cas: list[bool]
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject("t1"), [_set("n", 1)]), _write(_subject("t1"), [_set("note", "x")])])
+        await unit.stage([_write(_subject("t2"), [_set("n", 2)])])
+        result = await _commit(unit, validations)
+    assert validations.commit == 0
+    assert cas == [True, True]
+    assert result.diverged is False
+    view = await svc.read("notes", _subject("t1"))
+    assert view is not None
+    assert view.data == {"n": 1, "note": "x"}
+    # One state_writes row per item, sharing the subject's one committed seq.
+    t1_rows = [w for w in pg.writes if w["subject_key"] == "t1"]
+    assert [w["paths"] for w in t1_rows] == [[["n"]], [["note"]]]
+    assert len({w["seq"] for w in t1_rows}) == 1
+    assert result.results[0].seq == result.results[1].seq == t1_rows[0]["seq"]
+
+
+async def test_a_moved_base_replays_and_validates_once_per_batch(
+    svc: StatesService, pg: FakeStatesPg, validations: _Counter, cas: list[bool]
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        # An intermediate document that is invalid, a final one that is valid.
+        await unit.stage([_write(_subject(), [_set("n", "x")]), _write(_subject(), [_set("n", 2)])])
+        await unit.stage([_write(_subject(), [_set("note", "b")])])
+        await spawn_root_task(svc.apply("notes", _subject(), [_set("note", "moved")], op_id=None, origin=_ORIGIN))
+        result = await _commit(unit, validations)
+    assert cas == [False]
+    assert validations.commit == 2  # once per (batch, subject)
+    assert result.diverged is False
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 2, "note": "b"}
+
+
+async def test_a_version_bump_between_stage_and_commit_replays(
+    svc: StatesService, pg: FakeStatesPg, cas: list[bool]
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject(), [_set("n", 1)])])
+        await svc.put_declaration(_decl({"type": "object", "properties": {"n": {"type": "integer"}, "x": {}}}))
+        await unit.commit()
+    assert cas == [False]
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 1}
+
+
+async def test_an_invalid_final_document_on_replay_is_loud_and_rolls_back(
+    svc: StatesService, pg: FakeStatesPg, cas: list[bool]
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject("t1"), [_set("n", 1)])])
+        await unit.stage([_write(_subject("t2"), [_set("n", 2)])])
+        await svc.put_declaration(_decl({"type": "object", "properties": {"n": {"type": "string"}}}))
+        with pytest.raises(ValueValidationError, match="state 'notes' subject agent/a/thread/t1"):
+            await unit.commit()
+    assert not pg.records
+    assert not pg.writes
+
+
+async def test_replayed_rows_carry_each_items_stage_time_origin(
+    svc: StatesService, pg: FakeStatesPg, cas: list[bool]
+) -> None:
+    from tai42_contract.states.models import StateContext, SubjectCandidates
+
+    from tai42_skeleton.states.context import state_context
+
+    await svc.put_declaration(_decl())
+    ctx = StateContext(
+        door="conversation",
+        candidates=SubjectCandidates(target_kind="agent", target_name="a", by_kind={"thread": "t1"}),
+        actor="alice",
+        turn_id="turn-1",
+        inbound_id="in-1",
+    )
+    async with svc.open_unit() as unit:
+        with state_context(ctx):
+            await unit.stage([_write(_subject(), [_set("n", 1)])])
+        await spawn_root_task(svc.apply("notes", _subject(), [_set("note", "moved")], op_id=None, origin=_ORIGIN))
+        await unit.commit()
+    assert cas == [False]
+    replayed = [w for w in pg.writes if w["paths"] == [["n"]]]
+    assert [(w["door"], w["actor"], w["turn_id"]) for w in replayed] == [("conversation", "alice", "turn-1")]
+
+
+async def test_projected_rows_carry_each_items_paths_and_origin(svc: StatesService, pg: FakeStatesPg) -> None:
+    from tai42_contract.states.models import StateContext, SubjectCandidates
+
+    from tai42_skeleton.states.context import state_context
+
+    await svc.put_declaration(_decl())
+    ctx = StateContext(
+        door="hook",
+        candidates=SubjectCandidates(target_kind="agent", target_name="a", by_kind={"thread": "t1"}),
+        actor="bob",
+    )
+    async with svc.open_unit() as unit:
+        with state_context(ctx):
+            await unit.stage([_write(_subject(), [_set("n", 1)], op_id="w1"), _write(_subject(), [_set("note", "y")])])
+        await unit.commit()
+    rows = [(w["paths"], w["door"], w["actor"], w["op_id"]) for w in pg.writes]
+    assert rows == [([["n"]], "hook", "bob", "w1"), ([["note"]], "hook", "bob", None)]
+    assert "w1" in pg.applied_ops
+
+
+async def test_commit_writes_on_a_callers_connection_opens_no_transaction(svc: StatesService, pg: FakeStatesPg) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject(), [_set("n", 1)])])
+        staged, records = list(unit._staged), list(unit._records)
+        await unit.discard()
+
+    class _RollbackError(Exception):
+        pass
+
+    observed: dict[str, Any] = {}
+
+    async def _commit_then_roll_back() -> None:
+        async with svc._store.begin() as conn:
+            before = pg.transactions
+            results = await svc._commit_writes(staged, staged=records, conn=conn)
+            observed["own_transactions"] = pg.transactions - before
+            observed["applied"] = results[0].applied
+            observed["written"] = bool(pg.records)
+            raise _RollbackError
+
+    with pytest.raises(_RollbackError):
+        await _commit_then_roll_back()
+    assert observed == {"own_transactions": 0, "applied": True, "written": True}
+    assert not pg.records  # the caller's rollback undid every write
+
+
+async def test_a_concurrent_ledger_insert_of_a_staged_op_id_falls_back_to_replay(
+    svc: StatesService, pg: FakeStatesPg, cas: list[bool]
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject(), [_set("n", 1)], op_id="shared")])
+        # Another writer lands the same op_id without touching this subject's record.
+        await spawn_root_task(svc.apply("notes", _subject("t9"), [_set("n", 9)], op_id="shared", origin=_ORIGIN))
+        result = await unit.commit()
+    assert cas == [False]
+    assert result.results[0].applied is False
+    assert await svc.read("notes", _subject()) is None
+
+
+@pytest.mark.parametrize("staged_kind", ["replace", "ops", "template_jq"])
+async def test_a_write_replayed_onto_a_recreated_state_is_admitted_by_the_new_declaration(
+    svc: StatesService, pg: FakeStatesPg, cas: list[bool], staged_kind: str
+) -> None:
+    """Every staged write kind replayed after its state was deleted and re-declared with other
+    subject kinds is refused by the re-declared kinds, loudly, and nothing of the commit lands."""
+    await _with_template(svc)
+    async with svc.open_unit() as unit:
+        if staged_kind == "replace":
+            await unit.stage_replace("notes", _subject(), {"m": 1}, _ORIGIN)
+        elif staged_kind == "ops":
+            await unit.stage([_write(_subject(), [_set("m", 1)])])
+        else:
+            await unit.stage(
+                [
+                    StateBatchWrite(
+                        state="notes", subject=_subject(), template_jq="add", input={"id": "x"}, origin=_ORIGIN
+                    )
+                ]
+            )
+        await svc.delete_declaration("notes")
+        await svc.put_declaration(
+            StateDeclaration(name="notes", schema=_SCHEMA, subject_kinds=["case"], default_subject_kind="case")
+        )
+        with pytest.raises(SubjectRefusedError, match="subject kind 'thread' is not declared by state 'notes'"):
+            await unit.commit()
+    assert cas == [False]
+    assert not pg.records
+    assert not pg.writes

@@ -18,6 +18,7 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.states.schema import _is_narrowing, _validate_schema
 from tai42_skeleton.states.service.base import _StatesServiceBase
+from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
 
 
@@ -26,19 +27,17 @@ class _DeclarationMixin(_StatesServiceBase):
         self._ensure_available()
         out: list[StateDeclaration] = []
         for row in await self._store.list_declarations():
-            decl = _row_to_declaration(row)
-            regimes = self._compose_regimes(await self._load_state_attachments(decl.name))
-            out.append(decl.model_copy(update={"regimes": regimes}))
+            entry = await self._catalog.catalog_entry_at(row["name"], int(row["version"]))
+            if entry is None:
+                continue  # deleted between the list and this read
+            out.append(_served_declaration(entry))
         return out
 
     async def get_declaration(self, name: str) -> StateDeclaration | None:
+        """The declaration from the catalog snapshot after one ``SELECT version`` probe; ``None`` when undeclared."""
         self._ensure_available()
-        row = await self._store.get_declaration(name)
-        if row is None:
-            return None
-        decl = _row_to_declaration(row)
-        regimes = self._compose_regimes(await self._load_state_attachments(decl.name))
-        return decl.model_copy(update={"regimes": regimes})
+        entry = await self._catalog.catalog_entry(name)
+        return None if entry is None else _served_declaration(entry)
 
     async def put_declaration(self, decl: StateDeclaration) -> StateDeclaration:
         """Create or plain re-declare a state.
@@ -105,7 +104,7 @@ class _DeclarationMixin(_StatesServiceBase):
         Refuses while a registered consumer still binds it (:class:`DeclarationInUseError`).
         """
         self._ensure_available()
-        if await self._store.get_declaration(name) is None:
+        if await self._store.declaration_version(name) is None:
             raise StateNotFoundError(f"no state declared as {name!r}")
         consumers = await self.consumers(name)
         binders = [c for c in consumers if c.unavailable is None]
@@ -119,9 +118,7 @@ class _DeclarationMixin(_StatesServiceBase):
     async def stats(self, name: str) -> dict[str, Any]:
         """``{records, per_field, per_kind, consumers}`` for the listing."""
         self._ensure_available()
-        decl = await self._store.get_declaration(name)
-        if decl is None:
-            raise StateNotFoundError(f"no state declared as {name!r}")
+        decl = await self._require_declaration(name)
         records, per_field, per_kind = await self._store.field_stats(name)
         props = (await _resolve_state_schema(f"state {name!r} schema", decl["schema"])).get("properties", {})
         consumers = await self.consumers(name)
@@ -131,3 +128,8 @@ class _DeclarationMixin(_StatesServiceBase):
             "per_kind": per_kind,
             "consumers": len([c for c in consumers if c.unavailable is None]),
         }
+
+
+def _served_declaration(entry: StateEntry) -> StateDeclaration:
+    """The served declaration of a catalog entry, built from deep copies of its JSON fields."""
+    return _row_to_declaration(served_row(entry)).model_copy(update={"regimes": list(entry.served_regimes)})

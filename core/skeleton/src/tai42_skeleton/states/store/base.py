@@ -8,21 +8,43 @@ record-read and record-write mixins.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 from contextlib import AbstractAsyncContextManager
-from typing import Any
+from typing import Any, Protocol
 
+from jsonschema import Draft202012Validator
 from psycopg import AsyncConnection
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
 
+class ApplyEntry(Protocol):
+    """What a write path applies a declaration version with: the document validator and the composed paths."""
+
+    @property
+    def validator(self) -> Draft202012Validator:
+        """Validates a whole record document against the effective schema."""
+        ...
+
+    @property
+    def regime_paths(self) -> list[tuple[list[Any], str, str]]:
+        """The absolute regime rules ``(path, regime, template)`` over every attachment."""
+        ...
+
+    @property
+    def traced_paths(self) -> tuple[tuple[str | int, ...], ...]:
+        """The attach paths under which a write stamps ``_trace``."""
+        ...
+
+
+class ApplyEntrySource(Protocol):
+    """Serves the :class:`ApplyEntry` for a declaration ``version`` read under the write's lock, on its cursor."""
+
+    async def write_entry(self, cur: Any, state: str, version: int) -> ApplyEntry:
+        """The entry built at ``version``; a miss loads it on ``cur`` (the write's transaction)."""
+        ...
+
+
 class _StoreBase(ABC):
     """The cross-mixin method contract every concern mixin builds on."""
-
-    # The version-gated attachments-composition cache, keyed ``(state, declaration.updated_at)``
-    # off the ``FOR SHARE``-locked declaration row and holding ``(regime_paths, traced_paths)``.
-    # The composed store owns the one instance; the write mixin reads and populates it.
-    _attachment_paths_cache: OrderedDict[tuple[str, Any], tuple[Any, Any]]
 
     @abstractmethod
     def _write_cursor(self, conn: AsyncConnection[Any] | None) -> AbstractAsyncContextManager[Any]:

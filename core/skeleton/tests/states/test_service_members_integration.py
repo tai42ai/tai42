@@ -19,7 +19,7 @@ from typing import Any, LiteralString
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.states.errors import RegimeViolationError, ValueValidationError
+from tai42_contract.states.errors import RegimeViolationError, SubjectRefusedError, ValueValidationError
 from tai42_contract.states.models import (
     AttachBody,
     StateBatchWrite,
@@ -576,3 +576,41 @@ async def test_apply_batch_mixes_custom_ops_and_template_jq_items(
     templated = await svc.read(state, _sub("t2"))
     assert templated is not None
     assert templated.data["a"]["items"][0]["id"] == 1
+
+
+@pytest.mark.parametrize("staged_kind", ["replace", "ops"])
+async def test_a_unit_write_replayed_onto_a_recreated_state_is_refused_by_its_new_subject_kinds(
+    real_plain: tuple[StatesService, str, str], staged_kind: str
+) -> None:
+    """Another process deletes and re-declares the state with other subject kinds between stage and
+    commit: the replay is refused by the re-declared kinds and nothing of the commit lands."""
+    svc, state, _b = real_plain
+    other = StatesService()
+    async with svc.open_unit() as unit:
+        if staged_kind == "replace":
+            await unit.stage_replace(state, _sub("t1"), {"n": 1}, WriteOrigin(consumer="c"))
+        else:
+            await unit.stage(
+                [
+                    StateBatchWrite(
+                        state=state,
+                        subject=_sub("t1"),
+                        ops=[{"op": "set", "path": ["n"], "value": 1}],
+                        origin=WriteOrigin(consumer="c"),
+                    )
+                ]
+            )
+        await other.delete_declaration(state)
+        await other.put_declaration(
+            _plain_decl(state).model_copy(update={"subject_kinds": ["case"], "default_subject_kind": "case"})
+        )
+        with pytest.raises(SubjectRefusedError, match=f"subject kind 'thread' is not declared by state '{state}'"):
+            await unit.commit()
+    async with (
+        client_ctx(PostgresClient, component_store_settings(STATES_COMPONENT)) as pool,
+        pool.connection() as conn,
+    ):
+        cur = await conn.execute("SELECT count(*) AS n FROM state_records WHERE state = %s", (state,))
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 0

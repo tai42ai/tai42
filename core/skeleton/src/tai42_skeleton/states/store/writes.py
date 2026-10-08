@@ -6,6 +6,8 @@ idempotency ledger.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -16,15 +18,31 @@ from tai42_contract.states.models import CompletedOrigin, StateSubject
 
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
 from tai42_skeleton.states.paths import partition_guarded
+from tai42_skeleton.states.schema import _validate_document
 
-from .base import _StoreBase
+from .base import ApplyEntry, ApplyEntrySource, _StoreBase
 from .connection import _pool, _settings
 from .cursors import _subject_cols
-from .trace import _abs_regime_paths, _iso_now, _refuse_composing_shape, _traced_paths, stamp_trace
+from .trace import _iso_now, _refuse_composing_shape, stamp_trace
 
-# The attachments-composition cache ceiling, mirroring the service template cache's bound.
-# Evicting the oldest past this keeps a busy process's memory bounded across many states.
-_ATTACHMENT_PATHS_CACHE_MAX = 256
+
+@dataclass(frozen=True, slots=True)
+class ProjectedWrite:
+    """One staged write's commit bookkeeping on a compare-and-set subject write.
+
+    ``ledger`` inserts ``op_id`` into the idempotency ledger; ``row`` records one ``state_writes``
+    row with ``paths`` and the completed ``origin``.
+    """
+
+    op_id: str | None
+    paths: list[list[Any]]
+    origin: CompletedOrigin
+    ledger: bool
+    row: bool
+
+
+class _ProjectionMovedError(Exception):
+    """The compare-and-set found a moved base, a moved declaration version, or a ledger conflict."""
 
 
 class _RecordWriteStore(_StoreBase):
@@ -76,24 +94,29 @@ class _RecordWriteStore(_StoreBase):
         data: dict[str, Any],
         *,
         origin: CompletedOrigin,
-        validate_doc: Any,
+        catalog: ApplyEntrySource,
+        validate_subject_in_txn: Any,
+        validate: bool = True,
         conn: AsyncConnection[Any] | None = None,
     ) -> tuple[dict[str, Any], float]:
         """Replace ``subject``'s whole document with ``data`` and record the write.
 
-        ``data`` is validated whole against the effective schema; the write records
-        paths ``[[]]`` (the whole document). ONE txn under the declaration
-        ``FOR SHARE`` lock; the subject resolves through the alias table first. With
-        ``conn`` the write joins the caller's transaction (the unit of work's commit
-        replaying a staged replace alongside the batch's other writes).
+        ONE txn under the declaration ``FOR SHARE`` lock, which reads the ``version`` and the
+        declared ``subject_kinds``; ``validate_subject_in_txn`` refuses the subject under that lock,
+        so the write is admitted by the declaration it lands under. ``data`` is validated whole with
+        the declaration version's validator (``validate=False`` leaves the check to a caller that
+        validates the batch it belongs to); the write records paths ``[[]]`` (the whole document).
+        The subject resolves through the alias table first. With ``conn`` the write joins the
+        caller's transaction (the unit of work's commit replaying a staged replace alongside the
+        batch's other writes).
         """
         async with self._write_cursor(conn) as cur:
-            await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR SHARE", (state,))
-            decl = await cur.fetchone()
-            if decl is None:
-                raise StateNotFoundError(f"no state declared as {state!r}")
+            version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
+            await validate_subject_in_txn(subject_kinds)
+            entry = await catalog.write_entry(cur, state, version)
             kind, key = await self._resolve_subject(cur, state, subject)
-            validate_doc(decl["effective_schema"], data)
+            if validate:
+                _validate_document(entry.validator, data)
             await cur.execute(
                 "INSERT INTO state_records (state, target_kind, target_name, subject_kind, subject_key, data, "
                 "updated_at) VALUES (%s, %s, %s, %s, %s, %s, clock_timestamp()) "
@@ -109,53 +132,40 @@ class _RecordWriteStore(_StoreBase):
             )
             return data, float(seq or 0.0)
 
-    async def _composed_attachment_paths(self, cur: Any, state: str, version: Any) -> tuple[Any, Any]:
-        """The state's ``(regime_paths, traced_paths)``, version-gated by the declaration's ``updated_at``.
+    @staticmethod
+    async def _lock_declaration(cur: Any, state: str, mode: str) -> tuple[int, list[str]]:
+        """Lock the declaration row (``SHARE`` or ``UPDATE``) and read ``(version, subject_kinds)``.
 
-        Served from a bounded per-process cache keyed ``(state, version)``: a hit skips the
-        attachments JOIN, a miss runs it and populates. Every attachment/declaration writer bumps
-        ``updated_at`` under the ``FOR UPDATE`` lock, so a changed composition carries a new
-        version and the key misses cross-process — a stale composition is never served.
+        An undeclared state raises loudly.
         """
-        cache_key = (state, version)
-        cached = self._attachment_paths_cache.get(cache_key)
-        if cached is not None:
-            self._attachment_paths_cache.move_to_end(cache_key)
-            return cached
-        await cur.execute(
-            "SELECT m.template, m.path, mo.body FROM state_attachments m "
-            "JOIN state_templates mo ON mo.name = m.template WHERE m.state = %s",
-            (state,),
-        )
-        attachment_rows = list(await cur.fetchall())
-        composed = (_abs_regime_paths(attachment_rows), _traced_paths(attachment_rows))
-        self._attachment_paths_cache[cache_key] = composed
-        self._attachment_paths_cache.move_to_end(cache_key)
-        if len(self._attachment_paths_cache) > _ATTACHMENT_PATHS_CACHE_MAX:
-            self._attachment_paths_cache.popitem(last=False)
-        return composed
+        if mode == "SHARE":
+            await cur.execute(
+                "SELECT version, subject_kinds FROM state_declarations WHERE name = %s FOR SHARE", (state,)
+            )
+        else:
+            await cur.execute(
+                "SELECT version, subject_kinds FROM state_declarations WHERE name = %s FOR UPDATE", (state,)
+            )
+        decl = await cur.fetchone()
+        if decl is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        return int(decl["version"]), list(decl["subject_kinds"])
 
     async def read_apply_context(
-        self, state: str, *, conn: AsyncConnection[Any] | None = None
-    ) -> tuple[dict[str, Any], list[str], list[tuple[list[Any], str, str]], tuple[tuple[str | int, ...], ...]]:
+        self, state: str, *, catalog: ApplyEntrySource, conn: AsyncConnection[Any] | None = None
+    ) -> tuple[int, list[str], ApplyEntry]:
         """The inputs :meth:`apply_ops` validates and projects with, read WITHOUT holding a lock across a scope.
 
-        Returns ``(effective_schema, subject_kinds, regime_paths, traced_paths)`` — the same
-        effective schema, declared subject kinds, absolute composing-regime paths and traced
-        attach prefixes ``apply_ops`` reads under its ``FOR SHARE`` lock — so an in-scope
-        unit-of-work projects a staged write against the identical inputs the commit will apply
-        it under. A one-shot read; an undeclared state raises loudly.
+        Returns ``(version, subject_kinds, entry)`` — the declaration version, its declared subject
+        kinds, and the entry (validator, composed regime paths, traced attach prefixes) built at that
+        version — read under a ``FOR SHARE`` lock held only for this read, so an in-scope unit of
+        work projects a staged write against the identical inputs a commit at the same version
+        applies it under. An undeclared state raises loudly.
         """
-        async with self._read_cursor(conn) as cur:
-            await cur.execute(
-                "SELECT effective_schema, subject_kinds, updated_at FROM state_declarations WHERE name = %s FOR SHARE",
-                (state,),
-            )
-            decl = await cur.fetchone()
-            if decl is None:
-                raise StateNotFoundError(f"no state declared as {state!r}")
-            regime_paths, traced_paths = await self._composed_attachment_paths(cur, state, decl["updated_at"])
-            return decl["effective_schema"], list(decl["subject_kinds"]), regime_paths, traced_paths
+        async with self._write_cursor(conn) as cur:
+            version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
+            entry = await catalog.write_entry(cur, state, version)
+            return version, subject_kinds, entry
 
     async def op_applied(self, op_id: str, *, conn: AsyncConnection[Any] | None = None) -> bool:
         """Whether ``op_id`` is already in the idempotency ledger — the read a staged replay checks.
@@ -175,8 +185,9 @@ class _RecordWriteStore(_StoreBase):
         *,
         op_id: str | None,
         origin: CompletedOrigin,
-        validate_doc: Any,
+        catalog: ApplyEntrySource,
         validate_subject_in_txn: Any,
+        validate: bool = True,
         conn: AsyncConnection[Any] | None = None,
     ) -> tuple[bool, dict[str, Any] | None, float | None, list[dict[str, Any]]]:
         """Apply a batch of path-addressed ops to one record, in ONE txn.
@@ -185,33 +196,28 @@ class _RecordWriteStore(_StoreBase):
         ``(False, None, None, [])`` on an op-id replay.
 
         Order (pinned): the declaration row ``FOR SHARE`` — the schema-change serialization pin,
-        the effective-schema read, the declared ``subject_kinds`` and the ``updated_at`` version;
-        ``validate_subject_in_txn`` refuses the subject under that lock; compose the state's regime
-        + traced paths from its attachments, served from the version-gated cache (a hit on
-        ``(state, updated_at)`` skips the attachments JOIN, a miss reads and populates); refuse a
-        ``composing`` shape violation BEFORE the op-ledger insert; the op-ledger
-        ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is set (replay ⇒ return without
-        touching the record); the ATOMIC UPSERT-LOCK on the record row; the COMPARE-AND-SET GUARD
-        filter; the ``_trace`` stamp under a traced attach; the SHARED pure ops apply; the
-        whole-document validation; the UPDATE + ``state_writes`` row as ONE writable CTE. With
-        ``conn`` the write joins the caller's transaction (a reconciler's record write commits or
-        rolls back with the attach).
+        reading the ``version`` and the declared ``subject_kinds``; ``validate_subject_in_txn``
+        refuses the subject under that lock; the version's entry (validator, composed regime +
+        traced paths) from ``catalog`` (a miss reads the effective schema and the attachments on
+        this transaction); refuse a ``composing`` shape violation BEFORE the op-ledger insert; the
+        op-ledger ``INSERT ... ON CONFLICT DO NOTHING`` when ``op_id`` is set (replay ⇒ return
+        without touching the record); the ATOMIC UPSERT-LOCK on the record row; the
+        COMPARE-AND-SET GUARD filter; the ``_trace`` stamp under a traced attach; the SHARED pure
+        ops apply; the whole-document validation (skipped with ``validate=False``, for a caller
+        that validates the batch the write belongs to); the UPDATE + ``state_writes`` row as ONE
+        writable CTE. With ``conn`` the write joins the caller's transaction (a reconciler's
+        record write commits or rolls back with the attach).
         """
         async with self._write_cursor(conn) as cur:
-            await cur.execute(
-                "SELECT effective_schema, subject_kinds, updated_at FROM state_declarations WHERE name = %s FOR SHARE",
-                (state,),
-            )
-            decl = await cur.fetchone()
-            if decl is None:
-                raise StateNotFoundError(f"no state declared as {state!r}")
+            version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
 
             # Refuse the subject inside this transaction, under the declaration lock: the one
-            # locked read of the declaration serves the subject admission check AND the
-            # effective-schema validation; the door does not separately pre-read the declaration.
-            await validate_subject_in_txn(decl["subject_kinds"])
+            # locked read of the declaration serves the subject admission check AND the entry
+            # the validation uses; the door does not separately pre-read the declaration.
+            await validate_subject_in_txn(subject_kinds)
 
-            regime_paths, traced_paths = await self._composed_attachment_paths(cur, state, decl["updated_at"])
+            entry = await catalog.write_entry(cur, state, version)
+            regime_paths, traced_paths = entry.regime_paths, entry.traced_paths
 
             # (i) refuse a composing shape violation BEFORE the ledger insert.
             _refuse_composing_shape(ops, regime_paths)
@@ -267,7 +273,8 @@ class _RecordWriteStore(_StoreBase):
                 stamp_trace(applied_ops, traced_paths, stamp)
 
             merged = apply_path_ops(current, applied_ops)
-            validate_doc(decl["effective_schema"], merged)
+            if validate:
+                _validate_document(entry.validator, merged)
 
             # (iii) the record UPDATE and its ``state_writes`` provenance row (touched paths =
             # each applied op's absolute path) land in ONE writable CTE: the UPDATE's returned
@@ -311,6 +318,114 @@ class _RecordWriteStore(_StoreBase):
             seq_row = await cur.fetchone()
             seq = None if seq_row is None else seq_row["seq"]
             return (True, merged, seq, guarded_skipped)
+
+    async def write_projected(
+        self,
+        state: str,
+        subject: StateSubject,
+        *,
+        version: int,
+        base_seq: float | None,
+        document: dict[str, Any] | None,
+        writes: Sequence[ProjectedWrite],
+        conn: AsyncConnection[Any],
+    ) -> tuple[bool, float | None]:
+        """Write a subject's already-validated projected ``document`` if nothing moved since it was staged.
+
+        Inside a SAVEPOINT on the caller's transaction: the declaration row ``FOR SHARE`` must
+        still be at ``version``; the record (alias-resolved, locked through the upsert-lock) must
+        still be at ``base_seq`` (``None`` = absent); every ledger ``op_id`` must insert fresh.
+        Then the document lands (or, with no ``document``, a placeholder the lock created is
+        removed) with one ``state_writes`` row per written item, all sharing the record's one new
+        ``seq``. Returns ``(True, seq)``; on any mismatch the savepoint rolls back and the answer
+        is ``(False, None)`` — the caller replays. No validation runs here: the document was
+        validated when it was staged under ``version``.
+        """
+        try:
+            async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                return True, await self._write_projected_on(cur, state, subject, version, base_seq, document, writes)
+        except _ProjectionMovedError:
+            return False, None
+
+    async def _write_projected_on(
+        self,
+        cur: Any,
+        state: str,
+        subject: StateSubject,
+        version: int,
+        base_seq: float | None,
+        document: dict[str, Any] | None,
+        writes: Sequence[ProjectedWrite],
+    ) -> float | None:
+        """The compare-and-set write on the savepoint's cursor; raises :class:`_ProjectionMovedError` on a mismatch."""
+        current_version, _kinds = await self._lock_declaration(cur, state, "SHARE")
+        kind, key = await self._resolve_subject(cur, state, subject)
+        where = (state, subject.target_kind, subject.target_name, kind, key)
+        await cur.execute(
+            "INSERT INTO state_records (state, target_kind, target_name, subject_kind, subject_key, data, "
+            "updated_at) VALUES (%s, %s, %s, %s, %s, '{}'::jsonb, clock_timestamp()) "
+            "ON CONFLICT (state, target_kind, target_name, subject_kind, subject_key) DO UPDATE SET "
+            "state = EXCLUDED.state "
+            "RETURNING data, extract(epoch FROM updated_at)::float8 AS seq, (xmax = 0) AS inserted",
+            where,
+        )
+        record = await cur.fetchone()
+        if record is None:
+            raise AssertionError
+        current_seq = None if record["inserted"] else record["seq"]
+        fresh = current_version == version and current_seq == base_seq
+        if not fresh or not await self._insert_ledger(cur, [w.op_id for w in writes if w.ledger]):
+            raise _ProjectionMovedError
+        if document is None:
+            if record["inserted"]:
+                await cur.execute(
+                    "DELETE FROM state_records WHERE state = %s AND target_kind = %s AND target_name = %s "
+                    "AND subject_kind = %s AND subject_key = %s",
+                    where,
+                )
+            return None
+        await cur.execute(
+            "UPDATE state_records SET data = %s, updated_at = clock_timestamp() "
+            "WHERE state = %s AND target_kind = %s AND target_name = %s "
+            "AND subject_kind = %s AND subject_key = %s "
+            "RETURNING extract(epoch FROM updated_at)::float8 AS seq",
+            (Jsonb(document), *where),
+        )
+        seq_row = await cur.fetchone()
+        seq = None if seq_row is None else float(seq_row["seq"])
+        for write in writes:
+            if write.row:
+                await self._insert_write(
+                    cur,
+                    state,
+                    subject.target_kind,
+                    subject.target_name,
+                    kind,
+                    key,
+                    seq,
+                    write.origin,
+                    write.paths,
+                    write.op_id,
+                )
+        return seq
+
+    @staticmethod
+    async def _insert_ledger(cur: Any, op_ids: list[str | None]) -> bool:
+        """Insert each ``op_id`` into the idempotency ledger; ``False`` when any is already there."""
+        for op_id in op_ids:
+            await cur.execute(
+                "INSERT INTO state_applied_ops (op_id, applied_at) VALUES (%s, now()) ON CONFLICT DO NOTHING",
+                (op_id,),
+            )
+            if cur.rowcount == 0:
+                return False
+        return True
+
+    async def locked_entry(self, state: str, *, catalog: ApplyEntrySource, conn: AsyncConnection[Any]) -> ApplyEntry:
+        """The entry at the declaration version read ``FOR SHARE`` on the caller's transaction."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            version, _kinds = await self._lock_declaration(cur, state, "SHARE")
+            return await catalog.write_entry(cur, state, version)
 
     async def erase_subject(self, state: str, subject: StateSubject, *, origin: CompletedOrigin) -> None:
         """The RTBF delete — idempotent, ALIAS-AWARE, and audited.
@@ -360,7 +475,7 @@ class _RecordWriteStore(_StoreBase):
         mode: str,
         *,
         origin: CompletedOrigin,
-        validate_doc: Any,
+        catalog: ApplyEntrySource,
     ) -> dict[str, Any]:
         """Fold ``subject`` into ``into`` in ONE txn under the declaration row ``FOR UPDATE``.
 
@@ -381,10 +496,8 @@ class _RecordWriteStore(_StoreBase):
             conn.transaction(),
             conn.cursor(row_factory=dict_row) as cur,
         ):
-            await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
-            decl = await cur.fetchone()
-            if decl is None:
-                raise StateNotFoundError(f"no state declared as {state!r}")
+            version, _subject_kinds = await self._lock_declaration(cur, state, "UPDATE")
+            entry = await catalog.write_entry(cur, state, version)
 
             tk, tn = subject.target_kind, subject.target_name
             await cur.execute(
@@ -429,7 +542,7 @@ class _RecordWriteStore(_StoreBase):
                 dst_data: dict[str, Any] = {} if dst_row is None else dst_row["data"]
                 merged = {**src_row["data"], **dst_data}  # survivor wins; old fills absent members
                 try:
-                    validate_doc(decl["effective_schema"], merged)
+                    _validate_document(entry.validator, merged)
                 except Exception as exc:
                     raise SubjectFoldError(
                         f"merging subject {subject.kind}/{subject.key} into {target_kind}/{target_key} would leave an "

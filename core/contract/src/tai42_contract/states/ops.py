@@ -2,8 +2,8 @@
 
 This is the dependency-free half of the state store: the op-name constants, the
 resource caps, ``validate_op``/``validate_path``/``validate_guard`` (the loud
-structural validators), and the pure read helpers ``value_at_path``, ``json_equal``
-and ``keyed_op_match_counts``. It carries NO apply/fold engine — that persisted-store
+structural validators), and the pure read helpers ``value_at_path``, ``json_equal``,
+``keyed_op_match_counts`` and ``path_overlaps``. It carries NO apply/fold engine — that persisted-store
 machinery lives in the skeleton, importing this vocabulary so the wire grammar the
 platform validates and the grammar a consumer builds against can never drift.
 
@@ -100,6 +100,7 @@ LOUDLY.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, cast
 
 from tai42_contract.states.errors import InvalidPathError
@@ -536,6 +537,15 @@ def validate_guard(guard: Any, *, where: str = "op") -> dict[str, Any]:
     if extra:
         raise InvalidPathError(f"{where}: guard carries unknown keys {sorted(extra)}")
     return data
+
+
+def path_overlaps(a: Sequence[Any], b: Sequence[Any]) -> bool:
+    """Whether two paths overlap — equal, or one a prefix/descendant of the other.
+
+    ``"*"`` in either side matches one segment on the other.
+    """
+    n = min(len(a), len(b))
+    return all(a[i] == "*" or b[i] == "*" or a[i] == b[i] for i in range(n))
 
 
 def value_at_path(doc: Any, path: list[str | int]) -> Any:

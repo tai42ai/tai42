@@ -27,6 +27,7 @@ from tai42_contract.states import (
     StateExistsError,
     StateNotFoundError,
     StateRecord,
+    StateRegimeRule,
     StatesNotConfiguredError,
     StateSubject,
     StateTemplateDocument,
@@ -170,7 +171,7 @@ def test_declaration_carries_the_platform_composed_regimes():
     # attachments and serves on every read; a plain declaration carries none (None), and the
     # served field round-trips the composed list.
     served = StateDeclaration.model_validate(_decl(regimes=[{"path": ["sub", "tags"], "regime": "composing"}]))
-    assert served.regimes == [{"path": ["sub", "tags"], "regime": "composing"}]
+    assert served.regimes == [StateRegimeRule(path=["sub", "tags"], regime="composing")]
     assert StateDeclaration.model_validate(_decl()).regimes is None
     assert "regimes" in served.model_dump()
 
@@ -488,6 +489,9 @@ def test_appstates_enumerates_its_thirty_three_members():
         "get_template",
         "put_template",
         "delete_template",
+        "get_rendered_template",
+        "rendered_attachments",
+        "render_template",
         "list_attachments",
         "attach",
         "update_attachment_declarations",

@@ -9,10 +9,9 @@ declaration here), so every mixin resolves its ``self`` access against one place
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections import OrderedDict
     from collections.abc import Sequence
 
     from psycopg import AsyncConnection
@@ -36,25 +35,26 @@ if TYPE_CHECKING:
     from tai42_skeleton.states.store import PostgresStatesStore
     from tai42_skeleton.states.templates import StateTemplate
 
+    from .catalog import CatalogSnapshot, StateEntry
     from .registries import (
         StatesAttachReconcilerRegistry,
         StatesAttachValidatorRegistry,
         StatesConsumerListerRegistry,
     )
-    from .unit import _StagedReplace, _StateUnit
+    from .rendered import RenderedEntry, RenderedTemplates
+    from .unit import StagedItemRecord, _StagedReplace, _StateUnit
 
 
 class _StatesServiceBase:
     """Instance state + the cross-mixin method surface of :class:`StatesService`."""
-
-    _TEMPLATE_CACHE_MAX: ClassVar[int]
 
     _store: PostgresStatesStore
     _attach_validators: StatesAttachValidatorRegistry
     _attach_reconcilers: StatesAttachReconcilerRegistry
     _consumer_listers: StatesConsumerListerRegistry
     _seeds: StateTemplateSeedRegistry
-    _template_cache: OrderedDict[tuple[str, Any], StateTemplate]
+    _catalog: CatalogSnapshot
+    _rendered_cache: RenderedTemplates
 
     @staticmethod
     def _ensure_available() -> None: ...
@@ -63,7 +63,7 @@ class _StatesServiceBase:
 
     def _complete_origin(self, origin: WriteOrigin) -> CompletedOrigin: ...
 
-    async def validate_subject(self, decl: StateDeclaration, subject: StateSubject) -> None: ...
+    async def _admit_subject(self, state: str, subject: StateSubject) -> tuple[int, list[str], str]: ...
 
     async def _validate_subject_admitted(
         self, subject_kinds: list[str], state_name: str, subject: StateSubject
@@ -77,18 +77,21 @@ class _StatesServiceBase:
 
     async def _resolve_template_body(self, name: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
 
-    async def _validated_template(self, row: dict[str, Any]) -> StateTemplate: ...
+    async def _template_at(self, name: str, version: int, body: dict[str, Any]) -> StateTemplate: ...
+
+    async def _rendered(self, template: StateTemplate, version: int) -> RenderedEntry: ...
+
+    async def _validated_template_write(self, doc: StateTemplateDocument) -> tuple[StateTemplate, dict[str, Any]]: ...
 
     async def _load_state_attachments(
         self, state: str, *, override: dict[str, StateTemplate] | None = None
     ) -> list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]]: ...
 
-    async def _compose_effective(self, state: str, base_schema: TemplatedText | dict[str, Any]) -> dict[str, Any]: ...
+    async def _entry_attachments(
+        self, entry: StateEntry, *, override: dict[str, StateTemplate] | None = None
+    ) -> list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]]: ...
 
-    @staticmethod
-    def _compose_regimes(
-        attachments: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]],
-    ) -> list[dict[str, Any]]: ...
+    async def _compose_effective(self, state: str, base_schema: TemplatedText | dict[str, Any]) -> dict[str, Any]: ...
 
     @staticmethod
     def _effective_parameters(template: StateTemplate, parameters: dict[str, Any]) -> dict[str, Any]: ...
@@ -98,7 +101,7 @@ class _StatesServiceBase:
     ) -> None: ...
 
     async def _run_attach_validators(
-        self, template_doc: StateTemplateDocument, declarations: dict[str, Any], effective: dict[str, Any]
+        self, state: str, template_doc: StateTemplateDocument, declarations: dict[str, Any], effective: dict[str, Any]
     ) -> None: ...
 
     async def _run_attach_reconcilers(
@@ -153,7 +156,49 @@ class _StatesServiceBase:
 
     async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]: ...
 
-    async def _commit_writes(self, writes: Sequence[StateBatchWrite | _StagedReplace]) -> list[ApplyResult]: ...
+    async def _commit_writes(
+        self,
+        writes: Sequence[StateBatchWrite | _StagedReplace],
+        *,
+        staged: Sequence[StagedItemRecord] | None = None,
+        conn: AsyncConnection[Any] | None = None,
+    ) -> list[ApplyResult]: ...
+
+    async def _replace_completed(
+        self,
+        state: str,
+        subject: StateSubject,
+        data: dict[str, Any],
+        *,
+        origin: CompletedOrigin,
+        conn: AsyncConnection[Any] | None = None,
+        validate: bool = True,
+    ) -> StateRecord: ...
+
+    async def _apply_completed(
+        self,
+        state: str,
+        subject: StateSubject,
+        ops: list[dict[str, Any]],
+        *,
+        op_id: str | None,
+        origin: CompletedOrigin,
+        conn: AsyncConnection[Any] | None = None,
+        validate: bool = True,
+    ) -> ApplyResult: ...
+
+    async def _apply_template_jq_completed(
+        self,
+        state: str,
+        subject: StateSubject,
+        name: str,
+        input_: Any,
+        *,
+        op_id: str | None,
+        origin: CompletedOrigin,
+        conn: AsyncConnection[Any] | None = None,
+        validate: bool = True,
+    ) -> TemplateJqApplyResult: ...
 
     async def _resolve_template_jq_ops(
         self,

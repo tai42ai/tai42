@@ -41,6 +41,10 @@ class _FakeResourceManager:
     """Renders a program body: inline ``content`` verbatim, or a stored ``id`` from
     ``_STORED_PROGRAMS`` — an unmapped id is the loud not-found the real manager raises."""
 
+    epoch = 1
+    generation = 0
+    cache_enabled = True
+
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
             from tai42_skeleton.template.resource_manager import TemplateNotFoundError
@@ -539,7 +543,8 @@ async def test_input_program_by_id_unfetchable_at_run_time_is_loud(svc: StatesSe
     await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}]}, origin=_ORIGIN)
     del _STORED_PROGRAMS["stored-anything-due"]
     with pytest.raises(
-        ValueValidationError, match=r"template_jq 'any_due' .* references stored id 'stored-anything-due'"
+        TemplateValidationError,
+        match=r"template 'byid' template_jq 'any_due' references stored id 'stored-anything-due'",
     ):
         await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
 

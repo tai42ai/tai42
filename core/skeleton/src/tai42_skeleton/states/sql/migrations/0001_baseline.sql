@@ -9,11 +9,19 @@
 -- The column comments state the invariants the tables cannot express; the store
 -- (states/store.py) enforces the rest.
 
+-- The catalog row versions: every insert or update of a `state_declarations` or
+-- `state_templates` row takes its `version` from this one sequence, so a version only
+-- rises and never repeats for a name, even across a delete and a re-create of the row.
+-- Every process-local derived artifact of a catalog row keys on that version.
+CREATE SEQUENCE IF NOT EXISTS state_catalog_versions AS BIGINT;
+
 -- A declared state: its author base `schema`, the composed `effective_schema`
 -- every document validation reads (base + each attached template's fragment), the
 -- `subject_kinds` it serves and the `default_subject_kind` a door's ambient subject
 -- resolves to, and an optional per-state `retention_days` (INT4; NULL keeps records
--- forever unless the global default is set).
+-- forever unless the global default is set). `version` is drawn from
+-- `state_catalog_versions` on every write to the row (an attachment write or an attached
+-- template's replace included).
 CREATE TABLE IF NOT EXISTS state_declarations (
     name                 TEXT PRIMARY KEY,
     description          TEXT        NOT NULL DEFAULT '',
@@ -22,18 +30,21 @@ CREATE TABLE IF NOT EXISTS state_declarations (
     subject_kinds        JSONB       NOT NULL DEFAULT '[]'::jsonb,
     default_subject_kind TEXT        NOT NULL DEFAULT '',
     retention_days       INTEGER,
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    version              BIGINT      NOT NULL DEFAULT nextval('state_catalog_versions')
 );
 
 -- A platform state-template document (schema fragment + parameters + write regimes +
 -- attach-time declarations + trace switch). `shipped_hash` is the seed applier's
 -- canonical-body hash on a shipped default (NULL for an operator upload); it is the
 -- only field that tells an unedited shipped template from an operator-owned one.
+-- `version` is drawn from `state_catalog_versions` on every write to the row.
 CREATE TABLE IF NOT EXISTS state_templates (
     name         TEXT PRIMARY KEY,
     body         JSONB       NOT NULL DEFAULT '{}'::jsonb,
     shipped_hash TEXT,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    version      BIGINT      NOT NULL DEFAULT nextval('state_catalog_versions')
 );
 
 -- One attachment of a template on a state at `path`, carrying the resolved `parameters`
