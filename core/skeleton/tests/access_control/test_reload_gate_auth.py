@@ -119,9 +119,9 @@ async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app)
     # into IdentityProviderUnavailableError, the verifier propagates it, and the
     # backend converts it to the retriable answer while the gate is held. The autouse
     # registry-isolation fixture restores the "redis" registration afterwards.
-    from tai42_contract.access_control import registry
+    from tai42_kit.access_control import registry
 
-    registry._REGISTRY.clear()
+    registry._PROVIDERS._generation.committed().clear()
     settings = AccessControlSettings(auth_providers=["redis"])  # name configured, registry mid-reload
     adapter = AuthAdapter(settings)
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)
@@ -134,9 +134,9 @@ async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app)
 
 async def test_real_adapter_empty_registry_outside_reload_denies_401():
     # The mirror of the integration path: no reload, empty registry -> loud 401 deny.
-    from tai42_contract.access_control import registry
+    from tai42_kit.access_control import registry
 
-    registry._REGISTRY.clear()
+    registry._PROVIDERS._generation.committed().clear()
     settings = AccessControlSettings(auth_providers=["redis"])
     adapter = AuthAdapter(settings)
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)

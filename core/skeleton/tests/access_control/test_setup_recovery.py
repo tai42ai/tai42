@@ -16,7 +16,8 @@ import copy
 
 import pytest
 from pydantic import SecretStr
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
+from tai42_kit.access_control import registry
 
 from tai42_skeleton.access_control import management, setup_recovery
 from tai42_skeleton.access_control import setup_gate as setup_gate_mod
@@ -32,7 +33,7 @@ _TOKEN = "setup-token-xyz"
 @pytest.fixture
 def provider() -> _SpyProvider:
     spy = _SpyProvider()
-    registry._REGISTRY["redis"] = lambda _settings: spy
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
     return spy
 
 
@@ -231,7 +232,7 @@ async def test_recover_refuses_when_gate_is_off(
 async def test_recover_refuses_when_no_provider_can_mint(
     pg: FakeAccessControlPg, setup_redis: FakeRedis, operator_token: None
 ) -> None:
-    registry._REGISTRY["redis"] = lambda _settings: _ValidatorProvider()
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: _ValidatorProvider()
     _seed_owner(pg)
     with pytest.raises(SetupRecoveryError, match="no configured identity provider can mint"):
         await recover_owner_key(_TOKEN, key_user_id=None, key_description="recovered")

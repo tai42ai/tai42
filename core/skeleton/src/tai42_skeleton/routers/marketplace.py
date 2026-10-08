@@ -31,9 +31,9 @@ UPSTREAM dependency of this proxying surface, so it maps to a 502 Bad Gateway (a
 the translation lives in the operations layer.
 
 The advisory poll is the ONE background outbound call the feature makes and is a
-documented, default-on setting (``MARKETPLACE_ADVISORIES_POLL``); its lifecycle is
-wired at the bottom of this module, so the poll runs exactly when this surface is
-opted into the deployment's ``routers_modules``.
+documented, default-on setting (``MARKETPLACE_ADVISORIES_POLL``); the app registers its
+lifecycle at construction, and it runs exactly where this module's advisories door is
+served.
 
 The search route reads its whitelisted query facets at the HTTP edge (``tags`` is
 multi-value and must survive as repeated params, which the adapter's plain
@@ -44,15 +44,11 @@ the adapter's request-model parse.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_kit.db import component_binding, component_store_configured, database_password_env
 
-from tai42_skeleton.db import SKELETON_COMPONENT
-from tai42_skeleton.marketplace import advisories
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.marketplace import marketplace_advisories as _marketplace_advisories_op
 from tai42_skeleton.operations.marketplace import marketplace_categories as _marketplace_categories_op
@@ -69,8 +65,6 @@ from tai42_skeleton.operations.marketplace import marketplace_upgrade_all as _ma
 # The single-valued search facets forwarded to the registry; ``tags`` is handled
 # separately as a multi-value param. Unknown query params are ignored (they never
 # reach the registry).
-logger = logging.getLogger(__name__)
-
 _SEARCH_SINGLE_PARAMS = ("q", "kind", "category", "namespace", "tier", "contract", "sort", "page", "page_size")
 
 
@@ -187,32 +181,3 @@ marketplace_advisories = register_operation_route(
     method="GET",
     action="read",
 )
-
-
-@tai42_app.lifecycle.on_post_swap
-def _start_advisories_poll() -> None:
-    """(Re)establish the advisory poll on the serving loop.
-
-    Run at boot and after every epoch swap, both ON the serving loop, so the poll task attaches to the loop
-    its refreshes run on and retires with its generation. It is a no-op when
-    ``MARKETPLACE_ADVISORIES_POLL`` is off.
-
-    Skipped entirely with no install-attribution store configured: the poll would
-    otherwise fail every interval reaching for an absent Postgres inventory, so a
-    store-less deployment logs one INFO line and starts nothing (matching
-    ``start_poll``'s own documented-silence contract).
-    """
-    if not component_store_configured(SKELETON_COMPONENT):
-        logger.info(
-            "marketplace: advisory poll skipped — the skeleton database is not configured (%s); "
-            "no installed inventory to poll",
-            database_password_env(component_binding(SKELETON_COMPONENT)),
-        )
-        return
-    advisories.start_poll()
-
-
-@tai42_app.lifecycle.on_shutdown
-async def _stop_advisories_poll() -> None:
-    """Cancel and await the advisory poll task on the serving loop it lives on."""
-    await advisories.stop_poll()

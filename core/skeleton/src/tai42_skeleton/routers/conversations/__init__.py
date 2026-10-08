@@ -67,8 +67,8 @@ The config doors carry their own ``/api/conversation-configs`` prefix rather tha
 under ``/api/conversations/{route_name}``, where a ``config`` first segment would collide
 with the read-one route door.
 
-Also here: the two authed turn-submission doors (message + event) and the four
-conversation-bridge lifecycle hooks. Importing this package registers every route and hook.
+Also here: the two authed turn-submission doors (message + event). Importing this package
+registers every route.
 Thin adapters over ``tai42_skeleton.operations.conversations`` — no routing logic here.
 ``get_current_user_id`` and ``reload_gate`` are homed at this package alias so a test's patch
 here is the single seam the submission doors read through at call time.
@@ -92,15 +92,6 @@ from .extractors import (
     _extract_thread_mode_body,
     _extract_thread_mode_query,
     _extract_transcript_query,
-)
-
-# The four conversation-bridge lifecycle hooks — importing the module registers them, and
-# they are reachable at the package alias for the boot tests that drive them directly.
-from .lifecycle import (
-    _redrive_pending_conversations,
-    _register_conversation_completion_tool,
-    _start_conversations_delivery_sweep,
-    _stop_conversations_delivery_sweep,
 )
 from .routes import (
     _delete_conversation_person_op,
@@ -146,11 +137,7 @@ __all__ = [
     "_extract_thread_mode_query",
     "_extract_transcript_query",
     "_list_conversation_threads_op",
-    "_redrive_pending_conversations",
-    "_register_conversation_completion_tool",
     "_set_conversation_config_op",
-    "_start_conversations_delivery_sweep",
-    "_stop_conversations_delivery_sweep",
     "create_conversation_route",
     "delete_conversation_config",
     "delete_conversation_person",

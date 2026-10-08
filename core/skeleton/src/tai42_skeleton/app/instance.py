@@ -15,13 +15,21 @@ from tai42_skeleton.access_control.startup import (
     check_raw_path_routes_resolvable,
     check_route_actions,
     check_spa_shell_public,
+    declare_gate_state_to_kit,
     probe_identity_provider,
     seed_roles,
 )
 from tai42_skeleton.access_control.verifier import reset_registered_reserved_paths
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
+from tai42_skeleton.conversations.lifecycle import (
+    redrive_pending_conversations,
+    register_conversation_completion_tools,
+    start_conversations_delivery_sweep,
+    stop_conversations_delivery_sweep,
+)
 from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
+from tai42_skeleton.marketplace.advisories import start_advisories_poll, stop_advisories_poll
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
 from tai42_skeleton.states.db import assert_states_schema_applied
 
@@ -162,6 +170,21 @@ async def lifespan(app_):
         yield
 
 
+def _register_feature_lifecycles(app: TaiMCP) -> None:
+    """Register the feature lifecycles that run whatever routers ``default_routers`` mounts.
+
+    The conversation completion tools and re-drive run every epoch build, the delivery sweep
+    on the serving loop after every swap; the advisory poll starts only where the
+    ``marketplace_advisories`` operation is served.
+    """
+    app.lifecycle.on_startup(register_conversation_completion_tools)
+    app.lifecycle.on_startup(redrive_pending_conversations)
+    app.lifecycle.on_post_swap(start_conversations_delivery_sweep)
+    app.lifecycle.on_shutdown(stop_conversations_delivery_sweep)
+    app.lifecycle.on_post_swap(start_advisories_poll)
+    app.lifecycle.on_shutdown(stop_advisories_poll)
+
+
 def build_app() -> TaiMCP:
     """Build (once) the process app singleton.
 
@@ -193,6 +216,9 @@ def build_app() -> TaiMCP:
         # adapter FRESH from settings, so a profile that flips ACCESS_CONTROL_*
         # rebuilds the adapter + verifier chain rather than pinning the boot one.
         app = TaiMCP(name="Tai", lifespan=lifespan)
+        # The gate state is handed to the kit FIRST in every epoch build, whatever the
+        # gate's setting, so any later handler that enqueues a callback job finds it.
+        app.lifecycle.on_startup(declare_gate_state_to_kit)
         # The schema gate runs FIRST, before any handler that touches a store: a
         # database with pending migrations refuses to boot with the ``tai db
         # migrate`` fix named, rather than failing deeper on a missing table. It
@@ -318,6 +344,9 @@ def build_app() -> TaiMCP:
         # ``raise_on_error``.
         app.lifecycle.on_startup(rehydrate_sub_mcp_apps)
         app.lifecycle.on_reload(rehydrate_sub_mcp_apps)
+        # Registered LAST in the startup order: a re-driven conversation turn may call a
+        # preset or a sub-MCP tool rehydrated above.
+        _register_feature_lifecycles(app)
         # Preset create/save/rollback/delete fan out on the worker bus
         # (``reload_tool``/``remove_tool`` with ``kind="preset"``); each subscribed
         # worker dispatches the op through this reloader so the fleet converges.

@@ -90,17 +90,17 @@ def _patch_reload(monkeypatch, *, manifest: dict, env: dict[str, str]) -> None:
 
 def _committed_registry_snapshots() -> dict[str, dict]:
     """A deep-enough snapshot of the four generation registries' COMMITTED contents."""
-    from tai42_contract.access_control import registry as identity_registry
-    from tai42_contract.accounts import registry as accounts_registry
+    from tai42_kit.access_control import registry as identity_registry
+    from tai42_kit.accounts import registry as accounts_registry
 
     from tai42_skeleton.connectors.providers import registry as connector_registry
     from tai42_skeleton.operations.registry import operation_registry
 
     return {
-        "connector": dict(connector_registry._REGISTRY),
-        "identity": dict(identity_registry._REGISTRY),
-        "accounts": dict(accounts_registry._REGISTRY),
-        "operation": dict(operation_registry._operations),
+        "connector": dict(connector_registry._GENERATION.committed()),
+        "identity": dict(identity_registry._PROVIDERS._generation.committed()),
+        "accounts": dict(accounts_registry._PROVIDERS._generation.committed()),
+        "operation": dict(operation_registry._generation.committed()),
     }
 
 

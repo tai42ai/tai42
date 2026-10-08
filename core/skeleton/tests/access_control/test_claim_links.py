@@ -13,8 +13,9 @@ import asyncio
 import logging
 
 import pytest
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
+from tai42_kit.access_control import registry
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.access_control import claim_links
@@ -87,7 +88,7 @@ def provider() -> _FakeProvider:
             "sk-orphan": AuthIdentity(user_id="orphan", claims={}),
         }
     )
-    registry._REGISTRY["redis"] = lambda _settings: prov
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: prov
     return prov
 
 
@@ -241,7 +242,7 @@ async def test_non_admin_may_not_claim_link_a_non_mint_identity(redis: FakeRedis
         async def validate_token(self, token: str) -> AuthIdentity | None:
             return AuthIdentity(user_id="ext-user", claims={}) if token == "sk-ext" else None
 
-    registry._REGISTRY["redis"] = lambda _settings: _External()
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: _External()
 
     with pytest.raises(ClaimLinkError) as exc:
         await create_claim_link(

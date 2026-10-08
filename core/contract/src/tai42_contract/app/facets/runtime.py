@@ -80,12 +80,15 @@ class AppLifecycle(Protocol):
         """
         ...
 
-    def on_fleet_op_applied(self, func: Callable[[str], Any]) -> Callable[[str], Any]:
+    def on_fleet_op_applied(self, func: Callable[[str, float], Any]) -> Callable[[str, float], Any]:
         """Register a handler fired after any worker-bus op applies in this process.
 
-        Also fired after the reconnect self-resync reload. Unlike its zero-arg
-        siblings, the handler takes ONE argument — the op name — so it can act on
-        some ops and skip others (a query op carries no state change to react to).
+        Also fired after the reconnect self-resync reload. The handler is called
+        ``handler(op_name, budget)``: ``op_name`` lets it act on some ops and skip others
+        (a query op carries no state change to react to); ``budget`` — seconds remaining
+        before the publisher's report cut, measured from this process's receipt of the op
+        (the bus transit before receipt is not subtracted); a post-apply obligation that
+        cannot finish within it must raise.
         """
         ...
 

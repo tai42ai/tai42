@@ -19,18 +19,17 @@ dies on fork; the writer's ``shutdown()`` evicts and rebuilds it.
 from __future__ import annotations
 
 from tai42_contract.monitoring import Monitoring
+from tai42_kit.registry import StagedSlot
 
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 
-# ``_backend`` is the COMMITTED live backend ``get_monitoring()`` serves. During an
-# epoch build the monitoring plugin's re-import records its fresh backend in
-# ``_staged_backend`` WITHOUT touching the live one — activation (which shuts down the
-# previous backend's writer) is deferred to commit, so a failed build never tears down
-# the live monitoring backend. ``_staging`` distinguishes "build registered no
-# monitoring module" (keep the live backend) from a staged replacement.
-_backend: Monitoring | None = None
-_staged_backend: Monitoring | None = None
-_staging: bool = False
+# The COMMITTED live backend ``get_monitoring()`` serves. During an epoch build the
+# monitoring plugin's re-import stages its fresh backend WITHOUT touching the live one —
+# activation (which shuts down the previous backend's writer) is deferred to commit, so a
+# failed build never tears down the live monitoring backend, and a build that registers no
+# monitoring module keeps the live backend.
+_BACKEND: StagedSlot[Monitoring] = StagedSlot(on_replace=lambda old: old.writer.shutdown())
+_noop_default: Monitoring | None = None
 
 
 def init_monitoring(backend: Monitoring) -> None:
@@ -41,15 +40,9 @@ def init_monitoring(backend: Monitoring) -> None:
     backend keeps serving and is shut down only at commit, so a failed build leaves it
     running. At boot (no staging) it is activated immediately — shutting down any
     previously-installed backend's writer first so its background flush thread / vendor
-    client is not leaked. The no-op default's ``shutdown`` is a no-op.
+    client is not leaked.
     """
-    global _backend, _staged_backend
-    if _staging:
-        _staged_backend = backend
-        return
-    if _backend is not None:
-        _backend.writer.shutdown()
-    _backend = backend
+    _BACKEND.set(backend)
 
 
 def begin_staging() -> None:
@@ -57,9 +50,7 @@ def begin_staging() -> None:
 
     The live backend keeps serving.
     """
-    global _staging, _staged_backend
-    _staging = True
-    _staged_backend = None
+    _BACKEND.begin()
 
 
 def commit_staging() -> None:
@@ -68,20 +59,12 @@ def commit_staging() -> None:
     Activation shuts down the previous live backend's writer; a build that named
     no monitoring module keeps it. Idempotent when no build staged.
     """
-    global _backend, _staged_backend, _staging
-    if _staging and _staged_backend is not None:
-        if _backend is not None:
-            _backend.writer.shutdown()
-        _backend = _staged_backend
-    _staged_backend = None
-    _staging = False
+    _BACKEND.commit()
 
 
 def abort_staging() -> None:
     """Drop the staged backend on a failed build — the live backend was never touched."""
-    global _staged_backend, _staging
-    _staged_backend = None
-    _staging = False
+    _BACKEND.abort()
 
 
 def register_monitoring(builder=None):
@@ -112,33 +95,30 @@ def reset_monitoring() -> None:
     Not a production path — a real backend is registered once via the monitoring
     plugin.
     """
-    global _backend, _staged_backend, _staging
-    _backend = None
-    _staged_backend = None
-    _staging = False
+    _BACKEND.reset()
 
 
 def get_monitoring_staged() -> Monitoring:
     """The STAGED backend if a build registered one, else the committed backend — the build's own view.
 
-    During staging a build that names a monitoring module records it in
-    ``_staged_backend``; a build naming none keeps the committed backend.
     Serve-time reads use :func:`get_monitoring` (committed only).
     """
-    if _staged_backend is not None:
-        return _staged_backend
-    return get_monitoring()
+    staged = _BACKEND.staged_or_current()
+    return staged if staged is not None else get_monitoring()
 
 
 def get_monitoring() -> Monitoring:
     """Return the registered backend, or a shared no-op default if none is set.
 
-    Monitoring being absent is a valid 'disabled' state, not a failure: the first
-    call with nothing registered installs a process-wide ``NoOpMonitoring`` (writes
-    do nothing, reads return empty) and returns it. A real backend registered via
-    ``init_monitoring`` replaces it. Callers never have to initialize monitoring.
+    Monitoring being absent is a valid 'disabled' state, not a failure: with nothing
+    registered the process-wide ``NoOpMonitoring`` (writes do nothing, reads return empty)
+    is served. A real backend registered via ``init_monitoring`` replaces it. Callers never
+    have to initialize monitoring.
     """
-    global _backend
-    if _backend is None:
-        _backend = NoOpMonitoring()
-    return _backend
+    global _noop_default
+    backend = _BACKEND.current()
+    if backend is not None:
+        return backend
+    if _noop_default is None:
+        _noop_default = NoOpMonitoring()
+    return _noop_default

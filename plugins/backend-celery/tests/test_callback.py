@@ -17,6 +17,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_SUBJECT_ARG,
 )
+from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 _FORWARDED = {
@@ -24,6 +25,9 @@ _FORWARDED = {
     SCHEDULE_EXECUTION_KEY_ARG: "svc",
     SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
 }
+
+# The secret-read capability the enqueue path carries onto every callback spec.
+_CARRIED = {WORKER_SECRET_CAPABILITY_ARG: False}
 
 
 async def test_prepare_backend_kwargs_injects_tool_name_and_stamps_capability() -> None:
@@ -54,7 +58,10 @@ async def test_rendered_condition_unknown_id_raises(stub_app) -> None:
 
 async def test_condition_failure_returns_none(stub_app) -> None:
     callback = CallbackSchema(
-        condition=TemplatedText(content=".k == 2"), expr=TemplatedText(content="."), tool="follow_up"
+        condition=TemplatedText(content=".k == 2"),
+        expr=TemplatedText(content="."),
+        tool="follow_up",
+        carried_kwargs=_CARRIED,
     )
     result = await callback_execution({"k": 1}, callback)
     assert result is None
@@ -63,7 +70,7 @@ async def test_condition_failure_returns_none(stub_app) -> None:
 
 async def test_empty_condition_passes_and_runs_tool(stub_app) -> None:
     stub_app.tools.run_tool_result = {"ran": True}
-    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up")
+    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up", carried_kwargs=_CARRIED)
     result = await callback_execution(7, callback)
     assert result == {"ran": True}
     assert stub_app.tools.run_tool_calls == [("follow_up", {"payload": 7})]
@@ -73,7 +80,7 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     # A worker execution has no live caller, so the callback's tool observes the
     # detached flag set; the flag never leaks past the callback.
     stub_app.tools.run_tool_result = {"ran": True}
-    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up")
+    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up", carried_kwargs=_CARRIED)
 
     await callback_execution(7, callback)
 
@@ -82,19 +89,19 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     assert in_detached_run() is False
 
 
-@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
-async def test_callback_binds_the_worker_secret_capability(
-    stub_app, access_control, gate_enabled: bool, capable: bool
-) -> None:
-    # A dequeued callback's follow-up tool sees the same worker-bound capability as
-    # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
-    access_control(gate_enabled)
+@pytest.mark.parametrize("capability", [True, False])
+async def test_callback_binds_the_carried_capability(stub_app, capability: bool) -> None:
+    # A dequeued callback's follow-up tool sees the capability the enqueue path carried, reset after.
     stub_app.tools.run_tool_result = {"ran": True}
-    callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up")
+    callback = CallbackSchema(
+        expr=TemplatedText(content="{payload: .}"),
+        tool="follow_up",
+        carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: capability},
+    )
 
     await callback_execution(7, callback)
 
-    assert stub_app.tools.secret_capability_seen == [capable]
+    assert stub_app.tools.secret_capability_seen == [capability]
     assert caller_may_read_secrets() is False
 
 
@@ -107,7 +114,7 @@ async def test_no_tool_returns_expression_output(stub_app) -> None:
 
 async def test_empty_expr_yields_empty_mapping(stub_app) -> None:
     stub_app.tools.run_tool_result = "done"
-    callback = CallbackSchema(tool="follow_up")
+    callback = CallbackSchema(tool="follow_up", carried_kwargs=_CARRIED)
     result = await callback_execution(3, callback)
     assert result == "done"
     assert stub_app.tools.run_tool_calls == [("follow_up", {})]
@@ -142,7 +149,7 @@ async def test_callback_that_asks_parks_under_the_forwarded_identity(stub_app) -
     # receiver-less schedule door; a follow-up that asks hands back the re-park sentinel — never a value.
     sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
     stub_app.interactions.park_sentinel = sentinel
-    callback = CallbackSchema(tool="follow", carried_kwargs=dict(_FORWARDED))
+    callback = CallbackSchema(tool="follow", carried_kwargs={**_FORWARDED, **_CARRIED})
 
     out = await callback_execution({"value": 3}, callback)
 

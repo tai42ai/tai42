@@ -6,8 +6,9 @@ or the no-op local variant), subscribes with ``_apply_bus_op`` as the callback a
 ``_resync_on_ready`` as the on-ready self-resync, and cancels it at shutdown.
 
 * ``_apply_bus_op`` dispatches an op to its local admin primitive AND fires the
-  ``on_fleet_op_applied`` handlers with the op NAME — the op has not fully applied
-  until they finish, so a raising handler fails the op;
+  ``on_fleet_op_applied`` handlers with the op NAME and the seconds left before the
+  apply deadline — the op has not fully applied until they finish, so a raising
+  handler fails the op;
 * ``_resync_on_ready`` routes the reconnect self-resync through the same apply
   path, so the hook fires for the resync reload too (a celery worker's prefork
   children must not stay stale on the exact path the resync heals);
@@ -28,10 +29,12 @@ from unittest.mock import AsyncMock
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.storage import Storage
+from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
+from tai42_skeleton.app.lifecycle import bus_subscription as bus_subscription_module
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template import resource_manager as rm_mod
@@ -83,10 +86,16 @@ def test_build_bus_is_real_with_a_redis_url(monkeypatch: pytest.MonkeyPatch) -> 
         reset_all_settings()
 
 
-# -- _apply_bus_op fires the on_fleet_op_applied hook with the op name ---------
+# -- _apply_bus_op fires the on_fleet_op_applied hook with the op name and budget -
 
 
-async def test_apply_bus_op_dispatches_then_fires_hook_with_op_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def _freeze_monotonic(monkeypatch: pytest.MonkeyPatch, now: float) -> None:
+    monkeypatch.setattr(bus_subscription_module.time, "monotonic", lambda: now)
+
+
+async def test_apply_bus_op_dispatches_then_fires_hook_with_op_name_and_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     m = _Mixin()
     sentinel = {"status": "ok", "from": "dispatch"}
 
@@ -94,16 +103,34 @@ async def test_apply_bus_op_dispatches_then_fires_hook_with_op_name(monkeypatch:
         return sentinel
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
+    _freeze_monotonic(monkeypatch, 100.0)
 
-    fired: list[str] = []
-    m._on_fleet_op_applied(lambda name: fired.append(name))
+    fired: list[tuple[str, float]] = []
+    m._on_fleet_op_applied(lambda name, budget: fired.append((name, budget)))
 
-    result = await m._apply_bus_op({"op": "reload_mcp", "title": "svc"})
+    result = await m._apply_bus_op({"op": "reload_mcp", "title": "svc"}, deadline=125.0)
 
-    # The dispatch result becomes the op's terminal payload, and the hook fired
-    # AFTER the op applied, with the op name so a handler can filter by op.
+    # The dispatch result becomes the op's terminal payload, and the hook fired AFTER
+    # the op applied, with the op name (to filter by op) and the seconds left before
+    # the deadline.
     assert result is sentinel
-    assert fired == ["reload_mcp"]
+    assert fired == [("reload_mcp", 25.0)]
+
+
+async def test_a_passed_deadline_hands_a_zero_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    m = _Mixin()
+
+    async def fake_dispatch(op: dict[str, Any]) -> Any:
+        return None
+
+    monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
+    _freeze_monotonic(monkeypatch, 200.0)
+    fired: list[float] = []
+    m._on_fleet_op_applied(lambda _name, budget: fired.append(budget))
+
+    await m._apply_bus_op({"op": "reload_config"}, deadline=150.0)
+
+    assert fired == [0.0]
 
 
 async def test_a_raising_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,7 +141,7 @@ async def test_a_raising_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
 
-    def boom(_name: str) -> None:
+    def boom(_name: str, _budget: float) -> None:
         raise RuntimeError("prefork turnover failed")
 
     m._on_fleet_op_applied(boom)
@@ -122,7 +149,20 @@ async def test_a_raising_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> N
     # The post-apply hook is part of the op applying, so a raising handler makes
     # the op fail loudly (the subscriber turns it into a terminal ``failed``).
     with pytest.raises(RuntimeError, match="prefork turnover failed"):
-        await m._apply_bus_op({"op": "list_failed_mcps"})
+        await m._apply_bus_op({"op": "list_failed_mcps"}, deadline=1e9)
+
+
+async def test_a_one_argument_hook_fails_the_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    m = _Mixin()
+
+    async def fake_dispatch(op: dict[str, Any]) -> Any:
+        return {"status": "ok"}
+
+    monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
+    m._on_fleet_op_applied(lambda name: None)
+
+    with pytest.raises(TypeError):
+        await m._apply_bus_op({"op": "reload_config"}, deadline=1e9)
 
 
 async def test_self_resync_routes_reload_config_through_the_apply_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,21 +174,28 @@ async def test_self_resync_routes_reload_config_through_the_apply_path(monkeypat
         return {"status": "ok"}
 
     monkeypatch.setattr(m, "_dispatch_bus_op", fake_dispatch)
+    monkeypatch.setenv("TAI_BUS_APPLY_TIMEOUT", "17")
+    reset_all_settings()
+    _freeze_monotonic(monkeypatch, 50.0)
 
-    fired: list[str] = []
-    m._on_fleet_op_applied(lambda name: fired.append(name))
+    fired: list[tuple[str, float]] = []
+    m._on_fleet_op_applied(lambda name, budget: fired.append((name, budget)))
 
-    # Boot (first connect): the live config was JUST built by start(), so the resync
-    # latches ready WITHOUT a redundant reload_config swap.
-    await m._resync_on_ready()
-    assert dispatched == []
-    assert m._boot_ready.is_set()
+    try:
+        # Boot (first connect): the live config was JUST built by start(), so the resync
+        # latches ready WITHOUT a redundant reload_config swap.
+        await m._resync_on_ready()
+        assert dispatched == []
+        assert m._boot_ready.is_set()
 
-    # Reconnect: re-read persisted config through the SAME apply path as a delivered
-    # op (a broadcast may have been missed while away), so the hook fires for it too.
-    await m._resync_on_ready()
+        # Reconnect: re-read persisted config through the SAME apply path as a delivered
+        # op (a broadcast may have been missed while away), so the hook fires for it too,
+        # with the full apply window as its budget.
+        await m._resync_on_ready()
+    finally:
+        reset_all_settings()
     assert dispatched == ["reload_config"]
-    assert fired == ["reload_config"]
+    assert fired == [("reload_config", 17.0)]
 
 
 async def test_self_resync_swallows_a_failing_apply_and_stays_live(
@@ -177,7 +224,7 @@ async def test_self_resync_swallows_a_failing_apply_and_stays_live(
 
     assert any(r.levelno == logging.ERROR and "self-resync" in r.getMessage() for r in caplog.records)
     # The subscription is still live: a subsequently delivered op still applies.
-    result = await m._apply_bus_op({"op": "reload_config"})
+    result = await m._apply_bus_op({"op": "reload_config"}, deadline=1e9)
     assert result == {"status": "ok"}
     assert dispatched == ["reload_config", "reload_config"]
 
@@ -247,7 +294,7 @@ def test_on_fleet_op_applied_is_registered_through_the_lifecycle_facet() -> None
     fired: list[str] = []
 
     @app.lifecycle.on_fleet_op_applied
-    def _handler(op_name: str) -> None:  # pragma: no cover - registration only
+    def _handler(op_name: str, budget: float) -> None:  # pragma: no cover - registration only
         fired.append(op_name)
 
     key = f"{_handler.__module__}.{_handler.__qualname__}"
@@ -447,20 +494,3 @@ async def test_dead_perpetual_task_marks_and_exits_for_every_registration(
 
     assert m._dead_perpetual_task == (task_name, "RuntimeError")
     assert exits == [m._worker_kind]
-
-
-def test_the_bus_apply_window_matches_the_contract_agreement() -> None:
-    """The contract carries the apply window's ENV NAME and DEFAULT because a
-    backend-runtime process derives its pool-turnover budget from the env, never
-    from this settings object. Two sources of truth, so the same drift guard the
-    mutating-op set gets applies here: a default raised on one side and not the
-    other would silently put the turnover's confirm-or-raise after the
-    publisher's report cut, turning a truthful ``failed`` into a guess."""
-    from tai42_contract.backend import BUS_APPLY_TIMEOUT_DEFAULT, BUS_APPLY_TIMEOUT_ENV
-
-    from tai42_skeleton.app.bus_settings import BusSettings
-
-    field = BusSettings.model_fields["apply_timeout"]
-    prefix = BusSettings.model_config.get("env_prefix", "")
-    assert f"{prefix}apply_timeout".upper() == BUS_APPLY_TIMEOUT_ENV
-    assert field.default == BUS_APPLY_TIMEOUT_DEFAULT

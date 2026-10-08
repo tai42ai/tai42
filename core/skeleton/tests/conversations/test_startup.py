@@ -1,6 +1,7 @@
 """The conversation recovery lifecycle wiring: the ``on_startup`` hook that re-drives every
 unfinished record, the ``on_post_swap`` hook that (re)establishes the periodic sweep on
-the serving loop, and the ``on_shutdown`` hook that stops it.
+the serving loop, and the ``on_shutdown`` hook that stops it — registered when the app is
+constructed, whatever routers it mounts.
 
 The recovery passes themselves are tested in ``test_turn`` and ``test_delivery_sweep``;
 here only the wiring is asserted — that each hook runs its passes, in the order the
@@ -14,17 +15,42 @@ from __future__ import annotations
 import pytest
 
 import tai42_skeleton.conversations as conversations_package
+from tai42_skeleton.app.instance import app as skeleton_app
+from tai42_skeleton.conversations import lifecycle
+
+_KEYS = {
+    name: f"tai42_skeleton.conversations.lifecycle.{name}"
+    for name in (
+        "register_conversation_completion_tools",
+        "redrive_pending_conversations",
+        "start_conversations_delivery_sweep",
+        "stop_conversations_delivery_sweep",
+    )
+}
 
 
-def _router():
-    from tai42_contract.app import tai42_app
+def test_the_hooks_are_registered_at_construction() -> None:
+    assert skeleton_app._startup_handlers[_KEYS["register_conversation_completion_tools"]] is (
+        lifecycle.register_conversation_completion_tools
+    )
+    assert skeleton_app._startup_handlers[_KEYS["redrive_pending_conversations"]] is (
+        lifecycle.redrive_pending_conversations
+    )
+    assert skeleton_app._post_swap_handlers[_KEYS["start_conversations_delivery_sweep"]] is (
+        lifecycle.start_conversations_delivery_sweep
+    )
+    assert skeleton_app._shutdown_handlers[_KEYS["stop_conversations_delivery_sweep"]] is (
+        lifecycle.stop_conversations_delivery_sweep
+    )
 
-    from tai42_skeleton.app.instance import app as skeleton_app
 
-    with tai42_app.bound(skeleton_app):
-        from tai42_skeleton.routers import conversations as router
-
-    return router
+def test_the_redrive_runs_after_the_sub_mcp_rehydrate() -> None:
+    # The re-drive may call a preset or a sub-MCP tool, so it follows their rehydration in the
+    # per-epoch handler order.
+    keys = [f"{h.__module__}.{h.__qualname__}" for h in skeleton_app._epoch_handlers()]
+    rehydrate = keys.index("tai42_skeleton.app.instance.rehydrate_sub_mcp_apps")
+    assert keys.index(_KEYS["register_conversation_completion_tools"]) > rehydrate
+    assert keys.index(_KEYS["redrive_pending_conversations"]) > rehydrate
 
 
 @pytest.fixture
@@ -58,7 +84,6 @@ async def test_startup_registers_the_completion_tools(monkeypatch):
     # ``tool(...)`` call carries the exact name, hidden meta and force flag.
     from tai42_contract.app import tai42_app
 
-    from tai42_skeleton.app.instance import app as skeleton_app
     from tai42_skeleton.conversations.turn import (
         COMPLETION_TOOL_NAME,
         DELIVER_TOOL_COMPLETION_NAME,
@@ -74,11 +99,9 @@ async def test_startup_registers_the_completion_tools(monkeypatch):
         return func
 
     with tai42_app.bound(skeleton_app):
-        from tai42_skeleton.routers import conversations as router
-
         monkeypatch.setattr(skeleton_app.tools, "tool", _record_tool)
         try:
-            await router._register_conversation_completion_tool()
+            await lifecycle.register_conversation_completion_tools()
         finally:
             monkeypatch.setattr(skeleton_app.tools, "tool", original_tool)
 
@@ -98,13 +121,13 @@ async def test_startup_redrives_intake_then_delivery(monkeypatch, order):
     # Intake re-drive FIRST: it gives every stranded ``accepted`` record a terminal outcome
     # the delivery re-drive then picks up. The sweep is established separately (post-swap).
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
-    await _router()._redrive_pending_conversations()
+    await lifecycle.redrive_pending_conversations()
     assert order == ["redrive_accepted", "redrive_pending"]
 
 
 async def test_startup_is_a_no_op_without_a_backend(monkeypatch, order):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
-    await _router()._redrive_pending_conversations()
+    await lifecycle.redrive_pending_conversations()
     assert order == []
 
 
@@ -113,23 +136,23 @@ async def test_post_swap_starts_the_sweep_with_a_backend(monkeypatch, order):
     # not by the on_startup re-drive, so it survives a reload rather than dying on the
     # throwaway build-thread loop.
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
-    _router()._start_conversations_delivery_sweep()
+    lifecycle.start_conversations_delivery_sweep()
     assert order == ["start_delivery_sweep"]
 
 
 async def test_post_swap_is_a_no_op_without_a_backend(monkeypatch, order):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
-    _router()._start_conversations_delivery_sweep()
+    lifecycle.start_conversations_delivery_sweep()
     assert order == []
 
 
 async def test_shutdown_stops_the_sweep_with_a_backend(monkeypatch, order):
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
-    await _router()._stop_conversations_delivery_sweep()
+    await lifecycle.stop_conversations_delivery_sweep()
     assert order == ["stop_delivery_sweep"]
 
 
 async def test_shutdown_is_a_no_op_without_a_backend(monkeypatch, order):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
-    await _router()._stop_conversations_delivery_sweep()
+    await lifecycle.stop_conversations_delivery_sweep()
     assert order == []

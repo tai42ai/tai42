@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from tai42_kit.registry import StagedSlot
 
 logger = logging.getLogger(__name__)
 
@@ -431,15 +432,12 @@ def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPl
 
 
 # -- Process-global current registry, swapped atomically by the build pass -----
-# ``_current`` is the COMMITTED registry the Studio routes serve. During an epoch
-# build the rebuild handler stages its fresh registry in ``_pending`` without swapping
-# the live one; ``commit_staging`` promotes it atomically on success, ``abort_staging``
-# drops it on failure — so a failed build never swaps in a half-built Studio
-# registry.
+# The COMMITTED registry is what the Studio routes serve. During an epoch build the
+# rebuild handler stages its fresh registry without swapping the live one; commit
+# promotes it atomically on success, abort drops it on failure — so a failed build
+# never swaps in a half-built Studio registry.
 
-_current: StudioPluginRegistry | None = None
-_pending: StudioPluginRegistry | None = None
-_staging: bool = False
+_REGISTRY: StagedSlot[StudioPluginRegistry] = StagedSlot()
 
 
 def set_current_registry(registry: StudioPluginRegistry) -> None:
@@ -447,11 +445,7 @@ def set_current_registry(registry: StudioPluginRegistry) -> None:
 
     STAGED during an epoch build (promoted at commit), else swapped in immediately (boot).
     """
-    global _current, _pending
-    if _staging:
-        _pending = registry
-        return
-    _current = registry
+    _REGISTRY.set(registry)
 
 
 def current_registry() -> StudioPluginRegistry:
@@ -460,9 +454,10 @@ def current_registry() -> StudioPluginRegistry:
     Raises if the pass has not run (the app is not started) — never returns a silent empty
     registry that would hide a boot-order bug.
     """
-    if _current is None:
+    current = _REGISTRY.current()
+    if current is None:
         raise StudioPluginError("studio plugin registry has not been built — is the app started?")
-    return _current
+    return current
 
 
 def current_registry_staged() -> StudioPluginRegistry:
@@ -471,9 +466,10 @@ def current_registry_staged() -> StudioPluginRegistry:
     The build's own view (kind status). Serve-time reads use :func:`current_registry` (committed
     only). Raises the same not-built error when neither exists.
     """
-    if _pending is not None:
-        return _pending
-    return current_registry()
+    staged = _REGISTRY.staged_or_current()
+    if staged is None:
+        return current_registry()
+    return staged
 
 
 def begin_staging() -> None:
@@ -481,9 +477,7 @@ def begin_staging() -> None:
 
     A rebuild during the build stages rather than swaps the live registry.
     """
-    global _staging, _pending
-    _staging = True
-    _pending = None
+    _REGISTRY.begin()
 
 
 def commit_staging() -> None:
@@ -491,18 +485,12 @@ def commit_staging() -> None:
 
     Idempotent when no build staged.
     """
-    global _current, _pending, _staging
-    if _staging and _pending is not None:
-        _current = _pending
-    _pending = None
-    _staging = False
+    _REGISTRY.commit()
 
 
 def abort_staging() -> None:
     """Drop the staged registry on a failed build — the live registry is untouched."""
-    global _pending, _staging
-    _pending = None
-    _staging = False
+    _REGISTRY.abort()
 
 
 async def rebuild_studio_plugin_registry() -> None:

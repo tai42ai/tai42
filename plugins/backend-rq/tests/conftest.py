@@ -13,7 +13,7 @@ from __future__ import annotations
 import fnmatch
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -236,18 +236,22 @@ stub_app = StubApp()
 tai42_app.bind(stub_app)
 
 
+@pytest.fixture(autouse=True)
+def _gate_state_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh kit gate state per test, declared enabled — what the skeleton hands the kit at boot."""
+    from tai42_kit.registry import StagedSlot
+    from tai42_kit.utils import worker_secret_capability as capability_module
+
+    monkeypatch.setattr(capability_module, "_GATE_STATE", StagedSlot())
+    capability_module.set_access_control_gate_state(True)
+
+
 @pytest.fixture
-def access_control(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[bool], None]]:
-    """Set the ``ACCESS_CONTROL_ENABLE`` gate for a test and restore it after — the
-    worker's own read of the operator env the skeleton gate reads."""
-    from tai42_kit.settings import reset_all_settings
+def access_control() -> Callable[[bool], None]:
+    """Declare the access-control gate state to the kit for a test, as the gate's owner does."""
+    from tai42_kit.utils.worker_secret_capability import set_access_control_gate_state
 
-    def _set(enabled: bool) -> None:
-        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true" if enabled else "false")
-        reset_all_settings()
-
-    yield _set
-    reset_all_settings()
+    return set_access_control_gate_state
 
 
 @pytest.fixture(autouse=True)

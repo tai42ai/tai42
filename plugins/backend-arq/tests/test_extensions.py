@@ -117,9 +117,9 @@ async def test_async_task_enqueue_opts_split(bind_pool) -> None:
 
     ((_args, kwargs),) = fake.calls
     # countdown maps to arq's _defer_by enqueue option, callback_kwargs stays a
-    # job kwarg, and a None option is dropped entirely.
+    # job kwarg carrying the gate state decided here, and a None option is dropped entirely.
     assert kwargs["_defer_by"] == 30
-    assert kwargs["callback_kwargs"] == {"tool": "next"}
+    assert kwargs["callback_kwargs"] == {"tool": "next", "carried_kwargs": {"backend_secret_capability": False}}
     assert "countdown" not in kwargs
     assert "expires" not in kwargs
     assert "_expires" not in kwargs

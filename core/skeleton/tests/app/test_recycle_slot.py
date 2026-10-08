@@ -76,7 +76,7 @@ async def test_slot_fires_after_the_terminal_reply() -> None:
     events: list[tuple[str, Any]] = []
     r = _RecordingRedis(events)
 
-    async def handler(_op: dict[str, Any]) -> dict[str, str]:
+    async def handler(_op: dict[str, Any], *, deadline: float) -> dict[str, str]:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
         return {"recycling": "serve"}
 
@@ -92,7 +92,7 @@ async def test_slot_fires_even_without_a_reply_channel() -> None:
     events: list[tuple[str, Any]] = []
     r = _RecordingRedis(events)
 
-    async def handler(_op: dict[str, Any]) -> None:
+    async def handler(_op: dict[str, Any], *, deadline: float) -> None:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
         return None
 
@@ -105,7 +105,7 @@ async def test_a_failed_apply_disarms_without_firing() -> None:
     events: list[tuple[str, Any]] = []
     r = _RecordingRedis(events)
 
-    async def handler(_op: dict[str, Any]) -> None:
+    async def handler(_op: dict[str, Any], *, deadline: float) -> None:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
         raise RuntimeError("apply blew up")
 
@@ -122,10 +122,10 @@ async def test_arming_then_a_clean_op_that_does_not_rearm_does_not_refire() -> N
     events: list[tuple[str, Any]] = []
     r = _RecordingRedis(events)
 
-    async def arming(_op: dict[str, Any]) -> None:
+    async def arming(_op: dict[str, Any], *, deadline: float) -> None:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
 
-    async def plain(_op: dict[str, Any]) -> None:
+    async def plain(_op: dict[str, Any], *, deadline: float) -> None:
         return None
 
     await bus._handle_op(cast("Any", r), arming, _frame("reply-chan"))
@@ -147,7 +147,7 @@ async def test_terminal_reply_publish_error_disarms_without_firing() -> None:
             if phase == "terminal":
                 raise ConnectionError("bus publish failed")
 
-    async def arming(_op: dict[str, Any]) -> None:
+    async def arming(_op: dict[str, Any], *, deadline: float) -> None:
         bus.arm_post_reply(lambda: fired.append("slot"))
 
     r = _RaisingOnTerminal()
@@ -161,7 +161,7 @@ async def test_terminal_reply_publish_error_disarms_without_firing() -> None:
     assert bus._post_reply_slot is None
 
     # A subsequent clean op that never rearms must not misfire the stale self-exit.
-    async def plain(_op: dict[str, Any]) -> None:
+    async def plain(_op: dict[str, Any], *, deadline: float) -> None:
         return None
 
     await bus._handle_op(cast("Any", r), plain, _frame(None))
@@ -174,7 +174,7 @@ async def test_cancellation_after_arming_disarms_the_slot() -> None:
     fired: list[str] = []
     r = _RecordingRedis([])
 
-    async def arming_then_cancelled(_op: dict[str, Any]) -> None:
+    async def arming_then_cancelled(_op: dict[str, Any], *, deadline: float) -> None:
         bus.arm_post_reply(lambda: fired.append("slot"))
         raise asyncio.CancelledError
 
@@ -223,9 +223,9 @@ async def test_apply_bus_op_recycle_returns_payload_and_fires_hook() -> None:
     m = _Mixin()
     m._bus = _make_bus(WorkerKind.backend)
     fired: list[str] = []
-    m._on_fleet_op_applied(lambda name: fired.append(name))
+    m._on_fleet_op_applied(lambda name, _budget: fired.append(name))
 
-    result = await m._apply_bus_op({"op": "recycle"})
+    result = await m._apply_bus_op({"op": "recycle"}, deadline=1e9)
 
     assert result == {"recycling": "backend"}
     assert fired == ["recycle"]

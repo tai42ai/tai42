@@ -26,11 +26,6 @@ from tai42_contract.access_control.models import (
     RoleDefinition,
 )
 from tai42_contract.access_control.policy import PolicyEnforcer
-from tai42_contract.access_control.registry import (
-    get_identity_provider_factory,
-    register_identity_provider,
-    reset_registry,
-)
 from tai42_contract.access_control.verifier import Verifier
 
 __all__ = [
@@ -49,9 +44,6 @@ __all__ = [
     "Verifier",
     "caller_may_read_secrets",
     "get_current_user_id",
-    "get_identity_provider_factory",
-    "register_identity_provider",
-    "reset_registry",
     "reset_request_secret_capability",
     "reset_request_user_id",
     "set_request_secret_capability",

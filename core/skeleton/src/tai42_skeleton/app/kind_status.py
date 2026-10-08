@@ -26,9 +26,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel
-from tai42_contract.access_control.registry import get_identity_provider_factory_staged
-from tai42_contract.accounts.registry import iter_accounts_provider_factories_staged
 from tai42_contract.app import tai42_app
+from tai42_kit.access_control.registry import get_identity_provider_factory_staged
+from tai42_kit.accounts.registry import iter_accounts_provider_factories_staged
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 
 from tai42_skeleton.access_control.settings import access_control_settings

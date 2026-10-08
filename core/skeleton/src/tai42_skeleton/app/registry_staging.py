@@ -1,24 +1,27 @@
 """Coordinated staged-registration lifecycle for every per-generation global.
 
 An epoch build stages each code-populated global — the connector, identity, accounts,
-and operation registries, plus the monitoring backend, the Studio plugin registry, and
-the route registry's ``/api`` shape index — into a fresh generation off to the side, and
-promotes them ALL TOGETHER only if the build succeeds.
+and operation registries, plus the monitoring backend, the Studio plugin registry, the
+route registry's ``/api`` shape index, and the access-control gate state declared to the
+kit — into a fresh generation off to the side, and promotes them ALL TOGETHER only if the
+build succeeds.
 A failed build drops every staged generation untouched, so the live epoch keeps serving
 against a complete, unmutated set of globals.
 
-Three of these live in the contract (identity/accounts) or below the app so they stay
-epoch-free; this skeleton helper is the ONE place their staging is driven in lockstep
-with the skeleton-owned ones. ``begin`` runs after ``reset_all_settings`` in the
-build+swap primitive; ``commit`` runs in the no-await swap stretch; ``abort`` runs on
-the failure branch. The order within each phase is immaterial — each global's
-promotion is an independent atomic reference assignment.
+The identity and accounts registries live in the kit, where plugins register into them
+without an app handle; every one of these globals stands on the kit's staged-generation
+primitives, and this skeleton helper is the ONE place their staging is driven in
+lockstep. ``begin`` runs after ``reset_all_settings`` in the build+swap primitive;
+``commit`` runs in the no-await swap stretch; ``abort`` runs on the failure branch. The
+order within each phase is immaterial — each global's promotion is an independent atomic
+reference assignment.
 """
 
 from __future__ import annotations
 
-from tai42_contract.access_control import registry as identity_registry
-from tai42_contract.accounts import registry as accounts_registry
+from tai42_kit.access_control import registry as identity_registry
+from tai42_kit.accounts import registry as accounts_registry
+from tai42_kit.utils import worker_secret_capability as gate_state
 
 from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.connectors.providers import registry as connector_registry
@@ -39,6 +42,7 @@ def begin_staging_all() -> None:
     monitoring_registry.begin_staging()
     studio_registry.begin_staging()
     route_registry.begin_shape_staging()
+    gate_state.begin_staging()
 
 
 def commit_staging_all() -> None:
@@ -54,6 +58,7 @@ def commit_staging_all() -> None:
     monitoring_registry.commit_staging()
     studio_registry.commit_staging()
     route_registry.commit_shape_staging()
+    gate_state.commit_staging()
 
 
 def abort_staging_all() -> None:
@@ -69,3 +74,4 @@ def abort_staging_all() -> None:
     monitoring_registry.abort_staging()
     studio_registry.abort_staging()
     route_registry.abort_shape_staging()
+    gate_state.abort_staging()

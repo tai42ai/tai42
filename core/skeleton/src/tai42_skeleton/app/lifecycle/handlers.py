@@ -36,7 +36,7 @@ class LifecycleHandlersMixin(LifecycleState):
         return func
 
     def _on_fleet_op_applied(self, func: Callable):
-        """Register a handler fired with the OP NAME after every applied bus op and the reconnect resync.
+        """Register a handler fired with the OP NAME and the apply BUDGET after every applied bus op and the resync.
 
         Keyed by qualified name so a module re-import replaces rather than accumulates.
         """
@@ -111,17 +111,17 @@ class LifecycleHandlersMixin(LifecycleState):
         """
         await self._run_handlers(list(self._post_swap_handlers.values()), raise_on_error=raise_on_error)
 
-    async def _run_fleet_op_applied_handlers(self, op_name: str) -> None:
-        """Fire every ``on_fleet_op_applied`` handler with the op name.
+    async def _run_fleet_op_applied_handlers(self, op_name: str, budget: float) -> None:
+        """Fire every ``on_fleet_op_applied`` handler with the op name and the seconds left of the apply window.
 
         A raising handler propagates (fail-loud), turning the op's terminal reply into ``failed`` —
         the post-apply obligation is part of the op applying.
         """
         for handler in list(self._fleet_op_applied_handlers.values()):
             if inspect.iscoroutinefunction(handler):
-                await handler(op_name)
+                await handler(op_name, budget)
             else:
-                handler(op_name)
+                handler(op_name, budget)
 
     def _epoch_handlers(self) -> list[Callable]:
         """The ONE ordered per-epoch handler list: startup handlers then reload handlers.

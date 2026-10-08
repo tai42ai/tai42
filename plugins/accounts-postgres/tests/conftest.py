@@ -547,18 +547,18 @@ def response_json(response: Any) -> Any:
 def _isolate_registries():
     """Snapshot + restore both module-level registries around each test so a
     registration never leaks into the next."""
-    from tai42_contract.access_control import registry as identity_registry
-    from tai42_contract.accounts import registry as accounts_registry
+    from tai42_kit.access_control import registry as identity_registry
+    from tai42_kit.accounts import registry as accounts_registry
 
-    identity_saved = dict(identity_registry._REGISTRY)
-    accounts_saved = dict(accounts_registry._REGISTRY)
+    identity_saved = dict(identity_registry._PROVIDERS._generation.committed())
+    accounts_saved = dict(accounts_registry._PROVIDERS._generation.committed())
     try:
         yield
     finally:
-        identity_registry._REGISTRY.clear()
-        identity_registry._REGISTRY.update(identity_saved)
-        accounts_registry._REGISTRY.clear()
-        accounts_registry._REGISTRY.update(accounts_saved)
+        identity_registry._PROVIDERS._generation.committed().clear()
+        identity_registry._PROVIDERS._generation.committed().update(identity_saved)
+        accounts_registry._PROVIDERS._generation.committed().clear()
+        accounts_registry._PROVIDERS._generation.committed().update(accounts_saved)
 
 
 @pytest.fixture(autouse=True)

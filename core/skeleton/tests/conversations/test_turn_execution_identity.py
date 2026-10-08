@@ -170,13 +170,14 @@ def store(monkeypatch) -> ConversationRecordStore:
 @pytest.fixture(autouse=True)
 def _isolate_registries():
     routes_snapshot = dict(route_registry._routes)
-    ops_snapshot = dict(operation_registry._operations)
+    ops_snapshot = dict(operation_registry._generation.committed())
     with tai42_app.bound(None):
         try:
             yield
         finally:
             route_registry._routes = routes_snapshot
-            operation_registry._operations = ops_snapshot
+            operation_registry._generation.committed().clear()
+            operation_registry._generation.committed().update(ops_snapshot)
 
 
 def _wire_turn(monkeypatch, execution_key: str, tool: str, arguments: dict) -> tuple[FakeChannel, ConversationRoute]:

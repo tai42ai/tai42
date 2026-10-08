@@ -55,6 +55,7 @@ import ast
 import re
 import subprocess
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 from typing import NoReturn
@@ -275,6 +276,73 @@ def _top_modules_ref(ref: str, src_rel: str, repo_root: Path) -> set[str]:
             if stem is not None:
                 modules.add(stem)
     return modules
+
+
+_DIST_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _normalized_dist_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _read_pyproject(path: Path) -> dict:
+    try:
+        return tomllib.loads(path.read_text())
+    except FileNotFoundError:
+        _fail(f"pyproject.toml not found at {path}")
+
+
+def _project_dependencies(member_dir: Path) -> list[str]:
+    """The normalized distribution names of a member's ``[project] dependencies``."""
+    names: list[str] = []
+    for requirement in _read_pyproject(member_dir / "pyproject.toml").get("project", {}).get("dependencies", []):
+        match = _DIST_NAME.match(requirement)
+        if match is None:
+            _fail(f"unparseable dependency {requirement!r} in {member_dir / 'pyproject.toml'}")
+        names.append(_normalized_dist_name(match.group(1)))
+    return names
+
+
+def _workspace_members(repo_root: Path) -> dict[str, Path]:
+    """Normalized distribution name -> member dir, for every ``[tool.uv.workspace]`` member of the repo root.
+
+    A repo root without a ``pyproject.toml`` or without a workspace has no members. A member dir
+    without a ``pyproject.toml`` (a descriptor-only dir) carries no distribution.
+    """
+    root_pyproject = repo_root / "pyproject.toml"
+    if not root_pyproject.is_file():
+        return {}
+    workspace = _read_pyproject(root_pyproject).get("tool", {}).get("uv", {}).get("workspace", {})
+    excluded = {path for pattern in workspace.get("exclude", []) for path in repo_root.glob(pattern)}
+    members: dict[str, Path] = {}
+    for pattern in workspace.get("members", []):
+        for member in sorted(repo_root.glob(pattern)):
+            if member in excluded or not (member / "pyproject.toml").is_file():
+                continue
+            name = _read_pyproject(member / "pyproject.toml").get("project", {}).get("name")
+            if name is not None:
+                members[_normalized_dist_name(name)] = member
+    return members
+
+
+def _first_party_dependencies(package_dir: Path, repo_root: Path) -> list[tuple[str, str]]:
+    """The package's first-party dependencies as ``(distribution name, src dir relative to the repo root)``.
+
+    A first-party dependency is a ``[project] dependencies`` entry whose distribution is a workspace
+    member, followed transitively (a first-party base may itself inherit from another member's
+    class). Sorted by distribution name.
+    """
+    members = _workspace_members(repo_root)
+    found: dict[str, Path] = {}
+    pending = _project_dependencies(package_dir)
+    while pending:
+        name = pending.pop()
+        member = members.get(name)
+        if member is None or name in found:
+            continue
+        found[name] = member
+        pending.extend(_project_dependencies(member))
+    return sorted((name, (member / "src").relative_to(repo_root).as_posix()) for name, member in found.items())
 
 
 def _call_callee_name(func: ast.expr) -> str | None:
@@ -604,7 +672,7 @@ def _is_logger_binding(value: str | None) -> bool:
     return value is not None and _LOGGER_BINDING.match(value.strip()) is not None
 
 
-def _breakages(module: str, ref: str, src_rel: str, repo_root: Path) -> list[str]:
+def _breakages(module: str, ref: str, src_rel: str, repo_root: Path, first_party: list[str]) -> list[str]:
     # griffe is the heavy release-only dependency (api-gate extra); import it
     # lazily so the pure decision helpers can be imported and unit-tested in an
     # environment that does not carry it.
@@ -613,9 +681,19 @@ def _breakages(module: str, ref: str, src_rel: str, repo_root: Path) -> list[str
     # The ref side loads from a worktree griffe checks out of ``repo_root`` (a
     # repo-relative search path); the worktree side loads the current tree at the
     # same path made absolute, so both sides are anchored to ``repo_root`` and
-    # never to the process's working directory.
-    old = griffe.load_git(module, ref=ref, repo=repo_root, search_paths=[src_rel])
-    new = griffe.load(module, search_paths=[repo_root / src_rel])
+    # never to the process's working directory. Each side first loads the
+    # first-party dependencies (``first_party``: their src dirs) into its own
+    # collection, so a class inheriting from a first-party base resolves its
+    # inherited members on both sides; a third-party base stays unresolved.
+    old_collection = griffe.ModulesCollection()
+    new_collection = griffe.ModulesCollection()
+    for dep_src_rel in first_party:
+        for dep in sorted(_top_modules_ref(ref, dep_src_rel, repo_root)):
+            griffe.load_git(dep, ref=ref, repo=repo_root, search_paths=[dep_src_rel], modules_collection=old_collection)
+        for dep in sorted(_top_modules_worktree(repo_root / dep_src_rel)):
+            griffe.load(dep, search_paths=[repo_root / dep_src_rel], modules_collection=new_collection)
+    old = griffe.load_git(module, ref=ref, repo=repo_root, search_paths=[src_rel], modules_collection=old_collection)
+    new = griffe.load(module, search_paths=[repo_root / src_rel], modules_collection=new_collection)
     explained: list[str] = []
     for b in griffe.find_breaking_changes(old, new):
         if isinstance(b.obj, griffe.Attribute) and _is_logger_binding(str(b.obj.value)):
@@ -690,8 +768,9 @@ def main() -> None:
     findings: list[str] = [
         f"{module}: shipped top-level module was removed" for module in sorted(old_modules - new_modules)
     ]
+    first_party = [dep_src_rel for _name, dep_src_rel in _first_party_dependencies(repo_root / args.dir, repo_root)]
     for module in sorted(old_modules & new_modules):
-        findings.extend(_breakages(module, previous, src_rel, repo_root))
+        findings.extend(_breakages(module, previous, src_rel, repo_root, first_party))
 
     header = f"{args.package}: {old_version} -> {args.version} ({bump} bump, mode={mode})"
     passes, reason = _gate_passes(mode, old_version, args.version, bool(findings))

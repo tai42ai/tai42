@@ -66,10 +66,11 @@ def _isolate_registries():
         # reinstating a snapshot would drop another suite's routes with nothing to
         # re-record them.
         routes_before = set(route_registry._routes)
-        ops_snapshot = dict(operation_registry._operations)
+        ops_snapshot = dict(operation_registry._generation.committed())
         try:
             yield
         finally:
             for key in set(route_registry._routes) - routes_before:
                 del route_registry._routes[key]
-            operation_registry._operations = ops_snapshot
+            operation_registry._generation.committed().clear()
+            operation_registry._generation.committed().update(ops_snapshot)

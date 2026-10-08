@@ -69,7 +69,7 @@ def _restore_global_app_surface():
     app._manifest = None
     surface_before = {(m.path, m.methods) for m in load_all_routes()}  # offline full import
     routes_before = dict(route_registry._routes)
-    ops_before = dict(operation_registry._operations)
+    ops_before = dict(operation_registry._generation.committed())
     routing_before = {n: (m.route_template, m.http_method, m.path_params) for n, m in ops_before.items()}
     try:
         yield
@@ -77,10 +77,10 @@ def _restore_global_app_surface():
         app._manifest = manifest_before
         route_registry._routes.clear()
         route_registry._routes.update(routes_before)
-        operation_registry._operations.clear()
-        operation_registry._operations.update(ops_before)
+        operation_registry._generation.committed().clear()
+        operation_registry._generation.committed().update(ops_before)
         for name, (template, method, path_params) in routing_before.items():
-            metadata = operation_registry._operations[name]
+            metadata = operation_registry._generation.committed()[name]
             metadata.route_template, metadata.http_method, metadata.path_params = template, method, path_params
         # The restored table must read back the complete offline surface — a partial
         # restore would leave the started/curated boot state leaking to the next reader.

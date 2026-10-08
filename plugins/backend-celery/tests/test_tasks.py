@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
@@ -63,7 +64,7 @@ def test_run_async_runs_on_the_task_loop() -> None:
 
 async def test_run_tool_pops_tool_name_arg(stub_app) -> None:
     stub_app.tools.run_tool_result = "result"
-    out = await run_tool(backend_tool_name="my_tool", a=1)
+    out = await run_tool(backend_tool_name="my_tool", backend_secret_capability=False, a=1)
     assert out == "result"
     assert stub_app.tools.run_tool_calls == [("my_tool", {"a": 1})]
 
@@ -76,40 +77,36 @@ async def test_run_tool_missing_tool_name_raises(stub_app) -> None:
 async def test_run_tool_runs_the_tool_detached(stub_app) -> None:
     # A worker execution has no live caller, so the tool observes the detached
     # flag set; the flag never leaks past the run.
-    await run_tool(backend_tool_name="my_tool", a=1)
+    await run_tool(backend_tool_name="my_tool", backend_secret_capability=False, a=1)
     assert stub_app.tools.detached_seen == [True]
     assert stub_app.tools.offloads == [True]
     assert in_detached_run() is False
 
 
-@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
-async def test_run_tool_binds_the_worker_secret_capability(
-    stub_app, access_control, gate_enabled: bool, capable: bool
-) -> None:
-    # No HTTP request bound the capability, so the worker binds it to the gate
-    # state (OFF -> secret-capable synthetic admin, ON -> fail-closed), reset after.
-    access_control(gate_enabled)
-    await run_tool(backend_tool_name="my_tool", a=1)
-    assert stub_app.tools.secret_capability_seen == [capable]
-    assert caller_may_read_secrets() is False
-
-
-async def test_run_tool_binds_the_propagated_submitter_capability(stub_app, access_control) -> None:
-    # An admin submitter's capability rides with the job as True; the worker binds it
-    # verbatim even gate ON, and never passes the reserved kwarg to the tool.
-    access_control(True)
+@pytest.mark.parametrize("capability", [True, False])
+async def test_run_tool_binds_the_carried_capability(stub_app, capability: bool) -> None:
+    # The worker binds the capability the job carried verbatim, never passes the reserved
+    # kwarg to the tool, and the bind never leaks past the run.
     stub_app.tools.run_tool_result = "result"
-    out = await run_tool(backend_tool_name="my_tool", backend_secret_capability=True, a=1)
+    out = await run_tool(backend_tool_name="my_tool", backend_secret_capability=capability, a=1)
     assert out == "result"
-    assert stub_app.tools.secret_capability_seen == [True]
+    assert stub_app.tools.secret_capability_seen == [capability]
     assert stub_app.tools.run_tool_calls == [("my_tool", {"a": 1})]
     assert caller_may_read_secrets() is False
+
+
+async def test_run_tool_without_a_carried_capability_raises(stub_app) -> None:
+    with pytest.raises(KeyError, match="backend_secret_capability"):
+        await run_tool(backend_tool_name="my_tool", a=1)
+    assert stub_app.tools.run_tool_calls == []
 
 
 def test_tool_execution_runs_tool_through_app(stub_app) -> None:
     stub_app.tools.run_tool_result = {"ok": True}
     try:
-        out = tool_execution.apply(kwargs={"backend_tool_name": "my_tool", "x": 2}).get()
+        out = tool_execution.apply(
+            kwargs={"backend_tool_name": "my_tool", "backend_secret_capability": False, "x": 2}
+        ).get()
     finally:
         if tool_execution._loop is not None:  # close the task loop opened by apply()
             tool_execution._loop.close()
@@ -154,3 +151,41 @@ def test_callback_task_runs_callback_execution(stub_app) -> None:
             callback_task._loop.close()
             callback_task._loop = None
     assert out == 6
+
+
+@pytest.mark.parametrize("capability", [True, False])
+def test_callback_task_retried_after_a_transient_error_runs_with_the_carried_capability(
+    stub_app, monkeypatch: pytest.MonkeyPatch, capability: bool
+) -> None:
+    # celery's autoretry re-sends the task's own argument list, so the retry runs the SAME
+    # spec object the first attempt was handed.
+    from tai42_kit.backend import CallbackSchema
+    from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
+
+    from tai42_backend_celery.core.tasks import callback_task
+
+    recorded_run_tool = stub_app.tools.run_tool
+    attempts: list[bool] = []
+
+    async def fails_once_then_runs(key: str, arguments: Any, **kwargs: Any) -> Any:
+        attempts.append(caller_may_read_secrets())
+        if len(attempts) == 1:
+            raise ConnectionError("transient broker error")
+        return await recorded_run_tool(key, arguments, **kwargs)
+
+    monkeypatch.setattr(stub_app.tools, "run_tool", fails_once_then_runs)
+    monkeypatch.setattr(stub_app.tools, "run_tool_result", {"ran": True})
+    callback = CallbackSchema(
+        expr=TemplatedText(content="."),
+        tool="follow_up",
+        carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: capability},
+    )
+    try:
+        outcome = callback_task.apply(args=({"k": 1}, callback))
+    finally:
+        if callback_task._loop is not None:
+            callback_task._loop.close()
+            callback_task._loop = None
+    assert outcome.state == "SUCCESS", outcome.result
+    assert outcome.result == {"ran": True}
+    assert attempts == [capability, capability]

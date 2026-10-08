@@ -17,6 +17,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_SUBJECT_ARG,
 )
+from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 from tai42_backend_rq import tasks
 from tai42_backend_rq.settings import rq_settings
@@ -29,6 +30,9 @@ _FORWARDED = {
     SCHEDULE_EXECUTION_KEY_ARG: "svc",
     SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
 }
+
+# The secret-read capability the enqueue path carries onto every callback spec.
+_CARRIED = {WORKER_SECRET_CAPABILITY_ARG: False}
 
 
 async def _noop_shutdown() -> None:
@@ -65,7 +69,7 @@ async def test_tool_execution_dispatches_and_closes_clients(app, monkeypatch):
     app.tools.run_result = {"out": 1}
 
     arg_name = rq_settings().tool_name_arg
-    result = await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
+    result = await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: False, "x": 5})
 
     assert result == {"out": 1}
     assert app.tools.run_calls == [("my_tool", {"x": 5})]
@@ -94,47 +98,40 @@ async def test_tool_execution_runs_the_tool_detached(app, monkeypatch):
     monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
 
     arg_name = rq_settings().tool_name_arg
-    await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
+    await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: False, "x": 5})
 
     assert app.tools.detached_seen == [True]
     assert app.tools.offloads == [True]
     assert in_detached_run() is False
 
 
-@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
-async def test_tool_execution_binds_the_worker_secret_capability(
-    app, access_control, monkeypatch, gate_enabled: bool, capable: bool
-):
-    # No HTTP request bound the capability, so the worker binds it to the gate
-    # state (OFF -> secret-capable synthetic admin, ON -> fail-closed), reset after.
+@pytest.mark.parametrize("capability", [True, False])
+async def test_tool_execution_binds_the_carried_capability(app, monkeypatch, capability: bool):
+    # The worker binds the capability the job carried verbatim, never passes the reserved
+    # kwarg to the tool, and the bind never leaks past the job.
     async def fake_shutdown() -> None:
         pass
 
     monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-    access_control(gate_enabled)
 
     arg_name = rq_settings().tool_name_arg
-    await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
+    await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: capability, "x": 5})
 
-    assert app.tools.secret_capability_seen == [capable]
-    assert caller_may_read_secrets() is False
-
-
-async def test_tool_execution_binds_the_propagated_submitter_capability(app, access_control, monkeypatch):
-    # An admin submitter's capability rides with the job as True; the worker binds it
-    # verbatim even gate ON, and never passes the reserved kwarg to the tool.
-    async def fake_shutdown() -> None:
-        pass
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-    access_control(True)
-
-    arg_name = rq_settings().tool_name_arg
-    await tasks.tool_execution(**{arg_name: "my_tool", "backend_secret_capability": True, "x": 5})
-
-    assert app.tools.secret_capability_seen == [True]
+    assert app.tools.secret_capability_seen == [capability]
     assert app.tools.run_calls == [("my_tool", {"x": 5})]
     assert caller_may_read_secrets() is False
+
+
+async def test_tool_execution_without_a_carried_capability_raises(app, monkeypatch):
+    async def fake_shutdown() -> None:
+        pass
+
+    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
+
+    arg_name = rq_settings().tool_name_arg
+    with pytest.raises(KeyError, match=WORKER_SECRET_CAPABILITY_ARG):
+        await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
+    assert app.tools.run_calls == []
 
 
 async def test_tool_execution_missing_tool_name_raises_but_still_cleans_up(app, monkeypatch):
@@ -163,7 +160,7 @@ async def test_tool_execution_closes_clients_on_tool_failure(app, monkeypatch):
 
     arg_name = rq_settings().tool_name_arg
     with pytest.raises(RuntimeError, match="tool blew up"):
-        await tasks.tool_execution(**{arg_name: "my_tool"})
+        await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: False})
     assert closed == [True]
 
 
@@ -224,7 +221,7 @@ async def test_callback_job_runs_callback_on_success(monkeypatch):
 
     monkeypatch.setattr(tasks, "callback_execution", fake_callback_execution)
 
-    callback = CallbackSchema(tool="next_tool")
+    callback = CallbackSchema(tool="next_tool", carried_kwargs=_CARRIED)
     assert await tasks.callback_job("job-1", callback) == "chained"
     assert seen == [({"n": 3}, callback)]
 
@@ -233,26 +230,26 @@ async def test_callback_job_reports_failed_primary_with_exc_string(monkeypatch):
     """The reported error is the Result's persisted traceback text, not the
     Result object's repr."""
     _patch_job_fetch(monkeypatch, FakeFetchedJob(failed=True))
-    result = await tasks.callback_job("job-1", CallbackSchema(tool="t"))
+    result = await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
     assert result == {"status": "failure", "job_id": "job-1", "error": "job failed hard"}
 
 
 async def test_callback_job_failed_primary_without_exc_string_falls_back(monkeypatch):
     _patch_job_fetch(monkeypatch, FakeFetchedJob(failed=True, exc_string=None))
-    result = await tasks.callback_job("job-1", CallbackSchema(tool="t"))
+    result = await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
     assert result == {"status": "failure", "job_id": "job-1", "error": "Result(id=r-1, type=FAILED)"}
 
 
 async def test_callback_job_reports_unfinished_primary(monkeypatch):
     _patch_job_fetch(monkeypatch, FakeFetchedJob(finished=False))
-    result = await tasks.callback_job("job-1", CallbackSchema(tool="t"))
+    result = await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
     assert result == {"status": "not_finished", "job_id": "job-1", "error": "Job not completed"}
 
 
 async def test_callback_job_missing_primary_raises(monkeypatch):
     _patch_job_fetch(monkeypatch, NoSuchJobError("gone"))
     with pytest.raises(NoSuchJobError):
-        await tasks.callback_job("job-1", CallbackSchema(tool="t"))
+        await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
 
 
 async def test_callback_job_closes_clients_on_success(monkeypatch):
@@ -271,7 +268,7 @@ async def test_callback_job_closes_clients_on_success(monkeypatch):
 
     monkeypatch.setattr(tasks, "callback_execution", fake_callback_execution)
 
-    assert await tasks.callback_job("job-1", CallbackSchema(tool="t")) == "chained"
+    assert await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED)) == "chained"
     assert closed == [True]
 
 
@@ -285,7 +282,7 @@ async def test_callback_job_closes_clients_when_it_raises(monkeypatch):
     _patch_job_fetch(monkeypatch, NoSuchJobError("gone"))
 
     with pytest.raises(NoSuchJobError):
-        await tasks.callback_job("job-1", CallbackSchema(tool="t"))
+        await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
     assert closed == [True]
 
 
@@ -373,7 +370,7 @@ async def test_enqueue_task_countdown_maps_to_enqueue_in(queue):
 
 
 async def test_enqueue_task_chains_callback_job(queue):
-    callback = CallbackSchema(tool="next")
+    callback = CallbackSchema(tool="next", carried_kwargs=_CARRIED)
     job = await tasks.enqueue_task(a=1, callback_kwargs=callback)
 
     assert [kind for kind, _ in queue.calls] == ["enqueue", "enqueue"]
@@ -402,17 +399,27 @@ async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(app, monkeyp
     callback_call = queue.calls[1]
     assert callback_call.func is tasks.callback_job
     (_, enqueued_callback) = callback_call.args
-    assert enqueued_callback.carried_kwargs == _FORWARDED
+    assert enqueued_callback.carried_kwargs == {**_FORWARDED, **_CARRIED}
 
 
-async def test_enqueue_carries_nothing_onto_a_plain_callback(app, monkeypatch):
-    # A plain background task forwards no door context, so the callback stays a plain follow-up.
+@pytest.mark.parametrize(("gate_enabled", "capability"), [(True, False), (False, True)])
+async def test_enqueue_carries_the_gate_state_onto_a_plain_callback(
+    app, monkeypatch, access_control, gate_enabled: bool, capability: bool
+):
+    # A plain background task forwards no door context; its callback still carries the gate state
+    # decided in this, the submitting process: ON fail-closes, OFF is the synthetic admin.
+    access_control(gate_enabled)
     queue = _FakeQueue("q")
     monkeypatch.setattr(tasks, "Queue", lambda name, connection=None: queue)
     monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
-    await tasks.enqueue_task(backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), text="hi")
+    await tasks.enqueue_task(
+        backend_tool_name="greet",
+        backend_secret_capability=True,
+        callback_kwargs=CallbackSchema(tool="next"),
+        text="hi",
+    )
     (_, enqueued_callback) = queue.calls[1].args
-    assert enqueued_callback.carried_kwargs == {}
+    assert enqueued_callback.carried_kwargs == {WORKER_SECRET_CAPABILITY_ARG: capability}
 
 
 async def test_callback_job_that_asks_parks_under_the_forwarded_identity(app, monkeypatch):
@@ -423,7 +430,7 @@ async def test_callback_job_that_asks_parks_under_the_forwarded_identity(app, mo
     sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
     app.interactions.park_sentinel = sentinel
 
-    out = await tasks.callback_job("job-1", CallbackSchema(tool="follow", carried_kwargs=dict(_FORWARDED)))
+    out = await tasks.callback_job("job-1", CallbackSchema(tool="follow", carried_kwargs={**_FORWARDED, **_CARRIED}))
 
     assert out is sentinel
     assert app.interactions.binds == [("svc", "fp-1")]

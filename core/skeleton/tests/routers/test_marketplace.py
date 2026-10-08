@@ -669,15 +669,3 @@ async def test_upgrade_all_off_refuses_not_configured(monkeypatch: pytest.Monkey
     with pytest.raises(NotSupportedError) as exc_info:
         await mkt_ops.marketplace_upgrade_all()
     assert exc_info.value.extra["code"] == "marketplace-not-configured"
-
-
-def test_advisories_poll_skipped_when_store_unconfigured(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    # Store-less: the startup hook logs one INFO skip line and starts nothing, killing
-    # the forever-hourly warning loop against an absent inventory.
-    _off(monkeypatch)
-    started: list[bool] = []
-    monkeypatch.setattr(router.advisories, "start_poll", lambda: started.append(True))
-    with caplog.at_level("INFO", logger=router.logger.name):
-        router._start_advisories_poll()
-    assert started == []
-    assert any("advisory poll skipped" in rec.getMessage() for rec in caplog.records)

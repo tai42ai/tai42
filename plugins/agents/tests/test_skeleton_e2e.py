@@ -50,14 +50,14 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from tai42_contract.access_control.identity import IdentityProvider
-from tai42_contract.access_control.registry import (
+from tai42_contract.agent.events import MessageFinal, StructuredFinal
+from tai42_contract.app import tai42_app
+from tai42_contract.interactions import ParkResumeUnauthorizedError
+from tai42_kit.access_control.registry import (
     get_identity_provider_factory,
     register_identity_provider,
     reset_registry,
 )
-from tai42_contract.agent.events import MessageFinal, StructuredFinal
-from tai42_contract.app import tai42_app
-from tai42_contract.interactions import ParkResumeUnauthorizedError
 
 # Safe under any binding — these modules touch no tai42_app HTTP decorators at import
 # (unlike the routers, which are imported only after the skeleton app is bound).

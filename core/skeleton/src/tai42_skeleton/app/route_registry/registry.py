@@ -10,6 +10,7 @@ from dataclasses import replace
 
 from pydantic import BaseModel
 from tai42_contract.app import DeclaredRouteMetadata
+from tai42_kit.registry import StagedGeneration
 
 from tai42_skeleton.app.route_registry.metadata import (
     CORE_OWNER,
@@ -54,8 +55,7 @@ class RouteRegistry:
         """Initialize the empty route map, shape index, and owner-to-modules association."""
         self._routes: dict[tuple[str, tuple[str, ...]], RouteMetadata] = {}
         self._version = 0
-        self._committed_shapes: list[_ShapeEntry] = []
-        self._staged_shapes: list[_ShapeEntry] | None = None
+        self._shapes: StagedGeneration[list[_ShapeEntry]] = StagedGeneration(list)
         # Per plugin owner, the import module(s) whose ``@custom_route`` registered its
         # routes — the module the handler is DEFINED in, which is the module whose
         # import fires the decorator. A plugin whose routes register in a SIBLING of its
@@ -278,7 +278,7 @@ class RouteRegistry:
 
         Cold boot writes committed directly.
         """
-        return self._staged_shapes if self._staged_shapes is not None else self._committed_shapes
+        return self._shapes.write_target()
 
     def _record_shape(self, meta: RouteMetadata, method_key: tuple[str, ...]) -> None:
         """Index one handler route by shape, raising on a cross-owner collision.
@@ -314,7 +314,7 @@ class RouteRegistry:
         uninstalled plugin's stale entry); a candidate ``/api`` shape can only overlap another
         ``/api`` shape, so the non-``/api`` entries present here never collide with one.
         """
-        return list(self._committed_shapes)
+        return list(self._shapes.committed())
 
     def match(self, path: str, method: str) -> RouteMetadata | None:
         """The registered handler route that OWNS the concrete request ``(path, method)``, or ``None``.
@@ -324,7 +324,7 @@ class RouteRegistry:
         """
         concrete = parse_concrete(path)
         best: _ShapeEntry | None = None
-        for entry in self._committed_shapes:
+        for entry in self._shapes.committed():
             if method not in entry.methods or not overlap(concrete, entry.shape):
                 continue
             # Strict ``>`` keeps the FIRST-registered entry on an equal-specificity,
@@ -336,22 +336,24 @@ class RouteRegistry:
                 best = entry
         return best.meta if best is not None else None
 
+    def serves_operation(self, name: str) -> bool:
+        """Whether the committed route generation serves a core handler route registered for operation ``name``."""
+        return any(e.meta.owner == CORE_OWNER and e.meta.name == name for e in self._shapes.committed())
+
     def begin_shape_staging(self) -> None:
         """Open a fresh staged shape generation for an epoch build.
 
         The committed live one keeps answering match/collision until the atomic commit.
         """
-        self._staged_shapes = []
+        self._shapes.begin()
 
     def commit_shape_staging(self) -> None:
         """Promote the staged shape generation to committed — one reference flip in the build's no-await swap."""
-        if self._staged_shapes is not None:
-            self._committed_shapes = self._staged_shapes
-            self._staged_shapes = None
+        self._shapes.commit()
 
     def abort_shape_staging(self) -> None:
         """Drop the staged shape generation on a failed build; the committed live one is untouched."""
-        self._staged_shapes = None
+        self._shapes.abort()
 
     def reset_shape_index(self) -> None:
         """Clear the write-target shape generation before a registration pass re-records it.
@@ -415,11 +417,11 @@ class RouteRegistry:
         owner's routes are all in one binding, so the sibling-cache bug drops them
         all-or-nothing). A no-op outside an epoch build (no staged generation).
         """
-        if self._staged_shapes is None:
+        if not self._shapes.staging:
             return
-        staged_owners = {entry.meta.owner for entry in self._staged_shapes}
+        staged_owners = {entry.meta.owner for entry in self._shapes.write_target()}
         committed_plugin_owners = {
-            entry.meta.owner for entry in self._committed_shapes if entry.meta.owner.kind == "plugin"
+            entry.meta.owner for entry in self._shapes.committed() if entry.meta.owner.kind == "plugin"
         }
         dropped = sorted(
             f"{owner.owner_ref}:{owner.item_name}"

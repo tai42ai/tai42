@@ -36,8 +36,8 @@ from uuid import uuid4
 
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, IdentityProvider
-from tai42_contract.access_control.registry import get_identity_provider_factory
 from tai42_contract.template import TemplatedText
+from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 

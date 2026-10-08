@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -37,7 +38,7 @@ async def test_two_serve_workers_claim_distinct_ordinals(wire_bus_client: None) 
     bus_a = make_bus(kind=WorkerKind.serve)
     bus_b = make_bus(kind=WorkerKind.serve)
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     t1, id_a = await _spawn_subscriber(bus_a, noop)
@@ -123,7 +124,7 @@ async def test_echo_skip_is_keyed_on_name_and_generation() -> None:
     bus._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=3)
     applied: list[dict] = []
 
-    async def record(op: dict) -> None:
+    async def record(op: dict, *, deadline: float) -> None:
         applied.append(op)
 
     def frame(name: str, generation: int) -> dict:
@@ -195,7 +196,7 @@ async def test_reconnect_after_transport_drop(wire_bus_client: None, server: fak
     worker = make_bus(heartbeat_ttl=5.0)
     reconnects: list[str] = []
 
-    async def apply(op: dict) -> None:
+    async def apply(op: dict, *, deadline: float) -> None:
         return None
 
     async def on_ready() -> None:
@@ -233,7 +234,7 @@ async def test_reconnect_after_wrapped_disconnect(wire_pooled_bus_client: None, 
     worker = make_bus(heartbeat_ttl=5.0)
     reconnects: list[str] = []
 
-    async def apply(op: dict) -> None:
+    async def apply(op: dict, *, deadline: float) -> None:
         return None
 
     async def on_ready() -> None:
@@ -282,7 +283,7 @@ async def test_heartbeat_death_forces_reconnect(
 
     monkeypatch.setattr(worker, "_heartbeat_loop", flaky_heartbeat)
 
-    async def apply(_op: dict) -> None:
+    async def apply(_op: dict, *, deadline: float) -> None:
         return None
 
     async def on_ready() -> None:
@@ -316,7 +317,7 @@ async def test_lost_slot_remints_a_new_life(
     worker = make_bus(heartbeat_ttl=0.3)
     readies: list[str] = []
 
-    async def apply(_op: dict) -> None:
+    async def apply(_op: dict, *, deadline: float) -> None:
         return None
 
     async def on_ready() -> None:
@@ -499,7 +500,7 @@ async def test_teardown_deliberate_swallows_a_release_transport_blip(
 async def test_mark_recycling_writes_the_recycling_state(wire_bus_client: None) -> None:
     bus = make_bus(heartbeat_ttl=5.0)
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     task, identity = await _spawn_subscriber(bus, noop)
@@ -527,7 +528,7 @@ async def test_mark_recycling_swallows_a_transport_blip(
     # write. The renew succeeds; the presence SET raises a transport error.
     bus = make_bus(heartbeat_ttl=5.0)
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     task, _ = await _spawn_subscriber(bus, noop)
@@ -581,7 +582,7 @@ async def test_presence_writes_are_skipped_on_a_lost_claim(wire_bus_client: None
 async def test_presence_value_round_trips_through_census(wire_bus_client: None) -> None:
     bus = make_bus(heartbeat_ttl=5.0)
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     task, identity = await _spawn_subscriber(bus, noop)
@@ -602,7 +603,7 @@ async def test_last_op_is_stamped_after_a_terminal_reply(wire_bus_client: None) 
     publisher = make_bus(heartbeat_ttl=5.0)
     worker = make_bus(heartbeat_ttl=5.0)
 
-    async def apply(_op: dict) -> dict:
+    async def apply(_op: dict, *, deadline: float) -> dict:
         return {"ok": True}
 
     task, worker_id = await _spawn_subscriber(worker, apply)
@@ -623,6 +624,26 @@ async def test_last_op_is_stamped_after_a_terminal_reply(wire_bus_client: None) 
         assert last_op.op == "reload_config"
         assert last_op.outcome == "applied"
         assert last_op.at
+    finally:
+        await _stop(task)
+
+
+async def test_the_callback_deadline_is_the_receipt_instant_plus_the_apply_window(wire_bus_client: None) -> None:
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=7.0)
+    worker = make_bus(heartbeat_ttl=5.0, apply_timeout=7.0)
+    deadlines: list[float] = []
+
+    async def apply(_op: dict, *, deadline: float) -> None:
+        deadlines.append(deadline)
+
+    task, _worker_id = await _spawn_subscriber(worker, apply)
+    try:
+        before = time.monotonic()
+        local = LocalApplyResult(outcome=OpOutcome.applied)
+        await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        after = time.monotonic()
+        assert len(deadlines) == 1
+        assert before + 7.0 <= deadlines[0] <= after + 7.0
     finally:
         await _stop(task)
 
@@ -665,7 +686,7 @@ async def test_failing_callback_reports_failed(wire_bus_client: None) -> None:
     publisher = make_bus()
     worker = make_bus()
 
-    async def boom(_op: dict) -> None:
+    async def boom(_op: dict, *, deadline: float) -> None:
         raise RuntimeError("nope")
 
     task, worker_id = await _spawn_subscriber(worker, boom)
@@ -690,10 +711,10 @@ async def test_subscriber_skips_op_outside_targets(wire_bus_client: None) -> Non
     a_seen: list[dict] = []
     b_seen: list[dict] = []
 
-    async def record_a(op: dict) -> None:
+    async def record_a(op: dict, *, deadline: float) -> None:
         a_seen.append(op)
 
-    async def record_b(op: dict) -> None:
+    async def record_b(op: dict, *, deadline: float) -> None:
         b_seen.append(op)
 
     task_a, id_a = await _spawn_subscriber(worker_a, record_a)
@@ -718,10 +739,10 @@ async def test_empty_targets_list_reaches_nobody(wire_bus_client: None) -> None:
     a_seen: list[dict] = []
     b_seen: list[dict] = []
 
-    async def record_a(op: dict) -> None:
+    async def record_a(op: dict, *, deadline: float) -> None:
         a_seen.append(op)
 
-    async def record_b(op: dict) -> None:
+    async def record_b(op: dict, *, deadline: float) -> None:
         b_seen.append(op)
 
     task_a, _ = await _spawn_subscriber(worker_a, record_a)
@@ -764,7 +785,7 @@ async def test_subscription_uses_a_fresh_epoch_immune_connection(
     async def on_ready() -> None:
         ready.set()
 
-    async def apply(_op: dict) -> object:
+    async def apply(_op: dict, *, deadline: float) -> object:
         return None
 
     task = asyncio.create_task(bus.subscribe(apply, on_ready))

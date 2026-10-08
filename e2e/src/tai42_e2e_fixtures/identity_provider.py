@@ -31,7 +31,7 @@ from tai42_contract.access_control.identity import (
     IdentityProviderSettings,
     ReadinessTarget,
 )
-from tai42_contract.access_control.registry import register_identity_provider
+from tai42_kit.access_control.registry import register_identity_provider
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import component_store_settings

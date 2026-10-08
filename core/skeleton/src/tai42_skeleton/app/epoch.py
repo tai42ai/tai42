@@ -674,11 +674,6 @@ async def build_and_swap_epoch(
 
     snapshot = dict(os.environ)
     loaded_before = set(_loaded_env_keys)
-    apply_env_and_reset_settings(proposed_env)
-    # Open a staged generation for every per-generation global, so ``start()`` and the
-    # epoch handlers populate the generation being built and the live epoch's globals
-    # stay untouched until the atomic commit below.
-    begin_staging_all()
 
     # All fallible work runs before the epoch counter advances, so a failed build
     # leaves the monotonic client epoch — and every piece of live state — untouched.
@@ -686,6 +681,11 @@ async def build_and_swap_epoch(
     new_epoch = Epoch(number=current_client_epoch())
     _building_epoch = new_epoch
     try:
+        apply_env_and_reset_settings(proposed_env)
+        # Open a staged generation for every per-generation global, so ``start()`` and the
+        # epoch handlers populate the generation being built and the live epoch's globals
+        # stay untouched until the atomic commit below.
+        begin_staging_all()
         rebuild()
         serving_app = await build_serving_app(new_epoch)
     except BaseException:

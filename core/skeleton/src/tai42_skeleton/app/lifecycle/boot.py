@@ -1,14 +1,16 @@
 """Reset the process registries and drive the per-epoch rebuild (start/reload)."""
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from fastmcp.prompts import Prompt
 from fastmcp.resources import Resource
 from fastmcp.resources.template import ResourceTemplate
+from fastmcp.server.providers import LocalProvider
 from fastmcp.tools import Tool
-from tai42_contract.accounts import reset_registry as reset_accounts_registry
 from tai42_contract.app import tai42_app
+from tai42_kit.accounts.registry import reset_registry as reset_accounts_registry
 
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.boot_rules import require_bus_for_backend
@@ -257,32 +259,28 @@ class BootMixin(LifecycleState):
         that re-fires on the reimport always adds into a clean surface, never
         tripping ``on_duplicate="error"``.
 
-        Enumerates the provider's OWN stored components, deliberately NOT the server
-        ``list_*`` views: those filter (enabled / visibility / auth) and synthesize
-        (prefab renderer resources computed on demand, resident on no provider), so
-        a filtered-out component would survive the reset and re-collide on the
-        re-fire, and a synthetic resource URI has nothing to remove and would raise.
-        The raw provider surface is exactly the set the re-fired decorators
-        (re-)populate. ``ResourceTemplate`` is a distinct component kind (not a
-        ``Resource`` subclass) under its own key namespace, so it is cleared on its
-        own branch. Names/URIs are de-duplicated so a versioned/unversioned mix
-        cannot double-remove one name (``remove_*`` clears all versions by name in
-        one call). Synchronous — a plain dict read and sync ``remove_*`` calls,
-        needing no event loop, so it runs inline wherever ``start()`` runs (the
-        serving loop at cold boot, a worker thread on reload).
+        Enumerates the provider's OWN stored components through the provider's public
+        listings, deliberately NOT the server ``list_*`` views: those filter (enabled /
+        visibility / auth) and synthesize (prefab renderer resources computed on demand,
+        resident on no provider), so a filtered-out component would survive the reset and
+        re-collide on the re-fire, and a synthetic resource URI has nothing to remove and
+        would raise. The provider listings return every stored component, disabled ones
+        included, after the provider's own transforms — and the skeleton adds none to its
+        provider — which is exactly the set the re-fired decorators (re-)populate. Names /
+        URIs are de-duplicated so a versioned/unversioned mix cannot double-remove one name
+        (``remove_*`` clears all versions by name in one call). Synchronous: the async
+        listings are gathered through the one off-loop runner, so it runs wherever
+        ``start()`` runs (the serving loop at cold boot, a worker thread on reload).
         """
         provider = self._fast_mcp.local_provider
-        components = list(provider._components.values())
-        for name in {c.name for c in components if isinstance(c, Tool)}:
+        tools, prompts, resources, templates = run_blocking(lambda: _provider_surface(provider))
+        for name in {tool.name for tool in tools}:
             provider.remove_tool(name)
-        for name in {c.name for c in components if isinstance(c, Prompt)}:
+        for name in {prompt.name for prompt in prompts}:
             provider.remove_prompt(name)
-        # ResourceTemplate is a distinct component kind, NOT a Resource subclass, so
-        # the Resource branch never sweeps it — it needs its own removal branch (the
-        # four kinds are disjoint, so the branch order is immaterial).
-        for uri_template in {c.uri_template for c in components if isinstance(c, ResourceTemplate)}:
+        for uri_template in {template.uri_template for template in templates}:
             provider.remove_template(uri_template)
-        for uri in {str(c.uri) for c in components if isinstance(c, Resource)}:
+        for uri in {str(resource.uri) for resource in resources}:
             provider.remove_resource(uri)
 
     def _registry_names_sync(self) -> dict[str, set[str]]:
@@ -301,3 +299,15 @@ class BootMixin(LifecycleState):
             }
 
         return run_blocking(snapshot)
+
+
+async def _provider_surface(
+    provider: LocalProvider,
+) -> tuple[Sequence[Tool], Sequence[Prompt], Sequence[Resource], Sequence[ResourceTemplate]]:
+    """Every stored tool, prompt, resource and resource template of ``provider``, through its public listings."""
+    return (
+        await provider.list_tools(),
+        await provider.list_prompts(),
+        await provider.list_resources(),
+        await provider.list_resource_templates(),
+    )

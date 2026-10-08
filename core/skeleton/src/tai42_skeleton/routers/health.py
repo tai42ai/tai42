@@ -19,8 +19,8 @@ from collections.abc import Awaitable, Callable
 from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
-from tai42_contract.access_control.registry import get_identity_provider_factory
 from tai42_contract.app import tai42_app
+from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import ClientSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient

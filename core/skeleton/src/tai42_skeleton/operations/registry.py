@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from tai42_kit.registry import StagedGeneration
 
 if TYPE_CHECKING:
     from tai42_skeleton.operations.errors import OperationError
@@ -84,22 +85,16 @@ class OperationRegistry:
 
     def __init__(self) -> None:
         """Initialize the empty committed and staged operation generations."""
-        # ``_operations`` is the COMMITTED generation the request path (authz/dispatch)
-        # resolves against; ``_pending`` is the generation an epoch build stages into,
-        # promoted to committed in ONE reference assignment (atomic under the GIL) only
-        # on a successful build. A failed build drops ``_pending`` and never touches the
-        # committed surface, so the live epoch keeps dispatching against a complete
-        # generation — the request path never observes a torn rebuild.
-        self._operations: dict[str, OperationMetadata] = {}
-        self._pending: dict[str, OperationMetadata] | None = None
+        # The COMMITTED generation is what the request path (authz/dispatch) resolves
+        # against; an epoch build stages into a fresh generation promoted in ONE reference
+        # assignment only on a successful build. A failed build drops it and never touches
+        # the committed surface, so the request path never observes a torn rebuild.
+        self._generation: StagedGeneration[dict[str, OperationMetadata]] = StagedGeneration(dict)
         self._rebuild_depth = 0
-
-    def _write_target(self) -> dict[str, OperationMetadata]:
-        return self._pending if self._pending is not None else self._operations
 
     def register(self, metadata: OperationMetadata) -> None:
         """Register ``metadata``, raising when its name is already registered."""
-        target = self._write_target()
+        target = self._generation.write_target()
         existing = target.get(metadata.name)
         if existing is not None and existing is not metadata:
             raise ValueError(
@@ -111,21 +106,22 @@ class OperationRegistry:
     def get(self, name: str) -> OperationMetadata:
         """Return the committed operation registered under ``name``, raising ``KeyError`` when absent."""
         try:
-            return self._operations[name]
+            return self._generation.committed()[name]
         except KeyError:
             raise KeyError(f"Operation {name!r} is not registered.") from None
 
     def has(self, name: str) -> bool:
         """Whether an operation is registered under ``name`` in the committed generation."""
-        return name in self._operations
+        return name in self._generation.committed()
 
     def all(self) -> list[OperationMetadata]:
         """Every COMMITTED operation, ordered by name — the request-path surface."""
-        return [self._operations[name] for name in sorted(self._operations)]
+        committed = self._generation.committed()
+        return [committed[name] for name in sorted(committed)]
 
     def names(self) -> frozenset[str]:
         """The names of every committed operation."""
-        return frozenset(self._operations)
+        return frozenset(self._generation.committed())
 
     def all_staged(self) -> list[OperationMetadata]:
         """Every operation in the STAGED generation if a build is staging, else the committed one.
@@ -133,7 +129,7 @@ class OperationRegistry:
         The build's own view (the projection reads this so it projects the generation being assembled, not
         the live one).
         """
-        target = self._write_target()
+        target = self._generation.write_target()
         return [target[name] for name in sorted(target)]
 
     def names_staged(self) -> frozenset[str]:
@@ -141,7 +137,7 @@ class OperationRegistry:
 
         The build's own view (the projection's include/exclude validation).
         """
-        return frozenset(self._write_target())
+        return frozenset(self._generation.write_target())
 
     def clear(self) -> None:
         """Drop every registration from the write target.
@@ -150,27 +146,28 @@ class OperationRegistry:
         Kept for tests; the epoch build opens an empty staged generation via :meth:`begin_staging` rather
         than clearing.
         """
-        self._write_target().clear()
+        self._generation.write_target().clear()
 
     def begin_staging(self) -> None:
         """Open a fresh staged generation the epoch build populates.
 
         Leaves the committed surface serving the live generation untouched.
         """
-        self._pending = {}
+        self._generation.begin()
 
     def commit_staging(self) -> None:
         """Promote the staged generation to committed in one reference assignment (atomic under the GIL).
 
         A no-op if no build staged.
         """
-        if self._pending is not None:
-            self._operations = self._pending
-            self._pending = None
+        self._generation.commit()
 
     def abort_staging(self) -> None:
-        """Drop the staged generation on a failed build — the committed surface never saw its registrations."""
-        self._pending = None
+        """Drop the staged generation on a failed build — the committed surface never saw its registrations.
+
+        A no-op if no build staged.
+        """
+        self._generation.abort()
 
     @contextmanager
     def rebuilding(self) -> Iterator[None]:
@@ -198,7 +195,7 @@ class OperationRegistry:
         an app that never started). Both halves must hold — a rebuild that has already
         replayed some records is populated but not yet an answer about the rest.
         """
-        return self._rebuild_depth == 0 and bool(self._operations)
+        return self._rebuild_depth == 0 and bool(self._generation.committed())
 
 
 # The one process-wide operation registry. The ``@operation`` decorator records

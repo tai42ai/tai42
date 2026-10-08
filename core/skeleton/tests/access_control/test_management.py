@@ -12,9 +12,10 @@ tokens-payload merge, and the version bump — not the store SQL (that is
 from __future__ import annotations
 
 import pytest
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 from tai42_contract.template import TemplatedText
+from tai42_kit.access_control import registry
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control import management
@@ -77,7 +78,7 @@ def provider() -> _SpyProvider:
     """Register a spy provider as ``"redis"`` (the default ``auth_providers`` entry); the
     autouse registry-isolation fixture restores the real registration afterwards."""
     spy = _SpyProvider()
-    registry._REGISTRY["redis"] = lambda _settings: spy
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
     return spy
 
 
@@ -233,8 +234,8 @@ async def test_first_mintable_provider_chosen(pg: FakeAccessControlPg, redis: Fa
     # A validator-only provider first in the chain is skipped; the second, mintable
     # provider is chosen to provision.
     spy = _SpyProvider()
-    registry._REGISTRY["validator"] = lambda _s: _ValidatorProvider()
-    registry._REGISTRY["mintable"] = lambda _s: spy
+    registry._PROVIDERS._generation.committed()["validator"] = lambda _s: _ValidatorProvider()
+    registry._PROVIDERS._generation.committed()["mintable"] = lambda _s: spy
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator", "mintable"]')
     reset_all_settings()
     try:
@@ -246,7 +247,7 @@ async def test_first_mintable_provider_chosen(pg: FakeAccessControlPg, redis: Fa
 
 
 async def test_no_mintable_provider_raises_typeerror(pg: FakeAccessControlPg, monkeypatch) -> None:
-    registry._REGISTRY["validator"] = lambda _s: _ValidatorProvider()
+    registry._PROVIDERS._generation.committed()["validator"] = lambda _s: _ValidatorProvider()
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator"]')
     reset_all_settings()
     try:
@@ -257,8 +258,8 @@ async def test_no_mintable_provider_raises_typeerror(pg: FakeAccessControlPg, mo
 
 
 async def test_provider_capabilities_reports_mintability(monkeypatch) -> None:
-    registry._REGISTRY["validator"] = lambda _s: _ValidatorProvider()
-    registry._REGISTRY["mintable"] = lambda _s: _SpyProvider()
+    registry._PROVIDERS._generation.committed()["validator"] = lambda _s: _ValidatorProvider()
+    registry._PROVIDERS._generation.committed()["mintable"] = lambda _s: _SpyProvider()
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator", "mintable"]')
     reset_all_settings()
     try:
@@ -512,7 +513,7 @@ async def test_tokens_payload_skips_reserved_and_falsy(
 async def test_tokens_payload_empty_on_validator_only_deployment(pg: FakeAccessControlPg, monkeypatch) -> None:
     # A validator-only chain has no mint-capable provider, so there are no api-keys to
     # enumerate: the payload is empty.
-    registry._REGISTRY["validator"] = lambda _s: _ValidatorProvider()
+    registry._PROVIDERS._generation.committed()["validator"] = lambda _s: _ValidatorProvider()
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator"]')
     reset_all_settings()
     try:

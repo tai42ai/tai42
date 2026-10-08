@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from tai42_contract.app import tai42_app
@@ -100,7 +101,9 @@ class BusSubscriptionMixin(LifecycleState):
                 # config was JUST built by ``start()``, so a swap would be pure
                 # redundant work (and would retire the just-built epoch) — skip it and
                 # only latch boot-ready below.
-                await self._apply_bus_op({"op": "reload_config"})
+                await self._apply_bus_op(
+                    {"op": "reload_config"}, deadline=time.monotonic() + bus_settings().apply_timeout
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -155,7 +158,7 @@ class BusSubscriptionMixin(LifecycleState):
             # subscription cannot abort the remaining shutdown steps.
             pass
 
-    async def _apply_bus_op(self, op: dict[str, Any]) -> Any:
+    async def _apply_bus_op(self, op: dict[str, Any], *, deadline: float) -> Any:
         """Apply one fleet op delivered from a sibling worker (or the self-resync), then fire the post-apply hooks.
 
         The sibling-worker counterpart of a route-received admin call: it maps each op
@@ -164,14 +167,15 @@ class BusSubscriptionMixin(LifecycleState):
         dispatch through the async per-kind reloader; ``list_failed_mcps`` is a plain
         in-process read. An unrecognized op raises loudly.
 
-        After the op applies, ``on_fleet_op_applied`` handlers fire with the op name —
-        the op has not fully "applied" until they finish (a celery worker must re-fork
-        its prefork pool before it reports applied), and a raising handler fails the op.
+        After the op applies, ``on_fleet_op_applied`` handlers fire with the op name and
+        the seconds left before ``deadline`` (a ``time.monotonic()`` instant) — the op
+        has not fully "applied" until they finish (a celery worker must re-fork its
+        prefork pool before it reports applied), and a raising handler fails the op.
         The returned value becomes the op's terminal ``applied`` payload; the publisher
         echo-skips its own broadcast, so this never re-applies a self-op.
         """
         result = await self._dispatch_bus_op(op)
-        await self._run_fleet_op_applied_handlers(_op_field(op, "op"))
+        await self._run_fleet_op_applied_handlers(_op_field(op, "op"), max(0.0, deadline - time.monotonic()))
         return result
 
     async def _dispatch_bus_op(self, op: dict[str, Any]) -> Any:

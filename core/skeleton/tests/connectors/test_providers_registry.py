@@ -30,11 +30,11 @@ def load_ddl() -> str:
 @pytest.fixture(autouse=True)
 def _isolate_registry():
     """Snapshot and restore the module-global registry around each test."""
-    reg = dict(registry._REGISTRY)
-    registry._REGISTRY.clear()
+    reg = dict(registry._GENERATION.committed())
+    registry._GENERATION.committed().clear()
     yield
-    registry._REGISTRY.clear()
-    registry._REGISTRY.update(reg)
+    registry._GENERATION.committed().clear()
+    registry._GENERATION.committed().update(reg)
 
 
 def test_register_and_get():

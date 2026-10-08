@@ -4,8 +4,8 @@ Only a runtime whose worker processes PERSIST ACROSS JOBS holds a snapshot of
 this process's tool registry (or its own compiled-template cache), so only that
 runtime gets wired. When it is, the turnover runs inside the op's apply and before
 its terminal reply: the manifest env the replacement workers inherit is refreshed
-first, the budget is derived from the bus apply window so a stall reports a truthful
-``failed``, and a raise propagates rather than reporting a false ``applied``.
+first, the budget is what the host hands over of the apply window less a margin, so a stall
+reports a truthful ``failed``, and a raise propagates rather than reporting a false ``applied``.
 """
 
 from __future__ import annotations
@@ -17,13 +17,11 @@ from typing import ClassVar
 
 import pytest
 from tai42_contract.backend.runtime import (
-    BUS_APPLY_TIMEOUT_ENV,
     POOL_TURNOVER_FLEET_OPS,
     BackendRuntime,
 )
 
 from tai42_kit.backend import ManagedBackend
-from tai42_kit.backend.base import _turnover_budget
 
 from .fakes import (
     FakeApp,
@@ -40,17 +38,6 @@ _MANIFEST_ENV = "FAKEBACKEND_TEST_MANIFEST"
 # A launch-subcommand map, annotated so a test class declares it as the ClassVar
 # the base already types it as.
 _Runtimes = Mapping[str, type[BackendRuntime]]
-
-
-@pytest.fixture(autouse=True)
-def _no_ambient_apply_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every budget assertion here is written against the CODED default window.
-
-    A developer (or a CI leg) exporting ``TAI_BUS_APPLY_TIMEOUT`` would otherwise
-    move the expected budget out from under six tests, which is exactly the kind
-    of host-dependent green the kit conftest exists to prevent.
-    """
-    monkeypatch.delenv(BUS_APPLY_TIMEOUT_ENV, raising=False)
 
 
 @pytest.fixture
@@ -118,7 +105,7 @@ async def test_a_pool_turnover_op_turns_the_pool_over(wired: FakeThreadWorker, a
     # Every pool-turnover op recycles a persisting pool — a registry mutation the
     # workers snapshot, AND a template eviction their compiled cache would miss (a
     # forking backend's children are bus non-members reached only by turnover).
-    await _handler(app)(op_name)
+    await _handler(app)(op_name, 30.0)
 
     assert wired.turnovers == [(op_name, 27.0)]
 
@@ -128,7 +115,7 @@ async def test_a_template_eviction_op_turns_the_pool_over(wired: FakeThreadWorke
     # Called out explicitly: a template edit reaches only bus members, so a forking
     # backend's prefork children keep rendering the stale compilation until the pool
     # turns over — the same canonical mechanism a reload rides.
-    await _handler(app)(op_name)
+    await _handler(app)(op_name, 30.0)
 
     assert wired.turnovers == [(op_name, 27.0)]
 
@@ -137,7 +124,7 @@ async def test_a_template_eviction_op_turns_the_pool_over(wired: FakeThreadWorke
 async def test_a_non_turnover_op_turns_nothing_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
     # A query mutates no registry and a recycle ends the process, so replacing
     # workers for either would be pure downtime.
-    await _handler(app)(op_name)
+    await _handler(app)(op_name, 30.0)
 
     assert wired.turnovers == []
     assert os.environ[_MANIFEST_ENV] == ""
@@ -146,7 +133,7 @@ async def test_a_non_turnover_op_turns_nothing_over(wired: FakeThreadWorker, app
 async def test_the_manifest_env_is_refreshed_before_the_pool_turns_over(wired: FakeThreadWorker, app: FakeApp) -> None:
     app.admin.live_manifest = {"tools": ["reloaded"]}
 
-    await _handler(app)("reload_config")
+    await _handler(app)("reload_config", 30.0)
 
     # Captured INSIDE turn_over_pool: the replacement workers inherit the env, so
     # a refresh landing after the call would hand them the pre-mutation registry.
@@ -159,7 +146,7 @@ async def test_a_failing_turnover_fails_the_op(wired: FakeThreadWorker, app: Fak
     wired.turnover_error = RuntimeError("pool did not come back")
 
     with pytest.raises(RuntimeError, match="pool did not come back"):
-        await _handler(app)("reload_tool")
+        await _handler(app)("reload_tool", 30.0)
 
 
 async def test_a_backend_with_no_dispatch_settings_is_refused_at_turnover(app: FakeApp) -> None:
@@ -172,7 +159,7 @@ async def test_a_backend_with_no_dispatch_settings_is_refused_at_turnover(app: F
     runtime = await running_runtime(FakeThreadWorker)
 
     with pytest.raises(NotImplementedError, match="_NoSettingsBackend declares a runtime requiring pool turnover"):
-        await _handler(app)("reload_mcp")
+        await _handler(app)("reload_mcp", 30.0)
 
     runtime.release()
     await asyncio.wait_for(task, timeout=5)
@@ -181,25 +168,13 @@ async def test_a_backend_with_no_dispatch_settings_is_refused_at_turnover(app: F
 # -- budget -------------------------------------------------------------------
 
 
-def test_the_budget_sits_a_margin_under_the_bus_apply_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(BUS_APPLY_TIMEOUT_ENV, "45")
-    assert _turnover_budget() == 42.0
+@pytest.mark.parametrize(("handed", "expected"), [(45.0, 42.0), (30.0, 27.0), (6.0, 5.0), (0.0, 5.0)])
+async def test_the_budget_is_the_handed_window_less_a_margin_floored(
+    wired: FakeThreadWorker, app: FakeApp, handed: float, expected: float
+) -> None:
+    # The host hands what is left of the apply window; the turnover keeps a margin under
+    # it so a confirm-or-raise lands before the report cut, and a tiny window never
+    # collapses the budget to nothing.
+    await _handler(app)("reload_config", handed)
 
-
-def test_the_budget_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A tiny apply window must not collapse the budget to nothing: a confirm that
-    # cannot even be attempted reports a failure that is not the pool's.
-    monkeypatch.setenv(BUS_APPLY_TIMEOUT_ENV, "6")
-    assert _turnover_budget() == 5.0
-
-
-def test_the_budget_falls_back_to_the_default_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(BUS_APPLY_TIMEOUT_ENV, raising=False)
-    assert _turnover_budget() == 27.0
-
-
-def test_a_malformed_apply_window_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A guessed budget would report a guessed outcome.
-    monkeypatch.setenv(BUS_APPLY_TIMEOUT_ENV, "soon")
-    with pytest.raises(ValueError, match="soon"):
-        _turnover_budget()
+    assert wired.turnovers == [("reload_config", expected)]

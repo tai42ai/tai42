@@ -10,7 +10,7 @@ the same declared provider is a no-op, not an "already registered" crash.
 from pydantic import BaseModel
 from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.accounts import AccountsProvider, LoginMethod, MemberAction, MemberListing
-from tai42_contract.accounts.registry import register_accounts_provider
+from tai42_kit.accounts.registry import register_accounts_provider
 
 
 class FixtureAccountsProvider(AccountsProvider):

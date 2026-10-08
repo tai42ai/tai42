@@ -425,19 +425,19 @@ def test_config_manager_both_transaction_seams_required():
     assert mgr.read_env() == {"KEEP": "1"}  # DROP deleted (absent), BLANK filtered
 
 
-def test_app_lifecycle_accepts_one_arg_fleet_op_handler():
-    # AppLifecycle gains ``on_fleet_op_applied`` alongside the zero-arg
-    # siblings; its handler takes ONE argument (the op name). A registrar
-    # exposing all four members conforms to the runtime-checkable protocol.
+def test_app_lifecycle_fleet_op_handler_takes_the_op_name_and_the_budget():
+    # ``on_fleet_op_applied`` sits alongside the zero-arg siblings; its handler takes
+    # the op name and the seconds left of the apply window. A registrar exposing every
+    # member conforms to the runtime-checkable protocol.
     from tai42_contract.app import AppLifecycle
 
     assert "on_fleet_op_applied" in protocol_members(AppLifecycle)
     sig = inspect.signature(AppLifecycle.on_fleet_op_applied)
     assert "func" in sig.parameters
-    # The fleet-op handler takes ONE argument (the op name) — the deliberate
-    # deviation from the zero-arg siblings. Pin the arity so a regression that
-    # flips the annotation back to ``Callable[[], Any]`` fails here.
-    assert sig.parameters["func"].annotation == "Callable[[str], Any]"
+    assert sig.parameters["func"].annotation == "Callable[[str, float], Any]"
+    doc = AppLifecycle.on_fleet_op_applied.__doc__ or ""
+    assert "budget" in doc
+    assert "must raise" in doc
     sibling_sig = inspect.signature(AppLifecycle.on_startup)
     assert sibling_sig.parameters["func"].annotation == "Callable[[], Any]"
 
@@ -460,7 +460,19 @@ def test_app_lifecycle_accepts_one_arg_fleet_op_handler():
         async def wait_until_ready(self) -> None:
             return None
 
-    assert isinstance(Registrar(), AppLifecycle)
+    registrar = Registrar()
+    assert isinstance(registrar, AppLifecycle)
+
+    # A neutral handler receives the op name and the remaining budget.
+    seen: list[tuple[str, float]] = []
+
+    def handler(op_name: str, budget: float) -> None:
+        seen.append((op_name, budget))
+
+    registered = registrar.on_fleet_op_applied(handler)
+    assert registered is handler
+    handler("some_op", 12.5)
+    assert seen == [("some_op", 12.5)]
 
     class MissingHook:
         def on_startup(self, func: object) -> object:

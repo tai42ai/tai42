@@ -26,6 +26,7 @@ from tai42_contract.connectors.providers import (  # noqa: F401  (re-exported)
     ProviderDescriptor,
     SubServiceDescriptor,
 )
+from tai42_kit.registry import StagedGeneration
 
 logger = logging.getLogger(__name__)
 
@@ -46,22 +47,16 @@ SEED_CATEGORY_IDS = (
 
 # -- Registry ----------------------------------------------------------------
 # The reload seam calls register_connector for each manifest ``connectors`` entry.
-# ``_REGISTRY`` is the COMMITTED generation the request path (catalog, resolver)
-# reads; ``_pending`` is the generation an epoch build stages into, promoted
-# atomically on success and dropped on failure — so a failed build leaves the
-# live catalog untouched.
+# The COMMITTED generation is what the request path (catalog, resolver) reads; an
+# epoch build stages into a fresh generation promoted atomically on success and
+# dropped on failure — so a failed build leaves the live catalog untouched.
 
-_REGISTRY: dict[str, ProviderDescriptor] = {}
-_pending: dict[str, ProviderDescriptor] | None = None
-
-
-def _write_target() -> dict[str, ProviderDescriptor]:
-    return _pending if _pending is not None else _REGISTRY
+_GENERATION: StagedGeneration[dict[str, ProviderDescriptor]] = StagedGeneration(dict)
 
 
 def register_connector(descriptor: ProviderDescriptor) -> None:
     """Register ``descriptor`` in the write-target generation, rejecting a duplicate id or unseeded category."""
-    target = _write_target()
+    target = _GENERATION.write_target()
     if descriptor.id in target:
         raise ValueError(f"Provider {descriptor.id!r} already registered")
     # Registration runs during boot/reload, before the DB is reachable, so the
@@ -82,12 +77,12 @@ def reset_registry() -> None:
     staged map before re-registering the manifest's ``connectors`` entries, never the committed
     one), else the committed map (boot, test isolation).
     """
-    _write_target().clear()
+    _GENERATION.write_target().clear()
 
 
 def get_provider(provider_id: str) -> ProviderDescriptor:
     """Resolve a descriptor from the COMMITTED generation — the request-path accessor."""
-    descriptor = _REGISTRY.get(provider_id)
+    descriptor = _GENERATION.committed().get(provider_id)
     if descriptor is None:
         raise KeyError(f"Unknown Connectors provider: {provider_id!r}")
     return descriptor
@@ -95,7 +90,7 @@ def get_provider(provider_id: str) -> ProviderDescriptor:
 
 def list_providers() -> list[ProviderDescriptor]:
     """Every COMMITTED descriptor — the request-path catalog view."""
-    return list(_REGISTRY.values())
+    return list(_GENERATION.committed().values())
 
 
 def list_providers_staged() -> list[ProviderDescriptor]:
@@ -103,24 +98,19 @@ def list_providers_staged() -> list[ProviderDescriptor]:
 
     The build's own view (kind status).
     """
-    return list(_write_target().values())
+    return list(_GENERATION.write_target().values())
 
 
 def begin_staging() -> None:
     """Open a fresh staged generation the epoch build registers into."""
-    global _pending
-    _pending = {}
+    _GENERATION.begin()
 
 
 def commit_staging() -> None:
-    """Promote the staged generation to committed in one reference assignment."""
-    global _REGISTRY, _pending
-    if _pending is not None:
-        _REGISTRY = _pending  # pyright: ignore[reportConstantRedefinition]  # atomic generation swap
-        _pending = None
+    """Promote the staged generation to committed in one reference assignment; a no-op when none is open."""
+    _GENERATION.commit()
 
 
 def abort_staging() -> None:
-    """Drop the staged generation on a failed build."""
-    global _pending
-    _pending = None
+    """Drop the staged generation on a failed build; a no-op when none is open."""
+    _GENERATION.abort()

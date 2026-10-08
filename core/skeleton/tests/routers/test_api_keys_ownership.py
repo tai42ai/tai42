@@ -12,9 +12,10 @@ import json
 
 import pytest
 from starlette.requests import Request
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
+from tai42_kit.access_control import registry
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.operations.api_keys as ops_api_keys
@@ -68,13 +69,13 @@ def wired(monkeypatch):
     spy = _SpyProvider()
     # Overwrite the "redis" provider with the spy, snapshotting the registry so the
     # mutation never leaks into another test (the module-global registry is shared).
-    saved = dict(registry._REGISTRY)
-    registry._REGISTRY["redis"] = lambda _s: spy
+    saved = dict(registry._PROVIDERS._generation.committed())
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _s: spy
     try:
         yield pg, spy
     finally:
-        registry._REGISTRY.clear()
-        registry._REGISTRY.update(saved)
+        registry._PROVIDERS._generation.committed().clear()
+        registry._PROVIDERS._generation.committed().update(saved)
 
 
 def _req(payload: dict | None = None, *, path_params: dict | None = None, method: str = "POST") -> Request:
@@ -293,7 +294,7 @@ async def test_validator_only_listing_returns_empty(wired, monkeypatch):
         async def validate_token(self, token: str) -> AuthIdentity | None:
             return None
 
-    registry._REGISTRY["validator"] = lambda _s: _Validator()
+    registry._PROVIDERS._generation.committed()["validator"] = lambda _s: _Validator()
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator"]')
     reset_all_settings()
     try:

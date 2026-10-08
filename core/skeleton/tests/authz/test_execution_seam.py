@@ -83,13 +83,14 @@ def _isolate_registries(preset_manager_restored):
     ``effective_routers`` as the probe router alone, pinning every later ``load_*_routes()``
     in the process to the registry restored here."""
     routes_snapshot = dict(route_registry._routes)
-    ops_snapshot = dict(operation_registry._operations)
+    ops_snapshot = dict(operation_registry._generation.committed())
     with tai42_app.bound(None):
         try:
             yield
         finally:
             route_registry._routes = routes_snapshot
-            operation_registry._operations = ops_snapshot
+            operation_registry._generation.committed().clear()
+            operation_registry._generation.committed().update(ops_snapshot)
 
 
 @pytest.fixture
@@ -250,12 +251,12 @@ def test_a_key_that_no_longer_exists_never_reaches_a_capability_tool(ac) -> None
 def _rebuilding_operation_surface() -> Iterator[None]:
     """The window a config reload opens: the operation registry is cleared while dispatch
     continues, so a tool stays resolvable while the surface cannot say what it is."""
-    registered = dict(operation_registry._operations)
+    registered = dict(operation_registry._generation.committed())
     operation_registry.clear()
     try:
         yield
     finally:
-        operation_registry._operations.update(registered)
+        operation_registry._generation.committed().update(registered)
 
 
 def test_a_fenced_operation_is_refused_while_the_operation_surface_rebuilds(ac) -> None:
@@ -332,14 +333,14 @@ def test_a_fire_waits_out_an_in_flight_reload_instead_of_being_dropped(ac) -> No
     # the gate and decides again; otherwise a fire landing in a reload window is lost.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            registered = dict(operation_registry._operations)
+            registered = dict(operation_registry._generation.committed())
 
             async def reload_window() -> None:
                 async with reload_gate.lock:
                     with operation_registry.rebuilding():
                         operation_registry.clear()
                         await asyncio.sleep(0.05)
-                        operation_registry._operations.update(registered)
+                        operation_registry._generation.committed().update(registered)
 
             window = asyncio.create_task(reload_window())
             await asyncio.sleep(0)  # let the reload take the gate before the fire dispatches

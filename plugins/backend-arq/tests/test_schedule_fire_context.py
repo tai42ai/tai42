@@ -16,6 +16,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_SUBJECT_ARG,
 )
+from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 from tai42_backend_arq import tasks
 from tai42_backend_arq.settings import arq_settings
@@ -31,6 +32,7 @@ async def test_scheduled_fire_with_key_and_contract_drives_the_door(stub_app) ->
         _CTX,
         **{
             arg: "greet",
+            WORKER_SECRET_CAPABILITY_ARG: False,
             SCHEDULE_SUBJECT_ARG: _SUBJECT,
             SCHEDULE_EXECUTION_KEY_ARG: "svc",
             SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
@@ -54,6 +56,7 @@ async def test_task_job_with_forwarded_subject_drives_the_door(stub_app) -> None
         _CTX,
         **{
             arg: "greet",
+            WORKER_SECRET_CAPABILITY_ARG: False,
             SCHEDULE_SUBJECT_ARG: _SUBJECT,
             SCHEDULE_EXECUTION_KEY_ARG: "svc",
             SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
@@ -73,7 +76,9 @@ async def test_plain_background_job_runs_the_tool_directly(stub_app) -> None:
     arg = arq_settings().tool_name_arg
     # A top-level ``subject`` argument with NO stamped door signal is an ordinary tool argument: the run
     # stays a plain ``run_tool`` with no door drive (its ``api`` door is stamped at the write chokepoint).
-    await tasks.tool_execution(_CTX, **{arg: "greet", "subject": _SUBJECT, "message": "hi"})
+    await tasks.tool_execution(
+        _CTX, **{arg: "greet", WORKER_SECRET_CAPABILITY_ARG: False, "subject": _SUBJECT, "message": "hi"}
+    )
     assert stub_app.interactions.visit_calls == []
     assert stub_app.interactions.binds == []
     stub_app.tools.run_tool_mock.assert_awaited_once_with("greet", {"subject": _SUBJECT, "message": "hi"})

@@ -90,10 +90,10 @@ def test_reloading_a_provider_registering_module_is_reload_safe():
     # Before the reload-safe registry fix the SECOND reload re-ran the module-level
     # registration and raised ValueError("... already registered"), crashing boot;
     # now the re-registration of the same declared provider is a no-op.
-    from tai42_contract.access_control.registry import get_identity_provider_factory
-    from tai42_contract.access_control.registry import reset_registry as reset_identity
-    from tai42_contract.accounts.registry import get_accounts_provider_factory
-    from tai42_contract.accounts.registry import reset_registry as reset_accounts
+    from tai42_kit.access_control.registry import get_identity_provider_factory
+    from tai42_kit.access_control.registry import reset_registry as reset_identity
+    from tai42_kit.accounts.registry import get_accounts_provider_factory
+    from tai42_kit.accounts.registry import reset_registry as reset_accounts
 
     reset_accounts()
     reset_identity()

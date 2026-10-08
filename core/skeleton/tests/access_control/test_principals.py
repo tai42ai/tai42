@@ -17,9 +17,9 @@ from datetime import datetime
 
 import pytest
 from starlette.requests import Request
-from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider
 from tai42_contract.access_control.models import AccessPolicy
+from tai42_kit.access_control import registry
 
 import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import management
@@ -110,7 +110,7 @@ def redis_mgmt(monkeypatch) -> FakeRedis:
 @pytest.fixture
 def provider() -> _SpyProvider:
     spy = _SpyProvider()
-    registry._REGISTRY["redis"] = lambda _settings: spy
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
     return spy
 
 

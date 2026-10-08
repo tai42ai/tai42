@@ -25,8 +25,8 @@ from tai42_contract.accounts import (
     MemberAction,
     MemberEntry,
     MemberListing,
-    register_accounts_provider,
 )
+from tai42_kit.accounts.registry import register_accounts_provider
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import component_store_settings

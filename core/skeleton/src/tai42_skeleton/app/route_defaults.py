@@ -15,6 +15,8 @@ matches ``/{spa_path:path}`` and would shadow any router registered after it.
 - ``"none"`` — mount nothing by default; ``routers_modules`` is authoritative
   (a fully-manual or MCP-only surface).
 
+A feature's runtime lifecycle does not depend on the router selector.
+
 ``CORE_API_ROUTERS`` is independent of that selector — it is force-mounted by
 :func:`effective_router_modules` under every value, so a deployment-invariant answer
 is reachable even in a ``"none"`` boot.

@@ -18,7 +18,7 @@ import pytest
 from redis.exceptions import ResponseError
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import AuthIdentity
-from tai42_contract.access_control.registry import get_identity_provider_factory
+from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.data.string_util import hash_api_key
 

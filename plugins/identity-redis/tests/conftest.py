@@ -167,11 +167,11 @@ def make_client_ctx(fake: FakeRedis):
 def _isolate_identity_registry():
     """Snapshot + restore the module-level identity-provider registry around each
     test so a registration never leaks into the next."""
-    from tai42_contract.access_control import registry
+    from tai42_kit.access_control import registry
 
-    saved = dict(registry._REGISTRY)
+    saved = dict(registry._PROVIDERS._generation.committed())
     try:
         yield
     finally:
-        registry._REGISTRY.clear()
-        registry._REGISTRY.update(saved)
+        registry._PROVIDERS._generation.committed().clear()
+        registry._PROVIDERS._generation.committed().update(saved)

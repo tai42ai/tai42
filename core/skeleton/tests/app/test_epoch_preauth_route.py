@@ -38,7 +38,7 @@ def _restore_process_env_and_routes():
     """A successful build+swap leaves its applied env live in ``os.environ``. Snapshot and
     restore it, drop any route the reload added to the process-global route registry, and
     drop the fixture's identity-provider registration so neither leaks into another suite."""
-    from tai42_contract.access_control import registry as identity_registry
+    from tai42_kit.access_control import registry as identity_registry
 
     from tai42_skeleton.app import epoch as epoch_mod
     from tai42_skeleton.app.route_registry import route_registry
@@ -53,7 +53,7 @@ def _restore_process_env_and_routes():
     for key in list(route_registry._routes):
         if key not in routes_before:
             del route_registry._routes[key]
-    identity_registry._REGISTRY.pop(PROVIDER_NAME, None)
+    identity_registry._PROVIDERS._generation.committed().pop(PROVIDER_NAME, None)
 
 
 async def _dispatch_get(serving_app, path: str) -> tuple[int, bytes]:

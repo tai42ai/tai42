@@ -82,20 +82,6 @@ hold a snapshot of the registry OR their own compiled cache turns its pool over 
 one of these applies."""
 
 
-BUS_APPLY_TIMEOUT_ENV: Final[str] = "TAI_BUS_APPLY_TIMEOUT"
-"""Env var carrying the worker bus's apply window — the deadline by which an op
-must report a terminal verdict.
-
-A pool turnover runs INSIDE that window, so the host derives the turnover's
-budget from this value and a confirm-or-raise lands before the publisher's
-report cut. A backend-runtime process is reached by the env, not by the bus
-settings object, so the NAME is the agreement."""
-
-BUS_APPLY_TIMEOUT_DEFAULT: Final[float] = 30.0
-"""The apply window when the env var is unset. Mirrors the host's own default;
-a drift guard on the host side keeps the two in step."""
-
-
 class BackendRuntime(ABC):
     """ONE launchable runtime of an execution backend, named by its launch subcommand.
 

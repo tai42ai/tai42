@@ -45,7 +45,7 @@ async def test_census_lists_registered_workers(wire_bus_client: None) -> None:
     serve_bus = make_bus(kind=WorkerKind.serve)
     backend_bus = make_bus(kind=WorkerKind.backend)
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     t1, serve_id = await _spawn_subscriber(serve_bus, noop)
@@ -161,7 +161,7 @@ async def test_two_phase_ack_then_slow_apply_reports_applied(wire_bus_client: No
     worker = make_bus()
     seen: list[dict] = []
 
-    async def slow_apply(op: dict) -> dict:
+    async def slow_apply(op: dict, *, deadline: float) -> dict:
         seen.append(op)
         # Longer than the ack timeout, shorter than the apply timeout: the fast
         # received-ack must keep this worker from being judged missing.
@@ -186,7 +186,7 @@ async def test_all_terminal_early_exit_returns_before_apply_deadline(wire_bus_cl
     publisher = make_bus(apply_timeout=5.0)
     worker = make_bus(apply_timeout=5.0)
 
-    async def fast(_op: dict) -> None:
+    async def fast(_op: dict, *, deadline: float) -> None:
         return None
 
     task, _ = await _spawn_subscriber(worker, fast)
@@ -429,7 +429,7 @@ async def test_a_worker_that_fades_before_publish_is_off_the_census_entirely(wir
     publisher = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
     worker = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
 
-    async def apply(_op: dict) -> None:
+    async def apply(_op: dict, *, deadline: float) -> None:
         return None
 
     task, worker_id = await _spawn_subscriber(worker, apply)
@@ -451,7 +451,7 @@ async def test_expected_at_start_still_collects_a_faded_workers_confirmation(wir
     publisher = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
     worker = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
 
-    async def apply(_op: dict) -> dict:
+    async def apply(_op: dict, *, deadline: float) -> dict:
         return {"reloaded": True}
 
     task, worker_id = await _spawn_subscriber(worker, apply)
@@ -550,7 +550,7 @@ async def test_nonmember_whole_fleet_publish_broadcasts_with_no_phantom_self(wir
     member = make_bus()
     applied: list[dict] = []
 
-    async def record(op: dict) -> None:
+    async def record(op: dict, *, deadline: float) -> None:
         applied.append(op)
 
     task, member_id = await _spawn_subscriber(member, record)
@@ -598,7 +598,7 @@ async def test_echo_skip_synthesizes_self_and_never_reapplies(wire_bus_client: N
     bus = make_bus()
     applied: list[dict] = []
 
-    async def record(op: dict) -> None:
+    async def record(op: dict, *, deadline: float) -> None:
         applied.append(op)
 
     task, self_id = await _spawn_subscriber(bus, record)
@@ -654,7 +654,7 @@ async def test_namespace_isolation_no_cross_talk(wire_bus_client: None, server: 
     bus_b = make_bus(namespace="stack-b")
     a_calls: list[dict] = []
 
-    async def record(op: dict) -> None:
+    async def record(op: dict, *, deadline: float) -> None:
         a_calls.append(op)
 
     task_a, id_a = await _spawn_subscriber(bus_a, record)
@@ -708,7 +708,7 @@ async def test_validate_targets_raises_on_unknown(wire_bus_client: None) -> None
     bus = make_bus()
     worker = make_bus()
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     _, self_id = await _spawn_subscriber(bus, noop)
@@ -756,7 +756,7 @@ async def test_local_variant(wire_bus_client: None) -> None:
     with pytest.raises(ValueError, match="can never reply"):
         await bus.publish({"op": "x"}, targets=None, local=None)
 
-    async def noop(_op: dict) -> None:
+    async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
     task = asyncio.create_task(bus.subscribe(noop))
@@ -772,7 +772,7 @@ async def test_live_but_slow_apply_is_timed_out(wire_bus_client: None) -> None:
     publisher = make_bus(ack_timeout=0.05, apply_timeout=0.5, heartbeat_ttl=0.5)
     worker = make_bus(ack_timeout=0.05, apply_timeout=0.5, heartbeat_ttl=0.5)
 
-    async def slow(_op: dict) -> None:
+    async def slow(_op: dict, *, deadline: float) -> None:
         await asyncio.sleep(0.9)
 
     task, worker_id = await _spawn_subscriber(worker, slow)

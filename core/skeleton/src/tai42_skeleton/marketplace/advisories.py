@@ -21,7 +21,7 @@ cadence and stated deliberately.
 
 Loop ownership matters. The poll task must live on the REAL serving loop and retire
 with the generation that started it, so :func:`start_poll` is driven by the post-swap
-establisher — run at boot and after every epoch swap, both ON the serving loop — and
+establisher :func:`start_advisories_poll` — run at boot and after every epoch swap, both ON the serving loop — and
 NOT by the per-epoch handler list, which runs on a throwaway build-thread loop a
 spawned task would not survive. Each (re)start registers the task with the epoch under
 construction, so a retire cancels exactly that generation's own task.
@@ -37,7 +37,9 @@ from typing import Any
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import BaseModel, ConfigDict
+from tai42_kit.db import component_binding, component_store_configured, database_password_env
 
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.errors import ListingNotFoundError, RegistryResponseError
 from tai42_skeleton.marketplace.settings import marketplace_settings
@@ -130,18 +132,56 @@ async def current(max_age_s: int) -> AdvisoryState:
     return await refresh()
 
 
-def start_poll() -> None:
-    """(Re)start the background poll — the post-swap establisher body.
+def start_advisories_poll() -> None:
+    """(Re)establish the advisory poll on the serving loop — the post-swap establisher.
 
-    Called ON the serving loop (the post-swap hook runs there at boot and after every
-    epoch swap), so it cancels any previous task and — only when
+    Run at boot and after every epoch swap, both ON the serving loop, so the poll task
+    attaches to the loop its refreshes run on and retires with its generation. The poll
+    runs only where the ``marketplace_advisories`` operation is served (the committed route
+    generation registers its door) and an install-attribution store is configured; either
+    branch that starts nothing cancels a poll an earlier generation started and logs one
+    INFO line.
+    """
+    from tai42_skeleton.app.route_registry import route_registry
+
+    if not route_registry.serves_operation("marketplace_advisories"):
+        cancel_poll()
+        logger.info("marketplace: advisory poll not started — the marketplace_advisories operation is not served")
+        return
+    if not component_store_configured(SKELETON_COMPONENT):
+        cancel_poll()
+        logger.info(
+            "marketplace: advisory poll skipped — the skeleton database is not configured (%s); "
+            "no installed inventory to poll",
+            database_password_env(component_binding(SKELETON_COMPONENT)),
+        )
+        return
+    start_poll()
+
+
+async def stop_advisories_poll() -> None:
+    """Cancel and await the advisory poll task on the serving loop it lives on — the shutdown hook."""
+    await stop_poll()
+
+
+def cancel_poll() -> None:
+    """Cancel the running poll task, if any, and forget it; called on the serving loop."""
+    global _poll_task
+    task = _poll_task
+    _poll_task = None
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def start_poll() -> None:
+    """(Re)start the background poll.
+
+    Called ON the serving loop, so it cancels any previous task and — only when
     ``MARKETPLACE_ADVISORIES_POLL`` is true — logs the loud enabled line and spawns the
     task onto that loop, re-reading ``MARKETPLACE_*`` under the fresh settings caches.
     When the poll is disabled it logs nothing and starts nothing (documented silence).
     """
-    task = _poll_task
-    if task is not None and not task.done():
-        task.cancel()
+    cancel_poll()
     _spawn_poll_if_enabled()
 
 
