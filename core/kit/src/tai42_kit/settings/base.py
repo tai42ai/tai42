@@ -1,10 +1,13 @@
 """Kit base for env-sourced settings groups and their reload disposition."""
 
 import json
+from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from tai42_kit.settings.env_file import DEFAULT_ENV_FILE, TaiDotEnvSettingsSource
 
 # Reload disposition of a settings group (or a single field) across a settings
 # epoch flip: ``hot`` re-reads live, ``recycle`` needs its pooled resource torn
@@ -18,23 +21,56 @@ KeyMaterial = Annotated[SecretStr, Field(json_schema_extra={"key_material": True
 
 
 class TaiBaseSettings(BaseSettings):
-    """Base for env-configurable settings groups; concrete subclasses self-register."""
+    """Base for env-configurable settings groups; concrete subclasses self-register.
 
-    # ``env_file=".env"`` is read only if the file exists (absent under K8s,
-    # where the cluster injects env vars) — a side-effect-free replacement for
-    # an import-time ``load_dotenv()``. ``model_config`` merges down the MRO, so
-    # subclasses inherit this without restating it.
+    A settings class reads the env file named by its ``tai_env_file`` class attribute
+    (default ``.env``); the file is parsed once per file identity. A subclass that sets
+    ``model_config['env_file']`` is refused at import.
+    """
+
+    # The env file is named by ``tai_env_file`` and read by the kit's dotenv source,
+    # which serves one parse per file identity; the framework's own source reads
+    # nothing (``env_file=None``). ``only_existing`` resolves the fields only: the
+    # unmatched dotenv keys it skips are what ``extra="ignore"`` discards.
+    # ``model_config`` merges down the MRO, so subclasses inherit this.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None,
+        dotenv_filtering="only_existing",
         validate_default=True,
         env_ignore_empty=True,
         extra="ignore",
     )
 
+    # The env file this group reads, relative to the working directory; ``None``
+    # reads none. Read only if it exists (absent under K8s, where the cluster
+    # injects env vars).
+    tai_env_file: ClassVar[str | Path | None] = DEFAULT_ENV_FILE
+
     # Group-level reload disposition, read with inheriting ``getattr`` semantics
     # so a subclass inherits its base's declaration. Kit ships only the ``hot``
     # default; core-owned classes declare ``recycle``/``excluded`` downstream.
     reload_class: ClassVar[ReloadClass] = "hot"
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Put the kit's cached dotenv source in the dotenv slot.
+
+        Every other option of the source is read from ``settings_cls.model_config``,
+        as the framework's own source reads it.
+        """
+        dotenv = TaiDotEnvSettingsSource(
+            settings_cls,
+            env_file=cls.tai_env_file,
+            _init_state=dotenv_settings._init_state,
+        )
+        return (init_settings, env_settings, dotenv, file_secret_settings)
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
@@ -43,6 +79,13 @@ class TaiBaseSettings(BaseSettings):
         # unlike ``__init_subclass__``, which fires before. Every concrete
         # subclass self-registers as an env-configurable group.
         super().__pydantic_init_subclass__(**kwargs)
+        # The kit's dotenv source reads ``tai_env_file``; a ``model_config`` env file
+        # would be read by nothing, so declaring one is refused at import.
+        if cls.model_config.get("env_file") is not None:
+            raise TypeError(
+                f"{cls.__qualname__}: tai42 settings declare their env file with the 'tai_env_file' "
+                "class attribute; model_config['env_file'] is not read"
+            )
         # Own-attribute check (not ``getattr``): a concrete subclass of an
         # excluded abstract base still registers, since the flag is not inherited
         # into the subclass ``__dict__``. A ``ClassVar`` is the pydantic-safe way

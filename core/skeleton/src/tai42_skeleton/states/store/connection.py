@@ -18,7 +18,10 @@ from .base import _StoreBase
 
 
 def _settings() -> Any:
-    """The bound store's runtime connection settings, resolved fresh per call."""
+    """The bound store's runtime connection settings, as the kit registry serves them per call.
+
+    The registry re-reads them after a settings reset or a change of the env file.
+    """
     return component_store_settings(STATES_COMPONENT)
 
 

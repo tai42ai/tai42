@@ -19,9 +19,8 @@ from tai42_kit.transport import get_mcp_transport
 
 
 def _resolved_transport(cfg: TaiMCPConfig) -> Any:
-    """The per-server transport fastmcp resolves from our non-UDS dict config
-    (Client -> MCPConfigTransport -> single-server transport)."""
-    return cast(Any, Client(get_mcp_transport(cfg)).transport).transport
+    """The transport a fastmcp ``Client`` sends through for a URL server config."""
+    return cast(Any, Client(get_mcp_transport(cfg)).transport)
 
 
 def test_http_transport_does_not_forward_incoming_headers_by_default():
@@ -45,21 +44,21 @@ def test_non_uds_config_carries_explicit_auth_header():
         config=MCPConfig(url="http://host/mcp", headers={"Authorization": "Bearer downstream"}),
     )
     transport = get_mcp_transport(cfg)
-    assert isinstance(transport, dict)
-    assert transport["mcpServers"]["srv"]["headers"] == {"Authorization": "Bearer downstream"}
+    assert isinstance(transport, StreamableHttpTransport)
+    assert transport.headers == {"Authorization": "Bearer downstream"}
 
 
 def test_non_uds_config_without_auth_sends_no_headers():
     # No declared headers → none are sent (no ambient/auth leak path).
     cfg = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/mcp"))
     transport = get_mcp_transport(cfg)
-    assert isinstance(transport, dict)
-    assert transport["mcpServers"]["srv"]["headers"] == {}
+    assert isinstance(transport, StreamableHttpTransport)
+    assert transport.headers == {}
 
 
 def test_non_uds_client_end_to_end_is_header_isolated():
-    # The full path FastMCPClient uses (dict config -> Client -> resolved
-    # transport): the outbound transport never forwards ambient/inbound headers
+    # The full path FastMCPClient uses (transport -> Client): the outbound
+    # transport never forwards ambient/inbound headers
     # and carries only the config's own auth. With forward_incoming_headers=False
     # the outbound headers are exactly dict(self.headers) — the config's own
     # headers, no ambient forwarding.

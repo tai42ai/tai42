@@ -86,3 +86,42 @@ def test_extract_output_dict_content_returned_as_is():
     # through unchanged.
     content = {"raw": "value"}
     assert extract_tool_output({"content": content}) is content
+
+
+def _count_json_loads(monkeypatch) -> list[int]:
+    from tai42_kit.utils.data import mcp_output_util
+
+    count = [0]
+    original = json.loads
+
+    def _counting(*args, **kwargs):
+        count[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_output_util.json, "loads", _counting)
+    return count
+
+
+def test_a_structured_result_is_returned_as_is_with_no_parse(monkeypatch):
+    from mcp.types import CallToolResult, TextContent
+
+    structured = {"rows": [{"id": i, "label": f"row-{i}"} for i in range(500)]}
+    response = CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(structured))],
+        structuredContent=structured,
+    )
+    count = _count_json_loads(monkeypatch)
+
+    assert extract_tool_output(response) is response.structuredContent
+    assert count[0] == 0
+
+
+def test_a_text_only_result_is_parsed_once_per_block(monkeypatch):
+    from mcp.types import CallToolResult, TextContent
+
+    blocks = [json.dumps({"part": i}) for i in range(3)]
+    response = CallToolResult(content=[TextContent(type="text", text=text) for text in blocks])
+    count = _count_json_loads(monkeypatch)
+
+    assert extract_tool_output(response) == [{"part": 0}, {"part": 1}, {"part": 2}]
+    assert count[0] == 3

@@ -185,6 +185,67 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
     assert prev.saved == {"APP_KEY": "stored", "OLD_ONLY": "keep"}
 
 
+_DATABASE_KEYS = ("TAI_DATABASE_DEFAULT_PG_DB", "TAI_DATABASE_DEFAULT_PG_PASSWORD", "TAI_DB_BINDING_STATES")
+
+
+@pytest.mark.usefixtures("_epoch_state")
+async def test_profile_apply_changing_the_default_database_retargets_the_states_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """File config mode: the stored env is the working directory's ``.env``.
+
+    The build reads the states store's connection settings under the proposed env;
+    a failed build restores the env and the store reads the stored database again;
+    the stored ``.env`` rewritten in place of the old one is read with no reset.
+    """
+    from tai42_skeleton.states.store.connection import _settings as states_store_settings
+
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    for key in _DATABASE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    stored = {"TAI_DATABASE_DEFAULT_PG_PASSWORD": "pw", "TAI_DATABASE_DEFAULT_PG_DB": "first"}
+    (tmp_path / ".env").write_text("".join(f"{key}={value}\n" for key, value in stored.items()))
+    store = FakeConfigStore(env=dict(stored))
+    assert states_store_settings().pg_db == "first"
+
+    seen: dict[str, str | None] = {}
+
+    def _read_during_build() -> None:
+        seen["during"] = states_store_settings().pg_db
+
+    async def _fail_serve(_epoch: Epoch) -> Any:
+        raise _BuildBoomError("deliberate build failure after the settings read")
+
+    async def _noop() -> None:
+        return None
+
+    async def real_build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        return await build_and_swap_epoch(
+            env,
+            rebuild=_read_during_build,
+            build_serving_app=_fail_serve,
+            establish_background_loops=_noop,
+            drain_tolerate_driver=drain_tolerate_driver,
+        )
+
+    with pytest.raises(_BuildBoomError):
+        await _service(store).apply_replace_env(
+            {**stored, "TAI_DATABASE_DEFAULT_PG_DB": "second"},
+            driven=True,
+            save_previous=_PrevSpy(),
+            build_and_swap=real_build,
+        )
+
+    assert seen == {"during": "second"}
+    assert states_store_settings().pg_db == "first"
+
+    staged = tmp_path / ".env.staged"
+    staged.write_text("TAI_DATABASE_DEFAULT_PG_PASSWORD=pw\nTAI_DATABASE_DEFAULT_PG_DB=third\n")
+    os.replace(staged, tmp_path / ".env")
+    assert states_store_settings().pg_db == "third"
+
+
 # ---------------------------------------------------------------------------
 # Drain — no self-deadlock
 # ---------------------------------------------------------------------------

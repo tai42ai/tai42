@@ -183,10 +183,10 @@ class PostgresConnectionSettings(ClientSettings):
 
 
 class MCPClientSettings(TaiBaseSettings):
-    """Timeouts governing MCP client connect/init and per-tool-call dispatch.
+    """Timeouts and connection reuse governing MCP clients.
 
     These are behavior, not connection identity, so they are deliberately NOT
-    part of any pooled-client key — tuning a timeout must not split the pool.
+    part of any pooled-client key — tuning one must not split the pool.
     """
 
     model_config = SettingsConfigDict(env_prefix="MCP_CLIENT_")
@@ -198,6 +198,9 @@ class MCPClientSettings(TaiBaseSettings):
     # Wall-clock budget for one downstream MCP tool call made through a
     # kit-bound LangChain tool. Must be positive.
     call_timeout_seconds: float = Field(default=300, gt=0)
+    # Seconds an idle connection to a remote MCP server is kept for reuse by every
+    # kit-built MCP HTTP client. Must be positive.
+    keepalive_expiry_seconds: float = Field(default=30, gt=0)
 
 
 @settings_cache

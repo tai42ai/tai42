@@ -5836,6 +5836,7 @@ langgraph-checkpoint-postgres = [
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "orjson" },
     { name = "psycopg", extra = ["pool"] },
     { name = "redis" },
 ]
@@ -5880,6 +5881,7 @@ ollama = [
     { name = "redis" },
 ]
 postgres = [
+    { name = "orjson" },
     { name = "psycopg", extra = ["binary", "pool"] },
 ]
 redis = [
@@ -5937,6 +5939,8 @@ requires-dist = [
     { name = "langgraph-checkpoint-redis", marker = "extra == 'llm'", specifier = ">=0.5" },
     { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph-checkpoint-sqlite'", specifier = ">=3.0.3" },
     { name = "mcp", specifier = ">=1" },
+    { name = "orjson", marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.11.8,<4" },
+    { name = "orjson", marker = "extra == 'postgres'", specifier = ">=3.11.8,<4" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'", specifier = ">=3.3.2" },
     { name = "psycopg", extras = ["pool"], marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.3.2" },
     { name = "pydantic", specifier = ">=2.12" },

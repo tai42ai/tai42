@@ -52,7 +52,7 @@ class FastMCPClient(PooledClient[Client]):
         # The MCP wire protocol over a UDS socket; the caller (which owns the
         # runtime/CLI) supplies it. Ignored for non-UDS servers.
         uds_protocol: Literal["http", "sse"] = kwargs.get("uds_protocol", "http")
-        transport = get_mcp_transport(TaiMCPConfig(**config), uds_protocol=uds_protocol)
+        tai_config = TaiMCPConfig(**config)
         # No ambient-header forwarding: fastmcp transports default
         # ``forward_incoming_headers=False``, so this server's own inbound headers
         # (incl. auth) are never leaked to the downstream MCP — only the headers
@@ -63,12 +63,14 @@ class FastMCPClient(PooledClient[Client]):
         # lock, so an unbounded connect-stall would queue every same-config caller
         # forever. wait_for cancels the inner enter on expiry, letting fastmcp
         # unwind its partial transport state; nothing is registered in the pool.
-        # Any build failure — the fastmcp connect (__aenter__ raises RuntimeError
-        # on a down upstream) or the connect timeout — is wrapped in
-        # ClientConnectError so the dispatch seam's unavailable-client handling
-        # catches it; CancelledError is a BaseException and propagates untouched.
+        # Any build failure — the transport build (an invalid URL), the fastmcp
+        # connect (__aenter__ raises RuntimeError on a down upstream) or the
+        # connect timeout — is wrapped in ClientConnectError so the dispatch seam's
+        # unavailable-client handling catches it; CancelledError is a BaseException
+        # and propagates untouched.
         timeout = mcp_client_settings().connect_timeout_seconds
         try:
+            transport = get_mcp_transport(tai_config, uds_protocol=uds_protocol)
             return await asyncio.wait_for(Client(transport).__aenter__(), timeout=timeout)
         except TimeoutError as exc:
             raise ClientConnectError(

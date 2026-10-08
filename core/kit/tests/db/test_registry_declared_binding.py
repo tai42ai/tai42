@@ -4,9 +4,10 @@
 :func:`component_binding` cannot: it returns the LITERAL value of
 ``TAI_DB_BINDING_<SLUG>`` only when the var is explicitly set (including the
 literal ``"default"``), and ``None`` when unset — where ``component_binding``
-folds unset into the ``"default"`` fallback. Env is read fresh per call, so
-tests set it with monkeypatch and assert on the resolved value without touching
-a real Postgres.
+folds unset into the ``"default"`` fallback. The value is resolved once per
+process and re-read after a settings reset or an env-file rewrite; the suite
+resets settings around each test, so tests set env with monkeypatch and assert
+on the resolved value without touching a real Postgres.
 """
 
 import os
@@ -14,6 +15,7 @@ import os
 import pytest
 
 from tai42_kit.db import component_binding, component_binding_declared
+from tai42_kit.settings import reset_all_settings
 
 # Prefixes any test may set — stripped before each test so ambient env cannot
 # colour a resolution.
@@ -56,7 +58,17 @@ class TestComponentBindingDeclared:
         assert component_binding_declared("tai42-accounts-postgres") == "accounts"
         assert component_binding("tai42-accounts-postgres") == "accounts"
 
-    def test_fresh_read_per_call(self, monkeypatch):
+    def test_re_read_after_a_settings_reset(self, monkeypatch):
         assert component_binding_declared("skeleton") is None
         monkeypatch.setenv("TAI_DB_BINDING_SKELETON", "warehouse")
+        assert component_binding_declared("skeleton") is None
+        reset_all_settings()
         assert component_binding_declared("skeleton") == "warehouse"
+
+    def test_re_read_after_a_rewrite_of_the_env_file(self, tmp_path):
+        (tmp_path / ".env").write_text("TAI_DB_BINDING_SKELETON=warehouse\n")
+        assert component_binding_declared("skeleton") == "warehouse"
+        staged = tmp_path / ".env.staged"
+        staged.write_text("TAI_DB_BINDING_SKELETON=analytics\n")
+        os.replace(staged, tmp_path / ".env")
+        assert component_binding_declared("skeleton") == "analytics"

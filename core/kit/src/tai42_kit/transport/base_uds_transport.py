@@ -11,6 +11,8 @@ import httpx
 from fastmcp.client.transports import ClientTransport
 from mcp import ClientSession
 
+from tai42_kit.transport.mcp_http import mcp_http_limits
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,12 +48,15 @@ class BaseUDSTransport(ClientTransport):
     ) -> httpx.AsyncClient:
         # Build a fresh UDS transport per client so each client owns and closes
         # its own — a shared transport would be closed by the first client to
-        # exit, breaking every other client still using it.
+        # exit, breaking every other client still using it. The connection limits
+        # live on the transport: httpx applies a client's ``limits`` only to the
+        # transport it builds itself.
         uds_transport = httpx.AsyncHTTPTransport(
             uds=self.socket_path,
             retries=0,
             http1=True,
             http2=False,
+            limits=mcp_http_limits(),
         )
         return SafeAsyncClient(
             follow_redirects=True,

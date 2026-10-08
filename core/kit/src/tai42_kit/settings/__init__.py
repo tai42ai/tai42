@@ -7,6 +7,7 @@ Leaf settings live next to the impl they configure (``tai42_kit.llm``, ``tai42_k
 from tai42_kit.settings.base import KeyMaterial, ReloadClass, TaiBaseSettings
 from tai42_kit.settings.cache_registry import (
     StaleHolder,
+    keyed_settings_cache,
     register_settings_reset,
     reset_all_settings,
     settings_cache,
@@ -16,6 +17,7 @@ from tai42_kit.settings.default_namespace import (
     TAI_DEFAULT_ENV_PREFIX,
     DefaultNamespaceMixin,
 )
+from tai42_kit.settings.env_file import DEFAULT_ENV_FILE, env_file_identity
 from tai42_kit.settings.registry import (
     SettingsClassInfo,
     SettingsFieldInfo,
@@ -28,6 +30,7 @@ from tai42_kit.settings.require import (
 )
 
 __all__ = [
+    "DEFAULT_ENV_FILE",
     "TAI_DEFAULT_ENV_PREFIX",
     "DefaultNamespaceMixin",
     "KeyMaterial",
@@ -36,6 +39,8 @@ __all__ = [
     "SettingsFieldInfo",
     "StaleHolder",
     "TaiBaseSettings",
+    "env_file_identity",
+    "keyed_settings_cache",
     "not_configured_message",
     "register_settings_reset",
     "registered_settings",

@@ -458,6 +458,14 @@ async def test_mcp_create_connect_failure_raises_client_connect_error(monkeypatc
     assert isinstance(excinfo.value, ClientDisconnectedError)
 
 
+async def test_mcp_create_invalid_url_raises_client_connect_error():
+    # The transport is built inside the wrapped connect: a URL fastmcp cannot infer
+    # a transport for surfaces as ClientConnectError, never a bare ValueError.
+    with pytest.raises(ClientConnectError, match="Invalid URL") as excinfo:
+        await mcp_mod.FastMCPClient()._create(config={"title": "srv", "config": {"url": "ftp://h/mcp"}})
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
 async def test_mcp_create_cancelled_propagates_unwrapped(monkeypatch):
     # Cancellation is a BaseException, not caught by the Exception-wrapping in
     # _create; it must propagate as CancelledError, never as ClientConnectError.
