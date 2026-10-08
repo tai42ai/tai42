@@ -1,4 +1,4 @@
-"""The states service's template-seed applier, the bounded template cache, and the
+"""The states service's template-seed applier and the
 declaration stats/delete helpers — driven against the in-memory ``FakeStatesStore``."""
 
 from __future__ import annotations
@@ -38,16 +38,6 @@ async def test_apply_template_seeds_is_a_noop_when_feature_off(
     assert "seeded" not in store.templates
 
 
-async def test_template_cache_serves_hit_and_evicts(svc: StatesService) -> None:
-    svc._TEMPLATE_CACHE_MAX = 1  # type: ignore[misc]
-    await svc.put_template(_template_doc("m1"), replace=False)
-    await svc.put_template(_template_doc("m2"), replace=False)
-    await svc.get_template("m1")  # populates the cache
-    await svc.get_template("m1")  # a cache hit (move-to-end)
-    await svc.get_template("m2")  # overflows the bounded cache → eviction
-    assert len(svc._template_cache) == 1
-
-
 async def test_delete_declaration_not_found(svc: StatesService) -> None:
     with pytest.raises(StateNotFoundError, match="no state declared"):
         await svc.delete_declaration("absent")
@@ -66,3 +56,22 @@ async def test_stats_projects_fields_and_consumers(svc: StatesService) -> None:
 async def test_stats_undeclared_raises(svc: StatesService) -> None:
     with pytest.raises(StateNotFoundError):
         await svc.stats("absent")
+
+
+async def test_an_applied_seed_reads_back_through_get_template(svc: StatesService) -> None:
+    svc.register_template_seed(_template_doc("seeded"))
+    await svc.apply_template_seeds()
+    served = await svc.get_template("seeded")
+    assert served is not None
+    assert served.name == "seeded"
+
+
+async def test_a_seed_that_does_not_validate_is_refused_naming_it(svc: StatesService) -> None:
+    from tai42_contract.states.errors import TemplateValidationError
+
+    bad = _template_doc("broken", schema={"type": "object", "properties": {"y": {"$parameter": "missing"}}})
+    svc.register_template_seed(bad)
+    with pytest.raises(TemplateValidationError, match="broken"):
+        await svc.apply_template_seeds()
+    store: FakeStatesStore = svc._store  # type: ignore[assignment]
+    assert "broken" not in store.templates

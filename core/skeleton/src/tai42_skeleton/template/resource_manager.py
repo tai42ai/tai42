@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import itertools
 import logging
 import mimetypes
 import threading
@@ -116,8 +117,18 @@ def _assert_image(mime: str | None, source: object) -> None:
         raise ValueError(f"normalize_media requires an image resource; resolved mime {mime!r} for {source!r}")
 
 
+#: The process-wide source of :attr:`ResourceManager.epoch`: never reset, so every manager built in
+#: this process (at boot or after a reload) carries a value no earlier manager had.
+_EPOCHS = itertools.count(1)
+
+
 class ResourceManager:
-    """Fetch, render, schema-infer, and cache stored (and inline) templates, guarded and locale-aware."""
+    """Fetch, render, schema-infer, and cache stored (and inline) templates, guarded and locale-aware.
+
+    ``epoch`` identifies this manager among every manager the process builds; ``generation`` counts
+    its local cache evictions. A cache of renders made through a manager keys on both, so a rebuilt
+    manager or an evicted stored template re-renders.
+    """
 
     def __init__(self, provider: Storage | None):
         """Wire the sandboxed Jinja environment and the compiled-template caches from settings.
@@ -125,6 +136,8 @@ class ResourceManager:
         ``provider`` is the Storage backend, or ``None`` when none is registered.
         """
         self._provider = provider
+        self.epoch: int = next(_EPOCHS)
+        self.generation: int = 0
         # Sandboxed engine: template text is an authoring surface (hook
         # condition/expr, stored/inline renders), so rendering blocks dunder and
         # unsafe-callable access — a traversal like
@@ -172,6 +185,11 @@ class ResourceManager:
             # Bypass cache wrapper entirely
             self._get_compiled_template = self._fetch_and_compile
             logger.info("ResourceManager initialized with caching disabled")
+
+    @property
+    def cache_enabled(self) -> bool:
+        """Whether this manager caches compiled templates (a positive size and TTL)."""
+        return self._cache_enabled
 
     @property
     def provider(self) -> Storage:
@@ -447,6 +465,7 @@ class ResourceManager:
         dependency cache (``{% include %}``/``{% extends %}`` targets) is always
         present and is cleared whole, so no re-uploaded dependency is served stale.
         """
+        self.generation += 1
         # ``_get_compiled_template`` is the alru_cache wrapper only when caching is
         # enabled; otherwise it's the bare method with no cache controls.
         cache_clear = getattr(self._get_compiled_template, "cache_clear", None)
@@ -468,6 +487,7 @@ class ResourceManager:
         key is a no-op; the compiled-cache drop is a no-op when caching is off while
         the engine-cache drop always runs.
         """
+        self.generation += 1
         invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
         if invalidate is not None:
             invalidate(template_id)
@@ -492,6 +512,7 @@ class ResourceManager:
         the cache has already dropped (TTL/LRU) are pruned in the same pass, keeping
         the registry bounded by what is actually cached.
         """
+        self.generation += 1
         self._evict_engine_cache(lambda name: name.startswith(prefix))
         invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
         if invalidate is None:

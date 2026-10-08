@@ -175,3 +175,36 @@ async def test_delete_template_missing_is_noop_at_the_store_seam() -> None:
 
     # No raise despite the provider raising FileNotFoundError for the absent key.
     await manager.delete_template("never-existed.j2")
+
+
+def test_every_manager_carries_a_new_epoch() -> None:
+    first = ResourceManager(None)
+    second = ResourceManager(None)
+    assert second.epoch > first.epoch
+    assert first.generation == second.generation == 0
+
+
+@pytest.mark.parametrize(
+    "evict",
+    [
+        lambda rm: rm.evict_compiled("a/b.txt"),
+        lambda rm: rm.evict_dir("a"),
+        lambda rm: rm.clear_cache(),
+    ],
+)
+def test_each_local_eviction_seam_bumps_the_generation_once(evict) -> None:
+    rm = ResourceManager(None)
+    evict(rm)
+    assert rm.generation == 1
+    evict(rm)
+    assert rm.generation == 2
+
+
+def test_cache_enabled_reads_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.template import resource_manager as rm_module
+    from tai42_skeleton.template.settings import TemplateCacheSettings
+
+    monkeypatch.setattr(rm_module, "template_cache_settings", lambda: TemplateCacheSettings(ttl=0))
+    assert ResourceManager(None).cache_enabled is False
+    monkeypatch.setattr(rm_module, "template_cache_settings", lambda: TemplateCacheSettings(ttl=None, max_size=10))
+    assert ResourceManager(None).cache_enabled is True

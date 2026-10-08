@@ -41,15 +41,16 @@ class _RegistrationMixin(_StatesServiceBase):
         self._attach_validators.register(validator)
 
     async def _run_attach_validators(
-        self, template_doc: StateTemplateDocument, declarations: dict[str, Any], effective: dict[str, Any]
+        self, state: str, template_doc: StateTemplateDocument, declarations: dict[str, Any], effective: dict[str, Any]
     ) -> None:
         """Run every registered attach validator BEFORE any write.
 
-        Each gets the template document, the attach's declaration values, and the state's effective schema.
-        A validator raises loudly (a :class:`TemplateValidationError`) to refuse the door.
+        Each gets the state name, the template document, the attach's declaration values, and the
+        state's effective schema. A validator raises loudly (a :class:`TemplateValidationError`) to
+        refuse the door.
         """
         for validator in self._attach_validators.all():
-            await validator(template_doc, declarations, effective)
+            await validator(state, template_doc, declarations, effective)
 
     def register_attach_reconciler(self, reconciler: AttachReconciler) -> None:
         self._attach_reconcilers.register(reconciler)
@@ -105,4 +106,12 @@ class _RegistrationMixin(_StatesServiceBase):
             return
         from tai42_skeleton.states.seeds import apply_template_seeds
 
-        await apply_template_seeds(self._store, seeds=self._seeds.seeds())
+        await apply_template_seeds(self._store, seeds=self._seeds.seeds(), prepare=self._prepare_seed)
+
+    async def _prepare_seed(self, doc: StateTemplateDocument) -> dict[str, Any]:
+        """The body a seed is stored as: validated exactly as a template upload, refused naming the seed."""
+        try:
+            _template, stored_body = await self._validated_template_write(doc)
+        except TemplateValidationError as exc:
+            raise TemplateValidationError(f"state-template seed {doc.name!r} does not validate: {exc}") from exc
+        return stored_body

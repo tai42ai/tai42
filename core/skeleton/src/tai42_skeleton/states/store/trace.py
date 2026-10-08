@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from tai42_contract.states import path_overlaps
 from tai42_contract.states.errors import RegimeViolationError
 
 from tai42_skeleton.states.paths import APPEND, KEYED_OPS
-from tai42_skeleton.states.templates import path_overlaps
 
 
 def _iso_now() -> str:

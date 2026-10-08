@@ -27,9 +27,18 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StringConstraints,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.locale import normalize_optional_locale
@@ -43,13 +52,8 @@ SUBJECT_KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 #: ``:``, so a name carrying one would let two ledger keys collide.
 STATE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-#: The state-template ``name`` charset: a lowercase SLUG of at most 63 chars — a leading
-#: letter, then letters/digits/single hyphens, with NO leading, trailing, or consecutive
-#: hyphen. The slug rule is load-bearing for the qualified template-jq handle
-#: ``tjq_<template with '-'→'_'>__<jq>``: a name with ``--`` would encode to ``__`` and let
-#: (template ``a--b``, jq ``c``) collide with (template ``a``, jq ``b__c``); forbidding
-#: ``--`` (and a trailing ``-``) means the encoded template part never contains ``__`` nor
-#: ends in ``_``, so the FIRST ``__`` is an unambiguous template/jq boundary.
+#: A lowercase slug of at most 63 characters: a template name is a URL path segment
+#: (``/api/state-templates/{name}``).
 TEMPLATE_NAME_RE = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,62}$")
 
 #: The one platform-validated kind: its key is a person id resolved against the
@@ -67,6 +71,12 @@ MAX_RETENTION_DAYS = 2_147_483_647
 #: The upper bound on a :class:`WriteOrigin` ``meta`` bag: the byte length of its compact
 #: JSON serialization. A larger bag is refused loudly at the model boundary.
 MAX_ORIGIN_META_BYTES = 4096
+
+#: A write regime: ``single`` (one writer), ``composing`` (keyed ops or appends only) or ``free``.
+RegimeName = Literal["single", "composing", "free"]
+
+#: One record-path segment of a template-relative path: an object key or the ``"*"`` wildcard.
+PathSegment = Annotated[str, StringConstraints(min_length=1)]
 
 #: The literal every write door records: which door completed the write, stamped by
 #: the platform chokepoint from the ambient context (never consumer-supplied).
@@ -200,6 +210,57 @@ class CompletedOrigin(WriteOrigin):
     inbound_id: str | None = None
 
 
+def _drop_schema_default(schema: dict[str, Any]) -> None:
+    schema.pop("default", None)
+
+
+class StateTemplateParameter(BaseModel):
+    """One fillable template parameter: its value ``schema`` and an OPTIONAL ``default``.
+
+    ``has_default`` tells an absent default from an explicit ``null`` one; the wire shape omits
+    ``default`` when none was given.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, serialize_by_alias=True)
+
+    schema_: dict[str, Any] = Field(alias="schema")
+    # The published schema carries no ``default`` for ``default``: the key is absent on the wire
+    # when the parameter has none, and a reader tells that apart from an explicit ``null``.
+    default: Any = Field(default=None, json_schema_extra=_drop_schema_default)
+
+    @property
+    def has_default(self) -> bool:
+        """Whether the parameter carries a default (an explicit ``null`` counts)."""
+        return "default" in self.model_fields_set
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_default(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if not self.has_default:
+            data.pop("default", None)
+        return data
+
+
+class StateRegimeRule(BaseModel):
+    """One write-regime rule: a ``path`` (object keys and the ``"*"`` wildcard; ``[]`` is the root) and its ``regime``.
+
+    An undeclared path is ``free``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: list[PathSegment]
+    regime: RegimeName
+
+
+class StateTemplateTrace(BaseModel):
+    """The trace switch: when ``enabled``, every write under an attachment of the template stamps ``_trace``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: StrictBool = False
+
+
 class StateDeclaration(BaseModel):
     """A declared state: its identity, base schema, subject kinds, and optional retention.
 
@@ -227,7 +288,7 @@ class StateDeclaration(BaseModel):
     default_subject_kind: str
     retention_days: int | None = Field(default=None, gt=0, le=MAX_RETENTION_DAYS)
     effective_schema: dict[str, Any] | None = None
-    regimes: list[dict[str, Any]] | None = None
+    regimes: list[StateRegimeRule] | None = None
     updated_at: datetime | None = None
 
     @field_validator("name")
@@ -357,11 +418,11 @@ class StateTemplateDocument(BaseModel):
     kind: Literal["state-template"] = "state-template"
     name: str
     description: str = ""
-    parameters: dict[str, Any] = Field(default_factory=dict)
+    parameters: dict[str, StateTemplateParameter] = Field(default_factory=dict[str, StateTemplateParameter])
     schema_: TemplatedText | dict[str, Any] = Field(default_factory=dict, alias="schema")
-    regimes: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
+    regimes: list[StateRegimeRule] = Field(default_factory=list[StateRegimeRule])
     declarations: StateTemplateDeclarations | None = None
-    trace: dict[str, Any] = Field(default_factory=dict)
+    trace: StateTemplateTrace = Field(default_factory=StateTemplateTrace)
     #: ``name -> program`` — each a named jq program keyed by its handle.
     template_jq: dict[str, StateTemplateJq] | None = None
     reconcile: StateTemplateReconcile | None = None
@@ -587,12 +648,16 @@ class ConsumerRow(BaseModel):
     unavailable: str | None = None
 
 
-#: A data-dependent attach validator a consumer registers on the states facet: given
-#: the template document, the attachment's declaration VALUES, and the state's effective
-#: schema, it RAISES loudly (a ``TemplateValidationError`` naming the offending item)
-#: to refuse the door — consulted before every attach / declarations write. A pass
-#: returns ``None``.
-AttachValidator = Callable[["StateTemplateDocument", dict[str, Any], dict[str, Any]], Awaitable[None]]
+#: A data-dependent attach validator a consumer registers on the states facet: given the
+#: state name, the template document, the attachment's declaration VALUES, and the state's
+#: effective schema, it RAISES loudly (a ``TemplateValidationError`` naming the offending item)
+#: to refuse the door — consulted before every attach / declarations write and every template
+#: replace, once per live attachment. A pass returns ``None``.
+AttachValidator = Callable[[str, "StateTemplateDocument", dict[str, Any], dict[str, Any]], Awaitable[None]]
+
+
+class StateUnitClosedError(RuntimeError):
+    """The unit of work was already committed or discarded; it accepts no further staging, savepoint or commit."""
 
 
 @runtime_checkable
@@ -651,8 +716,11 @@ class StateUnit(Protocol):
         :meth:`~tai42_contract.app.facets.AppStates.apply_template_jq` would apply it, over the
         unit's current projection, and returns its provisional :class:`ApplyResult` (a re-staged
         ``op_id`` — already staged here or already committed — answers ``applied=False`` without
-        touching the projection, mirroring the ledger at commit). No store write happens; a
-        validation, composing-shape or schema error raises loudly.
+        touching the projection, mirroring the ledger at commit). The whole-document schema is
+        checked once per touched subject, on the document the batch's last write for it leaves, so
+        a batch is accepted or refused as one multi-op ``apply`` would be. No store write happens;
+        a validation, composing-shape or schema error raises loudly and leaves nothing of the batch
+        staged. A committed or discarded unit raises :class:`StateUnitClosedError`.
         """
         ...
 
@@ -662,15 +730,15 @@ class StateUnit(Protocol):
         The whole-batch rollback holds: any write that fails rolls the whole commit back and
         raises loudly, nothing lands. Returns the committed per-write :class:`ApplyResult` in
         staged order plus any divergence between the staged projection and the committed answer
-        (a visible field, also logged at warning). A committed or discarded unit refuses a
-        second commit loudly.
+        (a visible field, also logged at warning). A committed or discarded unit raises
+        :class:`StateUnitClosedError`.
         """
         ...
 
     async def discard(self) -> None:
         """Drop the unit's staging without writing.
 
-        A committed or discarded unit refuses a second discard loudly.
+        A committed or discarded unit raises :class:`StateUnitClosedError`.
         """
         ...
 
@@ -679,7 +747,8 @@ class StateUnit(Protocol):
 
         Writes staged inside the ``async with`` block are KEPT on a clean exit and DROPPED on an
         exception — only the child's staged deltas roll back, and the exception propagates
-        loudly. Savepoints nest to any depth.
+        loudly. Savepoints nest to any depth. Entering one on a committed or discarded unit raises
+        :class:`StateUnitClosedError`.
         """
         ...
 

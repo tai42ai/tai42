@@ -24,6 +24,7 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
+from tai42_contract.states.rendered import RenderedAttachment, RenderedStateTemplate
 
 
 @runtime_checkable
@@ -97,6 +98,29 @@ class AppStates(Protocol):
         """Delete a template document.
 
         Raises :class:`~tai42_contract.states.TemplateInUseError` while it is still attached.
+        """
+        ...
+
+    async def get_rendered_template(self, name: str) -> RenderedStateTemplate | None:
+        """The stored template ``name`` rendered — every body as jq text, the input programs ordered.
+
+        ``None`` when no such template is stored. A body that cannot be rendered raises
+        :class:`~tai42_contract.states.TemplateValidationError` naming the template.
+        """
+        ...
+
+    async def rendered_attachments(self, state: str) -> list[RenderedAttachment]:
+        """Every attachment on ``state`` with its rendered template, ordered by template name.
+
+        Raises :class:`~tai42_contract.states.StateNotFoundError` for an undeclared state.
+        """
+        ...
+
+    async def render_template(self, doc: StateTemplateDocument) -> RenderedStateTemplate:
+        """Render a candidate template document that is not stored (its ``version`` is ``"candidate"``).
+
+        Validates the document as a store would; a refusal raises
+        :class:`~tai42_contract.states.TemplateValidationError`.
         """
         ...
 
@@ -322,8 +346,8 @@ class AppStates(Protocol):
         """Register a data-dependent attach validator.
 
         A plugin calls this through the ``tai42_app`` handle when its module loads. The
-        validator receives the template document, an attachment's declaration values, and the
-        state's effective schema, and RAISES to refuse; it runs before every ``attach``,
+        validator receives the state name, the template document, an attachment's declaration
+        values, and the state's effective schema, and RAISES to refuse; it runs before every ``attach``,
         ``update_attachment_declarations`` and ``put_template(replace=True)`` write, so a
         consumer's checks fire at the platform's declarations doors, the States page
         included.

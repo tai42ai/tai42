@@ -455,3 +455,112 @@ async def test_off_stack_state_doors_refuse_501(off_stack: TaiStack) -> None:
         "/api/states/status-off/records/agent/a-42/thread/t1/template-jq/add",
         json={"input": {"id": "x"}},
     )
+
+
+@pytest.mark.needs("kind:states", "topology:replicas")
+async def test_a_template_replace_on_one_worker_is_served_on_the_other(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """Every per-process derived artifact of a template keys on its stored version: a replace
+    through replica A is served — document, attached declaration, and the program it evaluates —
+    by replica B on its next read, with no fan-out."""
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+    state = uniq("status")
+    template = uniq("replace-tmpl").replace("_", "-")
+
+    def _template(answer: str, regime: str) -> dict:
+        return {
+            "kind": "state-template",
+            "name": template,
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+            "regimes": [{"path": ["items"], "regime": regime}],
+            "template_jq": {"answer": {"purpose": "input", "jq": {"content": answer}}},
+        }
+
+    await api_a.put(
+        f"/api/states/{state}",
+        json={
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    await api_a.put(f"/api/state-templates/{template}", json=_template('"before"', "single"))
+    await api_a.put(f"/api/states/{state}/attachments/{template}", json={"path": ["box"]})
+    record = _record_path(state, "agent", "a-42", "thread", "t1")
+    # B reads (and caches) the template, the declaration and the rendered program first.
+    assert (await api_b.get(f"/api/state-templates/{template}"))["regimes"] == [{"path": ["items"], "regime": "single"}]
+    assert (await api_b.get(f"/api/states/{state}"))["regimes"] == [{"path": ["box", "items"], "regime": "single"}]
+    assert (await api_b.get(f"{record}/template-jq/answer"))["value"] == "before"
+
+    await api_a.put(f"/api/state-templates/{template}?replace=true", json=_template('"after"', "composing"))
+
+    assert (await api_b.get(f"/api/state-templates/{template}"))["regimes"] == [
+        {"path": ["items"], "regime": "composing"}
+    ]
+    assert (await api_b.get(f"/api/states/{state}"))["regimes"] == [{"path": ["box", "items"], "regime": "composing"}]
+    assert (await api_b.get(f"{record}/template-jq/answer"))["value"] == "after"
+
+
+@pytest.mark.needs("kind:states", "topology:replicas")
+async def test_a_state_and_template_recreated_on_one_worker_are_served_anew_on_the_other(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """A catalog version never repeats for a name: a state and a template deleted and re-created
+    through replica A are served by replica B as the re-created rows — B's next write validates
+    under the new schema and its rendered program is the new one — though B cached the deleted
+    rows first."""
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+    state = uniq("status")
+    template = uniq("recreate-tmpl").replace("_", "-")
+    record = _record_path(state, "agent", "a-42", "thread", "t1")
+
+    async def create(note_type: str, answer: str) -> None:
+        await api_a.put(
+            f"/api/states/{state}",
+            json={
+                "schema": {"type": "object", "properties": {"note": {"type": note_type}}},
+                "subject_kinds": ["thread"],
+                "default_subject_kind": "thread",
+            },
+        )
+        await api_a.put(
+            f"/api/state-templates/{template}",
+            json={
+                "kind": "state-template",
+                "name": template,
+                "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+                "template_jq": {"answer": {"purpose": "input", "jq": {"content": answer}}},
+            },
+        )
+        await api_a.put(f"/api/states/{state}/attachments/{template}", json={"path": ["box"]})
+
+    await create("integer", '"before"')
+    # B writes and evaluates first, so it holds the declaration, its validator and the rendered program.
+    await api_b.put(record, json={"note": 1})
+    assert (await api_b.get(f"{record}/template-jq/answer"))["value"] == "before"
+
+    await api_a.delete(f"/api/states/{state}/attachments/{template}")
+    await api_a.delete(f"/api/state-templates/{template}")
+    await api_a.delete(f"/api/states/{state}")
+    await create("string", '"after"')
+
+    await api_b.put(record, json={"note": 2}, expect=422)
+    await api_b.put(record, json={"note": "two"})
+    assert (await api_b.get(f"{record}/template-jq/answer"))["value"] == "after"
+
+
+@pytest.mark.needs("kind:states")
+async def test_a_shipped_template_seed_reads_back(seams_stack: TaiStack) -> None:
+    """A template a plugin ships as a seed is stored through the validated write, so it reads
+    back like an uploaded one — typed sections, the trace default included."""
+    api = seams_stack.api()
+    served = await api.get("/api/state-templates/e2e-seed-template")
+    assert served["name"] == "e2e-seed-template"
+    assert served["parameters"] == {"cap": {"schema": {"type": "integer"}, "default": 3}}
+    assert served["trace"] == {"enabled": False}
+    catalog = await api.get("/api/state-templates")
+    listed = next(item for item in catalog if item["name"] == "e2e-seed-template")
+    assert listed["shipped_default"] is True

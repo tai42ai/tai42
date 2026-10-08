@@ -46,6 +46,7 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import logging
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 
 import pytest
@@ -62,6 +63,7 @@ import tai42_skeleton.versioning.store as versioning_store
 from ._fakes.advisory_locks import FakeAdvisoryLocks
 from ._fakes.interactions_redis import FakeRedis
 from ._module_identity import restore_states_module_identity
+from ._staged_generations import preserved_staged_generations
 from .runs.conftest import FakeRunIndexPg
 from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 from .versioning.conftest import FakeVersioningPg
@@ -114,6 +116,25 @@ class _FakeConn:
 class _FakePool:
     def connection(self) -> _FakeConn:
         return _FakeConn()
+
+
+@pytest.fixture(autouse=True)
+def _preserve_generation_globals() -> Iterator[None]:
+    """Restore every per-generation global around each test.
+
+    An app boot rewrites the committed generations (the connector, identity, accounts,
+    operation, monitoring and Studio registries, the route registry's shape index, and the
+    access-control gate state) from its own manifest, and an epoch build promotes a staged
+    generation over them. A test that boots a narrow manifest, or drives a build with a
+    no-op rebuild, leaves those globals holding only what it registered; the router and
+    plugin modules stay cached in ``sys.modules``, so nothing repopulates them for the next
+    test on the same worker. Every later reader then sees the narrowed surface, e.g. the
+    access-control verifier no longer matching a declared-public route. Autouse fixtures of one
+    conftest run in name order; the snapshot is taken on entry and the restore on exit of this
+    fixture, so a registration another autouse fixture makes before it is part of the restored
+    state and one made after it is undone with the test."""
+    with preserved_staged_generations():
+        yield
 
 
 @pytest.fixture(autouse=True, scope="session")

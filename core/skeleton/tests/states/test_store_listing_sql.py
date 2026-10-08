@@ -7,6 +7,7 @@ from __future__ import annotations
 from tai42_contract.conversations import ConversationTargetKind
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
+from tai42_skeleton.states.service.catalog import CatalogSnapshot
 from tai42_skeleton.states.store import PostgresStatesStore, make_cursor
 
 from .conftest import FakeStatesPg
@@ -29,6 +30,10 @@ def _ok(schema, doc):
 
 def _subj(key="t1", kind="thread", tk: ConversationTargetKind = "agent", tn="a"):
     return StateSubject(target_kind=tk, target_name=tn, kind=kind, key=key)
+
+
+async def _admit(subject_kinds: list[str]) -> None:
+    """A permissive in-txn subject check — these SQL tests isolate the store, not admission."""
 
 
 async def test_list_subjects_keyset_paging(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
@@ -63,10 +68,14 @@ async def test_search_records_containment(pg: FakeStatesPg, store: PostgresState
     assert [r["subject_key"] for r in rows] == ["t1"]
 
 
-async def test_writes_paging_newest_first_and_alias_aware(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_writes_paging_newest_first_and_alias_aware(
+    pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot
+) -> None:
     pg.seed_declaration("alerts")
     for i in range(3):
-        await store.replace("alerts", _subj(), {"n": i}, origin=_ORIGIN, validate_doc=_ok)
+        await store.replace(
+            "alerts", _subj(), {"n": i}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit
+        )
     first = await store.writes("alerts", _subj(), limit=2, cursor=None)
     assert len(first) == 2
     assert first[0]["id"] > first[1]["id"]  # newest first
@@ -75,11 +84,11 @@ async def test_writes_paging_newest_first_and_alias_aware(pg: FakeStatesPg, stor
     assert nxt[0]["id"] < first[-1]["id"]
 
 
-async def test_writes_follows_a_fold(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_writes_follows_a_fold(pg: FakeStatesPg, store: PostgresStatesStore, catalog: CatalogSnapshot) -> None:
     pg.seed_declaration("alerts")
     s1, s2 = _subj(key="old"), _subj(key="new")
-    await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, validate_doc=_ok)
-    await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, validate_doc=_ok)
+    await store.replace("alerts", s2, {"n": 2}, origin=_ORIGIN, catalog=catalog, validate_subject_in_txn=_admit)
+    await store.fold_subject("alerts", s1, s2, "switch", origin=_ORIGIN, catalog=catalog)
     # the old key's audit trail resolves onto the survivor's writes
     rows = await store.writes("alerts", s1, limit=10, cursor=None)
     assert rows  # the survivor's replace + the fold write row are visible through the old key

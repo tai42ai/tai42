@@ -106,17 +106,21 @@ def _anchor_exists(node: Any, anchor: str) -> bool:
     return False
 
 
-def _validate_document(schema: dict[str, Any], doc: dict[str, Any]) -> None:
-    """Validate the FULL record document against the effective schema.
+def _validate_document(validator: Draft202012Validator, doc: dict[str, Any], *, where: str | None = None) -> None:
+    """Validate the FULL record document with the effective schema's ``validator``.
 
-    The error names the offending JSON path. Loud on the first failure.
+    The error names the offending JSON path, prefixed with ``where`` (the state and subject a
+    batch validation checks) when given. Loud on the first failure.
     """
+    prefix = "" if where is None else f"{where}: "
     try:
-        Draft202012Validator(schema).validate(doc)
+        validator.validate(doc)
     except jsonschema.ValidationError as exc:
-        raise ValueValidationError(f"record invalid under the state schema at {exc.json_path}: {exc.message}") from exc
+        raise ValueValidationError(
+            f"{prefix}record invalid under the state schema at {exc.json_path}: {exc.message}"
+        ) from exc
     except referencing.exceptions.Unresolvable as exc:
-        raise ValueValidationError(f"the state schema carries an unresolvable $ref: {exc}") from exc
+        raise ValueValidationError(f"{prefix}the state schema carries an unresolvable $ref: {exc}") from exc
 
 
 def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> bool:

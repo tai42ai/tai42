@@ -8,6 +8,7 @@ from tai42_contract.states.errors import ValueValidationError
 from tai42_contract.states.models import (
     AttachBody,
     StateDeclaration,
+    StateRegimeRule,
     StateTemplateDocument,
     WritesPage,
 )
@@ -44,9 +45,9 @@ async def test_get_declaration_serves_regimes_for_a_attach_and_empty_for_none(sv
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     attached = await svc.get_declaration("alerts")
     assert attached is not None
-    assert attached.regimes == [{"path": ["sub", "tags"], "regime": "composing"}]
+    assert attached.regimes == [StateRegimeRule(path=["sub", "tags"], regime="composing")]
     served = await svc.served_declaration("alerts")
-    assert attached.regimes == served["regimes"]
+    assert [r.model_dump() for r in attached.regimes or []] == served["regimes"]
 
 
 async def test_list_declarations_serves_composed_regimes(svc: StatesService) -> None:
@@ -54,7 +55,7 @@ async def test_list_declarations_serves_composed_regimes(svc: StatesService) -> 
     await svc.put_template(StateTemplateDocument.model_validate(_REGIME_TEMPLATE), replace=False)
     await svc.attach("alerts", "tagmod", AttachBody(path=["sub"]))
     decls = await svc.list_declarations()
-    assert [d.regimes for d in decls] == [[{"path": ["sub", "tags"], "regime": "composing"}]]
+    assert [d.regimes for d in decls] == [[StateRegimeRule(path=["sub", "tags"], regime="composing")]]
 
 
 async def test_put_declaration_refuses_a_client_supplied_regimes(svc: StatesService) -> None:
@@ -63,7 +64,7 @@ async def test_put_declaration_refuses_a_client_supplied_regimes(svc: StatesServ
         schema={"type": "object", "properties": {"n": {"type": "integer"}}},
         subject_kinds=["thread"],
         default_subject_kind="thread",
-        regimes=[{"path": ["forged"], "regime": "single"}],
+        regimes=[StateRegimeRule(path=["forged"], regime="single")],
     )
     with pytest.raises(ValueError, match="regimes are computed by the platform"):
         await svc.put_declaration(forged)

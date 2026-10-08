@@ -1,10 +1,7 @@
-"""The frozen value objects of a platform state-template document and their wire projection.
+"""The validated platform state-template value object and its canonical wire projection.
 
-The document's sub-shapes — its declarations, ``template_jq`` programs and ``reconcile``
-programs — are the contract models (the single published source of their wire shape); the
-remaining shapes stay frozen dataclasses because a pydantic model with a field literally
-named ``schema`` shadows ``BaseModel.schema`` and warns, and the suite turns warnings into
-errors (the contract models sidestep this with the ``schema_`` alias).
+Every section is a contract model (the single published source of its wire shape); the value
+object is a frozen dataclass because its fragment field is literally named ``schema``.
 """
 
 from __future__ import annotations
@@ -14,49 +11,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tai42_contract.states.models import (
+    StateRegimeRule,
     StateTemplateDeclarations,
     StateTemplateJq,
+    StateTemplateParameter,
     StateTemplateReconcile,
+    StateTemplateTrace,
 )
 
 TEMPLATE_KIND = "state-template"
-
-
-@dataclass(frozen=True, slots=True)
-class TemplateParameter:
-    """A fillable parameter: its value ``schema`` and an OPTIONAL ``default``.
-
-    A parameter without a default must be referenced by a marker in the fragment and supplied at
-    attach; ``has_default`` distinguishes an absent default from an explicit ``null`` default.
-    """
-
-    schema: dict[str, Any]
-    has_default: bool = False
-    default: Any = None
-
-
-@dataclass(frozen=True, slots=True)
-class RegimeRule:
-    """One per-path writer rule.
-
-    A template-relative ``path`` (object keys and the ``"*"`` wildcard, which matches one list
-    index or key) and its ``regime`` (``single`` / ``composing`` / ``free``). An undeclared path
-    is ``free``.
-    """
-
-    path: list[str]
-    regime: str
-
-
-@dataclass(frozen=True, slots=True)
-class TemplateTrace:
-    """The trace switch.
-
-    When ``enabled``, the effective schema admits ``_trace`` and the platform ``apply`` chokepoint
-    stamps it on every write under an attachment of this template.
-    """
-
-    enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,11 +32,11 @@ class StateTemplate:
 
     name: str
     description: str
-    parameters: dict[str, TemplateParameter]
+    parameters: dict[str, StateTemplateParameter]
     schema: dict[str, Any]
-    regimes: list[RegimeRule]
+    regimes: list[StateRegimeRule]
     declarations: StateTemplateDeclarations | None
-    trace: TemplateTrace
+    trace: StateTemplateTrace
     template_jq: dict[str, StateTemplateJq] = field(default_factory=dict)
     reconcile: StateTemplateReconcile | None = None
 
@@ -90,13 +53,10 @@ class StateTemplate:
         """
         doc: dict[str, Any] = {"kind": TEMPLATE_KIND, "name": self.name, "description": self.description}
         if self.parameters:
-            doc["parameters"] = {
-                name: ({"schema": p.schema, "default": p.default} if p.has_default else {"schema": p.schema})
-                for name, p in self.parameters.items()
-            }
+            doc["parameters"] = {name: p.model_dump() for name, p in self.parameters.items()}
         doc["schema"] = self.schema
         if self.regimes:
-            doc["regimes"] = [{"path": list(r.path), "regime": r.regime} for r in self.regimes]
+            doc["regimes"] = [r.model_dump() for r in self.regimes]
         if self.declarations is not None:
             declarations: dict[str, Any] = {"schema": self.declarations.schema_}
             if self.declarations.check is not None:
@@ -110,8 +70,7 @@ class StateTemplate:
                 "close": self.reconcile.close.model_dump(exclude_none=True),
                 "resolutions": self.reconcile.resolutions.model_dump(exclude_none=True),
             }
-        if self.trace.enabled:
-            doc["trace"] = {"enabled": True}
+        doc["trace"] = self.trace.model_dump()
         return doc
 
 

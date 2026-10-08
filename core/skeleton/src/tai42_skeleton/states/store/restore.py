@@ -9,7 +9,9 @@ from psycopg.types.json import Jsonb
 from tai42_contract.states.errors import StateNotFoundError
 from tai42_contract.states.models import CompletedOrigin
 
-from .base import _StoreBase
+from tai42_skeleton.states.schema import _validate_document
+
+from .base import ApplyEntrySource, _StoreBase
 from .connection import _pool, _settings
 
 
@@ -17,7 +19,7 @@ class _RestoreStore(_StoreBase):
     """The backup section's write-through restore paths for records and subject aliases."""
 
     async def restore_records(
-        self, state: str, rows: list[dict[str, Any]], *, origin: CompletedOrigin, validate_doc: Any
+        self, state: str, rows: list[dict[str, Any]], *, origin: CompletedOrigin, catalog: ApplyEntrySource
     ) -> None:
         """Restore record rows for ``state`` under the completed origin, validating each document, in ONE txn.
 
@@ -31,13 +33,16 @@ class _RestoreStore(_StoreBase):
             conn.transaction(),
             conn.cursor(row_factory=dict_row) as cur,
         ):
-            await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s FOR SHARE", (state,))
+            await cur.execute(
+                "SELECT version, subject_kinds FROM state_declarations WHERE name = %s FOR SHARE", (state,)
+            )
             decl = await cur.fetchone()
             if decl is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
+            entry = await catalog.write_entry(cur, state, int(decl["version"]))
             for row in rows:
                 data = row["data"]
-                validate_doc(decl["effective_schema"], data)
+                _validate_document(entry.validator, data)
                 tk, tn = row["target_kind"], row["target_name"]
                 kind, key = row["subject_kind"], row["subject_key"]
                 await cur.execute(

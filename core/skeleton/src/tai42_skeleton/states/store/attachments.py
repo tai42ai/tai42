@@ -97,7 +97,8 @@ class _AttachmentStore(_StoreBase):
                 (state, template, Jsonb(path), Jsonb(parameters), Jsonb(declarations)),
             )
             await cur.execute(
-                "UPDATE state_declarations SET effective_schema = %s, updated_at = now() WHERE name = %s",
+                "UPDATE state_declarations SET effective_schema = %s, updated_at = now(), "
+                "version = nextval('state_catalog_versions') WHERE name = %s",
                 (Jsonb(effective_schema), state),
             )
 
@@ -126,25 +127,29 @@ class _AttachmentStore(_StoreBase):
             if cur.rowcount == 0:
                 return False
             await cur.execute(
-                "UPDATE state_declarations SET effective_schema = %s, updated_at = now() WHERE name = %s",
+                "UPDATE state_declarations SET effective_schema = %s, updated_at = now(), "
+                "version = nextval('state_catalog_versions') WHERE name = %s",
                 (Jsonb(effective_schema), state),
             )
             return True
 
     async def update_attachment_parameters(
-        self, state: str, template: str, parameters: dict[str, Any], *, effective_schema: dict[str, Any]
+        self,
+        state: str,
+        template: str,
+        parameters: dict[str, Any],
+        *,
+        effective_schema: dict[str, Any],
+        conn: AsyncConnection[Any] | None = None,
     ) -> bool:
         """Rewrite a attach's stored (effective) parameters and the state's effective schema in ONE txn.
 
         Runs under the declaration lock — used by a template replace to backfill a newly
-        defaulted parameter into a live attach. ``False`` when no such attach exists.
+        defaulted parameter into a live attach and to bump the declaration's version with the
+        template's. ``False`` when no such attach exists. With ``conn`` the write joins the
+        caller's transaction.
         """
-        async with (
-            _pool(_settings()) as pool,
-            pool.connection() as conn,
-            conn.transaction(),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
+        async with self._write_cursor(conn) as cur:
             await cur.execute("SELECT name FROM state_declarations WHERE name = %s FOR UPDATE", (state,))
             if await cur.fetchone() is None:
                 raise StateNotFoundError(f"no state declared as {state!r}")
@@ -155,7 +160,8 @@ class _AttachmentStore(_StoreBase):
             if cur.rowcount == 0:
                 return False
             await cur.execute(
-                "UPDATE state_declarations SET effective_schema = %s, updated_at = now() WHERE name = %s",
+                "UPDATE state_declarations SET effective_schema = %s, updated_at = now(), "
+                "version = nextval('state_catalog_versions') WHERE name = %s",
                 (Jsonb(effective_schema), state),
             )
             return True
@@ -179,7 +185,8 @@ class _AttachmentStore(_StoreBase):
             if cur.rowcount == 0:
                 return False
             await cur.execute(
-                "UPDATE state_declarations SET effective_schema = %s, updated_at = now() WHERE name = %s",
+                "UPDATE state_declarations SET effective_schema = %s, updated_at = now(), "
+                "version = nextval('state_catalog_versions') WHERE name = %s",
                 (Jsonb(effective_schema), state),
             )
             return True

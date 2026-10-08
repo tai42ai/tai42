@@ -6,14 +6,16 @@ regime path is checked statically against the fragment structure at validation.
 
 from __future__ import annotations
 
+import typing
 from typing import Any
 
 from tai42_contract.states.errors import TemplateValidationError
+from tai42_contract.states.models import RegimeName
 
 from tai42_skeleton.states.templates.model import StateTemplate
 from tai42_skeleton.states.templates.parameters import _is_marker
 
-REGIMES = frozenset({"single", "composing", "free"})
+REGIMES = frozenset(typing.get_args(RegimeName))
 
 
 def _pattern_prefix_matches(pattern: list[str], path: list[Any]) -> bool:
@@ -39,15 +41,6 @@ def regime_for(template: StateTemplate, relative_path: list[Any]) -> str:
             best = rule.regime
             best_len = len(rule.path)
     return best
-
-
-def path_overlaps(a: list[Any], b: list[Any]) -> bool:
-    """Whether two paths overlap — equal, or one a prefix/descendant of the other.
-
-    ``"*"`` in either side matches one segment on the other.
-    """
-    n = min(len(a), len(b))
-    return all(a[i] == "*" or b[i] == "*" or a[i] == b[i] for i in range(n))
 
 
 def _descend_wildcard(node: dict[str, Any], path: list[str]) -> Any:

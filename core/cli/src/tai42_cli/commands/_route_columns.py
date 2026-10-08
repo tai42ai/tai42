@@ -427,6 +427,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "shipped_default",
         ),
     ),
+    ("GET", "/api/state-templates/{name}"): RouteShape(items_key="regimes", columns=("path", "regime")),
     ("GET", "/api/states"): RouteShape(
         items_key=None,
         columns=(
@@ -519,6 +520,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("PUT", "/api/presets/{name}/versions/{version}/tags"): RouteShape(
         items_key=None, columns=("name", "version", "tags")
     ),
+    ("PUT", "/api/state-templates/{name}"): RouteShape(items_key="regimes", columns=("path", "regime")),
     ("PUT", "/api/states/{name}"): RouteShape(
         items_key=None,
         columns=(

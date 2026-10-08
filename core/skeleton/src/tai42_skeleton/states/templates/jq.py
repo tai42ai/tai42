@@ -7,8 +7,9 @@ prelude from rendered bodies and compiles an all-inline section at upload.
 
 from __future__ import annotations
 
+import heapq
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from tai42_contract.states.errors import TemplateValidationError
 from tai42_contract.states.models import StateTemplateJq
@@ -31,33 +32,44 @@ def _input_def(name: str, jq: str) -> str:
     return f"def tjq_{name}($params): {jq}; "
 
 
-def _references(expr: str, name: str) -> bool:
-    """Whether ``expr`` names ``name`` as a jq token (a call or a bare reference)."""
-    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", expr) is not None
+# A sibling call ``tjq_<name>`` as a whole jq token; one tokenising pass per body finds every one.
+_SIBLING_CALL_RE = re.compile(r"(?<![A-Za-z0-9_])tjq_([A-Za-z0-9_]+)")
 
 
-def _input_order(rendered_inputs: Mapping[str, str]) -> list[str]:
+def input_order(rendered_inputs: Mapping[str, str]) -> list[str]:
     """A deterministic dependency-first ordering of input-program names.
 
-    Keyed on each program's RENDERED body text: a program that references a sibling is
-    emitted AFTER it (jq resolves names backward only). A reference cycle — which jq cannot
-    express — falls back to sorted order, so the compile fails loudly at validation rather
-    than silently.
+    Keyed on each program's RENDERED body text: a program that calls a sibling as ``tjq_<name>``
+    is emitted AFTER it (jq resolves names backward only); among the programs ready at a step the
+    smallest name goes first. A reference cycle — which jq cannot express — appends the remaining
+    names sorted, so the compile fails loudly at validation rather than silently.
     """
-    names = sorted(rendered_inputs)
-    # A sibling is called by its prelude def name ``tjq_<name>``; a def that calls another
-    # must be emitted AFTER it (jq resolves names backward only).
-    deps = {a: {b for b in names if b != a and _references(rendered_inputs[a], f"tjq_{b}")} for a in names}
+    siblings = set(rendered_inputs)
+    dependents: dict[str, list[str]] = {name: [] for name in siblings}
+    pending: dict[str, int] = {}
+    for name, body in rendered_inputs.items():
+        refs = (set(_SIBLING_CALL_RE.findall(body)) & siblings) - {name}
+        pending[name] = len(refs)
+        for ref in refs:
+            dependents[ref].append(name)
+    ready = [name for name, count in pending.items() if count == 0]
+    heapq.heapify(ready)
     ordered: list[str] = []
-    remaining = set(names)
-    while remaining:
-        ready = sorted(n for n in remaining if deps[n] <= set(ordered))
-        if not ready:
-            ordered.extend(sorted(remaining))
-            break
-        ordered.append(ready[0])
-        remaining.discard(ready[0])
+    while ready:
+        name = heapq.heappop(ready)
+        ordered.append(name)
+        for dependent in dependents[name]:
+            pending[dependent] -= 1
+            if pending[dependent] == 0:
+                heapq.heappush(ready, dependent)
+    if len(ordered) < len(siblings):
+        ordered.extend(sorted(siblings - set(ordered)))
     return ordered
+
+
+def sibling_prelude(rendered_inputs: Mapping[str, str], order: Sequence[str]) -> str:
+    """The ``def tjq_<name>($params): <jq>;`` sibling declarations in ``order`` (dependency-first)."""
+    return "".join(_input_def(name, rendered_inputs[name]) for name in order)
 
 
 def template_jq_prelude(rendered_inputs: Mapping[str, str]) -> str:
@@ -69,7 +81,7 @@ def template_jq_prelude(rendered_inputs: Mapping[str, str]) -> str:
     input programs. The bodies are rendered at the point of use (the save door and the
     evaluator seam); this function is pure over already-rendered text.
     """
-    return "".join(_input_def(name, rendered_inputs[name]) for name in _input_order(rendered_inputs))
+    return sibling_prelude(rendered_inputs, input_order(rendered_inputs))
 
 
 def _compile_template_jq_inline(programs: Mapping[str, StateTemplateJq]) -> None:

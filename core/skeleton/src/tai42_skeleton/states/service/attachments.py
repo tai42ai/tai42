@@ -7,6 +7,7 @@ effective schema; subject validation refuses a subject a state's declaration doe
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import jsonschema
@@ -29,29 +30,35 @@ from tai42_kit.utils.data.jq_util import run_jq_first
 
 from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.service.base import _StatesServiceBase
+from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
 from tai42_skeleton.states.templates import StateTemplate, compose_effective_schema, regime_for
 
 
 class _AttachmentMixin(_StatesServiceBase):
-    async def validate_subject(self, decl: StateDeclaration, subject: StateSubject) -> None:
-        """Refuse a subject that a state's declaration does not admit.
+    async def _admit_subject(self, state: str, subject: StateSubject) -> tuple[int, list[str], str]:
+        """Refuse a subject ``state`` does not admit, from one narrow declaration read.
 
-        An undeclared kind, or — for kind ``person`` — an unknown person or a person whose target does
-        not match the subject's. The ``ConversationPersonStore`` is constructed LAZILY and
-        ONLY on the ``person`` branch (its constructor raises 501 without the redis
-        conversations backend), so no state of another kind is gated on redis.
+        Returns the declaration's ``(version, subject_kinds, default_subject_kind)``; an undeclared
+        state raises :class:`StateNotFoundError`.
         """
-        await self._validate_subject_admitted(decl.subject_kinds, decl.name, subject)
+        scalars = await self._store.declaration_scalars(state)
+        if scalars is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        await self._validate_subject_admitted(scalars[1], state, subject)
+        return scalars
 
     async def _validate_subject_admitted(
         self, subject_kinds: list[str], state_name: str, subject: StateSubject
     ) -> None:
-        """The admission check behind :meth:`validate_subject`, over the declared kinds directly.
+        """Refuse a subject the declared ``subject_kinds`` do not admit.
 
-        The write path calls this inside the record transaction, under the declaration
-        ``FOR SHARE`` lock, from the ``subject_kinds`` the locked declaration row returns — so
-        the subject is refused without a second declaration read.
+        An undeclared kind, or — for kind ``person`` — an unknown person or a person whose target does
+        not match the subject's. The ``ConversationPersonStore`` is constructed LAZILY and ONLY on
+        the ``person`` branch (its constructor raises 501 without the redis conversations backend),
+        so no state of another kind is gated on redis. The write path calls this inside the record
+        transaction, under the declaration ``FOR SHARE`` lock, from the ``subject_kinds`` the locked
+        declaration row returns — so the subject is refused without a second declaration read.
         """
         if subject.kind not in subject_kinds:
             raise SubjectRefusedError(
@@ -79,7 +86,19 @@ class _AttachmentMixin(_StatesServiceBase):
             row = await self._store.get_attachment(state, template)
             rows = [] if row is None else [row]
         elif state is not None:
-            rows = await self._store.list_attachments_for_state(state)
+            entry = await self._catalog.catalog_entry(state)
+            if entry is None:
+                return []
+            return [
+                {
+                    "state": state,
+                    "template": a.template,
+                    "path": list(a.path),
+                    "parameters": copy.deepcopy(a.parameters),
+                    "declarations": copy.deepcopy(a.declarations),
+                }
+                for a in entry.attachments
+            ]
         elif template is not None:
             rows = await self._store.list_attachments_of_template(template)
         else:
@@ -129,7 +148,7 @@ class _AttachmentMixin(_StatesServiceBase):
         )
         _validate_schema(effective)
         template_doc = StateTemplateDocument.model_validate(template.to_document())
-        await self._run_attach_validators(template_doc, declarations, effective)
+        await self._run_attach_validators(state, template_doc, declarations, effective)
         reconcilers = [] if skip_reconcilers else self._attach_reconcilers.all()
         if reconcilers:
             async with self._store.begin() as conn:
@@ -177,7 +196,7 @@ class _AttachmentMixin(_StatesServiceBase):
         await self._validate_attach_values(template, dict(row["parameters"] or {}), declarations)
         effective = await self._compose_effective(state, (await self._require_declaration(state))["schema"])
         template_doc = StateTemplateDocument.model_validate(template.to_document())
-        await self._run_attach_validators(template_doc, declarations, effective)
+        await self._run_attach_validators(state, template_doc, declarations, effective)
         reconcilers = [] if skip_reconcilers else self._attach_reconcilers.all()
         if reconcilers:
             async with self._store.begin() as conn:
@@ -232,9 +251,10 @@ class _AttachmentMixin(_StatesServiceBase):
         round-trips a declaration (``retention_days`` included) without dropping any.
         """
         self._ensure_available()
-        decl = await self._require_declaration(name)
-        attachments = await self._load_state_attachments(name)
-        regimes = self._compose_regimes(attachments)
+        entry = await self._catalog.catalog_entry(name)
+        if entry is None:
+            raise StateNotFoundError(f"no state declared as {name!r}")
+        decl = served_row(entry)
         # Serialize ``updated_at`` through the same model dump the list read uses, so both
         # reads render the timestamp identically (pydantic's ISO ``…Z``), never two formats.
         updated_at = _row_to_declaration(decl).model_dump(mode="json")["updated_at"]
@@ -247,10 +267,15 @@ class _AttachmentMixin(_StatesServiceBase):
             "default_subject_kind": decl["default_subject_kind"],
             "retention_days": decl["retention_days"],
             "attachments": [
-                {"template": m.name, "path": list(p), "parameters": dict(pa), "declarations": dict(d)}
-                for m, p, pa, d in attachments
+                {
+                    "template": a.template,
+                    "path": list(a.path),
+                    "parameters": copy.deepcopy(a.parameters),
+                    "declarations": copy.deepcopy(a.declarations),
+                }
+                for a in entry.attachments
             ],
-            "regimes": regimes,
+            "regimes": [r.model_dump() for r in entry.served_regimes],
             "updated_at": updated_at,
         }
 
@@ -259,32 +284,38 @@ class _AttachmentMixin(_StatesServiceBase):
         return regime_for(template, relative_path)
 
     async def _require_declaration(self, state: str) -> dict[str, Any]:
-        decl = await self._store.get_declaration(state)
-        if decl is None:
+        """A deep copy of the declaration row from the catalog snapshot; loud when undeclared."""
+        entry = await self._catalog.catalog_entry(state)
+        if entry is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
-        return decl
+        return served_row(entry)
 
     async def _require_declaration_decl(self, state: str) -> StateDeclaration:
         return _row_to_declaration(await self._require_declaration(state))
 
-    async def _get_template_or_raise(self, name: str) -> StateTemplate:
-        row = await self._store.get_template(name)
-        if row is None:
-            raise StateNotFoundError(f"no template {name!r}")
-        return await self._validated_template(row)
-
     async def _load_state_attachments(
         self, state: str, *, override: dict[str, StateTemplate] | None = None
     ) -> list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]]:
-        """Every attachment on the state as ``(template, path, parameters, declarations)``.
+        """Every attachment on the state as ``(template, path, parameters, declarations)``, ordered by template name.
 
-        ``override`` supplies a not-yet-stored template body (a template replace composes against the candidate).
+        Served from the catalog snapshot at the declaration's current version. ``override``
+        supplies a not-yet-stored template body (a template replace composes against the
+        candidate). An undeclared state has no attachments.
         """
+        entry = await self._catalog.catalog_entry(state)
+        if entry is None:
+            return []
+        return await self._entry_attachments(entry, override=override)
+
+    async def _entry_attachments(
+        self, entry: StateEntry, *, override: dict[str, StateTemplate] | None = None
+    ) -> list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]]:
+        """The attachments an entry holds, each with its validated template at the version the entry recorded."""
         override = override or {}
         out: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]] = []
-        for row in await self._store.list_attachments_for_state(state):
-            template = override.get(row["template"]) or await self._get_template_or_raise(row["template"])
-            out.append((template, list(row["path"]), dict(row["parameters"] or {}), dict(row["declarations"] or {})))
+        for a in entry.attachments:
+            template = override.get(a.template) or await self._template_at(a.template, a.template_version, a.body)
+            out.append((template, list(a.path), copy.deepcopy(a.parameters), copy.deepcopy(a.declarations)))
         return out
 
     async def _compose_effective(self, state: str, base_schema: Any) -> dict[str, Any]:
@@ -296,21 +327,6 @@ class _AttachmentMixin(_StatesServiceBase):
         resolved_base = await _resolve_state_schema(f"state {state!r} schema", base_schema)
         attachments = await self._load_state_attachments(state)
         return compose_effective_schema(resolved_base, [(m, p, pa) for m, p, pa, _d in attachments])
-
-    @staticmethod
-    def _compose_regimes(
-        attachments: list[tuple[StateTemplate, list[str], dict[str, Any], dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
-        """The absolute write-regime rules over already-loaded ``attachments``.
-
-        Each attached template's regime paths prefixed by the attach path. The ONE composition every
-        declaration read (``get_declaration``/``list_declarations``) and
-        ``served_declaration`` share, so a served regime is identical across doors.
-        """
-        regimes: list[dict[str, Any]] = []
-        for template, base_path, _params, _decls in attachments:
-            regimes.extend({"path": [*base_path, *rule.path], "regime": rule.regime} for rule in template.regimes)
-        return regimes
 
     def _validate_attach_path(self, path: Any) -> None:
         if not isinstance(path, list):
@@ -356,7 +372,7 @@ def _validate_effective_parameters(template: StateTemplate, effective: dict[str,
         if param is None:
             raise TemplateValidationError(f"attach supplies unknown parameter {name!r} for template {template.name!r}")
         try:
-            Draft202012Validator(param.schema).validate(value)
+            Draft202012Validator(param.schema_).validate(value)
         except jsonschema.ValidationError as exc:
             raise TemplateValidationError(f"attach parameter {name!r} is invalid: {exc.message}") from exc
     for name, param in template.parameters.items():

@@ -62,7 +62,7 @@ def test_template_name_accepts_a_single_internal_hyphen() -> None:
 def test_unknown_key_refused_plainly(key: str) -> None:
     # Any key outside the platform set is refused, naming what a state-template document
     # holds (template_jq/reconcile are IN the set; a flow concept like ``loop`` is not).
-    with pytest.raises(TemplateValidationError, match="unknown key"):
+    with pytest.raises(TemplateValidationError, match=f"{key}\n  Extra inputs are not permitted"):
         validate_template(_doc(**{key: {}}))
 
 
@@ -326,11 +326,11 @@ def test_purpose_specific_keys_refused() -> None:
     # An ``input`` program may not declare ``reads``/``writes``; ``params`` is admitted on
     # BOTH purposes (an update's ``params`` names its ``$input`` keys). A key outside a
     # purpose's set is refused.
-    with pytest.raises(TemplateValidationError, match="unknown key"):
+    with pytest.raises(TemplateValidationError, match="declares no reads or writes"):
         validate_template(
             _planner_doc(template_jq={"v": {"purpose": "input", "writes": [["ledger"]], "jq": {"content": "."}}})
         )
-    with pytest.raises(TemplateValidationError, match="unknown key"):
+    with pytest.raises(TemplateValidationError, match="reads_x\n  Extra inputs are not permitted"):
         validate_template(
             _planner_doc(template_jq={"u": {"purpose": "update", "reads_x": [["a"]], "jq": {"content": "[]"}}})
         )
@@ -453,7 +453,7 @@ def test_reconcile_parses_three_jq_programs() -> None:
 
 
 def test_reconcile_missing_a_program_is_refused() -> None:
-    with pytest.raises(TemplateValidationError, match="reconcile close"):
+    with pytest.raises(TemplateValidationError, match=r"reconcile\.close\n  Field required"):
         validate_template(_planner_doc(reconcile={"orphans": {"content": "."}, "resolutions": {"content": "."}}))
 
 
@@ -521,9 +521,9 @@ def test_reconcile_by_id_is_accepted_and_round_trips() -> None:
 
 def test_program_body_with_a_stray_key_is_refused() -> None:
     # A stray key inside the nested templated-text value is refused by the value type.
-    with pytest.raises(TemplateValidationError, match="not a valid templated text"):
+    with pytest.raises(TemplateValidationError, match=r"template_jq\.v\.jq\.extra\n  Extra inputs are not permitted"):
         validate_template(_planner_doc(template_jq={"v": {"purpose": "input", "jq": {"content": ".", "extra": 1}}}))
-    with pytest.raises(TemplateValidationError, match="not a valid templated text"):
+    with pytest.raises(TemplateValidationError, match=r"reconcile\.orphans\.extra\n  Extra inputs are not permitted"):
         validate_template(
             _planner_doc(
                 reconcile={

@@ -1,17 +1,31 @@
-"""The ``state_declarations`` table — reads, guarded upsert, and record counts/field stats."""
+"""The ``state_declarations`` table — reads, guarded upsert, the version probes, and record counts/field stats.
+
+Every write to a declaration row draws its ``version`` from the ``state_catalog_versions`` sequence in the
+statement that changes it, so a version never repeats for a name, even across a delete and a re-create, and a
+reader keyed on the version it read never serves a derived artifact across a change.
+"""
 
 from __future__ import annotations
 
 import inspect
 from typing import Any
 
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .base import _StoreBase
 from .connection import _pool, _settings
 
+# Every attachment on one state with the attached template's version and stored body.
+_ATTACHMENT_ROWS = (
+    "SELECT m.template, m.path, m.parameters, m.declarations, mo.version AS template_version, mo.body "
+    "FROM state_attachments m JOIN state_templates mo ON mo.name = m.template "
+    "WHERE m.state = %s ORDER BY m.template"
+)
 
-class _DeclarationStore:
+
+class _DeclarationStore(_StoreBase):
     """The ``state_declarations`` table + its record counts and per-field/per-kind stats."""
 
     async def get_declaration(self, name: str) -> dict[str, Any] | None:
@@ -22,7 +36,7 @@ class _DeclarationStore:
         ):
             await cur.execute(
                 "SELECT name, description, schema, effective_schema, subject_kinds, default_subject_kind, "
-                "retention_days, updated_at FROM state_declarations WHERE name = %s",
+                "retention_days, updated_at, version FROM state_declarations WHERE name = %s",
                 (name,),
             )
             return await cur.fetchone()
@@ -35,9 +49,74 @@ class _DeclarationStore:
         ):
             await cur.execute(
                 "SELECT name, description, schema, effective_schema, subject_kinds, default_subject_kind, "
-                "retention_days, updated_at FROM state_declarations ORDER BY name"
+                "retention_days, updated_at, version FROM state_declarations ORDER BY name"
             )
             return list(await cur.fetchall())
+
+    async def declaration_version(self, name: str) -> int | None:
+        """The declaration row's ``version``, or ``None`` when ``name`` is not declared — the catalog probe."""
+        async with self._read_cursor(None) as cur:
+            await cur.execute("SELECT version FROM state_declarations WHERE name = %s", (name,))
+            row = await cur.fetchone()
+            return None if row is None else int(row["version"])
+
+    async def declaration_scalars(
+        self, name: str, *, conn: AsyncConnection[Any] | None = None
+    ) -> tuple[int, list[str], str] | None:
+        """``(version, subject_kinds, default_subject_kind)`` of a declaration, or ``None`` when undeclared.
+
+        The narrow read a record door's subject admission needs, never the heavy JSON columns.
+        """
+        async with self._read_cursor(conn) as cur:
+            await cur.execute(
+                "SELECT version, subject_kinds, default_subject_kind FROM state_declarations WHERE name = %s",
+                (name,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return int(row["version"]), list(row["subject_kinds"]), row["default_subject_kind"]
+
+    async def read_state_entry_rows(self, cur: Any, state: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """``(effective_schema, attachment rows)`` of a declared state, on the caller's (locked) transaction."""
+        await cur.execute("SELECT effective_schema FROM state_declarations WHERE name = %s", (state,))
+        row = await cur.fetchone()
+        if row is None:
+            raise AssertionError("the caller holds the declaration row lock")
+        await cur.execute(_ATTACHMENT_ROWS, (state,))
+        return row["effective_schema"], list(await cur.fetchall())
+
+    async def read_state_catalog_rows(self, state: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """``(declaration row, attachment rows)`` read consistently in one transaction; ``(None, [])`` when undeclared.
+
+        The declaration row is read ``FOR SHARE``, so no attachment or attached-template write
+        (each locks the declaration ``FOR UPDATE``) lands between the two reads.
+        """
+        async with (
+            _pool(_settings()) as pool,
+            pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(
+                "SELECT name, description, schema, effective_schema, subject_kinds, default_subject_kind, "
+                "retention_days, updated_at, version FROM state_declarations WHERE name = %s FOR SHARE",
+                (state,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None, []
+            await cur.execute(_ATTACHMENT_ROWS, (state,))
+            return row, list(await cur.fetchall())
+
+    async def lock_declarations(self, names: list[str], *, conn: AsyncConnection[Any]) -> None:
+        """Take each named declaration row ``FOR UPDATE`` on the caller's transaction, in sorted name order."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT name FROM state_declarations WHERE name = ANY(%s) ORDER BY name FOR UPDATE",
+                (sorted(set(names)),),
+            )
+            await cur.fetchall()
 
     async def upsert_declaration(
         self,
@@ -70,7 +149,8 @@ class _DeclarationStore:
                 "ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, "
                 "schema = EXCLUDED.schema, effective_schema = EXCLUDED.effective_schema, "
                 "subject_kinds = EXCLUDED.subject_kinds, default_subject_kind = EXCLUDED.default_subject_kind, "
-                "retention_days = EXCLUDED.retention_days, updated_at = now()",
+                "retention_days = EXCLUDED.retention_days, updated_at = now(), "
+                "version = nextval('state_catalog_versions')",
                 (
                     name,
                     description,
@@ -132,7 +212,8 @@ class _DeclarationStore:
                 "ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, "
                 "schema = EXCLUDED.schema, effective_schema = EXCLUDED.effective_schema, "
                 "subject_kinds = EXCLUDED.subject_kinds, default_subject_kind = EXCLUDED.default_subject_kind, "
-                "retention_days = EXCLUDED.retention_days, updated_at = now()",
+                "retention_days = EXCLUDED.retention_days, updated_at = now(), "
+                "version = nextval('state_catalog_versions')",
                 (
                     name,
                     description,

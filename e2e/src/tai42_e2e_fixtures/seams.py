@@ -9,7 +9,9 @@
   rename loudly);
 * an **invocation-seam probe** tool that reports the in-flight tool name
   ``current_tool_invocation()`` deposits for its own call, and the ``None`` a reader
-  sees where no deposit is in scope.
+  sees where no deposit is in scope;
+* a shipped **state-template seed** (``register_template_seed``) a boot stores when the
+  states component is bound.
 
 Each registration runs at IMPORT, so the manifest tool loader re-runs it on every
 boot/reload (the registries are reset each ``start()``). Generic vocab only."""
@@ -20,6 +22,7 @@ import os
 
 from tai42_contract.app import tai42_app
 from tai42_contract.presets import PresetSeed, PresetSeedToolMeta
+from tai42_contract.states import StateTemplateDocument
 from tai42_contract.tools import current_tool_invocation
 
 # -- preset seed -------------------------------------------------------------
@@ -111,3 +114,18 @@ async def e2e_invocation_probe() -> dict:
     reader.join()
 
     return {"inside": inside_name, "outside": outside["value"], "pid": _os.getpid()}
+
+
+# -- state-template seed -----------------------------------------------------
+
+tai42_app.states.register_template_seed(
+    StateTemplateDocument.model_validate(
+        {
+            "name": "e2e-seed-template",
+            "description": "the shipped template seed probe",
+            "parameters": {"cap": {"schema": {"type": "integer"}, "default": 3}},
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+            "template_jq": {"count": {"purpose": "input", "jq": {"content": "(.items // []) | length"}}},
+        }
+    )
+)

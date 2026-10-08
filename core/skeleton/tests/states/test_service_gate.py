@@ -152,7 +152,7 @@ async def test_attach_validator_runs_before_write(svc: StatesService) -> None:
     await svc.put_template(template_doc, replace=False)
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
 
-    async def refusing(doc, declarations, effective) -> None:
+    async def refusing(state, doc, declarations, effective) -> None:
         raise TemplateValidationError("consumer says no")
 
     svc.register_attach_validator(refusing)

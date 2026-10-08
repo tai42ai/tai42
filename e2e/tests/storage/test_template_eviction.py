@@ -93,3 +93,45 @@ async def test_template_dir_delete_evicts_prefix_fleet_wide(
     # evicted compilation and gets a loud 404, not the stale body.
     missing = await _render(api_b, path, expect=404)
     assert path in missing["error"], missing
+
+
+@pytest.mark.needs("kind:states")
+async def test_a_resource_upload_rerenders_the_template_jq_that_reads_it_on_every_worker(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """A template program stored by id is rendered once per worker and served from its cache; an
+    upload of the resource through replica A re-renders it on A (the origin's local eviction) and
+    on B (the fleet eviction), so both evaluate the NEW program text."""
+    path = f"{uniq('program')}.jq"
+    state = uniq("status")
+    template = uniq("by-id-tmpl").replace("_", "-")
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+
+    _assert_fleet_fanout(await _upload(api_a, path, '"first program"'))
+    await api_a.put(
+        f"/api/states/{state}",
+        json={
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+    )
+    await api_a.put(
+        f"/api/state-templates/{template}",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+            "template_jq": {"probe": {"purpose": "input", "jq": {"id": path}}},
+        },
+    )
+    await api_a.put(f"/api/states/{state}/attachments/{template}", json={"path": ["box"]})
+    record = f"/api/states/{state}/records/agent/a-42/thread/t1/template-jq/probe"
+    for api in (api_a, api_b):
+        assert (await api.get(record, retry_on_reloading=True))["value"] == "first program"
+
+    _assert_fleet_fanout(await _upload(api_a, path, '"second program"'))
+    for api in (api_a, api_b):
+        evaluated = await api.get(record, retry_on_reloading=True)
+        assert evaluated["value"] == "second program", f"a worker served a stale rendered program: {evaluated}"

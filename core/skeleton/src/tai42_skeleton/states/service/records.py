@@ -34,7 +34,6 @@ from tai42_contract.states.models import (
 )
 
 from tai42_skeleton.states.paths import validate_op
-from tai42_skeleton.states.schema import _validate_document
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.rows import _page_limit, _subject_from_row
 from tai42_skeleton.states.service.unit import current_state_unit
@@ -54,8 +53,7 @@ class _RecordMixin(_StatesServiceBase):
         merges).
         """
         self._ensure_available()
-        decl = await self._require_declaration_decl(state)
-        await self.validate_subject(decl, subject)
+        await self._admit_subject(state, subject)
         view = await self._projected_record_view(state, subject, conn=conn)
         if view is None:
             return None
@@ -82,13 +80,13 @@ class _RecordMixin(_StatesServiceBase):
         While an out-of-transaction unit of work is bound to the caller's scope the replace
         STAGES into it rather than touching the store, so it reads back within the scope and
         rolls back with a discard — mirroring the read seam. A ``conn``-threaded call (the
-        unit's own commit) writes the store directly.
+        unit's own commit) writes the store directly. The subject is admitted where the write is
+        decided: by the unit when it stages, else inside the write transaction under the
+        declaration lock.
         """
         self._ensure_available()
         if not isinstance(data, dict):
             raise ValueValidationError("a record document must be a JSON object")
-        decl = await self._require_declaration_decl(state)
-        await self.validate_subject(decl, subject)
         if conn is None:
             unit = current_state_unit()
             if unit is not None:
@@ -97,12 +95,48 @@ class _RecordMixin(_StatesServiceBase):
                 if view is None:
                     raise AssertionError
                 return view
-        completed = self._complete_origin(origin)
-        await self._store.replace(state, subject, data, origin=completed, validate_doc=_validate_document, conn=conn)
-        view = await self.read(state, subject, conn=conn)
+        return await self._replace_completed(state, subject, data, origin=self._complete_origin(origin), conn=conn)
+
+    async def _replace_completed(
+        self,
+        state: str,
+        subject: StateSubject,
+        data: dict[str, Any],
+        *,
+        origin: CompletedOrigin,
+        conn: AsyncConnection[Any] | None = None,
+        validate: bool = True,
+    ) -> StateRecord:
+        """The store replace under an already-completed origin; ``validate=False`` leaves the check to the caller.
+
+        The subject is admitted inside the write transaction from the locked declaration's kinds, so a
+        replay after the state was re-declared is refused by the declaration it would land under.
+        """
+
+        async def _validate_subject_in_txn(subject_kinds: list[str]) -> None:
+            await self._validate_subject_admitted(subject_kinds, state, subject)
+
+        await self._store.replace(
+            state,
+            subject,
+            data,
+            origin=origin,
+            catalog=self._catalog,
+            validate_subject_in_txn=_validate_subject_in_txn,
+            validate=validate,
+            conn=conn,
+        )
+        view = await self._projected_record_view(state, subject, conn=conn)
         if view is None:
             raise AssertionError
-        return view
+        return StateRecord(
+            state=state,
+            subject=subject,
+            data=view["data"],
+            seq=view["seq"],
+            canonical_subject=view["canonical_subject"],
+            folded_from=view["folded_from"],
+        )
 
     async def merge(
         self, state: str, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin
@@ -156,9 +190,26 @@ class _RecordMixin(_StatesServiceBase):
                     [StateBatchWrite(state=state, subject=subject, ops=ops, op_id=op_id, origin=origin)]
                 )
                 return staged[0]
+        return await self._apply_completed(
+            state, subject, ops, op_id=op_id, origin=self._complete_origin(origin), conn=conn
+        )
+
+    async def _apply_completed(
+        self,
+        state: str,
+        subject: StateSubject,
+        ops: list[dict[str, Any]],
+        *,
+        op_id: str | None,
+        origin: CompletedOrigin,
+        conn: AsyncConnection[Any] | None = None,
+        validate: bool = True,
+    ) -> ApplyResult:
+        """The store apply under an already-completed origin; ``validate=False`` leaves the check to the caller."""
+        if not ops:
+            return ApplyResult(applied=False, data=None, seq=None, skipped=[])
         for i, op in enumerate(ops):
             validate_op(op, where=f"ops[{i}]")
-        completed = self._complete_origin(origin)
 
         async def _validate_subject_in_txn(subject_kinds: list[str]) -> None:
             """Refuse the subject under the declaration lock, from the row read in the write txn."""
@@ -169,9 +220,10 @@ class _RecordMixin(_StatesServiceBase):
             subject,
             ops,
             op_id=op_id,
-            origin=completed,
-            validate_doc=_validate_document,
+            origin=origin,
+            catalog=self._catalog,
             validate_subject_in_txn=_validate_subject_in_txn,
+            validate=validate,
             conn=conn,
         )
         return ApplyResult(
@@ -206,8 +258,7 @@ class _RecordMixin(_StatesServiceBase):
     async def erase(self, state: str, subject: StateSubject, *, origin: WriteOrigin) -> None:
         """Erase ``subject``'s record, recording the write."""
         self._ensure_available()
-        decl = await self._require_declaration_decl(state)
-        await self.validate_subject(decl, subject)
+        await self._admit_subject(state, subject)
         completed = self._complete_origin(origin)
         await self._store.erase_subject(state, subject, origin=completed)
 
@@ -218,13 +269,10 @@ class _RecordMixin(_StatesServiceBase):
         self._ensure_available()
         if mode not in ("switch", "merge"):
             raise SubjectFoldError(f"unknown fold mode {mode!r} (supported: merge, switch)")
-        decl = await self._require_declaration_decl(state)
-        await self.validate_subject(decl, subject)
-        await self.validate_subject(decl, into)
+        _version, subject_kinds, _default = await self._admit_subject(state, subject)
+        await self._validate_subject_admitted(subject_kinds, state, into)
         completed = self._complete_origin(origin)
-        return await self._store.fold_subject(
-            state, subject, into, mode, origin=completed, validate_doc=_validate_document
-        )
+        return await self._store.fold_subject(state, subject, into, mode, origin=completed, catalog=self._catalog)
 
     async def list_subjects(
         self,
@@ -242,7 +290,7 @@ class _RecordMixin(_StatesServiceBase):
         """
         self._ensure_available()
         page = _page_limit(limit)
-        if await self._store.get_declaration(state) is None:
+        if await self._store.declaration_version(state) is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
         rows = await self._store.list_subjects(state, kind=kind, limit=page, cursor=cursor, conn=conn)
         next_cursor = (
@@ -266,7 +314,7 @@ class _RecordMixin(_StatesServiceBase):
         page = _page_limit(limit)
         if not isinstance(filters, dict) or not filters:
             raise ValueValidationError("search needs a non-empty filters object (a JSONB containment document)")
-        if await self._store.get_declaration(state) is None:
+        if await self._store.declaration_version(state) is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
         rows = await self._store.search_records(state, filters, limit=page, cursor=cursor)
         next_cursor = (
@@ -351,7 +399,7 @@ class _RecordMixin(_StatesServiceBase):
         The backup section's own record-restore path (off the ``AppStates`` protocol).
 
         EVERY row's subject is validated (declared kind, non-empty key, and — for kind
-        ``person`` — a known person of the row's target) through :meth:`validate_subject`
+        ``person`` — a known person of the row's target) through the declaration's admission check
         BEFORE any write; a refusal names the offending row index and its subject and
         nothing is written, so a restore never lands records under an undeclared kind or an
         unknown person.
@@ -359,7 +407,10 @@ class _RecordMixin(_StatesServiceBase):
         self._ensure_available()
         from pydantic import ValidationError
 
-        decl = await self._require_declaration_decl(state)
+        scalars = await self._store.declaration_scalars(state)
+        if scalars is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        subject_kinds = scalars[1]
         row_list = list(rows)
         for index, row in enumerate(row_list):
             try:
@@ -376,11 +427,11 @@ class _RecordMixin(_StatesServiceBase):
                     f"{row.get('subject_kind')!r}/{row.get('subject_key')!r}: {exc}"
                 ) from exc
             try:
-                await self.validate_subject(decl, subject)
+                await self._validate_subject_admitted(subject_kinds, state, subject)
             except SubjectRefusedError as exc:
                 raise SubjectRefusedError(f"restore row {index}: {exc}") from exc
         completed = self._complete_origin(origin)
-        await self._store.restore_records(state, row_list, origin=completed, validate_doc=_validate_document)
+        await self._store.restore_records(state, row_list, origin=completed, catalog=self._catalog)
 
     async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
         """Restore subject-alias rows for ``state`` verbatim (identity, not a write).

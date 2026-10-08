@@ -143,3 +143,24 @@ async def test_delete_attach(pg: FakeStatesPg, store: PostgresStatesStore) -> No
 async def test_delete_attach_undeclared_raises(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     with pytest.raises(StateNotFoundError):
         await store.delete_attachment("nope", "m", effective_schema={})
+
+
+async def test_a_fetched_row_is_a_snapshot_a_later_write_leaves_unchanged(
+    pg: FakeStatesPg, store: PostgresStatesStore
+) -> None:
+    """A read returns the row as it stood when the statement ran, as a database read does."""
+    await store.upsert_template("m", {"name": "m", "v": 1}, None)
+    pg.seed_declaration("alerts")
+    template = await store.get_template("m")
+    declaration = await store.get_declaration("alerts")
+    listed = await store.list_templates()
+    assert template is not None
+    assert declaration is not None
+    template_version, declaration_version = template["version"], declaration["version"]
+    await store.upsert_template("m", {"name": "m", "v": 2}, None)
+    await store.upsert_attachment("alerts", "m", ["a"], {}, {}, effective_schema={"type": "object"})
+    assert template["body"] == {"name": "m", "v": 1}
+    assert template["version"] == template_version
+    assert listed[0]["body"] == {"name": "m", "v": 1}
+    assert declaration["version"] == declaration_version
+    assert declaration["effective_schema"] != {"type": "object"}
