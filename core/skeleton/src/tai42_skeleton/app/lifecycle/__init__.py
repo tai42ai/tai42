@@ -3,7 +3,7 @@
 Also holds the module-global seam the tests patch at this package path.
 """
 
-from tai42_contract.access_control.registry import reset_registry as reset_identity_registry
+from tai42_kit.access_control.registry import reset_registry as reset_identity_registry
 from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.clients.impl.mcp import FastMCPClient
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry

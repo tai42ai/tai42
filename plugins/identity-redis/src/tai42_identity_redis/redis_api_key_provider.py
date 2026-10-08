@@ -23,7 +23,7 @@ from tai42_contract.access_control.identity import (
     IdentityProviderSettings,
     ReadinessTarget,
 )
-from tai42_contract.access_control.registry import register_identity_provider
+from tai42_kit.access_control.registry import register_identity_provider
 from tai42_kit.clients import RedisConnectionSettings, client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, hgetall, hset_mapping, scan_iter
 from tai42_kit.utils.data.string_util import hash_api_key

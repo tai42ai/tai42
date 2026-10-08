@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import BaseModel, SecretStr
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 from tai42_contract.accounts import LoginAttachingProvider
 from tai42_contract.accounts.errors import LoginAttachError, LoginConflictError
@@ -24,6 +24,7 @@ from tai42_contract.accounts.models import (
     MemberListing,
     PasswordCredential,
 )
+from tai42_kit.access_control import registry
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import roles as roles_module
@@ -143,7 +144,7 @@ class _RaisingLoginAttaching(LoginAttachingProvider):
 @pytest.fixture
 def provider() -> _SpyProvider:
     spy = _SpyProvider()
-    registry._REGISTRY["redis"] = lambda _settings: spy
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
     return spy
 
 
@@ -299,7 +300,7 @@ async def test_setup_refused_without_a_mint_provider(
 ) -> None:
     from tai42_kit.settings import reset_all_settings
 
-    registry._REGISTRY["validator"] = lambda _s: _ValidatorProvider()
+    registry._PROVIDERS._generation.committed()["validator"] = lambda _s: _ValidatorProvider()
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator"]')
     reset_all_settings()
     monkeypatch.setattr(access_control_settings(), "enable", True)
@@ -308,7 +309,7 @@ async def test_setup_refused_without_a_mint_provider(
         with pytest.raises(NotSupportedError, match="no configured identity provider"):
             await setup_deployment(setup_token=_TOKEN, owner_display_name="Owner")
     finally:
-        registry._REGISTRY.pop("validator", None)
+        registry._PROVIDERS._generation.committed().pop("validator", None)
         reset_all_settings()
 
 

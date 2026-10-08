@@ -6,8 +6,9 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -30,6 +31,15 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.bus_settings import BusSettings
 
 logger = logging.getLogger(__name__)
+
+
+class OpApplier(Protocol):
+    """Applies one delivered op; ``deadline`` is the ``time.monotonic()`` instant its apply window ends."""
+
+    def __call__(self, op: dict[str, Any], /, *, deadline: float) -> Awaitable[Any]:
+        """Apply ``op`` and return its terminal payload; a raise reports the op ``failed``."""
+        ...
+
 
 # The seam-package object this submodule reads ``client_ctx`` through at call time, so a
 # ``monkeypatch.setattr`` on the ``tai42_skeleton.app.bus`` alias bites the pooled
@@ -93,7 +103,7 @@ class WorkerBusSubscribeMixin:
 
     async def subscribe(
         self,
-        callback: Callable[[dict[str, Any]], Awaitable[Any]],
+        callback: OpApplier,
         on_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Consume the control channel until cancelled, reconnecting with backoff.
@@ -103,9 +113,10 @@ class WorkerBusSubscribeMixin:
         op is applied by awaiting ``callback`` on this task, with a two-phase
         confirmation: a ``received`` ack the instant the op is delivered, then one
         terminal ``applied``/``failed`` when the callback returns (a raising callback
-        ⇒ ``failed``). The publisher's own broadcast is echo-skipped by ``(name,
-        generation)`` — its self entry is synthesized from the ``local`` result it
-        hands :meth:`publish`.
+        ⇒ ``failed``). The callback's ``deadline`` is the receipt instant plus the
+        apply window; the bus transit before receipt is not subtracted. The publisher's
+        own broadcast is echo-skipped by ``(name, generation)`` — its self entry is
+        synthesized from the ``local`` result it hands :meth:`publish`.
 
         The claim is verified FIRST on every (re)connect: a held claim keeps the same
         name+generation across a reconnect; a lost claim (renew miss) re-mints a NEW
@@ -159,7 +170,7 @@ class WorkerBusSubscribeMixin:
 
     async def _run_subscription(
         self,
-        callback: Callable[[dict[str, Any]], Awaitable[Any]],
+        callback: OpApplier,
         on_ready: Callable[[], Awaitable[None]] | None,
         on_established: Callable[[], None],
     ) -> None:
@@ -376,7 +387,7 @@ class WorkerBusSubscribeMixin:
     async def _handle_op(
         self,
         r: Any,
-        callback: Callable[[dict[str, Any]], Awaitable[Any]],
+        callback: OpApplier,
         msg: dict[str, Any],
     ) -> None:
         admitted = self._admit_op_frame(msg)
@@ -422,7 +433,7 @@ class WorkerBusSubscribeMixin:
     async def _apply_op_and_reply(
         self,
         r: Any,
-        callback: Callable[[dict[str, Any]], Awaitable[Any]],
+        callback: OpApplier,
         op_payload: dict[str, Any],
         responder: dict[str, Any],
         reply_to: str | None,
@@ -433,13 +444,14 @@ class WorkerBusSubscribeMixin:
         exit.
         """
         identity = self.identity
+        received_at = time.monotonic()
         if reply_to:
             await self._reply(r, reply_to, {**responder, "phase": "received"})
         applied = False
         outcome_value = OpOutcome.applied.value
         try:
             try:
-                result = await callback(op_payload)
+                result = await callback(op_payload, deadline=received_at + self._settings.apply_timeout)
                 terminal: dict[str, Any] = {**responder, "phase": "terminal", "outcome": OpOutcome.applied.value}
                 if result is not None:
                     terminal["payload"] = result

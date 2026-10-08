@@ -251,16 +251,16 @@ def test_auth_providers_default_is_derived_not_hardcoded():
 def test_auth_providers_derives_from_any_registered_provider(monkeypatch):
     # A NEUTRAL (non-redis) identity provider boots under the derived chain with NO env and
     # NO hardcoded default — the agnostic proof that another provider can use the contract.
-    from tai42_contract.access_control import registry
+    from tai42_kit.access_control import registry
 
-    saved = dict(registry._write_target())
-    registry._write_target().clear()
+    saved = dict(registry._PROVIDERS._generation.write_target())
+    registry._PROVIDERS._generation.write_target().clear()
     try:
         registry.register_identity_provider("neutral-idp", lambda s: _StubProvider(s))
         assert AccessControlSettings().resolved_auth_providers() == ["neutral-idp"]
     finally:
-        registry._write_target().clear()
-        registry._write_target().update(saved)
+        registry._PROVIDERS._generation.write_target().clear()
+        registry._PROVIDERS._generation.write_target().update(saved)
 
 
 def test_auth_providers_parses_json_list_from_env(monkeypatch):

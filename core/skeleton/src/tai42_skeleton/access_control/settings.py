@@ -233,7 +233,7 @@ class AccessControlSettings(TaiBaseSettings):
         """
         if self.auth_providers is not None:
             return self.auth_providers
-        from tai42_contract.access_control.registry import iter_identity_provider_names_staged
+        from tai42_kit.access_control.registry import iter_identity_provider_names_staged
 
         return iter_identity_provider_names_staged()
 

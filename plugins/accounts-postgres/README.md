@@ -7,8 +7,9 @@ plugin that owns human user accounts, password login, sessions, and invites. It
 registers itself as the `"accounts-postgres"` provider and mints/validates its own
 `tai-sess-…` session tokens.
 
-Importing the package registers the provider in `tai42-contract`'s module-level
-accounts registry (`register_accounts_provider("accounts-postgres", ...)`), which
+Importing the package registers the provider in `tai42-kit`'s module-level
+accounts registry (`tai42_kit.accounts.registry`,
+`register_accounts_provider("accounts-postgres", ...)`), which
 ALSO lands the factory in the identity registry under the same name — an accounts
 provider is the token answerer for its own sessions, so one registration keeps
 sessions both mintable and validatable. No `tai42_app` handle is involved, so it
@@ -16,8 +17,8 @@ registers in any process that imports it. A deployment selects it by including
 `accounts-postgres` in the access-control `auth_providers` list.
 
 Its only tai-* dependencies are `tai42-contract` (the accounts ABC, the injected
-admin-services and settings Protocols, the login-method metadata models, and the
-registry it registers through) and `tai42-kit` (the Postgres and Redis clients and
+admin-services and settings Protocols, and the login-method metadata models) and
+`tai42-kit` (the registry it registers through, the Postgres and Redis clients and
 the session/invite hash). It **never** imports the skeleton — the plugin is
 contract-facing, and the import is banned by ruff.
 

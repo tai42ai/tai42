@@ -27,6 +27,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_SUBJECT_ARG,
 )
 from tai42_kit.utils.state_context import current_state_context
+from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 
@@ -199,7 +200,9 @@ async def test_backend_fire_with_identity_binds_then_drives(app: _FakeApp) -> No
 
 
 async def test_callback_with_no_forward_runs_plainly(app: _FakeApp) -> None:
-    await callback_execution({"r": 1}, CallbackSchema(tool="follow"))
+    await callback_execution(
+        {"r": 1}, CallbackSchema(tool="follow", carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: False})
+    )
     assert app.tools.calls[0].key == "follow"
     # No forwarded door context → a plain follow-up, no visit and no identity bind.
     assert app.interactions.visit_calls == []
@@ -213,6 +216,7 @@ async def test_callback_with_forwarded_pair_binds_and_subject_tracks(app: _FakeA
             SCHEDULE_SUBJECT_ARG: _SUBJECT,
             SCHEDULE_EXECUTION_KEY_ARG: "svc",
             SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
+            WORKER_SECRET_CAPABILITY_ARG: False,
         },
     )
     await callback_execution({"r": 1}, callback)

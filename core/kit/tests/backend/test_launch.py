@@ -337,6 +337,13 @@ def test_the_default_drain_budget_covers_the_default_job_budget() -> None:
     assert ManagedBackend.drain_timeout == DEFAULT_DRAIN_TIMEOUT_SECONDS
 
 
+def test_the_default_drain_budget_is_the_dispatch_job_budget_default_plus_a_margin() -> None:
+    from tai42_kit.backend.base import _DRAIN_MARGIN_SECONDS
+
+    job_budget_default = BackendDispatchSettings.model_fields["task_timeout"].default
+    assert float(job_budget_default) + _DRAIN_MARGIN_SECONDS == DEFAULT_DRAIN_TIMEOUT_SECONDS
+
+
 def test_a_binding_can_read_its_drain_budget_from_live_settings() -> None:
     # ``drain_timeout`` is not a ClassVar precisely so a binding can override it
     # with a property that reads the engine's CURRENT job budget.

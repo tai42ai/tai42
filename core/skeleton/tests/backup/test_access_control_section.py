@@ -9,8 +9,9 @@ partial restore) is re-minted onto the surviving policy, which stays byte-equal.
 from __future__ import annotations
 
 import pytest
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, registry
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider
+from tai42_kit.access_control import registry
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import store as store_module
@@ -52,12 +53,12 @@ class _SpyProvider(ApiKeyIdentityProvider):
 
 @pytest.fixture(autouse=True)
 def _isolate_identity_registry():
-    saved = dict(registry._REGISTRY)
+    saved = dict(registry._PROVIDERS._generation.committed())
     try:
         yield
     finally:
-        registry._REGISTRY.clear()
-        registry._REGISTRY.update(saved)
+        registry._PROVIDERS._generation.committed().clear()
+        registry._PROVIDERS._generation.committed().update(saved)
 
 
 @pytest.fixture
@@ -76,7 +77,7 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _SpyProvider:
     """Register a spy as the default ``"redis"`` provider and wire the AC Redis the
     context delete + version bump touch."""
     spy = _SpyProvider()
-    registry._REGISTRY["redis"] = lambda _settings: spy
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
     monkeypatch.setattr(management, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
     return spy
 

@@ -7,10 +7,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 from tai42_contract.accounts import AccountsAdminServices
 from tai42_contract.template import TemplatedText
+from tai42_kit.access_control import registry
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.data import run_jq_first
 
@@ -78,7 +78,7 @@ def _wire_versioned_store(monkeypatch, mem: _MemStore) -> None:
 @pytest.fixture
 def provider() -> _SpyProvider:
     spy = _SpyProvider()
-    registry._REGISTRY["redis"] = lambda _settings: spy
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
     return spy
 
 
@@ -573,7 +573,7 @@ async def test_services_remove_policy_validator_only_deployment(mem, pg: FakeAcc
         async def validate_token(self, token: str) -> AuthIdentity | None:
             return None
 
-    registry._REGISTRY["accounts"] = lambda _settings: _Validator()
+    registry._PROVIDERS._generation.committed()["accounts"] = lambda _settings: _Validator()
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["accounts"]')
     reset_all_settings()
     try:
@@ -584,7 +584,7 @@ async def test_services_remove_policy_validator_only_deployment(mem, pg: FakeAcc
         assert pg.policy("bob") is None
         assert pg.principal("bob") is None
     finally:
-        registry._REGISTRY.pop("accounts", None)
+        registry._PROVIDERS._generation.committed().pop("accounts", None)
         reset_all_settings()
 
 

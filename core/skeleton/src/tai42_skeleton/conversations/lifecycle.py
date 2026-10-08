@@ -1,4 +1,4 @@
-"""Conversation-bridge boot and shutdown lifecycle hooks."""
+"""Conversation-bridge lifecycle hooks, registered by the app at construction whatever routers it mounts."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.conversations.cache import get_conversations_manager
 
 
-@tai42_app.lifecycle.on_startup
-async def _register_conversation_completion_tool() -> None:
+async def register_conversation_completion_tools() -> None:
     """Force-register the two hidden completion-delivery tools.
 
     The continuations a parked turn's resumed outcome is delivered through: ``conversation_deliver``
@@ -17,8 +16,8 @@ async def _register_conversation_completion_tool() -> None:
 
     Both are mandatory bridge mechanisms (never operator-excludable catalog tools), so each is
     registered ``force=True`` and ``tai42/hidden`` — never offered to a model, reached only
-    when a resumed run's resumer fires it. Registered whenever the bridge is wired, so the
-    completion continuation the turn engine binds always resolves.
+    when a resumed run's resumer fires it. Registered in every epoch build, so the completion
+    continuation the turn engine binds always resolves.
     """
     from tai42_skeleton.conversations.turn import (
         COMPLETION_TOOL_NAME,
@@ -43,8 +42,7 @@ async def _register_conversation_completion_tool() -> None:
     )
 
 
-@tai42_app.lifecycle.on_startup
-async def _redrive_pending_conversations() -> None:
+async def redrive_pending_conversations() -> None:
     """Resume every unfinished conversation record on boot, so nothing is stranded across a restart.
 
     Intake re-drive must run FIRST: it gives every stranded ``accepted`` record a terminal
@@ -60,8 +58,7 @@ async def _redrive_pending_conversations() -> None:
     await redrive_pending()
 
 
-@tai42_app.lifecycle.on_post_swap
-def _start_conversations_delivery_sweep() -> None:
+def start_conversations_delivery_sweep() -> None:
     """(Re)establish the periodic stalled-delivery sweep on the serving loop.
 
     Run at boot and after every epoch swap, both ON the serving loop, so the sweep task
@@ -76,8 +73,7 @@ def _start_conversations_delivery_sweep() -> None:
     start_delivery_sweep()
 
 
-@tai42_app.lifecycle.on_shutdown
-async def _stop_conversations_delivery_sweep() -> None:
+async def stop_conversations_delivery_sweep() -> None:
     """Cancel and await the stalled-delivery sweep on the serving loop it lives on.
 
     A backend-less deployment never started one.

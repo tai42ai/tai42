@@ -13,11 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
-from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
-from tai42_contract.accounts import registry as accounts_registry
 from tai42_contract.accounts.models import LoginMethod, MemberAction, MemberListing
 from tai42_contract.accounts.provider import AccountsProvider
+from tai42_kit.access_control import registry
+from tai42_kit.accounts import registry as accounts_registry
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.access_control.startup as startup
@@ -54,7 +54,7 @@ def _bind_providers(monkeypatch: pytest.MonkeyPatch, providers: dict[str, _SpyPr
     # Point the configured chain at the given spies and reset the settings cache so the
     # probe resolves them. The autouse registry fixture restores the baseline afterwards.
     for name, spy in providers.items():
-        registry._REGISTRY[name] = lambda _settings, spy=spy: spy
+        registry._PROVIDERS._generation.committed()[name] = lambda _settings, spy=spy: spy
     import json
 
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", json.dumps(names))
@@ -97,7 +97,7 @@ async def test_provider_probe_first_failure_propagates(monkeypatch: pytest.Monke
 async def test_provider_probe_raises_when_no_identity_provider_registered(monkeypatch: pytest.MonkeyPatch) -> None:
     # Gate enabled, chain DERIVED (no env) and the registry empty: no credential could ever
     # authenticate, so the boot fails loudly rather than minting a dead gate.
-    registry._REGISTRY.clear()
+    registry._PROVIDERS._generation.committed().clear()
     monkeypatch.delenv("ACCESS_CONTROL_AUTH_PROVIDERS", raising=False)
     reset_all_settings()
     try:
@@ -136,25 +136,25 @@ class _FakeAccountsProvider(AccountsProvider):
 async def test_registered_but_unconfigured_accounts_provider_fails_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     # A registered accounts provider missing from the chain would mint sessions that
     # never authenticate — boot must fail loudly naming it.
-    accounts_registry._REGISTRY["acct"] = _FakeAccountsProvider
+    accounts_registry._PROVIDERS._generation.committed()["acct"] = _FakeAccountsProvider
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["redis"]')
     reset_all_settings()
     try:
         with pytest.raises(RuntimeError, match="acct"):
             await check_accounts_providers_configured()
     finally:
-        accounts_registry._REGISTRY.pop("acct", None)
+        accounts_registry._PROVIDERS._generation.committed().pop("acct", None)
         reset_all_settings()
 
 
 async def test_configured_accounts_provider_passes(monkeypatch: pytest.MonkeyPatch) -> None:
-    accounts_registry._REGISTRY["acct"] = _FakeAccountsProvider
+    accounts_registry._PROVIDERS._generation.committed()["acct"] = _FakeAccountsProvider
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["acct"]')
     reset_all_settings()
     try:
         await check_accounts_providers_configured()  # no raise
     finally:
-        accounts_registry._REGISTRY.pop("acct", None)
+        accounts_registry._PROVIDERS._generation.committed().pop("acct", None)
         reset_all_settings()
 
 
@@ -484,3 +484,34 @@ async def test_check_raw_path_routes_resolvable_raises_when_a_mark_is_missing(
     monkeypatch.setattr(role_gate, "resolve_route_meta", _fake_resolve)
     with pytest.raises(RuntimeError, match="do not resolve back to themselves"):
         await check_raw_path_routes_resolvable()
+
+
+# -- the gate state handed to the kit ------------------------------------------
+
+
+def test_the_gate_state_declaration_is_registered_first_at_construction() -> None:
+    # Every epoch build (boot and reload) re-declares the gate state before any other
+    # startup handler can enqueue a callback that carries it.
+    from tai42_skeleton.access_control.startup import declare_gate_state_to_kit
+    from tai42_skeleton.app.instance import app
+
+    assert next(iter(app._startup_handlers.values())) is declare_gate_state_to_kit
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_declare_gate_state_to_kit_hands_the_access_control_setting(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    from tai42_kit.registry import StagedSlot
+    from tai42_kit.utils import worker_secret_capability as capability_module
+
+    from tai42_skeleton.access_control.startup import declare_gate_state_to_kit
+
+    monkeypatch.setattr(capability_module, "_GATE_STATE", StagedSlot())
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true" if enabled else "false")
+    reset_all_settings()
+    try:
+        declare_gate_state_to_kit()
+    finally:
+        reset_all_settings()
+    assert capability_module.access_control_gate_state() is enabled

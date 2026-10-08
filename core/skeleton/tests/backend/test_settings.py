@@ -23,24 +23,13 @@ def test_base_backend_settings_is_cached() -> None:
         base_backend_settings.cache_clear()
 
 
-def test_the_dispatch_fields_match_the_shared_backend_mixin() -> None:
-    """``BackendSettings`` and ``tai42_kit.backend.BackendDispatchSettings`` declare
-    the SAME three fields for the two sides of tool dispatch — the host here, every
-    backend plugin through the mixin — and they must agree on names, defaults and
-    reload classes or the two sides stop meeting.
-
-    They are two declaration sites rather than one because the API-diff gate loads
-    this package with only itself on griffe's search path: an inherited member is
-    invisible there and reads as a removed public attribute. This guard is what the
-    inheritance would otherwise have given for free.
-    """
+def test_the_dispatch_fields_are_inherited_from_the_shared_dispatch_group() -> None:
+    """The host's dispatch fields are INHERITED from the group every backend plugin shares,
+    so the two sides of tool dispatch meet on the same names, defaults and reload classes by
+    construction — the env surface under ``BACKEND_`` is unchanged."""
     from tai42_kit.backend import BackendDispatchSettings
 
-    def _declared(cls: type) -> dict[str, tuple[object, object]]:
-        return {
-            name: (field.default, (field.json_schema_extra or {}).get("reload"))  # pyright: ignore[reportAttributeAccessIssue]
-            for name, field in cls.model_fields.items()  # pyright: ignore[reportAttributeAccessIssue]
-        }
-
-    assert _declared(BackendSettings) == _declared(BackendDispatchSettings)
+    assert issubclass(BackendSettings, BackendDispatchSettings)
+    assert BackendSettings.model_config.get("env_prefix") == "BACKEND_"
     assert set(BackendSettings.model_fields) == {"manifest_key", "task_timeout", "tool_name_arg"}
+    assert "manifest_key" not in vars(BackendSettings).get("__annotations__", {})

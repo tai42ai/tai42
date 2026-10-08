@@ -65,13 +65,14 @@ def _isolate_registries():
     whose start() repopulates both from the probe manifest — so the probe router's
     operations and routes can never leak into another suite's registry view."""
     routes_snapshot = dict(route_registry._routes)
-    ops_snapshot = dict(operation_registry._operations)
+    ops_snapshot = dict(operation_registry._generation.committed())
     with tai42_app.bound(None):
         try:
             yield
         finally:
             route_registry._routes = routes_snapshot
-            operation_registry._operations = ops_snapshot
+            operation_registry._generation.committed().clear()
+            operation_registry._generation.committed().update(ops_snapshot)
 
 
 @pytest.fixture

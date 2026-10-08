@@ -176,8 +176,8 @@ def test_reload_with_connector_plugin_is_reload_safe():
     provider_id = "fixture_conn"
     manifest = Manifest.model_validate({"lifecycle_modules": ["tests.app._fixtures.connector_plugin"]})
 
-    saved = dict(conn_registry._REGISTRY)
-    conn_registry._REGISTRY.clear()
+    saved = dict(conn_registry._GENERATION.committed())
+    conn_registry._GENERATION.committed().clear()
 
     async def run():
         async with app.app_context(manifest):
@@ -190,8 +190,8 @@ def test_reload_with_connector_plugin_is_reload_safe():
     try:
         asyncio.run(run())
     finally:
-        conn_registry._REGISTRY.clear()
-        conn_registry._REGISTRY.update(saved)
+        conn_registry._GENERATION.committed().clear()
+        conn_registry._GENERATION.committed().update(saved)
 
 
 def _oauth_descriptor(provider_id: str = "acme"):
@@ -233,8 +233,8 @@ def test_manifest_connectors_registered_at_boot():
 
     manifest = Manifest.model_validate({"connectors": [_oauth_descriptor("iota").model_dump(mode="json")]})
 
-    saved = dict(conn_registry._REGISTRY)
-    conn_registry._REGISTRY.clear()
+    saved = dict(conn_registry._GENERATION.committed())
+    conn_registry._GENERATION.committed().clear()
 
     async def run():
         async with app.app_context(manifest):
@@ -244,8 +244,8 @@ def test_manifest_connectors_registered_at_boot():
     try:
         asyncio.run(run())
     finally:
-        conn_registry._REGISTRY.clear()
-        conn_registry._REGISTRY.update(saved)
+        conn_registry._GENERATION.committed().clear()
+        conn_registry._GENERATION.committed().update(saved)
 
 
 def test_reload_dropping_connector_unregisters_it():
@@ -256,8 +256,8 @@ def test_reload_dropping_connector_unregisters_it():
     with_conn = Manifest.model_validate({"connectors": [_oauth_descriptor("iota").model_dump(mode="json")]})
     empty = Manifest.model_validate({})
 
-    saved = dict(conn_registry._REGISTRY)
-    conn_registry._REGISTRY.clear()
+    saved = dict(conn_registry._GENERATION.committed())
+    conn_registry._GENERATION.committed().clear()
 
     async def run():
         async with app.app_context(with_conn):
@@ -269,8 +269,8 @@ def test_reload_dropping_connector_unregisters_it():
     try:
         asyncio.run(run())
     finally:
-        conn_registry._REGISTRY.clear()
-        conn_registry._REGISTRY.update(saved)
+        conn_registry._GENERATION.committed().clear()
+        conn_registry._GENERATION.committed().update(saved)
 
 
 def test_duplicate_connector_ids_fail_boot():
@@ -281,8 +281,8 @@ def test_duplicate_connector_ids_fail_boot():
 
     manifest = Manifest.model_construct(connectors=[_oauth_descriptor("iota"), _oauth_descriptor("iota")])
 
-    saved = dict(conn_registry._REGISTRY)
-    conn_registry._REGISTRY.clear()
+    saved = dict(conn_registry._GENERATION.committed())
+    conn_registry._GENERATION.committed().clear()
 
     async def run():
         async with app.app_context(manifest):
@@ -292,8 +292,8 @@ def test_duplicate_connector_ids_fail_boot():
         with pytest.raises(ValueError, match="already registered"):
             asyncio.run(run())
     finally:
-        conn_registry._REGISTRY.clear()
-        conn_registry._REGISTRY.update(saved)
+        conn_registry._GENERATION.committed().clear()
+        conn_registry._GENERATION.committed().update(saved)
 
 
 def test_manifest_rejects_duplicate_connector_ids_on_validate():

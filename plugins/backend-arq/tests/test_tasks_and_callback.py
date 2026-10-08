@@ -21,6 +21,7 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_SUBJECT_ARG,
 )
+from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 from tai42_backend_arq import tasks
 from tai42_backend_arq.settings import ArqSettings, TaskFailedError
@@ -31,6 +32,9 @@ _FORWARDED = {
     SCHEDULE_EXECUTION_KEY_ARG: "svc",
     SCHEDULE_EXECUTION_FINGERPRINT_ARG: "fp-1",
 }
+
+# The secret-read capability the enqueue path carries onto every callback spec.
+_CARRIED = {WORKER_SECRET_CAPABILITY_ARG: False}
 
 
 class _RecordingRedis:
@@ -60,7 +64,7 @@ async def test_tool_execution_runs_named_tool(stub_app) -> None:
     stub_app.tools.run_tool_mock = AsyncMock(return_value={"out": 1})
     ctx = {"redis": _Ctx(), "job_id": "job-9"}
 
-    out = await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
+    out = await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=False, text="hi")
 
     assert out == {"out": 1}
     stub_app.tools.run_tool_mock.assert_awaited_once_with("mytool", {"text": "hi"})
@@ -72,7 +76,9 @@ async def test_tool_execution_chains_callback_even_on_failure(stub_app) -> None:
     ctx = {"redis": redis, "job_id": "job-9"}
 
     with pytest.raises(RuntimeError, match="tool blew up"):
-        await tasks.tool_execution(ctx, backend_tool_name="mytool", callback_kwargs={"tool": "next"})
+        await tasks.tool_execution(
+            ctx, backend_tool_name="mytool", backend_secret_capability=False, callback_kwargs={"tool": "next"}
+        )
 
     assert redis.enqueued == [("callback_job", "job-9", {"tool": "next"})]
 
@@ -87,40 +93,33 @@ async def test_tool_execution_runs_the_tool_detached(stub_app) -> None:
     # flag set; the flag never leaks past the job.
     ctx = {"redis": _Ctx(), "job_id": "job-9"}
 
-    await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
+    await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=False, text="hi")
 
     assert stub_app.tools.detached_seen == [True]
     assert stub_app.tools.offloads == [True]
     assert in_detached_run() is False
 
 
-@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
-async def test_tool_execution_binds_the_worker_secret_capability(
-    stub_app, access_control, gate_enabled: bool, capable: bool
-) -> None:
-    # No HTTP request bound the capability, so the worker binds it to the gate
-    # state (OFF -> secret-capable synthetic admin, ON -> fail-closed) and the
-    # bind never leaks past the job.
-    access_control(gate_enabled)
+@pytest.mark.parametrize("capability", [True, False])
+async def test_tool_execution_binds_the_carried_capability(stub_app, capability: bool) -> None:
+    # The worker binds the capability the job carried verbatim, never passes the reserved
+    # kwarg to the tool, and the bind never leaks past the job.
     ctx = {"redis": _Ctx(), "job_id": "job-9"}
 
-    await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
+    await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=capability, text="hi")
 
-    assert stub_app.tools.secret_capability_seen == [capable]
-    assert caller_may_read_secrets() is False
-
-
-async def test_tool_execution_binds_the_propagated_submitter_capability(stub_app, access_control) -> None:
-    # An admin submitter's capability rides with the job as True; the worker binds it
-    # verbatim even gate ON, and never passes the reserved kwarg to the tool.
-    access_control(True)
-    ctx = {"redis": _Ctx(), "job_id": "job-9"}
-
-    await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=True, text="hi")
-
-    assert stub_app.tools.secret_capability_seen == [True]
+    assert stub_app.tools.secret_capability_seen == [capability]
     stub_app.tools.run_tool_mock.assert_awaited_once_with("mytool", {"text": "hi"})
     assert caller_may_read_secrets() is False
+
+
+async def test_tool_execution_without_a_carried_capability_raises(stub_app) -> None:
+    ctx = {"redis": _Ctx(), "job_id": "job-9"}
+
+    with pytest.raises(KeyError, match=WORKER_SECRET_CAPABILITY_ARG):
+        await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
+
+    stub_app.tools.run_tool_mock.assert_not_called()
 
 
 # -- callback_job ------------------------------------------------------------------------
@@ -153,7 +152,9 @@ async def test_callback_job_runs_callback_over_result(monkeypatch, stub_app) -> 
     stub_app.tools.run_tool_mock = AsyncMock(return_value="chained")
 
     out = await tasks.callback_job(
-        {"redis": object()}, "job-1", {"tool": "next_tool", "expr": {"content": "{v: .value}"}}
+        {"redis": object()},
+        "job-1",
+        {"tool": "next_tool", "expr": {"content": "{v: .value}"}, "carried_kwargs": dict(_CARRIED)},
     )
 
     assert out == "chained"
@@ -201,7 +202,7 @@ async def test_callback_job_raises_when_callback_execution_fails(monkeypatch, st
     _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result={"value": 3}))
     monkeypatch.setattr(tasks, "callback_execution", AsyncMock(side_effect=RuntimeError("callback blew up")))
     with pytest.raises(RuntimeError, match="callback blew up"):
-        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema(tool="next"))
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema(tool="next", carried_kwargs=_CARRIED))
 
 
 async def test_callback_job_aborted_predecessor_reported_as_failure(monkeypatch) -> None:
@@ -220,7 +221,12 @@ async def test_callback_job_aborted_predecessor_reported_as_failure(monkeypatch)
 
 async def test_callback_condition_pass_runs_tool(stub_app) -> None:
     stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
-    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
+    cb = CallbackSchema(
+        condition=TemplatedText(content=".ok"),
+        expr=TemplatedText(content="{x: .value}"),
+        tool="next",
+        carried_kwargs=_CARRIED,
+    )
 
     out = await callback_execution({"ok": True, "value": 5}, cb)
 
@@ -231,7 +237,12 @@ async def test_callback_condition_pass_runs_tool(stub_app) -> None:
 async def test_callback_runs_tool_detached(stub_app) -> None:
     # A worker execution has no live caller, so the callback's tool observes the
     # detached flag set; the flag never leaks past the callback.
-    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
+    cb = CallbackSchema(
+        condition=TemplatedText(content=".ok"),
+        expr=TemplatedText(content="{x: .value}"),
+        tool="next",
+        carried_kwargs=_CARRIED,
+    )
 
     await callback_execution({"ok": True, "value": 5}, cb)
 
@@ -240,23 +251,29 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     assert in_detached_run() is False
 
 
-@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
-async def test_callback_binds_the_worker_secret_capability(
-    stub_app, access_control, gate_enabled: bool, capable: bool
-) -> None:
-    # A dequeued callback's follow-up tool sees the same worker-bound capability as
-    # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
-    access_control(gate_enabled)
-    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
+@pytest.mark.parametrize("capability", [True, False])
+async def test_callback_binds_the_carried_capability(stub_app, capability: bool) -> None:
+    # A dequeued callback's follow-up tool sees the capability the enqueue path carried, reset after.
+    cb = CallbackSchema(
+        condition=TemplatedText(content=".ok"),
+        expr=TemplatedText(content="{x: .value}"),
+        tool="next",
+        carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: capability},
+    )
 
     await callback_execution({"ok": True, "value": 5}, cb)
 
-    assert stub_app.tools.secret_capability_seen == [capable]
+    assert stub_app.tools.secret_capability_seen == [capability]
     assert caller_may_read_secrets() is False
 
 
 async def test_callback_condition_fail_returns_none(stub_app) -> None:
-    cb = CallbackSchema(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
+    cb = CallbackSchema(
+        condition=TemplatedText(content=".ok"),
+        expr=TemplatedText(content="{x: .value}"),
+        tool="next",
+        carried_kwargs=_CARRIED,
+    )
     out = await callback_execution({"ok": False, "value": 5}, cb)
     assert out is None
     stub_app.tools.run_tool_mock.assert_not_called()
@@ -269,6 +286,7 @@ async def test_callback_condition_empty_pipeline_skips(stub_app) -> None:
         condition=TemplatedText(content=".errors[] | select(.fatal)"),
         expr=TemplatedText(content="{x: .value}"),
         tool="next",
+        carried_kwargs=_CARRIED,
     )
     out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, cb)
     assert out is None
@@ -280,7 +298,10 @@ async def test_callback_expr_empty_pipeline_yields_empty_mapping(stub_app) -> No
     # tool as {} — never the opaque RuntimeError.
     stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
     cb = CallbackSchema(
-        condition=TemplatedText(content=".ok"), expr=TemplatedText(content=".errors[] | select(.fatal)"), tool="next"
+        condition=TemplatedText(content=".ok"),
+        expr=TemplatedText(content=".errors[] | select(.fatal)"),
+        tool="next",
+        carried_kwargs=_CARRIED,
     )
     out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, cb)
     assert out == "ran"
@@ -295,7 +316,7 @@ async def test_callback_without_tool_returns_expr_output() -> None:
 
 async def test_callback_without_expr_yields_empty_kwargs(stub_app) -> None:
     stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
-    cb = CallbackSchema(tool="next")
+    cb = CallbackSchema(tool="next", carried_kwargs=_CARRIED)
     out = await callback_execution({"value": 4}, cb)
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {})
@@ -317,7 +338,10 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
     reset_all_settings()
     try:
         cb = CallbackSchema(
-            condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next"
+            condition=TemplatedText(content=".ok"),
+            expr=TemplatedText(content="{x: .value}"),
+            tool="next",
+            carried_kwargs=_CARRIED,
         )
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
@@ -375,15 +399,26 @@ async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(stub_app) ->
         redis, backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), **_FORWARDED
     )
     (_, job_kwargs) = redis.jobs[0]
-    assert job_kwargs["callback_kwargs"].carried_kwargs == _FORWARDED
+    assert job_kwargs["callback_kwargs"].carried_kwargs == {**_FORWARDED, **_CARRIED}
 
 
-async def test_enqueue_carries_nothing_onto_a_plain_callback(stub_app) -> None:
-    # A plain background task forwards no door context, so the callback stays a plain follow-up.
+@pytest.mark.parametrize(("gate_enabled", "capability"), [(True, False), (False, True)])
+async def test_enqueue_carries_the_gate_state_onto_a_plain_callback(
+    stub_app, access_control, gate_enabled: bool, capability: bool
+) -> None:
+    # A plain background task forwards no door context; its callback still carries the gate state
+    # decided in this, the submitting process: ON fail-closes, OFF is the synthetic admin.
+    access_control(gate_enabled)
     redis: Any = _RecordingRedis()
-    await tasks.enqueue_task(redis, backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), text="hi")
+    await tasks.enqueue_task(
+        redis,
+        backend_tool_name="greet",
+        backend_secret_capability=True,
+        callback_kwargs=CallbackSchema(tool="next"),
+        text="hi",
+    )
     (_, job_kwargs) = redis.jobs[0]
-    assert job_kwargs["callback_kwargs"].carried_kwargs == {}
+    assert job_kwargs["callback_kwargs"].carried_kwargs == {WORKER_SECRET_CAPABILITY_ARG: capability}
 
 
 async def test_callback_job_that_asks_parks_under_the_forwarded_identity(monkeypatch, stub_app) -> None:
@@ -392,7 +427,7 @@ async def test_callback_job_that_asks_parks_under_the_forwarded_identity(monkeyp
     sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
     stub_app.interactions.park_sentinel = sentinel
     _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result={"value": 3}))
-    cb = CallbackSchema(tool="follow", carried_kwargs=dict(_FORWARDED))
+    cb = CallbackSchema(tool="follow", carried_kwargs={**_FORWARDED, **_CARRIED})
 
     out = await tasks.callback_job({"redis": object()}, "job-1", cb)
 

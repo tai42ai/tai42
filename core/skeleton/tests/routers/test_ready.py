@@ -18,8 +18,8 @@ import pytest
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from starlette.requests import Request
-from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider, ReadinessTarget
+from tai42_kit.access_control import registry
 from tai42_kit.clients import ClientSettings, PostgresConnectionSettings, RedisConnectionSettings
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
@@ -442,7 +442,7 @@ async def test_wired_connections_enumerates_identity_provider_generically(monkey
     try:
         conns = health._wired_connections()
     finally:
-        registry._REGISTRY.pop("custom_idp", None)
+        registry._PROVIDERS._generation.committed().pop("custom_idp", None)
         reset_all_settings()
 
     # The provider registered under "custom_idp" (never "redis") still contributes its

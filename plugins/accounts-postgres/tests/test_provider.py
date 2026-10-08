@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.access_control.identity import AuthIdentity
-from tai42_contract.access_control.registry import get_identity_provider_factory
 from tai42_contract.accounts import FormMethod, InviteCredential, PasswordCredential
 from tai42_contract.accounts.errors import LoginAttachError
-from tai42_contract.accounts.registry import get_accounts_provider_factory
+from tai42_kit.access_control.registry import get_identity_provider_factory
+from tai42_kit.accounts.registry import get_accounts_provider_factory
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 

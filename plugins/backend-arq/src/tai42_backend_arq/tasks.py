@@ -95,9 +95,9 @@ async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
         tool_name = kwargs.pop(arq_settings().tool_name_arg)
         # A worker executes a dequeued task with no live caller holding a
         # connection, so the turn budget does not apply, and no HTTP request bound
-        # the secret-read capability — the worker binds the submitter's own capability
-        # carried with the job (falling back to the gate state when none rode along).
-        secret_capability = kwargs.pop(WORKER_SECRET_CAPABILITY_ARG, None)
+        # the secret-read capability — the worker binds the one the job carried (a job
+        # without it raises ``KeyError``).
+        secret_capability = kwargs.pop(WORKER_SECRET_CAPABILITY_ARG)
         # ``backend_fire`` pops the reserved ``backend_schedule_*`` job kwargs and either binds the
         # stamped firing identity and drives the schedule door (a contract-bearing schedule, or a task
         # that forwarded the ambient subject/identity), or runs the tool plainly when the job carries no

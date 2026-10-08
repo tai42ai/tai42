@@ -16,7 +16,7 @@ import contextlib
 import itertools
 import json
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -28,6 +28,7 @@ from tai42_contract.errors import ClientDisconnectedError
 
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, WorkerState
+from tai42_skeleton.app.bus.subscribe import OpApplier
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 
 
@@ -108,7 +109,7 @@ def make_bus(namespace: str = "tai", kind: WorkerKind = WorkerKind.serve, **over
 
 async def _spawn_subscriber(
     bus: WorkerBus,
-    callback: Callable[[dict], Awaitable[object]],
+    callback: OpApplier,
 ) -> tuple[asyncio.Task[None], WorkerIdentity]:
     """Start a subscriber and wait until it is counted READY in the census (slot
     claimed, self-resync fired, presence written ready), so a subsequent whole-fleet
@@ -187,7 +188,7 @@ def _make_nonmember_bus(kind: WorkerKind = WorkerKind.serve) -> WorkerBus:
     return bus
 
 
-async def _noop_op(_op: dict) -> None:
+async def _noop_op(_op: dict, *, deadline: float) -> None:
     return None
 
 

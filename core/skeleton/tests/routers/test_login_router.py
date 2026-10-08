@@ -17,7 +17,6 @@ from starlette.requests import Request
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity
-from tai42_contract.accounts import registry as accounts_registry
 from tai42_contract.accounts.models import (
     FormField,
     FormMethod,
@@ -28,6 +27,7 @@ from tai42_contract.accounts.models import (
     MemberListing,
 )
 from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider
+from tai42_kit.accounts import registry as accounts_registry
 
 import tai42_skeleton.routers.api_keys as api_keys_router
 import tai42_skeleton.routers.login as login_router
@@ -136,15 +136,15 @@ def _clean_accounts_registry():
     from tai42_skeleton.app.instance import app
 
     core = app._serving_core
-    saved_registry = dict(accounts_registry._REGISTRY)
+    saved_registry = dict(accounts_registry._PROVIDERS._generation.committed())
     saved_active = dict(core.active_auth_providers)
-    accounts_registry._REGISTRY.clear()
+    accounts_registry._PROVIDERS._generation.committed().clear()
     core.active_auth_providers.clear()
     try:
         yield
     finally:
-        accounts_registry._REGISTRY.clear()
-        accounts_registry._REGISTRY.update(saved_registry)
+        accounts_registry._PROVIDERS._generation.committed().clear()
+        accounts_registry._PROVIDERS._generation.committed().update(saved_registry)
         core.active_auth_providers.clear()
         core.active_auth_providers.update(saved_active)
 
@@ -311,7 +311,7 @@ class _ClaimProvider(ApiKeyIdentityProvider):
 def _claim_exchange_client(monkeypatch, *, seeded: dict[str, str], valid: set[str]) -> TestClient:
     import json as _json
 
-    from tai42_contract.access_control import registry as id_registry
+    from tai42_kit.access_control import registry as id_registry
     from tai42_kit.utils.data.string_util import hash_api_key
 
     from tai42_skeleton.access_control import claim_links as claim_links_module
@@ -327,7 +327,7 @@ def _claim_exchange_client(monkeypatch, *, seeded: dict[str, str], valid: set[st
     }
     fake = FakeRedis(strings=strings)
     monkeypatch.setattr(claim_links_module, "client_ctx", make_client_ctx(fake))
-    monkeypatch.setitem(id_registry._REGISTRY, "redis", lambda _s: _ClaimProvider(valid))
+    monkeypatch.setitem(id_registry._PROVIDERS._generation.committed(), "redis", lambda _s: _ClaimProvider(valid))
 
     routes = [Route("/api/login/claim", login_router.exchange_claim_token, methods=["POST"])]
     return TestClient(Starlette(routes=routes, middleware=AuthAdapter(settings).get_middleware()))

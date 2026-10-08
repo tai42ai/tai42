@@ -17,8 +17,6 @@ from typing import ClassVar, Final
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import Backend
 from tai42_contract.backend.runtime import (
-    BUS_APPLY_TIMEOUT_DEFAULT,
-    BUS_APPLY_TIMEOUT_ENV,
     POOL_TURNOVER_FLEET_OPS,
     BackendRuntime,
     ExecutionMode,
@@ -39,19 +37,22 @@ DEFAULT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
 # It must sit ABOVE the longest job the engine can be running, because a warm
 # drain waits for in-flight work to finish: a bound below the job budget abandons
 # — and so severs — exactly the work the drain exists to protect. The default is
-# the dispatch surface's own ``task_timeout`` default (300s) plus a margin for the
+# the dispatch surface's own ``task_timeout`` default plus a margin for the
 # engine's own teardown. A binding that knows its live job budget overrides
 # ``drain_timeout`` from settings rather than living with this default, and the
 # deployment's termination grace must be at least as long or the supervisor's kill
 # lands first.
-DEFAULT_DRAIN_TIMEOUT_SECONDS: Final[float] = 330.0
+_DRAIN_MARGIN_SECONDS: Final = 30.0
+DEFAULT_DRAIN_TIMEOUT_SECONDS: Final[float] = (
+    float(BackendDispatchSettings.model_fields["task_timeout"].default) + _DRAIN_MARGIN_SECONDS
+)
 
-# The whole-turnover budget is derived from the bus apply window (the contract's
-# host agreement) less a margin, and floored, so a confirm-or-raise lands before
-# the publisher's report cut and a stall records a truthful ``failed`` rather
-# than a guessed ``timed_out``.
-_TURNOVER_BUDGET_MARGIN = 3.0
-_TURNOVER_BUDGET_FLOOR = 5.0
+# The whole-turnover budget is the apply budget the host hands the fleet-op handler,
+# less a margin, and floored, so a confirm-or-raise lands before the publisher's
+# report cut and a stall records a truthful ``failed`` rather than a guessed
+# ``timed_out``.
+_TURNOVER_BUDGET_MARGIN: Final = 3.0
+_TURNOVER_BUDGET_FLOOR: Final = 5.0
 
 
 class ManagedBackend(Backend):
@@ -382,11 +383,13 @@ class ManagedBackend(Backend):
         if not runtime.pool_turnover_required:
             return
 
-        async def _on_fleet_op_applied(op_name: str) -> None:
+        async def _on_fleet_op_applied(op_name: str, budget: float) -> None:
             if op_name not in POOL_TURNOVER_FLEET_OPS:
                 return
             self._refresh_manifest_env()
-            await runtime.turn_over_pool(reason=op_name, budget=_turnover_budget())
+            await runtime.turn_over_pool(
+                reason=op_name, budget=max(_TURNOVER_BUDGET_FLOOR, budget - _TURNOVER_BUDGET_MARGIN)
+            )
 
         tai42_app.lifecycle.on_fleet_op_applied(_on_fleet_op_applied)
 
@@ -395,13 +398,3 @@ class ManagedBackend(Backend):
         os.environ[self.dispatch_settings.manifest_key] = json.dumps(
             tai42_app.admin.live_manifest, separators=(",", ":")
         )
-
-
-def _turnover_budget() -> float:
-    """The whole-turnover budget: the bus apply window less a margin, floored.
-
-    A malformed value raises — a guessed budget would report a false outcome.
-    """
-    raw = os.environ.get(BUS_APPLY_TIMEOUT_ENV)
-    apply_timeout = BUS_APPLY_TIMEOUT_DEFAULT if raw is None else float(raw)
-    return max(_TURNOVER_BUDGET_FLOOR, apply_timeout - _TURNOVER_BUDGET_MARGIN)

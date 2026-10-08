@@ -2,8 +2,9 @@
 
 The policy RULES live in Postgres and the live-context/version-counter surfaces are
 plain Redis reads that fail closed at request time, so neither needs a boot probe.
-What DOES get boot-time treatment lives here, run once at startup when access control
-is enabled: the configured identity providers' OWN storage is probed; the roles the
+What DOES get boot-time treatment lives here: the gate state is handed to the kit in
+every epoch build, and, when access control is enabled, the configured identity
+providers' OWN storage is probed; the roles the
 control plane hands out are seeded; the always-public login surface is enumerated and
 guarded against an accidental authed mount; and a registered accounts provider left
 out of the resolution chain fails the boot rather than minting dead sessions.
@@ -14,12 +15,22 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from tai42_contract.access_control.registry import get_identity_provider_factory_staged
-from tai42_contract.accounts import iter_accounts_provider_factories_staged
+from tai42_kit.access_control.registry import get_identity_provider_factory_staged
+from tai42_kit.accounts.registry import iter_accounts_provider_factories_staged
+from tai42_kit.utils.worker_secret_capability import set_access_control_gate_state
 
 from tai42_skeleton.access_control.settings import access_control_settings
 
 logger = logging.getLogger(__name__)
+
+
+def declare_gate_state_to_kit() -> None:
+    """Hand the access-control gate state to the kit, which stamps it onto every enqueued callback job.
+
+    Run first in every epoch build, so the generation the build assembles carries the gate
+    state its own settings resolve.
+    """
+    set_access_control_gate_state(access_control_settings().enable)
 
 
 async def probe_identity_provider() -> None:

@@ -34,7 +34,11 @@ from tai42_kit.utils.schedule_subject import (
     pop_schedule_subject,
     schedule_subject_context,
 )
-from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
+from tai42_kit.utils.worker_secret_capability import (
+    WORKER_SECRET_CAPABILITY_ARG,
+    access_control_gate_state,
+    bind_worker_secret_capability,
+)
 
 
 class CallbackSchema(CallbackFields):
@@ -149,23 +153,25 @@ def _candidates_subject(context: Any) -> StateSubject | None:
 
 
 def carry_forwarded_fire(callback: CallbackSchema | dict[str, Any], kwargs: dict[str, Any]) -> None:
-    """Carry a task job's forwarded door subject + firing identity from ``kwargs`` onto its callback spec.
+    """Carry the callback job's secret-read capability and the task's forwarded door pair onto its spec.
 
-    A background task dispatched from within a door fire forwards its subject/identity pair onto its
-    worker job (:func:`_forward_ambient_fire`); the callback runs as a SEPARATE job that receives only
-    the predecessor's result and this spec, so the same pair is carried onto the spec's
-    ``carried_kwargs`` here or the follow-up loses the door context (:func:`_run_callback_tool` reads it
-    back). A plain task forwards no pair, so the callback is left untouched and runs plainly. Each
-    enqueue path calls this once with its popped ``callback_kwargs`` option — a :class:`CallbackSchema`
-    or the raw mapping the spec is before it crosses the queue as JSON.
+    The callback runs as a SEPARATE job that receives only the predecessor's result and this spec, so
+    what it needs rides on the spec's ``carried_kwargs``. It ALWAYS carries the secret-read capability
+    under :data:`WORKER_SECRET_CAPABILITY_ARG`: the access-control gate state decided here, in the
+    submitting process (gate ON -> ``False``, gate OFF -> ``True``) — a follow-up no caller
+    re-authorizes never clears the secret fence off the submitter's own verdict. A background task
+    dispatched from within a door fire also forwards its subject/identity pair onto its worker job
+    (:func:`_forward_ambient_fire`); that pair is carried too, or the follow-up loses the door context
+    (:func:`_run_callback_tool` reads it back). Each enqueue path calls this once with its popped
+    ``callback_kwargs`` option — a :class:`CallbackSchema` or the raw mapping the spec is before it
+    crosses the queue as JSON.
     """
-    carried = {
+    carried: dict[str, Any] = {
         key: kwargs[key]
         for key in (SCHEDULE_SUBJECT_ARG, SCHEDULE_EXECUTION_KEY_ARG, SCHEDULE_EXECUTION_FINGERPRINT_ARG)
         if key in kwargs
     }
-    if not carried:
-        return
+    carried[WORKER_SECRET_CAPABILITY_ARG] = not access_control_gate_state()
     if isinstance(callback, CallbackSchema):
         callback.carried_kwargs = carried
     else:
@@ -190,14 +196,27 @@ async def callback_execution(result: Any, callback: CallbackSchema) -> Any:
     if callback.tool:
         # A worker executes a dequeued callback with no live caller holding a
         # connection, so the turn budget does not apply, and no HTTP request bound
-        # the secret-read capability — the worker binds it here to the gate state.
+        # the secret-read capability — the worker binds the one the callback carried.
+        capability = _carried_capability(callback)
         detached_token = mark_detached_run()
         try:
-            with bind_worker_secret_capability():
+            with bind_worker_secret_capability(capability):
                 return await _run_callback_tool(callback, expr_output)
         finally:
             reset_detached_run(detached_token)
     return expr_output
+
+
+def _carried_capability(callback: CallbackSchema) -> bool:
+    """Read the secret-read capability the enqueue path carried; a spec without one raises ``KeyError``.
+
+    The spec is left as it is: a backend that retries a callback re-runs the same spec object, and the
+    retry must find the capability again.
+    """
+    try:
+        return callback.carried_kwargs[WORKER_SECRET_CAPABILITY_ARG]
+    except KeyError:
+        raise KeyError(f"callback spec carries no {WORKER_SECRET_CAPABILITY_ARG!r}") from None
 
 
 async def _run_callback_tool(callback: CallbackSchema, expr_output: Any) -> Any:

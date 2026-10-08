@@ -15,6 +15,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from tai42_kit.registry import StagedSlot
 
 import tai42_skeleton.plugins.registry as reg
 import tai42_skeleton.routers.plugins as router
@@ -78,11 +79,10 @@ def studio_env(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "_studio_root", lambda package: plugin_studio)
     registry = build_registry(["acme_plugin"], str(dist))
     # Preserve/restore the process-global registry around the test.
-    prev = reg._current
+    monkeypatch.setattr(reg, "_REGISTRY", StagedSlot())
     set_current_registry(registry)
     monkeypatch.setattr(router, "plugins_settings", lambda: SimpleNamespace(studio_dist_path=str(dist)))
-    yield SimpleNamespace(dist=dist, plugin_studio=plugin_studio, registry=registry)
-    reg._current = prev
+    return SimpleNamespace(dist=dist, plugin_studio=plugin_studio, registry=registry)
 
 
 # -- Registry listing --------------------------------------------------------
@@ -97,7 +97,7 @@ async def test_registry_listing(studio_env):
 
 
 async def test_registry_listing_unbuilt_is_loud(monkeypatch):
-    monkeypatch.setattr(reg, "_current", None)
+    monkeypatch.setattr(reg, "_REGISTRY", StagedSlot())
     resp = await router.list_studio_plugins(_req())
     assert resp.status_code == 500
     assert "not been built" in _json(resp)["error"]

@@ -175,11 +175,12 @@ live-reloadable needs a non-forking pool (`threads`/`gevent`) or a full worker-p
 respawn on reload.
 
 The turnover runs inside the op apply, before this worker's terminal reply is sent, and
-the publisher waits only its bus apply window for that reply. So the confirmation budget
-is derived from `TAI_BUS_APPLY_TIMEOUT` (the same knob the bus reads, default `30s`) and
-sits a small margin under it: the confirm or raise reaches the publisher before its report
-cut, so a stalled turnover is recorded as a truthful `failed` rather than a `timed_out`
-guess. Raising `TAI_BUS_APPLY_TIMEOUT` raises the turnover budget under it.
+the publisher waits only its bus apply window (`TAI_BUS_APPLY_TIMEOUT`, default `30s`) for
+that reply. The host hands the fleet-op handler what is left of that window, measured from
+this worker's receipt of the op, and the confirmation budget sits a small margin under it:
+the confirm or raise reaches the publisher before its report cut, so a stalled turnover is
+recorded as a truthful `failed` rather than a `timed_out` guess. Raising
+`TAI_BUS_APPLY_TIMEOUT` raises the turnover budget under it.
 
 ## Development
 

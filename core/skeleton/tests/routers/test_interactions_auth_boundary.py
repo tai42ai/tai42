@@ -81,6 +81,13 @@ def _interactions_store_configured(monkeypatch):
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
 
 
+class _BoundaryClient(TestClient):
+    """A test client that also exposes the seam a verifier-boundary test seeds a bound question into."""
+
+    interactions_fake: InteractionsFake
+    interactions_settings: InteractionsSettings
+
+
 @pytest.fixture
 def boundary_client(monkeypatch):
     # An EMPTY pattern table: the public grant provably flows from the authed=False
@@ -119,8 +126,7 @@ def boundary_client(monkeypatch):
         Route("/api/interactions/callback/{ticket}", router.callback, methods=["GET", "POST"]),
     ]
     app = Starlette(routes=routes, middleware=AuthAdapter(ac_settings).get_middleware())
-    client = TestClient(app)
-    # Expose the seam a verifier-boundary test seeds a bound question into.
+    client = _BoundaryClient(app)
     client.interactions_fake = interactions_fake
     client.interactions_settings = isettings
     return client

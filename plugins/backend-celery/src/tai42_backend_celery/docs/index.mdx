@@ -55,9 +55,10 @@ down.
 Celery is the one shipped backend whose workers PERSIST ACROSS JOBS, so it is the
 one that declares pool turnover: after a registry-mutating fleet op applies, the
 live manifest is re-exported into the env and the prefork pool is replaced and
-confirmed before the op reports `applied`. The turnover's budget is derived from
-the bus apply window (`TAI_BUS_APPLY_TIMEOUT`) less a margin, so a pool that will
-not come back reports a truthful `failed` rather than a guessed timeout.
+confirmed before the op reports `applied`. The turnover's budget is what is left of
+the bus apply window (`TAI_BUS_APPLY_TIMEOUT`), measured from this worker's receipt
+of the op, less a margin, so a pool that will not come back reports a truthful
+`failed` rather than a guessed timeout.
 
 `beat` and `flower` pull no queued work, so they run on the event loop and keep
 whatever signal handling their own CLI installs. Nothing else runs in those

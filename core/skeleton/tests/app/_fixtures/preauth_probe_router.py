@@ -18,8 +18,8 @@ from __future__ import annotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
-from tai42_contract.access_control.registry import register_identity_provider
 from tai42_contract.app import tai42_app
+from tai42_kit.access_control.registry import register_identity_provider
 
 PROVIDER_NAME = "fake_preauth"
 PREAUTH_PATH = "/api/preauth-probe"

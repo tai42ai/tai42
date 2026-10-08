@@ -7,8 +7,8 @@ reload gate exactly as production does. The two loops are (re)established by the
 hook the primitive runs ON the serving loop after each swap, registered with the new epoch
 so they retire with their generation. Test-local ``on_post_swap`` establishers call the
 REAL ``advisories.start_poll`` / ``delivery_sweep.start_delivery_sweep`` so the actual poll and
-sweep tasks are asserted — bypassing only the routers' store-configured guards, which are
-not the mechanism under test. The loops sleep on their (long) intervals, so neither touches
+sweep tasks are asserted — bypassing only the establishers' store-configured guards, which
+are not the mechanism under test. The loops sleep on their (long) intervals, so neither touches
 a store during the test.
 """
 
@@ -41,6 +41,10 @@ def _restore_process_env():
     reset_all_settings()
 
 
+# The marketplace router is listed so the advisories operation stays served across the reload.
+_MANIFEST = {"default_routers": "none", "routers_modules": ["tai42_skeleton.routers.marketplace"]}
+
+
 def _patch_reload(monkeypatch, *, manifest: dict, env: dict[str, str]) -> None:
     monkeypatch.setattr(app.config.config_manager, "read_manifest", lambda: manifest)
     monkeypatch.setattr(app.config.config_manager, "read_env", lambda: env)
@@ -69,7 +73,7 @@ def test_advisories_poll_and_delivery_sweep_survive_a_reload(monkeypatch: pytest
     ]
 
     async def run() -> None:
-        async with app.app_context(Manifest.model_validate({"default_routers": "none"})):
+        async with app.app_context(Manifest.model_validate(_MANIFEST)):
             serving_loop = asyncio.get_running_loop()
 
             # Boot established both loops on the serving loop.
@@ -83,7 +87,7 @@ def test_advisories_poll_and_delivery_sweep_survive_a_reload(monkeypatch: pytest
             assert sweep_boot.get_loop() is serving_loop
 
             # Drive a REAL reload through the gate (collapses onto build_and_swap_epoch).
-            _patch_reload(monkeypatch, manifest={"default_routers": "none"}, env={"ACCESS_CONTROL_ENABLE": "false"})
+            _patch_reload(monkeypatch, manifest=dict(_MANIFEST), env={"ACCESS_CONTROL_ENABLE": "false"})
             await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # Both loops are STILL running after the reload — re-established as fresh tasks
@@ -105,8 +109,7 @@ def test_advisories_poll_and_delivery_sweep_survive_a_reload(monkeypatch: pytest
             assert poll_boot.cancelled() or poll_boot.done()
             assert sweep_boot.cancelled() or sweep_boot.done()
 
-            # Stop the live loops before leaving the context (this manifest mounts no
-            # router whose on_shutdown would).
+            # Stop the live loops before leaving the context.
             await advisories_module.stop_poll()
             await delivery_sweep_module.stop_delivery_sweep()
 

@@ -141,15 +141,20 @@ def test_apply_task_opts_carries_the_forwarded_pair_onto_the_callback(monkeypatc
     monkeypatch.setattr(extensions, "callback_task", type("_S", (), {"s": staticmethod(lambda cb: "sig")})())
     callback = extensions.CallbackSchema(tool="follow_up")
     extensions._apply_task_opts({"callback_kwargs": callback, "a": 1, **_FORWARDED})
-    assert callback.carried_kwargs == _FORWARDED
+    assert callback.carried_kwargs == {**_FORWARDED, "backend_secret_capability": False}
 
 
-def test_apply_task_opts_carries_nothing_onto_a_plain_callback(monkeypatch) -> None:
-    # A plain background task forwards no door context, so the callback stays a plain follow-up.
+@pytest.mark.parametrize(("gate_enabled", "capability"), [(True, False), (False, True)])
+def test_apply_task_opts_carries_the_gate_state_onto_a_plain_callback(
+    monkeypatch, access_control, gate_enabled: bool, capability: bool
+) -> None:
+    # A plain background task forwards no door context; its callback still carries the gate state
+    # decided in this, the submitting process: ON fail-closes, OFF is the synthetic admin.
+    access_control(gate_enabled)
     monkeypatch.setattr(extensions, "callback_task", type("_S", (), {"s": staticmethod(lambda cb: "sig")})())
     callback = extensions.CallbackSchema(tool="follow_up")
-    extensions._apply_task_opts({"callback_kwargs": callback, "a": 1})
-    assert callback.carried_kwargs == {}
+    extensions._apply_task_opts({"callback_kwargs": callback, "a": 1, "backend_secret_capability": True})
+    assert callback.carried_kwargs == {"backend_secret_capability": capability}
 
 
 class _FakeEntry:

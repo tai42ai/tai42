@@ -16,6 +16,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from tai42_kit.registry import StagedSlot
 
 import tai42_skeleton.plugins.registry as reg
 import tai42_skeleton.routers.plugins as router
@@ -76,7 +77,7 @@ def _build_env(tmp_path: Path) -> tuple[Path, Path]:
 def boundary_client(tmp_path, monkeypatch):
     plugin_studio, dist = _build_env(tmp_path)
     monkeypatch.setattr(reg, "_studio_root", lambda package: plugin_studio)
-    prev = reg._current
+    monkeypatch.setattr(reg, "_REGISTRY", StagedSlot())
     set_current_registry(build_registry(["acme_plugin"], str(dist)))
     monkeypatch.setattr(router, "plugins_settings", lambda: type("S", (), {"studio_dist_path": str(dist)})())
 
@@ -103,8 +104,7 @@ def boundary_client(tmp_path, monkeypatch):
     ]
     app = Starlette(routes=routes, middleware=AuthAdapter(ac_settings).get_middleware())
     client = TestClient(app)
-    yield client
-    reg._current = prev
+    return client
 
 
 def test_asset_reachable_unauthenticated(boundary_client):

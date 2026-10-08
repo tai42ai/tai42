@@ -256,6 +256,96 @@ async def test_start_poll_cancels_the_previous_task_and_spawns_a_fresh_one(
         marketplace_settings.cache_clear()
 
 
+async def test_cancel_poll_cancels_and_forgets_the_running_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")
+    marketplace_settings.cache_clear()
+    try:
+        advisories.start_poll()
+        task = advisories._poll_task
+        assert task is not None
+        advisories.cancel_poll()
+        assert advisories._poll_task is None
+        await asyncio.sleep(0)
+        assert task.cancelled()
+        advisories.cancel_poll()  # nothing running: a no-op
+    finally:
+        await advisories.stop_poll()
+        marketplace_settings.cache_clear()
+
+
+async def test_start_poll_twice_leaves_exactly_one_task_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")
+    marketplace_settings.cache_clear()
+    try:
+        advisories.start_poll()
+        first = advisories._poll_task
+        advisories.start_poll()
+        await asyncio.sleep(0)
+        live = [t for t in asyncio.all_tasks() if t.get_name() == "tai-marketplace-advisories" and not t.done()]
+        assert live == [advisories._poll_task]
+        assert first is not None
+        assert first.cancelled()
+    finally:
+        await advisories.stop_poll()
+        marketplace_settings.cache_clear()
+
+
+# -- start_advisories_poll: the post-swap establisher ------------------------
+
+
+def _serving(monkeypatch: pytest.MonkeyPatch, *, served: bool, store: bool) -> list[bool]:
+    from tai42_skeleton.app.route_registry import route_registry
+
+    monkeypatch.setattr(route_registry, "serves_operation", lambda name: served and name == "marketplace_advisories")
+    monkeypatch.setattr(advisories, "component_store_configured", lambda component: store)
+    started: list[bool] = []
+    monkeypatch.setattr(advisories, "start_poll", lambda: started.append(True))
+    return started
+
+
+def test_the_establisher_starts_the_poll_where_the_operation_is_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = _serving(monkeypatch, served=True, store=True)
+    advisories.start_advisories_poll()
+    assert started == [True]
+
+
+async def test_the_establisher_starts_nothing_where_the_operation_is_not_served(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A poll an earlier generation started is cancelled: a reload that stops serving the
+    # operation leaves no poll alive.
+    earlier = asyncio.create_task(asyncio.sleep(3600))
+    advisories._poll_task = earlier
+    started = _serving(monkeypatch, served=False, store=True)
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.marketplace.advisories"):
+        advisories.start_advisories_poll()
+    assert started == []
+    assert advisories._poll_task is None
+    await asyncio.sleep(0)
+    assert earlier.cancelled()
+    assert any(
+        "advisory poll not started — the marketplace_advisories operation is not served" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_the_establisher_skips_and_cancels_when_the_store_is_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Store-less: one INFO skip line and nothing started, killing the forever-hourly warning
+    # loop against an absent inventory; an earlier generation's poll is cancelled.
+    earlier = asyncio.create_task(asyncio.sleep(3600))
+    advisories._poll_task = earlier
+    started = _serving(monkeypatch, served=True, store=False)
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.marketplace.advisories"):
+        advisories.start_advisories_poll()
+    assert started == []
+    assert advisories._poll_task is None
+    await asyncio.sleep(0)
+    assert earlier.cancelled()
+    assert any("advisory poll skipped" in r.getMessage() for r in caplog.records)
+
+
 # -- _poll_loop + stop_poll --------------------------------------------------
 
 

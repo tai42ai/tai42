@@ -391,14 +391,14 @@ def _isolate_identity_registry():
     next. The skeleton's interim ``redis`` registration (registered at the provider
     module's import) is captured by the baseline snapshot and restored, so tests
     that build the real ``AuthAdapter`` still resolve ``auth_providers=["redis"]``."""
-    from tai42_contract.access_control import registry
+    from tai42_kit.access_control import registry
 
-    saved = dict(registry._REGISTRY)
+    saved = dict(registry._PROVIDERS._generation.committed())
     try:
         yield
     finally:
-        registry._REGISTRY.clear()
-        registry._REGISTRY.update(saved)
+        registry._PROVIDERS._generation.committed().clear()
+        registry._PROVIDERS._generation.committed().update(saved)
 
 
 class _FakeResourceManager:
@@ -431,7 +431,7 @@ class _FakeAccounts:
     ``active_provider`` lookup finds it."""
 
     def active_provider(self, name: str):
-        from tai42_contract.access_control.registry import get_identity_provider_factory
+        from tai42_kit.access_control.registry import get_identity_provider_factory
 
         from tai42_skeleton.access_control.settings import access_control_settings
 

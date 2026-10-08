@@ -345,9 +345,11 @@ class DisabledAccessControlSecretCapabilityMiddleware:
     default: an in-process fire rebinds it to the firing execution KEY's admin status at
     the execution-identity switch
     (:func:`~tai42_skeleton.authz.execution.bind_execution_identity`), and a backend-worker
-    run — a dequeued task in a process with no HTTP request — binds the SUBMITTER's own
-    capability carried with the job at its worker seam
-    (:func:`~tai42_kit.utils.worker_secret_capability.bind_worker_secret_capability`).
+    run — a dequeued job in a process with no HTTP request — binds the capability the job
+    carried at its worker seam
+    (:func:`~tai42_kit.utils.worker_secret_capability.bind_worker_secret_capability`): a
+    task carries the SUBMITTER's own capability, a callback the gate state decided where it
+    was enqueued.
     """
 
     def __init__(self, app: ASGIApp):

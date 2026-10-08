@@ -638,9 +638,16 @@ def _run_main(
     api_gate.main()
 
 
+def _write_pyproject(member: Path, name: str, dependencies: tuple[str, ...] = ()) -> None:
+    member.mkdir(parents=True, exist_ok=True)
+    deps = ", ".join(f'"{dep}"' for dep in dependencies)
+    (member / "pyproject.toml").write_text(f'[project]\nname = "{name}"\nversion = "0"\ndependencies = [{deps}]\n')
+
+
 def _build_release_repo(repo: Path, *, mode: str, old_version: str, old_body: str, new_body: str) -> None:
     (repo / ".github").mkdir(parents=True)
     (repo / ".github" / "api-gate.yml").write_text(f"mode: {mode}\n")
+    _write_pyproject(repo / "core" / "widget", "widget")
     src = repo / "core" / "widget" / "src" / "widget"
     src.mkdir(parents=True)
     (src / "__init__.py").write_text(old_body)
@@ -896,6 +903,7 @@ def test_main_reports_removed_top_level_module(monkeypatch: pytest.MonkeyPatch, 
     # A whole shipped top-level module dropped between the tag and the worktree is a
     # removal finding; a minor bump under label-honesty may not carry it.
     pytest.importorskip("griffe")
+    _write_pyproject(tmp_path / "core" / "widget", "widget")
     src_root = tmp_path / "core" / "widget" / "src"
     (src_root / "widget").mkdir(parents=True)
     (src_root / "widget" / "__init__.py").write_text(_KEEP)
@@ -909,3 +917,85 @@ def test_main_reports_removed_top_level_module(monkeypatch: pytest.MonkeyPatch, 
     (src_root / "extra.py").unlink()
     with pytest.raises(SystemExit):
         _run_main(monkeypatch, tmp_path, package="widget", member_dir="core/widget", version="1.1.0")
+
+
+# ---------------------------------------------------- first-party inherited members
+# A package's class inheriting from a base in another workspace member: both sides of
+# the diff load the first-party dependency into the same griffe collection, so the
+# inherited members resolve.
+
+_BASE_WITH_TWO = "class Base:\n    kept: int = 0\n    extra: str = ''\n"
+_BASE_WITH_ONE = "class Base:\n    kept: int = 0\n"
+
+
+def _build_workspace(repo: Path, *, base_old: str, child_old: str) -> None:
+    (repo / ".github").mkdir(parents=True)
+    (repo / ".github" / "api-gate.yml").write_text("mode: label-honesty\n")
+    (repo / "pyproject.toml").write_text(
+        '[tool.uv.workspace]\nmembers = ["core/*"]\nexclude = ["core/descriptor-only"]\n'
+    )
+    (repo / "core" / "descriptor-only").mkdir(parents=True)
+    _write_pyproject(repo / "core" / "leaf", "leaf")
+    _write_pyproject(repo / "core" / "basekit", "Base_Kit", ("leaf>=1",))
+    _write_pyproject(repo / "core" / "child", "child", ("base-kit[extra]>=1,<2", "pydantic>=2"))
+    leaf = repo / "core" / "leaf" / "src" / "leaf"
+    leaf.mkdir(parents=True)
+    (leaf / "__init__.py").write_text("class Root:\n    root: int = 0\n")
+    base = repo / "core" / "basekit" / "src" / "base_kit"
+    base.mkdir(parents=True)
+    (base / "__init__.py").write_text(base_old)
+    child = repo / "core" / "child" / "src" / "child"
+    child.mkdir(parents=True)
+    (child / "__init__.py").write_text(child_old)
+    _init_repo(repo)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "release")
+    _git(repo, "tag", "child-v1.0.0")
+
+
+def test_first_party_dependencies_are_the_workspace_members_the_package_needs(tmp_path: Path):
+    _build_workspace(tmp_path, base_old=_BASE_WITH_ONE, child_old="from base_kit import Base\n")
+    deps = api_gate._first_party_dependencies(tmp_path / "core" / "child", tmp_path)
+    # Transitive (the base's own first-party base resolves too), normalized names, no third party.
+    assert deps == [("base-kit", "core/basekit/src"), ("leaf", "core/leaf/src")]
+
+
+def test_first_party_dependencies_without_a_workspace_is_empty(tmp_path: Path):
+    _write_pyproject(tmp_path / "core" / "widget", "widget", ("pydantic>=2",))
+    assert api_gate._first_party_dependencies(tmp_path / "core" / "widget", tmp_path) == []
+
+
+def test_first_party_dependencies_refuse_a_package_without_a_pyproject(tmp_path: Path):
+    (tmp_path / "core" / "widget").mkdir(parents=True)
+    with pytest.raises(SystemExit):
+        api_gate._first_party_dependencies(tmp_path / "core" / "widget", tmp_path)
+
+
+def test_end_to_end_a_field_moved_into_the_first_party_base_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    pytest.importorskip("griffe")
+    _build_workspace(
+        tmp_path,
+        base_old=_BASE_WITH_ONE,
+        child_old="from base_kit import Base\n\n\nclass Child(Base):\n    extra: str = ''\n",
+    )
+    (tmp_path / "core" / "basekit" / "src" / "base_kit" / "__init__.py").write_text(_BASE_WITH_TWO)
+    (tmp_path / "core" / "child" / "src" / "child" / "__init__.py").write_text(
+        "from base_kit import Base\n\n\nclass Child(Base):\n    pass\n"
+    )
+    # ``Child.extra`` is still there, inherited — a patch carries no breaking change.
+    _run_main(monkeypatch, tmp_path, package="child", member_dir="core/child", version="1.0.1")
+
+
+def test_end_to_end_a_member_removed_from_the_first_party_base_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    pytest.importorskip("griffe")
+    _build_workspace(
+        tmp_path,
+        base_old=_BASE_WITH_TWO,
+        child_old="from base_kit import Base\n\n\nclass Child(Base):\n    pass\n",
+    )
+    (tmp_path / "core" / "basekit" / "src" / "base_kit" / "__init__.py").write_text(_BASE_WITH_ONE)
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, tmp_path, package="child", member_dir="core/child", version="1.1.0")
+    assert "Child.extra" in capsys.readouterr().out

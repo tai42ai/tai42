@@ -6,14 +6,15 @@ The Redis-backed **api-key identity provider** for the TAI ecosystem — an
 installable plugin that registers itself as the `"redis"` identity provider and
 resolves an inbound api key to an authenticated identity.
 
-Importing the package registers the provider in `tai42-contract`'s module-level
-identity-provider registry (`register_identity_provider("redis", ...)`), with no
+Importing the package registers the provider in `tai42-kit`'s module-level
+identity-provider registry (`tai42_kit.access_control.registry`,
+`register_identity_provider("redis", ...)`), with no
 `tai42_app` handle involved — so it registers in any process that imports it,
 including ones that never `start()`. A deployment selects it by including
 `redis` in the access-control `auth_providers` list.
 
-Its only tai-* dependencies are `tai42-contract` (the identity ABCs and the
-registry it registers through) and `tai42-kit` (the Redis client, the hash typing
+Its only tai-* dependencies are `tai42-contract` (the identity ABCs) and
+`tai42-kit` (the registry it registers through, the Redis client, the hash typing
 seams, and the api-key hash). It **never** imports the skeleton — the plugin is
 contract-facing, and the import is banned by ruff.
 

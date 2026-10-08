@@ -66,17 +66,17 @@ def _reset_epoch_state() -> Iterator[None]:
     so its ``begin/commit_staging_all`` would promote an EMPTY staged generation and
     wipe the committed generation registries for later suites — snapshot and restore
     the committed generation globals around each test."""
-    from tai42_contract.access_control import registry as identity_registry
-    from tai42_contract.accounts import registry as accounts_registry
+    from tai42_kit.access_control import registry as identity_registry
+    from tai42_kit.accounts import registry as accounts_registry
 
     from tai42_skeleton.connectors.providers import registry as connector_registry
     from tai42_skeleton.operations.registry import operation_registry
 
     saved = {
-        "connector": dict(connector_registry._REGISTRY),
-        "identity": dict(identity_registry._REGISTRY),
-        "accounts": dict(accounts_registry._REGISTRY),
-        "operation": dict(operation_registry._operations),
+        "connector": dict(connector_registry._GENERATION.committed()),
+        "identity": dict(identity_registry._PROVIDERS._generation.committed()),
+        "accounts": dict(accounts_registry._PROVIDERS._generation.committed()),
+        "operation": dict(operation_registry._generation.committed()),
     }
     for name in ("_current", "_serving_slot", "_retiring_epoch"):
         setattr(epoch_mod, name, None)
@@ -87,14 +87,18 @@ def _reset_epoch_state() -> Iterator[None]:
         for name in ("_current", "_serving_slot", "_retiring_epoch", "_building_epoch"):
             setattr(epoch_mod, name, None)
         epoch_mod._loaded_env_keys = set()
-        connector_registry._REGISTRY = saved["connector"]
-        connector_registry._pending = None
-        identity_registry._REGISTRY = saved["identity"]
-        identity_registry._pending = None
-        accounts_registry._REGISTRY = saved["accounts"]
-        accounts_registry._pending = None
-        operation_registry._operations = saved["operation"]
-        operation_registry._pending = None
+        connector_registry._GENERATION.abort()
+        connector_registry._GENERATION.committed().clear()
+        connector_registry._GENERATION.committed().update(saved["connector"])
+        identity_registry._PROVIDERS._generation.abort()
+        identity_registry._PROVIDERS._generation.committed().clear()
+        identity_registry._PROVIDERS._generation.committed().update(saved["identity"])
+        accounts_registry._PROVIDERS._generation.abort()
+        accounts_registry._PROVIDERS._generation.committed().clear()
+        accounts_registry._PROVIDERS._generation.committed().update(saved["accounts"])
+        operation_registry._generation.abort()
+        operation_registry._generation.committed().clear()
+        operation_registry._generation.committed().update(saved["operation"])
 
 
 def _install_boot(name: str = "boot-app") -> dict:

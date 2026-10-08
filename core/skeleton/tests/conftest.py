@@ -294,8 +294,8 @@ def _ensure_redis_identity_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     is re-registered after the clear (the reset still runs, so a manifest re-import's
     duplicate guard is unaffected). Suites that isolate the registry snapshot this
     baseline and restore it."""
-    from tai42_contract.access_control import registry
     from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
+    from tai42_kit.access_control import registry
 
     import tai42_skeleton.app.lifecycle as lifecycle
 
@@ -303,7 +303,7 @@ def _ensure_redis_identity_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         # Guard/register against the WRITE TARGET (the staged generation during an epoch
         # build, else the committed map), so a reload's staged registry gets the default
         # even though the committed one already holds it.
-        if "redis" not in registry._write_target():
+        if "redis" not in registry.iter_identity_provider_names_staged():
             registry.register_identity_provider("redis", RedisApiKeyProvider)
 
     real_reset = lifecycle.reset_identity_registry
