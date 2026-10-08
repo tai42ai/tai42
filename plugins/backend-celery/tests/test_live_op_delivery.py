@@ -8,8 +8,9 @@ filtering, manifest refresh and the Celery turnover, end to end), and asserts
 through a pool child (``probe_registry`` returns the child pid + the registry it
 was forked with).
 
-Skipped when no Redis broker is reachable — set ``TAI_TEST_CELERY_BROKER``
-(default ``redis://localhost:6399/0``) to run it.
+Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run it; once set, an
+unreachable broker fails the module instead of skipping it. Unset, it probes
+``redis://localhost:6399/0`` and skips when nothing answers there.
 """
 
 from __future__ import annotations
@@ -24,15 +25,20 @@ from typing import Any
 
 import pytest
 
-_BROKER = os.environ.get("TAI_TEST_CELERY_BROKER", "redis://localhost:6399/0")
+_BROKER_ENV = "TAI_TEST_CELERY_BROKER"
+_BROKER_REQUIRED = _BROKER_ENV in os.environ
+_BROKER = os.environ.get(_BROKER_ENV, "redis://localhost:6399/0")
 
 
 def _redis_reachable(url: str) -> bool:
+    """Whether a Redis broker answers at ``url``; a configured broker that does not answer raises."""
     import redis
 
     try:
         redis.Redis.from_url(url).ping()
-    except Exception:
+    except redis.ConnectionError:
+        if _BROKER_REQUIRED:
+            raise
         return False
     return True
 
@@ -62,11 +68,27 @@ def _bus_op_applied(stub_app: Any) -> Any:
     return stub_app.lifecycle.fleet_op_applied[-1]
 
 
+@contextlib.contextmanager
+def _fresh_connection(celery_app: Any) -> Iterator[Any]:
+    """A dedicated broker connection for one control call from the test driver.
+
+    The driver shares its process with the worker, so every pool child is forked
+    from it. A control call over the app's shared pool returns its connection with
+    a reply ``BRPOP`` still in flight, and kombu's after-fork pool cleanup in each
+    child then blocks reading that reply from the socket it shares with this
+    process — the child never reports up and the pool re-forks it forever. A
+    connection outside the pool is closed here and never reaches a child.
+    """
+    with celery_app.connection_for_write() as conn:
+        yield conn
+
+
 def _wait_worker_ready(prefork: Any, celery_app: Any, timeout: float = 40.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if prefork._worker_ready.is_set() and prefork._local_nodename is not None:
-            pong = celery_app.control.ping(timeout=1.0)
+            with _fresh_connection(celery_app) as conn:
+                pong = celery_app.control.ping(timeout=1.0, connection=conn)
             if pong:
                 return
         time.sleep(0.2)
@@ -111,10 +133,8 @@ def live_worker() -> Iterator[Any]:
 
         # Reap any pool child before stopping (the stats read needs the worker
         # still consuming), so the suite does not leak forked processes.
-        try:
-            stats = celery_app.control.inspect(timeout=1.0).stats() or {}
-        except Exception:
-            stats = {}
+        with _fresh_connection(celery_app) as conn:
+            stats = celery_app.control.inspect(timeout=1.0, connection=conn).stats() or {}
         state.should_stop = 0
         thread.join(timeout=15)
         for cfg in stats.values():

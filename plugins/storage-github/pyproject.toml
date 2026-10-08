@@ -82,7 +82,9 @@ filterwarnings = ["error"]
 source = ["tai42_storage_github"]
 
 [tool.coverage.report]
+# fail_under is compared to the total rounded to `precision` decimals.
 fail_under = 97
+precision = 2
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

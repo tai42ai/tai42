@@ -357,7 +357,8 @@ jobs:
       # lets the skeleton row's real-Postgres pass reach them. Empty on every CI runner
       # image restart, so each job gets a fresh, uncontended database. The connector
       # token store keeps a Redis cache beside its Postgres rows, so its integration
-      # tests need the Redis service too.
+      # tests need the Redis service too, and the Celery backend's live
+      # prefork-turnover test uses it as its broker.
       postgres:
         image: postgres:16-alpine
         env:
@@ -442,8 +443,13 @@ jobs:
         # On a release train a member whose declared range runs behind the bumped
         # contract skips its suite (its code was proven on main; it reloads once the
         # post-merge re-pin widens the range); a member that still admits runs it.
+        # The Celery backend's live prefork-turnover test runs a real worker against
+        # the job's Redis service; with the broker named here, an unreachable broker
+        # fails that test instead of skipping it.
         if: ${{ (matrix.dir != 'core/skeleton' && matrix.dir != 'core/kit' && matrix.dir != 'plugins/accounts-postgres') && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
         working-directory: ${{ matrix.dir }}
+        env:
+          TAI_TEST_CELERY_BROKER: redis://localhost:6379/0
         run: >-
           uv run --no-sync pytest ${{ matrix.pytest_mode == 'collect' && '--collect-only -q' || '--cov --cov-report=term-missing' }}
       - name: Served-document schema freshness

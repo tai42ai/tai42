@@ -104,7 +104,9 @@ asyncio_default_fixture_loop_scope = "function"
 source = ["tai42_identity_redis"]
 
 [tool.coverage.report]
+# fail_under is compared to the total rounded to `precision` decimals.
 fail_under = 95
+precision = 2
 
 [tool.pyright]
 include = ["src", "tests"]
