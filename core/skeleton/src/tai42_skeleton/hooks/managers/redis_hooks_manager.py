@@ -57,9 +57,8 @@ class RedisHooksManager(BaseHooksManager):
         """Bind the manager to ``settings`` (redis connection and key layout)."""
         super().__init__(settings)
 
-    async def register(self, params: HookParams) -> bool:
-        """Register or move ``params`` under its topic atomically; returns ``True``."""
-        self.validate_jq_fields(params)
+    async def _store_hook(self, params: HookParams) -> bool:
+        """Store or move ``params`` under its topic atomically; returns ``True``."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
             await eval_script(
                 r,

@@ -539,12 +539,10 @@ async def test_run_once_schedule_applies_binding_around_start_without_injecting_
 
     install(_Tools(set(_MARKERS) | {"mytool"}))
 
-    import tai42_skeleton.tools.state_binding as sb_mod
-
-    async def _noop_attach(app, b) -> None:
+    async def _noop_check(b) -> None:
         return None
 
-    monkeypatch.setattr(sb_mod, "validate_and_attach_binding", _noop_attach)
+    monkeypatch.setattr(schedules_ops, "check_schedule_definition", _noop_check)
 
     async def _noop_authz(name, args) -> None:
         return None
@@ -639,3 +637,55 @@ async def test_run_once_returns_the_park_notice_for_a_parked_outcome(monkeypatch
     )
     result = await schedules_ops.create_schedule("mytool", {}, {})
     assert result == {"parked": ["u1"]}
+
+
+# -- the schedule definition check at the create door ----------------------------------------
+
+
+def _ghost_binding():
+    from tai42_contract.states import StateAttach, StateBinding
+    from tai42_contract.template import TemplatedText
+
+    return StateBinding(states=[StateAttach(state="ghost", subject_expr=TemplatedText(content=".x"))])
+
+
+def _patch_schedule_binding_check(monkeypatch: pytest.MonkeyPatch, error: Exception | None) -> list:
+    import tai42_skeleton.tools.state_binding as sb_mod
+
+    calls: list = []
+
+    async def _validate_and_attach(app, binding) -> None:
+        calls.append(binding)
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(sb_mod, "validate_and_attach_binding", _validate_and_attach)
+    return calls
+
+
+async def test_create_with_a_binding_naming_an_undeclared_state_is_not_found(install, monkeypatch) -> None:
+    from tai42_contract.states.errors import StateNotFoundError
+
+    install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
+    _patch_schedule_binding_check(monkeypatch, StateNotFoundError("state 'ghost' is not declared"))
+    with pytest.raises(NotFoundError, match=r"^invalid schedule: state 'ghost' is not declared$"):
+        await schedules_ops.create_schedule("mytool", {}, {}, state_binding=_ghost_binding())
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+async def test_create_with_a_store_fault_during_the_binding_check_propagates(install, monkeypatch, fault_class) -> None:
+    from tai42_contract.states import errors as states_errors
+
+    install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
+    fault = getattr(states_errors, fault_class)("store down")
+    _patch_schedule_binding_check(monkeypatch, fault)
+    with pytest.raises(type(fault)) as caught:
+        await schedules_ops.create_schedule("mytool", {}, {}, state_binding=_ghost_binding())
+    assert caught.value is fault
+
+
+async def test_create_with_an_uncompilable_binding_jq_is_a_bad_request(install, monkeypatch) -> None:
+    install(_FakeTools(set(_MARKERS) | {"mytool"}, run_result="ran"))
+    _patch_schedule_binding_check(monkeypatch, ValueError("jq does not compile"))
+    with pytest.raises(BadRequestError, match=r"^invalid schedule: jq does not compile$"):
+        await schedules_ops.create_schedule("mytool", {}, {}, state_binding=_ghost_binding())

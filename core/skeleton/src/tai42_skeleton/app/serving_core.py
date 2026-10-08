@@ -25,7 +25,6 @@ from tai42_skeleton.presets.manager import PresetManager
 from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
 from tai42_skeleton.sandbox import SandboxHolder
-from tai42_skeleton.states.backup import register_states_backup_section
 from tai42_skeleton.states.seeds import StateTemplateSeedRegistry
 from tai42_skeleton.states.service import (
     StatesAttachReconcilerRegistry,
@@ -246,7 +245,6 @@ class ServingCore:
             consumer_listers=self._states_consumer_listers,
             seeds=self._states_template_seeds,
         )
-        register_states_backup_section(self._backup_registry)
 
         # The preset register/reload engine, rehydrated per epoch from the store by the
         # startup/reload handler.

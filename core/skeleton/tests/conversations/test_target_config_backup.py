@@ -119,3 +119,86 @@ async def test_import_empty_is_a_noop_without_the_backend(monkeypatch):
     report = await import_target_configs({"target_configs": []}, "skip")
     assert report.created == 0
     assert report.errors == []
+
+
+# -- the target-config write service on restore ---------------------------------------------------
+
+
+def _row(name: str, state: str = "status") -> dict:
+    return {
+        "target_kind": "tool",
+        "target_name": name,
+        "state_binding": {"states": [{"state": state, "subject_expr": {"content": ".x"}, "templates": ["t1"]}]},
+    }
+
+
+def _patch_binding_validation(monkeypatch, error_for=None) -> list:
+    """Patch the validate-and-attach seam: record each binding, raise ``error_for(binding)`` when it returns one."""
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    calls: list = []
+
+    async def _validate_and_attach(app, binding) -> None:
+        calls.append(binding)
+        error = error_for(binding) if error_for is not None else None
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _validate_and_attach)
+    return calls
+
+
+async def test_a_bad_binding_is_a_per_row_refusal_and_a_good_one_attaches(store, monkeypatch):
+    from tai42_contract.states.errors import StateNotFoundError
+
+    calls = _patch_binding_validation(
+        monkeypatch,
+        lambda b: StateNotFoundError("state 'ghost' is not declared") if b.states[0].state == "ghost" else None,
+    )
+    payload = {"target_configs": [_row("bad", "ghost"), _row("good")]}
+
+    report = await import_target_configs(payload, "skip")
+
+    assert report.errors == ["config ('tool', 'bad'): state 'ghost' is not declared"]
+    assert report.skipped == 1
+    assert report.created == 1
+    assert len(calls) == 2
+    assert await store.get("tool", "bad") is None
+    assert await store.get("tool", "good") is not None
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+async def test_a_store_fault_during_the_binding_check_fails_the_section(store, monkeypatch, fault_class):
+    from tai42_contract.states import errors as states_errors
+
+    fault = getattr(states_errors, fault_class)("store down")
+    _patch_binding_validation(monkeypatch, lambda b: fault)
+
+    with pytest.raises(type(fault), match="store down"):
+        await import_target_configs({"target_configs": [_row("lookup")]}, "skip")
+    assert await store.get("tool", "lookup") is None
+
+
+async def test_a_preset_target_config_restores_before_its_preset_exists(store, monkeypatch):
+    # The target's existence is the door's rule against the live registries, never the restore's:
+    # a config whose target is a preset a later section restores is stored, and its binding's
+    # templates are attached, on a deployment that has no such preset yet.
+    calls = _patch_binding_validation(monkeypatch)
+
+    report = await import_target_configs({"target_configs": [_row("probe-preset")]}, "skip")
+
+    assert report.created == 1
+    assert report.errors == []
+    assert len(calls) == 1
+    assert calls[0].states[0].templates == ["t1"]
+    assert await store.get("tool", "probe-preset") is not None
+
+
+async def test_a_binding_whose_jq_does_not_compile_is_a_per_row_refusal(store, monkeypatch):
+    _patch_binding_validation(monkeypatch, lambda b: ValueError("subject_expr is not valid jq"))
+
+    report = await import_target_configs({"target_configs": [_row("lookup")]}, "skip")
+
+    assert report.errors == ["config ('tool', 'lookup'): subject_expr is not valid jq"]
+    assert report.skipped == 1
+    assert await store.get("tool", "lookup") is None

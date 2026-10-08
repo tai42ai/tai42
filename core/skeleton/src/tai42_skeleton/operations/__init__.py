@@ -40,7 +40,17 @@ from tai42_skeleton.operations.registry import (
 # reloaded: a reload would mint a new ``operation_registry`` and orphan the singleton, or
 # re-mint a helper's exported types under the still-cached leaves that closed over them.
 _INFRA_MODULES = frozenset(
-    {"__init__", "adapter", "decorator", "errors", "projection", "registry", "_authority", "_broadcast"}
+    {
+        "__init__",
+        "adapter",
+        "decorator",
+        "definition_door",
+        "errors",
+        "projection",
+        "registry",
+        "_authority",
+        "_broadcast",
+    }
 )
 
 

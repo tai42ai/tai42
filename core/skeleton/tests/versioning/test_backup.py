@@ -148,9 +148,10 @@ def pg(monkeypatch) -> _FakeVersioningBackupPg:
 def _seed(pg: _FakeVersioningBackupPg) -> None:
     """Two kinds, multiple versions, non-trivial active pointers, plus a
     soft-deleted ghost — the state the round-trip must restore intact."""
-    # kind=preset "wv": v1,v2,v3 with active pointer rolled back to 2.
+    # kind=record "wv": v1,v2,v3 with active pointer rolled back to 2. A kind that registers
+    # no restore check, so the round-trip is about the SQL alone.
     pg.documents.append(
-        {"id": 1, "kind": "preset", "name": "wv", "active_version": 2, "is_active": True, "created_at": _T0}
+        {"id": 1, "kind": "record", "name": "wv", "active_version": 2, "is_active": True, "created_at": _T0}
     )
     for n, units in ((1, "a"), (2, "b"), (3, "c")):
         pg.versions.append(
@@ -164,7 +165,7 @@ def _seed(pg: _FakeVersioningBackupPg) -> None:
     pg.versions.append({"id": 5, "document_id": 2, "version": 2, "body": {"rule": "y"}, "tags": [], "created_at": _T0})
     # A soft-deleted ghost of "wv" with its own history — audit rows survive too.
     pg.documents.append(
-        {"id": 3, "kind": "preset", "name": "wv", "active_version": 1, "is_active": False, "created_at": _T0}
+        {"id": 3, "kind": "record", "name": "wv", "active_version": 1, "is_active": False, "created_at": _T0}
     )
     pg.versions.append(
         {"id": 6, "document_id": 3, "version": 1, "body": {"units": "old"}, "tags": [], "created_at": _T0}

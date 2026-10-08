@@ -5,8 +5,9 @@ The store carries the ``multichannel`` opt-in + first-contact ``greeting_templat
 Operator config, carrying no credentials, so the section is not secret-flagged — the same
 split the connectors subsystem draws between its non-secret ``connector_categories`` and its
 secret ``connector_connections``. Each restored row is re-validated by the model (the
-``{pairing_code}``-only placeholder rule and the non-blank-template rule), so a malformed
-row is a per-row rejection, never an aborted restore of the rest.
+``{pairing_code}``-only placeholder rule and the non-blank-template rule) and written through
+the shared write service, so a malformed row or a refused binding is a per-row rejection, never
+an aborted restore of the rest.
 """
 
 from __future__ import annotations
@@ -17,8 +18,11 @@ from typing import Any, Literal
 from pydantic import ValidationError
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.conversations import TargetConversationConfig
+from tai42_contract.states.errors import StatesError
 
 from tai42_skeleton.conversations.cache import get_conversations_manager
+from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore, write_target_config
+from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +45,52 @@ async def export_target_configs() -> dict[str, Any]:
     return {"target_configs": [config.model_dump(mode="json") for config in configs.values()]}
 
 
+async def _write_row(
+    config: TargetConversationConfig,
+    store: ConversationTargetConfigStore,
+    key: Any,
+    existing: set[tuple[str, str]],
+    report: BackupSectionReport,
+) -> None:
+    """Write ``config`` through the write service and count it, or record its per-row rejection.
+
+    A binding the states store refuses, or a ``ValueError`` the write raises, is the row's own
+    defect; any other error (an unbound store, a store or transport fault) fails the section.
+    """
+    try:
+        await write_target_config(config, store=store)
+    except ValueError as exc:
+        report.errors.append(f"config {key!r}: {exc}")
+        report.skipped += 1
+        return
+    except StatesError as exc:
+        if not is_binding_refusal(exc):
+            raise
+        report.errors.append(f"config {key!r}: {exc}")
+        report.skipped += 1
+        return
+    pair = (config.target_kind, config.target_name)
+    if pair in existing:
+        report.updated += 1
+    else:
+        report.created += 1
+    # Now that this pair is stored, a later duplicate in the same payload must treat it as
+    # existing: skipped_existing under skip, updated under overwrite.
+    existing.add(pair)
+
+
 async def import_target_configs(
     payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
 ) -> BackupSectionReport:
     """Restore per-target configs, keyed by ``(target_kind, target_name)``.
 
-    A malformed envelope raises BEFORE any write. Each row is model-validated; a row failing
-    validation is a per-row rejection in the report. Under ``skip`` (the default) an existing
-    config is left untouched; under ``overwrite`` it is replaced.
+    A malformed envelope raises BEFORE any write. Each row is model-validated and written
+    through the write service the set door uses (a carried binding is validated and its
+    templates attached); a row failing validation or carrying a refused binding is a per-row
+    rejection in the report, while a store or transport failure fails the section. The target's
+    existence is not checked: a config may name a target a later section restores or a later
+    registration provides. Under ``skip`` (the default) an existing config is left untouched;
+    under ``overwrite`` it is replaced.
     """
     if not isinstance(payload, dict):
         raise ValueError(f"conversation_target_config section payload must be an envelope dict, got {type(payload)}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
@@ -88,13 +130,6 @@ async def import_target_configs(
         if pair in existing and mode == "skip":
             report.details["skipped_existing"] += 1
             continue
-        await store.upsert(config)
-        if pair in existing:
-            report.updated += 1
-        else:
-            report.created += 1
-        # Now that this pair is stored, a later duplicate in the same payload must treat it as
-        # existing: skipped_existing under skip, updated under overwrite.
-        existing.add(pair)
+        await _write_row(config, store, key, existing, report)
 
     return report

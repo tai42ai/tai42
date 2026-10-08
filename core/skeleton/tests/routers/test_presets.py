@@ -2816,8 +2816,8 @@ def test_rollback_reattaches_the_target_version_binding(pg, emit, monkeypatch) -
 
 def test_rollback_refuses_when_target_binding_template_is_gone(pg, emit, monkeypatch) -> None:
     # A rollback to a version whose binding names a template whose DEFINITION is gone cannot
-    # re-attach it — a loud 400 that re-points nothing, never a bricked preset that faults at
-    # every run.
+    # re-attach it — a loud 404 naming the absent template that re-points nothing, never a
+    # bricked preset that faults at every run.
     async def run():
         async with instance.app.app_context(_manifest()):
             attached: set[tuple[str, str]] = set()
@@ -2838,11 +2838,339 @@ def test_rollback_refuses_when_target_binding_template_is_gone(pg, emit, monkeyp
             resp = await router.rollback_preset(
                 _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
             )
-            assert resp.status_code == 400, _err(resp)
-            assert "state_binding" in _err(resp)
+            assert resp.status_code == 404, _err(resp)
+            assert _err(resp) == "invalid state_binding: template 't1' does not exist"
             # Nothing committed: the active version is unchanged and no emit fired.
             record = await instance.app.presets.store.get_preset("wv")
             assert record.active_version == 2
             assert emit == []
+
+    asyncio.run(run())
+
+
+# -- the preset document check at every preset door ------------------------------------------------
+
+
+_GHOST_BINDING = {"states": [{"state": "ghost", "subject_expr": {"content": ".x"}, "templates": ["t1"]}]}
+
+
+def _patch_binding_seams(monkeypatch, *, attach_error=None, validate_error=None) -> dict[str, list]:
+    """Patch both binding seams the preset document check reaches; record every call per seam."""
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    calls: dict[str, list] = {"attach": [], "validate": []}
+
+    async def _attach(app, binding) -> None:
+        calls["attach"].append(binding)
+        if attach_error is not None:
+            raise attach_error
+
+    async def _validate_only(app, binding) -> None:
+        calls["validate"].append(binding)
+        if validate_error is not None:
+            raise validate_error
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _attach)
+    monkeypatch.setattr(state_binding_module, "validate_binding", _validate_only)
+    return calls
+
+
+def test_create_with_a_binding_naming_an_undeclared_state_is_not_found(pg, emit, monkeypatch) -> None:
+    from tai42_contract.states.errors import StateNotFoundError
+
+    _patch_binding_seams(monkeypatch, attach_error=StateNotFoundError("state 'ghost' is not declared"))
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("wv", state_binding=_GHOST_BINDING))
+            )
+            assert resp.status_code == 404, _err(resp)
+            assert _err(resp) == "invalid state_binding: state 'ghost' is not declared"
+            assert _non_role_documents(pg) == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+def test_a_store_fault_at_each_preset_write_door_is_never_a_client_error(pg, emit, monkeypatch, fault_class) -> None:
+    from tai42_contract.states import errors as states_errors
+
+    fault = getattr(states_errors, fault_class)("store down")
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            calls = _patch_binding_seams(monkeypatch)
+            await _create_versioned("wv", state_binding=_ROUTE_BINDING)
+            assert len(calls["attach"]) == 1
+            _patch_binding_seams(monkeypatch, attach_error=fault)
+
+            with pytest.raises(type(fault), match="store down"):
+                await router.create_preset(
+                    _request("POST", "/api/presets", body=_create_body("other", state_binding=_ROUTE_BINDING))
+                )
+            with pytest.raises(type(fault), match="store down"):
+                await router.save_version(
+                    _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": _GHOST_BINDING})
+                )
+            with pytest.raises(type(fault), match="store down"):
+                await router.rollback_preset(
+                    _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
+                )
+            record = await instance.app.presets.store.get_preset("wv")
+            assert record.active_version == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+def test_a_store_fault_at_the_dry_run_is_never_an_invalid_verdict(pg, emit, monkeypatch, fault_class) -> None:
+    from tai42_contract.states import errors as states_errors
+
+    fault = getattr(states_errors, fault_class)("store down")
+    _patch_binding_seams(monkeypatch, validate_error=fault)
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            with pytest.raises(type(fault), match="store down"):
+                await _validate({"name": "newp", "base_tool": "weather", "state_binding": _GHOST_BINDING})
+
+    asyncio.run(run())
+
+
+def test_the_dry_run_validates_the_binding_and_never_attaches(pg, emit, monkeypatch) -> None:
+    calls = _patch_binding_seams(monkeypatch)
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            data = _data(await _validate({"name": "newp", "base_tool": "weather", "state_binding": _GHOST_BINDING}))
+            assert data == {"valid": True, "error": None}
+            assert calls["attach"] == []
+            assert len(calls["validate"]) == 1
+
+    asyncio.run(run())
+
+
+def test_a_dry_run_binding_refusal_is_an_invalid_state_binding_verdict(pg, emit, monkeypatch) -> None:
+    from tai42_contract.states.errors import StateNotFoundError
+
+    _patch_binding_seams(monkeypatch, validate_error=StateNotFoundError("state 'ghost' is not declared"))
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            data = _data(await _validate({"name": "newp", "base_tool": "weather", "state_binding": _GHOST_BINDING}))
+            assert data == {"valid": False, "error": "invalid state_binding: state 'ghost' is not declared"}
+
+    asyncio.run(run())
+
+
+def test_a_document_rule_refusal_answers_its_own_text_never_the_binding_prefix(pg, emit, monkeypatch) -> None:
+    from tai42_skeleton.operations.presets import authoring
+    from tai42_skeleton.presets.definition import PresetDefinitionError
+
+    async def _refuse(body, *, name, attach) -> None:
+        raise PresetDefinitionError("probe body refusal")
+
+    monkeypatch.setattr(authoring, "check_preset_body", _refuse)
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            resp = await router.create_preset(_request("POST", "/api/presets", body=_create_body("wv")))
+            assert resp.status_code == 400
+            assert _err(resp) == "probe body refusal"
+            data = _data(await _validate({"name": "newp", "base_tool": "weather"}))
+            assert data == {"valid": False, "error": "probe body refusal"}
+
+    asyncio.run(run())
+
+
+def test_a_save_version_carrying_the_binding_forward_attaches_nothing(pg, emit, monkeypatch) -> None:
+    calls = _patch_binding_seams(monkeypatch)
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", state_binding=_ROUTE_BINDING)
+            assert len(calls["attach"]) == 1
+            resp = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"description": "d2"})
+            )
+            assert resp.status_code == 200, _err(resp)
+            assert len(calls["attach"]) == 1
+            resp = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"state_binding": _GHOST_BINDING})
+            )
+            assert resp.status_code == 200, _err(resp)
+            assert len(calls["attach"]) == 2
+
+    asyncio.run(run())
+
+
+# -- the preset restore judges the document, never the live registries --------------------------
+
+
+def _wire_backup_onto(pg: FakeVersioningPg, monkeypatch) -> None:
+    """Point the versioned-document backup's SQL at the SAME in-memory tables the preset store reads."""
+    import tai42_skeleton.versioning.backup as versioning_backup
+
+    from ..versioning.test_backup import _FakeVersioningBackupPg
+
+    backup_pg = _FakeVersioningBackupPg()
+    backup_pg.documents = pg.documents
+    backup_pg.versions = pg.versions
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield backup_pg
+
+    monkeypatch.setattr(versioning_backup, "client_ctx", fake_client_ctx)
+
+
+def _preset_document(doc_id: int, name: str, body: dict[str, Any]) -> tuple[dict, dict]:
+    created_at = "2024-01-01T00:00:00+00:00"
+    document = {
+        "id": doc_id,
+        "kind": "preset",
+        "name": name,
+        "active_version": 1,
+        "is_active": True,
+        "created_at": created_at,
+    }
+    version = {"id": doc_id, "document_id": doc_id, "version": 1, "body": body, "tags": [], "created_at": created_at}
+    return document, version
+
+
+def _restore_payload(*entries: tuple[int, str, dict[str, Any]]) -> dict[str, list]:
+    pairs = [_preset_document(doc_id, name, body) for doc_id, name, body in entries]
+    return {"documents": [d for d, _ in pairs], "versions": [v for _, v in pairs]}
+
+
+def test_a_preset_restore_never_runs_a_live_registry_rule(pg, emit, monkeypatch) -> None:
+    from tai42_skeleton.operations.presets.authoring import _dry_run_bind_error
+    from tai42_skeleton.versioning.backup import import_versioned_documents
+
+    _wire_backup_onto(pg, monkeypatch)
+    payload = _restore_payload(
+        (9001, "probe-base", {"base_tool": "weather", "description": "d"}),
+        (9002, "probe-chained", {"base_tool": "probe-base", "description": "d"}),
+        (9003, "probe-later", {"base_tool": "later-tool", "description": "d"}),
+    )
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            first = await import_versioned_documents(payload)
+            assert (first.created, first.updated, first.skipped, first.errors) == (3, 0, 0, [])
+
+            # The rehydrate applies the live verdict to every restored row, loudly.
+            mgr = instance.app.preset_manager
+            await mgr.rehydrate()
+            assert mgr.is_registered("probe-base")
+            assert mgr.quarantined_names() == {"probe-chained", "probe-later"}
+            assert mgr._quarantine["probe-chained"] == "its base tool 'probe-base' is itself a preset"
+            assert mgr._quarantine["probe-later"] == "its base tool 'later-tool' is not a registered tool"
+
+            # The same document again, with ``probe-base`` now live: the same checks, the same verdicts.
+            again = await import_versioned_documents(payload, "overwrite")
+            assert (again.created, again.updated, again.skipped, again.errors) == (0, 3, 0, [])
+
+            # The doors keep refusing the body the restore stored.
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("probe-later-copy", base_tool="later-tool"))
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == "base tool 'later-tool' is not a registered tool"
+            bind_error = await _dry_run_bind_error("later-tool", {}, name="probe-later", description="d")
+            assert bind_error is not None
+            assert bind_error.startswith("preset 'probe-later' cannot bind: ")
+
+    asyncio.run(run())
+
+
+def test_a_preset_restore_refuses_a_body_failing_a_document_rule_with_the_door_text(pg, emit, monkeypatch) -> None:
+    from tai42_skeleton.versioning.backup import import_versioned_documents
+
+    _wire_backup_onto(pg, monkeypatch)
+    bad_schema = {"base_tool": "weather", "description": "d", "output_schema": {"type": "string"}}
+    payload = _restore_payload(
+        (9011, "probe-schema", bad_schema),
+        (9012, "probe-good", {"base_tool": "weather", "description": "d"}),
+    )
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            report = await import_versioned_documents(payload)
+            door_text = 'output_schema must be an object schema ("type": "object")'
+            assert report.errors == [f"preset 'probe-schema': {door_text}"]
+            assert (report.created, report.skipped) == (1, 1)
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("probe-schema", output_schema={"type": "string"}))
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == door_text
+
+    asyncio.run(run())
+
+
+def test_a_preset_restore_attaches_its_binding_and_refuses_a_bad_one_per_document(pg, emit, monkeypatch) -> None:
+    from tai42_contract.states.errors import StateNotFoundError
+
+    from tai42_skeleton.versioning.backup import import_versioned_documents
+
+    _wire_backup_onto(pg, monkeypatch)
+    calls = _patch_binding_seams(monkeypatch)
+
+    async def _attach(app, binding) -> None:
+        calls["attach"].append(binding)
+        if binding.states[0].state == "ghost":
+            raise StateNotFoundError("state 'ghost' is not declared")
+
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _attach)
+    payload = _restore_payload(
+        (9021, "probe-bad", {"base_tool": "weather", "description": "d", "state_binding": _GHOST_BINDING}),
+        (9022, "probe-good", {"base_tool": "weather", "description": "d", "state_binding": _ROUTE_BINDING}),
+    )
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            report = await import_versioned_documents(payload)
+            assert report.errors == ["preset 'probe-bad': state 'ghost' is not declared"]
+            assert (report.created, report.skipped) == (1, 1)
+            assert [b.states[0].state for b in calls["attach"]] == ["ghost", "status"]
+            assert {d["name"] for d in _non_role_documents(pg)} == {"probe-good"}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+def test_a_store_fault_during_a_preset_restore_fails_the_section_and_skips_nothing(
+    pg, emit, monkeypatch, fault_class
+) -> None:
+    from tai42_contract.states import errors as states_errors
+
+    from tai42_skeleton.routers.backup import import_backup
+
+    fault = getattr(states_errors, fault_class)("store down")
+    _wire_backup_onto(pg, monkeypatch)
+    calls = _patch_binding_seams(monkeypatch, attach_error=fault)
+    payload = _restore_payload(
+        (9031, "probe-bound", {"base_tool": "weather", "description": "d", "state_binding": _ROUTE_BINDING}),
+        (9032, "probe-plain", {"base_tool": "weather", "description": "d"}),
+    )
+    document = {"version": 1, "sections": {"versioned_documents": payload}}
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            resp = await import_backup(
+                _request("POST", "/api/backup/import", body={"document": document, "sections": ["versioned_documents"]})
+            )
+            assert resp.status_code == 200, _err(resp)
+            data = _data(resp)
+            assert data["ok"] is False
+            section = data["sections"]["versioned_documents"]
+            assert section["errors"] == ["store down"]
+            assert (section["created"], section["updated"], section["skipped"]) == (0, 0, 0)
+            assert len(calls["attach"]) == 1
+            assert _non_role_documents(pg) == []
 
     asyncio.run(run())

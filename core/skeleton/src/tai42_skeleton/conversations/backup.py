@@ -14,18 +14,22 @@ is token-free-evaluable, refusing per row a key revoked+reminted since the backu
 from __future__ import annotations
 
 import logging
-import secrets
 from typing import Any, Literal
 
 from pydantic import ValidationError
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.conversations import ConversationRoute
+from tai42_contract.states.errors import StatesError
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
-from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
-from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
+from tai42_skeleton.conversations.managers.base_conversations_manager import (
+    BaseConversationsManager,
+    DoorFlipRefusedError,
+)
+from tai42_skeleton.conversations.route_writes import RouteBindRefusedError, write_route
+from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -34,16 +38,6 @@ def _empty_report() -> BackupSectionReport:
     # ``skipped_existing`` (routes left untouched under ``skip``) and the once-shown
     # ``new_callback_secrets`` are this section's own counts, so they ride ``details``.
     return BackupSectionReport(details={"skipped_existing": 0, "new_callback_secrets": []})
-
-
-def _channel_identity(route: ConversationRoute) -> tuple[str, str] | None:
-    """The ``(channel, canonical identity)`` pair a ``channel`` row claims.
-
-    ``None`` for an ``api`` row, which claims none.
-    """
-    if route.door != "channel" or route.channel is None or route.our_identity is None:
-        return None
-    return (route.channel, canonical_address(route.our_identity))
 
 
 async def export_conversation_routes() -> dict[str, Any]:
@@ -87,15 +81,8 @@ def _validate_row(
     return route
 
 
-async def _authorize_row(
-    route: ConversationRoute, scan: ExecutionKeyScan, claimed: dict[tuple[str, str], str], report: BackupSectionReport
-) -> bool:
-    """Whether ``route`` may be written.
-
-    Its execution key must assert usable and token-free-evaluable, and its
-    ``(channel, our_identity)`` claim must be unheld by a DIFFERENT route. Either failure is a
-    per-row rejection recorded in the report.
-    """
+async def _authorize_row(route: ConversationRoute, scan: ExecutionKeyScan, report: BackupSectionReport) -> bool:
+    """Whether ``route``'s execution key asserts usable and token-free-evaluable, a per-row rejection otherwise."""
     try:
         # The same assertion the create door makes; a key reminted since the backup no
         # longer carries the row's bound fingerprint.
@@ -106,36 +93,6 @@ async def _authorize_row(
         report.errors.append(f"route {route.route_name!r}: {exc}")
         report.skipped += 1
         return False
-    pair = _channel_identity(route)
-    holder = claimed.get(pair) if pair is not None else None
-    if pair is not None and holder is not None and holder != route.route_name:
-        report.errors.append(
-            f"route {route.route_name!r}: channel {pair[0]!r} identity {pair[1]!r} is already routed by {holder!r}"
-        )
-        report.skipped += 1
-        return False
-    return True
-
-
-async def _bind_check_row(route: ConversationRoute, report: BackupSectionReport) -> bool:
-    """Whether ``route`` passes the SAME bind check the create door runs, a per-row rejection on failure.
-
-    Resolves the row's target to its owner and runs the platform's own rules plus the owner's
-    validator against the target's active body; a target with a bind-time defect against the route's
-    door fields — an asking target bound with no reply/resume path, say — is rejected per row in the
-    report rather than restored as a route that cannot run.
-    """
-    from tai42_skeleton.conversations.target_validators import (
-        active_target_candidate_body,
-        target_bind_refusal_lines,
-    )
-
-    candidate = await active_target_candidate_body(route.target_kind, route.target_name)
-    lines = await target_bind_refusal_lines(route, candidate)
-    if lines:
-        report.errors.append(f"route {route.route_name!r}: {'; '.join(lines)}")
-        report.skipped += 1
-        return False
     return True
 
 
@@ -143,32 +100,39 @@ async def _write_row(
     route: ConversationRoute,
     manager: BaseConversationsManager,
     existing: dict[str, ConversationRoute],
-    claimed: dict[tuple[str, str], str],
     report: BackupSectionReport,
 ) -> None:
-    """Persist ``route`` with a freshly minted callback secret (shown once) and record it.
+    """Write ``route`` through the route write service, recording it or its per-row refusal.
 
-    Re-homes its ``(channel, identity)`` claim, and records it as created or updated. Export
-    carried no secret; a ``channel`` row and a poll-only api row (no callback declared) sign
-    nothing and carry none. created/updated follows the pre-restore snapshot, not the store's
-    return.
+    The write runs the route's save rules (the bind check, the expressions, the canonical
+    ``(channel, our_identity)`` claim) and mints a fresh callback secret (shown once); export
+    carried no secret. A refusal of the route itself is a per-row rejection in the report; any
+    other failure (a store or transport fault) propagates as the section's failure.
+    created/updated follows the pre-restore snapshot, not the store's return.
     """
-    callback_secret = secrets.token_urlsafe(32) if route.door == "api" and route.callback_url is not None else None
-    restored = route.model_copy(update={"callback_secret": callback_secret})
-    await manager.put_route(restored)
-    pair = _channel_identity(route)
-    # The row may have moved off the pair it held before this write.
-    for held in [held for held, owner in claimed.items() if owner == route.route_name]:
-        claimed.pop(held)
-    if pair is not None:
-        claimed[pair] = route.route_name
+    try:
+        result = await write_route(route.model_copy(update={"callback_secret": None}), manager=manager)
+    except RouteBindRefusedError as exc:
+        report.errors.append(f"route {route.route_name!r}: {'; '.join(exc.lines)}")
+        report.skipped += 1
+        return
+    except (ValueError, DoorFlipRefusedError) as exc:
+        report.errors.append(f"route {route.route_name!r}: {exc}")
+        report.skipped += 1
+        return
+    except StatesError as exc:
+        if not is_binding_refusal(exc):
+            raise
+        report.errors.append(f"route {route.route_name!r}: {exc}")
+        report.skipped += 1
+        return
     if route.route_name in existing:
         report.updated += 1
     else:
         report.created += 1
-    if callback_secret is not None:
+    if result.callback_secret is not None:
         report.details["new_callback_secrets"].append(
-            {"route_name": route.route_name, "callback_secret": callback_secret}
+            {"route_name": route.route_name, "callback_secret": result.callback_secret}
         )
 
 
@@ -179,9 +143,12 @@ async def import_conversation_routes(
 
     A malformed envelope raises BEFORE any write. Each row written is validated, its
     execution key asserted usable and token-free-evaluable against the LIVE policy store
-    (pass-role skipped — the restore door is admin-fenced), and its
-    ``(channel, our_identity)`` claim checked unclaimed. A row failing any of these is a
-    per-row rejection in the report, never an aborted restore of the rest.
+    (pass-role skipped — the restore door is admin-fenced), then written through the route
+    write service the create door uses (the bind check, the expressions, the canonical
+    ``(channel, our_identity)`` claim, the store's door-flip refusal). A row failing any of these
+    is a per-row rejection in the report, never an aborted restore of the rest; a store or
+    transport failure fails the section. The target's existence is not checked: a route may name
+    a target a later section restores or a later registration provides.
     """
     if not isinstance(payload, dict):
         raise ValueError(f"conversations section payload must be an envelope dict, got {type(payload)}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
@@ -202,9 +169,6 @@ async def import_conversation_routes(
         raise RuntimeError("conversation routes require the redis conversations backend to restore")
 
     existing, _ = await manager.list_routes()
-    # Live ``(channel, identity)`` claims, tracked across the restore: two channel rows on
-    # one identity are unresolvable, refused here as the create door refuses them.
-    claimed = {pair: row.route_name for row in existing.values() if (pair := _channel_identity(row)) is not None}
     # ONE scan for the whole restore, so each distinct key is read and rendered once.
     scan = ExecutionKeyScan()
 
@@ -212,10 +176,8 @@ async def import_conversation_routes(
         route = _validate_row(item, existing, mode, report)
         if route is None:
             continue
-        if not await _authorize_row(route, scan, claimed, report):
+        if not await _authorize_row(route, scan, report):
             continue
-        if not await _bind_check_row(route, report):
-            continue
-        await _write_row(route, manager, existing, claimed, report)
+        await _write_row(route, manager, existing, report)
 
     return report

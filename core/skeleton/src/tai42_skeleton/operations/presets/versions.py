@@ -29,7 +29,7 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations._broadcast import fleet_fanout
 from tai42_skeleton.operations.presets import fanout
 from tai42_skeleton.operations.presets.authoring import (
-    _attach_body_binding,
+    _check_body_at_door,
     _combo_registry_error,
     _dry_run_bind_error,
     _enforce_registration_tier,
@@ -191,11 +191,17 @@ async def _save_version_core(
     # against the NEW version — the candidate body, judged before the write so a save that would
     # strand a route is a 409 that commits nothing (the rename gate's stance, for the reverse edge).
     await _assert_bound_routes_still_bind(name, new_body)
-    # A NEWLY provided binding is attach-validated at SAVE, exactly as create does — its
-    # named templates attach idempotently and its expressions/adapters compile, so a bad
-    # edit is a 400 that persists nothing. A carried-forward binding was vetted at its
-    # own save; an explicit ``null`` clears and attaches nothing.
-    await _attach_body_binding(state_binding)
+    # The preset document's save rules over the new body, exactly as create runs them. Only a
+    # NEWLY provided binding is attach-validated — its named templates attach idempotently and
+    # its expressions/adapters compile, so a bad edit is a 4xx that persists nothing. A
+    # carried-forward binding was vetted at its own save; an explicit ``null`` clears and
+    # attaches nothing.
+    await _check_body_at_door(
+        new_body.model_copy(
+            update={"state_binding": state_binding if isinstance(state_binding, StateBinding) else None}
+        ),
+        name=name,
+    )
     # Registration-tier fence: the tier is the CURRENT preset's base tool,
     # so editing a fenced base tool's preset is admin-fenced too. Skipped for a platform
     # seed (``enforce_tier=False``) — no caller to fence.
@@ -354,11 +360,11 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     await _assert_bound_routes_still_bind(name, target_body)
     # Registration-tier fence: the tier is the target body's base tool.
     await _enforce_registration_tier(target_body.base_tool)
-    # A rollback ACTIVATES the target version's own door binding, so it is attach-validated
-    # here exactly as create and save-version do (templates detached since the version was
-    # authored are re-attached idempotently); a binding whose templates are gone is a loud
-    # 400 that re-points nothing.
-    await _attach_body_binding(target_body.state_binding)
+    # A rollback ACTIVATES the target version's body and its own door binding, so the document
+    # rules run over it and its binding is attach-validated exactly as create and save-version
+    # do (templates detached since the version was authored are re-attached idempotently); a
+    # binding whose templates are gone is a loud 4xx that re-points nothing.
+    await _check_body_at_door(target_body, name=name)
 
     prior_active = prior_record.active_version
     # Pinned before the rollback+reload local apply — see :func:`_census_at_start`.

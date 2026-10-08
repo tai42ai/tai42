@@ -170,9 +170,25 @@ class BaseHooksManager(ABC):
             return
         await self._run_hook_with_limit(hook, payload, tool_kwargs_override)
 
-    @abstractmethod
     async def register(self, params: HookParams) -> bool:
-        """Register the hook described by ``params``; return whether it was newly added."""
+        """Register the hook described by ``params``; return whether it was newly added.
+
+        The one write service every hook write runs through (the register door and the backup
+        restore alike): the inline jq compiles, then a carried state binding is validated and its
+        templates attached, then the backend stores the hook. A refusal raises before anything is
+        stored.
+        """
+        self.validate_jq_fields(params)
+        if params.state_binding is not None:
+            from tai42_skeleton.app import instance
+            from tai42_skeleton.tools import state_binding
+
+            await state_binding.validate_and_attach_binding(instance.app, params.state_binding)
+        return await self._store_hook(params)
+
+    @abstractmethod
+    async def _store_hook(self, params: HookParams) -> bool:
+        """Store the already-validated hook ``params``; return whether it was newly added."""
         ...
 
     @abstractmethod

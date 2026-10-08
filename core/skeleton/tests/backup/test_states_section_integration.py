@@ -227,3 +227,56 @@ async def test_import_reports_refused_entity_and_lands_the_rest(run_token: str) 
     view = await tai42_app.states.read(state, _SUBJECT)
     assert view is not None
     assert view.data == {"n": 5}
+
+
+async def test_a_hook_binding_a_state_the_same_document_restores_restores_and_attaches(
+    run_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``states`` replays before ``webhooks``, so a hook whose binding names a state (and a
+    # template on it) declared by the SAME document restores, and its template is attached by the
+    # hook write service the restore runs.
+    import tai42_skeleton.hooks.cache as hooks_cache
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+    from tai42_skeleton.authz import execution as execution_module
+    from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
+    from tai42_skeleton.hooks.settings import HooksSettings
+    from tai42_skeleton.operations.backup import import_backup
+
+    token = run_token
+    state, module = _state(token), _module(token)
+    manager = InMemoryHooksManager(HooksSettings())
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: manager)
+    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+    states_payload: dict[str, Any] = {
+        "version": 1,
+        "templates": [{"kind": "state-template", "name": module, "schema": _MODULE_SCHEMA}],
+        "declarations": [
+            {"name": state, "schema": _BASE_SCHEMA, "subject_kinds": ["thread"], "default_subject_kind": "thread"}
+        ],
+        "attachments": [],
+        "aliases": [],
+        "records": [],
+    }
+    hook = {
+        "name": "bound",
+        "topic": "t",
+        "tool": "notify",
+        "execution_key": "k-fire",
+        "execution_key_fingerprint": "fp",
+        "state_binding": {"states": [{"state": state, "subject_expr": {"content": ".x"}, "templates": [module]}]},
+    }
+    document = {
+        "version": 1,
+        "sections": {
+            "webhooks": {"hooks": [hook], "trigger_links": [], "topic_verifiers": {}, "tombstones": []},
+            "states": states_payload,
+        },
+    }
+
+    result = await import_backup(document, ["webhooks", "states"])
+
+    assert result.sections["states"].errors == []
+    assert result.sections["webhooks"].errors == []
+    assert result.sections["webhooks"].created == 1
+    assert set(await manager.list_hooks()) == {"bound"}
+    assert [m["template"] for m in await tai42_app.states.list_attachments(state)] == [module]

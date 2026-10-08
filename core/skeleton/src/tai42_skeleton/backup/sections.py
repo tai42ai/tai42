@@ -23,9 +23,14 @@ from typing import Any
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import FanoutSummary
 from tai42_contract.backup import BackupSectionReport
+from tai42_contract.states import StateBinding
+from tai42_contract.states.errors import StatesError
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
 from tai42_skeleton.backup.registry import current_import_mode
+from tai42_skeleton.schedules import check_schedule_definition
+from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -409,18 +414,56 @@ async def _export_schedules() -> Any:
     return await tai42_app.tools.run_tool("backend_export_schedules", {})
 
 
+async def _check_schedule_rows(payload: Any) -> tuple[Any, list[int], list[dict[str, Any]]]:
+    """Run the schedule definition check over every row carrying a door binding.
+
+    Returns the rows to forward to the backend, each forwarded row's index in ``payload``, and
+    one ``{"index", "name", "error"}`` record per refused row. A row reads as ``{"name",
+    "kwargs"}`` with its binding under the reserved kwargs key, the shape every scheduling
+    backend exports; a row of any other shape carries no binding the platform can read and is
+    forwarded untouched for the backend to judge. A refusal (a malformed binding, a binding the
+    states store refuses) keeps the row from the backend; any other error fails the section.
+    """
+    if not isinstance(payload, list):
+        return payload, [], []
+    forwarded: list[Any] = []
+    positions: list[int] = []
+    refused: list[dict[str, Any]] = []
+    for index, row in enumerate(payload):
+        kwargs = row.get("kwargs") if isinstance(row, dict) else None
+        raw = kwargs.get(SCHEDULE_STATE_BINDING_ARG) if isinstance(kwargs, dict) else None
+        if raw is not None:
+            try:
+                await check_schedule_definition(StateBinding.model_validate(raw))
+            except ValueError as exc:
+                refused.append({"index": index, "name": row.get("name"), "error": str(exc)})
+                continue
+            except StatesError as exc:
+                if not is_binding_refusal(exc):
+                    raise
+                refused.append({"index": index, "name": row.get("name"), "error": str(exc)})
+                continue
+        forwarded.append(row)
+        positions.append(index)
+    return forwarded, positions, refused
+
+
 async def _import_schedules(payload: Any) -> BackupSectionReport:
     # The document is opaque, but the mode is forwarded explicitly across the tool
     # boundary (a backend cannot read this process's import-mode context). A backend
     # whose import tool predates ``mode`` rejects it — a loud per-section error, not a
     # silent mode mismatch.
+    forwarded, positions, refused = await _check_schedule_rows(payload)
     raw = await tai42_app.tools.run_tool(
-        "backend_import_schedules", {"schedules": payload, "mode": current_import_mode()}
+        "backend_import_schedules", {"schedules": forwarded, "mode": current_import_mode()}
     )
-    return _schedules_report(raw)
+    report = _schedules_report(raw, positions)
+    report.errors = [_schedule_error_text(entry) for entry in refused] + report.errors
+    report.skipped += len(refused)
+    return report
 
 
-def _schedules_report(raw: Any) -> BackupSectionReport:
+def _schedules_report(raw: Any, positions: list[int]) -> BackupSectionReport:
     """Map the scheduling backend's import result into the typed section report.
 
     The ``backend_import_schedules`` result is the schedules section's own round-trip
@@ -428,11 +471,13 @@ def _schedules_report(raw: Any) -> BackupSectionReport:
     error records (each rendered as a string) fill ``errors``, and every other count it
     carries (a backend's ``skipped_existing`` tally, say) rides ``details``. A result
     that is not a mapping is refused loudly rather than mis-reported as an empty restore.
+    ``positions`` maps the backend's row index (over the rows it was handed) back to the
+    row's index in the restored document.
     """
     if not isinstance(raw, dict):
         raise TypeError(f"schedules backend returned a non-mapping import report: {type(raw).__name__}")
     typed_keys = ("created", "updated", "skipped", "errors")
-    errors = [_schedule_error_text(entry) for entry in raw.get("errors") or []]
+    errors = [_schedule_error_text(_document_row(entry, positions)) for entry in raw.get("errors") or []]
     details = {key: value for key, value in raw.items() if key not in typed_keys}
     return BackupSectionReport(
         created=int(raw.get("created", 0)),
@@ -441,6 +486,19 @@ def _schedules_report(raw: Any) -> BackupSectionReport:
         errors=errors,
         details=details,
     )
+
+
+def _document_row(entry: Any, positions: list[int]) -> Any:
+    """A backend error record re-indexed from the backend's row to the document's row.
+
+    Only a record carrying an in-range integer ``index`` is re-indexed; any other shape is kept
+    as the backend reported it.
+    """
+    if isinstance(entry, dict):
+        index = entry.get("index")
+        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(positions):
+            return {**entry, "index": positions[index]}
+    return entry
 
 
 def _schedule_error_text(entry: Any) -> str:
@@ -527,6 +585,7 @@ def register_core_sections(registry: Any) -> None:
     # Imported here (not at module top) so ``webhooks_section`` can reach this module's
     # ``_empty_report`` without an import cycle.
     from tai42_skeleton.backup.webhooks_section import _export_webhooks, _import_webhooks
+    from tai42_skeleton.states.backup import register_states_backup_section
 
     registry.register_section("manifest", _export_manifest, _import_manifest)
     registry.register_section("env", _export_env, _import_env, secret=True)
@@ -535,6 +594,9 @@ def register_core_sections(registry: Any) -> None:
     # Before ``webhooks``/``conversations``: their token-free scan renders policy
     # conditions naming a stored resource by id, which are templates this section restores.
     registry.register_section("templates", _export_templates, _import_templates)
+    # States before every section that restores a binding: a restored binding attaches templates
+    # on states, so the declarations and templates it names restore first.
+    register_states_backup_section(registry)
     # AFTER ``access_control`` and ``templates`` (records decided against the live policy
     # store, which those restore). secret=True: the bulk export aggregates hook
     # ``tool_kwargs`` and full token hashes, broader than the grantable per-record read.

@@ -589,3 +589,65 @@ async def test_in_memory_import_refuses_trigger_portion_hooks_restore(in_memory_
     assert set(await in_memory_store.manager.list_hooks()) == {"h1"}
     assert len(report.errors) == 2  # one for the record, one for the tombstone
     assert report.created == 1
+
+
+# -- the hook write service on restore ----------------------------------------------------------
+
+
+def _bound_hook(name: str, state: str) -> dict:
+    return {
+        "name": name,
+        "topic": "t",
+        "tool": "notify",
+        "execution_key": "k-fire",
+        "execution_key_fingerprint": "fp",
+        "state_binding": {"states": [{"state": state, "subject_expr": {"content": ".x"}, "templates": ["t1"]}]},
+    }
+
+
+def _doc(*hooks: dict) -> dict:
+    return {"hooks": list(hooks), "trigger_links": [], "topic_verifiers": {}, "tombstones": []}
+
+
+def _patch_binding_validation(monkeypatch, error_for=None) -> list:
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    calls: list = []
+
+    async def _validate_and_attach(app, binding) -> None:
+        calls.append(binding)
+        error = error_for(binding) if error_for is not None else None
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _validate_and_attach)
+    return calls
+
+
+async def test_a_refused_binding_is_a_per_hook_rejection_and_a_good_binding_attaches(store, monkeypatch) -> None:
+    from tai42_contract.states.errors import StateNotFoundError
+
+    calls = _patch_binding_validation(
+        monkeypatch,
+        lambda b: StateNotFoundError("state 'ghost' is not declared") if b.states[0].state == "ghost" else None,
+    )
+
+    report = await webhooks_section._import_webhooks(_doc(_bound_hook("bad", "ghost"), _bound_hook("good", "status")))
+
+    assert report.errors == ["hook 'bad': state 'ghost' is not declared"]
+    assert report.skipped == 1
+    assert report.created == 1
+    assert [binding.states[0].state for binding in calls] == ["ghost", "status"]
+    assert set(await store.manager.list_hooks()) == {"good"}
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+async def test_a_store_fault_during_the_binding_check_fails_the_section(store, monkeypatch, fault_class) -> None:
+    from tai42_contract.states import errors as states_errors
+
+    fault = getattr(states_errors, fault_class)("store down")
+    _patch_binding_validation(monkeypatch, lambda b: fault)
+
+    with pytest.raises(type(fault), match="store down"):
+        await webhooks_section._import_webhooks(_doc(_bound_hook("h", "status")))
+    assert await store.manager.list_hooks() == {}

@@ -28,12 +28,13 @@ from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
+    NotFoundError,
     NotSupportedError,
     operation,
 )
 from tai42_skeleton.operations.presets import fanout
 from tai42_skeleton.operations.presets.authoring import (
-    _attach_body_binding,
+    _check_body_at_door,
     _combo_registry_error,
     _dry_run_bind_error,
     _enforce_registration_tier,
@@ -291,10 +292,10 @@ async def _create_preset_core(
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
-    # Attach-on-use + validate the door binding at SAVE (the write of the runnable
-    # definition carrying it): its named templates are attached idempotently and its
-    # expressions/adapters compiled, so a bad binding fails the create before any row.
-    await _attach_body_binding(state_binding)
+    # The preset document's save rules at SAVE (the write of the runnable definition): its
+    # binding's named templates are attached idempotently and its expressions/adapters compiled,
+    # so a bad body fails the create before any row.
+    await _check_body_at_door(body, name=name)
 
     record, census = await _claim_preset_name(name, body, tags)
     await instance.app.emit_list_changed("tool")
@@ -311,7 +312,7 @@ async def _create_preset_core(
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError],
     request_model=PresetCreate,
     response_model=PresetCreateResult,
 )

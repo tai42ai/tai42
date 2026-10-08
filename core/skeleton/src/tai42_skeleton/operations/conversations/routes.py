@@ -1,27 +1,22 @@
 """Conversation-route CRUD doors and their body validators.
 
-Create/upsert (pass-role bind + target-exists + jq compile + callback-secret mint),
+Create/upsert (target-exists + pass-role bind at the door, then the route write service),
 read/list (secret withheld), delete (with thread-index reclamation), and the single
 answer-record read.
 """
 
 from __future__ import annotations
 
-import secrets
 import sys
 from typing import Any
 
-from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate, OverlapPolicy
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.data.jq_util import compile_check
 
-from tai42_skeleton.conversations.address import canonical_address
-from tai42_skeleton.conversations.managers.base_conversations_manager import (
-    BaseConversationsManager,
-    DoorFlipRefusedError,
-)
+from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefusedError
+from tai42_skeleton.conversations.route_writes import RouteBindRefusedError, write_route
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError, ValidationRejectedError
 from tai42_skeleton.operations.response_models_group_a import (
     ConversationRecordView,
@@ -30,7 +25,6 @@ from tai42_skeleton.operations.response_models_group_a import (
     ConversationRouteView,
     RouteRemoveResult,
 )
-from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 from .backend import _require_backend
 
@@ -75,63 +69,6 @@ async def _assert_target_exists(target_kind: str, target_name: str) -> None:
         raise NotFoundError(f"tool not found: {target_name!r}") from exc
 
 
-async def _assert_target_bindable(create: ConversationRouteCreate) -> None:
-    """Run the route bind check once the target exists, refusing a route whose target cannot bind.
-
-    Resolves the route's target to its registered owner and runs the platform's own rules (an
-    asking agent, reached as either kind, needs a reply/resume path) plus the one validator the
-    owner registered, passing the target's active body as the candidate. A refusal returns message
-    lines joined into a 422, so a defect the target carries — reading a state no binding supplies,
-    an asking agent with no reply/resume path — is caught at bind, never deferred to run time.
-    """
-    from tai42_skeleton.conversations.target_validators import (
-        active_target_candidate_body,
-        target_bind_refusal_lines,
-    )
-
-    candidate = await active_target_candidate_body(create.target_kind, create.target_name)
-    messages = await target_bind_refusal_lines(create, candidate)
-    if messages:
-        raise ValidationRejectedError("\n".join(messages))
-
-
-# The named jq variables each expression may read, declared at create-time compilation so an author
-# referencing one passes (jq resolves ``$name`` references at compile). The four door jqs read the
-# run's parked interactions as ``$parked``; ``reply_expr`` additionally reads the turn ids/subject
-# as ``$turn`` and the caller ask entries as ``$asks``.
-_DOOR_EXPR_VARIABLES = ("parked",)
-_REPLY_EXPR_VARIABLES = ("asks", "parked", "turn")
-
-
-async def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
-    """Render each templated jq program and compile it at create, declaring the variables it may read.
-
-    An invalid one is refused here, not at the first message. A by-id text whose stored resource
-    cannot be fetched fails the create loudly, naming the field and the id. Both target kinds may
-    carry the door jqs.
-    """
-    exprs = (
-        ("start_expr", create.start_expr, _DOOR_EXPR_VARIABLES),
-        ("cancel_expr", create.cancel_expr, _DOOR_EXPR_VARIABLES),
-        ("resume_expr", create.resume_expr, _DOOR_EXPR_VARIABLES),
-        ("extras_expr", create.extras_expr, _DOOR_EXPR_VARIABLES),
-        ("reply_expr", create.reply_expr, _REPLY_EXPR_VARIABLES),
-    )
-    for field, text, variables in exprs:
-        if text is None:
-            continue
-        try:
-            program = await tai42_app.storage.resource_manager.render_templated_text(text)
-        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
-            raise BadRequestError(
-                f"{field} references stored id {text.id!r}, which could not be fetched: {exc}"
-            ) from exc
-        try:
-            compile_check(program, variables=variables)
-        except Exception as exc:
-            raise BadRequestError(f"invalid {field}: {exc}") from exc
-
-
 def _door_flip_refusal(refused: DoorFlipRefusedError) -> BadRequestError:
     """The operator-facing refusal for an edit that would change a route's ``door`` while it holds threads.
 
@@ -147,32 +84,6 @@ def _door_flip_refusal(refused: DoorFlipRefusedError) -> BadRequestError:
         "(which reclaims its threads) and create it again under the new door, or create the new door "
         "under a different route_name"
     )
-
-
-async def _unclaimed_channel_identity(
-    manager: BaseConversationsManager, *, route_name: str, channel: str, our_identity: str
-) -> str:
-    """The canonical ``our_identity`` a ``channel`` row is STORED under.
-
-    Refused when another route already claims that ``(channel, identity)`` pair. Inbound
-    routing matches the canonical form, so a second claimant would make every message to
-    that identity unresolvable; it is refused here at the write instead.
-    """
-    try:
-        identity = canonical_address(our_identity)
-    except ValueError as exc:
-        raise BadRequestError(f"invalid our_identity: {exc}") from exc
-    routes, _ = await manager.list_routes()
-    for row in routes.values():
-        if (
-            row.route_name != route_name
-            and row.door == "channel"
-            and row.channel == channel
-            and row.our_identity is not None
-            and canonical_address(row.our_identity) == identity
-        ):
-            raise BadRequestError(f"channel {channel!r} identity {identity!r} is already routed by {row.route_name!r}")
-    return identity
 
 
 @operation(
@@ -246,20 +157,21 @@ async def create_conversation_route(
     ``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``
     suppresses it for an operator to answer) when a thread carries no per-thread override.
 
-    ``execution_key`` is the api-key identity the turn runs AS; the caller must be allowed
-    to delegate it and it must be usable by a tokenless fire, both decided BEFORE the write
-    so a refusal leaves any existing row untouched. ``target_name`` must merely EXIST — the
-    agent (``target_kind=agent``) or tool (``target_kind=tool``) — the key's live grants
-    bound the turn at fire. The door jqs (``start_expr``/``cancel_expr``/``resume_expr``/
-    ``extras_expr``) and ``reply_expr``, when given, are rendered and compiled here so an invalid one
-    — or a by-id text whose stored resource cannot be fetched — is refused at create, not at first
-    message. A
+    ``target_name`` must merely EXIST — the agent (``target_kind=agent``) or tool
+    (``target_kind=tool``) — the key's live grants bound the turn at fire. ``execution_key`` is
+    the api-key identity the turn runs AS; the caller must be allowed to delegate it and it must
+    be usable by a tokenless fire. Both are decided at this door BEFORE the route write service
+    runs the route's own rules, so a refusal leaves any existing row untouched. The write service
+    runs the target's bind check (a refusal is a 422 carrying its lines), then renders and
+    compiles the door jqs (``start_expr``/``cancel_expr``/``resume_expr``/``extras_expr``) and
+    ``reply_expr``, so an invalid one — or a by-id text whose stored resource cannot be fetched —
+    is refused at create, not at first message. A
     ``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed
     on that channel. An edit that would change the ``door`` of a route already HOLDING
     threads is refused: the two doors key their threads differently, so the held threads
     cannot be re-keyed under the new door.
-    An ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted here
-    and returned ONCE; a poll-only api row (no callback) mints none and reads its answers
+    An ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted by the
+    write and returned ONCE; a poll-only api row (no callback) mints none and reads its answers
     back from the poll door. A positive
     ``turns_per_hour_override`` runs this route's per-address buckets at that rate instead
     of the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.
@@ -302,33 +214,20 @@ async def create_conversation_route(
     manager = _require_backend()
 
     await _assert_target_exists(create.target_kind, create.target_name)
-    await _assert_target_bindable(create)
-    await _assert_exprs_compile(create)
-
-    stored = create.model_dump()
-    # Only a ``channel`` row carries both fields; its identity is stored canonicalized.
-    if create.channel is not None and create.our_identity is not None:
-        stored["our_identity"] = await _unclaimed_channel_identity(
-            manager, route_name=create.route_name, channel=create.channel, our_identity=create.our_identity
-        )
-
     execution_key_fingerprint = await _pkg.assert_execution_key_bindable(
         await _pkg.resolve_caller(), create.execution_key
     )
-
-    # Signs the api-door callback; a ``channel`` row and a poll-only api row (no callback
-    # declared) sign nothing and carry no secret.
-    callback_secret = secrets.token_urlsafe(32) if create.door == "api" and create.callback_url is not None else None
-
-    route = ConversationRoute(
-        **stored,
-        callback_secret=callback_secret,
-        execution_key_fingerprint=execution_key_fingerprint,
-    )
-    try:
-        created = await manager.put_route(route)
-    except DoorFlipRefusedError as refused:
-        raise _door_flip_refusal(refused) from refused
+    route = ConversationRoute(**create.model_dump(), execution_key_fingerprint=execution_key_fingerprint)
+    # The write service runs the route's save rules (bind check, expressions, identity claim), mints
+    # the callback secret and stores the row; each refusal keeps its own status here.
+    with definition_door("conversation route"):
+        try:
+            result = await write_route(route, manager=manager)
+        except RouteBindRefusedError as exc:
+            raise ValidationRejectedError("\n".join(exc.lines)) from exc
+        except DoorFlipRefusedError as refused:
+            raise _door_flip_refusal(refused) from refused
+    created, route, callback_secret = result.created, result.route, result.callback_secret
     return {
         "created": created,
         "route_name": route.route_name,

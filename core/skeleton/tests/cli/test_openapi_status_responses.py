@@ -518,9 +518,10 @@ _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — this door is not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},
-    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, OperationFailedError,
+    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, ConflictError (409 — the
+    # schedule's state binding names an occupied attach path), OperationFailedError,
     # NotSupportedError, UnavailableError (503) — and the reload gate's own 503 beside it.
-    ("POST", "/api/schedules"): {400, 401, 403, 404, 500, 501, 503},
+    ("POST", "/api/schedules"): {400, 401, 403, 404, 409, 500, 501, 503},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503) — and the reload gate's own 503 beside it.
     ("DELETE", "/api/schedules/{schedule_name}"): {401, 403, 500, 501, 503},

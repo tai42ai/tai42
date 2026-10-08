@@ -437,7 +437,7 @@ def test_base_manager_cannot_be_constructed():
 def test_partial_subclass_is_abstract():
     # A subclass implementing only some ops is still abstract and cannot be built.
     class _Partial(BaseHooksManager):
-        async def register(self, params):  # type: ignore[override]
+        async def _store_hook(self, params):  # type: ignore[override]
             return True
 
     with pytest.raises(TypeError):

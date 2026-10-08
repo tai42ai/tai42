@@ -75,6 +75,7 @@ from tai42_kit.utils.schedule_subject import (
 
 from tai42_skeleton.operations import (
     BadRequestError,
+    ConflictError,
     NotFoundError,
     NotSupportedError,
     OperationError,
@@ -85,6 +86,8 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
+from tai42_skeleton.operations.definition_door import definition_door
+from tai42_skeleton.schedules import check_schedule_definition
 from tai42_skeleton.tools.binding import UnknownToolError
 from tai42_skeleton.tools.time import server_time
 
@@ -470,6 +473,7 @@ def _run_once_response(outcome: Any) -> Any:
     meta_executor=True,
     errors=[
         BadRequestError,
+        ConflictError,
         NotFoundError,
         NotSupportedError,
         PermissionDeniedError,
@@ -517,13 +521,10 @@ async def create_schedule(
     dispatch_name, arguments = await _resolve_schedule_dispatch(tool_name, tool_kwargs, schedule_kwargs)
     _refuse_reserved_schedule_keys(arguments)
     recurring = dispatch_name.endswith(_SCHEDULE_BRANCH_SUFFIX) or _EXPERT_SCHEDULE_KEY in arguments
-    if state_binding is not None:
-        from tai42_skeleton.app import instance
-        from tai42_skeleton.tools.state_binding import validate_and_attach_binding
-
-        # Attach-on-use + validate the binding at SAVE (create), before persisting the schedule — a
-        # bad binding fails the create loudly, never a schedule that fires broken.
-        await validate_and_attach_binding(instance.app, state_binding)
+    # Attach-on-use + validate the binding at SAVE (create), before persisting the schedule — a
+    # refused binding fails the create as a 4xx, never a schedule that fires broken.
+    with definition_door("schedule"):
+        await check_schedule_definition(state_binding)
     fingerprint: str | None = None
     if execution_key is not None:
         # Validate the key is bindable and derive its per-mint fingerprint, the way a hook does; the

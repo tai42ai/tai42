@@ -412,3 +412,170 @@ async def test_import_rejects_a_row_whose_target_fails_the_bind_check(wired, mon
     assert report.skipped == 1
     assert any("reply_expr" in err for err in report.errors)
     assert "chat" not in wired.rows
+
+
+# -- the route write service on restore: per-row refusals, canonical claims, section failure ----
+
+
+class _PlainRelayAgent(Agent):
+    """A non-asking agent: the platform's own bind rule makes no claim on it."""
+
+    tool_name = "relay"
+    ToolInput = _AskerInput
+
+    async def run(self, *, user_message=None, **kwargs):
+        return ""
+
+
+class _RelayBindApp:
+    """A minimal app whose agent registry holds the non-asking ``relay``, with an empty validator registry."""
+
+    class _Agents:
+        def all_agents(self):
+            return {"relay": _PlainRelayAgent()}
+
+    def __init__(self) -> None:
+        self.agents = _RelayBindApp._Agents()
+        self._target_validator_registry = TargetBindValidatorRegistry()
+
+
+class _FlipRefusingManager(_DictManager):
+    """A store whose existing row ``held`` holds threads on its door: a restore that flips that
+    route's door is refused by the store's own write, the way the live store refuses it."""
+
+    async def put_route(self, route: ConversationRoute) -> bool:
+        from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefusedError
+
+        current = self.rows.get(route.route_name)
+        if route.route_name == "held" and current is not None and current.door != route.door:
+            raise DoorFlipRefusedError(route.route_name, current.door, route.door, held=2)
+        return await super().put_route(route)
+
+
+async def test_a_door_flip_refused_by_the_store_is_a_per_row_skip_and_the_next_row_restores(monkeypatch):
+    manager = _FlipRefusingManager()
+    monkeypatch.setattr(backup, "get_conversations_manager", lambda: manager)
+    monkeypatch.setattr(backup, "ExecutionKeyScan", _NoopScan)
+    await manager.put_route(_api_route("held", "live-secret"))
+    flipped = _channel_route("held").model_dump(mode="json")
+    nxt = _api_route("next", "ignored").model_dump(mode="json")
+
+    report = await backup.import_conversation_routes({"routes": [flipped, nxt]}, "overwrite")
+
+    assert report.skipped == 1
+    assert report.errors == ["route 'held': conversation route 'held' holds 2 thread(s) on its 'api' door"]
+    assert report.created == 1
+    assert manager.rows["held"].door == "api"
+    assert "next" in manager.rows
+
+
+async def test_a_route_bind_refusal_is_a_per_row_skip_with_its_lines_and_the_next_row_restores(wired, monkeypatch):
+    from tai42_skeleton.app import instance
+
+    async def _probe(create, candidate) -> list[str]:
+        return ["probe refusal"] if create.route_name == "r1" else []
+
+    app = _RelayBindApp()
+    app._target_validator_registry.register("agent", "relay", _probe)
+    monkeypatch.setattr(instance, "app", app, raising=False)
+    first = _api_route("r1", "x").model_dump(mode="json")
+    second = _api_route("r2", "x").model_dump(mode="json")
+
+    report = await backup.import_conversation_routes({"routes": [first, second]})
+
+    assert report.errors == ["route 'r1': probe refusal"]
+    assert report.skipped == 1
+    assert report.created == 1
+    assert set(wired.rows) == {"r2"}
+
+
+async def test_a_restored_channel_route_stores_the_canonical_identity(wired):
+    row = _channel_route("line").model_dump(mode="json") | {"our_identity": "  +15550001111 "}
+
+    report = await backup.import_conversation_routes({"routes": [row]})
+
+    assert report.created == 1
+    assert wired.rows["line"].our_identity == "+15550001111"
+
+
+async def test_a_restored_route_with_an_uncompilable_reply_expr_is_refused_per_row(wired, monkeypatch):
+    from tai42_contract.app import tai42_app
+
+    class _Resources:
+        async def render_templated_text(self, text, locale=None):
+            return text.content
+
+    class _Storage:
+        resource_manager = _Resources()
+
+    monkeypatch.setattr(tai42_app, "_impl", type("Impl", (), {"storage": _Storage()})())
+    bad = _api_route("bad", "x").model_dump(mode="json") | {"reply_expr": {"content": ".["}}
+    good = _api_route("good", "x").model_dump(mode="json")
+
+    report = await backup.import_conversation_routes({"routes": [bad, good]})
+
+    assert report.skipped == 1
+    assert len(report.errors) == 1
+    assert report.errors[0].startswith("route 'bad': invalid reply_expr: ")
+    assert set(wired.rows) == {"good"}
+
+
+async def test_a_store_fault_while_writing_a_route_fails_the_section(monkeypatch):
+    # A store or transport failure is never a per-row skip: it propagates out of the importer.
+    class _DownManager(_DictManager):
+        async def put_route(self, route: ConversationRoute) -> bool:
+            raise ConnectionError("redis down")
+
+    manager = _DownManager()
+    monkeypatch.setattr(backup, "get_conversations_manager", lambda: manager)
+    monkeypatch.setattr(backup, "ExecutionKeyScan", _NoopScan)
+
+    with pytest.raises(ConnectionError, match="redis down"):
+        await backup.import_conversation_routes({"routes": [_api_route("chat", "x").model_dump(mode="json")]})
+    assert manager.rows == {}
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+async def test_a_states_fault_inside_the_bind_check_fails_the_section(wired, monkeypatch, fault_class):
+    # A target validator that reads the states store and meets a store fault: the section fails,
+    # never a per-row skip naming the fault as the route's refusal.
+    from tai42_contract.states import errors as states_errors
+
+    from tai42_skeleton.app import instance
+
+    fault = getattr(states_errors, fault_class)("store down")
+
+    async def _reads_states(create, candidate) -> list[str]:
+        raise fault
+
+    app = _RelayBindApp()
+    app._target_validator_registry.register("agent", "relay", _reads_states)
+    monkeypatch.setattr(instance, "app", app, raising=False)
+
+    with pytest.raises(type(fault), match="store down"):
+        await backup.import_conversation_routes({"routes": [_api_route("chat", "x").model_dump(mode="json")]})
+    assert wired.rows == {}
+
+
+async def test_a_states_refusal_inside_the_bind_check_is_a_per_row_skip(wired, monkeypatch):
+    # A target validator whose own check meets a binding refusal of the states store (a state the
+    # target reads is not declared) refuses that row; the next row restores.
+    from tai42_contract.states.errors import StateNotFoundError
+
+    from tai42_skeleton.app import instance
+
+    async def _reads_states(create, candidate) -> list[str]:
+        if create.route_name == "r1":
+            raise StateNotFoundError("state 'ghost' is not declared")
+        return []
+
+    app = _RelayBindApp()
+    app._target_validator_registry.register("agent", "relay", _reads_states)
+    monkeypatch.setattr(instance, "app", app, raising=False)
+    rows = [_api_route(name, "x").model_dump(mode="json") for name in ("r1", "r2")]
+
+    report = await backup.import_conversation_routes({"routes": rows})
+
+    assert report.errors == ["route 'r1': state 'ghost' is not declared"]
+    assert report.skipped == 1
+    assert set(wired.rows) == {"r2"}

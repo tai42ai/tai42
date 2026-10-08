@@ -11,7 +11,8 @@ from tai42_contract.conversations import ConversationTargetKind, TargetConversat
 from tai42_contract.states.binding import StateBinding
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.errors import NotSupportedError
+from tai42_skeleton.operations.definition_door import definition_door
+from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
 from tai42_skeleton.operations.response_models_group_a import (
     ConversationConfigDeleteResult,
     ConversationConfigListEnvelope,
@@ -76,7 +77,7 @@ async def get_conversation_config(target_kind: str, target_name: str) -> dict[st
     summary="Create or replace a conversation target config",
     tags=["conversations"],
     destructive=True,
-    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError],
     request_model=TargetConversationConfig,
     response_model=ConversationConfigSetResult,
 )
@@ -112,14 +113,12 @@ async def set_conversation_config(
         raise BadRequestError(f"invalid conversation config: {exc}") from exc
     manager = _require_backend()
     await _assert_target_exists(config.target_kind, config.target_name)
-    if state_binding is not None:
-        from tai42_skeleton.app import instance
-        from tai42_skeleton.tools.state_binding import validate_and_attach_binding
+    from tai42_skeleton.conversations.target_config import write_target_config
 
-        # Attach-on-use + validate the binding at SAVE (the config upsert) — a bad binding is
-        # a 400 that persists no config.
-        await validate_and_attach_binding(instance.app, state_binding)
-    created = await manager.target_configs.upsert(config)
+    # The write service attaches the binding's templates and stores the row; a refused binding is
+    # a 4xx that persists no config, a store fault a 500.
+    with definition_door("conversation config"):
+        created = await write_target_config(config, store=manager.target_configs)
     return {
         "created": created,
         "target_kind": config.target_kind,

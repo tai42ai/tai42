@@ -53,6 +53,7 @@ from tai42_skeleton.hooks.trigger_auth import webhook_trigger_auth
 from tai42_skeleton.hooks.trigger_links import TriggerLinkError
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
+from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError, OperationError
 from tai42_skeleton.operations.response_models_group_b import (
     HookListView,
@@ -266,7 +267,7 @@ _HOOK_EXTRAS_EXPR_PARAM = Annotated[
     tags=["hooks"],
     destructive=True,
     authority_changing=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError],
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError],
     request_model=HookRegister,
     response_model=HookRegisterResult,
 )
@@ -298,7 +299,10 @@ async def register_hook(
     alike.
     """
     execution_key_fingerprint = await assert_execution_key_bindable(await resolve_caller(), execution_key)
-    try:
+    # The model parse and the write service both run inside the definition mapping: a field the
+    # model refuses, a jq that does not compile and a binding the states store refuses are each a
+    # 4xx that stores no hook; a store or transport failure stays unmapped (a 500).
+    with definition_door("hook params"):
         params = HookParams(
             name=name,
             topic=topic,
@@ -314,20 +318,7 @@ async def register_hook(
             resume_expr=resume_expr,
             extras_expr=extras_expr,
         )
-        if state_binding is not None:
-            from tai42_skeleton.app import instance
-            from tai42_skeleton.tools.state_binding import validate_and_attach_binding
-
-            # Attach-on-use + validate the binding at SAVE (the hook upsert) — a bad binding
-            # is a 400 that stores no hook.
-            await validate_and_attach_binding(instance.app, state_binding)
         registered = await get_hooks_manager().register(params)
-    except ValueError as exc:
-        # The manager compiles the condition/expr jq at registration; a bad
-        # expression is client input, so it is a 400 (as is a flat-field validation
-        # failure reaching this operation from the MCP/CLI edge, which has no HTTP
-        # extractor). Store/transport failures raise other types and surface as 500.
-        raise BadRequestError(f"invalid hook params: {exc}") from exc
     return {"registered": registered, "name": name}
 
 

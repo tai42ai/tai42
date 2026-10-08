@@ -21,9 +21,9 @@ from tai42_skeleton.operations import BadRequestError, NotSupportedError, operat
 from tai42_skeleton.operations.presets.authoring import (
     _combo_registry_error,
     _dry_run_bind_error,
+    _dry_run_body_error,
     _input_schema_authoring_error,
     _output_schema_error,
-    _state_binding_error,
     _write_validator_error,
 )
 from tai42_skeleton.operations.presets.create import _NOT_CONFIGURED_CODE, _NOT_CONFIGURED_NOUN
@@ -113,8 +113,9 @@ async def _verdict_bind_chain(
 
     Returns a verdict — the SAME chain the real create/save doors run, so the dry run never
     reports valid on a draft the write door would 400. ``extensions`` defaults to no combos
-    for the bind chain's combo/schema checks; ``state_binding`` is validated (WITHOUT
-    attaching) exactly as create/save validate-and-attach it.
+    for the bind chain's combo/schema checks; the document rules run over the draft and its
+    ``state_binding`` is validated (WITHOUT attaching) exactly as create/save validate-and-attach
+    it.
     """
     combos: list[list[ExtensionElement]] = extensions or []
     combo_error = _combo_registry_error(combos)
@@ -151,10 +152,9 @@ async def _verdict_bind_chain(
     write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         return _verdict(write_validator_error)
-    state_binding_error = await _state_binding_error(state_binding)
-    if state_binding_error is not None:
-        return _verdict(state_binding_error)
-    return _verdict(None)
+    # The document rules over the draft, its binding validated WITHOUT attaching — a dry run
+    # writes nothing. A store fault is not a verdict on the draft and propagates.
+    return _verdict(await _dry_run_body_error(body, name=name))
 
 
 @operation(

@@ -869,9 +869,11 @@ async def test_an_edit_that_keeps_the_door_is_untouched_by_the_guard(wired, reco
 
 async def test_unclaimed_channel_identity_rejects_a_blank_identity(wired):
     # The identity guard canonicalizes before comparing; a value blank once trimmed keys no
-    # route, so it is refused as a 400 rather than stored unresolvable.
-    with pytest.raises(BadRequestError, match="invalid our_identity"):
-        await ops._unclaimed_channel_identity(wired, route_name="line", channel="twilio", our_identity="   ")
+    # route, so the write refuses it rather than storing it unresolvable.
+    from tai42_skeleton.conversations import route_writes
+
+    with pytest.raises(route_writes.RouteWriteRefusedError, match="invalid our_identity"):
+        await route_writes._unclaimed_channel_identity(wired, route_name="line", channel="twilio", our_identity="   ")
 
 
 async def test_operations_501_without_a_backend(monkeypatch):
@@ -1290,3 +1292,107 @@ async def test_delete_is_refused_while_a_route_is_bound(wired, monkeypatch):
 
     # A preset no route targets deletes freely (nothing held).
     await _assert_no_bound_routes("other-preset")
+
+
+# -- the route door's order and texts over the route write service ----------------------------
+
+
+async def test_a_bind_refusal_is_a_422_carrying_the_validator_lines(wired):
+    from tai42_skeleton.app import instance
+
+    async def _probe(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return ["probe refusal"]
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _probe)
+    with pytest.raises(ValidationRejectedError) as caught:
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert str(caught.value) == "probe refusal"
+    assert "chat" not in wired.rows
+
+
+async def test_the_delegation_check_runs_before_the_bind_check(wired, monkeypatch):
+    # A caller who may not bind the execution key reads the delegation refusal: the target's bind
+    # check (which would also refuse) never runs.
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.errors import ForbiddenError
+
+    consulted: list[str] = []
+
+    async def _probe(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        consulted.append(create.route_name)
+        return ["probe refusal"]
+
+    async def _refuse(caller, execution_key):
+        raise ForbiddenError(f"access denied: may not bind {execution_key!r}")
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _probe)
+    monkeypatch.setattr(ops, "assert_execution_key_bindable", _refuse)
+    with pytest.raises(ForbiddenError, match="may not bind 'svc'"):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert consulted == []
+    assert "chat" not in wired.rows
+
+
+async def test_a_duplicate_channel_claim_reads_the_full_prefixed_text(wired):
+    await ops.create_conversation_route(
+        route_name="r",
+        door="channel",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        channel="c",
+        our_identity="i",
+    )
+    with pytest.raises(BadRequestError) as caught:
+        await ops.create_conversation_route(
+            route_name="r2",
+            door="channel",
+            target_kind="agent",
+            target_name="relay",
+            execution_key="svc",
+            channel="c",
+            our_identity="i",
+        )
+    assert str(caught.value) == "invalid conversation route: channel 'c' identity 'i' is already routed by 'r'"
+    assert "r2" not in wired.rows
+
+
+async def test_an_uncompilable_start_expr_reads_the_full_prefixed_text(wired):
+    with pytest.raises(BadRequestError, match=r"^invalid conversation route: invalid start_expr: "):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            start_expr=TemplatedText(content="{unterminated"),
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+    assert "chat" not in wired.rows
+
+
+async def test_the_channel_identity_is_stored_canonical(wired):
+    await ops.create_conversation_route(
+        route_name="line",
+        door="channel",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        channel="twilio",
+        our_identity="  +15550001111 ",
+    )
+    assert wired.rows["line"].our_identity == "+15550001111"

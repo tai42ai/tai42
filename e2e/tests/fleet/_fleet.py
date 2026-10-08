@@ -84,6 +84,18 @@ def build_backup_source_stack(res: StackResources, variants: Variants) -> StackC
     return _replace(cfg, name="backup-source", manifest=manifest, env=_pin_hashseed(cfg.env), run_metrics=False)
 
 
+def build_backup_definitions_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The single-worker backup source plus the redis conversations backend: a stack that holds
+    every stored definition a binding rides on — a hook, a preset, a per-target conversation
+    config — beside the states store, so a backup of them restores onto a second, fresh stack."""
+    cfg = build_backup_source_stack(res, variants)
+    manifest = copy.deepcopy(cfg.manifest)
+    manifest["routers_modules"] = [*manifest["routers_modules"], "tai42_skeleton.routers.conversations"]
+    env = dict(cfg.env)
+    env["CONVERSATIONS_REDIS_URL"] = res.redis_url
+    return _replace(cfg, name="backup-definitions", manifest=manifest, env=env)
+
+
 def build_backup_populated_stack(res: StackResources, variants: Variants) -> StackConfig:
     """A SINGLE-worker, access-control-ON backup stack that can hold a REAL conversation
     route (its ``callback_secret``) AND a REAL api-key token — the populated source for the
