@@ -249,7 +249,7 @@ test.afterEach(async ({ request }) => {
     originalMcp = null;
   }
   for (const key of createdEnvKeys) {
-    await postConfig(request, '/api/config/env', { [key]: '' });
+    await postConfig(request, '/api/config/env', { env: { [key]: '' } });
   }
   createdEnvKeys.clear();
   // Leave the stack QUIESCENT for the next serial spec: the restore + env cleanups above
@@ -264,7 +264,7 @@ test('an existing !ENV secret reference renders a masked, revealable chip', asyn
   const keyPre = uniq('E2E_MCP_REF').toUpperCase();
   createdEnvKeys.add(keyPre);
   // The referenced key must exist or the save-time dangling-!ENV validator refuses it.
-  const env = await postConfig(request, '/api/config/env', { [keyPre]: uniq('secret') });
+  const env = await postConfig(request, '/api/config/env', { env: { [keyPre]: uniq('secret') } });
   expect(env.status(), await env.text()).toBe(200);
   await seedEntry(request, uniq('e2e-ref'), keyPre);
 
@@ -290,7 +290,7 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
   test.setTimeout(120_000);
   const keyPre = uniq('E2E_MCP_PRE').toUpperCase();
   createdEnvKeys.add(keyPre);
-  const seedEnv = await postConfig(request, '/api/config/env', { [keyPre]: uniq('secret') });
+  const seedEnv = await postConfig(request, '/api/config/env', { env: { [keyPre]: uniq('secret') } });
   expect(seedEnv.status(), await seedEnv.text()).toBe(200);
   await seedEntry(request, uniq('e2e-paste'), keyPre);
 
@@ -381,7 +381,7 @@ test('removing a server whose secret was PASTED here sweeps the session-generate
   test.setTimeout(120_000);
   const seedKey = uniq('E2E_MCP_SEED').toUpperCase();
   createdEnvKeys.add(seedKey);
-  const env = await postConfig(request, '/api/config/env', { [seedKey]: uniq('secret') });
+  const env = await postConfig(request, '/api/config/env', { env: { [seedKey]: uniq('secret') } });
   expect(env.status(), await env.text()).toBe(200);
   await seedEntry(request, uniq('e2e-accept'), seedKey);
 
@@ -417,7 +417,7 @@ test('removing a server whose secret is a PICKED pre-existing key never sweeps i
   test.setTimeout(120_000);
   const keyPicked = uniq('E2E_MCP_KEEP').toUpperCase();
   createdEnvKeys.add(keyPicked);
-  const env = await postConfig(request, '/api/config/env', { [keyPicked]: uniq('secret') });
+  const env = await postConfig(request, '/api/config/env', { env: { [keyPicked]: uniq('secret') } });
   expect(env.status(), await env.text()).toBe(200);
   // The leaf references the pre-existing key directly (a PICKED reference — not pasted here),
   // so this editor never records it as session-generated.
@@ -460,7 +460,7 @@ test('removing a two-secret server sweeps only the session-generated leaf, keepi
   const keyPicked = uniq('E2E_MCP_PICK').toUpperCase(); // the LEAF_PICK picked pre-existing key
   createdEnvKeys.add(seedGen);
   createdEnvKeys.add(keyPicked);
-  const env = await postConfig(request, '/api/config/env', { [seedGen]: uniq('s1'), [keyPicked]: uniq('s2') });
+  const env = await postConfig(request, '/api/config/env', { env: { [seedGen]: uniq('s1'), [keyPicked]: uniq('s2') } });
   expect(env.status(), await env.text()).toBe(200);
   await seedEntryEnv(request, uniq('e2e-split'), { [LEAF_GEN]: seedGen, [LEAF_PICK]: keyPicked });
 

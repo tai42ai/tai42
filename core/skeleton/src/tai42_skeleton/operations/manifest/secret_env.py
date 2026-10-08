@@ -6,14 +6,19 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from tai42_contract.app.responses import ApplyResponse
+from tai42_kit.settings import unknown_owned_env_keys
+from tai42_kit.utils.data.env_markers import format_env_marker
 
-from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
+from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
+from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
+from tai42_skeleton.settings.owned_settings import register_owned_settings_groups
 
-from .models import _ENV_KEY_RE, _ENV_KEY_START, _NON_ENV_KEY_CHAR, _SECRET_MARKS_VAR, SetMcpSecretEnv
+from .models import _ENV_KEY_START, _NON_ENV_KEY_CHAR, SetMcpSecretEnv
 
 
 def _parse_manifest_pointer(pointer: str) -> list[str]:
@@ -36,18 +41,39 @@ def _parse_manifest_pointer(pointer: str) -> list[str]:
     return segments
 
 
+# The root a generated key moves under when its hint lands under an owned settings prefix.
+_GENERATED_KEY_ROOT = "SECRET"
+
+
 def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
-    """Derive a valid, unique env KEY from ``key_hint`` (a key_hint-based name).
+    """Derive a valid, unique, writable env KEY from ``key_hint`` (a key_hint-based name).
 
     The hint is uppercased and reduced to the shell-identifier charset; an empty or
     non-identifier result falls back to ``SECRET``. The name is then made unique against
-    ``taken`` (stored env keys and the X band) by appending ``_2``, ``_3``, … — so a
-    generated key never clobbers an existing key nor collides with a deployment X-band
-    name. The value is NEVER derived from the secret and is never returned to the caller.
+    ``taken`` (stored env keys, the X band and the registered settings names) by appending
+    ``_2``, ``_3``, … — so a generated key never clobbers an existing key nor collides with a
+    deployment X-band name. A name the owned-prefix audit would refuse (under an owned settings
+    prefix, accepted by no group) is minted under ``SECRET_`` instead; when that is refused too,
+    no generated key can be written and a ``ValueError`` asks for an explicit key. The value is
+    NEVER derived from the secret and is never returned to the caller.
     """
     base = _NON_ENV_KEY_CHAR.sub("_", key_hint).strip("_").upper()
     if not base or not _ENV_KEY_START.match(base):
-        base = f"SECRET_{base}".rstrip("_") if base else "SECRET"
+        base = f"{_GENERATED_KEY_ROOT}_{base}".rstrip("_") if base else _GENERATED_KEY_ROOT
+    register_owned_settings_groups()
+    candidate = _unique_env_key(base, taken)
+    if unknown_owned_env_keys([candidate]):
+        candidate = _unique_env_key(f"{_GENERATED_KEY_ROOT}_{base}", taken)
+    if unknown_owned_env_keys([candidate]):
+        raise ValueError(
+            f"no env key generated from key_hint {key_hint!r} lies outside every owned settings prefix "
+            f"(last candidate {candidate!r}); provide an explicit 'key'"
+        )
+    return candidate
+
+
+def _unique_env_key(base: str, taken: frozenset[str]) -> str:
+    """``base``, or the first ``base_<n>`` (n from 2) not in ``taken``."""
     candidate = base
     suffix = 2
     while candidate in taken:
@@ -65,13 +91,14 @@ def _resolve_secret_env_key(explicit: str | None, hint: str | None, value: str, 
     DIFFERENT value (never a silent overwrite of a live secret; an identical value is an
     idempotent re-send, no collision). A generated key is made unique against the stored keys,
     the X band, AND every registered settings ``env_var``, so it never clobbers a stored key
-    nor SHADOWS a registered var. Raises ``ValueError`` (the op maps it to a 400).
+    nor SHADOWS a registered var, and lies outside every owned settings prefix so the env write
+    accepts it. Raises ``ValueError`` (the op maps it to a 400).
     """
     if (explicit is None) == (hint is None):
         raise ValueError("provide exactly one of 'key' (explicit) or 'key_hint' (to generate from)")
     if explicit is not None:
-        if not _ENV_KEY_RE.fullmatch(explicit):
-            raise ValueError(f"invalid env key {explicit!r}: must match {_ENV_KEY_RE.pattern!r}")
+        if not ENV_KEY_RE.fullmatch(explicit):
+            raise ValueError(f"invalid env key {explicit!r}: must match {ENV_KEY_RE.pattern!r}")
         if explicit in stored and stored[explicit] != value:
             raise ValueError(
                 f"explicit key {explicit!r} collides with an existing stored env key holding a "
@@ -170,21 +197,20 @@ async def set_mcp_secret_env(
         # Mark the new key secret: APPEND to the current marks read from the STORED env —
         # never the settings cache, which is stale until a reload and would clobber a mark a
         # prior op just added. Read→append→fold into the same write_env merge, order-stable.
-        existing_marks = [m.strip() for m in stored.get(_SECRET_MARKS_VAR, "").split(",") if m.strip()]
-        marks = list(dict.fromkeys([*existing_marks, key_resolved]))
-        changes = {key_resolved: value, _SECRET_MARKS_VAR: ",".join(marks)}
-        marker = f"!ENV ${{{key_resolved}}}"
+        changes = {
+            key_resolved: value,
+            SECRET_MARKS_ENV_VAR: merge_secret_marks(stored.get(SECRET_MARKS_ENV_VAR), [key_resolved]),
+        }
+        marker = format_env_marker(key_resolved)
 
         def mutator(document: dict[str, Any]) -> None:
             _set_marker_at_pointer(document, segments, marker)
 
         return changes, mutator
 
-    with translate_orphan_env_write():
+    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
         try:
             result = await service.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
-        except BackendNeedsBusError as exc:
-            raise BadRequestError(str(exc)) from exc
         except ValueError as exc:
             # A bad/colliding key from _resolve_secret_env_key (raised inside prepare, before
             # any write) or a boundary refusal (X-band / dangling marker) — a loud 400 either

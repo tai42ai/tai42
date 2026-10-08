@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tai42_kit.utils.data.env_markers import (
     ENV_REF,
     EnvMarkerRef,
@@ -81,3 +83,78 @@ def test_required_versus_defaulted_detection():
 def test_env_marker_ref_required_property():
     assert EnvMarkerRef(var="X", default=None, pointer="/x").required is True
     assert EnvMarkerRef(var="X", default="d", pointer="/x").required is False
+
+
+# ---------------------------------------------------------------------------
+# the single-reference marker form: format / parse / is_env_marker
+# ---------------------------------------------------------------------------
+
+
+def test_marker_prefix_is_owned_here_and_shared_by_the_yaml_loader() -> None:
+    from tai42_kit.utils.data import env_markers, yaml_util
+
+    assert env_markers.ENV_MARKER_PREFIX == "!ENV "
+    assert yaml_util.ENV_MARKER_PREFIX is env_markers.ENV_MARKER_PREFIX
+
+
+@pytest.mark.parametrize(
+    ("var", "default", "marker"),
+    [("TOKEN", None, "!ENV ${TOKEN}"), ("REGION", "eu-1", "!ENV ${REGION:eu-1}")],
+)
+def test_format_and_parse_round_trip(var: str, default: str | None, marker: str) -> None:
+    from tai42_kit.utils.data.env_markers import EnvRef, format_env_marker, parse_env_marker
+
+    assert format_env_marker(var, default) == marker
+    assert parse_env_marker(marker) == EnvRef(var=var, default=default)
+
+
+@pytest.mark.parametrize(
+    ("var", "default"),
+    [("X", ""), ("X", "a}b"), ("A:B", None), ("A{B", None), ("", None)],
+    ids=["empty-default", "brace-in-default", "colon-in-name", "brace-in-name", "empty-name"],
+)
+def test_format_refuses_a_marker_the_grammar_cannot_read_back(var: str, default: str | None) -> None:
+    from tai42_kit.utils.data.env_markers import format_env_marker
+
+    with pytest.raises(ValueError, match="cannot be written as an !ENV marker"):
+        format_env_marker(var, default)
+
+
+def test_parse_keeps_a_default_with_colons() -> None:
+    from tai42_kit.utils.data.env_markers import EnvRef, parse_env_marker
+
+    assert parse_env_marker("!ENV ${URL:https://x:8080}") == EnvRef(var="URL", default="https://x:8080")
+
+
+@pytest.mark.parametrize(
+    "leaf",
+    [
+        "!ENV ${A}${B}",  # more than one reference
+        "!ENV prefix-${A}",  # surrounding text
+        "!ENV  ${A}",  # two spaces after the tag
+        "!ENV ${A{B}",  # a brace in the name
+        "!ENV $A",
+        "${A}",  # no marker prefix
+        "plain",
+    ],
+)
+def test_parse_refuses_anything_but_one_reference(leaf: str) -> None:
+    from tai42_kit.utils.data.env_markers import parse_env_marker
+
+    assert parse_env_marker(leaf) is None
+
+
+def test_is_env_marker() -> None:
+    from tai42_kit.utils.data.env_markers import is_env_marker
+
+    assert is_env_marker("!ENV ${A}") is True
+    assert is_env_marker("!ENV ${A}${B}") is True
+    assert is_env_marker("${A}") is False
+    assert is_env_marker(3) is False
+    assert is_env_marker(None) is False
+
+
+def test_escape_json_pointer_token() -> None:
+    from tai42_kit.utils.data.env_markers import escape_json_pointer_token
+
+    assert escape_json_pointer_token("a/b~c") == "a~1b~0c"

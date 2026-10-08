@@ -93,7 +93,7 @@ test.afterEach(async ({ request }) => {
   for (const key of createdEnvKeys) {
     // Posting '' merge-deletes the marker key; retry past the reload gate's retriable 503
     // in case this cleanup races the just-applied reload.
-    await postConfig(request, '/api/config/env', { [key]: '' });
+    await postConfig(request, '/api/config/env', { env: { [key]: '' } });
   }
   createdProfiles.clear();
   createdEnvKeys.clear();

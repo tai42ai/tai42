@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.config.service import ApplyResult, ConfigService
 from tai42_skeleton.marketplace.errors import ManifestComposeError
 from tai42_skeleton.operations._broadcast import fleet_fanout
@@ -33,6 +33,11 @@ def reload_report(result: ApplyResult) -> dict[str, Any]:
     operations ``apply_response``).
     """
     return {**result.local, "fanout": fleet_fanout(result.fleet)}
+
+
+def composed_manifest_invalid(detail: str) -> ManifestComposeError:
+    """The typed fault for a composed manifest the pipeline refuses."""
+    return ManifestComposeError(f"the composed manifest is invalid: {detail}")
 
 
 async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
@@ -52,10 +57,11 @@ async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]],
     the structural provides patch ingests no resolved secret value, so the pipeline's
     secret seal is a no-op.
     """
-    try:
-        return await svc.apply_change(mutator)
-    except (ValidationError, BackendNeedsBusError) as exc:
-        raise ManifestComposeError(f"the composed manifest is invalid: {exc}") from exc
+    with translate_backend_needs_bus(composed_manifest_invalid):
+        try:
+            return await svc.apply_change(mutator)
+        except ValidationError as exc:
+            raise composed_manifest_invalid(str(exc)) from exc
 
 
 async def remount_reload(

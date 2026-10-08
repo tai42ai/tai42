@@ -175,3 +175,14 @@ def test_setup_logging_attaches_the_masking_filter_once(root_logger_restored, ac
     setup_logging(LoggingSettings(log_level="INFO"))
     masks = [f for f in access_logger_restored.filters if isinstance(f, AccessLogQueryMaskingFilter)]
     assert len(masks) == 1  # idempotent: a re-setup never stacks a second filter
+
+
+def test_present_env_value_follows_the_empty_is_absent_rule() -> None:
+    from tai42_kit.settings import ENV_IGNORE_EMPTY, TaiBaseSettings, present_env_value
+
+    assert ENV_IGNORE_EMPTY is True
+    assert TaiBaseSettings.model_config.get("env_ignore_empty") is ENV_IGNORE_EMPTY
+    env = {"SET": "v", "EMPTY": ""}
+    assert present_env_value(env, "SET") == "v"
+    assert present_env_value(env, "EMPTY") is None
+    assert present_env_value(env, "ABSENT") is None

@@ -24,12 +24,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from tai42_kit.utils.data.env_markers import is_env_marker
+
+from tai42_skeleton.connectors.manifest_env import connector_client_env_refs
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-# The prefix of an ``!ENV`` marker string in the preserved manifest view (kept in
-# sync with the config manager's preserved-view convention).
-_ENV_MARKER_PREFIX = "!ENV "
 
 
 class ResolvedSecretError(ValueError):
@@ -100,7 +100,7 @@ def _retag_env_markers(
     leaf correctly re-tagged to its marker never false-positives. Mutates the
     *incoming* structure in place and returns it.
     """
-    if isinstance(preserved, str) and preserved.startswith(_ENV_MARKER_PREFIX):
+    if is_env_marker(preserved):
         if expanded == incoming:
             # Unchanged secret leaf: restore the operator's ``!ENV`` marker.
             return preserved
@@ -183,7 +183,7 @@ def _resolved_secrets(preserved: Any, expanded: Any) -> set[str]:
     string. Empty strings are excluded so they never trip the plaintext-leak net.
     """
     secrets: set[str] = set()
-    if isinstance(preserved, str) and preserved.startswith(_ENV_MARKER_PREFIX):
+    if is_env_marker(preserved):
         if isinstance(expanded, str) and expanded:
             secrets.add(expanded)
         return secrets
@@ -222,15 +222,7 @@ def _oauth_secret_names(manifest: Mapping[str, Any]) -> set[str]:
     These are the env key names whose values the platform masks by derivation. A
     missing/malformed ``connectors`` key contributes nothing.
     """
-    names: set[str] = set()
-    connectors = manifest.get("connectors")
-    if isinstance(connectors, list):
-        for connector in connectors:
-            if isinstance(connector, dict) and connector.get("kind") == "oauth":
-                var = connector.get("client_secret_env")
-                if isinstance(var, str) and var:
-                    names.add(var)
-    return names
+    return {ref.var for ref in connector_client_env_refs(manifest) if ref.secret}
 
 
 def _leaving_connector_secrets(
@@ -248,11 +240,3 @@ def _leaving_connector_secrets(
     mask even though it is no longer a live ``client_secret_env`` derivation.
     """
     return _oauth_secret_names(preserved_manifest) - _oauth_secret_names(candidate_manifest)
-
-
-def _parse_marks(value: str | None) -> list[str]:
-    """The comma-separated ``TAI_ENV_SECRET_KEYS`` value as an ordered, de-duplicated, trimmed list.
-
-    Empty segments are dropped.
-    """
-    return list(dict.fromkeys(mark.strip() for mark in (value or "").split(",") if mark.strip()))

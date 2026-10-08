@@ -18,12 +18,15 @@ class _FakeMcpTool:
 
 
 class _NoManifestConfig:
-    """Embedded/test runtime with no external manifest file: ``read_manifest``
+    """Embedded/test runtime with no external manifest file or env store: ``read_manifest``
     raises ``FileNotFoundError`` so ``_refresh_manifest_mcp`` keeps its in-memory
-    rows."""
+    rows, and ``read_env`` raises it so the boot audit sees an empty store."""
 
     def read_manifest(self):
         raise FileNotFoundError("no external manifest")
+
+    def read_env(self):
+        raise FileNotFoundError("no stored env")
 
 
 class _StubPresetManager:

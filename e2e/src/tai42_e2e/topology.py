@@ -159,13 +159,19 @@ class StackConfig:
     # of the ``tai serve`` fleet. One app process, in-process metrics mode; a
     # backend worker still joins the app-owned worker bus.
     embed: bool = False
-    # Opt-in SUPERVISED shape: stamp ``TAI_SUPERVISED=harness`` into every child's env
-    # (so the SUT resolves a recycle-supported shape, ``recycle_policy.detect_shape``) AND
-    # run a respawn-on-exit supervisor that re-launches a serve/backend process the instant
-    # it self-exits — the external supervisor a graceful recycle self-exit assumes (the
-    # applier's own deferred self-exit and each orchestrated sibling recycle). Off by default
-    # (bare): a recycle-class profile apply is then refused at the API, which is itself a test.
+    # Opt-in SUPERVISED shape: stamp ``TAI_SUPERVISED=<supervision_marker>`` into every
+    # child's env (so the SUT resolves a recycle-supported shape,
+    # ``recycle_policy.detect_shape``) AND run a respawn-on-exit supervisor that re-launches a
+    # serve/backend process the instant it self-exits — the external supervisor a graceful
+    # recycle self-exit assumes (the applier's own deferred self-exit and each orchestrated
+    # sibling recycle). Off by default (bare): a recycle-class profile apply is then refused
+    # at the API, which is itself a test.
     supervised: bool = False
+    # The supervision marker a supervised stack stamps (``harness``, or a deployment shape).
+    supervision_marker: str = "harness"
+    # The pinned set a ``k8s``/``compose``-marked stack declares
+    # (``TAI_SUPERVISED_PINNED_KEYS``, stamped as a JSON list); ``None`` stamps nothing.
+    supervised_pinned_keys: list[str] | None = None
     # Per-process CWD overrides, keyed by process name (the shared-dir test launches
     # the three kinds from three different working directories).
     cwd_overrides: dict[str, str] = field(default_factory=dict)

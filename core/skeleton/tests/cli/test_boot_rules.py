@@ -142,3 +142,29 @@ def test_run_mcp_app_shared_config_busless_raises_on_the_bus_var(monkeypatch: py
             workers=1,
         )
     assert "TAI_BUS_REDIS_URL" in str(exc.value)
+
+
+# -- the mutate-time translation ------------------------------------------------
+
+
+class _RefusedError(Exception):
+    pass
+
+
+def test_translate_backend_needs_bus_re_raises_as_the_given_error() -> None:
+    with (
+        pytest.raises(_RefusedError, match="Set TAI_BUS_REDIS_URL") as exc,
+        boot_rules.translate_backend_needs_bus(_RefusedError),
+    ):
+        boot_rules.check_backend_needs_bus(backend_module="pkg.backend", bus_configured=False)
+    assert isinstance(exc.value.__cause__, boot_rules.BackendNeedsBusError)
+
+
+def test_translate_backend_needs_bus_lets_other_errors_through() -> None:
+    with pytest.raises(KeyError), boot_rules.translate_backend_needs_bus(_RefusedError):
+        raise KeyError("other")
+
+
+def test_translate_backend_needs_bus_is_silent_without_an_error() -> None:
+    with boot_rules.translate_backend_needs_bus(_RefusedError):
+        boot_rules.check_backend_needs_bus(backend_module="pkg.backend", bus_configured=True)

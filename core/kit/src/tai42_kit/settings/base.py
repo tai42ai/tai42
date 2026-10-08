@@ -1,8 +1,9 @@
 """Kit base for env-sourced settings groups and their reload disposition."""
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Final, Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
@@ -18,6 +19,17 @@ ReloadClass = Literal["hot", "recycle", "excluded"]
 # ``SecretStr`` so masking applies everywhere a secret does; the ``key_material``
 # flag is what the registry surfaces so downstream policy can refuse to expose it.
 KeyMaterial = Annotated[SecretStr, Field(json_schema_extra={"key_material": True})]
+
+# The settings layer reads an empty env value as absent (``env_ignore_empty``).
+ENV_IGNORE_EMPTY: Final = True
+
+
+def present_env_value(env: Mapping[str, str], var: str) -> str | None:
+    """The value the settings layer reads for ``var``: ``None`` when absent or empty, the kit's empty-is-absent rule."""
+    value = env.get(var)
+    if value is None or (ENV_IGNORE_EMPTY and value == ""):
+        return None
+    return value
 
 
 class TaiBaseSettings(BaseSettings):
@@ -37,7 +49,7 @@ class TaiBaseSettings(BaseSettings):
         env_file=None,
         dotenv_filtering="only_existing",
         validate_default=True,
-        env_ignore_empty=True,
+        env_ignore_empty=ENV_IGNORE_EMPTY,
         extra="ignore",
     )
 
@@ -50,6 +62,12 @@ class TaiBaseSettings(BaseSettings):
     # so a subclass inherits its base's declaration. Kit ships only the ``hot``
     # default; core-owned classes declare ``recycle``/``excluded`` downstream.
     reload_class: ClassVar[ReloadClass] = "hot"
+
+    # When True, every env name under this group's ``env_prefix`` must name a
+    # field of a registered group with that prefix; an unknown name is refused at
+    # boot and on every env write (``tai42_kit.settings.owned_prefix``). Read with
+    # inheriting ``getattr`` semantics.
+    env_prefix_owned: ClassVar[bool] = False
 
     @classmethod
     def settings_customise_sources(

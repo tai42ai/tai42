@@ -12,7 +12,7 @@ from typing import Any
 
 from tai42_contract.app.responses import ApplyResponse
 
-from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
@@ -40,14 +40,9 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
     def mutator(document: dict[str, Any]) -> None:
         document["mcp"] = mcp
 
-    with translate_orphan_env_write():
+    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
         try:
             result = await ConfigService.from_app().apply_change(mutator)
-        except BackendNeedsBusError as exc:
-            # The invariant is a RuntimeError (a boot-time refusal must still crash loudly),
-            # so the mutate-time path maps it explicitly to a loud, actionable 400 naming
-            # TAI_BUS_REDIS_URL rather than letting it escape as a 500.
-            raise BadRequestError(str(exc)) from exc
         except ValueError as exc:
             raise BadRequestError(f"invalid mcp config: {exc}") from exc
         return apply_response(result)
@@ -100,7 +95,7 @@ def _without_entry(current: list[Any], title: str) -> list[Any]:
 async def _apply_entries_add(section: str, entries: list[Any], replace: bool) -> dict:
     # Empty ``entries`` is refused INSIDE the try (op-level, so the projection path is
     # refused identically) — a guard above the try would escape as a 500.
-    with translate_orphan_env_write():
+    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
         try:
             if not entries:
                 raise ValueError("entries must be a non-empty list")  # noqa: TRY301 in-try so the except maps it to a 400 identically on the projection path
@@ -109,23 +104,19 @@ async def _apply_entries_add(section: str, entries: list[Any], replace: bool) ->
                 document[section] = _merged_entries(document.get(section) or [], entries, replace)
 
             result = await ConfigService.from_app().apply_change(mutator)
-        except BackendNeedsBusError as exc:
-            raise BadRequestError(str(exc)) from exc
         except ValueError as exc:
             raise BadRequestError(f"invalid {section} config: {exc}") from exc
         return apply_response(result)
 
 
 async def _apply_entry_remove(section: str, title: str) -> dict:
-    with translate_orphan_env_write():
+    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
         try:
 
             def mutator(document: dict[str, Any]) -> None:
                 document[section] = _without_entry(document.get(section) or [], title)
 
             result = await ConfigService.from_app().apply_change(mutator)
-        except BackendNeedsBusError as exc:
-            raise BadRequestError(str(exc)) from exc
         except LookupError as exc:
             raise NotFoundError(f"unknown {section} entry title: {title!r}") from exc
         except ValueError as exc:

@@ -62,7 +62,7 @@ async def test_sub_mcp_registered_on_a_serves_on_b(replicas_stack: TaiStack, uni
     # (synchronous before the POST returns) and rehydrates the slug from the store;
     # B reloads only once A's fleet reload_config fan-out reaches it, so B re-serves
     # after a short, eventually-consistent delay — poll rather than sample once.
-    await api_a.post("/api/config/env", json={})
+    await api_a.post("/api/config/env", json={"env": {}})
     assert await _serves(replicas_stack, replicas_stack.port_a, slug)
     await wait_for_async(
         lambda: _serves(replicas_stack, replicas_stack.port_b, slug),
@@ -79,7 +79,7 @@ async def test_sub_mcp_registered_on_a_serves_on_b(replicas_stack: TaiStack, uni
     assert slug not in listing_b
 
     # A already BUILT the slug, so it may keep serving until its next reload.
-    await api_a.post("/api/config/env", json={})
+    await api_a.post("/api/config/env", json={"env": {}})
     await wait_for_async(
         lambda: _not_serving(replicas_stack, replicas_stack.port_a, slug),
         deadline=5.0,

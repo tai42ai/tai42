@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import ApplyResponse, ProfileApplyResponse
@@ -34,15 +34,16 @@ from tai42_contract.settings_profiles.errors import (
     SettingsProfileVersionNotFoundError,
 )
 from tai42_kit.db import component_store_configured
-from tai42_kit.settings import registered_settings
+from tai42_kit.settings import present_env_value, registered_settings
 
-from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.epoch import _reload_driven_by_request
 from tai42_skeleton.app.graceful_exit import request_serve_graceful_exit
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config import config_mode
 from tai42_skeleton.config.boundary import reload_class_by_env_var
+from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.recycle_policy import capability_report
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
@@ -62,16 +63,27 @@ from tai42_skeleton.operations.response_models_group_b import (
 
 # Importing this module registers ``EnvSecretMarksSettings`` (registration runs at
 # class-definition time) so the marks group appears in the settings schema, and
-# exposes the derived masked-key accessor the env read and profile snapshot use.
-from tai42_skeleton.settings.env_secret_marks import effective_secret_keys
+# exposes the derived masked-key accessor the env read uses.
+from tai42_skeleton.settings.env_secret_marks import (
+    SECRET_MARKS_ENV_VAR,
+    effective_secret_keys,
+    merge_secret_marks,
+    parse_secret_marks,
+)
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView, settings_profile_store
 
 
-class EnvUpdate(RootModel[dict[str, str]]):
-    """An env override map — a ``{name: value}`` object whose values are all strings.
+class EnvUpdate(BaseModel):
+    """An env write: overrides merged into the stored env, and optionally the whole set of secret marks.
 
-    Merged into the stored env config before a hot reload.
+    ``env`` maps names to string values (``""`` deletes a name). ``secret_keys`` absent or
+    ``null`` leaves the stored marks untouched; a list REPLACES them (``[]`` deletes them).
     """
+
+    model_config = ConfigDict(extra="forbid")
+
+    env: dict[str, str]
+    secret_keys: list[str] | None = None
 
 
 class ReloadConfigRequest(BaseModel):
@@ -153,21 +165,27 @@ async def read_settings_schema() -> dict:
         for field in cls_info.fields:
             payload = field.model_dump()
             default_var = field.default_namespace_var
-            if field.env_var and field.env_var in os.environ:
-                payload["value"] = os.environ[field.env_var]
+            # Each layer is read through the settings layer's empty-is-absent rule, so an
+            # exported empty value reports the next layer, as the field actually resolves.
+            process_value = present_env_value(os.environ, field.env_var) if field.env_var else None
+            stored_value = present_env_value(stored, field.env_var) if field.env_var else None
+            process_default = present_env_value(os.environ, default_var) if field.env_var and default_var else None
+            stored_default = present_env_value(stored, default_var) if field.env_var and default_var else None
+            if process_value is not None:
+                payload["value"] = process_value
                 payload["value_source"] = "env"
-            elif field.env_var and field.env_var in stored:
-                payload["value"] = stored[field.env_var]
+            elif stored_value is not None:
+                payload["value"] = stored_value
                 payload["value_source"] = "stored"
-            elif field.env_var and default_var and default_var in os.environ:
+            elif process_default is not None:
                 # The field's own var and stored override are both absent, but it
                 # participates in the shared ``TAI_DEFAULT_*`` namespace and that layer
                 # supplies a value — the truth an operator sees, resolved before the
                 # bare field default.
-                payload["value"] = os.environ[default_var]
+                payload["value"] = process_default
                 payload["value_source"] = "default_namespace"
-            elif field.env_var and default_var and default_var in stored:
-                payload["value"] = stored[default_var]
+            elif stored_default is not None:
+                payload["value"] = stored_default
                 payload["value_source"] = "default_namespace"
             elif field.env_var:
                 payload["value"] = field.default
@@ -196,19 +214,26 @@ async def read_settings_schema() -> dict:
     request_model=EnvUpdate,
     response_model=ApplyResponse,
 )
-async def write_env(env: dict[str, str]) -> dict:
-    """Merge env overrides into the stored config and hot-reload this worker and the fleet."""
+async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -> dict:
+    """Merge env overrides into the stored config and hot-reload this worker and the fleet.
+
+    ``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;
+    the marks variable itself is never accepted as an ``env`` key.
+    """
+    if SECRET_MARKS_ENV_VAR in env:
+        raise BadRequestError("set secret marks through the 'secret_keys' field, not as an env key")
+    for mark in secret_keys or []:
+        if not ENV_KEY_RE.fullmatch(mark):
+            raise BadRequestError(f"secret_keys entry {mark!r} is not a valid env key")
     # Merge the env overrides through the pipeline: ConfigService validates the
     # effective (resolved) config against the backend-needs-bus invariant, writes the
     # env, reloads locally, and broadcasts the reload to the whole fleet. An invalid
     # env key or effective config rejects before anything is written and maps to 400.
-    # ``BackendNeedsBusError`` is a RuntimeError (a boot-time refusal must still crash
-    # loudly), so the mutate-time path catches it explicitly to map it to a loud,
-    # actionable 400 naming TAI_BUS_REDIS_URL rather than letting it escape as a 500.
-    try:
-        result = await ConfigService.from_app().apply_env_change(env)
-    except (ValueError, BackendNeedsBusError) as exc:
-        raise BadRequestError(str(exc)) from exc
+    with translate_backend_needs_bus(BadRequestError):
+        try:
+            result = await ConfigService.from_app().apply_env_change(env, secret_keys)
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
     return apply_response(result)
 
 
@@ -365,12 +390,12 @@ async def put_profile(name: str, description: str, env: dict[str, str], secret_k
     body = SettingsProfileBody(description=description, env=env, secret_keys=secret_keys)
     # Refuse a profile that carries a deployment X-band key or a dangling !ENV marker
     # BEFORE it is persisted — the same replace-semantics validation the apply pipeline
-    # runs, so an unappliable profile is never committed. ``BackendNeedsBusError`` is a
-    # RuntimeError, mapped explicitly to a loud 400 like the env-write door.
-    try:
-        ConfigService.from_app()._validate_replace(body.env)
-    except (ValueError, BackendNeedsBusError) as exc:
-        raise BadRequestError(str(exc)) from exc
+    # runs, so an unappliable profile is never committed.
+    with translate_backend_needs_bus(BadRequestError):
+        try:
+            ConfigService.from_app()._validate_replace(body.env)
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
     store = _profile_store()
     try:
         await store.get_profile(name)
@@ -427,7 +452,7 @@ async def diff_profile(name: str) -> dict[str, Any]:
         body = await _profile_store().get_active_body(name)
     except SettingsProfileNotFoundError as exc:
         raise NotFoundError(f"settings profile {name!r} not found") from exc
-    profile_env = body.env
+    profile_env = _profile_env(body)
     current = _stored_env()
     added = sorted(key for key in profile_env if key not in current)
     removed = sorted(key for key in current if key not in profile_env)
@@ -448,6 +473,19 @@ async def diff_profile(name: str) -> dict[str, Any]:
         "recycle_keys": recycle_keys,
         "refused_keys": refused_keys,
     }
+
+
+def _profile_env(body: SettingsProfileBody) -> dict[str, str]:
+    """The env band applying ``body`` writes: its env plus its ``secret_keys`` as the secret marks.
+
+    The marks travel in ``secret_keys`` (a profile's env rows never carry the marks variable), so the
+    replace writes them with the env and a marked key stays masked once applied.
+    """
+    env = dict(body.env)
+    marks = merge_secret_marks(env.get(SECRET_MARKS_ENV_VAR), body.secret_keys)
+    if marks:
+        env[SECRET_MARKS_ENV_VAR] = marks
+    return env
 
 
 @operation(
@@ -526,17 +564,16 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     """Snapshot the CURRENT stored env into the reserved ``@previous`` profile.
 
     Creates ``@previous`` on the first apply, appends a new version thereafter — the apply
-    pipeline's rollback anchor. Carries the current DERIVED masked-key set
-    (:func:`~tai42_skeleton.settings.env_secret_marks.effective_secret_keys`: stored marks
-    UNIONED with every live ``connectors[*].client_secret_env``) so a rollback re-applies
-    with the same masking, including a connector secret with no operator mark. Never carries
-    env VALUES onto any report — this is a store write, not a response.
+    pipeline's rollback anchor. The snapshot has the shape of every other profile: ``env`` is
+    the stored rows without the secret-marks variable, ``secret_keys`` the band's own stored
+    marks, so applying it (:func:`_profile_env`) writes the pre-apply band back exactly. Never
+    carries env VALUES onto any report — this is a store write, not a response.
     """
     store = _profile_store()
     body = SettingsProfileBody(
         description="Auto-saved snapshot of the stored env before the last settings-profile apply.",
-        env=dict(stored_env),
-        secret_keys=list(effective_secret_keys(tai42_app.admin.live_manifest)),
+        env={key: value for key, value in stored_env.items() if key != SECRET_MARKS_ENV_VAR},
+        secret_keys=parse_secret_marks(stored_env.get(SECRET_MARKS_ENV_VAR)),
     )
     try:
         await store.get_profile(_PREVIOUS_NAME)
@@ -557,6 +594,8 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
 )
 async def apply_profile(name: str) -> OperationResponse:
     """Apply the profile's active env as the WHOLE stored env band and reload the fleet.
+
+    The profile's ``secret_keys`` are written as the stored secret marks in the same replace.
 
     A key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving
     epoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class
@@ -585,12 +624,13 @@ async def apply_profile(name: str) -> OperationResponse:
     # excuses this still-admitted request from its in-flight drain rather than self-waiting
     # the full drain budget on it.
     driven = _reload_driven_by_request.get()
-    try:
-        outcome = await ConfigService.from_app().apply_replace_env(
-            body.env, driven=driven, save_previous=_save_previous_version
-        )
-    except (ValueError, BackendNeedsBusError) as exc:
-        raise BadRequestError(str(exc)) from exc
+    with translate_backend_needs_bus(BadRequestError):
+        try:
+            outcome = await ConfigService.from_app().apply_replace_env(
+                _profile_env(body), driven=driven, save_previous=_save_previous_version
+            )
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
     # Arm the applier's own deferred self-exit as a POST-FLUSH BackgroundTask iff the diff
     # carries serve-affecting recycle keys (never a bare shape — refused upfront). An
     # inline ``create_task`` is FORBIDDEN: it would race the response body flush and sever

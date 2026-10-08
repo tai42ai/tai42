@@ -17,8 +17,9 @@ class SettingsProfileBody(BaseModel):
     included — the store rides the ``secret=True`` versioned-documents backup
     section); applying the profile REPLACES the stored env with it (a key the
     profile does not name is deleted, save the carried X-band). ``secret_keys`` are
-    the per-profile secret marks (which ``env`` keys are secret) folded into the
-    display mask union. ``description`` is the profile's human description.
+    the band's operator secret marks (which ``env`` keys are secret); applying the
+    profile writes them as the stored secret marks, from which the display mask
+    union is derived. ``description`` is the profile's human description.
     """
 
     description: str = ""

@@ -227,7 +227,7 @@ async def test_env_write_moves_resolved_view(fresh_stack: Callable[..., TaiStack
     api = stack.api()
     baseline = await converged_baseline(stack)
 
-    result = await api.post("/api/config/env", json={key: "b6-converged-value"}, retry_on_reloading=True)
+    result = await api.post("/api/config/env", json={"env": {key: "b6-converged-value"}}, retry_on_reloading=True)
     assert_fleet_fanout(result)
 
     await converged_digest(stack, differ_from=baseline)

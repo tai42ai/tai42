@@ -137,8 +137,16 @@ def test_config_lint_flags_unresolved_required_setting(monkeypatch: pytest.Monke
         secret=False,
         description="",
         nested_group=None,
+        accepted_env_vars=["TAI_LINT_TEST_REQUIRED"],
     )
-    group = SettingsClassInfo(name="LintProbe", module="probe", qualname="probe.LintProbe", fields=[field])
+    group = SettingsClassInfo(
+        name="LintProbe",
+        module="probe",
+        qualname="probe.LintProbe",
+        fields=[field],
+        env_prefix="TAI_LINT_TEST_",
+        env_prefix_owned=False,
+    )
 
     import tai42_skeleton.cli.offline as offline_cmd
 
@@ -207,3 +215,12 @@ def test_validate_manifest_file_rejects_invalid_manifest_shape(tmp_path) -> None
     invalid.write_text("mcp: not-a-list\n", encoding="utf-8")
     with pytest.raises(typer.BadParameter, match="invalid manifest"):
         validate_manifest_file(str(invalid))
+
+
+def test_config_lint_treats_an_empty_manifest_path_as_unset(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    # The settings layer's empty-is-absent rule: an exported empty TAI_MANIFEST_PATH names no file.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TAI_MANIFEST_PATH", "")
+    result = CliRunner().invoke(app_module.app, ["config", "lint"])
+    assert result.exit_code == 0, result.output
+    assert "skipping manifest shape check" in result.output

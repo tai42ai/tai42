@@ -60,7 +60,7 @@ async def test_backup_import_applies_manifest_and_env_fleet_wide(
 ) -> None:
     # -- source: write the env key and add an mcp entry, then export both sections.
     source = fresh_stack(build_backup_source_stack)
-    await source.api().post("/api/config/env", json={_KEY: "imported-b4-value"}, retry_on_reloading=True)
+    await source.api().post("/api/config/env", json={"env": {_KEY: "imported-b4-value"}}, retry_on_reloading=True)
     mcp_title = uniq("b4_mcp")
     src_doc = yaml.safe_load(manifest_file(source).read_text()) or {}
     src_doc["mcp"] = [*src_doc.get("mcp", []), {"title": mcp_title, **_UNREACHABLE_MCP}]

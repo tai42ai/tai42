@@ -119,7 +119,7 @@ async def test_schedule_branch_plus_reload_churn_wedges_celery_prefork(
             "fixed_kwargs": {"payload": "baked"},
         },
     )
-    await api_a.post("/api/config/env", json={})
+    await api_a.post("/api/config/env", json={"env": {}})
 
     # CHURN: create + rebind + re-version + rollback, each fanning a reload_tool pool
     # restart, interleaved with backend dispatches into the pool.
@@ -137,7 +137,7 @@ async def test_schedule_branch_plus_reload_churn_wedges_celery_prefork(
     original_version = created["active_version"]
     assert await _call_preset(stack, stack.port_a, name) == baked
 
-    await api_b.post("/api/config/env", json={})
+    await api_b.post("/api/config/env", json={"env": {}})
 
     async def b_serves_baked() -> bool:
         try:

@@ -1,12 +1,11 @@
-"""Recycle capability + refusal policy — the ONE source of truth.
+"""Recycle capability + refusal policy.
 
-This is the single exported source of truth for recycle refusal classification: the
-refusal key lists live here so they can never silently desync from the deployment env
-that pins them.
+The supervised deployment declares the keys it pins in ``TAI_SUPERVISED_PINNED_KEYS``;
+this module holds the refusal mechanism and the platform's own Tier-1 keys.
 
 Shape detection is deterministic: the ``TAI_SUPERVISED`` marker set in lockstep with
-the config mode by each supervised bundle (chart, compose, e2e harness). Absent
-marker = ``bare`` (no supervisor) — recycle-class diffs are refused wholesale.
+the config mode by each supervised deployment. Absent marker = ``bare`` (no
+supervisor) — recycle-class diffs are refused wholesale.
 
 Refusal is two-tier:
 
@@ -15,17 +14,17 @@ Refusal is two-tier:
   scan opens the OLD bus while replacements register only on the NEW bus after
   resync. ``TAI_DEFAULT_REDIS_URL`` reaches the bus via ``BusSettings``' default-URL
   fallback, so it joins ``TAI_BUS_REDIS_URL`` here.
-* Tier 2 (per shape): deployment-value pinning — a pod/container respawn re-injects
-  the chart/compose value, so a profile-carried change silently reverts. These keys
-  are orchestratable in principle (the bus is unchanged) but pinned, so they are
-  refused upfront. ``harness`` carries no Tier-2 list.
+* Tier 2 (``k8s`` / ``compose``): the deployment's declared pinned keys — a
+  pod/container respawn re-injects the deployment value, so a profile-carried change
+  silently reverts. They are refused upfront. ``harness`` and ``bare`` carry no Tier 2.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, Field
 
@@ -39,105 +38,16 @@ SUPERVISION_MARKER_ENV = "TAI_SUPERVISED"
 # Tier 1 — refused on every shape.
 TIER1_REFUSED_KEYS: frozenset[str] = frozenset({"TAI_BUS_REDIS_URL", "TAI_DEFAULT_REDIS_URL"})
 
-# Tier 2 (k8s) — the union of the chart's pinned pod-env helpers across BOTH
-# deployments (``tai.commonEnv`` + ``tai.subMcpEnv`` + ``tai.backendEnv``), MINUS the
-# X-band keys those helpers also carry (carried untouched across a profile apply,
-# never recyclable) and MINUS the Tier-1 bus URL.
-TIER2_K8S_REFUSED_KEYS: frozenset[str] = frozenset(
-    {
-        # commonEnv — redis auth + bus namespace + access-control toggle + feature
-        # redis stores + memory-redis flow stores + the default-PG registry block.
-        "REDIS_PASSWORD",
-        "TAI_BUS_NAMESPACE",
-        "ACCESS_CONTROL_ENABLE",
-        "ACCESS_CONTROL_REDIS_URL",
-        "INTERACTIONS_REDIS_URL",
-        "TAI_TOOL_RUNS_REDIS_URL",
-        "TAI_RATE_LIMIT_REDIS_URL",
-        "HOOKS_REDIS_URL",
-        "CONNECTOR_STORE_REDIS_URL",
-        "FLOW_REDIS_URL",
-        "MEMORY_REDIS_PASSWORD",
-        "LLM_PROVIDER_CHECKPOINT_CONN_STRING",
-        "LLM_PROVIDER_STORE_CONN_STRING",
-        "TAI_DATABASE_DEFAULT_PG_HOST",
-        "TAI_DATABASE_DEFAULT_PG_PORT",
-        "TAI_DATABASE_DEFAULT_PG_DB",
-        "TAI_DATABASE_DEFAULT_PG_USER",
-        "TAI_DATABASE_DEFAULT_PG_PASSWORD",
-        # subMcpEnv (serve only) — shared sub-MCP routing store.
-        "SUB_MCP_REDIS_URL",
-        # backendEnv (both deployments) — the task backend's connection env. arq and
-        # celery are the chart-supervisable backend types, so only their broker keys
-        # are pod-pinned here; rq's RQ_REDIS_URL is intentionally absent (rq is not
-        # baked into any shipped image). A custom rq deployment pins its own broker
-        # key in its pod spec and owns that key's refusal.
-        "CELERY_BROKER_URL",
-        "CELERY_RESULT_BACKEND",
-        "CELERY_REDBEAT_REDIS_URL",
-        "ARQ_REDIS_URL",
-        # Sandbox provider connection env. Both keys are recycle-class regardless of
-        # which provider is active: ``SANDBOX_DOCKER_HOST`` is the sandbox-docker engine
-        # connection, ``SANDBOX_LOCAL_ROOT`` binds the sandbox-local host workspace root.
-        # The providers are mutually exclusive at RUNTIME (the scalar ``sandbox_module``),
-        # so both coexist here. ``TAI_MCP_SANDBOX`` is deliberately absent (the provider
-        # loads via the manifest module, not that env), mirroring ``TAI_MCP_BACKEND``.
-        "SANDBOX_DOCKER_HOST",
-        "SANDBOX_LOCAL_ROOT",
-    }
-)
-
-# Tier 2 (compose) — the ``x-tai-app-env`` anchor's keys MINUS the X-classified
-# deployment bare reads (shape marker + sentinel path, refused on the X axis and never
-# recyclable), so ``TAI_SUPERVISED`` is excluded. Every service reuses the one anchor,
-# so this key set IS the compose deployment-value pinning; the Tier-1 bus URLs the
-# anchor also carries stay in the set (refused on their own axis as well).
-TIER2_COMPOSE_REFUSED_KEYS: frozenset[str] = frozenset(
-    {
-        "TAI_CONFIG_MODE",
-        "TAI_CONFIG_DIR_PATH",
-        "TAI_MANIFEST_PATH",
-        "TAI_BACKEND_MODULE",
-        "ACCESS_CONTROL_ENABLE",
-        "ACCESS_CONTROL_ALWAYS_PUBLIC_PATH_PREFIXES",
-        "TAI_BUS_REDIS_URL",
-        "TAI_DEFAULT_REDIS_URL",
-        "SUB_MCP_REDIS_URL",
-        "ARQ_REDIS_URL",
-        "CELERY_BROKER_URL",
-        "CELERY_RESULT_BACKEND",
-        "CELERY_REDBEAT_REDIS_URL",
-        "TAI_TOOL_RUNS_REDIS_URL",
-        "TAI_RATE_LIMIT_REDIS_URL",
-        "INTERACTIONS_REDIS_URL",
-        "HOOKS_REDIS_URL",
-        "ACCESS_CONTROL_REDIS_URL",
-        "CONNECTOR_STORE_REDIS_URL",
-        "TAI_DATABASE_DEFAULT_PG_HOST",
-        "TAI_DATABASE_DEFAULT_PG_PORT",
-        "TAI_DATABASE_DEFAULT_PG_DB",
-        "TAI_DATABASE_DEFAULT_PG_USER",
-        "TAI_DATABASE_DEFAULT_PG_PASSWORD",
-        "PROMETHEUS_MULTIPROC_DIR",
-        "STORAGE_S3_ENDPOINT",
-        "STORAGE_S3_BUCKET",
-        "STORAGE_S3_ACCESS_KEY",
-        "STORAGE_S3_SECRET_KEY",
-        "STORAGE_S3_SECURE",
-        "STORAGE_S3_REGION",
-        # Sandbox provider connection env — both recycle-class regardless of which
-        # provider is active (see the k8s list note above). ``TAI_MCP_SANDBOX`` stays
-        # absent from the anchor and this list, mirroring ``TAI_BACKEND_MODULE``'s env.
-        "SANDBOX_DOCKER_HOST",
-        "SANDBOX_LOCAL_ROOT",
-    }
-)
+# The env var a supervised deployment declares its pinned keys in: a JSON list of env names.
+PINNED_KEYS_ENV: Final = "TAI_SUPERVISED_PINNED_KEYS"
 
 # Deployment-infrastructure bare reads. X-classified: no profile may carry them — a
-# carried value would spoof shape detection (self-exit on an unsupervised host) or
-# relocate the readiness sentinel. The boundary validator folds this set into its
-# X-band refusal, enforced at EVERY env writer.
-X_CLASSIFIED_DEPLOYMENT_BARE_READS: frozenset[str] = frozenset({SUPERVISION_MARKER_ENV, "TAI_READY_SENTINEL_PATH"})
+# carried value would spoof shape detection (self-exit on an unsupervised host), shrink
+# the deployment's pinned set, or relocate the readiness sentinel. The boundary validator
+# folds this set into its X-band refusal, enforced at EVERY env writer.
+X_CLASSIFIED_DEPLOYMENT_BARE_READS: frozenset[str] = frozenset(
+    {SUPERVISION_MARKER_ENV, PINNED_KEYS_ENV, "TAI_READY_SENTINEL_PATH"}
+)
 
 # The worker kinds the recycle orchestrator censuses as recycle targets.
 CENSUS_TARGET_KINDS: tuple[WorkerKind, ...] = (WorkerKind.backend, WorkerKind.serve)
@@ -153,6 +63,9 @@ class Shape(StrEnum):
 
 
 _MARKER_SHAPES: frozenset[str] = frozenset({Shape.k8s.value, Shape.compose.value, Shape.harness.value})
+
+# The shapes whose deployment declares a pinned set.
+_PINNING_SHAPES: frozenset[Shape] = frozenset({Shape.k8s, Shape.compose})
 
 
 class CapabilityReport(BaseModel):
@@ -184,16 +97,57 @@ def detect_shape() -> Shape:
     return Shape(marker)
 
 
+def pinned_keys() -> frozenset[str]:
+    """The env keys the supervised deployment pins, from ``TAI_SUPERVISED_PINNED_KEYS``.
+
+    The value must be a JSON list of non-empty strings (``[]`` is legal); anything else
+    raises ``ValueError``. An unset variable raises ``RuntimeError``.
+    """
+    raw = os.environ.get(PINNED_KEYS_ENV)
+    if raw is None:
+        raise RuntimeError(f"{PINNED_KEYS_ENV} is not set")
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"{PINNED_KEYS_ENV} must be a JSON list of env names, got {raw!r}") from exc
+    if not isinstance(parsed, list) or not all(isinstance(key, str) and key for key in parsed):
+        raise ValueError(f"{PINNED_KEYS_ENV} must be a JSON list of env names, got {raw!r}")
+    return frozenset(parsed)
+
+
+def _require_pinned_keys(shape: Shape) -> frozenset[str]:
+    """The pinned set of a ``k8s``/``compose`` deployment; its absence raises naming the shape."""
+    if PINNED_KEYS_ENV not in os.environ:
+        raise RuntimeError(
+            f"{SUPERVISION_MARKER_ENV}={shape.value} requires {PINNED_KEYS_ENV} "
+            "(a JSON list of the env keys this deployment pins)"
+        )
+    return pinned_keys()
+
+
 def refused_keys(shape: Shape) -> frozenset[str]:
     """The keys a recycle diff may not carry on ``shape``.
 
-    Tier 1 always, plus the shape's Tier-2 pinned list (empty for harness and bare).
+    Tier 1 always, plus the deployment's declared pinned set on ``k8s`` and ``compose``.
     """
-    if shape is Shape.k8s:
-        return TIER1_REFUSED_KEYS | TIER2_K8S_REFUSED_KEYS
-    if shape is Shape.compose:
-        return TIER1_REFUSED_KEYS | TIER2_COMPOSE_REFUSED_KEYS
+    if shape in _PINNING_SHAPES:
+        return TIER1_REFUSED_KEYS | _require_pinned_keys(shape)
     return TIER1_REFUSED_KEYS
+
+
+def require_supervision_declared() -> None:
+    """Refuse boot unless the supervision marker and the pinned set agree.
+
+    A ``k8s``/``compose`` marker requires a well-formed ``TAI_SUPERVISED_PINNED_KEYS``; the
+    pinned set on any other shape is refused; an unrecognized marker raises through
+    :func:`detect_shape`.
+    """
+    shape = detect_shape()
+    if shape in _PINNING_SHAPES:
+        _require_pinned_keys(shape)
+        return
+    if PINNED_KEYS_ENV in os.environ:
+        raise RuntimeError(f"{PINNED_KEYS_ENV} is set but {SUPERVISION_MARKER_ENV} is not k8s or compose")
 
 
 def capability_report() -> CapabilityReport:

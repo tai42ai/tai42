@@ -74,3 +74,52 @@ def test_deduped_and_sorted(monkeypatch: pytest.MonkeyPatch) -> None:
     env_secret_marks_settings.cache_clear()
     keys = effective_secret_keys(_manifest_with(_oauth("acme"), _oauth("iota")))
     assert keys == ("ACME_CLIENT_SECRET", "IOTA_CLIENT_SECRET", "ZED_MARK")
+
+
+# ---------------------------------------------------------------------------
+# the marks variable's parse / format / merge helpers
+# ---------------------------------------------------------------------------
+
+
+def test_marks_variable_name() -> None:
+    from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR
+
+    assert SECRET_MARKS_ENV_VAR == "TAI_ENV_SECRET_KEYS"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, []),
+        ("", []),
+        (" , ,", []),
+        ("A", ["A"]),
+        (" B , A ,, B ", ["B", "A"]),
+    ],
+)
+def test_parse_secret_marks_trims_drops_empties_and_dedupes_in_order(raw: str | None, expected: list[str]) -> None:
+    from tai42_skeleton.settings.env_secret_marks import parse_secret_marks
+
+    assert parse_secret_marks(raw) == expected
+
+
+def test_format_secret_marks_joins_with_commas() -> None:
+    from tai42_skeleton.settings.env_secret_marks import format_secret_marks
+
+    assert format_secret_marks(["B", "A"]) == "B,A"
+    assert format_secret_marks([]) == ""
+
+
+def test_merge_secret_marks_is_an_ordered_union() -> None:
+    from tai42_skeleton.settings.env_secret_marks import merge_secret_marks
+
+    assert merge_secret_marks("B, A", ["A", "C", "C"]) == "B,A,C"
+    assert merge_secret_marks(None, ["X"]) == "X"
+    assert merge_secret_marks("X", []) == "X"
+
+
+def test_the_settings_group_parses_through_the_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.settings.env_secret_marks import EnvSecretMarksSettings
+
+    monkeypatch.setenv("TAI_ENV_SECRET_KEYS", " B , A ,, B ")
+    assert EnvSecretMarksSettings().secret_keys == ["B", "A"]

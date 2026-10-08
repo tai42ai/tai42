@@ -1,9 +1,9 @@
 """Recycle capability report + two-tier refusal policy.
 
-The ONE source of truth the profile-apply validator and the tai-distribution parity
-tests import: shape detection from the ``TAI_SUPERVISED`` marker, the tier-1
-bus-URL refusal on every shape, the per-shape tier-2 pinned lists, and the
-X-classification of the two deployment-infra bare reads.
+Shape detection from the ``TAI_SUPERVISED`` marker, the tier-1 bus-URL refusal on every
+shape, the supervised deployment's declared pinned set (``TAI_SUPERVISED_PINNED_KEYS``),
+the boot check that a supervised marker comes with its pinned set, and the
+X-classification of the deployment-infra bare reads.
 """
 
 from __future__ import annotations
@@ -13,20 +13,22 @@ import pytest
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.config.recycle_policy import (
     CENSUS_TARGET_KINDS,
+    PINNED_KEYS_ENV,
     TIER1_REFUSED_KEYS,
-    TIER2_COMPOSE_REFUSED_KEYS,
-    TIER2_K8S_REFUSED_KEYS,
     X_CLASSIFIED_DEPLOYMENT_BARE_READS,
     Shape,
     capability_report,
     detect_shape,
+    pinned_keys,
     refused_keys,
+    require_supervision_declared,
 )
 
 
 @pytest.fixture(autouse=True)
 def _clear_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    monkeypatch.delenv("TAI_SUPERVISED_PINNED_KEYS", raising=False)
 
 
 # -- shape detection ----------------------------------------------------------
@@ -76,73 +78,113 @@ def test_harness_supported_tier1_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(report.refused_keys) == set(TIER1_REFUSED_KEYS)
 
 
-def test_k8s_refuses_tier1_plus_the_k8s_pinned_union(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TAI_SUPERVISED", "k8s")
+@pytest.mark.parametrize("marker", ["k8s", "compose"])
+def test_supervised_refuses_tier1_plus_the_declared_pinned_set(monkeypatch: pytest.MonkeyPatch, marker: str) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", marker)
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", '["SUB_MCP_REDIS_URL", "STORAGE_S3_BUCKET"]')
     report = capability_report()
-    assert report.shape is Shape.k8s
+    assert report.shape is Shape(marker)
     assert report.recycle_supported is True
-    refused = set(report.refused_keys)
-    assert refused >= TIER1_REFUSED_KEYS
-    assert refused >= TIER2_K8S_REFUSED_KEYS
-    # Representative pinned helper keys from the union across BOTH deployments.
-    assert {"SUB_MCP_REDIS_URL", "ARQ_REDIS_URL", "CELERY_BROKER_URL"} <= refused
+    assert set(report.refused_keys) == TIER1_REFUSED_KEYS | {"SUB_MCP_REDIS_URL", "STORAGE_S3_BUCKET"}
 
 
-def test_compose_refuses_tier1_plus_the_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_empty_pinned_set_is_legal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAI_SUPERVISED", "compose")
-    report = capability_report()
-    assert report.shape is Shape.compose
-    refused = set(report.refused_keys)
-    assert refused >= TIER1_REFUSED_KEYS
-    assert refused >= TIER2_COMPOSE_REFUSED_KEYS
-    assert {"TAI_BACKEND_MODULE", "STORAGE_S3_BUCKET"} <= refused
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", "[]")
+    require_supervision_declared()
+    assert refused_keys(Shape.compose) == TIER1_REFUSED_KEYS
 
 
-# -- two-tier structure -------------------------------------------------------
+# -- the declared pinned set ----------------------------------------------------
+
+
+def test_pinned_keys_env_name() -> None:
+    assert PINNED_KEYS_ENV == "TAI_SUPERVISED_PINNED_KEYS"
+
+
+def test_pinned_keys_reads_the_json_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", '["A", "B", "A"]')
+    assert pinned_keys() == frozenset({"A", "B"})
+
+
+@pytest.mark.parametrize("raw", ["A,B", '{"A": 1}', '"A"', '["A", 3]', '["A", ""]', "[null]", ""])
+def test_malformed_pinned_keys_raise(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", raw)
+    with pytest.raises(ValueError, match=r"TAI_SUPERVISED_PINNED_KEYS must be a JSON list of env names, got"):
+        pinned_keys()
+
+
+def test_missing_pinned_keys_raise_when_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "compose")
+    with pytest.raises(RuntimeError, match=r"TAI_SUPERVISED=compose requires TAI_SUPERVISED_PINNED_KEYS"):
+        refused_keys(Shape.compose)
+
+
+@pytest.mark.parametrize("shape", list(Shape))
+def test_tier1_rides_every_shape(monkeypatch: pytest.MonkeyPatch, shape: Shape) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", "[]")
+    assert refused_keys(shape) >= TIER1_REFUSED_KEYS
+
+
+def test_harness_and_bare_carry_tier1_only() -> None:
+    assert refused_keys(Shape.harness) == TIER1_REFUSED_KEYS
+    assert refused_keys(Shape.bare) == TIER1_REFUSED_KEYS
 
 
 def test_tier1_is_the_two_bus_reaching_urls() -> None:
     assert frozenset({"TAI_BUS_REDIS_URL", "TAI_DEFAULT_REDIS_URL"}) == TIER1_REFUSED_KEYS
 
 
-@pytest.mark.parametrize("shape", list(Shape))
-def test_tier1_rides_every_shape(shape: Shape) -> None:
-    assert refused_keys(shape) >= TIER1_REFUSED_KEYS
+# -- the boot check -------------------------------------------------------------
 
 
-def test_harness_and_bare_carry_no_tier2() -> None:
-    assert refused_keys(Shape.harness) == TIER1_REFUSED_KEYS
-    assert refused_keys(Shape.bare) == TIER1_REFUSED_KEYS
+@pytest.mark.parametrize("marker", ["k8s", "compose"])
+def test_boot_refuses_a_supervised_marker_without_its_pinned_set(monkeypatch: pytest.MonkeyPatch, marker: str) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", marker)
+    with pytest.raises(RuntimeError) as exc:
+        require_supervision_declared()
+    assert str(exc.value) == (
+        f"TAI_SUPERVISED={marker} requires TAI_SUPERVISED_PINNED_KEYS "
+        "(a JSON list of the env keys this deployment pins)"
+    )
 
 
-def test_k8s_tier2_excludes_the_bus_url_and_x_band_keys() -> None:
-    # Tier-1 bus URL is not duplicated into the tier-2 list, and the X-band keys the
-    # helpers also carry are never recyclable (carried untouched), so they are absent.
-    assert "TAI_BUS_REDIS_URL" not in TIER2_K8S_REFUSED_KEYS
-    for x_key in ("TAI_CONFIG_MODE", "TAI_PLUGINS_PREFIX", "PROMETHEUS_MULTIPROC_DIR"):
-        assert x_key not in TIER2_K8S_REFUSED_KEYS
+def test_boot_refuses_a_malformed_pinned_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "compose")
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", "A,B")
+    with pytest.raises(ValueError, match="TAI_SUPERVISED_PINNED_KEYS must be a JSON list"):
+        require_supervision_declared()
 
 
-def test_compose_tier2_enumerates_the_anchor_verbatim() -> None:
-    # The anchor carries these even though they are X-band / tier-1 on other axes; the
-    # compose refusal enumerates the anchor as-is (parity with the compose file).
-    assert {"TAI_CONFIG_MODE", "TAI_BUS_REDIS_URL", "PROMETHEUS_MULTIPROC_DIR"} <= TIER2_COMPOSE_REFUSED_KEYS
+@pytest.mark.parametrize("marker", ["harness", None])
+def test_boot_refuses_a_pinned_set_without_a_supervised_marker(
+    monkeypatch: pytest.MonkeyPatch, marker: str | None
+) -> None:
+    if marker is not None:
+        monkeypatch.setenv("TAI_SUPERVISED", marker)
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", "[]")
+    with pytest.raises(RuntimeError) as exc:
+        require_supervision_declared()
+    assert str(exc.value) == "TAI_SUPERVISED_PINNED_KEYS is set but TAI_SUPERVISED is not k8s or compose"
 
 
-def test_both_sandbox_provider_keys_are_tier2_recycle_class_on_both_shapes() -> None:
-    # Both sandbox providers' connection keys are recycle-class regardless of which is
-    # active (mutually exclusive at runtime via the scalar module), so both coexist in
-    # both tier-2 lists — mirroring the ARQ_REDIS_URL precedent.
-    for key in ("SANDBOX_DOCKER_HOST", "SANDBOX_LOCAL_ROOT"):
-        assert key in TIER2_K8S_REFUSED_KEYS
-        assert key in TIER2_COMPOSE_REFUSED_KEYS
+def test_boot_refuses_a_bad_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "docker")
+    with pytest.raises(ValueError, match="TAI_SUPERVISED"):
+        require_supervision_declared()
 
 
-def test_sandbox_selecting_env_is_not_recycle_class() -> None:
-    # The provider loads via the manifest ``sandbox_module``, not this env — so it is
-    # deliberately absent from both lists, mirroring ``TAI_MCP_BACKEND`` / ``TAI_BACKEND_MODULE``.
-    assert "TAI_MCP_SANDBOX" not in TIER2_K8S_REFUSED_KEYS
-    assert "TAI_MCP_SANDBOX" not in TIER2_COMPOSE_REFUSED_KEYS
+@pytest.mark.parametrize("marker", ["harness", None])
+def test_boot_passes_an_unsupervised_or_harness_shape(monkeypatch: pytest.MonkeyPatch, marker: str | None) -> None:
+    if marker is not None:
+        monkeypatch.setenv("TAI_SUPERVISED", marker)
+    require_supervision_declared()
+
+
+def test_boot_passes_a_supervised_marker_with_its_pinned_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_SUPERVISED", "k8s")
+    monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", '["SUB_MCP_REDIS_URL"]')
+    require_supervision_declared()
 
 
 # -- census kinds -------------------------------------------------------------
@@ -157,5 +199,31 @@ def test_census_target_kinds_are_backend_then_serve() -> None:
 
 def test_deployment_bare_reads_are_x_classified() -> None:
     # A profile can NEVER carry these; the boundary validator folds this set into its
-    # X-band refusal enforced at every env writer.
-    assert frozenset({"TAI_SUPERVISED", "TAI_READY_SENTINEL_PATH"}) == X_CLASSIFIED_DEPLOYMENT_BARE_READS
+    # X-band refusal enforced at every env writer (a profile must not shrink the pinned set).
+    assert (
+        frozenset({"TAI_SUPERVISED", "TAI_SUPERVISED_PINNED_KEYS", "TAI_READY_SENTINEL_PATH"})
+        == X_CLASSIFIED_DEPLOYMENT_BARE_READS
+    )
+
+
+def test_pinned_keys_unset_raises() -> None:
+    with pytest.raises(RuntimeError, match="TAI_SUPERVISED_PINNED_KEYS is not set"):
+        pinned_keys()
+
+
+def test_app_context_refuses_boot_on_a_supervised_marker_without_its_pinned_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    monkeypatch.setenv("TAI_SUPERVISED", "compose")
+
+    async def boot() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            pass
+
+    with pytest.raises(RuntimeError, match="TAI_SUPERVISED=compose requires TAI_SUPERVISED_PINNED_KEYS"):
+        asyncio.run(boot())

@@ -331,7 +331,7 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
     monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-x"))
 
     assert not reload_gate.locked
-    resp = await config_router.write_env(_body_req(b'{"NEW": "val"}', "/api/config/env"))
+    resp = await config_router.write_env(_body_req(b'{"env": {"NEW": "val"}}', "/api/config/env"))
 
     assert resp.status_code == 200
     assert _json(resp) == {

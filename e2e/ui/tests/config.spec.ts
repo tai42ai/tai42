@@ -62,7 +62,7 @@ test.afterEach(async ({ request }) => {
   for (const key of createdKeys) {
     // Best-effort: posting '' merge-deletes the key; a transient reload 503 on the
     // rare failure path is tolerable (the run tears the stack down after).
-    await request.post('/api/config/env', { headers: apiHeaders(), data: { [key]: '' } });
+    await request.post('/api/config/env', { headers: apiHeaders(), data: { env: { [key]: '' } } });
   }
   createdKeys.clear();
 });
@@ -112,7 +112,7 @@ test('set, persist, edit, and restore a unique env key through the Environment t
   // RESTORE: unset the test key (posted as '' → deleted) and confirm it is gone.
   // The same retriable 503 applies — retry the delete-merge until it lands.
   await expect(async () => {
-    const restore = await request.post('/api/config/env', { headers: apiHeaders(), data: { [key]: '' } });
+    const restore = await request.post('/api/config/env', { headers: apiHeaders(), data: { env: { [key]: '' } } });
     expect(restore.status(), await restore.text()).toBe(200);
   }).toPass({ timeout: 45_000 });
   await expect.poll(async () => (await storedEnv(request))[key]).toBeUndefined();

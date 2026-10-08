@@ -19,7 +19,7 @@ from ._owned_support import create_service_owner, mint_key_for, provision_operat
 pytestmark = pytest.mark.needs("kind:identity", "kind:interactions", "setting:seeded-access-control")
 
 
-@pytest.mark.needs("kind:accounts", "setting:INTERACTIONS_NOTIFICATIONS_FEED_MAX=5")
+@pytest.mark.needs("kind:accounts", "setting:CHANNELS_NOTIFICATIONS_FEED_MAX=5")
 async def test_notification_audience_isolation_and_completeness(
     owned_keys_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

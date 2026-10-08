@@ -333,3 +333,64 @@ async def test_leaving_mark_written_only_when_it_grows_the_stored_set(
     # No env write carried the marks var (the set did not grow); the value stands.
     assert all("TAI_ENV_SECRET_KEYS" not in write for write in store.env_writes)
     assert store.env["TAI_ENV_SECRET_KEYS"] == "ACME_CLIENT_SECRET"
+
+
+# ---------------------------------------------------------------------------
+# owned-prefix audit on every env writer
+# ---------------------------------------------------------------------------
+
+
+async def test_env_write_setting_an_unknown_owned_name_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.settings import UnknownOwnedSettingError
+
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, _bus = _service(store)
+
+    with pytest.raises(UnknownOwnedSettingError, match=r"^env write: .*INTERACTIONS_TYPO \(prefix INTERACTIONS_\)"):
+        await service.apply_env_change({"INTERACTIONS_TYPO": "x", "INTERACTIONS_KEY_PREFIX": "k:"})
+
+    assert store.env_writes == []
+    assert admin.calls == 0
+
+
+async def test_env_write_deleting_a_stored_unknown_owned_name_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"INTERACTIONS_TYPO": "x"})
+    service, _admin, _bus = _service(store)
+
+    await service.apply_env_change({"INTERACTIONS_TYPO": ""})
+
+    # The deleting write passes the audit and lands (the real managers drop an emptied key).
+    assert store.env_writes == [{"INTERACTIONS_TYPO": ""}]
+
+
+async def test_combined_env_write_setting_an_unknown_owned_name_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.settings import UnknownOwnedSettingError
+
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(UnknownOwnedSettingError, match="CHANNELS_TYPO"):
+        await service.apply_env_and_change(_prepare({"CHANNELS_TYPO": "x"}, _secret_marker_mutator("CHANNELS_TYPO")))
+
+    assert store.env_writes == []
+    assert store.persisted == []
+
+
+def test_profile_replace_setting_an_unknown_owned_name_is_refused() -> None:
+    from tai42_kit.settings import UnknownOwnedSettingError
+
+    store = FakeConfigStore(manifest={}, env={})
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(UnknownOwnedSettingError, match="ACCESS_CONTROL_ENABEL"):
+        service._validate_replace({"ACCESS_CONTROL_ENABEL": "true"})
+
+
+def test_profile_replace_omitting_a_stored_unknown_owned_name_passes() -> None:
+    store = FakeConfigStore(manifest={}, env={"INTERACTIONS_TYPO": "x"})
+    service, _admin, _bus = _service(store)
+
+    service._validate_replace({"INTERACTIONS_KEY_PREFIX": "k:"})

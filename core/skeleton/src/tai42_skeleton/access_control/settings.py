@@ -2,7 +2,7 @@
 
 import re
 from re import Pattern
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
@@ -31,6 +31,7 @@ class AccessControlRedisSettings(RedisConnectionSettings):
     """
 
     model_config = SettingsConfigDict(env_prefix="ACCESS_CONTROL_")
+    env_prefix_owned: ClassVar[bool] = True
 
     redis_url: str | None = None
     redis_max_connections: int | None = 10
@@ -46,6 +47,7 @@ class AccessControlSettings(TaiBaseSettings):
     """Settings for the access-control auth gate, read from the ``ACCESS_CONTROL_`` env prefix."""
 
     model_config = SettingsConfigDict(env_prefix="ACCESS_CONTROL_")
+    env_prefix_owned: ClassVar[bool] = True
 
     enable: bool = True
 

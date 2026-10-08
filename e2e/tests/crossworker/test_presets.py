@@ -75,7 +75,7 @@ async def test_preset_create_always_persists(replicas_stack: TaiStack, uniq: Cal
     names_b = [p["name"] for p in await replicas_stack.api(port=replicas_stack.port_b).get("/api/presets")]
     assert name in names_a
     assert name in names_b
-    await api_a.post("/api/config/env", json={})
+    await api_a.post("/api/config/env", json={"env": {}})
     assert name in [p["name"] for p in await api_a.get("/api/presets")]
 
 
@@ -105,7 +105,7 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     assert await _call_preset(replicas_stack, replicas_stack.port_a, name) == baked
 
     # B's live binding follows only after B's own reload.
-    await api_b.post("/api/config/env", json={})
+    await api_b.post("/api/config/env", json={"env": {}})
 
     async def b_serves_baked() -> bool:
         try:

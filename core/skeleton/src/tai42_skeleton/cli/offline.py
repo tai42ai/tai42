@@ -18,6 +18,7 @@ import typer
 from tai42_kit.settings import registered_settings
 
 from tai42_skeleton.app.route_registry import load_api_routes
+from tai42_skeleton.settings.settings import CoreSettings
 
 
 def validate_manifest_file(path: str | Path) -> None:
@@ -111,7 +112,7 @@ def config_lint(
 
     Example: ``tai config lint config/manifest.yml``
     """
-    manifest_path = file or os.environ.get("TAI_MANIFEST_PATH")
+    manifest_path = file or CoreSettings().manifest_path
     if manifest_path is not None:
         if not os.path.isfile(manifest_path):
             raise typer.BadParameter(f"manifest file not found: {manifest_path}", param_hint="FILE")

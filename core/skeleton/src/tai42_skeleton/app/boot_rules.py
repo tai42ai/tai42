@@ -22,12 +22,15 @@ both ``tai serve`` and ``tai backend`` cross, and re-runs there on every reload.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from tai42_skeleton.app.bus_settings import bus_settings
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from tai42_skeleton.manifest import Manifest
 
 _BUS_VAR = "TAI_BUS_REDIS_URL"
@@ -42,6 +45,20 @@ class BackendNeedsBusError(RuntimeError):
     invariant rejects a manifest/env change that ADDS a backend with no bus and one
     that REMOVES the bus while a backend still needs it.
     """
+
+
+@contextmanager
+def translate_backend_needs_bus(into: Callable[[str], Exception]) -> Iterator[None]:
+    """Re-raise BackendNeedsBusError as ``into(str(exc))`` — the mutate-time doors' 400 or compose error.
+
+    The invariant is a ``RuntimeError`` so a boot-time refusal crashes loudly; a mutate-time
+    door maps it to its own loud, actionable error naming ``TAI_BUS_REDIS_URL`` rather than
+    letting it escape as a 500.
+    """
+    try:
+        yield
+    except BackendNeedsBusError as exc:
+        raise into(str(exc)) from exc
 
 
 def _bus_configured() -> bool:

@@ -48,6 +48,7 @@ def _field(
         description=None,
         default_namespace_var=default_namespace_var,
         nested_group=nested_group,
+        accepted_env_vars=[env_var] if env_var else [],
     )
 
 
@@ -187,6 +188,8 @@ async def test_settings_schema_shape(install, monkeypatch):
         name="Demo",
         module="mod",
         qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
         fields=[_field("a", "A_VAR", default="x")],
     )
     monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
@@ -227,6 +230,8 @@ async def test_settings_schema_value_overlay(install, monkeypatch):
         name="Demo",
         module="mod",
         qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
         fields=[
             _field("proc", "PROC_WINS"),
             _field("store", "STORE_ONLY"),
@@ -256,6 +261,8 @@ async def test_settings_schema_resolves_through_tai_default_namespace(install, m
         name="Demo",
         module="mod",
         qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
         fields=[
             _field("proc_dflt", "OWN_VAR", default="d", default_namespace_var="TAI_DEFAULT_REDIS_URL"),
             _field("store_dflt", "OTHER_VAR", default="d", default_namespace_var="STORE_DEFAULT"),
@@ -268,6 +275,34 @@ async def test_settings_schema_resolves_through_tai_default_namespace(install, m
     assert fields["proc_dflt"]["value"] == "redis://proc-default"
     # The default-namespace value can also come from the stored env layer.
     assert fields["store_dflt"]["value"] == "from_store_default"
+
+
+async def test_settings_schema_empty_exported_var_reports_the_next_layer(install, monkeypatch):
+    # The settings layer reads an empty variable as absent, so an exported empty value
+    # reports the value and source of the next layer, as the field actually resolves.
+    install({"EMPTY_PROC": "from_store", "EMPTY_DEFAULT_OWN": "", "STORE_EMPTY": ""})
+    monkeypatch.setenv("EMPTY_PROC", "")
+    monkeypatch.setenv("EMPTY_DEFAULT", "")
+    monkeypatch.delenv("STORE_EMPTY", raising=False)
+    monkeypatch.delenv("EMPTY_DEFAULT_OWN", raising=False)
+    info = SettingsClassInfo(
+        name="Demo",
+        module="mod",
+        qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
+        fields=[
+            _field("proc", "EMPTY_PROC", default="d"),
+            _field("stored", "STORE_EMPTY", default="d"),
+            _field("dflt", "EMPTY_DEFAULT_OWN", default="d", default_namespace_var="EMPTY_DEFAULT"),
+        ],
+    )
+    monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
+    resp = await router.read_settings_schema(_req())
+    fields = {f["name"]: f for f in _json(resp)["data"]["groups"][0]["fields"]}
+    assert (fields["proc"]["value"], fields["proc"]["value_source"]) == ("from_store", "stored")
+    assert (fields["stored"]["value"], fields["stored"]["value_source"]) == ("d", "field_default")
+    assert (fields["dflt"]["value"], fields["dflt"]["value_source"]) == ("d", "field_default")
 
 
 async def test_settings_schema_value_source_marks_provenance(install, monkeypatch):
@@ -284,6 +319,8 @@ async def test_settings_schema_value_source_marks_provenance(install, monkeypatc
         name="Demo",
         module="mod",
         qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
         fields=[
             _field("proc", "PROC_WINS"),
             _field("store", "STORE_ONLY"),
@@ -330,6 +367,8 @@ async def test_settings_schema_missing_env_is_empty_not_500(monkeypatch):
         name="Demo",
         module="mod",
         qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
         fields=[_field("dflt", "DEFAULT_X", default="d")],
     )
     monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
@@ -354,7 +393,7 @@ async def test_secret_marks_roundtrip_and_group(install, monkeypatch):
 
 async def test_write_env_happy(install):
     ctx = install({"OLD": "keep"})
-    resp = await router.write_env(_body_req(b'{"NEW": "val"}'))
+    resp = await router.write_env(_body_req(b'{"env": {"NEW": "val"}}'))
     assert resp.status_code == 200
     assert _json(resp) == {
         "data": {
@@ -369,7 +408,7 @@ async def test_write_env_happy(install):
 
 async def test_write_env_non_string_value_400(install):
     ctx = install({})
-    resp = await router.write_env(_body_req(b'{"PORT": 8080}'))
+    resp = await router.write_env(_body_req(b'{"env": {"PORT": 8080}}'))
     assert resp.status_code == 400
     assert "strings" in _json(resp)["error"]
     assert ctx.manager.written == []
@@ -398,10 +437,77 @@ async def test_write_env_manager_value_error_maps_to_400(install):
         raise ValueError("invalid env key 'BAD KEY': must match [A-Za-z_][A-Za-z0-9_]*")
 
     ctx.manager.write_env = _raise
-    resp = await router.write_env(_body_req(b'{"BAD KEY": "val"}'))
+    resp = await router.write_env(_body_req(b'{"env": {"BAD KEY": "val"}}'))
     assert resp.status_code == 400
     assert "invalid env key" in _json(resp)["error"]
     assert ctx.admin.reloads == 0
+
+
+_ENV_BODY_SHAPE = 'the env write body is {"env": {name: value}, "secret_keys": [name] | null}'
+
+
+async def test_write_env_secret_keys_replace_the_stored_marks(install):
+    ctx = install({"TAI_ENV_SECRET_KEYS": "OLD_MARK", "API_KEY": "v"})
+    resp = await router.write_env(_body_req(b'{"env": {"NEW": "x"}, "secret_keys": ["API_KEY", "NEW"]}'))
+    assert resp.status_code == 200
+    # One write carrying the env and the whole replaced marks set.
+    assert ctx.manager.written == [{"NEW": "x", "TAI_ENV_SECRET_KEYS": "API_KEY,NEW"}]
+
+
+async def test_write_env_without_secret_keys_leaves_the_marks(install):
+    ctx = install({"TAI_ENV_SECRET_KEYS": "OLD_MARK"})
+    for body in (b'{"env": {"NEW": "x"}}', b'{"env": {"NEW": "x"}, "secret_keys": null}'):
+        resp = await router.write_env(_body_req(body))
+        assert resp.status_code == 200
+    assert ctx.manager.written == [{"NEW": "x"}, {"NEW": "x"}]
+
+
+async def test_write_env_empty_secret_keys_deletes_the_marks(install):
+    ctx = install({"TAI_ENV_SECRET_KEYS": "OLD_MARK"})
+    resp = await router.write_env(_body_req(b'{"env": {}, "secret_keys": []}'))
+    assert resp.status_code == 200
+    assert ctx.manager.written == [{"TAI_ENV_SECRET_KEYS": ""}]
+
+
+async def test_write_env_raw_marks_key_in_env_400(install):
+    ctx = install({})
+    resp = await router.write_env(_body_req(b'{"env": {"TAI_ENV_SECRET_KEYS": "A"}}'))
+    assert resp.status_code == 400
+    assert _json(resp)["error"] == "set secret marks through the 'secret_keys' field, not as an env key"
+    assert ctx.manager.written == []
+
+
+@pytest.mark.parametrize("body", [b'{"FOO": "x"}', b"{}", b'{"env": {}, "extra": 1}', b'{"env": "x"}'])
+async def test_write_env_body_shape_400(install, body):
+    ctx = install({})
+    resp = await router.write_env(_body_req(body))
+    assert resp.status_code == 400
+    assert _json(resp)["error"] == _ENV_BODY_SHAPE
+    assert ctx.manager.written == []
+
+
+async def test_write_env_bad_mark_400(install):
+    ctx = install({})
+    resp = await router.write_env(_body_req(b'{"env": {}, "secret_keys": ["OK", "BAD KEY"]}'))
+    assert resp.status_code == 400
+    assert _json(resp)["error"] == "secret_keys entry 'BAD KEY' is not a valid env key"
+    assert ctx.manager.written == []
+
+
+@pytest.mark.parametrize("marks", [b'"A"', b"[1]"])
+async def test_write_env_secret_keys_not_a_list_of_strings_400(install, marks):
+    install({})
+    resp = await router.write_env(_body_req(b'{"env": {}, "secret_keys": ' + marks + b"}"))
+    assert resp.status_code == 400
+    assert "secret_keys" in _json(resp)["error"]
+
+
+async def test_write_env_unknown_owned_setting_400(install):
+    ctx = install({})
+    resp = await router.write_env(_body_req(b'{"env": {"INTERACTIONS_TYPO": "x"}}'))
+    assert resp.status_code == 400
+    assert "INTERACTIONS_TYPO (prefix INTERACTIONS_)" in _json(resp)["error"]
+    assert ctx.manager.written == []
 
 
 # -- GET /api/config/mode ----------------------------------------------------

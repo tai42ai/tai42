@@ -377,13 +377,16 @@ async def test_recycle_class_diff_orchestrates_and_flags_serve_affecting(monkeyp
 @pytest.mark.parametrize(
     ("shape", "key"),
     [
-        ("compose", "STORAGE_S3_ENDPOINT"),  # x-tai-app-env pinned (compose Tier-2)
-        ("k8s", "SUB_MCP_REDIS_URL"),  # sub-MCP routing store (k8s Tier-2)
+        ("compose", "STORAGE_S3_ENDPOINT"),  # declared pinned on compose (Tier-2)
+        ("k8s", "SUB_MCP_REDIS_URL"),  # declared pinned on k8s (Tier-2)
         ("harness", "TAI_BUS_REDIS_URL"),  # bus-reaching (Tier-1, every shape)
     ],
 )
 async def test_apply_refuses_pinned_key_upfront(monkeypatch: pytest.MonkeyPatch, shape: str, key: str) -> None:
     monkeypatch.setenv("TAI_SUPERVISED", shape)
+    if shape != "harness":
+        # The supervised deployment declares the keys it pins.
+        monkeypatch.setenv("TAI_SUPERVISED_PINNED_KEYS", f'["{key}"]')
     store = FakeConfigStore(env={})
     spy, calls = _swap_spy()
     prev = _PrevSpy()

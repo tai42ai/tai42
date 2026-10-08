@@ -18,15 +18,12 @@ from pydantic import ValidationError
 from tai42_contract.plugins import PluginSpec
 from tai42_kit.plugins import accepts_env, required_env_for_spec
 
-from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.config.service import ApplyResult, ConfigService
-from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError, ManifestComposeError
-from tai42_skeleton.marketplace.manifest_apply import apply_composed
+from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError
+from tai42_skeleton.marketplace.manifest_apply import apply_composed, composed_manifest_invalid
 from tai42_skeleton.marketplace.provides import env_manifest_pointer
-
-# The operator's "treat these env keys as secret" marks (comma-separated key names),
-# the same var ``set_mcp_secret_env`` appends to so the Studio editor masks the value.
-SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"  # noqa: S105 constant identifier, not a secret value
+from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
 
 
 def precheck_required_env(cm: Any, spec: PluginSpec, env: dict[str, str] | None) -> None:
@@ -140,9 +137,7 @@ async def apply_provides_change(
         if marks:
             # Append to the marks read from the STORED env (never the settings
             # cache, stale until a reload), mirroring ``set_mcp_secret_env``.
-            prior = stored.get(SECRET_MARKS_VAR)
-            existing = [m.strip() for m in (prior or "").split(",") if m.strip()]
-            changes[SECRET_MARKS_VAR] = ",".join(dict.fromkeys([*existing, *marks]))
+            changes[SECRET_MARKS_ENV_VAR] = merge_secret_marks(stored.get(SECRET_MARKS_ENV_VAR), marks)
         # Capture the PRIOR store value of EVERY key this install writes (value keys
         # AND the marks var) from the STORED snapshot: its exact prior string when
         # present, else ``""`` (the key was absent). The unwind restores each to this,
@@ -152,11 +147,12 @@ async def apply_provides_change(
             env_restore[key] = stored.get(key, "")
         return changes, mutator
 
-    try:
-        return await svc.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
-    except (ValidationError, BackendNeedsBusError) as exc:
-        raise ManifestComposeError(f"the composed manifest is invalid: {exc}") from exc
-    except ValueError as exc:
-        # A dangling-marker refusal (each missing required var + json-pointer) or
-        # another env-boundary refusal — raised before anything persisted.
-        raise InstallEnvError(str(exc)) from exc
+    with translate_backend_needs_bus(composed_manifest_invalid):
+        try:
+            return await svc.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
+        except ValidationError as exc:
+            raise composed_manifest_invalid(str(exc)) from exc
+        except ValueError as exc:
+            # A dangling-marker refusal (each missing required var + json-pointer) or
+            # another env-boundary refusal — raised before anything persisted.
+            raise InstallEnvError(str(exc)) from exc
