@@ -459,9 +459,9 @@ def _drain_budget(deadline: float | None) -> float:
     # absolute time — mirrors the kit's ``drain_epoch(epoch, deadline)`` vocabulary.
     if deadline is not None:
         return deadline
-    from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
+    from tai42_skeleton.app import instance
 
-    return tool_runs_settings().shutdown_drain_seconds
+    return instance.build_app().drain_budgets.budget()
 
 
 async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_driver: bool = False) -> None:

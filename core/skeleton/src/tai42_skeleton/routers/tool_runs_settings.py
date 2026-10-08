@@ -9,7 +9,9 @@ feature values from ``TAI_TOOL_RUNS_*``.
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
@@ -89,3 +91,9 @@ def tool_runs_store_configured() -> bool:
     surface answers OFF rather than reaching for an absent Redis.
     """
     return bool(ToolRunsRedisSettings().redis_url)
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The tool-runs Redis, when one is configured."""
+    redis = tool_runs_settings().redis
+    return [ReadinessTarget("tool_runs", RedisClient, redis)] if redis.redis_url else []

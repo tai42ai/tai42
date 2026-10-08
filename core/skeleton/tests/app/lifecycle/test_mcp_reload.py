@@ -14,7 +14,7 @@ from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as lifecycle_module
 from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
-from tai42_skeleton.connectors.token_injection import _prepare_request
+from tai42_skeleton.connectors.token_injection import prepare_managed_request
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
@@ -125,7 +125,7 @@ def test_reload_evicts_pooled_session_under_plain_key(monkeypatch):
 def test_reload_eviction_uses_managed_effective_key(monkeypatch):
     """For a managed entry the eviction key is the auth-MERGED effective config —
     the exact key a dispatch pools under — computed through the same
-    ``_prepare_request`` path, so the two can never drift."""
+    ``prepare_managed_request`` path, so the two can never drift."""
     m = _Mixin()
     config = _managed_cfg("svc")
     m._manifest = Manifest.model_validate({"mcp": [config.model_dump()]})
@@ -143,7 +143,7 @@ def test_reload_eviction_uses_managed_effective_key(monkeypatch):
 
     assert out["status"] == "ok"
     transport = _detect_transport(config.config)
-    expected = _prepare_request(config, auth, transport)[0].model_dump()
+    expected = prepare_managed_request(config, auth, transport)[0].model_dump()
     assert [kwargs for _loop, kwargs in sink] == [{"config": expected}]
     # The merged Bearer header proves the key is NOT the raw config dump.
     assert expected != config.model_dump()

@@ -6,7 +6,9 @@ from typing import ClassVar
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
@@ -556,3 +558,9 @@ class ConversationsSettings(TaiBaseSettings):
 def conversations_settings() -> ConversationsSettings:
     """The cached :class:`ConversationsSettings` for this process, re-read on every settings reset."""
     return ConversationsSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The conversation-bridge Redis, unless the bridge runs without a durable store."""
+    conversations = conversations_settings()
+    return [] if conversations.in_memory else [ReadinessTarget("conversations", RedisClient, conversations.redis)]

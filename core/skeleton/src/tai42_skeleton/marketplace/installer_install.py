@@ -65,7 +65,7 @@ class _InstallFlow(_InstallerBase):
             existing,
             owned_routes=self._owned_routes,
             reserved_prefixes=self._reserved_prefixes,
-            effective_env=self._svc()._effective_env({}),
+            effective_env=self._svc().effective_env({}),
         )
 
     # -- install ------------------------------------------------------------

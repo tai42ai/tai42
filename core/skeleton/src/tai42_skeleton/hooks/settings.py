@@ -2,7 +2,9 @@
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings
 
 
@@ -132,3 +134,9 @@ class HooksSettings(TaiBaseSettings):
     def trigger_tomb_scan_pattern(self) -> str:
         """The scan pattern matching every trigger tombstone key."""
         return f"{self.trigger_tomb_key_prefix}*"
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The hooks Redis, unless the hooks store runs in memory."""
+    hooks = HooksSettings()
+    return [] if hooks.in_memory else [ReadinessTarget("hooks", RedisClient, hooks.redis)]

@@ -2,14 +2,16 @@
 
 The route pings exactly the backing stores this deployment wired, deduped by
 connection identity and pinged concurrently. These tests fake ``client_ctx`` so no
-live Redis/Postgres is needed, and drive ``_wired_connections`` directly (or via a
-stub) to isolate the response/dedupe/aggregation behavior from the real gates.
+live Redis/Postgres is needed, and read the platform's declared targets through the
+readiness registry (or stub it) to isolate the response/dedupe/aggregation behavior
+from the real gates.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
@@ -25,7 +27,31 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
+from tai42_skeleton.app import instance
+from tai42_skeleton.app.readiness import ReadinessRegistry
 from tai42_skeleton.routers import health
+
+
+def _wired() -> list[ReadinessTarget]:
+    """The targets the platform's registered subsystems wire under the current settings."""
+    return instance.build_app().readiness.wired_targets()
+
+
+def _stub_wired(monkeypatch: pytest.MonkeyPatch, wired: Sequence[tuple[str, type, ClientSettings]]) -> None:
+    """Make the app's readiness registry wire exactly ``wired`` (``(name, client, settings)`` rows)."""
+    targets = [ReadinessTarget(*row) for row in wired]
+    registry = ReadinessRegistry()
+    registry.register("stub", lambda: targets)
+    monkeypatch.setattr(instance.build_app(), "_readiness", registry)
+
+
+def _stub_app(monkeypatch: pytest.MonkeyPatch, *, readiness: ReadinessRegistry, dead: tuple[str, str] | None) -> None:
+    """Serve ``/ready`` from a stand-in app with ``readiness`` and a dead-perpetual-task marker of ``dead``."""
+    monkeypatch.setattr(
+        health.instance,
+        "build_app",
+        lambda: cast(object, SimpleNamespace(readiness=readiness, dead_perpetual_task=lambda: dead)),
+    )
 
 
 class _RedisBoomError(Exception):
@@ -95,7 +121,7 @@ async def test_ready_all_healthy_returns_200(monkeypatch) -> None:
         # hidden default), so the wired versioning target supplies one.
         ("versioning", PostgresClient, PostgresConnectionSettings(pg_host="db", pg_password=SecretStr("pw"))),
     ]
-    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+    _stub_wired(monkeypatch, wired)
 
     resp = await health.readiness_check(_request())
 
@@ -122,7 +148,7 @@ async def test_ready_failure_returns_503_type_only(monkeypatch, caplog) -> None:
         ("tool_runs", RedisClient, RedisConnectionSettings(redis_url="redis://shared")),
         ("interactions", RedisClient, RedisConnectionSettings(redis_url="redis://shared")),
     ]
-    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+    _stub_wired(monkeypatch, wired)
 
     with caplog.at_level("WARNING", logger=health.logger.name):
         resp = await health.readiness_check(_request())
@@ -167,7 +193,7 @@ async def test_ready_dedupes_shared_connection(monkeypatch) -> None:
         ("tool_runs", RedisClient, RedisConnectionSettings(redis_url="redis://shared")),
         ("interactions", RedisClient, RedisConnectionSettings(redis_url="redis://shared")),
     ]
-    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+    _stub_wired(monkeypatch, wired)
 
     resp = await health.readiness_check(_request())
 
@@ -196,7 +222,7 @@ async def test_ready_dedupes_two_pg_prefixes_on_one_dsn(monkeypatch) -> None:
         ("marketplace", PostgresClient, _StoreA(pg_host="db", pg_password=SecretStr("pw"))),
         ("tool_meta", PostgresClient, _StoreB(pg_host="db", pg_password=SecretStr("pw"))),
     ]
-    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+    _stub_wired(monkeypatch, wired)
 
     resp = await health.readiness_check(_request())
 
@@ -216,7 +242,7 @@ async def test_ready_two_distinct_dsns_ping_twice(monkeypatch) -> None:
         ("versioning", PostgresClient, PostgresConnectionSettings(pg_host="db-one", pg_password=SecretStr("pw"))),
         ("marketplace", PostgresClient, PostgresConnectionSettings(pg_host="db-two", pg_password=SecretStr("pw"))),
     ]
-    monkeypatch.setattr(health, "_wired_connections", lambda: wired)
+    _stub_wired(monkeypatch, wired)
 
     resp = await health.readiness_check(_request())
 
@@ -239,7 +265,7 @@ async def test_wired_connections_gates_out_pg_and_inmemory_hooks(monkeypatch) ->
 
     reset_all_settings()
     try:
-        conns = health._wired_connections()
+        conns = _wired()
     finally:
         reset_all_settings()
 
@@ -253,7 +279,6 @@ async def test_wired_connections_gates_out_pg_and_inmemory_hooks(monkeypatch) ->
 
 async def test_wired_connections_gates_in_stores_when_wired(monkeypatch) -> None:
     _quiet_stores(monkeypatch)
-    monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: True)
     # A connector store password wires connectors in; a connector Redis URL rides the
     # additional Redis row on top of the Postgres row.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
@@ -261,7 +286,7 @@ async def test_wired_connections_gates_in_stores_when_wired(monkeypatch) -> None
     monkeypatch.setenv("HOOKS_REDIS_URL", "redis://hooks")
     reset_all_settings()
     try:
-        conns = health._wired_connections()
+        conns = _wired()
     finally:
         monkeypatch.delenv("CONNECTOR_STORE_REDIS_URL", raising=False)
         reset_all_settings()
@@ -291,7 +316,7 @@ async def test_ready_connectors_pg_only_readies_without_connector_redis(monkeypa
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "db")
     reset_all_settings()
     try:
-        wired = health._wired_connections()
+        wired = _wired()
         resp = await health.readiness_check(_request())
     finally:
         reset_all_settings()
@@ -316,7 +341,7 @@ async def test_wired_connections_gates_sub_mcp_on_redis_url(monkeypatch) -> None
     monkeypatch.setenv("SUB_MCP_REDIS_URL", "redis://sub-mcp")
     reset_all_settings()
     try:
-        wired = health._wired_connections()
+        wired = _wired()
     finally:
         reset_all_settings()
     sub_mcp = [(name, cls) for name, cls, _ in wired if name == "sub_mcp"]
@@ -325,22 +350,23 @@ async def test_wired_connections_gates_sub_mcp_on_redis_url(monkeypatch) -> None
     monkeypatch.delenv("SUB_MCP_REDIS_URL", raising=False)
     reset_all_settings()
     try:
-        wired_unset = health._wired_connections()
+        wired_unset = _wired()
     finally:
         reset_all_settings()
     assert "sub_mcp" not in [name for name, _, _ in wired_unset]
 
 
 def _quiet_stores(monkeypatch) -> None:
-    # Keep the readiness set to just the feature under test: no connectors/versioning,
-    # and no skeleton database leaking a store row in. Every DB-backed skeleton store
+    # Keep the readiness set to just the feature under test: no skeleton database leaking
+    # a store row in, and no Redis-backed subsystem wired. Every DB-backed skeleton store
     # gates on the one bound-database password, so clearing it turns them all off.
-    monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: False)
     for var in (
         "TAI_DEFAULT_REDIS_URL",
         "TAI_DATABASE_DEFAULT_PG_PASSWORD",
         "TAI_TOOL_RUNS_REDIS_URL",
         "INTERACTIONS_REDIS_URL",
+        "CONVERSATIONS_REDIS_URL",
+        "TAI_BUS_REDIS_URL",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -352,7 +378,7 @@ async def test_wired_connections_gates_marketplace_and_tool_meta_on_pg_password(
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
     reset_all_settings()
     try:
-        wired = health._wired_connections()
+        wired = _wired()
     finally:
         reset_all_settings()
     rows = {(name, cls) for name, cls, _ in wired}
@@ -364,7 +390,7 @@ async def test_wired_connections_omits_marketplace_and_tool_meta_when_unconfigur
     _quiet_stores(monkeypatch)
     reset_all_settings()
     try:
-        names = [name for name, _, _ in health._wired_connections()]
+        names = [name for name, _, _ in _wired()]
     finally:
         reset_all_settings()
     assert "marketplace" not in names
@@ -377,7 +403,7 @@ async def test_wired_connections_omits_tool_runs_and_interactions_when_redis_uns
     _quiet_stores(monkeypatch)
     reset_all_settings()
     try:
-        names = [name for name, _, _ in health._wired_connections()]
+        names = [name for name, _, _ in _wired()]
     finally:
         reset_all_settings()
     assert "tool_runs" not in names
@@ -394,7 +420,7 @@ async def test_wired_connections_gates_rate_limit_on_one_enabled_family(monkeypa
     monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://rl")
     reset_all_settings()
     try:
-        wired = health._wired_connections()
+        wired = _wired()
     finally:
         monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
         reset_all_settings()
@@ -411,7 +437,7 @@ async def test_wired_connections_drops_rate_limit_when_every_family_is_off(monke
     monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://rl")
     reset_all_settings()
     try:
-        names = [name for name, _, _ in health._wired_connections()]
+        names = [name for name, _, _ in _wired()]
     finally:
         monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
         reset_all_settings()
@@ -440,30 +466,22 @@ async def test_wired_connections_enumerates_identity_provider_generically(monkey
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["custom_idp"]')
     reset_all_settings()
     try:
-        conns = health._wired_connections()
+        conns = _wired()
     finally:
         registry._PROVIDERS._generation.committed().pop("custom_idp", None)
         reset_all_settings()
 
     # The provider registered under "custom_idp" (never "redis") still contributes its
     # declared target, verbatim — proving core routes through the ABC, not a name match.
-    ac = [conn for conn in conns if conn[0] == "access_control"]
+    ac = [conn for conn in conns if conn[0] == "access_control" and conn[2] is declared]
     assert ac == [("access_control", RedisClient, declared)]
-    assert ac[0][2] is declared
 
 
 async def test_ready_names_dead_perpetual_task(monkeypatch) -> None:
     # A dead perpetual task marks the live app; /ready surfaces it as a named
     # readiness failure and 503s, so the worker drains even when every wired store
     # pings clean. The marker is read through ``dead_perpetual_task()``.
-    monkeypatch.setattr(health, "_wired_connections", list)
-    monkeypatch.setattr(
-        health.instance,
-        "build_app",
-        lambda: cast(
-            object, SimpleNamespace(dead_perpetual_task=lambda: ("tai-worker-bus-subscription", "RuntimeError"))
-        ),
-    )
+    _stub_app(monkeypatch, readiness=ReadinessRegistry(), dead=("tai-worker-bus-subscription", "RuntimeError"))
 
     resp = await health.readiness_check(_request())
 
@@ -476,12 +494,7 @@ async def test_ready_names_dead_perpetual_task(monkeypatch) -> None:
 async def test_ready_healthy_when_no_perpetual_task_dead(monkeypatch) -> None:
     # With the marker unset the all-healthy path still returns 200 (no
     # ``perpetual_task:*`` check appears).
-    monkeypatch.setattr(health, "_wired_connections", list)
-    monkeypatch.setattr(
-        health.instance,
-        "build_app",
-        lambda: cast(object, SimpleNamespace(dead_perpetual_task=lambda: None)),
-    )
+    _stub_app(monkeypatch, readiness=ReadinessRegistry(), dead=None)
 
     resp = await health.readiness_check(_request())
 
@@ -494,7 +507,7 @@ async def test_ready_healthy_when_no_perpetual_task_dead(monkeypatch) -> None:
 async def test_ready_nothing_wired_returns_200_empty(monkeypatch) -> None:
     calls: list = []
     monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
-    monkeypatch.setattr(health, "_wired_connections", list)
+    _stub_wired(monkeypatch, [])
 
     resp = await health.readiness_check(_request())
 
@@ -502,3 +515,221 @@ async def test_ready_nothing_wired_returns_200_empty(monkeypatch) -> None:
     body = json.loads(bytes(resp.body))
     assert body == {"status": "ready", "checks": {}}
     assert calls == []
+
+
+async def test_conversations_and_bus_rows_are_wired_with_their_redis(monkeypatch) -> None:
+    # The conversation bridge and the worker bus declare their own Redis: each joins the
+    # readiness set exactly when its store is configured.
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://conversations")
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://bus")
+    reset_all_settings()
+    try:
+        wired = _wired()
+    finally:
+        reset_all_settings()
+    rows = {(target.name, target.client, target.settings.client_kwargs()["url"]) for target in wired}
+    assert ("conversations", RedisClient, "redis://conversations") in rows
+    assert ("bus", RedisClient, "redis://bus") in rows
+
+
+async def test_conversations_and_bus_rows_are_absent_when_not_wired(monkeypatch) -> None:
+    _quiet_stores(monkeypatch)
+    reset_all_settings()
+    try:
+        names = [target.name for target in _wired()]
+    finally:
+        reset_all_settings()
+    assert "conversations" not in names
+    assert "bus" not in names
+
+
+async def test_a_dead_conversations_redis_fails_readiness(monkeypatch) -> None:
+    platform_readiness = instance.build_app().readiness
+    calls: list = []
+    monkeypatch.setattr(
+        health,
+        "client_ctx",
+        _make_client_ctx(calls, fail_idents=frozenset({"redis://conversations"}), fail_type=_RedisBoomError),
+    )
+    _stub_app(monkeypatch, readiness=platform_readiness, dead=None)
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://conversations")
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://bus")
+    reset_all_settings()
+    try:
+        resp = await health.readiness_check(_request())
+    finally:
+        reset_all_settings()
+    assert resp.status_code == 503
+    body = json.loads(bytes(resp.body))
+    assert body["status"] == "not_ready"
+    assert body["checks"]["conversations"] == "_RedisBoomError"
+    assert body["checks"]["bus"] == "ok"
+
+
+def _state_store_gate_reads_its_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The suite reports the state store unconfigured by default; these tests read its real gate.
+    from tai42_kit.db import component_store_configured
+
+    from tai42_skeleton.states import db as states_db
+
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: component_store_configured("states"))
+
+
+def _state_store_on_its_own_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The skeleton database on ``db-main`` and the state store bound to its own ``records`` database.
+    _quiet_stores(monkeypatch)
+    _state_store_gate_reads_its_binding(monkeypatch)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "db-main")
+    monkeypatch.setenv("TAI_DB_BINDING_STATES", "records")
+    monkeypatch.setenv("TAI_DATABASE_RECORDS_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TAI_DATABASE_RECORDS_PG_HOST", "db-records")
+
+
+async def test_the_state_store_row_follows_its_own_binding(monkeypatch) -> None:
+    _state_store_on_its_own_database(monkeypatch)
+    reset_all_settings()
+    try:
+        states = [target for target in _wired() if target.name == "states"]
+    finally:
+        reset_all_settings()
+    assert [target.client for target in states] == [PostgresClient]
+    assert "@db-records:" in states[0].settings.client_kwargs()["dsn"]
+
+
+async def test_a_dead_state_store_database_fails_readiness(monkeypatch) -> None:
+    from tai42_kit.db import component_store_settings
+
+    _state_store_on_its_own_database(monkeypatch)
+    reset_all_settings()
+    try:
+        records_dsn = component_store_settings("states").client_kwargs()["dsn"]
+        calls: list = []
+        monkeypatch.setattr(
+            health,
+            "client_ctx",
+            _make_client_ctx(calls, fail_idents=frozenset({records_dsn}), fail_type=_RedisBoomError),
+        )
+        resp = await health.readiness_check(_request())
+    finally:
+        reset_all_settings()
+    assert resp.status_code == 503
+    body = json.loads(bytes(resp.body))
+    assert body["checks"]["states"] == "_RedisBoomError"
+    assert body["checks"]["versioning"] == "ok"
+
+
+async def test_the_state_store_on_the_default_database_adds_no_ping(monkeypatch) -> None:
+    _quiet_stores(monkeypatch)
+    _state_store_gate_reads_its_binding(monkeypatch)
+    monkeypatch.delenv("TAI_DB_BINDING_STATES", raising=False)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "db-main")
+    calls: list = []
+    monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
+    reset_all_settings()
+    try:
+        resp = await health.readiness_check(_request())
+    finally:
+        reset_all_settings()
+    assert resp.status_code == 200
+    body = json.loads(bytes(resp.body))
+    assert body["checks"]["states"] == "ok"
+    # Every skeleton-database row, the state store's included, rides one pool: one ping.
+    assert [client for client, _ in calls].count("PostgresClient") == 1
+
+
+def _register_provider_with_its_own_store(monkeypatch: pytest.MonkeyPatch, declared: list[ReadinessTarget]) -> None:
+    """Register an identity provider whose readiness targets are ``declared`` and make it the only one."""
+
+    class _OwnStoreProvider(IdentityProvider):
+        def __init__(self, settings: object) -> None:
+            self._settings = settings
+
+        async def validate_token(self, token: str) -> AuthIdentity | None:
+            return None
+
+        def readiness_targets(self) -> tuple[ReadinessTarget, ...]:
+            return tuple(declared)
+
+    registry.register_identity_provider("own_store_idp", _OwnStoreProvider)
+    monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["own_store_idp"]')
+
+
+async def test_the_access_control_gate_redis_is_a_row_beside_the_providers_own(monkeypatch) -> None:
+    # The gate reads its own Redis on every authenticated request, so it is wired whatever
+    # store an identity provider declares for itself.
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
+    monkeypatch.setenv("ACCESS_CONTROL_REDIS_URL", "redis://ac-gate")
+    own = ReadinessTarget("accounts", RedisClient, RedisConnectionSettings(redis_url="redis://accounts"))
+    _register_provider_with_its_own_store(monkeypatch, [own])
+    reset_all_settings()
+    try:
+        rows = {(target.name, target.settings.client_kwargs()["url"]) for target in _wired()}
+    finally:
+        registry._PROVIDERS._generation.committed().pop("own_store_idp", None)
+        reset_all_settings()
+    assert ("access_control", "redis://ac-gate") in rows
+    assert ("accounts", "redis://accounts") in rows
+
+
+async def test_a_dead_access_control_gate_redis_fails_readiness(monkeypatch) -> None:
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
+    monkeypatch.setenv("ACCESS_CONTROL_REDIS_URL", "redis://ac-gate")
+    _register_provider_with_its_own_store(
+        monkeypatch, [ReadinessTarget("accounts", RedisClient, RedisConnectionSettings(redis_url="redis://accounts"))]
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        health,
+        "client_ctx",
+        _make_client_ctx(calls, fail_idents=frozenset({"redis://ac-gate"}), fail_type=_RedisBoomError),
+    )
+    reset_all_settings()
+    try:
+        resp = await health.readiness_check(_request())
+    finally:
+        registry._PROVIDERS._generation.committed().pop("own_store_idp", None)
+        reset_all_settings()
+    assert resp.status_code == 503
+    body = json.loads(bytes(resp.body))
+    assert body["checks"]["access_control"] == "_RedisBoomError"
+    assert body["checks"]["accounts"] == "ok"
+
+
+async def test_a_provider_on_the_gate_redis_shares_its_one_ping(monkeypatch) -> None:
+    from tai42_skeleton.access_control.settings import access_control_settings
+
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
+    monkeypatch.setenv("ACCESS_CONTROL_REDIS_URL", "redis://ac-gate")
+    reset_all_settings()
+    _register_provider_with_its_own_store(
+        monkeypatch, [ReadinessTarget("access_control", RedisClient, access_control_settings().redis)]
+    )
+    calls: list = []
+    monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
+    try:
+        resp = await health.readiness_check(_request())
+    finally:
+        registry._PROVIDERS._generation.committed().pop("own_store_idp", None)
+        reset_all_settings()
+    assert resp.status_code == 200
+    assert calls.count(("RedisClient", "redis://ac-gate")) == 1
+    assert json.loads(bytes(resp.body))["checks"]["access_control"] == "ok"
+
+
+async def test_the_access_control_gate_redis_is_not_wired_when_access_control_is_off(monkeypatch) -> None:
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+    monkeypatch.setenv("ACCESS_CONTROL_REDIS_URL", "redis://ac-gate")
+    reset_all_settings()
+    try:
+        names = [target.name for target in _wired()]
+    finally:
+        reset_all_settings()
+    assert "access_control" not in names

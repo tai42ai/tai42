@@ -11,8 +11,10 @@ from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_contract.interactions.models import LOCAL_HTTP_HOSTS
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
@@ -165,3 +167,9 @@ def interactions_store_configured() -> bool:
     than reaching for an absent Redis.
     """
     return bool(interactions_settings().redis.redis_url)
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The interactions Redis, when one is configured."""
+    redis = interactions_settings().redis
+    return [ReadinessTarget("interactions", RedisClient, redis)] if redis.redis_url else []

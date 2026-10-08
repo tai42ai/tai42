@@ -97,7 +97,7 @@ def test_redact_scans_adversarial_scheme_run_linearly(hostile):
     # A long run of scheme-valid chars never followed by ``://`` must not backtrack
     # quadratically: the bounded scheme quantifier keeps the scan linear.
     start = time.monotonic()
-    result = mcp_health._redact(hostile)
+    result = mcp_health.redact_probe_error(hostile)
     elapsed = time.monotonic() - start
 
     assert result == hostile

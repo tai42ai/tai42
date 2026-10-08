@@ -92,8 +92,11 @@ class FileConfigManager(ConfigManager):
         return os.path.join(self._config_dir_path, ".env")
 
     @property
-    def _manifest_path(self) -> str:
-        # A fresh settings read per call: launchers set the variable after import.
+    def manifest_path(self) -> str:
+        """The manifest file this manager reads and writes: ``TAI_MANIFEST_PATH``, else ``manifest.yml`` in the dir.
+
+        A fresh settings read per call: launchers set the variable after import.
+        """
         return CoreSettings().manifest_path or os.path.join(self._config_dir_path, "manifest.yml")
 
     @property
@@ -137,7 +140,7 @@ class FileConfigManager(ConfigManager):
         read-modify-write under this one lock, so a concurrent worker cannot
         interleave between another writer's read and write and lose an update.
         """
-        with self._file_lock(self._manifest_path):
+        with self._file_lock(self.manifest_path):
             yield
 
     # -- Environment configuration -------------------------------------------
@@ -292,7 +295,7 @@ class FileConfigManager(ConfigManager):
         validation (:class:`~tai42_skeleton.config.service.ConfigService`) and by the
         offline CLI ``validate`` — closing the silent WRITE path, never the boot read.
         """
-        path = self._manifest_path
+        path = self.manifest_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Manifest not found: {path}")
         return self._load_yaml_expanded(path)
@@ -302,7 +305,7 @@ class FileConfigManager(ConfigManager):
 
         No secret values are resolved.
         """
-        path = self._manifest_path
+        path = self.manifest_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Manifest not found: {path}")
         return self._load_yaml_preserved(path)
@@ -341,15 +344,15 @@ class FileConfigManager(ConfigManager):
         """
         with self._manifest_transaction():
             document: CommentedMap = CommentedMap()
-            if os.path.exists(self._manifest_path):
-                document = self._load_yaml_preserved(self._manifest_path)
+            if os.path.exists(self.manifest_path):
+                document = self._load_yaml_preserved(self.manifest_path)
             # A mutator exception propagates here, before any write — nothing lands.
             mutator(document)
             defaults: dict = {}
             if os.path.exists(self._defaults_manifest_path):
                 defaults = self._load_yaml_preserved(self._defaults_manifest_path)
             content = merge_and_dump_manifest(defaults, document, {})
-            path = self._manifest_path
+            path = self.manifest_path
             try:
                 self._atomic_write(path, content)
             except OSError:
@@ -375,7 +378,7 @@ class FileConfigManager(ConfigManager):
                 defaults = self._load_yaml_preserved(self._defaults_manifest_path)
             persisted = cast("CommentedMap", copy.deepcopy(document))
             content = merge_and_dump_manifest(defaults, persisted, {})
-            path = self._manifest_path
+            path = self.manifest_path
             try:
                 self._atomic_write(path, content)
             except OSError:

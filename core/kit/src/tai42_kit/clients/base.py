@@ -148,7 +148,8 @@ class PooledClient[T]:
         """
         return {key: value for key, value in kwargs.items() if key not in _PASSENGER_KWARGS}
 
-    def _key(self, **kwargs) -> str:
+    def pool_key(self, **kwargs) -> str:
+        """The pool this client leases for ``kwargs``: two calls with equal keys share one pooled client."""
         return json.dumps(self._identity(**kwargs), sort_keys=True)
 
     def _default_build_options(self) -> dict:
@@ -301,7 +302,7 @@ class PooledClient[T]:
         :class:`ClientDisconnectedError`; retry to rebuild it.
         """
         loop = asyncio.get_running_loop()
-        key = self._key(**kwargs)
+        key = self.pool_key(**kwargs)
         entry, epoch = await self._acquire(loop, key, kwargs)
         entry.leases += 1
         try:
@@ -373,7 +374,7 @@ class PooledClient[T]:
         """Close and drop the pooled client for ``kwargs`` in the current epoch, if one is pooled."""
         loop = asyncio.get_running_loop()
         epoch = current_client_epoch()
-        key = self._key(**kwargs)
+        key = self.pool_key(**kwargs)
         with _registry_lock:
             per_loop = _loop_clients.get(loop)
             per_epoch = per_loop.get(epoch) if per_loop is not None else None

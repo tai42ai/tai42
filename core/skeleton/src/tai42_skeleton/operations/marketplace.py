@@ -69,6 +69,7 @@ from tai42_skeleton.marketplace.errors import (
     InstallEnvError,
     InstallStateError,
     ListingNotFoundError,
+    LocalStateError,
     MalformedRefError,
     ManifestCollisionError,
     MarketplaceError,
@@ -83,6 +84,7 @@ from tai42_skeleton.marketplace.errors import (
     VersionRefusedError,
 )
 from tai42_skeleton.marketplace.installer import Installer
+from tai42_skeleton.marketplace.resolve import parse_ref, spec_from_row
 from tai42_skeleton.marketplace.settings import marketplace_settings
 from tai42_skeleton.marketplace.store import MarketplaceInstallStore
 from tai42_skeleton.operations import (
@@ -125,29 +127,6 @@ def _truncate(text: str) -> str:
     if len(text) <= _ENVELOPE_DETAIL_CHARS:
         return text
     return f"... (truncated) {text[-_ENVELOPE_DETAIL_CHARS:]}"
-
-
-def _provided_items(spec: dict[str, Any]) -> list[dict[str, str]]:
-    """The ``{kind, name}`` of every item the stored spec provides, in spec order.
-
-    Read from the locally stored ``PluginSpec`` document (``model_dump(mode="json")``,
-    so ``kind`` is its enum string), NOT the registry — the answer is offline truth.
-    Studio joins these names against the manifest's ``mcp`` entry titles to mark an
-    installer-written entry read-only (the ``mcp_entry`` writer keys the title on the
-    provides item ``name``); a malformed/absent provides list yields ``[]``.
-    """
-    provides = spec.get("provides")
-    if not isinstance(provides, list):
-        return []
-    items: list[dict[str, str]] = []
-    for item in provides:
-        if not isinstance(item, dict):
-            continue
-        kind = item.get("kind")
-        name = item.get("name")
-        if isinstance(kind, str) and isinstance(name, str):
-            items.append({"kind": kind, "name": name})
-    return items
 
 
 def _pip_failed_error(exc: MarketplaceError) -> OperationError:
@@ -482,7 +461,8 @@ async def marketplace_installed() -> dict[str, Any]:
     failure: that row answers ``latest: null``, ``update_available: false``,
     ``missing_upstream: true``, so one dead listing never fails the whole
     inventory. A transport/garbled-upstream failure still surfaces as a 502,
-    and a garbled LOCAL row (an unparsable stored version) as a 500 — serving
+    and a garbled LOCAL row (a stored spec that no longer validates, a malformed
+    stored ref, an unparsable stored version) as a 500 naming the row — serving
     rows without their update picture would be a silent degrade of the spec'd
     shape.
 
@@ -506,7 +486,14 @@ async def marketplace_installed() -> dict[str, Any]:
     contract = running_contract_version()
     rows: list[dict[str, Any]] = []
     for record in await MarketplaceInstallStore().list_installed():
-        ns, _, name = record.ref.partition("/")
+        try:
+            spec = spec_from_row(record)
+            try:
+                ns, name = parse_ref(record.ref)
+            except MalformedRefError as exc:
+                raise LocalStateError(f"the stored ref {record.ref!r} is corrupt") from exc
+        except LocalStateError as exc:
+            raise _to_operation_error(exc) from exc
         missing_upstream = False
         targets: UpdateTargets | None = None
         try:
@@ -516,9 +503,8 @@ async def marketplace_installed() -> dict[str, Any]:
             missing_upstream = True
         except MarketplaceError as exc:
             raise _to_operation_error(exc) from exc
-        package = record.spec.get("package")
-        if isinstance(package, str):
-            compat = dist_compat(package)
+        if spec.package is not None:
+            compat = dist_compat(spec.package)
         else:
             # A row whose stored spec names no package distribution cannot be
             # verdicted — surfaced as unknown, never a silent "compatible".
@@ -528,14 +514,14 @@ async def marketplace_installed() -> dict[str, Any]:
                 "ref": record.ref,
                 "version": record.version,
                 "source": record.source,
-                "delivery": "package" if isinstance(package, str) else "descriptor",
+                "delivery": spec.delivery,
                 "installed_at": record.installed_at.isoformat(),
                 "latest": targets.latest if targets is not None else None,
                 "update_available": targets.update_available if targets is not None else False,
                 "incompatible_newer": targets.incompatible_newer if targets is not None else None,
                 "missing_upstream": missing_upstream,
                 "compat": compat.as_payload(),
-                "items": _provided_items(record.spec),
+                "items": [{"kind": item.kind.value, "name": item.name} for item in spec.provides],
                 "route_mounts": record.route_mounts,
             }
         )

@@ -28,6 +28,8 @@ from tai42_skeleton.app.route_registry import RouteOwner, RouteRegistry
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.marketplace.compat import CompatVerdict
 
+from ._fixtures.route_table import route_table
+
 _PLUGIN_DIST_ROOT = Path(__file__).parent / "_fixtures" / "_plugin_dist"
 
 # A no-distribution compat verdict: the fixture packages are on ``sys.path`` but not pip
@@ -410,7 +412,7 @@ def test_unmapped_route_submodule_in_a_foreign_walk_still_raises(foreign_role_di
 
 
 def _fastmcp_route_paths(app: TaiMCP) -> list[str]:
-    return [route.path for route in app._fast_mcp._additional_http_routes if isinstance(route, Route)]
+    return [route.path for route in route_table(app) if isinstance(route, Route)]
 
 
 def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(

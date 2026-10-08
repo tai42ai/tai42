@@ -353,6 +353,9 @@ class _OpsFakeApp:
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
         self.storage = _FakeStorage(_FakeResourceManager(by_id))
 
+    def target_validator(self, target_kind, target_name):
+        return self._target_validator_registry.get(target_kind, target_name)
+
 
 @pytest.fixture
 def record_redis(monkeypatch) -> FakeRecordRedis:

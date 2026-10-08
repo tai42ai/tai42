@@ -155,7 +155,7 @@ class _FakeSvc:
         self._cm._manifest = copy.deepcopy(document)
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
 
-    def _effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+    def effective_env(self, changes: dict[str, str]) -> dict[str, str]:
         import os
 
         return {**os.environ, **self._cm.read_env(), **changes}

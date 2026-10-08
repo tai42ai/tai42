@@ -180,32 +180,32 @@ async def _probe_unreachable(record: ConnectionRecord) -> list[str]:
 async def _probe_sub_service(record: ConnectionRecord, descriptor: ProviderDescriptor, sub_service: str) -> bool:
     """Whether ``sub_service`` answers a live MCP reachability probe.
 
-    Read-only and bounded, because the single-connection GET is idempotent. OAuth
+    Read-only and bounded, because the single-connection GET is idempotent. Both
+    kinds take their credential from :func:`resolve_managed_auth` with
+    ``allow_refresh=False`` — the resolver every managed dispatch uses. OAuth
     resolves the access token WITHOUT driving a refresh (no lock, no upstream
     token exchange, no ``auth_health_state`` write, no cooldown breaker): a
     still-fresh token is probed; a token that is stale / needs reconnect / cannot
     be resolved read-only yields no credential, so the sub-service reads
     unreachable rather than triggering a refresh a read must not cause. No-auth
-    injects the stored client config on the sub-service's transport channel.
+    resolves to the stored client config on the sub-service's transport channel,
+    or to no credential when it has none (probed with nothing injected).
 
     The whole per-sub-service probe (credential read + MCP round-trip) runs under
     a short timeout; a timeout, a missing provider credential
     (:class:`OperatorMisconfiguredError`), or any :class:`ConnectorError` is a
     logged, deliberate unreachable classification — never a 500.
     """
-    if record.kind == "none":
-        config_values = {key: value.get_secret_value() for key, value in record.config_values.items()}
-        return await probe(descriptor, sub_service, config_values=config_values)
     try:
         async with asyncio.timeout(_SUB_SERVICE_PROBE_TIMEOUT_SECONDS):
             auth = await resolve_managed_auth(
                 record.connection_id, record.provider_id, sub_service, allow_refresh=False
             )
-            if auth is None:
+            if auth is None and record.kind != "none":
                 # No fresh token resolvable read-only — unreachable without an
                 # upstream exchange (the read-only resolver never refreshes).
                 return False
-            return await probe(descriptor, sub_service, access_token=auth.access_token)
+            return await probe(descriptor, sub_service, auth=auth)
     except (ConnectorError, OperatorMisconfiguredError, TimeoutError) as exc:
         logger.info(
             "connectors: sub-service %s/%s classified unreachable on probe: %s",

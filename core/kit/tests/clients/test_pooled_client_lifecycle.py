@@ -69,7 +69,7 @@ def test_default_predicate_is_isinstance_against_set():
 def test_key_is_order_independent_json():
     # The pool key is canonical JSON, so kwarg order does not split the pool.
     base = PooledClient()
-    assert base._key(a=1, b=2) == base._key(b=2, a=1)
+    assert base.pool_key(a=1, b=2) == base.pool_key(b=2, a=1)
 
 
 async def test_disconnection_evicts_closes_and_raises_wrapped():

@@ -109,25 +109,25 @@ async def test_resolve_returns_none_when_resolver_none(monkeypatch):
     assert await resolve_managed_auth_for_config(_managed_stdio()) is None
 
 
-# -- token injection / _prepare_request --------------------------------------
+# -- token injection / prepare_managed_request --------------------------------------
 
 
 def test_prepare_request_no_auth_injects_nothing():
     config = _managed_http()
-    out_config, meta = ti._prepare_request(config, None, "http")
+    out_config, meta = ti.prepare_managed_request(config, None, "http")
     assert out_config is config
     assert meta is None
 
 
 def test_prepare_request_oauth_stdio_sets_meta():
     config = _managed_stdio()
-    _out_config, meta = ti._prepare_request(config, ManagedAuth(access_token="tok"), "stdio")
+    _out_config, meta = ti.prepare_managed_request(config, ManagedAuth(access_token="tok"), "stdio")
     assert meta == {CONNECTOR_META_TOKEN_KEY: "tok"}
 
 
 def test_prepare_request_oauth_http_sets_bearer():
     config = _managed_http()
-    out_config, meta = ti._prepare_request(config, ManagedAuth(access_token="tok"), "http")
+    out_config, meta = ti.prepare_managed_request(config, ManagedAuth(access_token="tok"), "http")
     assert meta is None
     assert out_config.config.headers is not None
     assert out_config.config.headers["authorization"] == "Bearer tok"
@@ -135,14 +135,14 @@ def test_prepare_request_oauth_http_sets_bearer():
 
 def test_prepare_request_no_auth_stdio_merges_env():
     config = _managed_stdio(env={"BASE": "1"})
-    out_config, meta = ti._prepare_request(config, ManagedAuth(env={"api_key": "k"}), "stdio")
+    out_config, meta = ti.prepare_managed_request(config, ManagedAuth(env={"api_key": "k"}), "stdio")
     assert out_config.config.env == {"BASE": "1", "api_key": "k"}
     assert meta is None
 
 
 def test_prepare_request_no_auth_http_merges_headers():
     config = _managed_http(headers={"X-Base": "1"})
-    out_config, _meta = ti._prepare_request(config, ManagedAuth(headers={"X-Tok": "v"}), "http")
+    out_config, _meta = ti.prepare_managed_request(config, ManagedAuth(headers={"X-Tok": "v"}), "http")
     assert out_config.config.headers == {"x-base": "1", "x-tok": "v"}
 
 
@@ -382,7 +382,7 @@ class _FakePool:
 def _effective_dump(config: TaiMCPConfig, auth: ManagedAuth, transport: str) -> dict:
     """The pool-key config a dispatch with ``auth`` opens — the pure preparation
     the eviction path itself uses to compute the superseded/fresh keys."""
-    return ti._prepare_request(config, auth, transport)[0].model_dump()
+    return ti.prepare_managed_request(config, auth, transport)[0].model_dump()
 
 
 def _fresh_refresher(monkeypatch, token: str = "fresh"):

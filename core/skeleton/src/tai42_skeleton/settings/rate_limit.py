@@ -20,7 +20,9 @@ Settings are read at call time.
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
@@ -170,3 +172,16 @@ class RateLimitSettings(TaiBaseSettings):
 def rate_limit_settings() -> RateLimitSettings:
     """The process-cached :class:`RateLimitSettings`."""
     return RateLimitSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The rate-limit counter Redis, when one is configured and any door family is enabled.
+
+    The limiter's coverage is derived from the route registry, so the row rides the enable
+    posture alone: a configured counter store is a wired dependency unless every door
+    family is switched off.
+    """
+    settings = rate_limit_settings()
+    if settings.any_family_enabled() and settings.redis.redis_url:
+        return [ReadinessTarget("rate_limit", RedisClient, settings.redis)]
+    return []

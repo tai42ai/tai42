@@ -13,7 +13,7 @@ from typing import Any
 
 import click
 import typer
-from tai42_cli.commands._common import app_context
+from tai42_cli import app_context
 from tai42_cli.render import print_records
 
 from tai42_skeleton.marketplace.client import RegistryClient
