@@ -52,6 +52,7 @@ from contextlib import asynccontextmanager
 import pytest
 from tai42_kit.settings import reset_all_settings
 
+import tai42_skeleton.access_control.store as access_control_store
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
 import tai42_skeleton.db.locks as db_locks
@@ -64,6 +65,8 @@ from ._fakes.advisory_locks import FakeAdvisoryLocks
 from ._fakes.interactions_redis import FakeRedis
 from ._module_identity import restore_states_module_identity
 from ._staged_generations import preserved_staged_generations
+from .access_control.conftest import FakeAccessControlPg
+from .access_control.conftest import make_pg_ctx as make_access_control_pg_ctx
 from .runs.conftest import FakeRunIndexPg
 from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 from .versioning.conftest import FakeVersioningPg
@@ -290,6 +293,20 @@ def _offline_run_index_store(monkeypatch: pytest.MonkeyPatch) -> None:
         yield fake
 
     monkeypatch.setattr(runs_store, "client_ctx", fake_client_ctx)
+
+
+@pytest.fixture(autouse=True)
+def _offline_access_control_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An access-control-enabled boot with the skeleton database configured audits the route
+    table (``check_route_rows_canonical``) through the policy store's own pooled
+    ``client_ctx``, so an offline app-boot test would otherwise open a real Postgres and fail
+    on the non-dialable host. Fake the store's seam with an empty in-memory
+    ``FakeAccessControlPg`` so the real audit runs against it; the access-control suites
+    re-patch this seam with their own seeded fake. Stands down under the real-Postgres
+    integration opt-in (``TAI42_SKELETON_REAL_PG``)."""
+    if os.environ.get("TAI42_SKELETON_REAL_PG") in ("1", "true", "True"):
+        return
+    monkeypatch.setattr(access_control_store, "client_ctx", make_access_control_pg_ctx(FakeAccessControlPg()))
 
 
 class _ProbeRedis:

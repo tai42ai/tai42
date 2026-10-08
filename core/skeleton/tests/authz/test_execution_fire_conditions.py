@@ -23,7 +23,7 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.check import check
-from tai42_skeleton.authz.execution import bind_execution_identity
+from tai42_skeleton.authz.execution import assert_key_carries_authority, bind_execution_identity
 from tai42_skeleton.authz.execution_evaluability import assert_execution_key_evaluable
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
@@ -108,6 +108,12 @@ def _bind_enforcer() -> PolicyEnforcer:
     return PolicyEnforcer(AccessControlSettings(enable=True))
 
 
+async def _bind_scan(key: str) -> None:
+    """The bind door's two record-level questions: the key stands, then its conditions are evaluable."""
+    standing = await assert_key_carries_authority(_bind_enforcer(), key, bound_fingerprint=f"fp-{key}")
+    await assert_execution_key_evaluable(standing)
+
+
 async def _fire(key: str, meta, settings: AccessControlSettings) -> None:
     """Authorize one dispatch AS ``key``: bind the execution identity, then run the same
     ``check`` the tool edge runs."""
@@ -129,7 +135,7 @@ def test_a_key_whose_condition_is_evaluable_binds_and_fires(ac_env, renderer, pr
         "k-fire", scopes=[_SCOPE], condition={"content": _EVALUABLE}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
     )
 
-    asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))  # the bind scan passes
+    asyncio.run(_bind_scan("k-fire"))  # the bind scan passes
     asyncio.run(_fire("k-fire", probe_op, settings))  # and so does the fire
 
 
@@ -166,7 +172,7 @@ def test_the_bind_scan_and_the_fire_assertion_are_one_rule(ac_env, renderer, pro
     )
 
     with pytest.raises(TokenFreeConditionError, match="unusable at a fire"):
-        asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))
+        asyncio.run(_bind_scan("k-fire"))
     with pytest.raises(PermissionDeniedError, match="not evaluable at a fire"):
         asyncio.run(_fire("k-fire", probe_op, settings))
 
@@ -184,7 +190,7 @@ def test_a_template_edited_after_the_bind_is_denied_with_no_policy_row_write(
     )
     renderer.templates["cond"] = _EVALUABLE
 
-    asyncio.run(assert_execution_key_evaluable(_bind_enforcer(), "k-fire"))
+    asyncio.run(_bind_scan("k-fire"))
     asyncio.run(_fire("k-fire", probe_op, settings))
 
     row_before = dict(ac_env.policy("k-fire"))

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 def wait_ready(stack: TaiStack) -> None:
     deadline = stack.infra.settings.boot_timeout
     for port in stack.app_ports:
-        wait_http_ok(stack, f"{stack.origin(port)}/health", deadline, "app health")
+        wait_http_ok(stack, f"{stack.base_url(port)}/health", deadline, "app health")
     if stack.config.run_metrics:
         assert stack.metrics_port is not None
         wait_http_ok(stack, f"http://{stack.host}:{stack.metrics_port}/metrics", deadline, "metrics")
@@ -39,7 +39,7 @@ def ready_status(stack: TaiStack, *, port: int | None = None) -> tuple[int, dict
     task under a ``perpetual_task:<name>`` check) reads it here rather than waiting for
     green."""
     target = port if port is not None else stack.app_ports[0]
-    resp = httpx.get(f"{stack.origin(target)}/ready", timeout=5.0)
+    resp = httpx.get(f"{stack.base_url(target)}/ready", timeout=5.0)
     return resp.status_code, resp.json()
 
 

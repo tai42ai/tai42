@@ -5,7 +5,7 @@ from typing import Any
 
 from fastmcp.server.auth import AccessToken
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM, get_current_user_id
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE, get_current_user_id
 from tai42_contract.access_control.models import AccessPolicy
 
 from tai42_skeleton.access_control.request_scopes import get_request_identity_claims, get_request_is_admin
@@ -19,9 +19,9 @@ def effective_scopes(key_scopes: list[str], owner_scopes: list[str]) -> list[str
     scopes (a plain membership filter would wrongly yield ``[]`` here); otherwise a plain intersection
     preserving the key's order.
     """
-    if "*" in owner_scopes:
+    if UNIVERSAL_SCOPE in owner_scopes:
         return list(key_scopes)
-    if "*" in key_scopes:
+    if UNIVERSAL_SCOPE in key_scopes:
         return list(owner_scopes)
     owner_set = set(owner_scopes)
     return [scope for scope in key_scopes if scope in owner_set]
@@ -44,9 +44,9 @@ def is_admin_policy(policy: AccessPolicy, owner_policy: AccessPolicy | None) -> 
     ``"*"``. ``owner_policy`` is the owner's CURRENT stored policy (``None`` for a top-level
     principal), so the classification is byte-identical wherever it is used.
     """
-    owner_scopes = owner_policy.scopes if owner_policy is not None else ["*"]
+    owner_scopes = owner_policy.scopes if owner_policy is not None else [UNIVERSAL_SCOPE]
     return (
-        "*" in effective_scopes(policy.scopes, owner_scopes)
+        UNIVERSAL_SCOPE in effective_scopes(policy.scopes, owner_scopes)
         and policy.condition is None
         and (owner_policy is None or owner_policy.condition is None)
     )

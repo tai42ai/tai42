@@ -24,7 +24,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.access_control import management
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.response_models_group_c import (
     SubMcpMapListing,
@@ -78,12 +77,9 @@ async def register_sub_mcp(slug: str, tools: list[str], transport: str = "http")
     if missing:
         raise NotFoundError(f"unknown tool(s): {', '.join(missing)}")
     # Store write FIRST (durable), then the in-process router swap — the service
-    # owns that ordering so a registration survives a crash between the two.
+    # owns that ordering so a registration survives a crash between the two, and
+    # announces the mount change to its listeners.
     await service.register_sub_mcp_app(slug, tools, transport=transport)
-    # A mount is a reachable surface, so a mount change must invalidate cached
-    # capability projections exactly as a route-table edit does — bump the version
-    # AFTER the durable write so a warm projection re-reads the new mount set.
-    await management.bump_policy_version()
     return {"slug": slug, "tools": tools, "transport": transport}
 
 
@@ -103,7 +99,4 @@ async def unregister_sub_mcp(slug: str) -> dict:
     removed = await service.unregister_sub_mcp_app(slug)
     if not removed:
         raise NotFoundError(f"sub-MCP app {slug!r} not found")
-    # A removed mount is a surface that vanished, so invalidate cached projections
-    # like a route-table edit — only after a real removal (a 404 wrote nothing).
-    await management.bump_policy_version()
     return {"slug": slug, "removed": True}

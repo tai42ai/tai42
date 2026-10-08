@@ -53,6 +53,8 @@ enforced policy back to a prior version.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
@@ -311,6 +313,21 @@ def role_store() -> RoleStoreView:
     from tai42_skeleton.versioning import versioned_store
 
     return RoleStoreView(versioned_store())
+
+
+@asynccontextmanager
+async def role_write_transaction() -> AsyncIterator[VersionedStoreTransaction]:
+    """One versioned-store transaction for a role-definition write; the policy version is bumped after commit.
+
+    A raise inside the body rolls the transaction back and propagates before the bump, so a
+    rolled-back write invalidates nothing. The bump makes every holder's next request read
+    the role's committed grants.
+    """
+    from tai42_skeleton.versioning import versioned_store
+
+    async with versioned_store().transaction() as tx:
+        yield tx
+    await management.bump_policy_version()
 
 
 async def seed_default_roles() -> None:

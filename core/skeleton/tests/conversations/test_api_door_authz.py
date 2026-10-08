@@ -12,6 +12,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
@@ -21,7 +22,6 @@ from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import settings as ac_settings_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.projection import NO_AUTH_USER_ID
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -34,7 +34,7 @@ from ..access_control.conftest import FakeAccessControlPg, FakeRedis, _FakeApp, 
 pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
 
 _MESSAGES_PATTERN = r"/api/conversations/.+/messages"
-_TEMPLATE = "conversations-messages"
+_TEMPLATE = "/conversations-messages"
 _SCOPE = "conversations-protected"
 _PATH = "/api/conversations/chat/messages"
 # The two credentials, and the principals the identity store resolves them to.
@@ -128,13 +128,12 @@ def client(monkeypatch, bound_app) -> TestClient:
     pg.add_route(_TEMPLATE, _SCOPE)
     # ``sender`` holds the door's resource scope, ``stranger`` a different one: what
     # separates them is the door's decision, not authentication.
-    pg.add_policy("sender", scopes=[_SCOPE])
-    pg.add_policy("stranger", scopes=["unrelated"])
+    pg.add_policy("sender", scopes=[_SCOPE], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
+    pg.add_policy("stranger", scopes=["unrelated"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     # The owner principal every key belongs to (["*"] caps nothing).
     pg.add_policy("owner1", scopes=["*"])
 
     ctx = make_client_ctx(redis)
-    monkeypatch.setattr(verifier_module, "client_ctx", ctx)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
@@ -250,13 +249,12 @@ def event_client(monkeypatch, bound_app) -> TestClient:
     )
     pg = FakeAccessControlPg()
     pg.add_route(_TEMPLATE, _SCOPE)
-    pg.add_policy("sender", scopes=[_SCOPE])
-    pg.add_policy("stranger", scopes=["unrelated"])
+    pg.add_policy("sender", scopes=[_SCOPE], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
+    pg.add_policy("stranger", scopes=["unrelated"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     # The owner principal every key belongs to (["*"] caps nothing).
     pg.add_policy("owner1", scopes=["*"])
 
     ctx = make_client_ctx(redis)
-    monkeypatch.setattr(verifier_module, "client_ctx", ctx)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")

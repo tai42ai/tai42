@@ -176,6 +176,15 @@ def _registry() -> BackupRegistry:
     return registry
 
 
+@pytest.fixture(autouse=True)
+def _no_mount_change_listeners(monkeypatch):
+    """No mount-change listener by default, so a sub-MCP restore reads the section's own
+    report; the test of the policy-cache invalidation wires the composition root's listener."""
+    from tai42_skeleton.sub_mcp import service as sub_mcp_service
+
+    monkeypatch.setattr(sub_mcp_service, "_mount_change_listeners", [])
+
+
 @pytest.fixture
 def execution_gate_off(monkeypatch):
     """Access control OFF for the token-free-evaluable assertion each imported hook
@@ -415,6 +424,113 @@ async def test_sub_mcp_roundtrip(monkeypatch):
     restored = await fresh.get_route("slug1")
     assert restored is not None
     assert restored.tools == ["tool_a"]
+
+
+async def test_sub_mcp_restore_bumps_the_policy_version_once_per_restored_slug(monkeypatch):
+    # A restored mount is a reachable surface: the sub-MCP write chokepoint announces each
+    # durable mount change to the listener the composition root wires, so warm capability
+    # projections re-read the restored mount set.
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control.settings import access_control_settings
+    from tai42_skeleton.sub_mcp import service as sub_mcp_service
+    from tai42_skeleton.sub_mcp import store as sub_mcp_store
+
+    from ..access_control.conftest import FakeRedis, make_client_ctx
+
+    redis = FakeRedis(strings={})
+    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(sub_mcp_service, "_mount_change_listeners", [])
+    sub_mcp_service.on_mount_changed(instance._invalidate_policy_cache)
+    monkeypatch.setattr(sub_mcp_store, "_IN_MEMORY_STORE", sub_mcp_store.InMemorySubMcpStore())
+    _install(monkeypatch, sub_app=SimpleNamespace(mcp_sub_app_router=_FakeSubAppRouter()))
+
+    document = {
+        "version": 1,
+        "sections": {
+            "sub_mcp": {
+                "slug1": {"tools": ["tool_a"], "transport": "http"},
+                "slug2": {"tools": ["tool_b"], "transport": "http"},
+            }
+        },
+    }
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["sub_mcp"]})))["data"]
+    assert data["ok"] is True
+    assert int(redis._strings[access_control_settings().policy_version_key]) == 2
+
+
+def _wire_access_control_restore(monkeypatch):
+    """A fresh fake policy store and Redis behind the access-control section; returns the Redis."""
+    from tai42_identity_redis import redis_api_key_provider as provider_module
+
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import store as store_module
+
+    from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
+    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
+    redis = FakeRedis(strings={})
+    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
+    _install(monkeypatch)
+    return redis
+
+
+async def test_access_control_restore_invalidates_the_policy_cache_once(monkeypatch):
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control.settings import access_control_settings
+
+    redis = _wire_access_control_restore(monkeypatch)
+    document = {
+        "version": 1,
+        "sections": {"access_control": {"scopes": {"/api/x": "scope-a", "/api/y": "scope-b"}, "tokens": {}}},
+    }
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["access_control"]})))["data"]
+    assert data["ok"] is True
+    assert await management.get_all_existing_scopes() == {"/api/x": "scope-a", "/api/y": "scope-b"}
+    assert int(redis._strings[access_control_settings().policy_version_key]) == 1
+
+
+async def test_access_control_restore_refuses_two_urls_with_one_canonical_route(monkeypatch):
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control.settings import access_control_settings
+
+    redis = _wire_access_control_restore(monkeypatch)
+    document = {
+        "version": 1,
+        "sections": {"access_control": {"scopes": {"/api/x": "scope-a", "/api//x/": "scope-b"}, "tokens": {}}},
+    }
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["access_control"]})))["data"]
+    assert data["ok"] is False
+    assert data["sections"]["access_control"]["errors"] == [
+        "access_control archive maps '/api/x' and '/api//x/' to one canonical route '/api/x'; refusing to restore"
+    ]
+    # Refused before the first write: nothing restored, nothing to invalidate.
+    assert await management.get_all_route_mappings() == {}
+    assert access_control_settings().policy_version_key not in redis._strings
+
+
+async def test_access_control_restore_refuses_an_archive_url_with_no_canonical_form(monkeypatch):
+    from tai42_skeleton.access_control import management
+
+    _wire_access_control_restore(monkeypatch)
+    document = {"version": 1, "sections": {"access_control": {"scopes": {"/api/%00x": "scope-a"}, "tokens": {}}}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["access_control"]})))["data"]
+    assert data["ok"] is False
+    assert "contains a NUL, control, or backslash byte" in data["sections"]["access_control"]["errors"][0]
+    assert await management.get_all_route_mappings() == {}
+
+
+async def test_access_control_skip_restore_matches_a_stored_row_by_its_canonical_form(monkeypatch):
+    from tai42_skeleton.access_control import management
+
+    _wire_access_control_restore(monkeypatch)
+    await management.add_url_to_scope("scope-live", "/api/x")
+    document = {"version": 1, "sections": {"access_control": {"scopes": {"/api/x/": "scope-a"}, "tokens": {}}}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["access_control"]})))["data"]
+    assert data["ok"] is True
+    assert data["sections"]["access_control"]["details"]["skipped_existing"] == 1
+    assert await management.get_all_route_mappings() == {"/api/x": "scope-live"}
 
 
 # -- webhooks round-trip (hooks manager faked) -------------------------------

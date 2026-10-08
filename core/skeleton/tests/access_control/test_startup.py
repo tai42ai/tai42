@@ -191,6 +191,48 @@ async def test_seed_roles_skips_when_no_versioned_store(monkeypatch: pytest.Monk
     await seed_roles()  # no raise, no seed
 
 
+# -- canonical route-row audit -------------------------------------------------
+
+
+def _stored_rows(monkeypatch: pytest.MonkeyPatch, rows: dict[str, str]) -> None:
+    from tai42_skeleton.access_control import management
+
+    async def _mappings() -> dict[str, str]:
+        return dict(rows)
+
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr(management, "get_all_route_mappings", _mappings)
+
+
+async def test_route_row_audit_passes_a_canonical_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stored_rows(monkeypatch, {"/": "s", "/api/x": "s", "/api/a b/{id}": "s"})
+    await startup.check_route_rows_canonical()
+
+
+async def test_route_row_audit_refuses_non_canonical_rows_with_the_reset_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stored_rows(monkeypatch, {"/api/ok": "s", "/api/x/": "s", "/api//y": "s", "/api/%00z": "s"})
+    with pytest.raises(RuntimeError) as exc:
+        await startup.check_route_rows_canonical()
+    assert str(exc.value) == (
+        "access_control: the route table holds non-canonical rows: ['/api/%00z', '/api//y', '/api/x/'] — reset "
+        "the access-control store (the canonical form decodes each segment once, collapses slashes and dot "
+        "segments, and drops a trailing slash)"
+    )
+
+
+async def test_route_row_audit_skips_when_no_skeleton_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.access_control import management
+
+    async def _mappings() -> dict[str, str]:
+        raise AssertionError("the route table must not be read without a skeleton store")
+
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.setattr(management, "get_all_route_mappings", _mappings)
+    await startup.check_route_rows_canonical()
+
+
 # -- always-public route guard -----------------------------------------------
 
 

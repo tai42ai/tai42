@@ -41,14 +41,15 @@ import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import IdentityProvider
 from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.data.string_util import hash_api_key
 
+from tai42_skeleton.access_control.policy import policy_enforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
+from tai42_skeleton.access_control.standing import StandingDenied, resolve_standing
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 from tai42_skeleton.utils.redis_typing import awaited
 
@@ -110,8 +111,10 @@ async def create_claim_link(
 ) -> dict:
     """Mint a one-time claim link for ``api_key`` and return its carrier.
 
-    The submitted key is resolved through the gate's verifier chain: an unresolvable key
-    is a 400 (never a dead QR). The resolved identity must satisfy the ownership rule
+    The submitted key is resolved through the gate's verifier chain and must carry authority
+    (the standing every door reads, its verified owner equal to the stored one): an
+    unresolvable key, or one that could not authenticate a request, is a 400 (never a dead
+    QR). The resolved identity must satisfy the ownership rule
     — (a) the caller is admin (any key), (b) the resolved key is owned by the caller's
     own principal (its owner claim is the caller's principal — the owner behind an owned
     caller key, else the caller itself), or (c) the resolved identity IS the caller's own
@@ -136,7 +139,17 @@ async def create_claim_link(
         raise ClaimLinkError(400, _INVALID_KEY_MESSAGE)
 
     resolved_user_id = access_token.client_id
-    resolved_owner = access_token.claims.get(OWNER_USER_ID_CLAIM)
+    enforcer = policy_enforcer(settings)
+    try:
+        standing = await resolve_standing(
+            enforcer,
+            resolved_user_id,
+            version=await enforcer.current_policy_version(),
+            verified_claims=access_token.claims,
+        )
+    except StandingDenied as exc:
+        raise ClaimLinkError(400, _INVALID_KEY_MESSAGE) from exc
+    resolved_owner = standing.owner
     is_own_key = resolved_user_id == caller_id
     # The caller acts as a principal: an owned caller key acts as its OWNER principal, a
     # top-level caller key as itself. Ownership stays one level deep, so a non-admin may

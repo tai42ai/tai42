@@ -25,18 +25,22 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import TemplateError
 from starlette.authentication import AuthenticationError
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
-from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tai42_kit.settings import register_settings_reset
 
-from tai42_skeleton.access_control.backend import effective_scopes
+from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, policy_is_empty
+from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition, policy_enforcer, render_condition
 from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.role_grants import role_level_decision_for_route
 from tai42_skeleton.access_control.settings import access_control_settings
+from tai42_skeleton.access_control.standing import (
+    Standing,
+    StandingDenied,
+    StandingDenyReason,
+    jq_passes,
+    resolve_standing,
+)
 from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_always_public_prefix
 from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -45,6 +49,8 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.template import TemplateNotFoundError
 
 if TYPE_CHECKING:
+    from tai42_contract.access_control.models import AccessPolicy
+
     from tai42_skeleton.access_control.settings import AccessControlSettings
     from tai42_skeleton.app.route_registry import RouteMetadata
     from tai42_skeleton.operations.registry import OperationMetadata
@@ -143,8 +149,8 @@ def _assert_execution_condition_evaluable(condition: str, *, principal: str, tem
         ) from exc
 
 
-async def _render_condition(condition: TemplatedText, *, principal: str) -> str:
-    """``condition`` as the text ``enforce`` will evaluate.
+async def _render_condition(condition: TemplatedText | None, *, principal: str) -> RenderedCondition:
+    """``condition`` as ``enforce`` will evaluate it.
 
     A render failure is a typed refusal naming the principal — never read as "no
     condition" and never flattened into the generic catch-all, which would drop the very
@@ -152,12 +158,12 @@ async def _render_condition(condition: TemplatedText, *, principal: str) -> str:
     can quote template content.
     """
     try:
-        return await tai42_app.storage.resource_manager.render_templated_text(condition)
+        return await render_condition(condition)
     except (ValueError, TemplateError, TemplateNotFoundError) as exc:
         logger.warning(
             "authz: denied — the policy condition of %s (template %r) does not render: %s",
             principal,
-            condition.id,
+            condition.id if condition is not None else None,
             exc,
         )
         raise PermissionDeniedError(f"access denied: the policy condition of {principal!r} does not render") from exc
@@ -224,11 +230,18 @@ async def check(
     # A background fire rather than a request; keys several terms of the shared tail.
     is_execution_fire = get_execution_identity() is not None
 
-    # The one target every layer of the tail keys on, pinned to the operation's OWN
-    # registered route before ANY layer — the always-public short-circuit included — reads
-    # it. Method defaults to POST for a route that declares none.
-    path = synthesize_path(operation_metadata, call_arguments)
+    # The one target every layer of the tail keys on — its canonical form, the SAME
+    # ``.request.path`` the HTTP edge's jq reads — pinned to the operation's OWN registered
+    # route before ANY layer, the always-public short-circuit included, reads it. Method
+    # defaults to POST for a route that declares none.
     method = operation_metadata.http_method or "POST"
+    synthesized = synthesize_path(operation_metadata, call_arguments)
+    try:
+        path = canonicalize_path(synthesized)
+    except MalformedPathError as exc:
+        raise PermissionDeniedError(
+            f"access denied: {method} {synthesized} is not a well-formed path for {operation_metadata.name!r}"
+        ) from exc
     route = _own_route(operation_metadata, path, method)
 
     await _authorize_pinned_route(
@@ -254,8 +267,8 @@ async def _authorize_pinned_route(
 ) -> None:
     """Run the post-pin authorization tail over a target already resolved to ``path``, ``method`` and ``route``.
 
-    The ONE spelling of the HTTP edge's decision downstream of the route pin, shared by
-    :func:`check` and
+    ``path`` is the canonical target. The ONE spelling of the HTTP edge's decision
+    downstream of the route pin, shared by :func:`check` and
     :func:`~tai42_skeleton.authz.execution.authorize_execution_agent_run` so neither can
     drift onto a narrower one. ``is_execution_fire`` is the caller's to decide; it keys
     the deleted-principal refusal, the fingerprint re-assert, the live effective-scope
@@ -275,40 +288,50 @@ async def _authorize_pinned_route(
     # The pre-auth login surface is public regardless of the policy layers and
     # short-circuits ahead of every one of them, as it does at the HTTP edge; running them
     # would make it HARDER to reach as a tool than as its route.
-    if is_always_public_prefix(canonicalize_path(path), ac_settings):
+    if is_always_public_prefix(path, ac_settings):
         return
 
     public = ac_settings.public_resource_id
-    # Public only when public is the ONLY resolved id (deny wins), and publicness relaxes
-    # the SCOPE test alone — the policy, jq and LEVEL passes still run.
-    is_public = set(resource_ids) == {public}
 
-    # 2. Policy + live context + scopes, pinned to ``version``.
+    # 2. Standing + live context + scopes, pinned to ``version``.
     principal = await _resolve_principal_policies(enforcer, caller_identity, user_id, version, is_execution_fire)
 
-    scopes = _pinned_scope_set(caller_identity, principal.policy, principal.owner_policy, is_execution_fire)
-    if not is_public:
+    scopes = _pinned_scope_set(caller_identity, principal.standing, is_execution_fire)
+    # Publicness (the public id ALONE — deny wins) relaxes the SCOPE test alone; the policy,
+    # jq and LEVEL passes still run.
+    if not is_public_only(resource_ids, public):
         _assert_scope_covers(resource_ids, scopes, public)
 
-    # 3. The jq policy fences over the synthesized path.
+    # 3. The jq policy fences over the canonical path.
     await _enforce_pinned_conditions(enforcer, user_id, path, method, principal, scopes, is_execution_fire)
 
     # 4. The per-tag LEVEL pass over the pinned route.
-    await _enforce_pinned_tag_level(principal.policy, principal.owner_policy, route, method, version, user_id, path)
+    await _enforce_pinned_tag_level(
+        principal.standing.policy, principal.standing.owner_policy, route, method, version, user_id, path
+    )
 
 
 @dataclass
 class _PinnedPrincipal:
-    """Principal resolved for a pinned tool-edge decision.
+    """Principal resolved for a pinned tool-edge decision: its standing, the fresh live context, and its claims.
 
-    Holds the caller's policy, the fresh live context, the owner's policy (for an owned
-    key, else ``None``), and the caller's verified token claims.
+    ``claims`` are the caller's verified token claims (a fire's synthetic owner claim).
     """
 
-    policy: AccessPolicy
+    standing: Standing
     context: dict[str, Any]
-    owner_policy: AccessPolicy | None
     claims: dict[str, Any]
+
+
+# The refusal each standing defect answers at the tool edge. A fingerprint mismatch answers
+# the execution-key refusal instead (see ``_resolve_principal_policies``).
+_STANDING_REFUSALS = {
+    StandingDenyReason.NO_POLICY: "access denied: principal has no policy",
+    StandingDenyReason.DISABLED: "access denied: principal is disabled",
+    StandingDenyReason.OWNER_MISMATCH: "access denied: owner claim does not match the stored owner",
+    StandingDenyReason.OWNER_DISABLED: "access denied: owner is disabled",
+    StandingDenyReason.OWNER_NO_POLICY: "access denied: owner has no policy",
+}
 
 
 async def _read_pinned_policy_version(enforcer: PolicyEnforcer, user_id: str) -> int:
@@ -348,30 +371,19 @@ async def _resolve_principal_policies(
     version: int,
     is_execution_fire: bool,
 ) -> _PinnedPrincipal:
-    """Fetch policy and live context pinned to ``version`` and resolve the owner's policy.
+    """Resolve the caller's standing and live context pinned to ``version``.
 
-    Denies a disabled/deleted principal, re-asserts a fire's bound fingerprint, then
-    fetches and validates the owner's policy.
+    One order for every door (:func:`~tai42_skeleton.access_control.standing.resolve_standing`):
+    a principal with no policy (what a deleted key reads as) or a disabled one is denied; a
+    fire's bound per-mint fingerprint is re-asserted against the LIVE policy on every dispatch,
+    so a within-fire revoke+remint of the same ``user_id`` is denied rather than authorized
+    against the reminted key's grants; the owner the stored policy names must be the owner
+    the caller's claims carry, and must exist and be enabled. A read fault denies fail-closed.
     """
-    try:
-        policy = await enforcer.get_policy_at(user_id, version)
-        context = await enforcer.get_live_context(user_id)
-    except Exception as exc:
-        logger.warning("authz: policy/context fetch failed for %s — denying", user_id, exc_info=True)
-        raise PermissionDeniedError("access denied") from exc
-
-    if policy.policy_data.get("disabled") is True:
-        raise PermissionDeniedError("access denied: principal is disabled")
-
-    # A fire's identity is built once at fire-open, so only the store can say the key still
-    # EXISTS; an empty policy is what a deleted key reads as, denying its next dispatch. A
-    # real request cannot reach here deleted — its credential fails to verify.
-    if is_execution_fire and policy_is_empty(policy):
-        raise PermissionDeniedError("access denied: principal has no policy")
-
-    # The fire's bound per-mint fingerprint is re-asserted against the LIVE policy every
-    # dispatch, so a within-fire revoke+remint of the same ``user_id`` is denied here
-    # rather than authorized against the reminted key's grants.
+    # The caller's verified token claims; empty only on the internal/direct-construction
+    # path, matching a request that carried no claims.
+    claims: dict[str, Any] = dict(caller_identity.claims) if caller_identity.claims is not None else {}
+    bound_fingerprint: str | None = None
     if is_execution_fire:
         bound_fingerprint = caller_identity.execution_key_fingerprint
         if bound_fingerprint is None:
@@ -379,64 +391,47 @@ async def _resolve_principal_policies(
             # for a fingerprint-less ACCOUNT principal (resolved by the ONE equality),
             # None never. Refuse loudly rather than dispatch with no anchor at all.
             raise PermissionDeniedError("access denied: bound execution identity carries no key fingerprint")
-        # Imported at call time: the execution module imports this one.
-        from tai42_skeleton.authz.execution import assert_policy_matches_fingerprint
+    try:
+        standing = await resolve_standing(
+            enforcer, user_id, version=version, verified_claims=claims, bound_fingerprint=bound_fingerprint
+        )
+        context = await enforcer.get_live_context(user_id)
+    except StandingDenied as denied:
+        if denied.reason is StandingDenyReason.FINGERPRINT_MISMATCH:
+            # Imported at call time: the execution module imports this one.
+            from tai42_skeleton.authz.execution import execution_key_refusal
 
-        assert_policy_matches_fingerprint(policy, user_id, bound_fingerprint=bound_fingerprint)
-
-    # The caller's verified token claims; empty only on the internal/direct-construction
-    # path, matching a request that carried no claims.
-    claims: dict[str, Any] = dict(caller_identity.claims) if caller_identity.claims is not None else {}
-
-    # Owned/delegated key: read from the same claim the HTTP backend reads, so the owner
-    # second-pass enforce runs for exactly the same keys. A disabled or policy-less owner
-    # denies fail-closed.
-    owner = claims.get(OWNER_USER_ID_CLAIM)
-    owner_policy = None
-    if owner is not None:
-        try:
-            owner_policy = await enforcer.get_policy_at(owner, version)
-        except Exception as exc:
-            logger.warning("authz: owner policy fetch failed for %s — denying", owner, exc_info=True)
-            raise PermissionDeniedError("access denied") from exc
-        if owner_policy.policy_data.get("disabled") is True:
-            raise PermissionDeniedError("access denied: owner is disabled")
-        if policy_is_empty(owner_policy):
-            raise PermissionDeniedError("access denied: owner has no policy")
-
-    return _PinnedPrincipal(policy=policy, context=context, owner_policy=owner_policy, claims=claims)
+            raise execution_key_refusal(user_id, denied) from denied
+        raise PermissionDeniedError(_STANDING_REFUSALS[denied.reason]) from denied
+    except Exception as exc:
+        logger.warning("authz: policy/context fetch failed for %s — denying", user_id, exc_info=True)
+        raise PermissionDeniedError("access denied") from exc
+    return _PinnedPrincipal(standing=standing, context=context, claims=claims)
 
 
-def _pinned_scope_set(
-    caller_identity: CallerIdentity,
-    policy: AccessPolicy,
-    owner_policy: AccessPolicy | None,
-    is_execution_fire: bool,
-) -> list[str]:
+def _pinned_scope_set(caller_identity: CallerIdentity, standing: Standing, is_execution_fire: bool) -> list[str]:
     """Return the scope set for the decision.
 
     On the request path this CONSUMES the auth backend's already-decided effective scopes
     (owner-attenuated), never re-deriving the attenuation; it falls back to the caller's own
     policy scopes only when none was carried. A background fire carries no attenuation
-    decision, so the set is derived here from the policies just read live — narrowing a
-    running key's scopes denies its very next dispatch.
+    decision, so the set is the one its standing derived from the policies just read live —
+    narrowing a running key's scopes denies its very next dispatch.
     """
     if is_execution_fire:
-        return effective_scopes(policy.scopes, owner_policy.scopes) if owner_policy is not None else policy.scopes
+        return standing.effective_scopes
     if caller_identity.effective_scopes is not None:
         return list(caller_identity.effective_scopes)
-    return policy.scopes
+    return standing.policy.scopes
 
 
 def _assert_scope_covers(resource_ids: list[str], scopes: list[str], public: str) -> None:
-    """Assert the caller holds EVERY protected resource id, or ``"*"``.
+    """Assert the caller holds EVERY protected resource id, or the universal scope.
 
     The public id carries no scope requirement. Skipped by the caller when the id set is
     public-alone.
     """
-    protected_ids = [rid for rid in resource_ids if rid != public]
-    has_permission = "*" in scopes or all(rid in scopes for rid in protected_ids)
-    if not has_permission:
+    if not scopes_cover(resource_ids, scopes, public):
         raise PermissionDeniedError("access denied: insufficient scope")
 
 
@@ -449,56 +444,33 @@ async def _enforce_pinned_conditions(
     scopes: list[str],
     is_execution_fire: bool,
 ) -> None:
-    """Enforce the jq policy fences over the synthesized path, keyed on {"method", "path"}.
+    """Enforce the jq policy fences over the canonical path, keyed on {"method", "path"}.
 
-    The key's condition runs first, then — for an owned key — the owner's as a SEPARATE
-    enforce pass over a context built from the OWNER's policy_data + scopes. Two sequential
+    The passes are the backend's (:func:`~tai42_skeleton.access_control.standing.jq_passes`):
+    the key's condition first, then — for an owned key whose owner carries one — the
+    owner's as a SEPARATE pass over the OWNER's policy_data + scopes. Two sequential
     enforce calls are semantically AND; never concatenate the jq strings.
 
     A fire presents no token, so its ``.identity`` carries only the stored owner claim; each
     rendered condition is re-asserted token-free-evaluable before being enforced. An ordinary
     request carries full claims and skips this.
     """
-    policy = principal.policy
-    owner_policy = principal.owner_policy
-    claims = principal.claims
-    context = principal.context
-    owner = claims.get(OWNER_USER_ID_CLAIM)
-
-    jq_context = JqAuthContext(
-        sub=user_id,
+    passes = jq_passes(
+        principal.standing,
+        user_id=user_id,
+        claims=principal.claims,
+        live_context=principal.context,
         scopes=scopes,
-        identity=claims,
-        policy=policy.policy_data,
-        context=context,
-        request={"method": method, "path": path},
-        system={"time": time.time()},
+        now=time.time(),
     )
-    condition_configured = policy.condition is not None
     try:
-        condition = ""
-        if policy.condition is not None:
-            condition = await _render_condition(policy.condition, principal=user_id)
-            if is_execution_fire and condition:
-                _assert_execution_condition_evaluable(condition, principal=user_id, template_id=policy.condition.id)
-        await enforcer.enforce(jq_context.model_dump(), condition, condition_configured=condition_configured)
-
-        if owner is not None and owner_policy is not None and owner_policy.condition is not None:
-            owner_context = JqAuthContext(
-                sub=user_id,
-                scopes=owner_policy.scopes,
-                identity=claims,
-                policy=owner_policy.policy_data,
-                context=context,
-                request={"method": method, "path": path},
-                system={"time": time.time()},
-            )
-            owner_condition = await _render_condition(owner_policy.condition, principal=owner)
-            if is_execution_fire and owner_condition:
+        for jq_pass in passes:
+            rendered = await _render_condition(jq_pass.condition, principal=jq_pass.principal)
+            if is_execution_fire and rendered.text and jq_pass.condition is not None:
                 _assert_execution_condition_evaluable(
-                    owner_condition, principal=owner, template_id=owner_policy.condition.id
+                    rendered.text, principal=jq_pass.principal, template_id=jq_pass.condition.id
                 )
-            await enforcer.enforce(owner_context.model_dump(), owner_condition, condition_configured=True)
+            await enforcer.enforce(jq_pass.context_for(method, path), rendered)
     except AuthenticationError as exc:
         raise PermissionDeniedError("access denied: policy condition rejected") from exc
     except PermissionDeniedError:

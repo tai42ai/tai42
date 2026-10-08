@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
 
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -120,7 +121,7 @@ def _verifier(settings: AccessControlSettings | None = None, identity=None) -> A
 def _wire(monkeypatch, pg: FakeAccessControlPg, redis: FakeRedis | None = None) -> None:
     """Route/pattern reads → the fake PG store; the version read → the fake Redis."""
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis or FakeRedis()))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis or FakeRedis()))
 
 
 async def test_verify_token_returns_access_token_for_identity():
@@ -222,7 +223,7 @@ async def test_always_public_path_short_circuits_without_store_query(monkeypatch
     pg.fault = ("SELECT", RuntimeError("store must not be queried"))
     redis = FakeRedis(raise_get=RuntimeError("version must not be read"))
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     v = _verifier(settings)
     assert await v.resolve_resource_ids("/api/login/methods") == [settings.public_resource_id]
     assert await v.resolve_resource_ids("/api/login") == [settings.public_resource_id]
@@ -454,7 +455,7 @@ async def test_route_repoint_visible_to_warm_cache_after_version_bump(monkeypatc
     pg = FakeAccessControlPg()
     redis = FakeRedis(strings={})
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
 
     await management.add_url_to_scope("weak", "/admin")
@@ -462,16 +463,15 @@ async def test_route_repoint_visible_to_warm_cache_after_version_bump(monkeypatc
     # Warm the route cache at the current version.
     assert await v.resolve_resource_ids("/admin") == ["weak"]
 
-    # Operator locks the route down to a stronger scope (overwrites the mapping)
-    # WITHOUT bumping the version: the warm cache still serves the old scope
-    # (proves the cache is actually warm — a bounded fail-open without the fix).
-    await management.add_url_to_scope("strong", "/admin")
+    # A store write that bypasses the management writer changes the row WITHOUT bumping
+    # the version: the warm cache still serves the old scope (proves the cache is warm).
+    await store_module.access_control_store().add_url_to_scope("strong", "/admin")
     assert await v.resolve_resource_ids("/admin") == ["weak"]
 
-    # Every scope route bumps the version → cross-worker cache miss, the re-point
-    # is visible immediately without waiting out the ttl.
-    await management.bump_policy_version()
-    assert await v.resolve_resource_ids("/admin") == ["strong"]
+    # The management writer bumps the version after its write → cross-worker cache miss,
+    # the re-point is visible immediately without waiting out the ttl.
+    await management.add_url_to_scope("stronger", "/admin")
+    assert await v.resolve_resource_ids("/admin") == ["stronger"]
 
 
 async def test_dynamic_pattern_change_visible_after_version_bump(monkeypatch):
@@ -483,16 +483,16 @@ async def test_dynamic_pattern_change_visible_after_version_bump(monkeypatch):
     pg = FakeAccessControlPg()
     redis = FakeRedis(strings={})
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
 
     v = _verifier(settings)
     # Warm the dynamic-pattern cache while empty.
     assert await v.resolve_resource_ids("/dyn/7") == []
 
-    # Register a dynamic pattern + its route WITHOUT bumping: the warm empty cache
-    # still resolves nothing.
-    await management.add_url_to_scope("dynroute", "/dyn/template", pattern=r"^/dyn/\d+$")
+    # Register a dynamic pattern + its route straight in the store, WITHOUT bumping: the
+    # warm empty cache still resolves nothing.
+    await store_module.access_control_store().add_url_to_scope("dynroute", "/dyn/template", pattern=r"^/dyn/\d+$")
     assert await v.resolve_resource_ids("/dyn/7") == []
 
     # Bump the version → both the route and the dynamic-pattern caches miss and

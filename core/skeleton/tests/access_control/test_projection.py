@@ -21,8 +21,7 @@ from tai42_contract.access_control.models import JqAuthContext
 from tai42_skeleton.access_control import management as management_module
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import projection
-from tai42_skeleton.access_control import verifier as verifier_module
-from tai42_skeleton.access_control.policy import PolicyEnforcer
+from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
 from tai42_skeleton.access_control.projection import build_projection
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import access_control_settings
@@ -66,9 +65,7 @@ def env(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg, bound_app) -> 
     redis = FakeRedis(strings={}, hashes={})
     rctx = make_client_ctx(redis)
     monkeypatch.setattr(policy_module, "client_ctx", rctx)
-    monkeypatch.setattr(verifier_module, "client_ctx", rctx)
     monkeypatch.setattr(management_module, "client_ctx", rctx)
-    monkeypatch.setattr(projection, "client_ctx", rctx)
     # Default-empty live seams; each test overrides what it exercises.
     monkeypatch.setattr(projection, "_registry_routes", list)
     monkeypatch.setattr(projection, "_sub_mcp_routes", _areturn({}))
@@ -345,6 +342,41 @@ async def test_projection_cache_is_version_keyed(env: _Env):
     assert {r.path for r in r3.routes} == {"/api/x", "/api/y"}
 
 
+async def test_sub_mcp_restore_invalidates_a_warm_projection(env: _Env, bound_app):
+    # A backup restore of the sub-MCP section adds a mount through the sub-MCP write
+    # chokepoint, whose wired listener invalidates the policy cache: the next projection
+    # reads the restored mount instead of the warm one.
+
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.backup.sections import _import_sub_mcp
+    from tai42_skeleton.sub_mcp import service as sub_mcp_service
+    from tai42_skeleton.sub_mcp import store as sub_mcp_store
+
+    class _Router:
+        def __init__(self) -> None:
+            self.routes: dict = {}
+
+        async def register_sub_mcp_app(self, slug, tools, transport="http"):
+            self.routes[slug] = SimpleNamespace(tools=tools, transport=transport)
+
+    env.mp.setattr(sub_mcp_store, "_IN_MEMORY_STORE", sub_mcp_store.InMemorySubMcpStore())
+    env.mp.setattr(projection, "_sub_mcp_routes", sub_mcp_store.get_sub_mcp_store().list_routes)
+    env.mp.setattr(bound_app, "sub_app", SimpleNamespace(mcp_sub_app_router=_Router()), raising=False)
+    env.mp.setattr(sub_mcp_service, "_mount_change_listeners", [])
+    sub_mcp_service.on_mount_changed(instance._invalidate_policy_cache)
+
+    env.pg.add_policy("u1", scopes=["mcp-app"])
+    env.pg.add_route(f"{projection.ROOT_PREFIX}/shop", "mcp-app")
+    warm = await build_projection("u1", ["mcp-app"], {})
+    assert warm.sub_mcp == []
+
+    report = await _import_sub_mcp({"shop": {"tools": ["t1"], "transport": "http"}})
+    assert report.created == 1
+
+    fresh = await build_projection("u1", ["mcp-app"], {})
+    assert [e.slug for e in fresh.sub_mcp] == ["shop"]
+
+
 async def test_store_error_raises_never_a_partial_projection(env: _Env):
     env.pg.add_policy("u1", scopes=["s"])
     env.pg.add_route("/api/x", "s")
@@ -411,8 +443,10 @@ async def _gate_oracle(
                 request=request,
                 system={"time": 0},
             ).model_dump(),
-            policy.condition.content if policy.condition is not None else "",
-            condition_configured=policy.condition is not None,
+            RenderedCondition(
+                (policy.condition.content or "") if policy.condition is not None else "",
+                configured=policy.condition is not None,
+            ),
         )
         if owner_policy is not None and owner_policy.condition is not None:
             await enforcer.enforce(
@@ -425,8 +459,7 @@ async def _gate_oracle(
                     request=request,
                     system={"time": 0},
                 ).model_dump(),
-                owner_policy.condition.content,
-                condition_configured=True,
+                RenderedCondition(owner_policy.condition.content or "", configured=True),
             )
     except AuthenticationError:
         return False
@@ -535,7 +568,7 @@ async def test_jq_infra_fault_during_build_propagates_and_gate_fails_closed(env:
         system={"time": 0},
     ).model_dump()
     with pytest.raises(policy_module.PolicyEvaluationError):
-        await enforcer.enforce(ctx, ".request.path | tonumber", condition_configured=True)
+        await enforcer.enforce(ctx, RenderedCondition(".request.path | tonumber", configured=True))
     assert issubclass(policy_module.PolicyEvaluationError, Exception)
 
 

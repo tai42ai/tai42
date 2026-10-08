@@ -23,8 +23,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 
@@ -66,20 +66,21 @@ def boundary_client(
     """Build a TestClient over ``routes`` guarded by the real auth stack.
 
     ``stances`` maps each route's path pattern (a regex, matched by the verifier)
-    to :data:`AUTHED` or :data:`PUBLIC`. The pattern doubles as its own template
+    to :data:`AUTHED` or :data:`PUBLIC`. Each pattern gets its own canonical template
     key, so the PG store resolves an AUTHED pattern to a protected scope and a
     PUBLIC pattern to the settings' public resource id.
     """
-    # ``path_patterns`` maps a route regex -> its template KEY; use the pattern
-    # text itself as the key so the map stays one-to-one and readable.
-    ac_settings = AccessControlSettings(path_patterns={pattern: pattern for pattern in stances})
+    # ``path_patterns`` maps a route regex -> its template KEY, a canonical path the route
+    # table can hold; one key per pattern keeps the map one-to-one.
+    templates = {pattern: f"/stance-{index}" for index, pattern in enumerate(stances)}
+    ac_settings = AccessControlSettings(path_patterns=templates)
 
-    # The verifier resolves each matched pattern's template (the pattern text) to its
-    # stored resource id through the PG store; seed one route row per pattern.
+    # The verifier resolves each matched pattern's template to its stored resource id
+    # through the PG store; seed one route row per pattern.
     pg = FakeAccessControlPg()
     for pattern, stance in stances.items():
         scope_id = ac_settings.public_resource_id if stance == PUBLIC else f"{pattern}-protected"
-        pg.add_route(pattern, scope_id)
+        pg.add_route(templates[pattern], scope_id)
 
     @asynccontextmanager
     async def version_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -88,7 +89,7 @@ def boundary_client(
     # The policy store resolves its Postgres through the registry; a fake transport
     # models a configured deployment, so the default database must be on.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
-    monkeypatch.setattr(verifier_module, "client_ctx", version_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", version_ctx)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
 
     app = Starlette(routes=routes, middleware=AuthAdapter(ac_settings).get_middleware())

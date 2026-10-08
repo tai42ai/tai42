@@ -159,6 +159,15 @@ class StackConfig:
     # of the ``tai serve`` fleet. One app process, in-process metrics mode; a
     # backend worker still joins the app-owned worker bus.
     embed: bool = False
+    # The ``module:attribute`` ASGI app the embed host serves. The default mounts the tai app
+    # at ``/``; a host that mounts it under a path prefix names that prefix in ``path_prefix``.
+    embed_app: str = "tai42_e2e_fixtures.embed_main:app"
+    # The path the tai app is served under on every app port (``""`` at the root). Every
+    # harness request to the app — readiness, the API and MCP clients, the metrics scrape —
+    # goes to ``stack.base_url(port)``, the origin plus this prefix.
+    path_prefix: str = ""
+    # The MCP transport the ``tai serve`` fleet runs (``tai serve --transport``).
+    transport: str = "http"
     # Opt-in SUPERVISED shape: stamp ``TAI_SUPERVISED=<supervision_marker>`` into every
     # child's env (so the SUT resolves a recycle-supported shape,
     # ``recycle_policy.detect_shape``) AND run a respawn-on-exit supervisor that re-launches a

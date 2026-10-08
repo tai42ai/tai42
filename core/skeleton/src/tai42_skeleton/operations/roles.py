@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, cast, get_args
 
 from pydantic import BaseModel, Field
+from tai42_contract.access_control import UNIVERSAL_SCOPE
 from tai42_contract.access_control.models import RoleDefinition
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
@@ -29,6 +30,7 @@ from tai42_skeleton.access_control.roles import (
     editor_jq,
     grantable_feature_tags,
     role_store,
+    role_write_transaction,
     viewer_jq,
 )
 from tai42_skeleton.access_control.store import access_control_store
@@ -129,7 +131,7 @@ def _resolved_create(name: str, description: str, base_tier: str, grants: Mappin
             name=name,
             description=description,
             base_tier=base_tier,
-            scopes=["*"],
+            scopes=[UNIVERSAL_SCOPE],
             grants=cast("_GrantMap", dict(grants)),
             condition=TemplatedText(content=condition),
         )
@@ -159,12 +161,11 @@ async def create_role(name: str, description: str, base_tier: str, grants: dict[
     # live role can never exist without its audit record. The Redis version bump follows
     # strictly AFTER the commit.
     try:
-        async with _versioned_store().transaction() as tx:
+        async with role_write_transaction() as tx:
             await role_store().create(name, body, tx=tx)
             await role_audit().record(name, "create", caller.caller_id, None, body, tx=tx)
     except DocumentExistsError as exc:
         raise ConflictError(f"role already exists: {name!r}") from exc
-    await _bump()
     return body
 
 
@@ -196,7 +197,7 @@ async def update_role(name: str, grants: dict[str, str] | None, description: str
     # concurrent edits serialize (no lost update, and the audit ``before`` is the truly
     # current body), and no role edit holds a second pooled connection. The version bump
     # follows the commit.
-    async with _versioned_store().transaction() as tx:
+    async with role_write_transaction() as tx:
         try:
             before = await role_store().get_active_body(name, tx=tx, for_update=True)
         except DocumentNotFoundError as exc:
@@ -213,7 +214,6 @@ async def update_role(name: str, grants: dict[str, str] | None, description: str
         body = updated.model_dump()
         await role_store().update(name, body, tx=tx)
         await role_audit().record(name, "edit", caller.caller_id, before, body, tx=tx)
-    await _bump()
     return body
 
 
@@ -249,7 +249,7 @@ async def modify_role_grants(
     # One transaction on one connection, exactly as ``update_role``: the ``before`` read
     # row-locks the active role (concurrent edits serialize, the audit ``before`` is the truly
     # current body), and no mutation holds a second pooled connection. The bump follows commit.
-    async with _versioned_store().transaction() as tx:
+    async with role_write_transaction() as tx:
         try:
             before = await role_store().get_active_body(name, tx=tx, for_update=True)
         except DocumentNotFoundError as exc:
@@ -269,7 +269,6 @@ async def modify_role_grants(
         body = updated.model_dump()
         await role_store().update(name, body, tx=tx)
         await role_audit().record(name, "edit", caller.caller_id, before, body, tx=tx)
-    await _bump()
     return body
 
 
@@ -304,14 +303,13 @@ async def delete_role(name: str) -> dict[str, Any]:
     # connection: the ``before`` read row-locks the active role so the audit records the
     # truly current body and the delete cannot race a concurrent edit, and the mutation
     # holds no second pooled connection. The version bump follows the commit.
-    async with _versioned_store().transaction() as tx:
+    async with role_write_transaction() as tx:
         try:
             before = await role_store().get_active_body(name, tx=tx, for_update=True)
         except DocumentNotFoundError as exc:
             raise NotFoundError(f"unknown role: {name!r}") from exc
         await role_store().delete(name, tx=tx)
         await role_audit().record(name, "delete", caller.caller_id, before, None, tx=tx)
-    await _bump()
     return {"name": name, "deleted": True}
 
 
@@ -365,7 +363,7 @@ async def rollback_role(name: str, version: int) -> dict[str, Any]:
     # row-locked) BEFORE the re-point so the audit records the truly current body and the
     # re-point cannot race a concurrent edit; ``after`` is the target version's (immutable)
     # body. Neither read opens a second pooled connection; the bump follows the commit.
-    async with _versioned_store().transaction() as tx:
+    async with role_write_transaction() as tx:
         try:
             before = await role_store().get_active_body(name, tx=tx, for_update=True)
         except DocumentNotFoundError as exc:
@@ -376,22 +374,4 @@ async def rollback_role(name: str, version: int) -> dict[str, Any]:
             raise NotFoundError(f"role {name!r} has no version {version}") from exc
         after = (await role_store().get_version(name, version, tx=tx)).body
         await role_audit().record(name, "rollback", caller.caller_id, before, after, tx=tx)
-    await _bump()
     return after
-
-
-async def _bump() -> None:
-    from tai42_skeleton.access_control import management
-
-    await management.bump_policy_version()
-
-
-def _versioned_store():
-    """The active versioned store, resolved lazily.
-
-    Follows the same construction point ``role_store``/``role_audit`` build over (a single
-    transaction spans both).
-    """
-    from tai42_skeleton.versioning import versioned_store
-
-    return versioned_store()

@@ -288,7 +288,7 @@ def _seed_access_control(venv_bin: Path, db_name: str, infra: Infra) -> None:
         "        cur.executemany('INSERT INTO access_control_routes (url, scope_id, pattern) VALUES (%s, %s, %s) "
         "ON CONFLICT (url) DO UPDATE SET scope_id = EXCLUDED.scope_id, pattern = EXCLUDED.pattern',"
         "[('/health','public',None),('/metrics','public',None),"
-        "('all-routes','all',r'^/(?!health$)(?!metrics$).*$')])\n"
+        "('/all-routes','all',r'^/(?!health$)(?!metrics$).*$')])\n"
         "    conn.commit()\n"
     )
     payload = {**_pg_payload(infra), "db": db_name, "redis": infra.redis_url}

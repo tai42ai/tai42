@@ -54,6 +54,37 @@ def test_fenced_route_audit_wired_as_startup_and_reload_when_enabled():
     assert check_fenced_routes_resolvable in instance.app._reload_handlers.values()
 
 
+def test_route_row_audit_wired_as_startup_when_enabled():
+    # A route row stored in a form no request path reduces to must fail the boot, so the
+    # canonical-row audit is a startup handler of the access-control build.
+    from tai42_skeleton.access_control.startup import check_route_rows_canonical
+
+    assert check_route_rows_canonical in instance.app._startup_handlers.values()
+
+
+def test_mount_change_listener_invalidates_the_policy_cache():
+    # A sub-MCP mount change reaches the access-control policy cache only through the
+    # listener the composition root wires on the sub-MCP write chokepoint.
+    from tai42_skeleton.sub_mcp import service
+
+    instance.build_app()
+    assert service._mount_change_listeners.count(instance._invalidate_policy_cache) == 1
+
+
+async def test_invalidate_policy_cache_bumps_the_policy_version(monkeypatch):
+    from tai42_skeleton.access_control import management
+
+    bumps: list[int] = []
+
+    async def _bump() -> int:
+        bumps.append(1)
+        return len(bumps)
+
+    monkeypatch.setattr(management, "bump_policy_version", _bump)
+    await instance._invalidate_policy_cache()
+    assert bumps == [1]
+
+
 # --- connectors gate --------------------------------------------------------
 
 

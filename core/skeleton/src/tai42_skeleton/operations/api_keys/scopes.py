@@ -50,7 +50,6 @@ async def add_scope_url(scope_id: str, url: str, pattern: str | None) -> dict[st
         await management.add_url_to_scope(scope_id, url, pattern)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    await management.bump_policy_version()
     return {"scope_id": scope_id, "url": url}
 
 
@@ -70,14 +69,17 @@ async def remove_scope_url(url: str) -> dict[str, str]:
     # reason rather than operate the AC store under the synthetic admin.
     if not _pkg.access_control_settings().enable:
         raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
-    existed, affected = await management.remove_url_from_scope(url)
+    try:
+        existed, affected = await management.remove_url_from_scope(url)
+    except ValueError as exc:
+        # A malformed url names no route row; the writer refuses it rather than guessing a form.
+        raise BadRequestError(str(exc)) from exc
     if not existed:
         raise NotFoundError(f"url not mapped: {url!r}")
-    # The store cascade has landed; bump the cache-buster first so enforcement follows
-    # immediately, then record each rewritten policy as a new PG version so the durable
-    # history's ``is_current`` stays honest against enforcement (a rollback target that
-    # still listed the removed scope would silently re-grant it).
-    await management.bump_policy_version()
+    # The store cascade has landed and the writer invalidated the policy cache; record
+    # each rewritten policy as a new PG version so the durable history's ``is_current``
+    # stays honest against enforcement (a rollback target that still listed the removed
+    # scope would silently re-grant it).
     for affected_user, body in affected:
         await _pkg._record_policy_version(affected_user, body)
     return {"url": url}
@@ -104,11 +106,9 @@ async def delete_scope(scope_id: str) -> dict[str, Any]:
         raise BadRequestError(str(exc)) from exc
     if deleted == 0:
         raise NotFoundError(f"scope not found: {scope_id!r}")
-    # The delete cascades the scope out of every referencing key's stored policy; bump
-    # the cache-buster first so enforcement follows immediately, then record each
-    # rewritten policy as a new PG version so the durable history's ``is_current`` stays
-    # honest against enforcement.
-    await management.bump_policy_version()
+    # The delete cascades the scope out of every referencing key's stored policy (the
+    # writer invalidated the policy cache); record each rewritten policy as a new PG
+    # version so the durable history's ``is_current`` stays honest against enforcement.
     for affected_user, body in affected:
         await _pkg._record_policy_version(affected_user, body)
     return {"scope_id": scope_id, "deleted_keys": deleted}

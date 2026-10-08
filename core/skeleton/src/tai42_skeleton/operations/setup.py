@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from secrets import token_urlsafe
 
+from tai42_contract.access_control import UNIVERSAL_SCOPE
 from tai42_contract.accounts import LoginAttachingProvider
 from tai42_contract.accounts.errors import LoginAttachError, LoginConflictError
 from tai42_contract.accounts.models import LoginAttachment, LoginCredential
@@ -140,7 +141,7 @@ async def setup_deployment(
             try:
                 await roles.apply_role(owner_id, RESERVED_ADMIN_ROLE)
                 raw_key, _body, key_fingerprint = await management.add_user_api_key(
-                    key_id, key_description, ["*"], owner_user_id=owner_id
+                    key_id, key_description, [UNIVERSAL_SCOPE], owner_user_id=owner_id
                 )
                 key_minted = True
                 attachment = await _attach_owner_login(owner_id, login)

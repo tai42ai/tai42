@@ -17,15 +17,16 @@ How the invariant is held:
   :meth:`AccessControlVerifier.resolve_resource_ids` and coverage-checked exactly as the
   middleware does (deny wins: ALL resolved protected ids covered, or ``"*"``).
 - **jq is exact, per (path, method)** — every reachable candidate is evaluated through
-  the REAL :class:`PolicyEnforcer` with the SAME two-pass context the backend builds (the
-  key's condition, then the owner's condition for an owned key), so a jq fence that denies
-  a route at the edge denies it in the projection too. An admin (the condition-free
+  the REAL :class:`PolicyEnforcer` over the SAME passes the backend builds
+  (:func:`~tai42_skeleton.access_control.standing.jq_passes`: the key's condition, then the
+  owner's condition for an owned key) on the SAME canonical probe path, so a jq fence that
+  denies a route at the edge denies it in the projection too. An admin (the condition-free
   ``"*"`` discriminator) skips the jq pass — its policy carries no condition by
   definition.
 
 **Point-in-time:** both ``.context.*`` (a single ``get_live_context`` read) and
-``.system.time`` (a single ``time.time()`` read, baked into every pass by
-``_prepare_pass``) are snapshotted once per build, so a cached projection reports them
+``.system.time`` (a single ``time.time()`` read, baked into every pass when the passes are
+built) are snapshotted once per build, so a cached projection reports them
 as of build time and is point-in-time within the ttl. This is informational only: the
 enforcement gate evaluates ``.context.*`` and ``.system.time`` fresh per request, so a
 condition whose truth turns on live time can read stale in the projection yet is always
@@ -55,23 +56,23 @@ from typing import Any
 from async_lru import alru_cache
 from pydantic import BaseModel
 from starlette.authentication import AuthenticationError
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
+from tai42_contract.access_control import UNIVERSAL_SCOPE
 from tai42_contract.app import tai42_app
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control import management
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer
+from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
+from tai42_skeleton.access_control.path_canon import canonicalize_path
+from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition, policy_enforcer, render_condition
 from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
+from tai42_skeleton.access_control.standing import JqPass, Standing, StandingDenied, jq_passes, resolve_standing
 from tai42_skeleton.access_control.store import access_control_store
-from tai42_skeleton.access_control.user import is_admin_policy
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes
 from tai42_skeleton.app.sub_mcp_app import ROOT_PREFIX
+from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 
 logger = logging.getLogger(__name__)
@@ -258,107 +259,35 @@ async def _path_reachable(
     if path in carve_out:
         return True
     ids = await verifier.resolve_resource_ids(path, method=method, policy_version=version)
-    if ids:
-        public = settings.public_resource_id
-        if set(ids) == {public}:
-            return True
-        protected = [rid for rid in ids if rid != public]
-        return "*" in scope_set or all(rid in scope_set for rid in protected)
-    # No resolved id and not carved: unreachable.
-    return False
-
-
-class _PreparedPass:
-    """A single enforce pass (the key's, or the owner's) with the build-invariant parts precomputed.
-
-    Precomputed once across the whole build: the rendered condition string, the
-    configured flag, and the ``JqAuthContext`` body sans the per-probe ``request``.
-
-    Only ``.request`` varies per ``(path, method)`` probe, so a probe shallow-copies the
-    base body and substitutes ``request`` rather than re-rendering the condition (a
-    storage read for a stored ``condition`` id) and rebuilding+dumping the whole context
-    on every pass — mirroring how the backend renders once per request.
-    """
-
-    __slots__ = ("base", "condition", "configured")
-
-    def __init__(self, condition: str | None, configured: bool, base: dict[str, Any]) -> None:
-        self.condition = condition
-        self.configured = configured
-        self.base = base
-
-
-async def _prepare_pass(
-    policy: AccessPolicy,
-    scopes: list[str],
-    claims: Mapping[str, Any],
-    live_ctx: dict[str, Any],
-    user_id: str,
-    now: float,
-) -> _PreparedPass:
-    """Render ``policy``'s condition ONCE and build the invariant jq-context body ONCE.
-
-    For reuse across every per-probe pass in this build.
-    """
-    condition = ""
-    if policy.condition is not None:
-        condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
-    configured = policy.condition is not None
-    base = JqAuthContext(
-        sub=user_id,
-        scopes=list(scopes),
-        identity=dict(claims),
-        policy=policy.policy_data,
-        context=live_ctx,
-        request={},
-        system={"time": now},
-    ).model_dump()
-    return _PreparedPass(condition, configured, base)
+    if not ids:
+        # No resolved id and not carved: unreachable.
+        return False
+    public = settings.public_resource_id
+    return is_public_only(ids, public) or scopes_cover(ids, scope_set, public)
 
 
 async def _jq_admits(
     enforcer: PolicyEnforcer,
-    key_pass: _PreparedPass,
-    owner_pass: _PreparedPass | None,
+    passes: list[tuple[JqPass, RenderedCondition]],
     path: str,
     method: str,
 ) -> bool:
-    """Whether the caller's (and, for an owned key, the owner's) jq condition admits the probe.
+    """Whether every condition pass (the key's, then the owner's for an owned key) admits the canonical probe.
 
-    Probes ``(path, method)`` with the SAME two-pass evaluation the backend runs, so a
-    fenced route is denied here exactly as it is at the edge. A genuine policy DENY returns ``False``;
-    a jq/render/store INFRASTRUCTURE fault (a ``PolicyEvaluationError``, which is NOT an
-    ``AuthenticationError``) propagates loudly rather than being swallowed as a deny that
-    would silently drop the route from a 200 projection.
+    The SAME passes the backend enforces, so a fenced route is denied here exactly as it is at
+    the edge. A genuine policy DENY returns ``False``; a jq/render/store INFRASTRUCTURE fault (a
+    ``PolicyEvaluationError``, which is NOT an ``AuthenticationError``) propagates loudly rather
+    than being swallowed as a deny that would silently drop the route from a 200 projection.
     """
-    request = {"method": method, "path": path}
     try:
-        await enforcer.enforce(
-            {**key_pass.base, "request": request}, key_pass.condition, condition_configured=key_pass.configured
-        )
-        if owner_pass is not None:
-            await enforcer.enforce(
-                {**owner_pass.base, "request": request},
-                owner_pass.condition,
-                condition_configured=owner_pass.configured,
-            )
+        for jq_pass, rendered in passes:
+            await enforcer.enforce(jq_pass.context_for(method, path), rendered)
     except AuthenticationError:
         return False
     return True
 
 
-# -- version read + cache ----------------------------------------------------
-
-
-async def _read_policy_version(settings: AccessControlSettings) -> int:
-    """The current policy version (a cheap single-key GET), mirroring the policy cache's own read.
-
-    A backend error RAISES (fail-closed) rather than pinning the cache to one slot; a
-    successful read with no key yet is version 0.
-    """
-    async with client_ctx(RedisClient, settings.redis) as r:
-        raw = await r.get(settings.policy_version_key)
-    return int(raw) if raw is not None else 0
+# -- cache -------------------------------------------------------------------
 
 
 _CachedBuilder = Callable[[str, int, _FrozenScopes, _FrozenClaims], Awaitable[ProjectionResult]]
@@ -401,7 +330,7 @@ async def build_projection(user_id: str, effective_scopes: list[str], claims: Ma
     the version-keyed policy cache, so the handler never fetches policy itself.
     """
     settings = access_control_settings()
-    version = await _read_policy_version(settings)
+    version = await policy_enforcer(settings).current_policy_version()
     wrapper = _FrozenClaims(dict(claims), _claims_digest(claims))
     builder = _get_cached_builder(settings)
     return await builder(user_id, version, _FrozenScopes(list(effective_scopes)), wrapper)
@@ -421,22 +350,26 @@ async def _build_uncached(
     enforcer = policy_enforcer(settings)
     verifier = AccessControlVerifier(settings, providers=[])
 
-    policy = await enforcer.get_policy(user_id)
-    # The owner is drawn from the STORED policy_data (the management dual-home) for BOTH
-    # the admin verdict and the owner-attenuation pass, so the projection classifies the
-    # caller byte-identically to the gate.
-    owner_claim = policy.policy_data.get(OWNER_USER_ID_CLAIM)
-    owner_policy = await enforcer.get_policy(owner_claim) if owner_claim is not None else None
-    admin = is_admin_policy(policy, owner_policy)
+    # The owner is the one the STORED policy names — the owner every door reads — and the
+    # request's verified owner claim is asserted equal to it, so the projection classifies the
+    # caller byte-identically to the gate. The request was admitted by the backend at an earlier
+    # version; a principal that lost its standing since is a loud refusal, never a projection.
+    try:
+        standing = await resolve_standing(enforcer, user_id, version=version, verified_claims=claims)
+    except StandingDenied as denied:
+        logger.error(  # noqa: TRY400 a refusal outcome with its reason, not an unexpected error — no traceback
+            "access_control: projection refused for %s — %s", user_id, denied
+        )
+        raise PermissionDeniedError("access denied: principal standing changed during the request") from denied
+    owner_claim = standing.owner
+    admin = standing.is_admin
 
     principal = await _resolve_principal(user_id, owner_claim)
 
     # One point-in-time live-context read for every jq pass in this build.
     live_ctx = await enforcer.get_live_context(user_id)
 
-    admits = await _build_admits(
-        enforcer, policy, owner_policy, effective_scopes, claims, live_ctx, user_id, admin, version
-    )
+    admits = await _build_admits(enforcer, standing, effective_scopes, claims, live_ctx, user_id, version)
 
     routes, projected_pairs = await _project_routes(verifier, settings, scope_set, carve_out, version, admits)
     route_patterns = await _project_route_patterns(verifier, settings, scope_set, carve_out, version, admits)
@@ -484,43 +417,36 @@ async def _resolve_principal(user_id: str, owner_claim: str | None) -> Principal
 
 async def _build_admits(
     enforcer: PolicyEnforcer,
-    policy: AccessPolicy,
-    owner_policy: AccessPolicy | None,
+    standing: Standing,
     effective_scopes: list[str],
     claims: Mapping[str, Any],
     live_ctx: dict[str, Any],
     user_id: str,
-    admin: bool,
     version: int,
 ) -> Callable[[str, str], Awaitable[bool]]:
     """Build the ``admits(path, method)`` predicate the request gate runs, so ``projection ⊆ gate`` holds.
 
-    The predicate is the jq two-pass ∧ per-tag LEVEL decision the request gate runs.
-    Render each condition and build each jq-context body ONCE per build (they are
-    invariant across every path/method probe — only ``.request`` varies), then reuse them
-    for every probe. The owner pass exists only for an owned key whose owner carries a
-    condition, matching the backend's key-then-owner two-pass enforce.
+    The predicate is the jq passes ∧ per-tag LEVEL decision the request gate runs, over a
+    canonical probe path. Each pass's condition is rendered ONCE per build (it is invariant
+    across every probe — only ``.request`` varies), then reused for every probe.
     """
-    now = time.time()
-    key_pass: _PreparedPass | None = None
-    owner_pass: _PreparedPass | None = None
-    if not admin:
-        key_pass = await _prepare_pass(policy, effective_scopes, claims, live_ctx, user_id, now)
-        if owner_policy is not None and owner_policy.condition is not None:
-            owner_pass = await _prepare_pass(owner_policy, list(owner_policy.scopes), claims, live_ctx, user_id, now)
+    passes: list[tuple[JqPass, RenderedCondition]] = []
+    if not standing.is_admin:
+        built = jq_passes(
+            standing, user_id=user_id, claims=claims, live_context=live_ctx, scopes=effective_scopes, now=time.time()
+        )
+        passes.extend([(jq_pass, await render_condition(jq_pass.condition)) for jq_pass in built])
 
     async def admits(path: str, method: str) -> bool:
-        if admin:
+        if standing.is_admin:
             return True
-        if key_pass is None:
-            raise AssertionError
-        if not await _jq_admits(enforcer, key_pass, owner_pass, path, method):
+        if not await _jq_admits(enforcer, passes, path, method):
             return False
         # The per-tag LEVEL term — the SAME shared decision the request gate runs, so a
         # fenced route or an ungranted tag is omitted here exactly as it is denied at the
         # edge (projection ⊆ gate). A missing-role pointer denies; an infra fault
         # propagates per the projection's failure doctrine.
-        allowed, _cause = await role_level_decision(policy, owner_policy, path, method, version)
+        allowed, _cause = await role_level_decision(standing.policy, standing.owner_policy, path, method, version)
         return allowed
 
     return admits
@@ -548,11 +474,12 @@ async def _project_routes(
         # are represented ONLY via route_patterns (and the sub_mcp/agents lists).
         if "{" in meta.path:
             continue
+        probe = canonicalize_path(meta.path)
         allowed = [
             method
             for method in meta.methods
-            if await _path_reachable(verifier, settings, scope_set, carve_out, version, meta.path, method)
-            and await admits(meta.path, method)
+            if await _path_reachable(verifier, settings, scope_set, carve_out, version, probe, method)
+            and await admits(probe, method)
         ]
         if allowed:
             routes.append(RouteEntry(path=meta.path, methods=sorted(allowed)))
@@ -580,10 +507,11 @@ async def _project_route_patterns(
         scope_id = mappings.get(template_url)
         if scope_id is None:
             continue
-        representative = _sample_path_for_pattern(regex)
-        if representative is None:
+        sample = _sample_path_for_pattern(regex)
+        if sample is None:
             logger.info("access_control: projection excluding non-sampleable route pattern %r", regex)
             continue
+        representative = canonicalize_path(sample)
         if not await _path_reachable(verifier, settings, scope_set, carve_out, version, representative, "GET"):
             continue
         if not await admits(representative, "GET"):
@@ -610,10 +538,10 @@ async def _project_sub_mcp(
     sub_routes = await _sub_mcp_routes()
     for slug in sorted(sub_routes):
         config = sub_routes[slug]
-        mount_root = f"{ROOT_PREFIX}/{slug}"
+        mount_root = canonicalize_path(f"{ROOT_PREFIX}/{slug}")
         if not await _path_reachable(verifier, settings, scope_set, carve_out, version, mount_root, "GET"):
             continue
-        if not await admits(f"{mount_root}/", "GET"):
+        if not await admits(mount_root, "GET"):
             continue
         sub_mcp.append(SubMcpEntry(slug=slug, tools=list(config.tools), transport=config.transport))
     return sub_mcp
@@ -646,7 +574,7 @@ async def _project_agents(
     """
     agents: list[str] = []
     for name in _all_agent_names():
-        run_path = f"/api/agents/{name}/runs"
+        run_path = canonicalize_path(f"/api/agents/{name}/runs")
         if await _path_reachable(verifier, settings, scope_set, carve_out, version, run_path, "POST") and await admits(
             run_path, "POST"
         ):
@@ -665,7 +593,7 @@ def _mintable() -> bool:
 def synthetic_full_projection() -> ProjectionResult:
     """The gate-OFF total projection: with no identity to project, every surface is reachable.
 
-    ``admin=True`` + ``scopes=["*"]`` under the named ``__no_auth__`` identity; the list
+    ``admin=True`` + the universal scope under the named ``__no_auth__`` identity; the list
     fields are explicitly EMPTY (the Studio renders everything off the full-projection
     flag). ``mintable`` is still DERIVED — a provider that physically cannot mint reports
     ``False`` even here.
@@ -675,7 +603,7 @@ def synthetic_full_projection() -> ProjectionResult:
         owner_user_id=None,
         principal=None,
         admin=True,
-        scopes=["*"],
+        scopes=[UNIVERSAL_SCOPE],
         routes=[],
         route_patterns=[],
         sub_mcp=[],

@@ -18,6 +18,7 @@ swallow it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from tai42_contract.app import tai42_app
@@ -142,6 +143,7 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
     policy rows in Postgres are the source of truth, matching the token restore, so the
     principal row is created and the exported policy body is not re-written.
     """
+    from tai42_skeleton.access_control import management
     from tai42_skeleton.access_control.store import access_control_store
 
     store = access_control_store()
@@ -165,11 +167,35 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
                 )
             if principal.get("disabled"):
                 await store.set_principal_disabled(user_id, True)
+            await management.record_policy_change()
         except (ValueError, KeyError) as exc:
             report.errors.append(f"principal {user_id!r}: {exc}")
             report.skipped += 1
             continue
         report.created += 1
+
+
+def _canonical_archive_urls(urls: Iterable[str]) -> dict[str, str]:
+    """Each archive route url mapped to its canonical form, refusing two urls with one canonical form.
+
+    The route table holds canonical urls, so two archive rows that reduce to one url would
+    overwrite each other — the archive is refused before the first write rather than restored
+    with a row silently dropped. A url with no canonical form raises its ``MalformedPathError``.
+    """
+    from tai42_skeleton.access_control.path_canon import canonicalize_path
+
+    canonical: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for url in urls:
+        form = canonicalize_path(url)
+        if form in seen:
+            raise ValueError(
+                f"access_control archive maps {seen[form]!r} and {url!r} to one canonical route {form!r}; "
+                "refusing to restore"
+            )
+        seen[form] = url
+        canonical[url] = form
+    return canonical
 
 
 async def _import_access_control(payload: dict[str, Any]) -> BackupSectionReport:
@@ -179,36 +205,38 @@ async def _import_access_control(payload: dict[str, Any]) -> BackupSectionReport
     mode = current_import_mode()
     report = _empty_report()
     report.details["new_api_keys"] = []
-
-    await _restore_principals(payload, report)
-
-    # Replay route -> scope mappings first so the token restore below finds every
-    # referenced scope already provisioned. Keyed by ``url``: under ``skip`` an
-    # already-mapped url is left as it stands.
-    marker = access_control_settings().public_resource_id
     patterns = payload.get("patterns") or {}
     scopes = payload.get("scopes") or {}
-    # Read live mappings only when there are scopes to place; a token-only restore needs no store hit.
-    existing_urls = set((await management.get_all_route_mappings()).keys()) if scopes else set()
-    for url, scope_id in scopes.items():
-        existed = url in existing_urls
-        if existed and mode == "skip":
-            report.details["skipped_existing"] += 1
-            continue
-        if scope_id == marker:
-            # The marker is a column value, not a scope: a public route restores through
-            # the dedicated pin writer, never ``add_url_to_scope``.
-            await management.pin_route_public(url, patterns.get(url))
-        else:
-            await management.add_url_to_scope(scope_id, url, patterns.get(url))
-        if existed:
-            report.updated += 1
-        else:
-            report.created += 1
+    canonical = _canonical_archive_urls(scopes)
 
-    await _restore_tokens(payload, report)
+    # Every write below records its change; the policy cache is invalidated once at the end,
+    # and still when a write part-way raises.
+    async with management.policy_write_batch():
+        await _restore_principals(payload, report)
 
-    await management.bump_policy_version()
+        # Replay route -> scope mappings first so the token restore below finds every
+        # referenced scope already provisioned. Keyed by the canonical url the table holds:
+        # under ``skip`` an already-mapped url is left as it stands.
+        marker = access_control_settings().public_resource_id
+        # Read live mappings only when there are scopes to place; a token-only restore needs no store hit.
+        existing_urls = set((await management.get_all_route_mappings()).keys()) if scopes else set()
+        for url, scope_id in scopes.items():
+            existed = canonical[url] in existing_urls
+            if existed and mode == "skip":
+                report.details["skipped_existing"] += 1
+                continue
+            if scope_id == marker:
+                # The marker is a column value, not a scope: a public route restores through
+                # the dedicated pin writer, never ``add_url_to_scope``.
+                await management.pin_route_public(url, patterns.get(url))
+            else:
+                await management.add_url_to_scope(scope_id, url, patterns.get(url))
+            if existed:
+                report.updated += 1
+            else:
+                report.created += 1
+
+        await _restore_tokens(payload, report)
     return report
 
 

@@ -19,6 +19,7 @@ from tai42_kit.access_control.registry import get_identity_provider_factory_stag
 from tai42_kit.accounts.registry import iter_accounts_provider_factories_staged
 from tai42_kit.utils.worker_secret_capability import set_access_control_gate_state
 
+from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path, under_prefix
 from tai42_skeleton.access_control.settings import access_control_settings
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,38 @@ async def seed_roles() -> None:
     from tai42_skeleton.access_control.roles import seed_default_roles
 
     await seed_default_roles()
+
+
+async def check_route_rows_canonical() -> None:
+    """Refuse to boot on a route table holding a row whose url is not in its canonical form.
+
+    Every request is looked up by its canonical path, so a non-canonical row is a mapping no
+    request can reach — and one its own remove/unpin could not address. The fix is a reset of
+    the access-control store; the rows are never rewritten here. Gated like
+    :func:`seed_roles` — skipped when no skeleton store is configured.
+    """
+    from tai42_kit.db import component_store_configured
+
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.db import SKELETON_COMPONENT
+
+    if not component_store_configured(SKELETON_COMPONENT):
+        return
+    stranded: list[str] = []
+    for url in await management.get_all_route_mappings():
+        try:
+            canonical = canonicalize_path(url)
+        except MalformedPathError:
+            stranded.append(url)
+            continue
+        if canonical != url:
+            stranded.append(url)
+    if stranded:
+        raise RuntimeError(
+            f"access_control: the route table holds non-canonical rows: {sorted(stranded)} — reset the "
+            "access-control store (the canonical form decodes each segment once, collapses slashes and dot "
+            "segments, and drops a trailing slash)"
+        )
 
 
 async def check_always_public_routes() -> None:
@@ -430,4 +463,4 @@ async def check_accounts_providers_configured() -> None:
 
 
 def _under_prefixes(path: str, prefixes: tuple[str, ...]) -> bool:
-    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+    return any(under_prefix(path, prefix) for prefix in prefixes)

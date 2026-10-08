@@ -47,7 +47,6 @@ from tai42_contract.access_control.context import reset_request_user_id, set_req
 import tai42_skeleton.routers as _routers_pkg
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
     reset_request_identity_claims,
@@ -95,11 +94,10 @@ def _seed_ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     pg.add_route("/api/tools/remove", "admin")
     pg.add_route("/api/manifest/replace", "admin")
     pg.add_policy("alice", scopes=["*"])
-    pg.add_policy("bob", scopes=[])
+    pg.add_policy("bob", scopes=["other"])
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     # The route index is process-global; rebuild it or an earlier boot's index un-fences a route.
     reset_route_index()

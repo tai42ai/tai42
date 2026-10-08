@@ -6,19 +6,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from starlette.authentication import AuthCredentials, AuthenticationBackend, AuthenticationError, UnauthenticatedUser
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
 
-# The auth gate renders a policy's jq condition through the live template
-# manager via this interface.
-from tai42_contract.app import tai42_app
-
-from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path, strip_root_path
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, policy_is_empty
+from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, render_condition
 from tai42_skeleton.access_control.role_gate import DenialCause
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tai42_skeleton.access_control.user import TaiUser, effective_scopes, is_admin_policy
+from tai42_skeleton.access_control.standing import (
+    Standing,
+    StandingDenied,
+    StandingDenyReason,
+    jq_passes,
+    resolve_standing,
+)
+from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_always_public_prefix
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
 
@@ -27,16 +28,37 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _AuthorizedPolicy:
-    """The principal's policy resolved for a request.
+    """The principal resolved for a request: its standing, the fresh live context, and the policy version read once.
 
-    Carries the caller's policy, the owner's policy (for an owned key, else ``None``), the fresh live
-    context, and the effective owner-attenuated scopes the request is enforced and finalized with.
+    The standing carries the caller's and the owner's policies and the effective owner-attenuated
+    scopes the request is enforced and finalized with; every later term of the decision keys on
+    ``version``.
     """
 
-    policy: AccessPolicy
-    owner_policy: AccessPolicy | None
+    standing: Standing
     dynamic_context: dict[str, Any]
-    resolved_scopes: list[str]
+    version: int
+
+
+# The server-side log line each standing refusal writes, formatted with the principal and the
+# subject the defect is on (the client always reads "Access Denied"); an owner mismatch is
+# logged by the resolver itself.
+_STANDING_DENY_LOG = {
+    StandingDenyReason.NO_POLICY: "access_control: denied principal %s — no policy",
+    StandingDenyReason.DISABLED: "access_control: denied disabled principal %s",
+    StandingDenyReason.OWNER_DISABLED: "access_control: denied owned key %s — owner %s is disabled",
+    StandingDenyReason.OWNER_NO_POLICY: "access_control: denied owned key %s — owner %s has no policy",
+}
+
+
+def _log_standing_denial(denied: StandingDenied) -> None:
+    message = _STANDING_DENY_LOG.get(denied.reason)
+    if message is None:
+        return
+    if denied.reason in (StandingDenyReason.OWNER_DISABLED, StandingDenyReason.OWNER_NO_POLICY):
+        logger.warning(message, denied.principal, denied.subject)
+    else:
+        logger.warning(message, denied.principal)
 
 
 def extract_credential_candidates(conn) -> list[str]:
@@ -211,147 +233,72 @@ class AccessControlAuthBackend(AuthenticationBackend):
             raise AuthorizationError("Access Denied")
 
         authorized = await self._resolve_authorized_policy(access_token, user_id)
+        standing = authorized.standing
+        method = conn.scope.get("method")
 
-        # The request path the jq fence reasons on: the live target with only a mounted
-        # ``root_path`` prefix removed, so a deployment served under a mount prefix feeds the
-        # fence ``/api/auth/...`` — the shape its ``startswith`` clauses match — not the
-        # prefixed ``/<mount>/api/auth/...``. The same strip the resource guard's carve-out
-        # applies, so the two agree on the path a role condition sees.
-        request_path = strip_root_path(conn.url.path, conn.scope.get("root_path", ""))
+        await self._enforce_conditions(canonical_path, method, user_id, access_token, authorized)
 
-        await self._enforce_conditions(
-            request_path,
-            conn.scope.get("method"),
-            user_id,
-            access_token,
-            authorized.policy,
-            authorized.owner_policy,
-            authorized.dynamic_context,
-            authorized.resolved_scopes,
-        )
-
-        await self._enforce_tag_level(
-            authorized.policy, authorized.owner_policy, canonical_path, conn.scope.get("method"), user_id
-        )
+        await self._enforce_tag_level(standing, canonical_path, method, user_id, authorized.version)
 
         # 6. Finalize with the effective scopes, stamping the admin discriminator so the
         # resource guard can admit a super-admin to a path the app does not serve and no row
         # maps (a registered authed route resolves to the universal scope, not that carve-out).
-        # Admin is
-        # computed on the EFFECTIVE (owner-attenuated) policy — the key's scopes capped by
-        # the owner's and both conditions ``None`` — the SAME predicate the projection,
-        # key management, and the fence exemption share, so the guard's verdict is
-        # byte-identical and an owned condition-free ``["*"]`` key fails CLOSED (it inherits
-        # its owner's jq base through the owner's condition).
-        access_token.scopes = authorized.resolved_scopes
-        return AuthCredentials(scopes=authorized.resolved_scopes), TaiUser(
-            access_token, is_admin=is_admin_policy(authorized.policy, authorized.owner_policy)
-        )
+        # Admin is computed on the EFFECTIVE (owner-attenuated) policy — the key's scopes capped
+        # by the owner's and both conditions ``None`` — the SAME predicate the projection, key
+        # management, and the fence exemption share, so the guard's verdict is byte-identical
+        # and an owned condition-free ``["*"]`` key fails CLOSED (it inherits its owner's jq
+        # base through the owner's condition).
+        access_token.scopes = standing.effective_scopes
+        return AuthCredentials(scopes=standing.effective_scopes), TaiUser(access_token, is_admin=standing.is_admin)
 
     async def _resolve_authorized_policy(self, access_token, user_id: str) -> _AuthorizedPolicy:
-        # 2 & 3. Fetch Policy (Cached) and Live Context (Fresh)
-        # A backend error here (redis down, etc.) must fail closed as a clean
-        # deny, not leak out as a raw 500: wrap it into AuthenticationError so the
-        # AuthenticationMiddleware's on_error handler renders a 401/403.
+        # 2 & 3. The policy version (read ONCE for the whole decision), the principal's standing
+        # at it, and the live context (fresh). A credential that verifies against a principal the
+        # policy store no longer knows (the residue mid-revoke), a disabled principal, an owned
+        # key whose owner is gone or disabled, or a credential whose owner claim is not the
+        # stored owner is denied here — "authenticated" never means "has no standing". A backend
+        # error fails closed as a clean deny, never a raw 500: the AuthenticationMiddleware's
+        # on_error handler renders it.
+        enforcer = self.enforcer
         try:
-            policy, dynamic_context = await self.enforcer.get_auth_data(user_id)
-
-            # A credential that verifies against a principal the policy store no longer
-            # knows (the residue mid-revoke). Denied here so "authenticated" can never
-            # mean "has no policy" — a door gated on nothing but an authenticated
-            # principal would otherwise admit a revoked key.
-            if policy_is_empty(policy):
-                logger.warning("access_control: denied principal %s — no policy", user_id)
-                raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
-
-            # Disabled principal (direct): a disabled account user's own session/key is
-            # denied here — defense in depth beside the owned-key owner-disable check.
-            if policy.policy_data.get("disabled") is True:
-                logger.warning("access_control: denied disabled principal %s", user_id)
-                raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
-
-            # Owned-key attenuation: a credential whose claims carry an owner is
-            # capped by the owner's CURRENT policy at REQUEST time, so the cap holds over
-            # time rather than freezing at mint. A missing/empty/disabled owner denies.
-            owner = access_token.claims.get(OWNER_USER_ID_CLAIM)
-            owner_policy = None
-            resolved_scopes = policy.scopes
-            if owner is not None:
-                owner_policy = await self.enforcer.get_policy(owner)
-                if owner_policy.policy_data.get("disabled") is True:
-                    logger.warning("access_control: denied owned key %s — owner %s is disabled", user_id, owner)
-                    raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
-                if policy_is_empty(owner_policy):
-                    logger.warning("access_control: denied owned key %s — owner %s has no policy", user_id, owner)
-                    raise AuthorizationError("Access Denied")  # noqa: TRY301 — deny guard inside translating try
-                resolved_scopes = effective_scopes(policy.scopes, owner_policy.scopes)
-        except AuthorizationError:
-            raise
+            version = await enforcer.current_policy_version()
+            standing = await resolve_standing(enforcer, user_id, version=version, verified_claims=access_token.claims)
+            dynamic_context = await enforcer.get_live_context(user_id)
+        except StandingDenied as denied:
+            _log_standing_denial(denied)
+            raise AuthorizationError("Access Denied") from denied
         except Exception as e:
             # Log the underlying failure (redis host:port, etc.) server-side, but
             # deny the caller with a generic message that leaks no internal detail.
             logger.exception("access_control: policy/context fetch failed for user %s", user_id)
             raise AuthorizationError("Access Denied") from e
-
-        return _AuthorizedPolicy(
-            policy=policy,
-            owner_policy=owner_policy,
-            dynamic_context=dynamic_context,
-            resolved_scopes=resolved_scopes,
-        )
+        return _AuthorizedPolicy(standing=standing, dynamic_context=dynamic_context, version=version)
 
     async def _enforce_conditions(
         self,
-        request_path: str,
+        canonical_path: str,
         method: str | None,
         user_id: str,
         access_token,
-        policy: AccessPolicy,
-        owner_policy: AccessPolicy | None,
-        dynamic_context: dict[str, Any],
-        resolved_scopes: list[str],
+        authorized: _AuthorizedPolicy,
     ) -> None:
-        # 4. Build Unified Context (with the effective, owner-attenuated scopes). ``request_path``
-        # is the caller-supplied root-stripped path — the jq fence never re-derives it per door.
-        context = JqAuthContext(
-            sub=user_id,
-            scopes=resolved_scopes,
-            identity=access_token.claims,
-            policy=policy.policy_data,
-            context=dynamic_context,
-            request={"method": method, "path": request_path},
-            system={"time": time.time()},
+        # 4 & 5. Enforce the key's own condition, then (for an owned key whose owner carries
+        # one) the OWNER's as a separate pass over the owner's policy data and scopes. Both read
+        # ``.request.path`` as the canonical, root-stripped path every door shares. Two passes
+        # are an AND — no jq string concatenation (splicing is injection-shaped).
+        standing = authorized.standing
+        passes = jq_passes(
+            standing,
+            user_id=user_id,
+            claims=access_token.claims,
+            live_context=authorized.dynamic_context,
+            scopes=standing.effective_scopes,
+            now=time.time(),
         )
-
-        # 5. Enforce Policy — the KEY's own condition, then (for an owned key) the
-        # OWNER's condition as a SEPARATE enforce pass over a context built from the
-        # OWNER's policy_data + scopes, so an owner condition referencing ``.policy.*``
-        # reads the owner's policy, never the key's mint-time policy_data. Two sequential
-        # enforce calls are semantically AND — no jq string concatenation (splicing is
-        # injection-shaped).
         try:
-            condition = ""
-            if policy.condition is not None:
-                condition = await tai42_app.storage.resource_manager.render_templated_text(policy.condition)
-            # Whether a condition was configured is known from the policy, not from
-            # the rendered string: a configured condition that renders empty must
-            # still be enforced (deny), so pass the configured flag through and let
-            # ``enforce`` fail closed rather than mistaking empty for "no condition".
-            condition_configured = policy.condition is not None
-            await self.enforcer.enforce(context.model_dump(), condition, condition_configured=condition_configured)
-
-            if owner_policy is not None and owner_policy.condition is not None:
-                owner_context = JqAuthContext(
-                    sub=user_id,
-                    scopes=owner_policy.scopes,
-                    identity=access_token.claims,
-                    policy=owner_policy.policy_data,
-                    context=dynamic_context,
-                    request={"method": method, "path": request_path},
-                    system={"time": time.time()},
-                )
-                owner_condition = await tai42_app.storage.resource_manager.render_templated_text(owner_policy.condition)
-                await self.enforcer.enforce(owner_context.model_dump(), owner_condition, condition_configured=True)
+            for jq_pass in passes:
+                rendered = await render_condition(jq_pass.condition)
+                await self.enforcer.enforce(jq_pass.context_for(method, canonical_path), rendered)
         except Exception as e:
             # Log the underlying failure (jq internals, render errors) server-side,
             # but deny the caller with a generic message that leaks no internal detail.
@@ -360,11 +307,11 @@ class AccessControlAuthBackend(AuthenticationBackend):
 
     async def _enforce_tag_level(
         self,
-        policy: AccessPolicy,
-        owner_policy: AccessPolicy | None,
+        standing: Standing,
         canonical_path: str,
         method: str | None,
         user_id: str,
+        version: int,
     ) -> None:
         # 5b. The per-tag LEVEL pass — Layer 2 of the (resource-x-action) model,
         # INTERSECTED with the base-tier jq above (fail-closed AND). Skipped for an admin
@@ -372,8 +319,9 @@ class AccessControlAuthBackend(AuthenticationBackend):
         # the governing role's per-tag level (the OWNER's role for an owned key — keys
         # inherit the owner). A resolution/infra fault fails closed as a clean deny.
         try:
-            version = await self.enforcer.current_policy_version()
-            allowed, cause = await role_level_decision(policy, owner_policy, canonical_path, method, version)
+            allowed, cause = await role_level_decision(
+                standing.policy, standing.owner_policy, canonical_path, method, version
+            )
         except Exception as e:
             logger.exception("access_control: per-tag level resolution failed for user %s", user_id)
             raise AuthorizationError("Access Denied") from e

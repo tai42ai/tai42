@@ -15,7 +15,7 @@ from starlette.authentication import AuthenticationError
 
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control.policy import PolicyEnforcer, PolicyEvaluationError
+from tai42_skeleton.access_control.policy import PolicyEnforcer, PolicyEvaluationError, RenderedCondition
 from tai42_skeleton.access_control.settings import AccessControlSettings
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -121,24 +121,11 @@ async def test_live_context_numeric_condition_passes_through_jq(monkeypatch):
     context = await enforcer.get_live_context("u1")
     jq_input = {"context": context, "policy": {"limit": 5}}
     # 3 < 5 → allowed (no raise).
-    await enforcer.enforce(jq_input, ".context.used < .policy.limit")
+    await enforcer.enforce(jq_input, RenderedCondition(".context.used < .policy.limit", configured=True))
     # 3 < 2 → denied.
     jq_input["policy"]["limit"] = 2
     with pytest.raises(AuthenticationError, match="Policy violation"):
-        await enforcer.enforce(jq_input, ".context.used < .policy.limit")
-
-
-async def test_get_auth_data_combines_policy_and_context(monkeypatch):
-    settings = AccessControlSettings()
-    pg = FakeAccessControlPg()
-    pg.add_policy("u1", scopes=["s"])
-    fake = FakeRedis(hashes={f"{settings.context_prefix}u1": {"used": "9"}})
-    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(fake))
-    enforcer = PolicyEnforcer(settings)
-    policy, context = await enforcer.get_auth_data("u1")
-    assert policy.scopes == ["s"]
-    assert context == {"used": 9}
+        await enforcer.enforce(jq_input, RenderedCondition(".context.used < .policy.limit", configured=True))
 
 
 async def test_enforce_raises_evaluation_error_on_runtime_jq_error():
@@ -148,7 +135,7 @@ async def test_enforce_raises_evaluation_error_on_runtime_jq_error():
     # caller that narrowly catches the deny type lets this propagate loudly instead of
     # swallowing it as a deny. It is deliberately not an ``AuthenticationError`` subclass.
     with pytest.raises(PolicyEvaluationError, match="Policy error"):
-        await enforcer.enforce({"x": "abc"}, ".x | tonumber")
+        await enforcer.enforce({"x": "abc"}, RenderedCondition(".x | tonumber", configured=True))
     assert not issubclass(PolicyEvaluationError, AuthenticationError)
 
 

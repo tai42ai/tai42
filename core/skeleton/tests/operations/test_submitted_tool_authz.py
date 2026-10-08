@@ -18,7 +18,6 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.route_registry import route_registry
@@ -89,7 +88,6 @@ def ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     # The route index and the grant cache are process-global; rebuild both against this
     # test's registry so no earlier boot's index or grant map leaks in.

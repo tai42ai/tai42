@@ -22,12 +22,10 @@ from typing import Any
 
 from tai42_contract.plugins import ROUTE_BASE_SEGMENT_RE, PluginItem, PluginSpec
 
-from tai42_skeleton.access_control.path_canon import canonicalize_path
+from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
+from tai42_skeleton.app.mount_map import resolved_api_path
 from tai42_skeleton.app.route_shapes import Shape, collision, parse_shape
 from tai42_skeleton.marketplace.errors import RouteMountError
-
-# The fixed platform-wide route root; only an item's mount base is remappable.
-_API_ROOT = "/api/"
 
 
 @dataclass(frozen=True)
@@ -141,7 +139,7 @@ def resolved_routes(spec: PluginSpec, mounts: Mapping[str, str]) -> list[Resolve
                 base=base,
                 default_base=default_base,
                 path=route.path,
-                full_path=f"{_API_ROOT}{base}{route.path}",
+                full_path=resolved_api_path(base, route.path),
                 methods=tuple(route.methods),
                 public=route.public,
             )
@@ -229,7 +227,7 @@ def reserved_public_offenders(
         # under after normalization — "reserved always wins", matching the runtime
         # verifier and the boot mount-map audit.
         full_path = canonicalize_path(route.full_path)
-        if any(full_path == prefix or full_path.startswith(f"{prefix}/") for prefix in reserved_prefixes):
+        if any(under_prefix(full_path, prefix) for prefix in reserved_prefixes):
             offenders.append(route)
     return offenders
 

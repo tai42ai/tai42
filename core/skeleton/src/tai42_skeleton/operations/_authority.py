@@ -13,17 +13,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, get_current_user_id
+from tai42_contract.access_control import (
+    KEY_FINGERPRINT_CLAIM,
+    OWNER_USER_ID_CLAIM,
+    UNIVERSAL_SCOPE,
+    get_current_user_id,
+)
 from tai42_contract.access_control.models import AccessPolicy
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import policy_enforcer, policy_is_empty
 from tai42_skeleton.access_control.settings import access_control_settings
-from tai42_skeleton.access_control.user import is_admin_policy
+from tai42_skeleton.access_control.standing import StandingDenied, resolve_standing
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, assert_key_carries_authority
 from tai42_skeleton.authz.execution_evaluability import ExecutionConditionError, assert_execution_key_evaluable
 from tai42_skeleton.authz.execution_identity import get_execution_identity
-from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError, OperationFailedError
+from tai42_skeleton.operations.errors import (
+    BadRequestError,
+    ForbiddenError,
+    NotFoundError,
+    OperationFailedError,
+    PermissionDeniedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +73,14 @@ async def resolve_caller() -> Caller:
     Both cases run the SAME classification, so the gate can never key on one principal
     while the dispatch runs as another.
 
-    ``owner_claim`` comes from the principal's OWN stored policy_data, never the
-    request-scope claims var. ``is_admin`` is computed on the EFFECTIVE (owner-attenuated)
+    The principal is read through the SAME standing resolution every door uses, at the current
+    policy version: ``owner_claim`` is the owner its OWN stored policy names, never the
+    request-scope claims var, and ``is_admin`` is computed on the EFFECTIVE (owner-attenuated)
     policy: full effective scopes AND no condition on the key or its owner — role-holders
     carry ``["*"]`` plus a jq condition, and an editor-minted condition-free owned key
-    inherits its owner's jq base and so is denied admin.
+    inherits its owner's jq base and so is denied admin. A principal that cannot carry
+    authority (it lost its policy, was disabled, or its owner was, after the request was
+    admitted) is refused 403, logged.
 
     Gate OFF ⇒ admin (nothing to classify; the surfaces are already open). Gate ON with NO
     principal bound is an invariant breach: RAISE the typed 500 rather than escalate
@@ -75,7 +89,7 @@ async def resolve_caller() -> Caller:
     """
     settings = access_control_settings()
     if not settings.enable:
-        return Caller(caller_id=None, policy=AccessPolicy(scopes=["*"]), is_admin=True, owner_claim=None)
+        return Caller(caller_id=None, policy=AccessPolicy(scopes=[UNIVERSAL_SCOPE]), is_admin=True, owner_claim=None)
 
     execution_identity = get_execution_identity()
     caller_id = execution_identity.user_id if execution_identity is not None else get_current_user_id()
@@ -88,16 +102,22 @@ async def resolve_caller() -> Caller:
         raise OperationFailedError("access_control: internal authority-resolution failure")
 
     enforcer = policy_enforcer(settings)
-    policy = await enforcer.get_policy(caller_id)
-    owner_claim = owner_of(policy.policy_data)
-    # The owner's CURRENT policy caps the caller for the admin verdict; a top-level
-    # principal has no owner claim and so no owner policy.
-    owner_policy = await enforcer.get_policy(owner_claim) if owner_claim is not None else None
+    version = await enforcer.current_policy_version()
+    try:
+        standing = await resolve_standing(enforcer, caller_id, version=version, verified_claims=None)
+    except StandingDenied as denied:
+        logger.error(  # noqa: TRY400 a refusal outcome with its reason, not an unexpected error — no traceback
+            "access_control: acting principal %s cannot carry authority (%s on %s); refusing the operation",
+            caller_id,
+            denied.reason.value,
+            denied.subject,
+        )
+        raise PermissionDeniedError("access denied: principal standing changed during the request") from denied
     return Caller(
         caller_id=caller_id,
-        policy=policy,
-        is_admin=is_admin_policy(policy, owner_policy),
-        owner_claim=owner_claim,
+        policy=standing.policy,
+        is_admin=standing.is_admin,
+        owner_claim=standing.owner,
     )
 
 
@@ -220,12 +240,12 @@ async def assert_execution_key_bindable(caller: Caller, execution_key: str) -> s
         raise OperationFailedError("access_control: internal key-fingerprint resolution failure")
 
     try:
-        await assert_key_carries_authority(enforcer, execution_key, bound_fingerprint=fingerprint)
+        standing = await assert_key_carries_authority(enforcer, execution_key, bound_fingerprint=fingerprint)
     except ExecutionKeyAuthorityError as exc:
         raise _unfireable_key_refusal(caller, execution_key, exc) from exc
 
     try:
-        await assert_execution_key_evaluable(enforcer, execution_key)
+        await assert_execution_key_evaluable(standing)
     except ExecutionConditionError as exc:
         raise _unevaluable_key_refusal(caller, execution_key, policy, exc) from exc
 

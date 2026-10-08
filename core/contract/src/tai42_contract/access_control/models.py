@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, ConditionMixin, TemplatedText, expression_annotation
+
+UNIVERSAL_SCOPE: Final = "*"
+"""The resource wildcard: a scope set holding it covers every resource id."""
 
 # The access-control surfaces' STRICT-TRUE override of the generic condition
 # payload. Unlike the truthy surfaces (hook registration, backend callbacks), the
@@ -113,8 +116,8 @@ class RoleDefinition(ConditionMixin):
     name: str
     description: str
 
-    # The scope layer; seeded roles stay ["*"] and differ only by the jq base.
-    scopes: list[str] = Field(default_factory=lambda: ["*"])
+    # The scope layer; seeded roles stay on the universal scope and differ only by the jq base.
+    scopes: list[str] = Field(default_factory=lambda: [UNIVERSAL_SCOPE])
 
     # The security posture a NEW role inherits its jq base (Layer 1) from —
     # "editor"/"viewer"; "admin" is reserved. Optional: the seeded roles carry

@@ -74,15 +74,20 @@ def install(monkeypatch):
     same state the fake router is primed with.
     """
     from tai42_skeleton.access_control import management as management_module
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.sub_mcp import service
     from tai42_skeleton.sub_mcp import store as sub_mcp_store
 
     from ..access_control.conftest import FakeRedis, make_client_ctx
 
     # A successful register/unregister bumps the policy version (so cached capability
-    # projections re-read the new mount set), which goes through ``management``'s Redis —
-    # point it at a per-test FakeRedis so the bump is observable and never hits a backend.
+    # projections re-read the new mount set) through the mount-change listener the
+    # composition root wires; the bump goes through ``management``'s Redis — point it at a
+    # per-test FakeRedis so the bump is observable and never hits a backend.
     redis = FakeRedis(strings={}, hashes={})
     monkeypatch.setattr(management_module, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(service, "_mount_change_listeners", [])
+    service.on_mount_changed(instance._invalidate_policy_cache)
 
     def _install(routes=None, registered=("get_forecast",)):
         routes = routes or {}
@@ -280,12 +285,12 @@ async def test_register_and_unregister_bump_policy_version(install):
     resp = await router.register_sub_mcp(_body_req(b'{"slug": "weather", "tools": ["get_forecast"]}'))
     assert resp.status_code == 200
     v1 = int(fake.redis._strings[version_key])
-    assert v1 > v0
+    assert v1 == v0 + 1
 
     resp = await router.unregister_sub_mcp(_req(slug="weather"))
     assert resp.status_code == 200
     v2 = int(fake.redis._strings[version_key])
-    assert v2 > v1
+    assert v2 == v1 + 1
 
 
 async def test_failed_register_and_unregister_do_not_bump_version(install):

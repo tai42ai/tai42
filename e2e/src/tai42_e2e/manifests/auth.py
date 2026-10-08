@@ -283,3 +283,62 @@ def build_accounts_fresh_stack(res: StackResources, variants: Variants) -> Stack
         run_metrics=False,
         auth=True,
     )
+
+
+def _busless_auth_manifest(variants: Variants) -> dict:
+    """Access control ON with the pluggable identity provider and the api-keys router (the
+    ``/api/auth/me`` read and the ``/api/auth/public-routes`` writes), on no backend: a
+    one-worker, busless stack whose readiness is HTTP ``/health`` alone."""
+    return {
+        "default_routers": "none",
+        "lifecycle_modules": [variants.identity.lifecycle_module],
+        "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.api_keys"],
+        "extensions_modules": _EXTENSION_MODULES,
+        "tools": [*_builtin_entries()],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+
+
+def _busless_auth_env(res: StackResources, variants: Variants) -> dict[str, str]:
+    env = _base_env(res, variants)
+    env["ACCESS_CONTROL_ENABLE"] = "true"
+    env.update(variants.identity.auth_provider_env())
+    return env
+
+
+def build_embed_prefix_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The embed host serving the tai app under the ``/mnt`` path prefix
+    (``tai42_e2e_fixtures.embed_prefix_main``) with access control ON: every request
+    reaches the app with ``root_path="/mnt"``, the shape whose access-control decisions must
+    read the root-stripped path. One app process, no backend, busless."""
+    return StackConfig(
+        name="embed-prefix",
+        topology=Topology.MULTIWORKER,
+        manifest=_busless_auth_manifest(variants),
+        env=_busless_auth_env(res, variants),
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+        embed=True,
+        embed_app="tai42_e2e_fixtures.embed_prefix_main:app",
+        path_prefix="/mnt",
+    )
+
+
+def build_sse_auth_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """``tai serve --transport sse`` with access control ON: the SSE event stream at ``/sse``
+    and its message endpoint mounted at ``/messages``. One worker (an SSE session is pinned to
+    the worker that opened it), no backend, busless."""
+    return StackConfig(
+        name="sse-auth",
+        topology=Topology.MULTIWORKER,
+        manifest=_busless_auth_manifest(variants),
+        env=_busless_auth_env(res, variants),
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+        transport="sse",
+    )

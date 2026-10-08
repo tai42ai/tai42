@@ -200,7 +200,7 @@ async def _crash_resume(run_id: str, record: dict[str, str]) -> None:
     # Bind the secret-read capability of the ORIGINAL run key, NEVER the reader's: the reconcile
     # runs on a read path under the reader's ambient context, so an unbound capability would leave
     # the re-drive acting on the reader's ``action=secret`` fence. It is the admin status of the
-    # rebuilt identity (``resolve_execution_key_secret_capability``, carried on ``is_admin``), and
+    # rebuilt identity (its standing's admin verdict, carried on ``is_admin``), and
     # fail-closed ``False`` when the key no longer carries authority — mirroring
     # ``bind_execution_identity``.
     secret_token = set_request_secret_capability(identity.is_admin if identity is not None else False)

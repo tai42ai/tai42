@@ -235,6 +235,26 @@ def test_settings_compile_path_patterns():
     assert template == "/a/{id}"
 
 
+@pytest.mark.parametrize(
+    ("template", "canonical"),
+    [("/a/{id}/", "/a/{id}"), ("//a/{id}", "/a/{id}"), ("/a/./{id}", "/a/{id}"), ("/a%20b/{id}", "/a b/{id}")],
+)
+def test_settings_refuse_a_non_canonical_path_patterns_template(template: str, canonical: str):
+    # A template is looked up by exact url in the canonical route table, so a template no
+    # row can hold is refused at load, naming the form to supply.
+    with pytest.raises(ValueError, match="is not canonical") as exc:
+        AccessControlSettings(path_patterns={r"^/a/\d+$": template})
+    assert (
+        f"path_patterns template {template!r} is not canonical (it canonicalizes to {canonical!r}) "
+        "— supply the canonical form"
+    ) in str(exc.value)
+
+
+def test_settings_refuse_a_malformed_path_patterns_template():
+    with pytest.raises(ValueError, match=r"path_patterns template '/a%00/\{id\}' is malformed: "):
+        AccessControlSettings(path_patterns={r"^/a/\d+$": "/a%00/{id}"})
+
+
 def test_access_control_settings_accessor_returns_settings():
     assert isinstance(access_control_settings(), AccessControlSettings)
 

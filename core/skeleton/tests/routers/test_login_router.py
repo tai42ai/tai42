@@ -32,7 +32,7 @@ from tai42_kit.accounts import registry as accounts_registry
 import tai42_skeleton.routers.api_keys as api_keys_router
 import tai42_skeleton.routers.login as login_router
 from tai42_skeleton.access_control import management as management_module
-from tai42_skeleton.access_control import verifier as verifier_module
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 
@@ -266,7 +266,7 @@ def test_public_methods_reachable_while_protected_still_401(monkeypatch):
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield ac_fake
 
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", ac_ctx)
 
     routes = [
         Route("/api/login/methods", login_router.login_methods, methods=["GET"]),

@@ -131,3 +131,27 @@ def test_under_prefix_is_segment_aware():
     assert under_prefix("/api", "/api") is True
     assert under_prefix("/api/x", "/api") is True
     assert under_prefix("/apiary", "/api") is False
+
+
+_PREFIX_CASES = [
+    ("/api", "/api", True),
+    ("/api/x", "/api", True),
+    ("/apiary", "/api", False),
+    ("/app", "/app", True),
+    ("/app/x", "/app", True),
+    ("/apple/x", "/app", False),
+    ("/", "/api", False),
+]
+
+
+@pytest.mark.parametrize(("path", "prefix", "expected"), _PREFIX_CASES)
+def test_every_segment_prefix_site_agrees_with_under_prefix(path: str, prefix: str, expected: bool):
+    # The boot audits, the settings overlap check and the reserved-pin test all answer the
+    # one segment-prefix question through ``under_prefix``, so they cannot drift apart.
+    from tai42_skeleton.access_control.settings import _prefix_overlaps
+    from tai42_skeleton.access_control.startup import _under_prefixes
+
+    assert under_prefix(path, prefix) is expected
+    assert _under_prefixes(path, (prefix,)) is expected
+    assert _under_prefixes(path, ("/elsewhere", prefix)) is expected
+    assert _prefix_overlaps(path, prefix) is (under_prefix(path, prefix) or under_prefix(prefix, path))

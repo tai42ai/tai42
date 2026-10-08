@@ -40,11 +40,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
+from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
 from tai42_skeleton.access_control.principals_mixin import PrincipalsStoreMixin
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -53,17 +54,15 @@ from tai42_skeleton.db import SKELETON_COMPONENT
 _POLICY_COLUMNS = "scopes, policy_data, condition"
 
 
-def _normalize_url(url: str) -> str:
-    """Canonicalize a route url to the exact form the verifier resolves against.
+def _canonical_url(url: str) -> str:
+    """The one canonical form of a route url — the form ``resolve_resource_ids`` looks every request up in.
 
-    ``AccessControlVerifier.resolve_resource_ids`` strips a trailing slash before
-    every lookup (when the path is longer than ``/``), so a route stored with a
-    trailing slash could never match a request. Normalizing on write with the same
-    rule keeps one canonical form on both sides.
+    Each segment decoded once, slashes collapsed, dot segments resolved, no trailing slash
+    (:func:`~tai42_skeleton.access_control.path_canon.canonicalize_path`), so a stored row can
+    never be a spelling no request reaches. A url with no canonical form raises
+    ``MalformedPathError`` (a ``ValueError``).
     """
-    if len(url) > 1 and url.endswith("/"):
-        return url.rstrip("/")
-    return url
+    return canonicalize_path(url)
 
 
 # The server-owned, immutable ``policy_data`` anchors a client may never write or strip:
@@ -193,10 +192,10 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         the public marker the url is mapped public (the marker is an ordinary column
         value, not a scope). Any prior binding for ``url`` — its scope AND its
         pattern — is replaced by the upsert, so a re-point, a pattern change, and a
-        pattern drop all leave exactly what this call writes. The url is normalized
-        to the verifier's canonical form; the ``pattern`` regex is stored verbatim.
+        pattern drop all leave exactly what this call writes. The url is stored in its
+        canonical form; the ``pattern`` regex is stored verbatim.
         """
-        url = _normalize_url(url)
+        url = _canonical_url(url)
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -220,7 +219,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         to the public marker owns no scope, so its removal skips the cascade. The
         delete, the emptiness check, and the cascade all commit in one transaction.
         """
-        url = _normalize_url(url)
+        url = _canonical_url(url)
         public = self._settings().public_resource_id
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -273,7 +272,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         ``remove_scope`` on that scope from blind-deleting the now-public route. When
         ``pattern`` is given the dynamic-pattern pair is registered exactly as
         ``add_url_to_scope`` does; without it any prior pattern is cleared. The url is
-        normalized to the verifier's canonical form. Committed in one transaction.
+        stored in its canonical form. Committed in one transaction.
 
         Raises ``ValueError`` when ``url`` falls under a reserved management prefix
         (``reserved_public_pin_prefixes``): the access-control control plane must not be
@@ -283,9 +282,9 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         does not pass through this door — this loud reject is the operator-facing half.
         """
         settings = self._settings()
-        url = _normalize_url(url)
+        url = _canonical_url(url)
         for prefix in settings.reserved_public_pin_prefixes:
-            if url == prefix or url.startswith(f"{prefix}/"):
+            if under_prefix(url, prefix):
                 raise ValueError(
                     f"{url!r} is under the reserved access-control management prefix "
                     f"{prefix!r} and cannot be pinned public"
@@ -314,7 +313,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         re-point of the same url cannot commit between the check and the delete: the
         stricter "only when public" contract holds even under a racing writer.
         """
-        url = _normalize_url(url)
+        url = _canonical_url(url)
         public = self._settings().public_resource_id
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -594,7 +593,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         transaction so the lock is held until the policy write commits.
         """
         public = self._settings().public_resource_id
-        concrete = [scope for scope in scopes if scope != "*"]
+        concrete = [scope for scope in scopes if scope != UNIVERSAL_SCOPE]
         if not concrete:
             return
         await cur.execute(

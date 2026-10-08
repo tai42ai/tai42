@@ -17,7 +17,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 import tai42_skeleton.routers.api_keys as router
-from tai42_skeleton.access_control import verifier as verifier_module
+from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 
@@ -25,15 +25,15 @@ from ._auth_boundary import wire_store_from_route_strings
 
 # tier 1: every /api/auth path resolves to one protected template.
 _PATH_PATTERNS = {
-    r"/api/auth/scopes": "auth-api",
-    r"/api/auth/scopes/.+": "auth-api",
-    r"/api/auth/routes": "auth-api",
-    r"/api/auth/public-routes": "auth-api",
-    r"/api/auth/tokens-payload": "auth-api",
-    r"/api/auth/api-keys": "auth-api",
-    r"/api/auth/api-keys/.+": "auth-api",
-    r"/api/auth/claim-links": "auth-api",
-    r"/api/auth/validate-condition": "auth-api",
+    r"/api/auth/scopes": "/auth-api",
+    r"/api/auth/scopes/.+": "/auth-api",
+    r"/api/auth/routes": "/auth-api",
+    r"/api/auth/public-routes": "/auth-api",
+    r"/api/auth/tokens-payload": "/auth-api",
+    r"/api/auth/api-keys": "/auth-api",
+    r"/api/auth/api-keys/.+": "/auth-api",
+    r"/api/auth/claim-links": "/auth-api",
+    r"/api/auth/validate-condition": "/auth-api",
 }
 
 
@@ -52,13 +52,13 @@ class _AcFake:
 def boundary_client(monkeypatch):
     ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
     # tier 2: the template maps to a PROTECTED resource id (not the public id).
-    ac_fake = _AcFake({"auth-api": "auth-api-protected"})
+    ac_fake = _AcFake({"/auth-api": "auth-api-protected"})
 
     @asynccontextmanager
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield ac_fake
 
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", ac_ctx)
     wire_store_from_route_strings(monkeypatch, ac_fake._strings)
 
     routes = [

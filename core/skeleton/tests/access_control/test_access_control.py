@@ -1,4 +1,4 @@
-"""Conformance + behavior tests for the copied access_control feature.
+"""Conformance + behavior tests for the access_control feature.
 
 Conformance asserts the local implementations satisfy the
 ``tai42_contract.access_control`` protocols/ABCs they are meant to implement.
@@ -13,10 +13,9 @@ from tai42_contract.access_control.identity import (
 from tai42_contract.access_control.identity import (
     IdentityProvider as ContractIdentityProvider,
 )
-from tai42_contract.access_control.policy import PolicyEnforcer as ContractPolicyEnforcer
 from tai42_contract.access_control.verifier import Verifier as ContractVerifier
 
-from tai42_skeleton.access_control.policy import PolicyEnforcer
+from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 
@@ -35,17 +34,17 @@ def test_verifier_satisfies_contract_protocol():
     assert isinstance(verifier, ContractVerifier)
 
 
-def test_policy_enforcer_satisfies_contract_protocol():
-    enforcer = PolicyEnforcer(_settings())
-    assert isinstance(enforcer, ContractPolicyEnforcer)
-
-
 async def test_enforce_empty_expression_is_noop():
-    assert await PolicyEnforcer(_settings()).enforce({"anything": 1}, None) is None
+    assert await PolicyEnforcer(_settings()).enforce({"anything": 1}, RenderedCondition("", configured=False)) is None
 
 
 async def test_enforce_passes_when_condition_true():
-    assert await PolicyEnforcer(_settings()).enforce({"scopes": ["admin"]}, '.scopes | index("admin") != null') is None
+    assert (
+        await PolicyEnforcer(_settings()).enforce(
+            {"scopes": ["admin"]}, RenderedCondition('.scopes | index("admin") != null', configured=True)
+        )
+        is None
+    )
 
 
 async def test_enforce_raises_on_violation():
@@ -53,7 +52,7 @@ async def test_enforce_raises_on_violation():
     # ``match`` pins the generic message: a regression that re-wraps this as
     # "Policy error: ..." (leaking internals) would fail this assertion.
     with pytest.raises(AuthenticationError, match="Policy violation"):
-        await enforcer.enforce({"plan": "free"}, '.plan == "pro"')
+        await enforcer.enforce({"plan": "free"}, RenderedCondition('.plan == "pro"', configured=True))
 
 
 @pytest.mark.parametrize(
@@ -71,7 +70,7 @@ async def test_enforce_denies_truthy_non_true_results(context, expression):
     # deny cases into allow.
     enforcer = PolicyEnforcer(_settings())
     with pytest.raises(AuthenticationError, match="Policy violation"):
-        await enforcer.enforce(context, expression)
+        await enforcer.enforce(context, RenderedCondition(expression, configured=True))
 
 
 async def test_enforce_denies_configured_condition_that_renders_empty():
@@ -80,14 +79,13 @@ async def test_enforce_denies_configured_condition_that_renders_empty():
     # "no condition configured" (which would fail open and allow the caller).
     enforcer = PolicyEnforcer(_settings())
     with pytest.raises(AuthenticationError, match="Policy violation"):
-        await enforcer.enforce({"anything": 1}, "", condition_configured=True)
+        await enforcer.enforce({"anything": 1}, RenderedCondition("", configured=True))
 
 
 async def test_enforce_allows_when_no_condition_configured():
     # Genuinely no condition configured -> nothing to enforce -> allow.
     enforcer = PolicyEnforcer(_settings())
-    assert await enforcer.enforce({"anything": 1}, "", condition_configured=False) is None
-    assert await enforcer.enforce({"anything": 1}, None, condition_configured=False) is None
+    assert await enforcer.enforce({"anything": 1}, RenderedCondition("", configured=False)) is None
 
 
 def test_settings_compose_redis_connection_not_inherit():

@@ -632,12 +632,19 @@ async def test_register_hook_withholds_a_THIRD_principals_id_from_a_non_admin(
     monkeypatch: pytest.MonkeyPatch, manager: InMemoryHooksManager
 ) -> None:
     # Pass-role admits the self-bind, but the refusal is about alice's OWNER: the defect
-    # is disclosed so alice can act on it, the owner's id is not.
+    # is disclosed so alice can act on it, the owner's id is not. Alice was resolved while
+    # carol still stood; carol's policy is gone by the time the bind door reads it.
     _gate_on(
         monkeypatch,
         caller_id="alice",
         policies={"alice": _owned_by("carol"), "carol": AccessPolicy(scopes=[])},
     )
+    admitted = authority.Caller(caller_id="alice", policy=_owned_by("carol"), is_admin=False, owner_claim="carol")
+
+    async def _admitted_caller() -> authority.Caller:
+        return admitted
+
+    monkeypatch.setattr(hooks_ops, "resolve_caller", _admitted_caller)
     with pytest.raises(BadRequestError, match="the owner of execution key 'alice' has no policy") as raised:
         await hooks_ops.register_hook(name="h", topic="t", tool="noop", execution_key="alice")
     assert "carol" not in str(raised.value)

@@ -26,7 +26,6 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.policy_store import ac_policy_store
 from tai42_skeleton.access_control.role_gate import reset_route_index, resolve_route_meta
 from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY, role_store
@@ -118,7 +117,6 @@ def ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     # Management writes reach redis through its own binding; same fake => one version counter.
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
@@ -389,7 +387,6 @@ def test_one_dispatch_decides_on_one_policy_snapshot(monkeypatch: pytest.MonkeyP
     # the version is read once and threaded through, so all four see one snapshot.
     redis = _VersionCountingRedis()
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
-    monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
 
     async def run() -> None:
         async with app.app_context(_manifest()), bind_execution_identity("k-owned", bound_fingerprint="fp-k-owned"):

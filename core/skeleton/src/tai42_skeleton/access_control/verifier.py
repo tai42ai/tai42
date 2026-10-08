@@ -7,10 +7,8 @@ from re import Pattern
 
 from async_lru import alru_cache
 from fastmcp.server.auth import AccessToken, TokenVerifier
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, IdentityProvider
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control.path_canon import (
@@ -19,6 +17,7 @@ from tai42_skeleton.access_control.path_canon import (
     canonicalize_path,
     under_prefix,
 )
+from tai42_skeleton.access_control.policy import policy_enforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.app.route_registry import load_all_routes, route_registry
@@ -27,15 +26,6 @@ logger = logging.getLogger(__name__)
 
 UUID_PATTERN = re.compile(r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 DIGIT_PATTERN = re.compile(r"/\d+")
-
-#: The universal scope every seeded role carries (`admin`/`editor`/`viewer` all hold `["*"]`).
-#: The scope-coverage sites (`middleware._authorize_resolved`, the tool edge's
-#: `_assert_scope_covers`, the projection's `_path_reachable`) read it as "covers every
-#: resource id". The declared-protection tier answers it as the resource of a registered
-#: authenticated surface the operator mapped to no named scope, so a role-holder reaches that
-#: surface on a fresh deployment while a scoped key (which lacks `*`) still needs an operator
-#: row. One spelling for the resource-wildcard, shared with the coverage sites.
-UNIVERSAL_SCOPE = "*"
 
 
 def is_always_public_prefix(path: str, settings: AccessControlSettings) -> bool:
@@ -246,7 +236,11 @@ class AccessControlVerifier(TokenVerifier):
         # snapshotted the version for a whole batch (the projection build resolving
         # many paths against one version) passes it in to skip the redundant per-path
         # read; the request-path gate omits it and reads once per request.
-        version = policy_version if policy_version is not None else await self._current_policy_version()
+        version = (
+            policy_version
+            if policy_version is not None
+            else await policy_enforcer(self.settings).current_policy_version()
+        )
 
         found_ids = await self._accumulate_route_ids(path, version)
         self._apply_resolution_fallbacks(path, method, found_ids)
@@ -464,16 +458,6 @@ class AccessControlVerifier(TokenVerifier):
         True when ``path`` equals a reserved prefix or is a route beneath it.
         """
         return any(under_prefix(path, prefix) for prefix in self.settings.reserved_public_pin_prefixes)
-
-    async def _current_policy_version(self) -> int:
-        # A backend error here fails closed by RAISING (it surfaces out of the
-        # resource guard as a clean deny), never a silent default: swallowing it to
-        # a fixed version would pin the route/pattern caches to one slot and serve a
-        # stale route map for the ttl. A successful read with no key yet is version
-        # 0. Mirrors PolicyEnforcer._current_policy_version.
-        async with client_ctx(RedisClient, self.settings.redis) as r:
-            raw = await r.get(self.settings.policy_version_key)
-        return int(raw) if raw is not None else 0
 
     def _normalize_auto(self, path: str) -> str:
         path = UUID_PATTERN.sub("/{uuid}", path)

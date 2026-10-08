@@ -18,6 +18,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
@@ -25,7 +26,6 @@ from tai42_kit.utils.data.string_util import hash_api_key
 import tai42_skeleton.routers.hooks as router
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
@@ -46,8 +46,8 @@ _VALID_KEY = "trigger-caller-key"
 # route row — they are public by their ``authed=False`` registration, which the verifier's
 # declared-public tier grants above the route table.
 _PATH_PATTERNS = {
-    r"/api/hooks": "hooks-api",
-    r"/api/hooks/.+": "hooks-api",
+    r"/api/hooks": "/hooks-api",
+    r"/api/hooks/.+": "/hooks-api",
 }
 
 
@@ -137,7 +137,7 @@ def boundary_client(monkeypatch):
     _wire_router(monkeypatch)
 
     ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
-    ac_fake = _AcFake({"hooks-api": "hooks-api-protected"})
+    ac_fake = _AcFake({"/hooks-api": "hooks-api-protected"})
 
     @asynccontextmanager
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -145,7 +145,7 @@ def boundary_client(monkeypatch):
 
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", ac_ctx)
     wire_store_from_route_strings(monkeypatch, ac_fake._strings)
 
     app = Starlette(routes=_routes(), middleware=AuthAdapter(ac_settings).get_middleware())
@@ -190,15 +190,14 @@ def credentialed_client(monkeypatch, bound_app):
         }
     )
     pg = FakeAccessControlPg()
-    pg.add_route("hooks-api", "hooks-api-protected")
+    pg.add_route("/hooks-api", "hooks-api-protected")
     # A non-admin holding the management doors' own resource scope, so any refusal is
     # the route's action class rather than the scope layer.
-    pg.add_policy("u1", scopes=["hooks", "hooks-api-protected"])
+    pg.add_policy("u1", scopes=["hooks", "hooks-api-protected"], policy_data={OWNER_USER_ID_CLAIM: "owner1"})
     # The owner principal's ["*"] policy caps nothing (the key stays non-admin, scoped).
     pg.add_policy("owner1", scopes=["*"])
 
     ctx = make_client_ctx(fake)
-    monkeypatch.setattr(verifier_module, "client_ctx", ctx)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
@@ -277,14 +276,14 @@ def locked_webhook_client(monkeypatch):
         webhook_verifiers = registry
 
     ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
-    ac_fake = _AcFake({"hooks-api": "hooks-api-protected"})
+    ac_fake = _AcFake({"/hooks-api": "hooks-api-protected"})
 
     @asynccontextmanager
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield ac_fake
 
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
+    monkeypatch.setattr(policy_module, "client_ctx", ac_ctx)
     wire_store_from_route_strings(monkeypatch, ac_fake._strings)
 
     with tai42_app.bound(_WebhookApp()):

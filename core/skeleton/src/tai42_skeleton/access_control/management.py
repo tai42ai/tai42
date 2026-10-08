@@ -18,7 +18,9 @@ Three backends are orchestrated here, each owning a distinct slice of state:
 - The ``ac:context:{user_id}`` per-user LIVE COUNTERS are a plain Redis HASH on the
   AC Redis, created by the first counter write (external metering writers use
   ``HSET``/``HINCRBY`` with JSON-encoded values) and deleted at revoke here; the
-  plain-Redis ``ac:policy_version`` cache-buster is bumped here after every mutation.
+  plain-Redis ``ac:policy_version`` cache-buster is bumped by every writer here after its
+  committed change (once per :func:`policy_write_batch` inside one), so no caller has to
+  remember the invalidation.
 
 Backend errors are never swallowed — they propagate so a failed provisioning op is
 loud. The mint/revoke orchestration is fail-closed (identity record first on mint,
@@ -29,12 +31,15 @@ silent orphan, and every step is ordered so a plain retry finishes the job.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, IdentityProvider
 from tai42_contract.template import TemplatedText
 from tai42_kit.access_control.registry import get_identity_provider_factory
@@ -80,6 +85,48 @@ _UNSET = _Unset.UNSET
 
 def _settings() -> AccessControlSettings:
     return access_control_settings()
+
+
+@dataclass
+class _Batch:
+    changed: bool = False
+
+
+_policy_write_batch: ContextVar[_Batch | None] = ContextVar("policy_write_batch", default=None)
+
+
+@asynccontextmanager
+async def policy_write_batch() -> AsyncIterator[None]:
+    """Run a run of policy writes under ONE cache invalidation, bumped on exit if anything changed.
+
+    Inside the block every writer of this module records its change instead of bumping; the
+    one bump runs in a ``finally``, so a raise part-way still invalidates what was written.
+    A revoke's bump is not deferred (its fail-closed order needs it immediately). Nested use
+    raises ``RuntimeError``.
+    """
+    if _policy_write_batch.get() is not None:
+        raise RuntimeError("policy_write_batch is not reentrant")
+    batch = _Batch()
+    token = _policy_write_batch.set(batch)
+    try:
+        yield
+    finally:
+        _policy_write_batch.reset(token)
+        if batch.changed:
+            await bump_policy_version()
+
+
+async def record_policy_change() -> None:
+    """Invalidate the policy cache after a committed enforced-authority change.
+
+    Bumps the policy version now, or — inside a :func:`policy_write_batch` — once when the
+    batch ends.
+    """
+    batch = _policy_write_batch.get()
+    if batch is not None:
+        batch.changed = True
+        return
+    await bump_policy_version()
 
 
 def _resolve_provider(name: str) -> IdentityProvider:
@@ -238,25 +285,33 @@ async def api_key_state(user_id: str) -> Literal["absent", "live", "orphaned", "
 
 
 async def add_url_to_scope(scope_id: str, url: str, pattern: str | None = None) -> None:
-    """Map ``url`` to ``scope_id`` (optionally with a dynamic ``pattern``)."""
+    """Map ``url`` to ``scope_id`` (optionally with a dynamic ``pattern``); the policy cache is invalidated."""
     await access_control_store().add_url_to_scope(scope_id, url, pattern)
+    await record_policy_change()
 
 
 async def remove_url_from_scope(url: str) -> tuple[bool, list[tuple[str, dict[str, Any]]]]:
     """Unmap ``url``, cascading its scope out of every token policy when the scope loses its last url.
 
-    Returns ``(existed, [(user_id, committed_body), …])``.
+    Returns ``(existed, [(user_id, committed_body), …])``; the policy cache is invalidated when the
+    url existed.
     """
-    return await access_control_store().remove_url_from_scope(url)
+    existed, affected = await access_control_store().remove_url_from_scope(url)
+    if existed:
+        await record_policy_change()
+    return existed, affected
 
 
 async def remove_scope(scope_id: str) -> tuple[int, list[tuple[str, dict[str, Any]]]]:
     """Delete a scope, stripping it from every token policy and deleting its routes.
 
-    Returns ``(deleted_count, [(user_id, committed_body), …])``. Removing the public marker raises
-    ``ValueError``.
+    Returns ``(deleted_count, [(user_id, committed_body), …])``; the policy cache is invalidated
+    when anything was deleted. Removing the public marker raises ``ValueError``.
     """
-    return await access_control_store().remove_scope(scope_id)
+    deleted, affected = await access_control_store().remove_scope(scope_id)
+    if deleted > 0:
+        await record_policy_change()
+    return deleted, affected
 
 
 async def get_public_route_pins() -> list[str]:
@@ -267,14 +322,19 @@ async def get_public_route_pins() -> list[str]:
 async def pin_route_public(url: str, pattern: str | None = None) -> None:
     """Pin ``url`` public (optionally with a dynamic ``pattern``), re-pointing it off any prior scope.
 
-    The dedicated public-pin writer — the marker never routes through ``add_url_to_scope``.
+    The dedicated public-pin writer — the marker never routes through ``add_url_to_scope``. The
+    policy cache is invalidated.
     """
     await access_control_store().pin_route_public(url, pattern)
+    await record_policy_change()
 
 
 async def unpin_public_route(url: str) -> bool:
-    """Unpin a public ``url``. Returns ``False`` when it was not pinned public."""
-    return await access_control_store().unpin_public_route(url)
+    """Unpin a public ``url``. Returns ``False`` when it was not pinned public; else the policy cache is invalidated."""
+    unpinned = await access_control_store().unpin_public_route(url)
+    if unpinned:
+        await record_policy_change()
+    return unpinned
 
 
 async def get_policy_body(user_id: str) -> dict[str, Any] | None:
@@ -304,9 +364,12 @@ async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, A
     """Write a prior policy ``body`` back as the enforced policy — the store side of a version rollback.
 
     Returns the restored body, or ``None`` if ``user_id`` is not provisioned (a falsy sentinel the
-    route's 404 guard tests).
+    route's 404 guard tests). A restored body invalidates the policy cache.
     """
-    return await access_control_store().restore_policy_body(user_id, body)
+    restored = await access_control_store().restore_policy_body(user_id, body)
+    if restored is not None:
+        await record_policy_change()
+    return restored
 
 
 # -- key mint / revoke / edit (cross-backend orchestration) ------------------
@@ -335,11 +398,11 @@ async def add_user_api_key(
 
     ``owner_user_id`` is REQUIRED: every api key belongs to a principal. The owner must be
     an EXISTING, ENABLED principal (a loud ``ValueError`` naming the state otherwise). The
-    owner claim is DUAL-HOMED at this single mint — the provider persists it on the identity
-    record (the ENFORCEMENT source, arriving on every request) and it is also written into
-    the committed ``policy_data`` under ``OWNER_USER_ID_CLAIM`` (the MANAGEMENT/listing
-    source, readable from the store the tokens-payload merge already performs). Both homes
-    are written only by this mint path.
+    owner claim is DUAL-HOMED at this single mint — written into the committed
+    ``policy_data`` under ``OWNER_USER_ID_CLAIM``, the owner every door reads, and persisted
+    by the provider on the identity record, whose copy arrives on every request and is
+    asserted equal to the stored one wherever a credential is verified. Both homes are
+    written only by this mint path.
 
     ORCHESTRATES the backends in a FAIL-CLOSED order. Raises ``ValueError`` if the
     user id is already provisioned, if the owner is not an enabled principal, or if any
@@ -348,7 +411,7 @@ async def add_user_api_key(
 
     1. the provider's ``provision`` writes the identity/key record FIRST — the key
        authenticates but GRANTS NOTHING until the policy below exists;
-    2. the policy row is written to the PG store.
+    2. the policy row is written to the PG store, then the policy cache is invalidated.
 
     The per-user live-context hash ``ac:context:{user_id}`` needs NO seed — a Redis
     hash is created by its first counter write, and an absent hash reads as an empty
@@ -392,7 +455,7 @@ async def add_user_api_key(
         # valid to mint; every other scope must exist in the route table.
         valid = set((await store.get_all_existing_scopes()).values())
         for scope in scopes:
-            if scope != "*" and scope not in valid:
+            if scope != UNIVERSAL_SCOPE and scope not in valid:
                 raise ValueError(f"scope {scope!r} does not exist or has no urls assigned")
 
     # 1. Identity record FIRST (fail-closed order) — the provider owns it. The owner
@@ -420,6 +483,7 @@ async def add_user_api_key(
             f"api key for user {user_id!r} was provisioned but its policy write failed; the key "
             f"authenticates but is denied everything — recover with revoke_api_key({user_id!r}) then re-mint"
         ) from exc
+    await record_policy_change()
     return raw_key, body, key_fingerprint
 
 
@@ -462,6 +526,8 @@ async def edit_user_payload(
     # for a user with no policy (its single existence signal this surface can read).
     if policy is None:
         return None
+    # The policy write is committed: invalidate before the description step, which can raise.
+    await record_policy_change()
 
     # Description edit → the provider (its single home). Only a supplied description
     # reaches the provider; ``update_description`` returning ``False`` for a user
@@ -483,7 +549,8 @@ async def remint_orphaned_api_key(user_id: str, description: str) -> str:
     Postgres policy survived a Redis flush. This mints a FRESH identity record for the
     SAME ``user_id`` through the provider, re-homing the owner claim from the policy
     row's management home (``policy_data[OWNER_USER_ID_CLAIM]``) onto the identity
-    record, its ENFORCEMENT home, so the restored key carries its original ownership.
+    record, whose copy every verified request is asserted against, so the restored key
+    carries its original ownership.
 
     The policy row is NOT touched: its scopes, condition, key fingerprint and owner
     claim stay, so a hook binding keyed on the fingerprint keeps resolving after the
@@ -584,7 +651,7 @@ async def revoke_api_key(user_id: str) -> bool:
 async def bump_policy_version() -> int:
     """Increment the policy-version counter (plain Redis), forcing a cross-worker cache miss on the next read.
 
-    Called after any scope/policy mutation. A failed bump RAISES loudly — it is never swallowed.
+    Returns the new version. A failed bump RAISES loudly — it is never swallowed.
     """
     s = _settings()
     async with client_ctx(RedisClient, s.redis) as r:
