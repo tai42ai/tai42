@@ -147,7 +147,7 @@ def test_specific_dotenv_beats_default_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAI_DEFAULT_HOST", "shared-host")
 
     class DotenvStoreSettings(StoreSettings):
-        model_config = SettingsConfigDict(env_prefix="STORE_", env_file=dotenv)
+        tai_env_file: ClassVar = dotenv
 
     assert DotenvStoreSettings().host == "store-host"
 
@@ -164,7 +164,7 @@ def test_default_env_beats_default_dotenv(tmp_path, monkeypatch):
     monkeypatch.setenv("TAI_DEFAULT_HOST", "env-host")
 
     class DotenvStoreSettings(StoreSettings):
-        model_config = SettingsConfigDict(env_prefix="STORE_", env_file=dotenv)
+        tai_env_file: ClassVar = dotenv
 
     assert DotenvStoreSettings().host == "env-host"
 
@@ -173,7 +173,7 @@ def test_default_dotenv_resolves_alone(tmp_path):
     dotenv = _write_dotenv(tmp_path / ".env", TAI_DEFAULT_HOST="dotenv-host")
 
     class DotenvStoreSettings(StoreSettings):
-        model_config = SettingsConfigDict(env_prefix="STORE_", env_file=dotenv)
+        tai_env_file: ClassVar = dotenv
 
     assert DotenvStoreSettings().host == "dotenv-host"
 

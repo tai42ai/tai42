@@ -8,7 +8,7 @@ namespace can supply the connection identity for every store at once, while any
 store-specific value still wins. The mechanism is built entirely on the
 documented pydantic-settings customization API (``PydanticBaseSettingsSource``
 subclasses composed through ``settings_customise_sources``); no source internals
-are overridden, so it holds across the declared ``pydantic-settings>=2.11`` floor.
+are overridden, so it holds across the declared ``pydantic-settings>=2.15`` floor.
 """
 
 import logging
@@ -17,9 +17,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
 
-from dotenv import dotenv_values
 from pydantic.fields import FieldInfo
 from pydantic_settings import PydanticBaseSettingsSource
+
+from tai42_kit.settings.env_file import read_env_file
 
 TAI_DEFAULT_ENV_PREFIX = "TAI_DEFAULT_"
 
@@ -91,27 +92,22 @@ class DefaultNamespaceEnvSource(_DefaultNamespaceSource):
 
 
 class DefaultNamespaceDotEnvSource(_DefaultNamespaceSource):
-    """Reads the model's ``env_file`` (``.env``) for the ``TAI_DEFAULT_*`` fallbacks.
+    """Reads the class's env file (``tai_env_file``) for the ``TAI_DEFAULT_*`` fallbacks.
 
     Process env is NOT consulted here — :class:`DefaultNamespaceEnvSource` covers
-    it and sits above this source. The configured ``env_file`` is normalized to a
-    sequence and read in order with later files overriding earlier ones (matching
-    pydantic-settings' own dotenv order); an absent file contributes nothing.
+    it and sits above this source. The file is read through the kit's env-file
+    cache, so this source and the class's dotenv source share one parse; an absent
+    file contributes nothing.
     """
 
     def _values(self) -> Mapping[str, str | None]:
-        env_file = self.config.get("env_file")
+        env_file = getattr(self.settings_cls, "tai_env_file", None)
         if env_file is None:
             return {}
-        if isinstance(env_file, (str, os.PathLike)):
-            env_file = [env_file]
-        encoding = self.config.get("env_file_encoding")
-        merged: dict[str, str | None] = {}
-        for entry in env_file:
-            path = Path(entry).expanduser()
-            if path.is_file() or path.is_fifo():
-                merged.update(dotenv_values(path, encoding=encoding or "utf8"))
-        return merged
+        path = Path(env_file).expanduser()
+        if not (path.is_file() or path.is_fifo()):
+            return {}
+        return read_env_file(path, encoding=self.config.get("env_file_encoding"))
 
 
 class _RecordingSource(PydanticBaseSettingsSource):
@@ -207,10 +203,21 @@ class DefaultNamespaceMixin:
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Append the ``TAI_DEFAULT_*`` fallback sources beneath the specific settings sources."""
+        """Append the ``TAI_DEFAULT_*`` fallback sources beneath the specific settings sources.
+
+        The specific sources are the next class's in the MRO (the settings base's,
+        whose dotenv slot holds the kit's cached dotenv source).
+        """
+        base = super().settings_customise_sources(  # pyright: ignore[reportAttributeAccessIssue] -- resolved on the settings base later in the MRO
+            settings_cls,
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
         tai_default_fields = cls.tai_default_fields
         if not tai_default_fields:
-            return (init_settings, env_settings, dotenv_settings, file_secret_settings)
+            return base
         # The four framework sources all carry a specific namespace and sit above
         # the default sources — specific always beats default (file secrets
         # included: it is a specific-namespace source, inert until ``secrets_dir``
@@ -218,10 +225,9 @@ class DefaultNamespaceMixin:
         # earlier source winning, which is exactly the per-field fallback: the
         # specific namespace fills what it sets, the default namespace the rest.
         recorded: list[frozenset[str]] = []
-        specific = (init_settings, env_settings, dotenv_settings, file_secret_settings)
-        default_start = len(specific)
+        default_start = len(base)
         return (
-            *(_RecordingSource(source, recorded) for source in specific),
+            *(_RecordingSource(source, recorded) for source in base),
             DefaultNamespaceEnvSource(settings_cls, tai_default_fields, recorded),
             DefaultNamespaceDotEnvSource(settings_cls, tai_default_fields, recorded),
             _DefaultNamespaceLogSource(settings_cls, tai_default_fields, recorded, default_start),

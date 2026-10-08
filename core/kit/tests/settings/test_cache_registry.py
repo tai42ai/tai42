@@ -21,11 +21,18 @@ from tai42_kit.settings.cache_registry import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_registry(monkeypatch):
-    """Snapshot the global registry + stamp roster so test state doesn't leak."""
-    monkeypatch.setattr(cache_registry, "_CACHE_CLEARS", dict(cache_registry._CACHE_CLEARS))
-    monkeypatch.setattr(cache_registry, "_RESET_HOOKS", dict(cache_registry._RESET_HOOKS))
-    monkeypatch.setattr(cache_registry, "_stamp_roster", list(cache_registry._stamp_roster))
+def _isolated_registry():
+    """Snapshot the global registry + stamp roster so test state doesn't leak.
+
+    Restored in this fixture's own teardown, before the suite's settings reset runs,
+    so a hook a test registers never reaches that reset.
+    """
+    saved = (cache_registry._CACHE_CLEARS, cache_registry._RESET_HOOKS, cache_registry._stamp_roster)
+    cache_registry._CACHE_CLEARS = dict(saved[0])
+    cache_registry._RESET_HOOKS = dict(saved[1])
+    cache_registry._stamp_roster = list(saved[2])
+    yield
+    cache_registry._CACHE_CLEARS, cache_registry._RESET_HOOKS, cache_registry._stamp_roster = saved
 
 
 def test_settings_cache_caches_and_resets():

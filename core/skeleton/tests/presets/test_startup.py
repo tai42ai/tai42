@@ -17,6 +17,7 @@ import asyncio
 
 import pytest
 from tai42_contract.presets import PresetBody
+from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -96,6 +97,8 @@ def test_startup_hook_skipped_when_store_unconfigured(pg: FakeVersioningPg, monk
         # seed runs before the gate is closed so a row exists to prove the skip.
         await _seed("ver", "weather")
         monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
+        # The registry serves what it resolved during the seed until a settings reset.
+        reset_all_settings()
         pg.executed.clear()
         async with app.app_context(_manifest()):
             assert not app.preset_manager.is_registered("ver")

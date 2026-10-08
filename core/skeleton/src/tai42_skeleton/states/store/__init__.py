@@ -5,8 +5,10 @@ substrate: ``state_declarations`` (base ``schema`` + composed ``effective_schema
 the ``subject_kinds`` and ``default_subject_kind`` it serves), ``state_records``,
 ``state_applied_ops`` (the idempotency ledger), ``state_subject_aliases``,
 ``state_templates``, ``state_attachments``, and ``state_writes`` (the write provenance
-ledger). Connection settings resolve FRESH per operation (``component_store_settings``)
-so a config reload re-targets the store.
+ledger). Connection settings are read per operation through ``component_store_settings``,
+which serves them resolved once per process and re-reads them after a settings reset
+(every config reload) or a change of the env file, so a config reload re-targets the
+store.
 
 A SUBJECT is ``(target_kind, target_name, kind, key)`` — four columns everywhere;
 equality (and identity across every method) is all four under ``state``. The store

@@ -28,6 +28,20 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_accounts_postgres.db import COMPONENT, accounts_migration_entry
 
+
+@pytest.fixture(autouse=True)
+def _reset_settings_between_tests() -> Any:
+    """Drop every cached settings accessor before and after each test.
+
+    The kit's database registry serves what it resolved first until a settings
+    reset; a test sets its env before its first read, so each test starts and ends
+    with nothing cached.
+    """
+    reset_all_settings()
+    yield
+    reset_all_settings()
+
+
 # -- bind a no-op app handle before any route module imports --------------------
 
 

@@ -75,6 +75,20 @@ def _reset_client_epoch() -> object:
 
 
 @pytest.fixture(autouse=True)
+def _reset_settings() -> object:
+    """Drop every cached settings accessor before and after each test.
+
+    Cached accessors serve what they resolved first; a test that sets env reads it
+    only after a reset, so each test starts and ends with nothing cached.
+    """
+    from tai42_kit.settings import reset_all_settings
+
+    reset_all_settings()
+    yield
+    reset_all_settings()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Clear ambient kit settings env and run each test from a scratch CWD.
 

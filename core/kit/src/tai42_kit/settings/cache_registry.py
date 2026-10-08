@@ -10,17 +10,21 @@ stale-config leak, reported loudly and never dropped.
 """
 
 import contextlib
+import functools
 import gc
 import logging
 import threading
 import types
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import cast
 
 from pydantic_settings import BaseSettings
+
+from tai42_kit.settings.base import TaiBaseSettings
+from tai42_kit.settings.env_file import EnvFileIdentity, env_file_identity
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +100,36 @@ def settings_cache[F: Callable](fn: F) -> F:
     cached = lru_cache(maxsize=1)(_construct)
     _CACHE_CLEARS[_key(fn)] = cached.cache_clear
     return cast(F, cached)
+
+
+def _env_file_token() -> EnvFileIdentity | None:
+    path = TaiBaseSettings.tai_env_file
+    return None if path is None else env_file_identity(path)
+
+
+def keyed_settings_cache[K: Hashable, V](fn: Callable[[K], V]) -> Callable[[K], V]:
+    """Cache a one-argument settings accessor per key, cleared on reset and re-read when the env file changes.
+
+    An entry is served while the env file keeps the identity it had when the entry
+    was built; ``reset_all_settings()`` drops every entry. A settings instance is
+    epoch-stamped on construction like :func:`settings_cache`'s. A build that raises
+    stores nothing, so the next call builds again.
+    """
+    entries: dict[K, tuple[EnvFileIdentity | None, V]] = {}
+
+    @functools.wraps(fn)
+    def cached(key: K) -> V:
+        token = _env_file_token()
+        entry = entries.get(key)
+        if entry is not None and entry[0] == token:
+            return entry[1]
+        value = fn(key)
+        _stamp_settings(value)
+        entries[key] = (token, value)
+        return value
+
+    _CACHE_CLEARS[_key(fn)] = entries.clear
+    return cached
 
 
 def register_settings_reset(fn: Callable[[], None]) -> Callable[[], None]:

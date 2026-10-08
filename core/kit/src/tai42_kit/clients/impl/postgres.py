@@ -1,7 +1,8 @@
 """Pooled Postgres client built on ``psycopg_pool.AsyncConnectionPool``."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -10,12 +11,17 @@ from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
 from tai42_kit.clients.base import PooledClient, reject_unknown_connection_kwargs
+from tai42_kit.clients.impl.postgres_json import configure_platform_json
 from tai42_kit.clients.settings import PostgresConnectionSettings
 
 # ``Json`` is re-exported so callers wrap jsonb params through the pooled
 # client's own module rather than importing psycopg directly — every pg
 # primitive the app touches is reached through the kit client layer.
-__all__ = ["Json", "PostgresClient", "pinned_connection", "postgres_pool_name"]
+__all__ = ["Json", "PostgresClient", "pinned_connection", "postgres_pool_name", "read_connection"]
+
+# A callback psycopg_pool runs with one connection (``configure=`` on every new
+# connection, ``reset=`` on every connection returned to the pool).
+ConnectionCallback = Callable[[AsyncConnection[Any]], Awaitable[None]]
 
 # The pool's default connection type. Naming it lets the pooled-client generic
 # resolve concretely (the AsyncConnectionPool default hides ACT behind a cast).
@@ -117,7 +123,14 @@ def _mask_dsn_password(dsn: str) -> str:
 
 
 async def _open_named_pool(
-    dsn: str, *, min_size: int, max_size: int, name: str, connection_kwargs: dict | None = None
+    dsn: str,
+    *,
+    min_size: int,
+    max_size: int,
+    name: str,
+    connection_kwargs: dict | None = None,
+    configure: ConnectionCallback | None = None,
+    reset: ConnectionCallback | None = None,
 ) -> _Pool:
     """Prove the first connection, then build and fill a named pool.
 
@@ -135,7 +148,10 @@ async def _open_named_pool(
 
     ``connection_kwargs`` (psycopg_pool's ``kwargs=``) are applied to every connection
     the pool opens — a caller whose driver needs autocommit, a row factory, or prepared
-    statements disabled passes them here.
+    statements disabled passes them here. ``configure`` runs on every new connection
+    (the kit's own pools register their json loader there); ``reset`` runs on every
+    connection returned to the pool once it is idle, and a connection it fails on or
+    leaves outside a transaction-idle state is discarded.
     """
     async with await AsyncConnection.connect(dsn):
         pass
@@ -148,6 +164,8 @@ async def _open_named_pool(
         name=name,
         connection_class=AsyncConnection,
         kwargs=connection_kwargs,
+        configure=configure,
+        reset=reset,
         # Validate each connection on checkout: a connection the server has
         # since closed (idle drop, restart, a severed-then-restored link) is
         # discarded and replaced instead of handed to the caller, who would
@@ -172,6 +190,26 @@ async def _open_named_pool(
         await pool.close()
         raise
     return pool
+
+
+async def _restore_transactional(conn: AsyncConnection[Any]) -> None:
+    """Return a connection :func:`read_connection` switched to autocommit to the pool's mode."""
+    if conn.autocommit:
+        await conn.set_autocommit(False)
+
+
+@asynccontextmanager
+async def read_connection(pool: AsyncConnectionPool[Any]) -> AsyncIterator[AsyncConnection[Any]]:
+    """A pooled connection in autocommit mode for stand-alone reads: each statement runs on its own, no BEGIN/COMMIT.
+
+    Plain SELECTs only. A locking read (FOR UPDATE / FOR SHARE), a write, or statements
+    that must be atomic together run on ``pool.connection()`` inside
+    ``conn.transaction()``. The pool must be a :class:`PostgresClient` pool, whose reset
+    callback returns the connection to transactional mode when it comes back.
+    """
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        yield conn
 
 
 class PostgresClient(PooledClient[_Pool]):
@@ -209,6 +247,8 @@ class PostgresClient(PooledClient[_Pool]):
             min_size=kwargs.get("min_size", _DEFAULT_MIN_SIZE),
             max_size=kwargs.get("max_size", _DEFAULT_MAX_SIZE),
             name=name,
+            configure=configure_platform_json,
+            reset=_restore_transactional,
         )
 
     async def _close(self, client: _Pool):
@@ -234,7 +274,7 @@ async def pinned_connection(settings: PostgresConnectionSettings) -> AsyncIterat
     kwargs = settings.client_kwargs()
     dsn = kwargs["dsn"]
     name = postgres_pool_name(dsn, _pool_owner(kwargs.get("env_prefix")), "pinned")
-    pool = await _open_named_pool(dsn, min_size=1, max_size=1, name=name)
+    pool = await _open_named_pool(dsn, min_size=1, max_size=1, name=name, configure=configure_platform_json)
     try:
         async with pool.connection() as conn:
             yield conn

@@ -43,6 +43,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         # redis<6 imports PyJWT eagerly at import time.
         "jwt",
         "opentelemetry",
+        # The kit Postgres client's json/jsonb read loader (``tai42-kit[postgres]``).
+        "orjson",
         "psycopg",
         "psycopg_binary",
         "psycopg_pool",

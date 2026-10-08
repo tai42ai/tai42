@@ -1,13 +1,17 @@
 """The named-database registry: database configuration/resolution, the per-
 database admin identity with its runtime fallback, and component bindings.
 
-Every function reads env fresh per call, so tests set env with monkeypatch and
-assert on the resolved settings without touching a real Postgres.
+Every function serves the settings resolved once per process, re-read after a
+settings reset or a change of the env file's identity; the suite resets settings
+around each test, so tests set env with monkeypatch and assert on the resolved
+settings without touching a real Postgres.
 """
 
 import os
+from pathlib import Path
 
 import pytest
+from pydantic_settings import BaseSettings
 
 from tai42_kit.clients.settings import PostgresConnectionSettings
 from tai42_kit.db import (
@@ -22,6 +26,7 @@ from tai42_kit.db import (
     database_password_env,
     database_settings,
 )
+from tai42_kit.settings import reset_all_settings
 
 # Prefixes any test may set — stripped before each test so ambient env cannot
 # colour a resolution.
@@ -33,6 +38,91 @@ def _isolated_env(monkeypatch):
     for key in list(os.environ):
         if key.startswith(_TEST_ENV_PREFIXES):
             monkeypatch.delenv(key, raising=False)
+
+
+def _replace_env_file(directory: Path, text: str) -> None:
+    staged = directory / ".env.staged"
+    staged.write_text(text)
+    os.replace(staged, directory / ".env")
+
+
+@pytest.fixture
+def constructions(monkeypatch) -> list[str]:
+    """Record the class name of every settings construction."""
+    built: list[str] = []
+    original = BaseSettings.__init__
+
+    def _counting(self, *args, **kwargs):
+        built.append(type(self).__name__)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(BaseSettings, "__init__", _counting)
+    return built
+
+
+class TestResolvedOncePerProcess:
+    def test_a_second_component_store_settings_call_constructs_nothing(self, monkeypatch, constructions):
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "db-host")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "s3cr3t")
+
+        first = component_store_settings("skeleton")
+        built_by_first = len(constructions)
+        second = component_store_settings("skeleton")
+
+        assert second is first
+        assert built_by_first == 2
+        assert len(constructions) == built_by_first
+
+    def test_admin_database_settings_construct_once(self, monkeypatch, constructions):
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "s3cr3t")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_ADMIN_USER", "migrator")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD", "migrator-pw")
+
+        first = admin_database_settings("default")
+        built = len(constructions)
+        second = admin_database_settings("default")
+
+        assert len(constructions) == built
+        assert second == first
+        assert second.pg_user == "migrator"
+
+    def test_a_settings_reset_re_reads(self, monkeypatch):
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "first-host")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "s3cr3t")
+        assert database_settings("default").pg_host == "first-host"
+
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "second-host")
+        assert database_settings("default").pg_host == "first-host"
+
+        reset_all_settings()
+        assert database_settings("default").pg_host == "second-host"
+
+    def test_a_replaced_env_file_re_reads(self, tmp_path):
+        (tmp_path / ".env").write_text("TAI_DATABASE_DEFAULT_PG_HOST=first-host\nTAI_DATABASE_DEFAULT_PG_PASSWORD=pw\n")
+        assert database_settings("default").pg_host == "first-host"
+
+        _replace_env_file(tmp_path, "TAI_DATABASE_DEFAULT_PG_HOST=second-host\nTAI_DATABASE_DEFAULT_PG_PASSWORD=pw\n")
+
+        assert database_settings("default").pg_host == "second-host"
+
+    def test_an_unconfigured_database_raises_on_every_call(self, monkeypatch, constructions):
+        for _ in range(3):
+            with pytest.raises(DatabaseNotConfiguredError):
+                database_settings("default")
+        # The resolved (unconfigured) settings are served once; the check runs per call.
+        assert constructions.count("_Database") == 1
+
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "s3cr3t")
+        reset_all_settings()
+        assert database_configured("default") is True
+
+    def test_a_half_set_admin_identity_raises_on_every_call(self, monkeypatch):
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "runtime-pw")
+        monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_ADMIN_USER", "migrator")
+
+        for _ in range(3):
+            with pytest.raises(AdminIdentityIncompleteError):
+                admin_database_settings("default")
 
 
 class TestDatabasePasswordEnv:
@@ -56,10 +146,18 @@ class TestComponentBinding:
         monkeypatch.setenv("TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES", "accounts")
         assert component_binding("tai42-accounts-postgres") == "accounts"
 
-    def test_fresh_read_per_call(self, monkeypatch):
+    def test_re_read_after_a_settings_reset(self, monkeypatch):
         assert component_binding("skeleton") == "default"
         monkeypatch.setenv("TAI_DB_BINDING_SKELETON", "warehouse")
+        assert component_binding("skeleton") == "default"
+        reset_all_settings()
         assert component_binding("skeleton") == "warehouse"
+
+    def test_re_read_after_a_rewrite_of_the_env_file(self, tmp_path):
+        (tmp_path / ".env").write_text("TAI_DB_BINDING_SKELETON=warehouse\n")
+        assert component_binding("skeleton") == "warehouse"
+        _replace_env_file(tmp_path, "TAI_DB_BINDING_SKELETON=analytics\n")
+        assert component_binding("skeleton") == "analytics"
 
 
 class TestDatabaseConfigured:
@@ -199,6 +297,7 @@ class TestComponentResolution:
         monkeypatch.setenv("TAI_DB_BINDING_SKELETON", "warehouse")
         assert component_store_configured("skeleton") is False
         monkeypatch.setenv("TAI_DATABASE_WAREHOUSE_PG_PASSWORD", "wh-pw")
+        reset_all_settings()
         assert component_store_configured("skeleton") is True
 
     def test_default_binding_when_unset(self, monkeypatch):

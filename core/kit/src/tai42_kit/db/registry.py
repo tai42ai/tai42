@@ -16,8 +16,8 @@ chain, guard, and every store share that database); unset binds to ``default``.
 ``<SLUG>`` is the component name uppercased with every char outside ``[A-Z0-9]``
 replaced by ``_``.
 
-Every function reads env FRESH per call (a fresh settings load under a per-name
-prefix), so a config reload re-evaluates.
+Every function serves the settings resolved once per process; a settings reset
+(every config reload) or a change of the env file's identity re-reads them.
 """
 
 import re
@@ -28,7 +28,7 @@ from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 
 from tai42_kit.clients.settings import PostgresConnectionSettings
-from tai42_kit.settings import TaiBaseSettings
+from tai42_kit.settings import TaiBaseSettings, keyed_settings_cache
 
 _DEFAULT_BINDING = "default"
 
@@ -86,9 +86,9 @@ def _binding_env(component: str) -> str:
 
 @cache
 def _database_settings_cls(prefix: str) -> type[PostgresConnectionSettings]:
-    # One cached settings class per database prefix; each instantiation reads env
-    # fresh. ``env_prefix`` on the class (not an init override) so ``pg_dsn`` names
-    # the exact ``TAI_DATABASE_<NAME>_PG_*`` var in its unconfigured error.
+    # One cached settings class per database prefix; ``_database`` serves its one
+    # instance. ``env_prefix`` on the class (not an init override) so ``pg_dsn``
+    # names the exact ``TAI_DATABASE_<NAME>_PG_*`` var in its unconfigured error.
     class _Database(PostgresConnectionSettings):
         registry_exclude: ClassVar[bool] = True
 
@@ -111,7 +111,7 @@ def _admin_identity_cls(prefix: str) -> type[_AdminIdentity]:
 def _binding_settings_cls(env_var: str) -> type[_ComponentBinding]:
     # One cached settings class per binding env var so the read goes through the
     # settings machinery (env + ``.env``, case-insensitive) rather than a raw
-    # ``os.environ`` peek. The class is cached; each instantiation reads fresh.
+    # ``os.environ`` peek. ``_binding_value`` serves its one resolved value.
     class _Binding(_ComponentBinding):
         registry_exclude: ClassVar[bool] = True
 
@@ -132,8 +132,9 @@ class _DeclaredBinding(TaiBaseSettings):
 
 @cache
 def _declared_binding_settings_cls(env_var: str) -> type[_DeclaredBinding]:
-    # One cached settings class per binding env var; each instantiation reads env
-    # fresh. Unset resolves to None so set-vs-default is observable.
+    # One cached settings class per binding env var; ``_declared_binding_value``
+    # serves its one resolved value. Unset resolves to None so set-vs-default is
+    # observable.
     class _Declared(_DeclaredBinding):
         registry_exclude: ClassVar[bool] = True
 
@@ -142,8 +143,24 @@ def _declared_binding_settings_cls(env_var: str) -> type[_DeclaredBinding]:
     return _Declared
 
 
+@keyed_settings_cache
 def _database(name: str) -> PostgresConnectionSettings:
     return _database_settings_cls(_database_prefix(name))()
+
+
+@keyed_settings_cache
+def _admin_identity(prefix: str) -> _AdminIdentity:
+    return _admin_identity_cls(prefix)()
+
+
+@keyed_settings_cache
+def _binding_value(env_var: str) -> str:
+    return _binding_settings_cls(env_var)().value
+
+
+@keyed_settings_cache
+def _declared_binding_value(env_var: str) -> str | None:
+    return _declared_binding_settings_cls(env_var)().value
 
 
 def _is_configured(settings: PostgresConnectionSettings) -> bool:
@@ -188,7 +205,7 @@ def admin_database_settings(name: str) -> PostgresConnectionSettings:
     """
     runtime = database_settings(name)
     prefix = _database_prefix(name)
-    admin = _admin_identity_cls(prefix)()
+    admin = _admin_identity(prefix)
     user_set = admin.pg_admin_user is not None
     password_set = admin.pg_admin_password is not None
     if user_set != password_set:
@@ -203,7 +220,7 @@ def admin_database_settings(name: str) -> PostgresConnectionSettings:
 
 def component_binding(component: str) -> str:
     """The database name a migration component binds to (default ``"default"``)."""
-    return _binding_settings_cls(_binding_env(component))().value
+    return _binding_value(_binding_env(component))
 
 
 def component_binding_declared(component: str) -> str | None:
@@ -213,7 +230,7 @@ def component_binding_declared(component: str) -> str | None:
     ``None`` when unset. Exposes set-vs-default, which :func:`component_binding`'s
     ``"default"`` fallback cannot.
     """
-    return _declared_binding_settings_cls(_binding_env(component))().value
+    return _declared_binding_value(_binding_env(component))
 
 
 def component_store_settings(component: str) -> PostgresConnectionSettings:

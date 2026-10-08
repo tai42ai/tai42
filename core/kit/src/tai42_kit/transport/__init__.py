@@ -1,7 +1,8 @@
 """MCP client transports over a unix-domain socket + the transport selector.
 
 The UDS transports implement the contract ``Transport`` Protocol; ``get_mcp_transport``
-picks between them (or a plain dict-config for non-UDS servers).
+picks between them, fastmcp's remote transports for URL servers, or a plain
+dict-config for command servers.
 """
 
 from tai42_kit.transport.base_uds_transport import BaseUDSTransport
