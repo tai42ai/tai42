@@ -36,6 +36,8 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from tai42_kit.registry import StagedSlot
 
+from tai42_skeleton.routers.paths import STUDIO_ASSET_PREFIX
+
 logger = logging.getLogger(__name__)
 
 # -- Validation charsets (injection-safe: every manifest-derived string that
@@ -54,12 +56,6 @@ _ASSET_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 # prefixed ``sha384-`` as the Subresource-Integrity / import-map ``integrity``
 # grammar requires.
 _SHA384_RE = re.compile(r"^sha384-[A-Za-z0-9+/]{64}={0,2}$")
-
-# The public asset route the browser actually requests for a plugin file. The
-# import-map ``integrity`` keys MUST be these fully-resolved absolute URLs — a
-# relative manifest-filename key silently fails to match and integrity does not
-# apply.
-_ASSET_URL_PREFIX = "/api/plugins/{name}/studio/"
 
 # The excluded structured manifest file: never served publicly, checked on the
 # realpath basename (a raw-string check is bypassed by ``sub/../studio-manifest.json``).
@@ -330,7 +326,10 @@ def _load_plugin(package: str) -> InstalledStudioPlugin:
     if manifest.entry not in manifest.integrity:
         raise StudioPluginError(f"studio plugin {package!r} entry {manifest.entry!r} has no integrity hash")
     integrity_by_url: dict[str, str] = {}
-    url_prefix = _ASSET_URL_PREFIX.format(name=package)
+    # The import-map ``integrity`` keys MUST be the fully-resolved absolute URLs the browser
+    # requests from the asset door — a relative manifest-filename key silently fails to
+    # match and integrity does not apply.
+    url_prefix = STUDIO_ASSET_PREFIX.format(name=package)
     for filename, declared in manifest.integrity.items():
         resolved = resolve_under(root, filename)
         if not resolved.is_file():

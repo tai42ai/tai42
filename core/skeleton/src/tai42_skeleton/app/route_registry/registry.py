@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from tai42_contract.app import DeclaredRouteMetadata
 from tai42_kit.registry import StagedGeneration
 
+from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.app.route_registry.metadata import (
     CORE_OWNER,
     CrossOwnerRouteCollisionError,
@@ -65,6 +66,9 @@ class RouteRegistry:
         # Process-spine like ``_routes`` (never epoch-staged), so a reload reads the
         # association the live epoch registered.
         self._owner_route_modules: dict[RouteOwner, set[str]] = {}
+        # The canonical path of the streamable-http transport the live serving app mounted
+        # (see :meth:`record_mounted`'s ``control_plane``), or ``None`` before one is mounted.
+        self._control_plane_mount: str | None = None
 
     @property
     def version(self) -> int:
@@ -92,6 +96,8 @@ class RouteRegistry:
         destructive: bool = False,
         action: RouteAction | None = None,
         self_service: bool = False,
+        any_authenticated: bool = False,
+        pre_auth: bool = False,
         declared: DeclaredRouteMetadata | None = None,
         owner: RouteOwner = CORE_OWNER,
         public: bool = False,
@@ -177,6 +183,8 @@ class RouteRegistry:
             action=resolved_action,
             destructive=destructive,
             self_service=self_service,
+            any_authenticated=any_authenticated,
+            pre_auth=pre_auth,
             owner=owner,
             public=public,
             no_body_reason=no_body_reason,
@@ -196,7 +204,9 @@ class RouteRegistry:
             self._owner_route_modules.setdefault(owner, set()).add(handler.__module__)
         self._version += 1
 
-    def record_mounted(self, *, path: str, methods: list[str], name: str, summary: str) -> None:
+    def record_mounted(
+        self, *, path: str, methods: list[str], name: str, summary: str, control_plane: bool = False
+    ) -> None:
         """Record one path TEMPLATE served by a mounted ASGI app — an MCP transport route or the sub-MCP mount.
 
         Recorded as it is mounted, so the registry describes the whole served surface instead of leaving these
@@ -217,6 +227,9 @@ class RouteRegistry:
         method set as well would accumulate: an epoch that mounts a narrower set would
         leave the previous epoch's wider record standing beside the new one, still
         claiming methods this deployment no longer serves.
+
+        ``control_plane=True`` marks the mount as the control-plane transport: its canonical
+        path joins :meth:`control_plane_prefixes`, replacing the one a previous epoch mounted.
         """
         method_key = tuple(sorted(m.upper() for m in methods))
         for stale in [key for key, meta in self._routes.items() if key[0] == path and meta.mounted]:
@@ -240,7 +253,22 @@ class RouteRegistry:
             action=derive_route_action(method_key),
             mounted=True,
         )
+        if control_plane:
+            self._control_plane_mount = canonicalize_path(path)
         self._version += 1
+
+    def control_plane_prefixes(self) -> tuple[str, ...]:
+        """The path prefixes of the control plane: ``/api`` plus the mounted streamable-http transport.
+
+        The transport's path is the one the live serving app recorded (``/mcp`` by default,
+        the configured path otherwise); before any is mounted, or on an SSE-only transport,
+        the set is ``/api`` alone. The sub-MCP mount and the SSE paths are not in it: they are
+        mounted surfaces the declared-protection tier resolves. The SPA shell never answers
+        under these prefixes.
+        """
+        if self._control_plane_mount is None:
+            return ("/api",)
+        return ("/api", self._control_plane_mount)
 
     def mark_raw_path_matched(self, path_prefix: str) -> None:
         """Mark every recorded route whose template starts with ``path_prefix`` as raw-path-matched.

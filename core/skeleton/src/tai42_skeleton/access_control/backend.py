@@ -9,7 +9,7 @@ from starlette.authentication import AuthCredentials, AuthenticationBackend, Aut
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, render_condition
-from tai42_skeleton.access_control.role_gate import DenialCause
+from tai42_skeleton.access_control.role_gate import DenialCause, resolve_route_meta
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.standing import (
@@ -129,6 +129,20 @@ class ReloadInProgressError(AuthenticationError):
     """
 
 
+def _declared_pre_auth(canonical: str, method: str | None) -> bool:
+    """Whether the registered route ``(canonical, method)`` resolves to is public and declares ``pre_auth``.
+
+    Read through the handler index the tool edge, the resource guard and the projection resolve
+    routes by. A path the index refuses to reason about (an encoded slash off a route that is
+    not raw-path-matched) is not such a route: its credential is verified.
+    """
+    try:
+        meta = resolve_route_meta(canonical, method)
+    except MalformedPathError:
+        return False
+    return meta is not None and meta.public and meta.pre_auth
+
+
 class AccessControlAuthBackend(AuthenticationBackend):
     """Starlette auth backend: verifies a request's credential and resolves its authorized policy."""
 
@@ -181,18 +195,18 @@ class AccessControlAuthBackend(AuthenticationBackend):
         # Case C: Credentials were provided, but NONE were valid -> deny loudly.
         raise AuthenticationError("Invalid API key")
 
-    def _is_always_public_path(self, canonical: str | None) -> bool:
-        """Whether the request's ``canonical`` path is the pre-auth login surface.
+    def _is_pre_auth_surface(self, canonical: str | None, method: str | None) -> bool:
+        """Whether the request ``(canonical, method)`` is a pre-authentication surface.
 
-        Asked of the ONE definition of that family over the SAME canonical form the resource guard
-        resolves on.
-        A malformed path (``canonical is None``) is NOT this surface: it falls through to
-        the credential path and is denied downstream, never admitted unauthenticated on a
-        shape the guard itself refuses to reason about.
+        A registered public route declaring ``pre_auth=True`` (the login doors of every owner),
+        or a path under an operator's always-public prefix — asked over the SAME canonical form
+        the resource guard resolves on. A malformed path (``canonical is None``) is NOT this
+        surface: it falls through to the credential path and is denied downstream, never
+        admitted unauthenticated on a shape the guard itself refuses to reason about.
         """
         if canonical is None:
             return False
-        return is_always_public_prefix(canonical, self.settings)
+        return is_always_public_prefix(canonical, self.settings) or _declared_pre_auth(canonical, method)
 
     async def authenticate(self, conn):
         """Resolve the connection's credential to ``(AuthCredentials, user)``, or deny with a typed error."""
@@ -209,11 +223,12 @@ class AccessControlAuthBackend(AuthenticationBackend):
             )
             canonical_path = None
 
-        # 0. Public login surface: ignore any presented credential outright. Identity is
-        # never needed here, and this middleware runs BEFORE the resource guard's public
+        # 0. Pre-auth surface: ignore any presented credential outright. Identity is never
+        # needed here, and this middleware runs BEFORE the resource guard's public
         # short-circuit — so verifying a stale ``tai-sess-``/``sk-`` token would 401 the
-        # recovery path this namespace exists for. No verification, no provider I/O.
-        if self._is_always_public_path(canonical_path):
+        # login/recovery door that replaces it. No verification, no provider I/O. Any other
+        # public route still verifies a presented credential: it keeps the caller's identity.
+        if self._is_pre_auth_surface(canonical_path, conn.scope.get("method")):
             return AuthCredentials(["unauthenticated"]), UnauthenticatedUser()
 
         # 1. Resolve Identity

@@ -37,10 +37,15 @@ _NEUTRAL_SELF_SERVICE_PATH = "/api/auth/widgets/me/rotate"
 
 @pytest.fixture
 def neutral_self_service_route(monkeypatch):
-    """Make the jq builders see one neutral declared self-service route."""
+    """Make the jq builders see one more neutral declared self-service route beside the registered ones."""
     import tai42_skeleton.access_control.roles as roles_module
 
-    monkeypatch.setattr(roles_module, "self_service_route_paths", lambda: {_NEUTRAL_SELF_SERVICE_PATH})
+    registered = roles_module.self_service_routes()
+    monkeypatch.setattr(
+        roles_module,
+        "self_service_routes",
+        lambda: [*registered, (_NEUTRAL_SELF_SERVICE_PATH, frozenset({"PUT"}))],
+    )
 
 
 class _SpyProvider(ApiKeyIdentityProvider):
@@ -122,6 +127,7 @@ async def _allows(jq: str, path: str, method: str) -> bool:
         ("/api/auth/roles", "GET", False),  # the roles management surface is admin-only
         ("/api/auth/logout", "POST", True),
         (_NEUTRAL_SELF_SERVICE_PATH, "PUT", True),  # a registered provider's self-service route
+        (_NEUTRAL_SELF_SERVICE_PATH, "POST", False),  # only the methods the route serves are carved in
     ],
 )
 async def test_editor_jq_matrix(neutral_self_service_route, path, method, allowed):
@@ -161,25 +167,29 @@ async def test_self_service_carve_in_is_route_declared(neutral_self_service_rout
     assert await _allows(editor_jq(), _NEUTRAL_SELF_SERVICE_PATH, "PUT") is True
 
 
-def test_self_service_route_paths_reads_the_registry_flag(monkeypatch):
-    # ``self_service_route_paths`` derives the set from the route registry's ``self_service``
-    # flag exactly as ``grantable_feature_tags`` derives the grant map — a route declaring the
-    # flag is in; one that does not is not; the platform names no route of its own.
+def test_self_service_routes_reads_the_registry_flag(monkeypatch):
+    # ``self_service_routes`` derives the set from the route registry's ``self_service`` flag
+    # exactly as ``grantable_feature_tags`` derives the grant map — a route declaring the flag
+    # is in, with the methods it serves (GET implies HEAD); one that does not is not.
     import tai42_skeleton.access_control.roles as roles_module
     import tai42_skeleton.app.route_registry as route_registry_module
 
     routes = [
-        SimpleNamespace(path=_NEUTRAL_SELF_SERVICE_PATH, self_service=True),
-        SimpleNamespace(path="/api/auth/admin/thing", self_service=False),
-        SimpleNamespace(path="/api/tools/run", self_service=False),
+        SimpleNamespace(path=_NEUTRAL_SELF_SERVICE_PATH, methods=("PUT",), self_service=True),
+        SimpleNamespace(path="/api/auth/widgets/{id}", methods=("GET",), self_service=True),
+        SimpleNamespace(path="/api/auth/admin/thing", methods=("POST",), self_service=False),
+        SimpleNamespace(path="/api/tools/run", methods=("POST",), self_service=False),
     ]
     monkeypatch.setattr(route_registry_module, "load_all_routes", lambda: routes)
-    assert roles_module.self_service_route_paths() == {_NEUTRAL_SELF_SERVICE_PATH}
+    assert roles_module.self_service_routes() == [
+        ("/api/auth/widgets/me/rotate", frozenset({"PUT"})),
+        ("/api/auth/widgets/{id}", frozenset({"GET", "HEAD"})),
+    ]
 
 
 async def test_no_self_service_route_without_a_declaring_route():
-    # With no route declaring itself self-service, the platform carves in nothing of its own:
-    # the control plane stays admin-only but for the platform's fixed self-service set.
+    # A route that declares nothing is carved in for no one: the control plane stays
+    # admin-only but for the routes that declare themselves self-service.
     assert _NEUTRAL_SELF_SERVICE_PATH not in editor_jq()
     assert await _allows(editor_jq(), _NEUTRAL_SELF_SERVICE_PATH, "PUT") is False
 

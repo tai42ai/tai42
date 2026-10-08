@@ -33,6 +33,13 @@ in :mod:`tai42_skeleton.operations.api_keys`; no key/scope logic lives here:
                                     version; ADMIN-ONLY.
 - ``POST   /api-keys/{user_id}/scopes``           — add/remove scopes on a key (granular; never a full replace).
 
+The caller self-service routes (the own-key subtree under ``/api-keys``, the tokens payload,
+claim-link creation, the mint capabilities, the read-only scopes listing and ``/me``) declare
+``self_service=True``, from which the seeded editor/viewer ceilings derive their carve-ins; a
+``secret``/``fenced`` one among them stays admin-only through its action class. ``/me`` also
+declares ``any_authenticated=True``: any authenticated identity reaches it whatever the route
+table maps.
+
 Each mutating door parses and validates its body at the HTTP edge into the
 operation's flat arguments (producing an explicit 400 surface), then the
 operation owns the ownership rules, the enforced-store write, the cache-buster bump,
@@ -80,6 +87,7 @@ from tai42_skeleton.operations.roles import list_role_versions as _list_role_ver
 from tai42_skeleton.operations.roles import modify_role_grants as _modify_role_grants_op
 from tai42_skeleton.operations.roles import rollback_role as _rollback_role_op
 from tai42_skeleton.operations.roles import update_role as _update_role_op
+from tai42_skeleton.routers.paths import AUTH_API_PREFIX
 
 # -- HTTP-edge body parsing --------------------------------------------------
 
@@ -265,13 +273,18 @@ async def _extract_me(request: Request) -> dict:
 
 
 list_scopes = register_operation_route(
-    tai42_app, operation_metadata_of(_list_scopes_op), path="/api/auth/scopes", method="GET", action="read"
+    tai42_app,
+    operation_metadata_of(_list_scopes_op),
+    path=f"{AUTH_API_PREFIX}/scopes",
+    method="GET",
+    action="read",
+    self_service=True,
 )
 
 add_scope_url = register_operation_route(
     tai42_app,
     operation_metadata_of(_add_scope_url_op),
-    path="/api/auth/scopes",
+    path=f"{AUTH_API_PREFIX}/scopes",
     method="POST",
     context_extractor=_extract_add_scope_url,
     action="write",
@@ -282,7 +295,7 @@ add_scope_url = register_operation_route(
 remove_scope_url = register_operation_route(
     tai42_app,
     operation_metadata_of(_remove_scope_url_op),
-    path="/api/auth/scopes/urls",
+    path=f"{AUTH_API_PREFIX}/scopes/urls",
     method="DELETE",
     context_extractor=_extract_remove_scope_url,
     action="write",
@@ -291,7 +304,7 @@ remove_scope_url = register_operation_route(
 delete_scope = register_operation_route(
     tai42_app,
     operation_metadata_of(_delete_scope_op),
-    path="/api/auth/scopes/{scope_id}",
+    path=f"{AUTH_API_PREFIX}/scopes/{{scope_id}}",
     method="DELETE",
     action="write",
 )
@@ -303,7 +316,7 @@ delete_scope = register_operation_route(
 list_routes = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_routes_op),
-    path="/api/auth/routes",
+    path=f"{AUTH_API_PREFIX}/routes",
     method="GET",
     context_extractor=_extract_list_routes,
     action="read",
@@ -316,7 +329,7 @@ list_routes = register_operation_route(
 list_public_routes = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_public_routes_op),
-    path="/api/auth/public-routes",
+    path=f"{AUTH_API_PREFIX}/public-routes",
     method="GET",
     action="read",
 )
@@ -324,7 +337,7 @@ list_public_routes = register_operation_route(
 pin_public_route = register_operation_route(
     tai42_app,
     operation_metadata_of(_pin_public_route_op),
-    path="/api/auth/public-routes",
+    path=f"{AUTH_API_PREFIX}/public-routes",
     method="POST",
     context_extractor=_extract_pin_public_route,
     action="write",
@@ -333,7 +346,7 @@ pin_public_route = register_operation_route(
 unpin_public_route = register_operation_route(
     tai42_app,
     operation_metadata_of(_unpin_public_route_op),
-    path="/api/auth/public-routes",
+    path=f"{AUTH_API_PREFIX}/public-routes",
     method="DELETE",
     context_extractor=_extract_unpin_public_route,
     action="write",
@@ -346,44 +359,49 @@ unpin_public_route = register_operation_route(
 list_tokens_payload = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_tokens_payload_op),
-    path="/api/auth/tokens-payload",
+    path=f"{AUTH_API_PREFIX}/tokens-payload",
     method="GET",
     action="read",
+    self_service=True,
 )
 
 create_api_key = register_operation_route(
     tai42_app,
     operation_metadata_of(_create_api_key_op),
-    path="/api/auth/api-keys",
+    path=f"{AUTH_API_PREFIX}/api-keys",
     method="POST",
     context_extractor=_extract_create_api_key,
     action="write",
+    self_service=True,
 )
 
 edit_api_key = register_operation_route(
     tai42_app,
     operation_metadata_of(_edit_api_key_op),
-    path="/api/auth/api-keys/{user_id}",
+    path=f"{AUTH_API_PREFIX}/api-keys/{{user_id}}",
     method="PUT",
     context_extractor=_extract_edit_api_key,
     action="write",
+    self_service=True,
 )
 
 revoke_api_key = register_operation_route(
     tai42_app,
     operation_metadata_of(_revoke_api_key_op),
-    path="/api/auth/api-keys/{user_id}",
+    path=f"{AUTH_API_PREFIX}/api-keys/{{user_id}}",
     method="DELETE",
     action="write",
+    self_service=True,
 )
 
 create_claim_link = register_operation_route(
     tai42_app,
     operation_metadata_of(_create_claim_link_op),
-    path="/api/auth/claim-links",
+    path=f"{AUTH_API_PREFIX}/claim-links",
     method="POST",
     context_extractor=_extract_create_claim_link,
     action="write",
+    self_service=True,
 )
 
 
@@ -391,22 +409,29 @@ create_claim_link = register_operation_route(
 
 
 get_capabilities = register_operation_route(
-    tai42_app, operation_metadata_of(_get_capabilities_op), path="/api/auth/capabilities", method="GET", action="read"
+    tai42_app,
+    operation_metadata_of(_get_capabilities_op),
+    path=f"{AUTH_API_PREFIX}/capabilities",
+    method="GET",
+    action="read",
+    self_service=True,
 )
 
 get_me = register_operation_route(
     tai42_app,
     operation_metadata_of(_get_me_op),
-    path="/api/auth/me",
+    path=f"{AUTH_API_PREFIX}/me",
     method="GET",
     context_extractor=_extract_me,
     action="read",
+    self_service=True,
+    any_authenticated=True,
 )
 
 # The roles listing exposes every role's raw base-tier jq condition, so it is an admin-only
 # ``secret`` read — no per-tag level opens it.
 list_roles = register_operation_route(
-    tai42_app, operation_metadata_of(_list_roles_op), path="/api/auth/roles", method="GET", action="secret"
+    tai42_app, operation_metadata_of(_list_roles_op), path=f"{AUTH_API_PREFIX}/roles", method="GET", action="secret"
 )
 
 # Role management is the access-control admin surface: each mutation is an admin-only
@@ -415,21 +440,29 @@ list_roles = register_operation_route(
 # ``require_admin`` is defense in depth behind it (with access control off there is no
 # principal to classify, so it allows exactly as the fence does).
 create_role = register_operation_route(
-    tai42_app, operation_metadata_of(_create_role_op), path="/api/auth/roles", method="POST", action="fenced"
+    tai42_app, operation_metadata_of(_create_role_op), path=f"{AUTH_API_PREFIX}/roles", method="POST", action="fenced"
 )
 
 update_role = register_operation_route(
-    tai42_app, operation_metadata_of(_update_role_op), path="/api/auth/roles/{name}", method="PUT", action="fenced"
+    tai42_app,
+    operation_metadata_of(_update_role_op),
+    path=f"{AUTH_API_PREFIX}/roles/{{name}}",
+    method="PUT",
+    action="fenced",
 )
 
 delete_role = register_operation_route(
-    tai42_app, operation_metadata_of(_delete_role_op), path="/api/auth/roles/{name}", method="DELETE", action="fenced"
+    tai42_app,
+    operation_metadata_of(_delete_role_op),
+    path=f"{AUTH_API_PREFIX}/roles/{{name}}",
+    method="DELETE",
+    action="fenced",
 )
 
 list_role_versions = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_role_versions_op),
-    path="/api/auth/roles/{name}/versions",
+    path=f"{AUTH_API_PREFIX}/roles/{{name}}/versions",
     method="GET",
     action="secret",
 )
@@ -437,7 +470,7 @@ list_role_versions = register_operation_route(
 rollback_role = register_operation_route(
     tai42_app,
     operation_metadata_of(_rollback_role_op),
-    path="/api/auth/roles/{name}/rollback",
+    path=f"{AUTH_API_PREFIX}/roles/{{name}}/rollback",
     method="POST",
     action="fenced",
 )
@@ -445,7 +478,7 @@ rollback_role = register_operation_route(
 modify_role_grants = register_operation_route(
     tai42_app,
     operation_metadata_of(_modify_role_grants_op),
-    path="/api/auth/roles/{name}/grants",
+    path=f"{AUTH_API_PREFIX}/roles/{{name}}/grants",
     method="POST",
     action="fenced",
 )
@@ -457,7 +490,7 @@ modify_role_grants = register_operation_route(
 validate_condition = register_operation_route(
     tai42_app,
     operation_metadata_of(_validate_condition_op),
-    path="/api/auth/validate-condition",
+    path=f"{AUTH_API_PREFIX}/validate-condition",
     method="POST",
     context_extractor=_extract_validate_condition,
     action="write",
@@ -468,29 +501,33 @@ validate_condition = register_operation_route(
 
 
 # The policy-administration surface is admin-only: the version history is a ``secret`` read
-# (a version body carries the raw jq policy), the rollback a ``fenced`` mutation.
+# (a version body carries the raw jq policy), the rollback a ``fenced`` mutation. Both sit in
+# the self-service own-key subtree the seeded ceilings admit; the action class is the fence.
 list_policy_versions = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_policy_versions_op),
-    path="/api/auth/api-keys/{user_id}/policy/versions",
+    path=f"{AUTH_API_PREFIX}/api-keys/{{user_id}}/policy/versions",
     method="GET",
     action="secret",
+    self_service=True,
 )
 
 rollback_policy = register_operation_route(
     tai42_app,
     operation_metadata_of(_rollback_policy_op),
-    path="/api/auth/api-keys/{user_id}/policy/rollback",
+    path=f"{AUTH_API_PREFIX}/api-keys/{{user_id}}/policy/rollback",
     method="POST",
     context_extractor=_extract_rollback_policy,
     action="fenced",
+    self_service=True,
 )
 
 modify_api_key_scopes = register_operation_route(
     tai42_app,
     operation_metadata_of(_modify_api_key_scopes_op),
-    path="/api/auth/api-keys/{user_id}/scopes",
+    path=f"{AUTH_API_PREFIX}/api-keys/{{user_id}}/scopes",
     method="POST",
     context_extractor=_extract_key_scopes,
     action="write",
+    self_service=True,
 )

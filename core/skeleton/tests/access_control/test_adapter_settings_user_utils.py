@@ -265,7 +265,14 @@ def test_auth_providers_default_is_derived_not_hardcoded():
     # one, so a deployment that installs any provider boots without naming it.
     assert AccessControlSettings().auth_providers is None
     assert AccessControlSettings().resolved_auth_providers() == ["redis"]
-    assert AccessControlSettings().always_public_path_prefixes == ("/api/login",)
+
+
+def test_settings_carry_no_route_knowledge_by_default():
+    # The login doors and the studio-asset door declare their own reach on their routes, so
+    # the operator-surface prefix and pattern lists default empty.
+    settings = AccessControlSettings()
+    assert settings.always_public_path_prefixes == ()
+    assert settings.always_public_route_patterns == ()
 
 
 def test_auth_providers_derives_from_any_registered_provider(monkeypatch):
@@ -319,41 +326,6 @@ def test_disjoint_prefixes_are_accepted():
         always_public_path_prefixes=("/api/login",),
     )
     assert settings.always_public_path_prefixes == ("/api/login",)
-
-
-# -- authenticated-always-allowed carve-out ----------------------------------
-
-
-def test_authenticated_always_allowed_paths_default():
-    assert AccessControlSettings().authenticated_always_allowed_paths == ("/api/auth/me",)
-
-
-def test_authenticated_always_allowed_paths_parse_json_from_env(monkeypatch):
-    from tai42_kit.settings import reset_all_settings
-
-    monkeypatch.setenv("ACCESS_CONTROL_AUTHENTICATED_ALWAYS_ALLOWED_PATHS", '["/api/auth/me", "/api/auth/session"]')
-    reset_all_settings()
-    try:
-        assert AccessControlSettings().authenticated_always_allowed_paths == (
-            "/api/auth/me",
-            "/api/auth/session",
-        )
-    finally:
-        reset_all_settings()
-
-
-def test_authenticated_always_allowed_under_always_public_raises():
-    # A path cannot be both public-anonymous and authenticated-only.
-    with pytest.raises(ValueError, match="falls under always-public prefix"):
-        AccessControlSettings(
-            always_public_path_prefixes=("/api/login",),
-            authenticated_always_allowed_paths=("/api/login/me",),
-        )
-
-
-def test_authenticated_always_allowed_non_slash_entry_raises():
-    with pytest.raises(ValueError, match="must be an absolute path"):
-        AccessControlSettings(authenticated_always_allowed_paths=("api/auth/me",))
 
 
 # -- claim-link settings -----------------------------------------------------

@@ -29,29 +29,37 @@ DIGIT_PATTERN = re.compile(r"/\d+")
 
 
 def is_always_public_prefix(path: str, settings: AccessControlSettings) -> bool:
-    """Whether the CANONICAL ``path`` is the pre-auth login surface that always resolves public.
+    """Whether the CANONICAL ``path`` is under an operator's always-public prefix.
 
-    Equal to an always-public prefix or a route beneath it.
-    The ONE definition of that family for every edge, so none can drift onto a different
-    login surface. A plain function rather than a verifier member, so an edge holding no
+    Equal to an always-public prefix or a path beneath it. The ONE definition of that family
+    for every edge (beside each route's own ``pre_auth`` declaration), so none can drift onto a
+    different surface. A plain function rather than a verifier member, so an edge holding no
     verifier asks this question instead of hand-rolling a second predicate.
     """
     return any(under_prefix(path, prefix) for prefix in settings.always_public_path_prefixes)
 
 
 def matches_always_public_route_pattern(path: str, settings: AccessControlSettings) -> bool:
-    """Whether the canonical ``path`` full-matches an always-public route pattern.
+    """Whether the canonical ``path`` full-matches an operator's always-public route pattern.
 
-    Covers a public surface a fixed prefix cannot reach, e.g. the plugin studio-asset door.
-    Full-match, so a longer path never inherits a shorter pattern's public grant.
+    Covers an operator's public surface a fixed prefix cannot reach. Full-match, so a longer
+    path never inherits a shorter pattern's public grant.
     """
     return any(pattern.fullmatch(path) for pattern in settings.compiled_always_public_route_patterns)
+
+
+def under_control_plane(path: str) -> bool:
+    """Whether the canonical ``path`` is under a control-plane prefix.
+
+    See :meth:`~tai42_skeleton.app.route_registry.RouteRegistry.control_plane_prefixes`.
+    """
+    return any(under_prefix(path, prefix) for prefix in route_registry.control_plane_prefixes())
 
 
 def registered_reserved_get_paths() -> frozenset[str]:
     """The DERIVED SPA-shell reserved set.
 
-    The canonical path of every CONCRETE, non-``/api``, non-``/mcp`` registered GET route
+    The canonical path of every CONCRETE registered GET route outside the control plane
     (``/health``, ``/ready``, and any future such route).
 
     A path that IS a registered route is not the SPA shell, so the GET fallback must
@@ -72,7 +80,7 @@ def registered_reserved_get_paths() -> frozenset[str]:
         if meta.mounted:
             continue
         canonical = canonicalize_path(meta.path)
-        if under_prefix(canonical, "/api") or under_prefix(canonical, "/mcp"):
+        if under_control_plane(canonical):
             continue
         paths.add(canonical)
     return frozenset(paths)
@@ -281,33 +289,33 @@ class AccessControlVerifier(TokenVerifier):
 
         Returns the public resource id or ``None`` to fall through to the route table.
         """
-        # Always-public prefixes short-circuit BEFORE any route-table read: the
-        # pre-auth login surface answers the public resource id unconditionally, so it
-        # is reachable on a fresh deployment with no route rows. The always-public and
+        # An operator's always-public prefixes short-circuit BEFORE any route-table read:
+        # such a surface answers the public resource id unconditionally, so it is reachable
+        # on a fresh deployment with no route rows. The always-public and
         # reserved prefix sets are validated disjoint at settings construction, so such a
         # path is never also reserved and the reserved-drop below can never contradict this.
         if is_always_public_prefix(path, self.settings):
             return self.settings.public_resource_id
 
-        # Always-public route patterns (e.g. the plugin studio-asset door) are
-        # AUTHORITATIVE for a non-reserved path: the pattern tier resolves the public id
-        # ALONE, so the door opens regardless of a protected route row the same path
-        # carries. Additive would never open it — a plugin bundle loads as a native ESM
-        # import that cannot send an auth header, and a public id alongside a protected id
-        # is deny-wins (CASE B). Hoisted ABOVE the route-table tiers, mirroring the prefix
-        # short-circuit above: it needs only path + settings, so the door's hot path skips
-        # the store reads whose ids it would only discard. A pattern that matches a RESERVED
-        # path grants nothing: it falls through to the tiers and the reserved-drop below, so
-        # the control plane is never public.
+        # An operator's always-public route patterns are AUTHORITATIVE for a non-reserved
+        # path: the pattern tier resolves the public id ALONE, so the surface opens
+        # regardless of a protected route row the same path carries (a public id alongside
+        # a protected id is deny-wins, CASE B). Hoisted ABOVE the route-table tiers,
+        # mirroring the prefix short-circuit above: it needs only path + settings, so the
+        # hot path skips the store reads whose ids it would only discard. A pattern that
+        # matches a RESERVED path grants nothing: it falls through to the tiers and the
+        # reserved-drop below, so the control plane is never public.
         if matches_always_public_route_pattern(path, self.settings) and not self._is_reserved_prefix(path):
             return self.settings.public_resource_id
 
         # Declared-public route tier (per-method, deny-safe, every path shape): a request
         # that resolves to a registered route DECLARED public — ``authed=False`` at
         # registration, whatever its owner (a core native/operator route such as the
-        # interactions callback, the served-media doors, the readiness probes, or the
-        # webhook/trigger ingress doors; or a plugin route whose tai-plugin.yml declared
-        # it) — answers UNAUTHENTICATED with no per-deployment route row or pattern. The
+        # interactions callback, the served-media doors, the login doors, the plugin
+        # studio-asset door, the readiness probes, or the webhook/trigger ingress doors; or a
+        # plugin route whose tai-plugin.yml declared it) — answers UNAUTHENTICATED with no
+        # per-deployment route row or pattern. A route-table row never shadows it: a plugin
+        # bundle loads as a native ESM import that cannot send an auth header. The
         # route's path shape is immaterial: ``/api`` or not, concrete or templated,
         # ``match`` reads the registry's index of every handler route. Per-method by
         # construction: a sibling method not declared public produces no match and falls
@@ -419,7 +427,7 @@ class AccessControlVerifier(TokenVerifier):
     def _is_spa_shell_fallback(self, path: str, method: str | None) -> bool:
         """SPA-shell public fallback (GET-only, last tier).
 
-        A GET to an UNMAPPED, non-/api, non-/mcp canonical path that is NOT a registered route is
+        A GET to an UNMAPPED canonical path outside the control plane that is NOT a registered route is
         served by the SPA catch-all as the dataless index.html shell — treat it as public so a
         deep-link refresh reaches the shell. It never opens a mutation (GET only) nor the
         API/control-plane surface.
@@ -430,20 +438,19 @@ class AccessControlVerifier(TokenVerifier):
         (e.g. ``/reports/5`` for ``/reports/{id}``) is not seen here and — absent a route
         row — would be served the shell. The boot audit (``check_spa_shell_public``) closes
         that gap by construction: it refuses to start when any templated ``authed=True``
-        non-/api GET route exists that is neither /api-prefixed (control-plane-excluded) nor
-        consciously acknowledged, so no such route can reach this tier. This fallback's
+        GET route exists that is neither under the control plane nor consciously
+        acknowledged, so no such route can reach this tier. This fallback's
         safety for templated routes rests on that audit; the code deliberately does not build
         a second (shadow) matcher.
         """
         return (
             self.settings.spa_shell_public
             and method == "GET"
-            # Segment-aware, mirroring ``serve_spa``'s own /api,/mcp 404 guard, so the
+            # Segment-aware, mirroring the SPA catch-all's own control-plane exclusion, so the
             # public surface is exactly the shell surface: the control plane never opens.
-            and not under_prefix(path, "/api")
-            and not under_prefix(path, "/mcp")
+            and not under_control_plane(path)
             # The DERIVED reserved check (both sides canonical): any real registered
-            # non-/api GET route (health/ready/…) resolves via its own path,
+            # GET route outside the control plane (health/ready/…) resolves via its own path,
             # never via the shell fallback — no static list.
             and path not in registered_reserved_get_paths_cached()
             # Operational paths the registry does not surface as concrete GET routes.

@@ -327,18 +327,18 @@ def _fenced_op(reg):
 
 
 def test_a_traversing_path_argument_is_denied_on_a_fenced_operation(ac_env, bound_app, fenced_template_route):
-    """``../login/z`` re-parents the synthesized path onto the always-public login surface,
+    """``../login/z`` re-parents the synthesized path onto an operator's always-public prefix,
     whose short-circuit precedes the scope test, both jq passes and the fence. The synthesis
     refuses the value, so no layer is asked about a target this dispatch is not for."""
-    settings = AccessControlSettings()
+    settings = AccessControlSettings(always_public_path_prefixes=("/api/login",))
     # The caller holds the fenced route's resource but is not admin, so the fence decides.
     ac_env.add_route("/api/things/deploy/fenced", "things")
     ac_env.add_policy("narrow", scopes=["things"])
     reg = OperationRegistry()
     meta = _fenced_op(reg)
 
-    # Non-vacuous: the canonical form of the synthesized path really is on the pre-auth
-    # login surface, so without the refusal ``check`` returns before any policy layer.
+    # Non-vacuous: the canonical form of the synthesized path really is under the
+    # always-public prefix, so without the refusal ``check`` returns before any policy layer.
     steered = canonicalize_path("/api/things/../login/z/fenced")
     assert is_always_public_prefix(steered, settings) is True
 
@@ -986,8 +986,8 @@ async def _login_route_handler(request):
 
 
 @contextmanager
-def _recorded_login_route():
-    """Record the always-public login route for the test, restoring the prior surface after.
+def _recorded_login_route(*, pre_auth: bool = True):
+    """Record the public login route for the test, restoring the prior surface after.
 
     ``check``'s route pin resolves through the global table, so the row must be present on
     its own footing rather than depending on the login router's once-per-process import."""
@@ -998,9 +998,11 @@ def _recorded_login_route():
         methods=["GET"],
         name="login_methods",
         handler=_login_route_handler,
-        summary="The always-public login-methods route",
+        summary="The public login-methods route",
         tags=["login"],
         authed=False,
+        public=True,
+        pre_auth=pre_auth,
         request_model=None,
         response_model=None,
         no_body_reason="test fixture: response body not under test",
@@ -1016,12 +1018,13 @@ def _recorded_login_route():
         reset_route_index()
 
 
-def test_always_public_operation_short_circuits_every_policy_layer(ac_env, bound_app, monkeypatch):
-    """An always-public route is admitted at the tool edge before any policy read, jq pass
-    or LEVEL pass, exactly as the auth backend admits it at step 0.
+def test_pre_auth_operation_short_circuits_every_policy_layer(ac_env, bound_app, monkeypatch):
+    """A route declaring ``pre_auth`` is admitted at the tool edge before any policy read,
+    jq pass or LEVEL pass, exactly as the auth backend admits it at step 0.
 
-    A route-table public PIN is the other kind of publicness: there the HTTP edge does run
-    all three passes for an authenticated caller, so the tool edge does too."""
+    A route-table public PIN on a route that declares no ``pre_auth`` is the other kind of
+    publicness: there the HTTP edge does run all three passes for an authenticated caller,
+    so the tool edge does too."""
     settings = AccessControlSettings()
     reg = OperationRegistry()
     meta = _op(reg, route=_LOGIN_PATH, method="GET")
@@ -1035,11 +1038,10 @@ def test_always_public_operation_short_circuits_every_policy_layer(ac_env, bound
     ac_env.add_policy("viewer1", scopes=[], policy_data={ROLE_POINTER_KEY: "editor"}, condition={"content": "true"})
     identity = CallerIdentity(user_id="viewer1", effective_scopes=())
 
-    async def run():
+    async def declared():
         # No route row and no scope: the short-circuit precedes both.
         await check(identity, meta, {}, settings=settings)
-
-        http = await _http_reaches(
+        return await _http_reaches(
             _ClaimsVerifier("viewer1", {"sub": "viewer1"}),
             {"X-Api-Key": "tok-viewer1"},
             _LOGIN_PATH,
@@ -1047,14 +1049,16 @@ def test_always_public_operation_short_circuits_every_policy_layer(ac_env, bound
             method="GET",
         )
 
-        # Non-vacuous: with the always-public family emptied the path is an ordinary
-        # route-table public pin, and the LEVEL pass denies.
-        pinned = AccessControlSettings(always_public_path_prefixes=())
-        ac_env.add_route(_LOGIN_PATH, pinned.public_resource_id)
-        with pytest.raises(PermissionDeniedError, match=f"GET {_LOGIN_PATH} is not permitted"):
-            await check(identity, meta, {}, settings=pinned)
-        return http
-
     # The same path over HTTP is public for everyone: the two edges agree.
     with _recorded_login_route():
-        assert asyncio.run(run()) is True
+        assert asyncio.run(declared()) is True
+
+    async def undeclared():
+        ac_env.add_route(_LOGIN_PATH, settings.public_resource_id)
+        with pytest.raises(PermissionDeniedError, match=f"GET {_LOGIN_PATH} is not permitted"):
+            await check(identity, meta, {}, settings=settings)
+
+    # Non-vacuous: without the declaration the path is an ordinary route-table public pin,
+    # and the LEVEL pass denies.
+    with _recorded_login_route(pre_auth=False):
+        asyncio.run(undeclared())

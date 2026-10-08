@@ -60,7 +60,6 @@ async def _http_status(settings: AccessControlSettings, raw_target: str, root_pa
         endpoint,
         AccessControlVerifier(settings, providers=[]),
         settings.public_resource_id,
-        settings.authenticated_always_allowed_paths,
     )
     app = AuthenticationMiddleware(
         guard,

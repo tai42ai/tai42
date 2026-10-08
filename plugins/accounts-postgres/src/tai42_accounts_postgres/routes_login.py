@@ -4,7 +4,9 @@ Handlers take no settings argument: they reach the injected services through
 ``service.provider_settings()``. Success bodies are ``{"data": {"token": raw,
 "user_id": ...}}``. Login failure is uniform: unknown email and wrong password
 both return a generic 401 and run a real argon2 verify so timing does not
-enumerate users. Also registers the AC-required boot guard.
+enumerate users. Every route declares ``pre_auth=True``: a credential presented on a
+login route is never verified, so a stale one cannot lock a caller out of logging in.
+Also registers the AC-required boot guard.
 """
 
 from __future__ import annotations
@@ -132,6 +134,7 @@ def _password_too_short(password: str) -> str | None:
     tags=["login"],
     request_model=PasswordLoginBody,
     response_model=SessionResponse,
+    pre_auth=True,
 )
 async def login_password(request: Request) -> Response:
     """Verify email + password and mint a session.
@@ -182,6 +185,7 @@ async def login_password(request: Request) -> Response:
     tags=["login"],
     request_model=InviteAcceptBody,
     response_model=SessionResponse,
+    pre_auth=True,
 )
 async def login_invite_accept(request: Request) -> Response:
     """Consume an invite, set the user's first password, and mint a session.

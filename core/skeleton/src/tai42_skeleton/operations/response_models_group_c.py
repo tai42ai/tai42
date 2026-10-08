@@ -8,7 +8,7 @@ verifier-stripped ``format_payload``) are typed ``JsonValue``; a bare list body 
 a named ``RootModel[list[...]]`` subclass and a dynamic slug-keyed map a named
 ``RootModel[dict[...]]`` subclass, so every body carries a stable, uniquely-named
 component schema. Existing models (``BackupSectionReport``, ``KindStatus``,
-``LoginMethod``, ``RouteConfig``, ``StudioPluginManifest`` and the channel/media
+``LoginMethod``, ``StudioPluginManifest`` and the channel/media
 contract shapes) are reused, never re-authored.
 """
 
@@ -22,7 +22,6 @@ from tai42_contract.accounts.models import LoginMethod
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.interactions.models import LocationElement, MediaItem
-from tai42_contract.sub_mcp import RouteConfig
 
 from tai42_skeleton.app.kind_status import KindStatus
 from tai42_skeleton.plugins.registry import StudioPluginManifest
@@ -566,11 +565,22 @@ class SandboxInfo(BaseModel):
 # --- Sub-MCP ----------------------------------------------------------------
 
 
-class SubMcpMapListing(RootModel[dict[str, RouteConfig]]):
-    """The registered sub-MCP apps as a dynamic slug-keyed MAP (not an ``items`` list).
+class SubMcpListingEntry(BaseModel):
+    """One registered sub-MCP app: its durable ``tools`` + ``transport`` and its served mount.
 
-    Each value is the durable ``RouteConfig`` (``tools`` + ``transport``).
+    ``mount_url`` is the URL the app is served at (its route-table key) and ``access_pattern``
+    the dynamic route pattern that maps every sub-path of the mount to that key, so a client
+    maps the mount without rebuilding either.
     """
+
+    tools: list[str]
+    transport: str
+    mount_url: str
+    access_pattern: str
+
+
+class SubMcpMapListing(RootModel[dict[str, SubMcpListingEntry]]):
+    """The registered sub-MCP apps as a dynamic slug-keyed MAP (not an ``items`` list)."""
 
 
 class SubMcpRegistrationResult(BaseModel):

@@ -17,15 +17,18 @@ import pytest
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import JqAuthContext
+from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control import management as management_module
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import projection
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
-from tai42_skeleton.access_control.projection import build_projection
+from tai42_skeleton.access_control.projection import build_projection, synthetic_full_projection
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
+from tai42_skeleton.app.route_registry import route_registry
+from tai42_skeleton.app.sub_mcp_app import sub_mcp_access_pattern, sub_mcp_mount_url
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx
 
@@ -221,18 +224,53 @@ async def test_projection_key_with_no_principal_row_is_an_invariant_error(env: _
 
 async def test_sub_mcp_filtered_by_mount_coverage(env: _Env):
     env.pg.add_policy("u1", scopes=["mcp-app"])
-    env.pg.add_route(f"{projection.ROOT_PREFIX}/shop", "mcp-app")
-    env.pg.add_route(f"{projection.ROOT_PREFIX}/secret", "secret-scope")
+    env.pg.add_route(sub_mcp_mount_url("relay"), "mcp-app")
+    env.pg.add_route(sub_mcp_mount_url("secret"), "secret-scope")
     env.sub_mcp(
         {
-            "shop": SimpleNamespace(tools=["t1"], transport="http"),
+            "relay": SimpleNamespace(tools=["t1"], transport="http"),
             "secret": SimpleNamespace(tools=["t2"], transport="http"),
         }
     )
     result = await build_projection("u1", ["mcp-app"], {})
-    assert {e.slug for e in result.sub_mcp} == {"shop"}  # secret mount uncovered
+    assert {e.slug for e in result.sub_mcp} == {"relay"}  # secret mount uncovered
     # No global tool door → tools is the union of the ALLOWED sub-MCP mounts' tools.
     assert result.tools == ["t1"]
+
+
+async def test_sub_mcp_entry_carries_the_served_mount(env: _Env):
+    # Each projected mount carries the URL it is served at and the access pattern a route row
+    # maps its sub-paths by, so a client never rebuilds either.
+    env.pg.add_policy("u1", scopes=["mcp-app"])
+    env.pg.add_route(sub_mcp_mount_url("relay"), "mcp-app")
+    env.sub_mcp({"relay": SimpleNamespace(tools=["t1"], transport="http")})
+    result = await build_projection("u1", ["mcp-app"], {})
+    [entry] = result.sub_mcp
+    assert (entry.mount_url, entry.access_pattern) == ("/app/relay", r"^/app/relay/.*$")
+
+
+async def test_served_access_pattern_is_the_one_the_verifier_matches(env: _Env):
+    # A route row stored with the served URL and access pattern (what the studio sends
+    # verbatim) maps a real request under the mount to that row's scope.
+    settings = access_control_settings()
+    slug = "chat-line"
+    env.pg.add_route(sub_mcp_mount_url(slug), "mcp-app", pattern=sub_mcp_access_pattern(slug))
+    verifier = AccessControlVerifier(settings, providers=[])
+    assert await verifier.resolve_resource_ids(f"/app/{slug}/x", method="POST") == ["mcp-app"]
+    # The pattern is anchored to the mount: a sibling slug sharing the prefix is not mapped.
+    assert "mcp-app" not in await verifier.resolve_resource_ids(f"/app/{slug}x/y", method="POST")
+
+
+@pytest.mark.parametrize("marker", ["public", "open"])
+async def test_projection_serves_the_configured_public_marker(env: _Env, monkeypatch, marker: str):
+    # The reserved public marker is served, so a client never hard-codes it — an operator who
+    # renames it sees the renamed one.
+    monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_RESOURCE_ID", marker)
+    reset_all_settings()
+    env.pg.add_policy("u1", scopes=["s"])
+    result = await build_projection("u1", ["s"], {})
+    assert result.public_resource_id == marker
+    assert synthetic_full_projection().public_resource_id == marker
 
 
 async def test_global_tool_door_projects_every_registry_tool(env: _Env):
@@ -366,15 +404,15 @@ async def test_sub_mcp_restore_invalidates_a_warm_projection(env: _Env, bound_ap
     sub_mcp_service.on_mount_changed(instance._invalidate_policy_cache)
 
     env.pg.add_policy("u1", scopes=["mcp-app"])
-    env.pg.add_route(f"{projection.ROOT_PREFIX}/shop", "mcp-app")
+    env.pg.add_route(sub_mcp_mount_url("relay"), "mcp-app")
     warm = await build_projection("u1", ["mcp-app"], {})
     assert warm.sub_mcp == []
 
-    report = await _import_sub_mcp({"shop": {"tools": ["t1"], "transport": "http"}})
+    report = await _import_sub_mcp({"relay": {"tools": ["t1"], "transport": "http"}})
     assert report.created == 1
 
     fresh = await build_projection("u1", ["mcp-app"], {})
-    assert [e.slug for e in fresh.sub_mcp] == ["shop"]
+    assert [e.slug for e in fresh.sub_mcp] == ["relay"]
 
 
 async def test_store_error_raises_never_a_partial_projection(env: _Env):
@@ -404,14 +442,16 @@ async def _gate_oracle(
     settings, user_id: str, effective_scopes: list[str], claims: dict, path: str, method: str
 ) -> bool:
     """An INDEPENDENT re-implementation of the gate decision (resolution + coverage +
-    carve-out + the backend's two-pass jq), used to cross-check the projection."""
+    the any-authenticated reach + the backend's two-pass jq), used to cross-check the projection."""
     verifier = AccessControlVerifier(settings, providers=[])
     enforcer = PolicyEnforcer(settings)
     scope_set = set(effective_scopes)
-    # The carve-out is checked BEFORE resolution, mirroring the middleware/product order, so
-    # a carve-out path that ALSO carries a route row bound to an uncovered scope is still
-    # admitted (the carve-out wins) rather than falling through to a coverage test.
-    if path in set(settings.authenticated_always_allowed_paths):
+    # A route declaring ``any_authenticated`` is admitted BEFORE resolution, mirroring the
+    # middleware/product order, so one that ALSO carries a route row bound to an uncovered
+    # scope is still admitted (the declaration wins) rather than falling through to a
+    # coverage test. Read straight off the registry's own match, not the guard's lookup.
+    declared = route_registry.match(path, method)
+    if declared is not None and declared.any_authenticated:
         reachable = True
     else:
         ids = await verifier.resolve_resource_ids(path)
@@ -509,11 +549,11 @@ async def test_projection_equals_gate_across_identity_matrix(env: _Env):
             assert ((method, path) in projected) is admitted, (user_id, method, path)
 
 
-async def test_carve_out_wins_over_route_row_bound_to_uncovered_scope(env: _Env):
-    # ``/api/auth/me`` is authenticated-always-allowed. Even when it ALSO carries a route
-    # row bound to a scope the caller does NOT cover, the carve-out is checked BEFORE
+async def test_any_authenticated_wins_over_route_row_bound_to_uncovered_scope(env: _Env):
+    # ``GET /api/auth/me`` declares ``any_authenticated``. Even when it ALSO carries a route
+    # row bound to a scope the caller does NOT cover, the declaration is read BEFORE
     # resolution (exactly as the middleware does), so the path is STILL projected — the
-    # carve-out wins over the uncovered coverage test it would otherwise fall through to.
+    # declaration wins over the uncovered coverage test it would otherwise fall through to.
     settings = access_control_settings()
     env.pg.add_policy("u1", scopes=["unrelated"])
     env.pg.add_route("/api/auth/me", "admin-only-scope")  # a scope u1 does NOT cover
@@ -521,7 +561,7 @@ async def test_carve_out_wins_over_route_row_bound_to_uncovered_scope(env: _Env)
     result = await build_projection("u1", ["unrelated"], {})
     projected = {(m, r.path) for r in result.routes for m in r.methods}
     assert ("GET", "/api/auth/me") in projected
-    # The independent oracle agrees: carve-out wins over the uncovered route row.
+    # The independent oracle agrees: the declaration wins over the uncovered route row.
     assert await _gate_oracle(settings, "u1", ["unrelated"], {}, "/api/auth/me", "GET") is True
 
 

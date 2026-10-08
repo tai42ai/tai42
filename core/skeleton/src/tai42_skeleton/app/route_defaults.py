@@ -25,7 +25,7 @@ Membership of the two tiers is EVERY module under ``tai42_skeleton.routers`` tha
 registers an HTTP route, EXCEPT the SPA catch-all (force-appended last, never in
 either tuple) and the route-less helper modules (``_tool_call``,
 ``metrics_settings``, ``observability_support``, ``tool_runs_settings``,
-``prometheus``). ``tests/app/test_route_defaults.py`` re-derives that set by
+``prometheus``, ``paths``). ``tests/app/test_route_defaults.py`` re-derives that set by
 iterating the real package and asserts the union of ``DEFAULT_API_ROUTERS``,
 ``CORE_API_ROUTERS`` and {``STUDIO_SPA_ROUTER``} equals it, so a newly-added
 route-registering router missing from both tuples fails the test rather than being

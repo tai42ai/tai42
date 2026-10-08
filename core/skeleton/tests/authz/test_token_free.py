@@ -240,7 +240,7 @@ def test_the_seeded_role_conditions_bind_freely(builder) -> None:
     assert_token_free_evaluable(builder())
 
 
-@pytest.mark.parametrize(("builder", "tokens", "depth"), [(editor_jq, 77, 16), (viewer_jq, 119, 19)])
+@pytest.mark.parametrize(("builder", "tokens", "depth"), [(editor_jq, 106, 16), (viewer_jq, 192, 22)])
 def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(builder, tokens: int, depth: int) -> None:
     # The seeded conditions are the platform's real worst case (the viewer condition spends
     # the most of the token/depth allowance). An edit eating the margin must fail here rather

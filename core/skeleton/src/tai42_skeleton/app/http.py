@@ -98,6 +98,8 @@ class HttpSurface:
         destructive: bool = False,
         action: "RouteAction | None" = None,
         self_service: bool = False,
+        any_authenticated: bool = False,
+        pre_auth: bool = False,
         declared: "DeclaredRouteMetadata | None" = None,
         no_body_reason: str | None = None,
         enveloped: bool = True,
@@ -121,6 +123,9 @@ class HttpSurface:
         ``authed`` argument on a declared route, or any route from a route-less
         item's module — is a registration error. Off a binding (a core/operator
         route) ``path`` is absolute and ``authed`` defaults to ``True``.
+
+        ``pre_auth`` requires the resolved route to be public and ``any_authenticated``
+        requires it to be authenticated; a contradiction is a ``ValueError``.
         """
         binding = current_mount_binding()
         if binding is not None:
@@ -151,6 +156,10 @@ class HttpSurface:
             resolved_authed = True if authed is None else authed
             resolved_public = not resolved_authed
             owner = CORE_OWNER
+        if pre_auth and not resolved_public:
+            raise ValueError(f"route {resolved_path!r} declares pre_auth=True but is authenticated")
+        if any_authenticated and resolved_public:
+            raise ValueError(f"route {resolved_path!r} declares any_authenticated=True but is public")
 
         fastmcp_route = self._app._fast_mcp.custom_route(resolved_path, methods, name, include_in_schema)
 
@@ -169,6 +178,8 @@ class HttpSurface:
                 destructive=destructive,
                 action=action,
                 self_service=self_service,
+                any_authenticated=any_authenticated,
+                pre_auth=pre_auth,
                 declared=declared,
                 owner=owner,
                 public=resolved_public,
@@ -225,7 +236,7 @@ class HttpSurface:
     def use_spa_fallback_route(self, path: str) -> None:
         """Upgrade the registered SPA catch-all at ``path`` to a :class:`SpaFallbackRoute` in place.
 
-        Its :meth:`~SpaFallbackRoute.matches` then returns ``Match.NONE`` for an ``/api``/``/mcp``
+        Its :meth:`~SpaFallbackRoute.matches` then returns ``Match.NONE`` for a control-plane
         path, so an unknown one falls to the router's native 404 and a known route keeps its 405;
         the route's ``custom_route`` registration, methods and route-registry row are unchanged —
         only its match narrows. Called AFTER the route is registered and idempotent: a route
@@ -246,7 +257,7 @@ class HttpSurface:
             if isinstance(fast_mcp, FastMCP):
                 raise RuntimeError(
                     "use_spa_fallback_route: the served FastMCP exposes no additional-route table; "
-                    "the SPA catch-all would keep matching /api and /mcp paths"
+                    "the SPA catch-all would keep matching control-plane paths"
                 )
             return
         for index, route in enumerate(routes):

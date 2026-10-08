@@ -5,8 +5,8 @@ plain Redis reads that fail closed at request time, so neither needs a boot prob
 What DOES get boot-time treatment lives here: the gate state is handed to the kit in
 every epoch build, and, when access control is enabled, the configured identity
 providers' OWN storage is probed; the roles the
-control plane hands out are seeded; the always-public login surface is enumerated and
-guarded against an accidental authed mount; and a registered accounts provider left
+control plane hands out are seeded; the pre-auth surface is enumerated and guarded
+against an authenticated route on it; and a registered accounts provider left
 out of the resolution chain fails the boot rather than minting dead sessions.
 """
 
@@ -124,14 +124,16 @@ async def check_route_rows_canonical() -> None:
 
 
 async def check_always_public_routes() -> None:
-    """Enumerate the always-public login surface and refuse an authed mount under it.
+    """Enumerate the pre-auth surface and refuse an authenticated route on it.
 
-    After routes are registered, walk the route registry: for every registered route
-    whose path falls under ``always_public_path_prefixes`` emit ONE info line naming
-    them (so an accidental mount under the public namespace is VISIBLE at every boot),
-    and FAIL CLOSED — raise — if any such route carries ``authed=True``. A route that
-    resolves public at runtime yet declares itself authed is a credential-front-door
-    contradiction the boot must REFUSE, never silently serve public.
+    After routes are registered, walk the route registry: every route declaring
+    ``pre_auth=True`` and every route under an operator's ``always_public_path_prefixes`` is
+    named in ONE info line (so the surface whose presented credentials are never verified is
+    VISIBLE at every boot). The boot FAILS CLOSED — raises — when a route under an
+    always-public prefix carries ``authed=True`` (it resolves public at runtime yet declares
+    itself authed: a credential-front-door contradiction), or when a route declaring
+    ``pre_auth=True`` is not public (registration refuses it; nothing inconsistent may reach
+    the registry by any path).
     """
     from tai42_skeleton.app.route_registry import route_registry
 
@@ -140,13 +142,22 @@ async def check_always_public_routes() -> None:
 
     public_routes = []
     authed_offenders = []
+    pre_auth_offenders = []
     for meta in route_registry.routes():
-        if not _under_prefixes(meta.path, prefixes):
+        under_operator_prefix = _under_prefixes(meta.path, prefixes)
+        if meta.pre_auth and not meta.public:
+            pre_auth_offenders.append(meta.path)
+        if not (under_operator_prefix or meta.pre_auth):
             continue
         public_routes.extend(f"{method} {meta.path}" for method in meta.methods)
-        if meta.authed:
+        if under_operator_prefix and meta.authed:
             authed_offenders.append(meta.path)
 
+    if pre_auth_offenders:
+        raise RuntimeError(
+            "access_control: routes declare pre_auth=True but are authenticated — a pre-auth surface "
+            f"must be public: {sorted(set(pre_auth_offenders))}"
+        )
     if authed_offenders:
         raise RuntimeError(
             "access_control: routes under an always-public prefix declare authed=True — a public "
@@ -154,14 +165,15 @@ async def check_always_public_routes() -> None:
         )
 
     if public_routes:
-        logger.info("access_control: always-public routes (no auth): %s", ", ".join(sorted(public_routes)))
+        logger.info("access_control: pre-auth routes (no auth): %s", ", ".join(sorted(public_routes)))
 
 
 async def check_spa_shell_public() -> None:
-    """Audit the non-``/api`` route surface — every method — against the public-admission rules.
+    """Audit the route surface outside the control plane — every method — against the public-admission rules.
 
     Driven by the ROUTE REGISTRY, never a static list, and EXHAUSTIVE: it iterates EVERY
-    registered non-``/api``/non-``/mcp`` handler route — CONCRETE AND TEMPLATED, on EVERY
+    registered handler route outside the control plane (``RouteRegistry.control_plane_prefixes``:
+    ``/api`` and the mounted streamable-http transport) — CONCRETE AND TEMPLATED, on EVERY
     method — and never silently skips one. Each must fall into exactly ONE bucket, or the
     boot FAILS closed:
 
@@ -187,23 +199,34 @@ async def check_spa_shell_public() -> None:
       from weakening when the verifier's declared-public tier opens public POST doors: such
       a door exists only after a reviewer acknowledged it.
 
-    ``/api``/``/mcp`` routes (concrete and templated alike) are excluded: ``serve_spa``
-    404s them, so the shell tier can never reach them regardless of auth or templating. A
+    Control-plane routes (concrete and templated alike) are excluded: the SPA catch-all never
+    matches them, so the shell tier can never reach them regardless of auth or templating. A
     declared-public ``/api`` route is granted by the verifier's owner-agnostic declared-public
-    tier from its ``authed=False`` registration, never by this non-/api audit.
+    tier from its ``authed=False`` registration, never by this audit. An
+    ``acknowledged_public_routes`` entry under a control-plane prefix FAILS the boot: an
+    acknowledged PUBLIC control-plane route is a contradiction.
     The fallback state and the derived + acknowledged surfaces are printed so drift and the
     public-by-declaration vs shell-fallback split stay reviewable in ops logs. The audit's
     exhaustiveness is what lets the runtime fallback (concrete-match only) rely on it for
     templated routes rather than build a second matcher — see ``resolve_resource_ids``.
 
-    Finally it confirms the terminal-deny exclusion: a ``/api``/``/mcp`` probe is
-    segment-under the excluded prefixes, so the GET fallback can never open the control
-    plane. (Exercised end-to-end by the terminal-deny + route-walk tests.)
+    Finally it confirms the terminal-deny exclusion: a probe under each control-plane prefix
+    is excluded from the shell tier, so the GET fallback can never open the control plane.
+    (Exercised end-to-end by the terminal-deny + route-walk tests.)
     """
     from tai42_skeleton.access_control.path_canon import under_prefix
-    from tai42_skeleton.access_control.verifier import registered_reserved_get_paths
+    from tai42_skeleton.access_control.verifier import registered_reserved_get_paths, under_control_plane
+    from tai42_skeleton.app.route_registry import route_registry
 
     settings = access_control_settings()
+    control_plane = route_registry.control_plane_prefixes()
+    for entry in settings.acknowledged_public_routes:
+        for prefix in control_plane:
+            if under_prefix(entry, prefix):
+                raise RuntimeError(
+                    f"access_control: acknowledged_public_routes entry {entry!r} is under the control-plane "
+                    f"prefix {prefix!r} — an acknowledged PUBLIC control-plane route is a contradiction"
+                )
     derived = registered_reserved_get_paths()
     acknowledged = frozenset(settings.acknowledged_public_routes)
 
@@ -223,9 +246,10 @@ async def check_spa_shell_public() -> None:
         )
 
     # Terminal-deny confirmation: the resolver structurally excludes the control plane
-    # from the shell tier, so no unmatched /api or /mcp path can ever reach the SPA shell.
-    for probe in ("/api/__boot_probe__", "/mcp/__boot_probe__"):
-        if not (under_prefix(probe, "/api") or under_prefix(probe, "/mcp")):
+    # from the shell tier, so no unmatched control-plane path can ever reach the SPA shell.
+    for prefix in control_plane:
+        probe = f"{prefix}/__boot_probe__"
+        if not under_control_plane(probe):
             raise RuntimeError(
                 f"access_control: control-plane probe {probe!r} is not excluded from the SPA-shell tier — "
                 "the terminal-deny invariant is broken"
@@ -234,7 +258,7 @@ async def check_spa_shell_public() -> None:
 
 @dataclass
 class _SpaShellAudit:
-    """The four buckets every registered non-/api handler route is sorted into by the public-surface audit.
+    """The four buckets every registered handler route outside the control plane is sorted into by the audit.
 
     Consciously acknowledged, acknowledged-yet-authed (a contradiction),
     authed-but-invisible-to-the-fallback, and public-by-declaration-yet-unacknowledged.
@@ -247,11 +271,12 @@ class _SpaShellAudit:
 
 
 def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[str]) -> _SpaShellAudit:
-    """Bucket every registered non-mounted, non-/api handler route (every method) against the rules.
+    """Bucket every registered non-mounted handler route outside the control plane (every method).
 
     See :func:`check_spa_shell_public` for the rule each bucket encodes.
     """
-    from tai42_skeleton.access_control.path_canon import canonicalize_path, under_prefix
+    from tai42_skeleton.access_control.path_canon import canonicalize_path
+    from tai42_skeleton.access_control.verifier import under_control_plane
     from tai42_skeleton.app.route_registry import route_registry
 
     audit = _SpaShellAudit()
@@ -262,11 +287,11 @@ def _classify_spa_shell_routes(acknowledged: frozenset[str], derived: frozenset[
         if meta.mounted:
             continue
         registered = meta.path
-        # The control plane is excluded structurally: the SPA catch-all does not match /api or
-        # /mcp (a SpaFallbackRoute), so the shell tier never reaches them. The literal REGISTERED
-        # prefix decides (registered paths carry clean, un-encoded prefixes), so a templated /api
+        # The control plane is excluded structurally: the SPA catch-all does not match it (a
+        # SpaFallbackRoute), so the shell tier never reaches it. The literal REGISTERED prefix
+        # decides (registered paths carry clean, un-encoded prefixes), so a templated /api
         # route is excluded too.
-        if under_prefix(registered, "/api") or under_prefix(registered, "/mcp"):
+        if under_control_plane(registered):
             continue
         templated = "{" in registered
         # Acknowledgment is REGISTRY-LEVEL: the REGISTERED path — the template string for a

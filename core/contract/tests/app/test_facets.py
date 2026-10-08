@@ -527,6 +527,18 @@ def test_custom_route_carries_self_describing_metadata():
     assert sig.parameters["enveloped"].default is True
 
 
+def test_custom_route_declares_route_reach_flags():
+    # A route declares its reach beside ``self_service``: ``any_authenticated`` (any
+    # authenticated identity, whatever its scopes) and ``pre_auth`` (a pre-authentication
+    # surface whose presented credentials are never verified). Keyword-only, off by default.
+    from tai42_contract.app import AppHttp
+
+    sig = inspect.signature(AppHttp.custom_route)
+    for name in ("self_service", "any_authenticated", "pre_auth"):
+        assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, f"{name} must be keyword-only"
+        assert sig.parameters[name].default is False
+
+
 def test_mount_base_is_a_zero_arg_str_query():
     # mount_base takes no arguments beyond self and returns the resolved absolute
     # mount base a declared plugin route module captures at import.

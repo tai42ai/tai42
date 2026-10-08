@@ -146,7 +146,7 @@ async def _http(principal: str) -> bool:
         await PlainTextResponse("ok")(scope, receive, send)
 
     guard = ResourceGuardMiddleware(
-        endpoint, AccessControlVerifier(settings, providers=[]), settings.public_resource_id, ()
+        endpoint, AccessControlVerifier(settings, providers=[]), settings.public_resource_id
     )
     app = AuthenticationMiddleware(
         guard,

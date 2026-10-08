@@ -144,7 +144,6 @@ class AuthAdapter(TokenVerifier):
                 ResourceGuardMiddleware,
                 verifier=self._internal_verifier,
                 public_resource_id=self.settings.public_resource_id,
-                authenticated_always_allowed_paths=self.settings.authenticated_always_allowed_paths,
             ),
         ]
 

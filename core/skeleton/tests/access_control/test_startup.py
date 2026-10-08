@@ -233,13 +233,13 @@ async def test_route_row_audit_skips_when_no_skeleton_store(monkeypatch: pytest.
     await startup.check_route_rows_canonical()
 
 
-# -- always-public route guard -----------------------------------------------
+# -- pre-auth surface guard ---------------------------------------------------
 
 
-def _bind_public_check(monkeypatch: pytest.MonkeyPatch, routes: list, prefixes=("/api/login",)) -> None:
-    """Point the always-public check at fixed route metadata and prefixes. The check
-    reads only ``.path``/``.methods``/``.authed`` off each entry, so lightweight
-    stand-ins suffice."""
+def _bind_public_check(monkeypatch: pytest.MonkeyPatch, routes: list, prefixes=("/portal",)) -> None:
+    """Point the pre-auth check at fixed route metadata and operator prefixes. The check
+    reads only ``.path``/``.methods``/``.authed``/``.public``/``.pre_auth`` off each entry,
+    so lightweight stand-ins suffice."""
     from tai42_skeleton.app import route_registry as rr
 
     monkeypatch.setattr(rr.route_registry, "routes", lambda: routes)
@@ -248,33 +248,54 @@ def _bind_public_check(monkeypatch: pytest.MonkeyPatch, routes: list, prefixes=(
     )
 
 
-def _meta(path: str, methods: tuple[str, ...], authed: bool, mounted: bool = False):
-    return SimpleNamespace(path=path, methods=methods, authed=authed, mounted=mounted)
+def _meta(path: str, methods: tuple[str, ...], authed: bool, mounted: bool = False, pre_auth: bool = False):
+    return SimpleNamespace(
+        path=path, methods=methods, authed=authed, public=not authed, mounted=mounted, pre_auth=pre_auth
+    )
 
 
 async def test_check_always_public_routes_raises_on_authed_offender(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A route under an always-public prefix that declares authed=True is a
+    # A route under an operator's always-public prefix that declares authed=True is a
     # credential-front-door contradiction: the boot must REFUSE, naming the path.
-    _bind_public_check(monkeypatch, [_meta("/api/login/methods", ("POST",), True)])
-    with pytest.raises(RuntimeError, match="/api/login/methods"):
+    _bind_public_check(monkeypatch, [_meta("/portal/form", ("POST",), True)])
+    with pytest.raises(RuntimeError, match="/portal/form"):
         await check_always_public_routes()
 
 
-async def test_check_always_public_routes_passes_and_logs_public_route(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    # A public route (authed=False) under the prefix passes and is enumerated in the
-    # single info line so an accidental mount stays visible at boot.
-    _bind_public_check(monkeypatch, [_meta("/api/login/methods", ("GET",), False)])
+async def test_check_always_public_routes_refuses_pre_auth_on_an_authenticated_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Registration refuses ``pre_auth=True`` on an authenticated route; the audit asserts
+    # nothing inconsistent reached the registry by any path.
+    _bind_public_check(monkeypatch, [_meta("/api/entry/exchange", ("POST",), True, pre_auth=True)])
+    with pytest.raises(RuntimeError) as exc:
+        await check_always_public_routes()
+    assert str(exc.value) == (
+        "access_control: routes declare pre_auth=True but are authenticated — a pre-auth surface "
+        "must be public: ['/api/entry/exchange']"
+    )
+
+
+async def test_check_always_public_routes_passes_and_logs_the_pre_auth_surface(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    # A public route under the operator prefix and a route declaring ``pre_auth`` both pass
+    # and are enumerated in the single info line, so the surface whose presented
+    # credentials are never verified stays visible at boot.
+    _bind_public_check(
+        monkeypatch,
+        [_meta("/portal/form", ("GET",), False), _meta("/api/login/methods", ("GET",), False, pre_auth=True)],
+    )
     with caplog.at_level("INFO"):
         await check_always_public_routes()  # no raise
-    assert "always-public routes (no auth)" in caplog.text
-    assert "GET /api/login/methods" in caplog.text
+    assert "pre-auth routes (no auth): GET /api/login/methods, GET /portal/form" in caplog.text
 
 
-async def test_check_always_public_routes_ignores_routes_outside_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A route OUTSIDE the always-public prefix is ignored entirely — even authed=True is
-    # legal there — so the check neither raises nor enumerates it.
+async def test_check_always_public_routes_ignores_routes_outside_the_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A route neither under an operator prefix nor declaring ``pre_auth`` is ignored
+    # entirely — authed=True is legal there — so the check neither raises nor enumerates it.
     _bind_public_check(monkeypatch, [_meta("/api/tools/run", ("POST",), True)])
-    await check_always_public_routes()  # no raise: the offender is not under the prefix
+    await check_always_public_routes()  # no raise: the route is not on the pre-auth surface
 
 
 # -- SPA-shell public fallback boot audit (H3/H4/H7) -------------------------
@@ -363,10 +384,11 @@ async def test_spa_check_excludes_mounted_transport_surfaces(monkeypatch: pytest
     await check_spa_shell_public()  # no raise
 
 
-async def test_spa_check_excludes_api_and_mcp_routes(monkeypatch: pytest.MonkeyPatch) -> None:
-    # /api + /mcp routes — concrete AND templated — are excluded from the audit: serve_spa
-    # 404s them, so the shell tier can never reach them. None of these should halt boot,
-    # even unacknowledged.
+async def test_spa_check_excludes_api_and_mcp_routes(monkeypatch: pytest.MonkeyPatch, streamable_http_mounted) -> None:
+    # Routes under a control-plane prefix (``/api`` and the mounted streamable-http transport
+    # at ``/mcp``) — concrete AND templated — are excluded from the audit: the SPA catch-all
+    # never matches them, so the shell tier can never reach them. None of these should halt
+    # boot, even unacknowledged.
     _bind_spa_check(
         monkeypatch,
         [
@@ -377,6 +399,40 @@ async def test_spa_check_excludes_api_and_mcp_routes(monkeypatch: pytest.MonkeyP
         ],
         derived=set(),
     )
+    await check_spa_shell_public()  # no raise
+
+
+@pytest.mark.parametrize(("entry", "prefix"), [("/api/secret", "/api"), ("/mcp/tool", "/mcp")])
+async def test_spa_check_refuses_an_acknowledged_entry_under_the_control_plane(
+    monkeypatch: pytest.MonkeyPatch, streamable_http_mounted, entry: str, prefix: str
+) -> None:
+    # An acknowledged PUBLIC control-plane route is a contradiction: the audit reads the
+    # served control-plane prefixes and refuses the entry, naming it and its prefix.
+    _bind_spa_check(monkeypatch, [], derived=set(), acknowledged=("/health", entry))
+    with pytest.raises(RuntimeError) as exc:
+        await check_spa_shell_public()
+    assert str(exc.value) == (
+        f"access_control: acknowledged_public_routes entry {entry!r} is under the control-plane prefix "
+        f"{prefix!r} — an acknowledged PUBLIC control-plane route is a contradiction"
+    )
+
+
+async def test_spa_check_reads_the_recorded_streamable_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The control-plane prefixes come from the mount records: with the transport mounted at
+    # ``/rpc`` an acknowledged ``/rpc/x`` is refused and ``/mcp/x`` is an ordinary entry.
+    import tai42_skeleton.access_control.verifier as verifier_module
+    from tai42_skeleton.app import route_registry as rr
+    from tai42_skeleton.app import serving_core
+    from tai42_skeleton.app.route_registry import RouteRegistry
+
+    registry = RouteRegistry()
+    for module in (serving_core, verifier_module, rr):
+        monkeypatch.setattr(module, "route_registry", registry)
+    serving_core.record_streamable_http_surface("/rpc", stateless=False)
+    _bind_spa_check(monkeypatch, [], derived=set(), acknowledged=("/rpc/x",))
+    with pytest.raises(RuntimeError, match="'/rpc/x' is under the control-plane prefix '/rpc'"):
+        await check_spa_shell_public()
+    _bind_spa_check(monkeypatch, [_meta("/mcp/x", ("GET",), False)], derived={"/mcp/x"}, acknowledged=("/mcp/x",))
     await check_spa_shell_public()  # no raise
 
 

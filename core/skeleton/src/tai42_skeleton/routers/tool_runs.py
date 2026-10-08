@@ -31,6 +31,7 @@ from tai42_skeleton.operations.tool_runs import get_run as _get_run_op
 from tai42_skeleton.operations.tool_runs import list_tool_runs as _list_tool_runs_op
 from tai42_skeleton.operations.tool_runs import submit_run as _submit_run_op
 from tai42_skeleton.routers._tool_call import ToolCallRequestError, read_tool_call
+from tai42_skeleton.routers.paths import TOOL_RUNS_PATH
 
 
 async def _extract_submission(request: Request) -> dict:
@@ -61,7 +62,7 @@ async def _extract_list_query(request: Request) -> dict:
 submit_run = register_operation_route(
     tai42_app,
     operation_metadata_of(_submit_run_op),
-    path="/api/tool-runs",
+    path=TOOL_RUNS_PATH,
     method="POST",
     context_extractor=_extract_submission,
     success_status=202,
@@ -71,7 +72,7 @@ submit_run = register_operation_route(
 get_run = register_operation_route(
     tai42_app,
     operation_metadata_of(_get_run_op),
-    path="/api/tool-runs/{run_id}",
+    path=f"{TOOL_RUNS_PATH}/{{run_id}}",
     method="GET",
     action="read",
 )
@@ -79,7 +80,7 @@ get_run = register_operation_route(
 list_tool_runs = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_tool_runs_op),
-    path="/api/tool-runs",
+    path=TOOL_RUNS_PATH,
     method="GET",
     context_extractor=_extract_list_query,
     action="read",

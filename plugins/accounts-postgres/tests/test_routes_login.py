@@ -8,7 +8,7 @@ from tai42_accounts_postgres import rate_limit, routes_login, service
 from tai42_accounts_postgres.hashing import DUMMY_HASH, HashCapacityError, hash_password
 from tai42_accounts_postgres.settings import accounts_settings
 
-from .conftest import FakeRedis, build_request, future, response_json
+from .conftest import FakeRedis, _FakeHttp, build_request, future, response_json
 
 
 @pytest.fixture
@@ -50,6 +50,16 @@ def _account_key() -> str:
 
 def _ip_key(ip: str = "198.51.100.7") -> str:
     return f"{accounts_settings().key_prefix}:acc:login:ip:{ip}"
+
+
+# -- route declarations ---------------------------------------------------------
+
+
+def test_login_routes_declare_pre_auth():
+    # Every login route is a pre-authentication surface: it declares ``pre_auth`` so a stale
+    # presented credential never locks a caller out of the door that replaces it.
+    for path in ("/password", "/invite/accept"):
+        assert _FakeHttp.registrations[path].get("pre_auth") is True, path
 
 
 # -- password login -------------------------------------------------------------

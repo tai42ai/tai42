@@ -254,6 +254,9 @@ def register_operation_route(
     response_headers: dict[str, str] | None = None,
     success_status: int = 200,
     action: RouteAction | None = None,
+    self_service: bool = False,
+    any_authenticated: bool = False,
+    pre_auth: bool = False,
 ) -> Callable[[Request], Awaitable[Response]]:
     """Register ``op`` as an HTTP route at ``path``/``method`` and return the handler.
 
@@ -286,6 +289,9 @@ def register_operation_route(
     it defaults to ``200`` and is set to ``202`` for an accepted-but-detached
     submission (the background tool-run submit door), so that door answers
     ``202`` rather than ``200``.
+
+    ``self_service``, ``any_authenticated`` and ``pre_auth`` declare the route's reach and
+    pass through to ``custom_route`` unchanged (see :class:`tai42_contract.app.facets.AppHttp`).
     """
     method_upper = method.upper()
     if method_upper == "GET" and op.destructive:
@@ -322,6 +328,9 @@ def register_operation_route(
         authed=authed,
         destructive=op.destructive,
         action=action,
+        self_service=self_service,
+        any_authenticated=any_authenticated,
+        pre_auth=pre_auth,
         no_body_reason=op.no_body_reason,
         enveloped=op.enveloped,
         declared=_declared_metadata(

@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 
 ROOT_PREFIX = "/app"
 
+
+def sub_mcp_mount_url(slug: str) -> str:
+    """The served URL the sub-MCP app ``slug`` mounts at — its route-table key."""
+    return f"{ROOT_PREFIX}/{slug}"
+
+
+def sub_mcp_access_pattern(slug: str) -> str:
+    """The dynamic route pattern mapping every sub-path of ``slug``'s mount to its mount URL."""
+    return f"^{re.escape(sub_mcp_mount_url(slug))}/.*$"
+
+
 # A slug is dispatched as ONE path segment, so it must be a single lowercase-safe
 # segment: a ``/`` (or a trailing newline) would mint a route that is unreachable
 # and undeletable. Validated here at the core so EVERY caller — the HTTP router
