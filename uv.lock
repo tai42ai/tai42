@@ -5116,6 +5116,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "tai42-kit", extra = ["monitoring"] },
     { name = "tai42-skeleton" },
 ]
 park = [
@@ -5140,6 +5141,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "tai42-contract", editable = "core/contract" },
     { name = "tai42-kit", editable = "core/kit" },
+    { name = "tai42-kit", extras = ["monitoring"], marker = "extra == 'dev'", editable = "core/kit" },
     { name = "tai42-skeleton", marker = "extra == 'dev'", editable = "core/skeleton" },
     { name = "wcmatch", specifier = ">=11.0.1" },
 ]
@@ -5639,7 +5641,7 @@ dependencies = [
     { name = "tai42-channel-whatsapp" },
     { name = "tai42-contract" },
     { name = "tai42-identity-redis" },
-    { name = "tai42-kit", extra = ["curl", "jq", "llm", "postgres", "redis", "uvicorn"] },
+    { name = "tai42-kit", extra = ["curl", "jq", "llm", "monitoring", "postgres", "redis", "uvicorn"] },
     { name = "tai42-mcp-dynamic-postgres" },
     { name = "tai42-monitoring-langfuse" },
     { name = "tai42-sandbox-docker" },
@@ -5700,7 +5702,7 @@ requires-dist = [
     { name = "tai42-channel-whatsapp", editable = "plugins/channel-whatsapp" },
     { name = "tai42-contract", editable = "core/contract" },
     { name = "tai42-identity-redis", editable = "plugins/identity-redis" },
-    { name = "tai42-kit", extras = ["llm", "jq", "uvicorn", "redis", "postgres", "curl"], editable = "core/kit" },
+    { name = "tai42-kit", extras = ["llm", "jq", "uvicorn", "redis", "postgres", "curl", "monitoring"], editable = "core/kit" },
     { name = "tai42-mcp-dynamic-postgres", specifier = ">=0.5,<0.6" },
     { name = "tai42-monitoring-langfuse", editable = "plugins/monitoring-langfuse" },
     { name = "tai42-sandbox-docker", editable = "plugins/sandbox-docker" },
@@ -5870,6 +5872,12 @@ mistral = [
     { name = "langgraph-checkpoint-redis" },
     { name = "redis" },
 ]
+monitoring = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+    { name = "orjson" },
+]
 ollama = [
     { name = "langchain" },
     { name = "langchain-core" },
@@ -5939,7 +5947,11 @@ requires-dist = [
     { name = "langgraph-checkpoint-redis", marker = "extra == 'llm'", specifier = ">=0.5" },
     { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph-checkpoint-sqlite'", specifier = ">=3.0.3" },
     { name = "mcp", specifier = ">=1" },
+    { name = "opentelemetry-api", marker = "extra == 'monitoring'", specifier = ">=1.44,<2" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'monitoring'", specifier = ">=1.44,<2" },
+    { name = "opentelemetry-sdk", marker = "extra == 'monitoring'", specifier = ">=1.44,<2" },
     { name = "orjson", marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.11.8,<4" },
+    { name = "orjson", marker = "extra == 'monitoring'", specifier = ">=3.11" },
     { name = "orjson", marker = "extra == 'postgres'", specifier = ">=3.11.8,<4" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'", specifier = ">=3.3.2" },
     { name = "psycopg", extras = ["pool"], marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.3.2" },
@@ -5968,7 +5980,7 @@ requires-dist = [
     { name = "tai42-kit", extras = ["llm"], marker = "extra == 'xai'" },
     { name = "uvicorn", marker = "extra == 'uvicorn'", specifier = ">=0.52.4" },
 ]
-provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xai", "ollama", "huggingface", "typesafe", "langgraph-checkpoint-postgres", "langgraph-checkpoint-sqlite", "redis", "curl", "postgres", "jwt", "dev"]
+provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xai", "ollama", "huggingface", "typesafe", "langgraph-checkpoint-postgres", "langgraph-checkpoint-sqlite", "monitoring", "redis", "curl", "postgres", "jwt", "dev"]
 
 [[package]]
 name = "tai42-mcp-dynamic-postgres"
@@ -5992,13 +6004,12 @@ name = "tai42-monitoring-langfuse"
 version = "4.0.4"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
-    { name = "langchain" },
     { name = "langfuse" },
-    { name = "opentelemetry-api" },
+    { name = "orjson" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "tai42-contract" },
-    { name = "tai42-kit" },
+    { name = "tai42-kit", extra = ["monitoring"] },
 ]
 
 [package.dev-dependencies]
@@ -6013,13 +6024,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "langchain", specifier = ">=1.2" },
     { name = "langfuse", specifier = "~=4.0.6" },
-    { name = "opentelemetry-api", specifier = ">=1.33,<2" },
+    { name = "orjson", specifier = ">=3.11" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "tai42-contract", editable = "core/contract" },
-    { name = "tai42-kit", editable = "core/kit" },
+    { name = "tai42-kit", extras = ["monitoring"], editable = "core/kit" },
 ]
 
 [package.metadata.requires-dev]
@@ -6178,6 +6188,7 @@ dev = [
     { name = "striprtf" },
     { name = "tabulate" },
     { name = "tai42-identity-redis" },
+    { name = "tai42-kit", extra = ["monitoring"] },
     { name = "tai42-toolbox" },
 ]
 files = [
@@ -6252,6 +6263,7 @@ requires-dist = [
     { name = "tai42-contract", editable = "core/contract" },
     { name = "tai42-identity-redis", marker = "extra == 'dev'", editable = "plugins/identity-redis" },
     { name = "tai42-kit", extras = ["llm", "jq", "uvicorn", "redis", "postgres"], editable = "core/kit" },
+    { name = "tai42-kit", extras = ["monitoring"], marker = "extra == 'dev'", editable = "core/kit" },
     { name = "tai42-skeleton", extras = ["toolbox", "files"], marker = "extra == 'dev'" },
     { name = "tai42-toolbox", marker = "extra == 'toolbox'", editable = "plugins/toolbox" },
     { name = "typer", specifier = ">=0.27.2" },

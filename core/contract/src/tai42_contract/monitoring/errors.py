@@ -36,3 +36,21 @@ class MonitoringReadNotSupportedError(MonitoringError):
     # A capability the backend does not provide — mirrors the skeleton's
     # NotSupportedError -> UNAVAILABLE (a missing capability, not a bad call).
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
+
+
+class ObservationNotFoundError(MonitoringError):
+    """An observation id is absent from a trace the backend holds."""
+
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
+
+
+class PayloadRefUnresolvedError(MonitoringError):
+    """The backend does not hold, at the time of the read, a value a reference names.
+
+    The origin record is not yet available (the backend's ingestion is asynchronous) or
+    was lost, or the pointer is absent in it. An upstream fault, never rendered as an
+    empty value; every message ends with "(not yet available or lost)" so a reader knows
+    a retry may succeed.
+    """
+
+    __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR

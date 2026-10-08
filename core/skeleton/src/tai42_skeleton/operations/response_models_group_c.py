@@ -15,6 +15,7 @@ contract shapes) are reused, never re-authored.
 from __future__ import annotations
 
 import warnings
+from typing import Literal
 
 from pydantic import BaseModel, JsonValue, RootModel
 from tai42_contract.accounts.models import LoginMethod
@@ -442,6 +443,16 @@ class RunTraceView(BaseModel):
     output: JsonValue = None
     metadata: JsonValue = None
     spans: list[SpanView]
+
+
+class ResolvedSpanValue(BaseModel):
+    """One span field's value (at an RFC 6901 pointer) with every record reference resolved."""
+
+    traceId: str
+    spanId: str
+    field: Literal["input", "output"]
+    pointer: str
+    value: JsonValue = None
 
 
 # --- Plugins ----------------------------------------------------------------

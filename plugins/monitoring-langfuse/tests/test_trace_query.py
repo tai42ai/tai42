@@ -10,9 +10,11 @@ from types import SimpleNamespace
 import pytest
 from langfuse.api.commons.errors import NotFoundError
 from tai42_contract.monitoring import (
+    MonitoringError,
     MonitoringFilter,
     MonitoringLevel,
     MonitoringReadNotSupportedError,
+    ObservationNotFoundError,
     OrderBy,
     TraceNotFoundError,
 )
@@ -131,39 +133,6 @@ async def test_list_traces_version_filter_rides_native_param(
     assert mock_client.api.trace.list.call_args.kwargs["version"] == "5"
 
 
-async def test_version_stamp_and_filter_round_trip(
-    manager, mock_client, monkeypatch, trace_row, list_returns, route_metrics, errors_for
-):
-    """The version a run is STAMPED with is the same dimension a filter QUERIES.
-
-    The writer lifts the neutral ``RUN_VERSION_METADATA_KEY`` onto langfuse's native
-    ``version`` dimension; the reader maps ``MonitoringFilter.version`` onto the same
-    native trace.list ``version`` param. So a run stamped at version V is queryable
-    by V — proven end to end without a live server."""
-    from unittest.mock import MagicMock
-
-    from tai42_contract.monitoring import RUN_VERSION_METADATA_KEY, MonitoringFilter
-
-    from tai42_monitoring_langfuse.writer import LangfuseWriter
-
-    # STAMP: the writer forwards the run version onto the native ``version`` dimension.
-    propagate = MagicMock(return_value=MagicMock())
-    monkeypatch.setattr("tai42_monitoring_langfuse.writer.propagate_attributes", propagate)
-    with LangfuseWriter(manager).trace_attributes(
-        name="run", tags=["preset:wv", "preset-v:5"], metadata={RUN_VERSION_METADATA_KEY: "5"}
-    ):
-        pass
-    stamped_version = propagate.call_args.kwargs["version"]
-    assert stamped_version == "5"
-
-    # FILTER: querying by that same value rides the same native ``version`` param.
-    list_returns([trace_row(id="a")])
-    route_metrics(tokens={"a": 1})
-    errors_for([])
-    await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(version=stamped_version))
-    assert mock_client.api.trace.list.call_args.kwargs["version"] == stamped_version
-
-
 async def test_list_traces_page_is_at_most_three_calls(
     manager, mock_client, trace_row, list_returns, route_metrics, errors_for
 ):
@@ -241,3 +210,62 @@ async def test_native_sort_allows_none_from_timestamp(manager, mock_client):
 async def test_trace_sort_unknown_field_raises(manager, mock_client):
     with pytest.raises(MonitoringReadNotSupportedError):
         await LangfuseReader(manager).list_traces(order_by=OrderBy(field="metadata"))
+
+
+# -- get_observation and the producer-metadata decode ---------------------------------------
+
+
+def _observation_body(**kw):
+    base = {"id": "o1", "trace_id": "t1", "type": "SPAN", "name": "node", "input": {"a": 1}, "output": None}
+    base.update(kw)
+    return SimpleNamespace(model_dump=lambda: base)
+
+
+async def test_get_observation_reads_one_observation(manager, mock_client):
+    mock_client.api.legacy.observations_v1.get.return_value = _observation_body()
+    obs = await LangfuseReader(manager).get_observation("t1", "o1")
+    assert (obs.id, obs.trace_id, obs.input) == ("o1", "t1", {"a": 1})
+    assert mock_client.api.legacy.observations_v1.get.call_args.args == ("o1",)
+
+
+async def test_get_observation_absent_is_not_found(manager, mock_client):
+    mock_client.api.legacy.observations_v1.get.side_effect = NotFoundError(body="nope")
+    with pytest.raises(ObservationNotFoundError):
+        await LangfuseReader(manager).get_observation("t1", "o1")
+
+
+async def test_get_observation_of_another_trace_is_not_found(manager, mock_client):
+    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(trace_id="other")
+    with pytest.raises(ObservationNotFoundError):
+        await LangfuseReader(manager).get_observation("t1", "o1")
+
+
+async def test_get_observation_transient_error_propagates(manager, mock_client):
+    mock_client.api.legacy.observations_v1.get.side_effect = TimeoutError("slow")
+    with pytest.raises(TimeoutError):
+        await LangfuseReader(manager).get_observation("t1", "o1")
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [json.dumps({"k": "v", "tai42.message": {"content": "c"}}), {"k": "v", "tai42.message": {"content": "c"}}],
+)
+async def test_producer_metadata_is_decoded_with_the_promoted_keys(manager, mock_client, encoded):
+    metadata = {"attributes": {"tai42.metadata": encoded, "tai42.step_role": "grouping", "other": "x"}}
+    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata=metadata)
+    obs = await LangfuseReader(manager).get_observation("t1", "o1")
+    assert obs.metadata == {"k": "v", "tai42.message": {"content": "c"}, "tai42.step_role": "grouping"}
+
+
+async def test_an_observation_without_producer_metadata_has_none(manager, mock_client):
+    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata={"attributes": {"x": 1}})
+    assert (await LangfuseReader(manager).get_observation("t1", "o1")).metadata is None
+    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata=None)
+    assert (await LangfuseReader(manager).get_observation("t1", "o1")).metadata is None
+
+
+async def test_malformed_producer_metadata_is_refused(manager, mock_client):
+    metadata = {"attributes": {"tai42.metadata": json.dumps([1, 2])}}
+    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata=metadata)
+    with pytest.raises(MonitoringError, match=r"malformed tai42\.metadata attribute on observation o1"):
+        await LangfuseReader(manager).get_observation("t1", "o1")

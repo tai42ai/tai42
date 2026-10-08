@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 
+from tai42_kit.monitoring.otel import OtelWriter
+
 from tai42_monitoring_langfuse import LangfuseMonitoring
 
 
@@ -19,6 +21,8 @@ def _import_register_module(stub_monitoring):
 
 
 def test_import_registers_zero_arg_builder(stub_monitoring, monkeypatch):
+    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
     monkeypatch.setenv("LANGFUSE_HOST", "http://localhost")
@@ -31,7 +35,7 @@ def test_import_registers_zero_arg_builder(stub_monitoring, monkeypatch):
     builder = stub_monitoring.registered_builders[0]
     backend = builder()
     assert isinstance(backend, LangfuseMonitoring)
-    assert backend.writer is not None
+    assert isinstance(backend.writer, OtelWriter)
     assert backend.reader is not None
 
 

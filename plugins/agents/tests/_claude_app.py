@@ -42,7 +42,7 @@ class _Span:
 
 class RecordingWriter:
     """A minimal ``MonitoringWriter`` for the usage-emission test: records each span's
-    ``trace_context`` and amended fields (``usage_details``) opened through ``start_span``."""
+    ``trace_context`` and amended fields (``usage``) opened through ``start_span``."""
 
     def __init__(self) -> None:
         self.trace_id: str | None = None

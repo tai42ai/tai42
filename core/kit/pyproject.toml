@@ -116,6 +116,16 @@ langgraph-checkpoint-sqlite = [
     "aiosqlite>=0.20",
 ]
 
+# The monitoring writer (tai42_kit.monitoring.otel and the encoder): an own
+# OpenTelemetry TracerProvider exporting OTLP/HTTP to a collector, and orjson
+# for the one encoding per recorded value.
+monitoring = [
+    "opentelemetry-api>=1.44,<2",
+    "opentelemetry-sdk>=1.44,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
+    "orjson>=3.11",
+]
+
 # Pooled-client backends — each client submodule (tai42_kit.clients.*) imports its
 # driver at module top, so install the matching extra to use that client.
 redis = ["redis>=5"]

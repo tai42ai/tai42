@@ -18,9 +18,12 @@ dies on fork; the writer's ``shutdown()`` evicts and rebuilds it.
 
 from __future__ import annotations
 
-from tai42_contract.monitoring import Monitoring
+import typing
+
+from tai42_contract.monitoring import Monitoring, MonitoringReader, MonitoringWriter
 from tai42_kit.registry import StagedSlot
 
+from tai42_skeleton.monitoring.health_watch import activate_export_health, deactivate_export_health
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 
 # The COMMITTED live backend ``get_monitoring()`` serves. During an epoch build the
@@ -32,6 +35,27 @@ _BACKEND: StagedSlot[Monitoring] = StagedSlot(on_replace=lambda old: old.writer.
 _noop_default: Monitoring | None = None
 
 
+def _check_backend(backend: Monitoring) -> None:
+    """Refuse a backend whose writer or reader lacks a member of its contract protocol, naming the members."""
+    for face, protocol, label in (
+        (backend.writer, MonitoringWriter, "writer"),
+        (backend.reader, MonitoringReader, "reader"),
+    ):
+        missing = sorted(m for m in typing.get_protocol_members(protocol) if not hasattr(face, m))
+        if missing:
+            raise TypeError(
+                f"monitoring backend {type(backend).__qualname__}: its {label} {type(face).__qualname__} lacks "
+                f"{', '.join(missing)} of the {protocol.__name__} protocol"
+            )
+
+
+def _activate_if_promoted(previous: Monitoring | None) -> None:
+    """Count the live backend's export health when it is a backend other than ``previous``."""
+    current = _BACKEND.current()
+    if current is not None and current is not previous:
+        activate_export_health(current.writer)
+
+
 def init_monitoring(backend: Monitoring) -> None:
     """Register the monitoring backend, installed by a monitoring plugin.
 
@@ -40,9 +64,14 @@ def init_monitoring(backend: Monitoring) -> None:
     backend keeps serving and is shut down only at commit, so a failed build leaves it
     running. At boot (no staging) it is activated immediately — shutting down any
     previously-installed backend's writer first so its background flush thread / vendor
-    client is not leaked.
+    client is not leaked. A backend whose writer or reader lacks a protocol member is
+    refused first (``TypeError``), staged or not. An activated recording writer has its
+    export health counted from then on.
     """
+    _check_backend(backend)
+    previous = _BACKEND.current()
     _BACKEND.set(backend)
+    _activate_if_promoted(previous)
 
 
 def begin_staging() -> None:
@@ -57,9 +86,12 @@ def commit_staging() -> None:
     """Activate the staged backend if the build registered one, else leave the live backend in place.
 
     Activation shuts down the previous live backend's writer; a build that named
-    no monitoring module keeps it. Idempotent when no build staged.
+    no monitoring module keeps it. The activated backend's export health is counted from
+    then on. Idempotent when no build staged.
     """
+    previous = _BACKEND.current()
     _BACKEND.commit()
+    _activate_if_promoted(previous)
 
 
 def abort_staging() -> None:
@@ -96,6 +128,7 @@ def reset_monitoring() -> None:
     plugin.
     """
     _BACKEND.reset()
+    deactivate_export_health()
 
 
 def get_monitoring_staged() -> Monitoring:

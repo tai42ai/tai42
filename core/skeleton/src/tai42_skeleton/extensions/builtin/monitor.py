@@ -17,7 +17,6 @@ from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
-from tai42_contract.secrets import mask_secrets
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.monitoring import get_monitoring
@@ -55,19 +54,18 @@ def monitor(func: Callable[..., Any], name: str, description: str) -> Callable[.
         if writer.current_trace_id() is not None:
             return await _call()
 
-        # The span is a recorder, not a live-caller door: any wrapped secret in the
-        # arguments or the result is masked to the placeholder before it is emitted.
+        # The writer masks any wrapped secret in the arguments or the result.
         with writer.start_span(
             name=name,
             kind=SpanKind.TOOL,
-            input_={"args": mask_secrets(args), "kwargs": mask_secrets(kwargs)},
+            input_={"args": args, "kwargs": kwargs},
         ) as span:
             try:
                 result = await _call()
             except Exception as e:
                 span.update(level=MonitoringLevel.ERROR, status_message=str(e))
                 raise
-            span.update(output=mask_secrets(result))
+            span.update(output=result)
             return result
 
     raw_name = f"{name}_{monitor.__name__}"

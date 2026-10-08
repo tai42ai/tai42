@@ -14,11 +14,10 @@ them; a FAILURE is marked here from the raised ``ChannelDeliveryError`` /
 ``ChannelInputError`` (level ERROR + the typed retry/kind detail), so no seam repeats
 that mapping.
 
-PII: the recipient rides the span INPUT, never the metadata. The writer masks ONLY the
-input path (``mask_secrets`` unwraps ``SecretValue`` there), so a wrapped value is
-masked; a plain-string recipient still reaches the (self-hosted) monitoring backend
-UNREDACTED, exactly as conversation content already does — recipient redaction is a
-monitoring-backend-side concern, not something this seam performs.
+PII: the recipient rides the span INPUT, never the metadata. The writer masks every
+``SecretValue``, so a wrapped value is masked; a plain-string recipient still reaches the
+(self-hosted) monitoring backend UNREDACTED, exactly as conversation content already does —
+recipient redaction is a monitoring-backend-side concern, not something this seam performs.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from typing import Any
 
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
 from tai42_contract.monitoring import MonitoringLevel, Span, SpanKind
-from tai42_contract.secrets import mask_secrets
 
 from tai42_skeleton.monitoring import get_monitoring
 
@@ -93,12 +91,12 @@ def send_span(channel: str, *, recipient: str | None, attempt: int | None = None
         # platform-local attribute, named plainly so it reads as one.
         metadata["retry.attempt"] = attempt
     writer = get_monitoring().writer
-    # ``recipient`` on the INPUT path only (masked there if a SecretValue) — see the
-    # module docstring on why it is not redacted further here.
+    # ``recipient`` on the INPUT path only — see the module docstring on why it is not
+    # redacted further here.
     with writer.start_span(
         name=f"send:{channel}",
         kind=SpanKind.TOOL,
-        input_=mask_secrets({"recipient": recipient}),
+        input_={"recipient": recipient},
         metadata=metadata,
     ) as span:
         try:

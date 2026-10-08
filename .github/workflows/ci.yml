@@ -202,7 +202,7 @@ jobs:
           # the services-backed e2e job. Any other value -> full pytest with cov.
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
-          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra typesafe|arq,celery,rq|cov
+          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra typesafe --extra monitoring|arq,celery,rq|cov
           cli|core/cli|tai42-cli||--extra dev --extra api-gate|arq,celery,rq|cov
           skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
           accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
@@ -820,9 +820,12 @@ jobs:
         # + postgres, which the `services:` block already binds on 6379/5432 —
         # colliding with "port is already allocated". Same pattern as the celery
         # step naming `rabbitmq`. The compose langfuse-web healthcheck makes
-        # `--wait` block until Langfuse actually serves.
+        # `--wait` block until Langfuse actually serves; the OpenTelemetry collector
+        # the platform exports through starts after it, and the
+        # `otel-collector-health` healthcheck makes `--wait` block until the
+        # collector is ready to receive.
         run: |
-          docker compose --profile monitoring up -d --wait langfuse-web langfuse-worker
+          docker compose --profile monitoring up -d --wait langfuse-web langfuse-worker otel-collector otel-collector-health
           echo "TAI_E2E_MONITORING=1" >> "$GITHUB_ENV"
       - name: Run the suite
         working-directory: e2e

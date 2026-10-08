@@ -2,36 +2,29 @@
 
 from __future__ import annotations
 
+from tai42_kit.monitoring.otel import OtelWriter
+
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
 from tai42_monitoring_langfuse.project import LangfuseProject
 from tai42_monitoring_langfuse.reader import LangfuseReader
-from tai42_monitoring_langfuse.writer import LangfuseWriter
 
 
 class LangfuseMonitoring:
-    """A ``Monitoring`` backed by one or more Langfuse projects.
+    """A ``Monitoring`` that writes through the kit's OpenTelemetry writer and reads one Langfuse project.
 
-    ``writer.scope(public_key)`` switches the active project per block.
+    The project's ``source`` stamps every record (``deployment.environment.name``, which
+    Langfuse reads as its environment) and scopes every read, so one value governs both.
     """
 
-    def __init__(
-        self,
-        *,
-        projects: list[LangfuseProject],
-        default_public_key: str,
-    ) -> None:
-        """Wire the client manager, writer, and reader over ``projects`` and ``default_public_key``."""
-        self._manager = LangfuseClientManager(projects, default_public_key)
-        self._writer = LangfuseWriter(self._manager)
+    def __init__(self, *, project: LangfuseProject) -> None:
+        """Wire the writer and the reader over ``project``."""
+        self._manager = LangfuseClientManager(project)
+        self._writer = OtelWriter(resource_attributes={"deployment.environment.name": project.source})
         self._reader = LangfuseReader(self._manager)
 
-    def add_project(self, project: LangfuseProject) -> None:
-        """Register an additional Langfuse project, selectable via ``writer.scope()``."""
-        self._manager.add_project(project)
-
     @property
-    def writer(self) -> LangfuseWriter:
-        """The write surface (trace/span/event emission)."""
+    def writer(self) -> OtelWriter:
+        """The write surface: the kit's OpenTelemetry writer."""
         return self._writer
 
     @property

@@ -3,7 +3,7 @@
 A driver that dispatches a nested run (a run dispatching a nested-run-as-tool) can
 deposit the CURRENT trace's lineage — a :class:`TraceContext` carrying ``trace_id`` and
 the anchor ``parent_span_id`` — for the wrapped block; a run-config builder reads it and,
-when the caller propagated no explicit ``monitoring_trace_id`` of its own, threads it onto
+when the caller propagated no explicit :data:`MONITORING_TRACE_ID_KEY` of its own, threads it onto
 the nested run so the nested run's spans join the SAME trace instead of minting a fresh,
 orphaned one. This module owns that ambient deposit — a ContextVar, mirroring the
 run-attribution and session-thread discipline — and the context manager that sets/resets it.
@@ -38,6 +38,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 
 from tai42_contract.monitoring.models import TraceContext
+
+# The two run-config ``configurable`` keys that carry a run's trace lineage into a nested
+# run: the trace to join and the span the nested run's root spans nest under.
+MONITORING_TRACE_ID_KEY = "monitoring_trace_id"
+MONITORING_PARENT_SPAN_ID_KEY = "monitoring_parent_span_id"
 
 _current_trace_context: ContextVar[TraceContext | None] = ContextVar("tai42_current_trace_context", default=None)
 
@@ -80,6 +85,8 @@ def ambient_trace_context(ctx: TraceContext) -> Generator[None]:
 
 
 __all__ = [
+    "MONITORING_PARENT_SPAN_ID_KEY",
+    "MONITORING_TRACE_ID_KEY",
     "ambient_trace_context",
     "get_ambient_trace_context",
     "reset_ambient_trace_context",

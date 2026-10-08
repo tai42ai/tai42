@@ -11,6 +11,7 @@ Redis logical DB, so tests in one module never see another's state."""
 from __future__ import annotations
 
 import base64
+import os
 import secrets
 from collections.abc import Callable, Iterator
 
@@ -44,6 +45,7 @@ from tai42_e2e.manifests import (
     build_claude_agent_stack,
     build_connectors_stack,
     build_core_stack,
+    build_dead_collector_monitoring_stack,
     build_deep_agent_durable_stack,
     build_default_router_stack,
     build_door_schedule_stack,
@@ -75,6 +77,7 @@ from tai42_e2e.manifests import (
     build_working_signal_capped_stack,
     build_working_signal_stack,
 )
+from tai42_e2e.manifests.monitoring import compose_monitoring_resources
 from tai42_e2e.oauth_idp import OAuthIdp
 from tai42_e2e.pytest_plugin import gated_collect_ignore
 from tai42_e2e.recording_proxy import RecordingConnectProxy, TargetServer
@@ -888,16 +891,29 @@ def extensions_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> 
 
 @pytest.fixture(scope="module")
 def monitoring_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub) -> Iterator[TaiStack]:
-    # The deterministic headless-init keys the compose monitoring profile sets, plus
-    # the scripted LLM stub the reference agent's run drives.
+    # The compose monitoring profile's coordinates, plus the scripted LLM stub the
+    # reference agent's run drives.
+    resource_kwargs = {**compose_monitoring_resources(os.environ), "llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra, tmp_path_factory.mktemp("monitoring"), build_monitoring_stack, resource_kwargs=resource_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def dead_collector_monitoring_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
+) -> Iterator[TaiStack]:
+    """The monitoring stack exporting to an address nothing listens on: every export fails."""
     resource_kwargs = {
-        "langfuse_host": "http://127.0.0.1:3000",
-        "langfuse_public_key": "pk-lf-e2e0000000000000000000000000000",
-        "langfuse_secret_key": "sk-lf-e2e0000000000000000000000000000",
+        **compose_monitoring_resources(os.environ),
+        "otel_traces_endpoint": "http://127.0.0.1:9/v1/traces",
         "llm_base_url": llm_stub.base_url,
     }
     yield from _boot(
-        infra, tmp_path_factory.mktemp("monitoring"), build_monitoring_stack, resource_kwargs=resource_kwargs
+        infra,
+        tmp_path_factory.mktemp("monitoring-dead-collector"),
+        build_dead_collector_monitoring_stack,
+        resource_kwargs=resource_kwargs,
     )
 
 

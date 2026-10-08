@@ -27,7 +27,7 @@ pytest.importorskip("langchain_typesafe")
 
 import httpx2
 from tai42_contract.app import tai42_app
-from tai42_contract.monitoring import MonitoringLevel, SpanKind, TraceContext, ambient_trace_context
+from tai42_contract.monitoring import MonitoringLevel, SpanKind, TokenUsage, TraceContext, ambient_trace_context
 
 from tai42_kit.llm import classifier
 from tai42_kit.llm.classifier import (
@@ -102,7 +102,7 @@ def _built() -> Any:
 class _RecordingSpan:
     def __init__(self) -> None:
         self.model: str | None = None
-        self.usage_details: dict[str, Any] | None = None
+        self.usage: TokenUsage | None = None
         self.metadata: dict[str, Any] | None = None
         self.level: MonitoringLevel | None = None
         self.status_message: str | None = None
@@ -116,15 +116,15 @@ class _RecordingSpan:
         *,
         output: Any = None,
         model: str | None = None,
-        usage_details: dict[str, Any] | None = None,
+        usage: TokenUsage | None = None,
         metadata: dict[str, Any] | None = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
     ) -> None:
         if model is not None:
             self.model = model
-        if usage_details is not None:
-            self.usage_details = usage_details
+        if usage is not None:
+            self.usage = usage
         if metadata is not None:
             self.metadata = metadata
         if level is not None:
@@ -198,7 +198,7 @@ def _assert_model_record(opened: _OpenSpan) -> None:
     assert opened.name == "classifier"
     assert opened.kind is SpanKind.LLM
     assert opened.span.model == "jev-latest"
-    assert opened.span.usage_details == {"input": 7, "output": 11}
+    assert opened.span.usage == TokenUsage(input_tokens=7, output_tokens=11)
     assert opened.span.metadata == {"request_id": "req-vendor"}
     assert opened.span.level is None
 
@@ -257,4 +257,4 @@ def test_provider_failure_records_the_span_error_and_reraises(writer: _Recording
     assert span.status_message
     # A failed call carries no model/usage record.
     assert span.model is None
-    assert span.usage_details is None
+    assert span.usage is None

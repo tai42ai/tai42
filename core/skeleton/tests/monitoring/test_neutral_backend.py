@@ -31,6 +31,7 @@ from tai42_contract.monitoring import (
     TraceNotFoundError,
 )
 
+from tai42_skeleton.monitoring.noop import NoOpWriter
 from tai42_skeleton.monitoring.registry import register_monitoring, reset_monitoring
 from tai42_skeleton.routers import observability as router
 
@@ -109,13 +110,18 @@ class _NeutralReader:
     async def list_traces(self, **_kwargs: Any) -> list[Any]:
         return []
 
+    async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
+        for observation in (await self.get_trace(trace_id)).observations:
+            if observation.id == observation_id:
+                return observation
+        raise TraceNotFoundError(trace_id)
+
     async def list_spans_in_window(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         return []
 
 
-class _NeutralWriter:
-    def shutdown(self) -> None:
-        pass
+class _NeutralWriter(NoOpWriter):
+    pass
 
 
 @dataclass

@@ -8,17 +8,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
+import orjson
 from langfuse.api.commons.errors import NotFoundError
 from tai42_contract.monitoring import (
+    PROMOTED_METADATA_KEYS,
+    MonitoringError,
     MonitoringFilter,
     MonitoringObservation,
     MonitoringReadNotSupportedError,
     MonitoringTrace,
     MonitoringTraceSummary,
+    ObservationNotFoundError,
     OrderBy,
     TraceNotFoundError,
     preview,
@@ -71,6 +76,24 @@ class TraceQuery(_LangfuseQuery):
         except NotFoundError as e:
             raise TraceNotFoundError(f"trace {trace_id} not found") from e
         return self._map_trace(trace.model_dump())
+
+    async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
+        """Fetch one observation with its full input/output.
+
+        An absent observation, or one that belongs to another trace, raises
+        ``ObservationNotFoundError``; any other failure propagates.
+        """
+        client = await self._active_client()
+        try:
+            raw = await asyncio.to_thread(
+                partial(client.api.legacy.observations_v1.get, observation_id, request_options=self._request_options())
+            )
+        except NotFoundError as e:
+            raise ObservationNotFoundError(f"observation {observation_id} not found in trace {trace_id}") from e
+        observation = self._map_observation(raw.model_dump())
+        if observation.trace_id != trace_id:
+            raise ObservationNotFoundError(f"observation {observation_id} not found in trace {trace_id}")
+        return observation
 
     async def list_traces(
         self,
@@ -507,9 +530,33 @@ class TraceQuery(_LangfuseQuery):
             status_message=_pick(raw, "status_message", "statusMessage"),
             input=raw.get("input"),
             output=raw.get("output"),
-            metadata=raw.get("metadata"),
+            metadata=_producer_metadata(raw),
             usage=_pick(raw, "usage_details", "usageDetails", "usage"),
             model=_pick(raw, "provided_model_name", "model"),
             start=_pick(raw, "start_time", "startTime"),
             end=_pick(raw, "end_time", "endTime"),
         )
+
+
+def _producer_metadata(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """The record's producer metadata: the decoded ``tai42.metadata`` object plus the promoted keys.
+
+    The backend keeps a non-SDK span's attributes under ``metadata.attributes``; ``None``
+    when the record carries none.
+    """
+    metadata = raw.get("metadata")
+    attributes = metadata.get("attributes") if isinstance(metadata, Mapping) else None
+    if not isinstance(attributes, Mapping):
+        return None
+    producer: dict[str, Any] = {}
+    encoded = attributes.get("tai42.metadata")
+    if isinstance(encoded, str):
+        encoded = orjson.loads(encoded)
+    if encoded is not None:
+        if not isinstance(encoded, Mapping):
+            raise MonitoringError(f"malformed tai42.metadata attribute on observation {raw.get('id')}")
+        producer.update(encoded)
+    for key in PROMOTED_METADATA_KEYS:
+        if key in attributes:
+            producer[key] = attributes[key]
+    return producer or None

@@ -19,6 +19,7 @@ from tai42_e2e_fixtures.tools import (
     overlap,
     park,
     readiness,
+    record_probe,
     sandbox,
     tool_target,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "overlap",
     "park",
     "readiness",
+    "record_probe",
     "sandbox",
     "tool_target",
 ]

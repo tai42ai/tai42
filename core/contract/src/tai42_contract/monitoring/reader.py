@@ -18,6 +18,7 @@ from tai42_contract.monitoring.models import (
     MetricsQuery,
     MetricsResult,
     MonitoringFilter,
+    MonitoringObservation,
     MonitoringTrace,
     MonitoringTraceSummary,
     OrderBy,
@@ -83,6 +84,14 @@ class MonitoringReader(Protocol):
         raises ``TraceNotFoundError``; a transient/backend failure (e.g. a timeout)
         propagates its error so the caller sees the failure and may retry.
         Distinct from ``list_spans_in_window`` (trimmed dashboard units).
+        """
+        ...
+
+    async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
+        """One observation of a trace, with its full input/output.
+
+        An absent observation raises ``ObservationNotFoundError``; an absent trace raises
+        ``TraceNotFoundError``; any other backend failure propagates.
         """
         ...
 

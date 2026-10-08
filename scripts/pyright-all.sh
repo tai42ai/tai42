@@ -23,7 +23,7 @@ cd "$(dirname "$0")/.."
 # dir|package|sync_extra — mirrors the ci.yml member table.
 read -r -d '' MEMBERS <<'EOF' || true
 core/contract|tai42-contract|--extra dev
-core/kit|tai42-kit|--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra typesafe
+core/kit|tai42-kit|--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra typesafe --extra monitoring
 core/cli|tai42-cli|--extra dev --extra api-gate
 core/skeleton|tai42-skeleton|--extra dev
 plugins/accounts-postgres|tai42-accounts-postgres|--extra dev

@@ -20,7 +20,7 @@ pytestmark = [
     pytest.mark.needs(
         "kind:monitoring:langfuse",
         "helper:langfuse-server",
-        "setting:LANGFUSE_HOST=http://127.0.0.1:3000",
+        "setting:LANGFUSE_HOST=compose-langfuse",
     ),
 ]
 

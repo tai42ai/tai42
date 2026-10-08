@@ -1,33 +1,43 @@
 """Every FEATURE's model call records under the run's trace through the ONE seam.
 
 One case per agent kind drives the agent's real face against the recording monitoring
-backend bound in ``conftest.py`` (whose ``get_monitoring_callbacks`` returns a real
-handler recording the trace id each model call fires under) and a scripted real chat
-model. Each case asserts the recording handler saw at least one ``on_chat_model_start``
-bound to the run's resolved trace id — so the per-invoke monitoring config reached the
-model call. The retrieval finalization and the vqa structured path are the paths that
-carried no config before the seam existed.
+backend bound in ``conftest.py`` (the kit's real OpenTelemetry writer over an in-memory
+exporter, recorded through the kit's monitoring callback handler) and a scripted real
+chat model. Each case asserts at least one model-call record exists under the run's
+resolved trace — so the per-invoke monitoring config reached the model call.
 
 The voting and refine cases also assert ONE trace per run: every sub-run (voters + judge;
 evaluator + critic + final pass) resolves the SAME trace id rather than minting N roots.
+
+The tools-agent reference case drives two tool turns and proves every chain record of the
+``create_agent`` graph resolves, through its references, to exactly the value the chain
+callback received, with no message content repeated inline after its first record.
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
+import orjson
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
+from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
+from opentelemetry.sdk.trace import ReadableSpan
 from pydantic import PrivateAttr
 from tai42_contract.agent.events import StreamEvent
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_kit.llm import RunTrace
+from tai42_kit.monitoring import encode_payload, resolve_refs
+from tai42_kit.monitoring.testing import span_to_observation
 from tests._deep_agent_fakes import _FakeCompiledGraph, _install_fake_resolve
 from tests._retrieval_tools_agent_support import StubStore
 
@@ -87,21 +97,32 @@ def _writer() -> RecordingMonitoringWriter:
 
 @pytest.fixture(autouse=True)
 def _reset_recording() -> None:
-    writer = _writer()
-    writer.contexts.clear()
-    writer.chat_model_starts.clear()
+    _writer().clear()
 
 
-def _run_trace_ids() -> set[str | None]:
-    """The distinct trace ids the active backend was asked for across this run."""
-    return {ctx.trace_id for ctx in _writer().contexts}
+def _kind(span: ReadableSpan) -> object:
+    return (span.attributes or {}).get("tai42.span.kind")
+
+
+def _trace_id(span: ReadableSpan) -> str:
+    assert span.context is not None
+    return format(span.context.trace_id, "032x")
+
+
+def _model_calls() -> list[ReadableSpan]:
+    return [s for s in _writer().spans() if _kind(s) == "LLM"]
+
+
+def _run_trace_ids() -> set[str]:
+    """The distinct traces the run's root records (a run root, or a run nested under a resolved lineage) joined."""
+    return {_trace_id(s) for s in _writer().spans() if s.parent is None or s.parent.is_remote}
 
 
 def _assert_model_call_recorded_under_the_run_trace() -> None:
-    writer = _writer()
-    assert writer.chat_model_starts, "no model call fired on_chat_model_start under the run"
-    assert set(writer.chat_model_starts) <= _run_trace_ids(), (
-        "a model call fired under a trace id the seam never resolved for this run"
+    calls = _model_calls()
+    assert calls, "no model call was recorded under the run"
+    assert {_trace_id(s) for s in calls} <= _run_trace_ids(), (
+        "a model call recorded under a trace id the seam never resolved for this run"
     )
 
 
@@ -160,7 +181,7 @@ def test_voting_agent_records_every_sub_run_under_one_trace(monkeypatch: pytest.
     _assert_model_call_recorded_under_the_run_trace()
     # ONE trace per run: the voter and the judge resolved the same trace id, not two roots.
     assert len(_run_trace_ids()) == 1
-    assert len(_writer().chat_model_starts) >= 2
+    assert len(_model_calls()) >= 2
 
 
 # --- refine_agent ---------------------------------------------------------------------
@@ -204,7 +225,7 @@ def test_refine_agent_records_every_sub_run_under_one_trace(monkeypatch: pytest.
     )
     _assert_model_call_recorded_under_the_run_trace()
     assert len(_run_trace_ids()) == 1
-    assert len(_writer().chat_model_starts) >= 2
+    assert len(_model_calls()) >= 2
 
 
 # --- retrieval_tools_agent ------------------------------------------------------------
@@ -274,7 +295,7 @@ def test_retrieval_tools_agent_graph_and_finalization_record_under_the_run_trace
     assert events  # a structured terminal was produced
     _assert_model_call_recorded_under_the_run_trace()
     # Two model calls recorded: the graph turn and the finalization, both under the run trace.
-    assert len(_writer().chat_model_starts) >= 2
+    assert len(_model_calls()) >= 2
     assert len(_run_trace_ids()) == 1
 
 
@@ -329,7 +350,9 @@ class _CallbackFiringGraph(_FakeCompiledGraph):
         self.received_config = config
         for handler in (config or {}).get("callbacks", []):
             if hasattr(handler, "on_chat_model_start"):
-                handler.on_chat_model_start({}, [])
+                run_id = uuid.uuid4()
+                handler.on_chat_model_start({}, [[]], run_id=run_id)
+                handler.on_llm_end(LLMResult(generations=[[]]), run_id=run_id)
         for chunk in self._chunks:
             yield chunk
 
@@ -342,3 +365,91 @@ def test_langchain_deep_agent_model_call_records_under_the_run_trace(monkeypatch
     _install_fake_resolve(monkeypatch, agent, graph)
     asyncio.run(_collect(agent.astream(user_message=TemplatedText(content="go"), thread_id="t")))
     _assert_model_call_recorded_under_the_run_trace()
+
+
+# --- the reference tools agent: each value recorded once, every chain record resolvable ------------------
+
+
+def _marker(kind: str, n: int) -> str:
+    return f"{kind}-{n}-" + "m" * 4096
+
+
+def _sends_as_dicts(value: Any) -> Any:
+    from dataclasses import fields, is_dataclass
+
+    from langgraph.types import Send
+
+    if isinstance(value, Send):
+        return {"node": value.node, "arg": _sends_as_dicts(value.arg), "timeout": None}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _sends_as_dicts(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, dict):
+        return {k: _sends_as_dicts(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sends_as_dicts(v) for v in value]
+    return value
+
+
+class _CaptureChainValues(BaseCallbackHandler):
+    """Registered after the monitoring handler: each chain run's real input/output, keyed by its record id."""
+
+    run_inline = True
+
+    def __init__(self) -> None:
+        self.span_of: dict[Any, str] = {}
+        self.inputs: dict[str, Any] = {}
+        self.outputs: dict[str, Any] = {}
+
+    def on_chain_start(self, serialized: Any, inputs: Any, *, run_id: Any, **kwargs: Any) -> None:
+        span_id = _writer().current_span_id()
+        assert span_id is not None
+        self.span_of[run_id] = span_id
+        self.inputs[span_id] = orjson.loads(encode_payload(_sends_as_dicts(inputs)))
+
+    def on_chain_end(self, outputs: Any, *, run_id: Any, **kwargs: Any) -> None:
+        self.outputs[self.span_of[run_id]] = orjson.loads(encode_payload(_sends_as_dicts(outputs)))
+
+
+def test_tools_agent_records_each_message_once_and_every_chain_record_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = [
+        AIMessage(content=_marker("ANSWER", 1), tool_calls=[{"name": "echo", "args": {"n": 1}, "id": "c1"}]),
+        AIMessage(content=_marker("ANSWER", 2), tool_calls=[{"name": "echo", "args": {"n": 2}, "id": "c2"}]),
+        AIMessage(content=_marker("ANSWER", 3)),
+    ]
+    _patch_tools_seams(monkeypatch, _RecordingChatModel(calls))
+    capture = _CaptureChainValues()
+    real_init = bta.init_langgraph_config
+
+    def init_with_capture(config: dict[str, Any] | None = None) -> RunTrace:
+        trace = real_init(config)
+        trace.config["callbacks"] = [*trace.config["callbacks"], capture]
+        return trace
+
+    monkeypatch.setattr(bta, "init_langgraph_config", init_with_capture)
+
+    def echo(n: int) -> str:
+        return _marker("RESULT", n)
+
+    tool = StructuredTool.from_function(echo, name="echo", description="Return the n-th result marker.")
+    asyncio.run(ainvoke_tools_agent(system_message="sys", user_message=["start"], tools=[tool]))
+
+    spans = _writer().spans()
+    markers = [_marker("ANSWER", n) for n in (1, 2, 3)] + [_marker("RESULT", n) for n in (1, 2)]
+    chains = [s for s in spans if _kind(s) == "CHAIN"]
+    assert {s.name for s in chains} >= {"model", "tools"}
+    for span in chains:
+        text = "".join(str(v) for v in (span.attributes or {}).values())
+        for marker in markers:
+            assert marker not in text, (span.name, marker[:9])
+
+    async def resolve_all() -> None:
+        reader = _writer().reader
+        for span in chains:
+            record = span_to_observation(span)
+            assert record.trace_id is not None
+            assert await resolve_refs(record.input, reader, trace_id=record.trace_id) == capture.inputs[record.id]
+            assert await resolve_refs(record.output, reader, trace_id=record.trace_id) == capture.outputs[record.id]
+
+    asyncio.run(resolve_all())

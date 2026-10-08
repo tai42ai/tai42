@@ -19,7 +19,8 @@
 #                (`docker compose --profile storage up -d`). Its OWN service, not
 #                the monitoring-profile `langfuse-minio` (langfuse-specific
 #                entrypoint + bucket); the axis bucket is created in fixture setup.
-#   monitoring — opt-in: the self-hosted Langfuse stack for the monitoring
+#   monitoring — opt-in: the self-hosted Langfuse stack plus the OpenTelemetry
+#                collector the platform exports through, for the monitoring
 #                suite (`docker compose --profile monitoring up -d`).
 #   sandbox    — opt-in: a rootless Docker-in-Docker engine for the one
 #                docker-gated sandbox leg (`tests/sandbox_docker`), reached over
@@ -195,6 +196,63 @@ services:
       LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-e2e0000000000000000000000000000
       LANGFUSE_INIT_USER_EMAIL: e2e@example.com
       LANGFUSE_INIT_USER_PASSWORD: e2e-password-123
+
+  # The OpenTelemetry collector the platform's monitoring writer exports to
+  # (OTLP/HTTP); it maps the platform's attribute names onto Langfuse's
+  # (otel-collector.yaml) and sends through Langfuse's OTLP endpoint with the
+  # project's key pair. Its queue lives on a volume so a backend outage is
+  # buffered, not dropped. The image is distroless (no shell, no HTTP client), so
+  # its health_check extension (13133) is probed by `otel-collector-health`.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    profiles: ["monitoring"]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - otel-collector-queue:/var/lib/otelcol/queue
+    depends_on:
+      langfuse-web:
+        condition: service_healthy
+      otel-collector-queue-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${TAI_E2E_OTEL_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${TAI_E2E_OTEL_METRICS_PORT:-8888}:8888"
+      - "127.0.0.1:${TAI_E2E_OTEL_HEALTH_PORT:-13133}:13133"
+    environment:
+      LANGFUSE_HOST: http://langfuse-web:3000
+      # base64 of the compose-baked project key pair "public:secret" (langfuse-web's
+      # LANGFUSE_INIT_PROJECT_PUBLIC_KEY / _SECRET_KEY).
+      OTEL_COLLECTOR_LANGFUSE_AUTH: cGstbGYtZTJlMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDpzay1sZi1lMmUwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw
+
+  # The collector runs as uid 10001 and a fresh named volume is root-owned, so the
+  # queue directory is handed to that uid before the collector starts.
+  otel-collector-queue-init:
+    image: busybox:1.37
+    profiles: ["monitoring"]
+    command: ["chown", "10001:10001", "/var/lib/otelcol/queue"]
+    volumes:
+      - otel-collector-queue:/var/lib/otelcol/queue
+
+  # The collector's health: it is healthy while the collector's health_check
+  # extension answers "Server available", which it does once every pipeline runs.
+  # `up --wait` on this service therefore returns only when the collector is ready
+  # to receive.
+  otel-collector-health:
+    image: busybox:1.37
+    profiles: ["monitoring"]
+    command: ["sleep", "infinity"]
+    init: true
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://otel-collector:13133/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+      start_interval: 1s
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3.172.1
@@ -617,3 +675,6 @@ networks:
     ipam:
       config:
         - subnet: 192.0.2.0/24
+
+volumes:
+  otel-collector-queue:
