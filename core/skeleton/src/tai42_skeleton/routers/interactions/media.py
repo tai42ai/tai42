@@ -21,8 +21,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
-from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.interactions.media import read_media
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations.storage import _content_disposition
@@ -70,10 +69,10 @@ async def _serve_inbound(media_id: str, *, head: bool) -> Response | None:
     record (or an unconfigured conversations store) falls through to the outbound store, so
     an unconfigured store never oracles its absence.
     """
-    conv_settings = ConversationsSettings()
-    if conv_settings.in_memory:
+    manager = get_conversations_manager()
+    if not manager.durable:
         return None
-    store = InboundMediaMetaStore(conv_settings)
+    store = manager.media_meta
     meta = await store.get(media_id)
     if meta is None:
         return None

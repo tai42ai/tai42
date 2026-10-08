@@ -23,7 +23,7 @@ from .routes import _validate_route_name
 # generation's submodules bind to their OWN package object here — a stale-but-orphaned handler
 # then still reads (and a test still patches) the same generation it was built with. This is the
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
-# ``assert_execution_key_bindable``/``_person_store``.
+# ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
@@ -48,7 +48,7 @@ async def _thread_delete_routes(thread_id: str, route_name: str) -> list[str]:
                 f"thread_id {thread_id!r} is not a thread of route {route_name!r}: it must start with {prefix!r}"
             )
         return [route_name]
-    person = await _pkg._person_store().get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
+    person = await _require_backend().persons.get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
     if person is None or route_name not in _person_routes(person):
         raise _thread_not_found(thread_id)
     return sorted(_person_routes(person))
@@ -130,12 +130,9 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     _validate_route_name(route_name)
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")
-    _require_backend()
+    store = _require_backend().records
     from tai42_skeleton.conversations.caps import get_turn_caps
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    store = ConversationRecordStore(ConversationsSettings())
     route_names = await _thread_delete_routes(thread_id, route_name)
     in_flight_409 = f"conversation thread {thread_id!r} has a turn in flight; retry once it drains"
     if await store.thread_has_live_intake(thread_id):
@@ -198,13 +195,11 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
     """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")
-    _require_backend()
+    manager = _require_backend()
     from tai42_skeleton.conversations.caps import get_turn_caps
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    store = ConversationRecordStore(ConversationsSettings())
-    person_store = _pkg._person_store()
+    store = manager.records
+    person_store = manager.persons
     thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
     person = await person_store.get_by_id(person_id)
     caps = get_turn_caps()

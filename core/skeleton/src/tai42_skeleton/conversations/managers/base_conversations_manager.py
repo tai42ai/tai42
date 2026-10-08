@@ -1,10 +1,19 @@
 """The routing-row store base for the conversation bridge."""
 
 from abc import ABC, abstractmethod
+from functools import cached_property
 
 from tai42_contract.conversations import ConversationRoute
 
+from tai42_skeleton.conversations.ledger import ChannelSendLedger
+from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
+from tai42_skeleton.conversations.mode import ConversationModeStore
+from tai42_skeleton.conversations.pair_codes import ConversationPairCodeStore
+from tai42_skeleton.conversations.persons import ConversationPersonStore
+from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.redeem_throttle import ConversationRedeemThrottle
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
 
 class DoorFlipRefusedError(Exception):
@@ -31,11 +40,62 @@ class BaseConversationsManager(ABC):
     The durable, backed-up mapping from an inbound door to the agent a turn runs and
     the execution key it runs AS. The in-memory backend refuses every operation with
     a loud 501.
+
+    Also the one place every conversations store is served from: each accessor builds its
+    store once per manager over the manager's ``settings``. A non-durable manager's
+    accessors raise the store's own :class:`~tai42_skeleton.operations.errors.NotSupportedError`
+    on every read (a refusal is never cached).
     """
 
     def __init__(self, settings: ConversationsSettings) -> None:
         """Store the conversations ``settings`` on the manager."""
         self.settings = settings
+
+    @property
+    @abstractmethod
+    def durable(self) -> bool:
+        """Whether this backend persists conversation state, so the stores can be served."""
+        ...
+
+    @cached_property
+    def records(self) -> ConversationRecordStore:
+        """The answer/record store."""
+        return ConversationRecordStore(self.settings)
+
+    @cached_property
+    def persons(self) -> ConversationPersonStore:
+        """The person store."""
+        return ConversationPersonStore(self.settings)
+
+    @cached_property
+    def modes(self) -> ConversationModeStore:
+        """The per-thread mode-override store."""
+        return ConversationModeStore(self.settings)
+
+    @cached_property
+    def pair_codes(self) -> ConversationPairCodeStore:
+        """The pairing-code store."""
+        return ConversationPairCodeStore(self.settings)
+
+    @cached_property
+    def target_configs(self) -> ConversationTargetConfigStore:
+        """The per-target conversation config store."""
+        return ConversationTargetConfigStore(self.settings)
+
+    @cached_property
+    def redeem_throttle(self) -> ConversationRedeemThrottle:
+        """The pairing-code redeem throttle."""
+        return ConversationRedeemThrottle(self.settings)
+
+    @cached_property
+    def media_meta(self) -> InboundMediaMetaStore:
+        """The inbound-media metadata store."""
+        return InboundMediaMetaStore(self.settings)
+
+    @cached_property
+    def send_ledger(self) -> ChannelSendLedger:
+        """The channel send ledger."""
+        return ChannelSendLedger(self.settings)
 
     @abstractmethod
     async def put_route(self, route: ConversationRoute) -> bool:

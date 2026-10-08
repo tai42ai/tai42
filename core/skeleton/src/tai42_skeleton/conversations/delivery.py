@@ -26,7 +26,6 @@ from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.delivery_api import _deliver_api, _post_callback
 from tai42_skeleton.conversations.delivery_channel import _deliver_channel
 from tai42_skeleton.conversations.models import DeliveryStatus
-from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
 logger = logging.getLogger(__name__)
@@ -36,10 +35,6 @@ _SIGNATURE_PREFIX = "sha256="
 
 # Strong references to in-flight delivery / grace tasks so they are not GC'd mid-flight.
 _DELIVERY_TASKS: set[asyncio.Task[None]] = set()
-
-
-def _store() -> ConversationRecordStore:
-    return ConversationRecordStore(ConversationsSettings())
 
 
 def _sign(secret: str, body: bytes) -> str:
@@ -92,7 +87,7 @@ async def deliver(message_id: str) -> None:
     worker's live lease is left untouched. A record still at intake carries no answer and
     refuses loudly.
     """
-    store = _store()
+    store = get_conversations_manager().records
     token = uuid4().hex
     claimed = await store.claim_delivery(message_id, time.time(), token, store.settings.delivery_claim_lease_seconds)
     if claimed == -2:
@@ -146,7 +141,7 @@ async def _confirm_after_grace(message_id: str, grace_seconds: float) -> None:
     The atomic ingest is a no-op on a record a receipt already made terminal.
     """
     await asyncio.sleep(grace_seconds)
-    await _store().ingest_receipt(message_id, DeliveryReceipt.DELIVERED, time.time())
+    await get_conversations_manager().records.ingest_receipt(message_id, DeliveryReceipt.DELIVERED, time.time())
 
 
 # -- out-of-band receipt sink ------------------------------------------------
@@ -161,7 +156,7 @@ async def record_delivery_status(channel: str, provider_message_id: str, status:
     record (unknown or already swept), and when it resolves to a record in a state that never
     sent an answer — a programmer error, since such a record carries no outbound id to resolve.
     """
-    store = _store()
+    store = get_conversations_manager().records
     message_id = await store.resolve_outbound(channel, provider_message_id)
     if message_id is None:
         raise LookupError(
@@ -203,7 +198,7 @@ async def mark_wait_delivered(message_id: str) -> bool:
     No callback is POSTed. Takes the same atomic claim a background delivery would, so
     only one of the two paths delivers. Returns ``True`` when this call is that one.
     """
-    store = _store()
+    store = get_conversations_manager().records
     token = uuid4().hex
     claimed = await store.claim_delivery(message_id, time.time(), token, store.settings.delivery_claim_lease_seconds)
     if claimed != 1:
@@ -223,7 +218,7 @@ async def redrive_pending() -> None:
     one still inside it. Only boot can rebuild the in-process grace timers lost with
     the previous process, so the rescheduling lives here and not in the periodic sweep.
     """
-    store = _store()
+    store = get_conversations_manager().records
     now = time.time()
     for work in await store.pending_work():
         if work.delivery_status is DeliveryStatus.PENDING_DELIVERY:
@@ -245,7 +240,7 @@ async def sweep_stalled_deliveries() -> None:
     record past its grace is confirmed here because the in-process fallback confirmation
     died with the worker that scheduled it.
     """
-    store = _store()
+    store = get_conversations_manager().records
     now = time.time()
     for work in await store.pending_work():
         if work.delivery_status is DeliveryStatus.PENDING_DELIVERY:

@@ -1,4 +1,4 @@
-"""The redis-backend guard shared by every routing operation, plus the lazy store accessors.
+"""The redis-backend guard shared by every routing operation.
 
 Also holds the read guards (route existence, person route set, uniform thread-not-found).
 """
@@ -6,19 +6,12 @@ Also holds the read guards (route existence, person route set, uniform thread-no
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
 
 from tai42_contract.conversations import ConversationRoute, Person
 
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
-from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 from tai42_skeleton.operations import NotFoundError
 from tai42_skeleton.operations.errors import NotSupportedError
-
-if TYPE_CHECKING:
-    from tai42_skeleton.conversations.mode import ConversationModeStore
-    from tai42_skeleton.conversations.persons import ConversationPersonStore
-    from tai42_skeleton.conversations.records import ConversationRecordStore
 
 # Surfaced before a create does any bind work it would then have to discard.
 _NO_BACKEND = "conversation routes require the redis conversations backend"
@@ -29,48 +22,16 @@ _NO_BACKEND = "conversation routes require the redis conversations backend"
 # generation's submodules bind to their OWN package object here — a stale-but-orphaned handler
 # then still reads (and a test still patches) the same generation it was built with. This is the
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
-# ``assert_execution_key_bindable``/``_person_store``.
+# ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
 def _require_backend() -> BaseConversationsManager:
+    """The durable conversations manager every routing operation and store read goes through."""
     manager = _pkg.get_conversations_manager()
-    if isinstance(manager, InMemoryConversationsManager):
+    if not manager.durable:
         raise NotSupportedError(_NO_BACKEND)
     return manager
-
-
-def _person_store() -> ConversationPersonStore:
-    """The person store over the live conversations settings.
-
-    Called only after :func:`_require_backend`, so its own backend guard never fires here.
-    """
-    from tai42_skeleton.conversations.persons import ConversationPersonStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    return ConversationPersonStore(ConversationsSettings())
-
-
-def _record_store() -> ConversationRecordStore:
-    """The answer/record store over the live conversations settings.
-
-    Called only after :func:`_require_backend`, so its own backend guard never fires here.
-    """
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    return ConversationRecordStore(ConversationsSettings())
-
-
-def _mode_store() -> ConversationModeStore:
-    """The per-thread mode-override store over the live conversations settings.
-
-    Called only after :func:`_require_backend`, so its own backend guard never fires here.
-    """
-    from tai42_skeleton.conversations.mode import ConversationModeStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    return ConversationModeStore(ConversationsSettings())
 
 
 def _person_routes(person: Person) -> set[str]:

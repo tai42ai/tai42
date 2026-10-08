@@ -13,7 +13,6 @@ from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, get_turn_caps
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.api_wait import ApiSubmitResult, _api_wait_or_callback
 from tai42_skeleton.conversations.turn.errors import (
     ConversationRouteResolutionError,
@@ -134,7 +133,7 @@ async def submit_event(
             "deployment resolved none"
         )
     route = await _get_event_route(route_name)
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     thread_id, client_address, record_caller_principal, multichannel = await _resolve_event_thread(
         store, route, submission, caller_principal
     )
@@ -175,7 +174,7 @@ async def submit_event(
     )
     try:
         await store.create_record(intake, intake_token=intake_token)
-        await accessors._refresh_thread_mode_ttl(thread_id)
+        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
         # The claim is the LAST mutation, mirroring the channel door: an owner id always
         # names a durable record, and a lost claim discards the record just created.
         claimed_owner = await store.claim_event(route_name, event_id, message_id)

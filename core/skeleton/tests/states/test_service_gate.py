@@ -27,6 +27,9 @@ from tai42_contract.states.models import (
     WriteOrigin,
 )
 
+from tai42_skeleton.conversations import cache as cache_module
+from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
+from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService, state_context
 
@@ -195,19 +198,14 @@ async def test_validate_subject_person_branch(svc: StatesService, monkeypatch: p
     await svc.put_declaration(decl)
 
     class _FakePersonStore:
-        def __init__(self, settings) -> None:
-            self._settings = settings
-
         async def get_by_id(self, person_id):
             if person_id == "known":
                 return SimpleNamespace(person_id="known", target_kind="agent", target_name="a")
             return None
 
-    import tai42_skeleton.conversations.persons as persons_mod
-    import tai42_skeleton.conversations.settings as settings_mod
-
-    monkeypatch.setattr(persons_mod, "ConversationPersonStore", _FakePersonStore)
-    monkeypatch.setattr(settings_mod, "ConversationsSettings", lambda: object())
+    manager = RedisConversationsManager(ConversationsSettings())
+    manager.persons = _FakePersonStore()  # type: ignore[assignment]  # the accessor serves the double
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
 
     # unknown person → refusal
     with pytest.raises(SubjectRefusedError, match="no person"):
@@ -222,31 +220,29 @@ async def test_validate_subject_person_branch(svc: StatesService, monkeypatch: p
 async def test_validate_subject_person_store_is_lazy_and_single(
     svc: StatesService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ``ConversationPersonStore`` is constructed ONLY on the ``person`` branch and
-    lazily: a non-person subject never touches it — so no other kind is gated on the redis
-    conversations backend — and a person subject constructs it exactly once."""
-    import tai42_skeleton.conversations.persons as persons_mod
-    import tai42_skeleton.conversations.settings as settings_mod
+    """The person store is reached through the conversations manager ONLY on the ``person``
+    branch and lazily: a non-person subject never consults the manager — so no other kind is
+    gated on the redis conversations backend — and a person subject reads it exactly once."""
 
-    ctor_calls = 0
-
-    class _CountingPersonStore:
-        def __init__(self, settings: object) -> None:
-            nonlocal ctor_calls
-            ctor_calls += 1
-
+    class _PersonStore:
         async def get_by_id(self, person_id: str) -> object:
             return SimpleNamespace(person_id=person_id, target_kind="agent", target_name="a")
 
-    monkeypatch.setattr(persons_mod, "ConversationPersonStore", _CountingPersonStore)
+    lookups = 0
+    backend_present = False
+    manager = RedisConversationsManager(ConversationsSettings())
+    manager.persons = _PersonStore()  # type: ignore[assignment]  # the accessor serves the double
+
+    def _get_manager() -> RedisConversationsManager:
+        nonlocal lookups
+        lookups += 1
+        if not backend_present:
+            raise RuntimeError("the redis conversations backend is not configured")
+        return manager
+
+    monkeypatch.setattr(cache_module, "get_conversations_manager", _get_manager)
 
     # --- a non-person kind with the redis conversations backend ABSENT ---
-    # constructing its settings would raise; a subject of another kind must resolve without
-    # ever reaching the person branch, so neither the settings nor the store are touched.
-    def _backend_absent() -> object:
-        raise RuntimeError("the redis conversations backend is not configured")
-
-    monkeypatch.setattr(settings_mod, "ConversationsSettings", _backend_absent)
     thread_decl = StateDeclaration(
         name="threads",
         schema={"type": "object", "properties": {"n": {"type": "integer"}}},
@@ -255,10 +251,10 @@ async def test_validate_subject_person_store_is_lazy_and_single(
     )
     await svc.put_declaration(thread_decl)
     assert await svc.read("threads", _subject(kind="thread")) is None
-    assert ctor_calls == 0
+    assert lookups == 0
 
-    # --- the person kind with the backend present: the store is built lazily, exactly once ---
-    monkeypatch.setattr(settings_mod, "ConversationsSettings", lambda: object())
+    # --- the person kind with the backend present: the manager is consulted lazily, exactly once ---
+    backend_present = True
     person_decl = StateDeclaration(
         name="people",
         schema={"type": "object", "properties": {"n": {"type": "integer"}}},
@@ -267,7 +263,7 @@ async def test_validate_subject_person_store_is_lazy_and_single(
     )
     await svc.put_declaration(person_decl)
     assert await svc.read("people", _subject(kind="person", key="known")) is None
-    assert ctor_calls == 1
+    assert lookups == 1
 
 
 def _door_ctx(door, actor, turn_id, inbound_id) -> StateContext:

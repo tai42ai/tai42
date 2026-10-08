@@ -180,11 +180,10 @@ INTERACTIONS_NOT_CONFIGURED_MESSAGE = (
 def interactions_store_configured() -> bool:
     """Whether this deployment configures the interactions Redis store at all.
 
-    Resolved through the SAME pydantic-settings the store connects with (its own
-    ``INTERACTIONS_REDIS_*`` env or the shared ``TAI_DEFAULT_REDIS_URL``), read
-    fresh — not the cached singleton — so a config reload re-evaluates. A set
-    ``redis_url`` signals the store is wired up; without one, the interactions and
-    internal-notifications surfaces answer OFF rather than reaching for an absent
-    Redis.
+    Read from the cached :func:`interactions_settings`, the SAME settings the store connects
+    with (its own ``INTERACTIONS_REDIS_*`` env or the shared ``TAI_DEFAULT_REDIS_URL``),
+    re-read on every config reload. A set ``redis_url`` signals the store is wired up;
+    without one, the interactions and internal-notifications surfaces answer OFF rather
+    than reaching for an absent Redis.
     """
-    return bool(InteractionsRedisSettings().redis_url)
+    return bool(interactions_settings().redis.redis_url)

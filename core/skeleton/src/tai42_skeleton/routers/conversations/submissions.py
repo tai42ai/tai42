@@ -13,7 +13,7 @@ from tai42_contract.conversations import ConversationAnswer, ConversationEventSu
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.conversations.caps import AddressRateLimitedError, ThreadQueueOverflowError
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.conversations.turn import (
     ApiSubmitResult,
     ConversationRouteResolutionError,
@@ -175,7 +175,7 @@ async def send_conversation_message(request: Request) -> Response:
         detail = "; ".join(error["msg"] for error in exc.errors())
         return _error(f"invalid conversation message: {detail}", 400)
 
-    cap = ConversationsSettings().sync_wait_max_seconds
+    cap = conversations_settings().sync_wait_max_seconds
     wait_seconds = 0 if message.wait_seconds is None else min(message.wait_seconds, cap)
 
     from tai42_skeleton.conversations import submit_api_message

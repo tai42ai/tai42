@@ -18,9 +18,9 @@ import time
 from typing import Any
 
 from tai42_skeleton.app.root_task import spawn_root_task
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.conversations.turn import accessors
+from tai42_skeleton.conversations.settings import ConversationsSettings, conversations_settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def start(record: ConversationRecord) -> None:
     without it, so any fault here is logged loudly and swallowed rather than failing the turn.
     """
     try:
-        settings = ConversationsSettings()
+        settings = conversations_settings()
         if settings.working_signal_max_seconds <= 0:
             return
         if record.channel is None:
@@ -159,7 +159,7 @@ async def _run_loop(record: ConversationRecord, channel: Any, expiry: float, set
             if _now() >= ceiling_deadline:
                 break
             try:
-                rec = await accessors._store().get_record(record.message_id)
+                rec = await cache.get_conversations_manager().records.get_record(record.message_id)
             except Exception:
                 logger.warning(
                     "conversations: reading record %s to refresh its working signal failed; stopping the signal",

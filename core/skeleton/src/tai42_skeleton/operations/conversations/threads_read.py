@@ -37,7 +37,7 @@ from .routes import _validate_route_name
 # generation's submodules bind to their OWN package object here — a stale-but-orphaned handler
 # then still reads (and a test still patches) the same generation it was built with. This is the
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
-# ``assert_execution_key_bindable``/``_person_store``.
+# ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
@@ -139,10 +139,7 @@ async def list_conversation_threads(
     offset, limit = _page_bounds(page, page_size)
     status_filter = _parse_status_filter(status)
     address_filter = _parse_address_filter(address)
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    listed, unreadable = await ConversationRecordStore(ConversationsSettings()).list_route_threads(
+    listed, unreadable = await manager.records.list_route_threads(
         route_name, offset=offset, limit=limit, status=status_filter, address=address_filter
     )
     items = [
@@ -213,15 +210,12 @@ async def get_conversation_thread(
     needle = q if (q is not None and q.strip()) else None
     manager = _require_backend()
     caller = await _pkg.resolve_caller()
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
     if thread_id.startswith(PERSON_THREAD_PREFIX):
         return await _read_person_thread(
             manager, route_name, thread_id, caller, page=page, offset=offset, limit=limit, order=order, q=needle
         )
     await _require_route(manager, route_name)
-    transcript, unreadable = await ConversationRecordStore(ConversationsSettings()).list_thread_records(
+    transcript, unreadable = await manager.records.list_thread_records(
         route_name, thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=needle
     )
     # An unknown/expired thread reads as total==0. Under a ``q`` search total is the MATCH
@@ -277,17 +271,14 @@ async def _read_person_thread(
     """
     person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
     route = await _require_route(manager, route_name)
-    person = await _pkg._person_store().get_by_id(person_id)
+    person = await manager.persons.get_by_id(person_id)
     if (
         person is None
         or (route.target_kind, route.target_name) != (person.target_kind, person.target_name)
         or route_name not in _person_routes(person)
     ):
         raise _thread_not_found(thread_id)
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    transcript, unreadable = await ConversationRecordStore(ConversationsSettings()).list_person_thread_records(
+    transcript, unreadable = await manager.records.list_person_thread_records(
         sorted(_person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=q
     )
     if q is None and transcript.total == 0:
@@ -326,12 +317,7 @@ async def search_conversation_messages(route_name: str, q: str, page: int = 1, p
     require_admin(await _pkg.resolve_caller())
     await _require_route(manager, route_name)
     offset, limit = _page_bounds(page, page_size)
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    found, unreadable = await ConversationRecordStore(ConversationsSettings()).search_route_messages(
-        route_name, offset=offset, limit=limit, q=q
-    )
+    found, unreadable = await manager.records.search_route_messages(route_name, offset=offset, limit=limit, q=q)
     return {
         "items": [record.view() for record in found.records],
         "total": found.total,
@@ -356,12 +342,10 @@ async def list_failed_conversations() -> dict[str, Any]:
     ``{"items", "total", "unreadable"}``, where ``unreadable`` counts the indexed failed members whose
     row was gone or unparseable.
     """
-    _require_backend()
+    manager = _require_backend()
     require_admin(await _pkg.resolve_caller())
     from tai42_skeleton.conversations.models import DeliveryStatus
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    listing = await ConversationRecordStore(ConversationsSettings()).list_by_status(frozenset({DeliveryStatus.FAILED}))
+    listing = await manager.records.list_by_status(frozenset({DeliveryStatus.FAILED}))
     items = [record.view() for record in listing.items]
     return {"items": items, "total": len(items), "unreadable": listing.unreadable}

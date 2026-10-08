@@ -41,7 +41,7 @@ from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import target as target_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import _connected, rendered_user_message
+from .conftest import FakeManager, _connected, rendered_user_message, serve_stores
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -102,17 +102,6 @@ class ContextModeAgent(Agent):
 
     async def append_thread_messages(self, *, thread_id: str, messages, **kwargs) -> None:
         return None
-
-
-class FakeManager:
-    def __init__(self, *routes: ConversationRoute) -> None:
-        self._routes = {r.route_name: r for r in routes}
-
-    async def list_routes(self):
-        return dict(self._routes), 0
-
-    async def get_route(self, name: str):
-        return self._routes.get(name)
 
 
 class FakeChannel:
@@ -330,13 +319,9 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
     )
 
     class _FakePersonStore:
-        def __init__(self, settings) -> None:
-            pass
-
         async def get_by_id(self, person_id: str):
             return person if person_id == "p9" else None
 
-    monkeypatch.setattr(persons_module, "ConversationPersonStore", _FakePersonStore)
     line_b = ConversationRoute(
         route_name="line-b",
         door="channel",
@@ -349,7 +334,8 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
         execution_key_fingerprint="fp-1",
     )
     agent = MemorylessAgent()
-    _wire(monkeypatch, FakeManager(_channel_route(initial_mode="agent"), line_b), agent)
+    manager = serve_stores(FakeManager(_channel_route(initial_mode="agent"), line_b), persons=_FakePersonStore())
+    _wire(monkeypatch, manager, agent)
     route = _channel_route(initial_mode="agent")
     person_thread = "bridge:@person:p9"
     intake = record_module._new_record(

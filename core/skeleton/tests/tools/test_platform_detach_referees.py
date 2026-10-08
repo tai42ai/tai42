@@ -71,17 +71,17 @@ async def test_preset_referee_feature_off_is_empty(monkeypatch) -> None:
 
 def _patch_configs(monkeypatch, configs: dict[tuple[str, str], TargetConversationConfig]) -> None:
     import tai42_skeleton.conversations.cache as cache_mod
-    import tai42_skeleton.conversations.target_config as target_config_mod
+    from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
+    from tai42_skeleton.conversations.settings import ConversationsSettings
 
     class _FakeConfigStore:
-        def __init__(self, *_a, **_k) -> None: ...
-
         async def list(self) -> tuple[dict[tuple[str, str], TargetConversationConfig], int]:
             return configs, 0
 
-    # A non-in-memory manager so the referee proceeds past its feature-off guard.
-    monkeypatch.setattr(cache_mod, "get_conversations_manager", lambda: SimpleNamespace())
-    monkeypatch.setattr(target_config_mod, "ConversationTargetConfigStore", _FakeConfigStore)
+    # A durable manager so the referee proceeds past its feature-off guard.
+    manager = RedisConversationsManager(ConversationsSettings())
+    manager.target_configs = _FakeConfigStore()  # type: ignore[assignment]  # the accessor serves the double
+    monkeypatch.setattr(cache_mod, "get_conversations_manager", lambda: manager)
 
 
 async def test_conversation_config_referee_blocks_on_binding_config(monkeypatch) -> None:

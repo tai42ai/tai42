@@ -47,8 +47,6 @@ def client(monkeypatch) -> TestClient:
     fake = FakeConfigRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_config_client_ctx(fake))
     router = _router()
-    op_globals = router._set_conversation_config_op.__globals__
-    monkeypatch.setitem(op_globals, "get_conversations_manager", lambda: object())
     from tai42_skeleton.app import instance
 
     monkeypatch.setattr(instance, "app", _FakeApp(), raising=False)

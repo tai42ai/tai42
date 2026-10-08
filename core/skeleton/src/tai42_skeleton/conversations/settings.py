@@ -6,7 +6,7 @@ import json
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
-from tai42_kit.settings import TaiBaseSettings
+from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 def _require_key_segment(name: str, value: str) -> None:
@@ -526,3 +526,9 @@ class ConversationsSettings(TaiBaseSettings):
         threshold.
         """
         return f"{self.prefix}:redeem_lock:{self._redeem_scope(target_kind, target_name, source_key)}"
+
+
+@settings_cache
+def conversations_settings() -> ConversationsSettings:
+    """The cached :class:`ConversationsSettings` for this process, re-read on every settings reset."""
+    return ConversationsSettings()

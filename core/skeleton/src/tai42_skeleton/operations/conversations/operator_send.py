@@ -20,13 +20,12 @@ from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import NotSupportedError, OperationFailedError, UnavailableError
 from tai42_skeleton.operations.response_models_group_a import ThreadMessageAck
 
-from .backend import _person_routes, _record_store, _require_backend, _require_route, _thread_not_found
+from .backend import _person_routes, _require_backend, _require_route, _thread_not_found
 from .models import _OPTIONS_ADAPTER, _SECTIONS_ADAPTER, ThreadMessageSend
 from .routes import _validate_route_name
 
 if TYPE_CHECKING:
     from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager as _Manager
-    from tai42_skeleton.conversations.records import ConversationRecordStore
 
 
 # The ``operations.conversations`` package instance THIS submodule belongs to, captured from
@@ -34,7 +33,7 @@ if TYPE_CHECKING:
 # generation's submodules bind to their OWN package object here — a stale-but-orphaned handler
 # then still reads (and a test still patches) the same generation it was built with. This is the
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
-# ``assert_execution_key_bindable``/``_person_store``.
+# ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
@@ -60,7 +59,7 @@ async def _route_keyed_target(named_route: ConversationRoute, thread_id: str, ad
 
 
 async def _person_target(
-    store: ConversationRecordStore,
+    manager: _Manager,
     named_route: ConversationRoute,
     thread_id: str,
     address: str | None,
@@ -75,7 +74,7 @@ async def _person_target(
     an empty thread offers none, which is a loud 400 asking for an explicit address.
     """
     person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
-    person = await _pkg._person_store().get_by_id(person_id)
+    person = await manager.persons.get_by_id(person_id)
     if (
         person is None
         or (named_route.target_kind, named_route.target_name) != (person.target_kind, person.target_name)
@@ -88,7 +87,7 @@ async def _person_target(
             raise BadRequestError(f"address {address!r} is not one of the thread's person addresses")
         route_name = named_route.route_name if named_route.route_name in match.routes else min(match.routes)
         return route_name, match.address
-    newest, _ = await store.list_person_thread_records(
+    newest, _ = await manager.records.list_person_thread_records(
         sorted(_person_routes(person)), thread_id, offset=0, limit=1, newest_first=True
     )
     if not newest.records:
@@ -101,7 +100,6 @@ async def _person_target(
 
 async def _resolve_operator_target(
     manager: _Manager,
-    store: ConversationRecordStore,
     named_route: ConversationRoute,
     thread_id: str,
     address: str | None,
@@ -115,7 +113,7 @@ async def _resolve_operator_target(
     so a ``ValueError`` from a store read here is server-side corruption, not a client error.
     """
     if thread_id.startswith(PERSON_THREAD_PREFIX):
-        route_name, client_address = await _person_target(store, named_route, thread_id, address)
+        route_name, client_address = await _person_target(manager, named_route, thread_id, address)
     else:
         route_name, client_address = await _route_keyed_target(named_route, thread_id, address)
     target_route = named_route if route_name == named_route.route_name else await manager.get_route(route_name)
@@ -259,13 +257,12 @@ async def send_conversation_thread_message(
             "an operator send needs an authenticated caller principal to attribute the message to, and this "
             "deployment resolved none; enable access control"
         )
-    store = _record_store()
     if address is not None:
         try:
             address = canonical_address(address)
         except ValueError as exc:
             raise BadRequestError(f"invalid address: {exc}") from exc
-    target_route, client_address = await _resolve_operator_target(manager, store, named_route, thread_id, address)
+    target_route, client_address = await _resolve_operator_target(manager, named_route, thread_id, address)
     from tai42_skeleton.conversations.turn import OperatorAppendError, operator_send
 
     try:

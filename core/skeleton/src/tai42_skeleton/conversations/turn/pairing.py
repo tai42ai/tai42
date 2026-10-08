@@ -16,9 +16,9 @@ from tai42_contract.conversations import (
     PersonAddress,
 )
 
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.pairing import Link, Redeem, Unlink
 from tai42_skeleton.conversations.persons import PairingTarget
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.outcome import (
     _pairing_reply,
     _ResolvedOutcome,
@@ -65,7 +65,7 @@ async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _
     if template is None:
         return None, None
     if _template_references_code(template):
-        minted = await accessors._pair_code_store().mint(multichannel.minting_conversation())
+        minted = await cache.get_conversations_manager().pair_codes.mint(multichannel.minting_conversation())
         return template.format(pairing_code=minted[0]), minted
     return template.format(), None
 
@@ -97,7 +97,8 @@ async def _mint_and_owe_greeting(multichannel: _Multichannel, thread_id: str) ->
     """
     greeting, minted = await _greeting_and_code(multichannel)
     if greeting is not None:
-        await accessors._store().record_owed_greeting(thread_id, greeting, carries_pair_code=minted is not None)
+        records = cache.get_conversations_manager().records
+        await records.record_owed_greeting(thread_id, greeting, carries_pair_code=minted is not None)
     return minted
 
 
@@ -117,7 +118,7 @@ async def _deliver_with_owed_greeting(thread_id: str, outcome: _ToolOutcome) -> 
     """
     if isinstance(outcome, _SupersededOutcome):
         return outcome, None
-    greeting = await accessors._store().read_owed_greeting(thread_id)
+    greeting = await cache.get_conversations_manager().records.read_owed_greeting(thread_id)
     if greeting is None:
         return outcome, None
     return _with_greeting(outcome, greeting), thread_id
@@ -145,12 +146,12 @@ async def _run_pairing_turn(
     """
     try:
         if isinstance(action, Link):
-            code, expires_at = greeting_code or await accessors._pair_code_store().mint(
+            code, expires_at = greeting_code or await cache.get_conversations_manager().pair_codes.mint(
                 multichannel.minting_conversation()
             )
             return _pairing_reply(_link_reply(code, expires_at))
         if isinstance(action, Unlink):
-            await accessors._person_store().detach(
+            await cache.get_conversations_manager().persons.detach(
                 person.person_id,
                 door=multichannel.door,
                 channel=multichannel.channel,
@@ -180,17 +181,18 @@ async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Rede
     linked, and the greeting predicate fires only at that address's OWN admitted
     inbound, which this is not.
     """
-    throttle = accessors._redeem_throttle()
+    manager = cache.get_conversations_manager()
+    throttle = manager.redeem_throttle
     source = multichannel.throttle_source_key()
     if await throttle.is_locked(multichannel.target, source):
         return _pairing_reply(_INVALID_CODE_TEXT)
     try:
-        minting = await accessors._pair_code_store().redeem(action.code)
+        minting = await manager.pair_codes.redeem(action.code)
     except PairCodeInvalidError:
         await throttle.record_failure(multichannel.target, source)
         return _pairing_reply(_INVALID_CODE_TEXT)
     await throttle.clear(multichannel.target, source)
-    minting_person, _created = await accessors._person_store().ensure_provisional(
+    minting_person, _created = await manager.persons.ensure_provisional(
         PairingTarget(target_kind=minting.target_kind, target_name=minting.target_name),
         PersonAddress(
             door=minting.door,
@@ -201,7 +203,7 @@ async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Rede
             linked_at=datetime.now(UTC),
         ),
     )
-    survivor = await accessors._person_store().merge(person.person_id, minting_person.person_id)
+    survivor = await manager.persons.merge(person.person_id, minting_person.person_id)
     # Re-key every park/outcome of the absorbed person onto the survivor, so a resume after the
     # merge addresses the surviving subject (its person id and its aggregated person-thread key).
     from tai42_skeleton.interactions.helper import rekey_parks_for_merge

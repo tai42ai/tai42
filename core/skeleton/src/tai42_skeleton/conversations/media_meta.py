@@ -24,7 +24,10 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.operations.errors import NotSupportedError
 from tai42_skeleton.utils.redis_typing import awaited, eval_script
+
+_NO_BACKEND = "inbound media metadata requires the redis conversations backend"
 
 # The blob key prefix for every ingested media. The path is a pure function of the ``media_id``, so the
 # ingest seam that writes the blob and the reaper that deletes it derive the SAME path from the id alone.
@@ -109,7 +112,12 @@ class InboundMediaMetaStore:
     __slots__ = ("settings",)
 
     def __init__(self, settings: ConversationsSettings) -> None:
-        """Bind the conversations ``settings`` (the store shares the conversations Redis + prefix)."""
+        """Bind the conversations ``settings``, refusing with a loud 501 without the redis conversations backend.
+
+        The store shares the conversations Redis and prefix.
+        """
+        if settings.in_memory:
+            raise NotSupportedError(_NO_BACKEND)
         self.settings = settings
 
     def meta_key(self, media_id: str) -> str:

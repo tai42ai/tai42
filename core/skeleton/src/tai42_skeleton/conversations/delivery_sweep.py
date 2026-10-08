@@ -11,7 +11,7 @@ import contextlib
 import logging
 
 from tai42_skeleton.conversations.records import PRUNE_START, PruneCursor
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.settings import conversations_settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def start_delivery_sweep() -> None:
     task = _sweep_task
     if task is not None and not task.done():
         task.cancel()
-    interval = ConversationsSettings().delivery_sweep_interval_seconds
+    interval = conversations_settings().delivery_sweep_interval_seconds
     logger.info("conversations: sweeping for stalled deliveries and lapsed intakes every %ss", interval)
     _sweep_task = asyncio.create_task(_sweep_loop(interval), name="tai-conversations-delivery-sweep")
     _sweep_task.add_done_callback(_on_sweep_done)
@@ -104,8 +104,9 @@ async def _prune_terminal_indexes() -> None:
     global _prune_cursor
     from tai42_skeleton.conversations import delivery
 
-    routes, _ = await delivery.get_conversations_manager().list_routes()
-    _prune_cursor = await delivery._store().prune_expired_terminal_indexes(routes.keys(), _prune_cursor)
+    manager = delivery.get_conversations_manager()
+    routes, _ = await manager.list_routes()
+    _prune_cursor = await manager.records.prune_expired_terminal_indexes(routes.keys(), _prune_cursor)
 
 
 async def _sweep_loop(interval_seconds: float) -> None:

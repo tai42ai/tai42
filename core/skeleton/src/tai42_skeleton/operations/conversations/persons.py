@@ -22,7 +22,7 @@ from .backend import _require_backend
 # generation's submodules bind to their OWN package object here — a stale-but-orphaned handler
 # then still reads (and a test still patches) the same generation it was built with. This is the
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
-# ``assert_execution_key_bindable``/``_person_store``.
+# ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
@@ -41,8 +41,7 @@ async def get_conversation_person(person_id: str) -> dict[str, Any]:
     """
     if not person_id.strip():
         raise BadRequestError("person_id must be a non-blank person identifier")
-    _require_backend()
-    person = await _pkg._person_store().get_by_id(person_id)
+    person = await _require_backend().persons.get_by_id(person_id)
     if person is None:
         raise NotFoundError(f"conversation person not found: {person_id!r}")
     return person.model_dump(mode="json")
@@ -69,8 +68,7 @@ async def set_conversation_person_locale(person_id: str, locale: str | None) -> 
         canonical = normalize_optional_locale(locale)
     except InvalidLocaleError as exc:
         raise BadRequestError(str(exc)) from exc
-    _require_backend()
-    person = await _pkg._person_store().set_locale(person_id, canonical)
+    person = await _require_backend().persons.set_locale(person_id, canonical)
     if person is None:
         raise NotFoundError(f"conversation person not found: {person_id!r}")
     return person.model_dump(mode="json")

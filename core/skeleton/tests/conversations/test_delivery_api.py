@@ -23,6 +23,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import FakeManager
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: The channel width the shared record env declares; the api door never chunks, so this only
@@ -91,14 +92,6 @@ def _api_route() -> ConversationRoute:
     )
 
 
-class _FakeRouteManager:
-    def __init__(self, route: ConversationRoute) -> None:
-        self._route = route
-
-    async def get_route(self, name: str) -> ConversationRoute | None:
-        return self._route if name == self._route.route_name else None
-
-
 def _api_record(message_id: str, answer: str) -> ConversationRecord:
     now = time.time()
     return ConversationRecord(
@@ -122,7 +115,7 @@ def _wire_callback(monkeypatch, handler) -> tuple[list[httpx.Request], list[dict
     """Drive the REAL ``_post_callback`` against a local transport, so the request the
     executor actually builds is what is asserted. Returns the requests it made and the
     kwargs it constructed its client with."""
-    monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: _FakeRouteManager(_api_route()))
+    monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: FakeManager(_api_route()))
     requests: list[httpx.Request] = []
     client_kwargs: list[dict] = []
     real_client = httpx.AsyncClient
@@ -337,9 +330,7 @@ async def test_a_no_callback_api_record_delivers_readable_without_a_post(monkeyp
         posted.append(url)
         return 200
 
-    monkeypatch.setattr(
-        delivery_module, "get_conversations_manager", lambda: _FakeRouteManager(_no_callback_api_route())
-    )
+    monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: FakeManager(_no_callback_api_route()))
     monkeypatch.setattr(delivery_module, "_post_callback", _post)
     assert await store.claim_delivery("m-poll", time.time(), "worker-1", 120) == 1
     await delivery_api_module._deliver_api(store, await _get(store, "m-poll"), "worker-1")

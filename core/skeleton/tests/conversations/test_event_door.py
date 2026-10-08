@@ -44,6 +44,7 @@ from .conftest import (
     _tool_channel_route,
     _wire,
     _wire_tool,
+    serve_stores,
 )
 from .fake_record_redis import make_record_client_ctx
 
@@ -422,13 +423,13 @@ async def test_event_on_a_linked_person_thread_carries_the_person_fields_like_a_
 async def test_event_on_a_linked_person_thread_never_writes_greets_or_classifies(env, monkeypatch):
     channel = FakeChannel()
     route = _tool_channel_route(start_expr=".")
-    _wire(monkeypatch, FakeManager(route), channel)
+    manager = FakeManager(route)
+    _wire(monkeypatch, manager, channel)
     _seed_multichannel_linked_person(monkeypatch, env)
 
     ensure_calls: list = []
     classify_calls: list = []
     greeting_calls: list = []
-    original_store = accessors_module._person_store
 
     class _SpyStore:
         def __init__(self, inner) -> None:
@@ -444,7 +445,7 @@ async def test_event_on_a_linked_person_thread_never_writes_greets_or_classifies
         async def get_by_id(self, *args, **kwargs):
             return await self._inner.get_by_id(*args, **kwargs)
 
-    monkeypatch.setattr(accessors_module, "_person_store", lambda: _SpyStore(original_store()))
+    serve_stores(manager, persons=_SpyStore(manager.persons))
     real_classify = target_module.classify
     monkeypatch.setattr(target_module, "classify", lambda text: classify_calls.append(text) or real_classify(text))
     real_greeting = pairing_module._greeting_and_code

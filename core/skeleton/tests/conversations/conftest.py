@@ -10,7 +10,9 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from functools import cached_property
 from typing import Any, ClassVar
 
 import pytest
@@ -34,9 +36,10 @@ from tai42_skeleton.conversations.managers.base_conversations_manager import (
     BaseConversationsManager,
     DoorFlipRefusedError,
 )
+from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.settings import ConversationsSettings, conversations_settings
 from tai42_skeleton.conversations.target_validators import TargetBindValidatorRegistry
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
@@ -162,6 +165,10 @@ class _DictManager(BaseConversationsManager):
     and the real ``put_route`` refuses a door flip in the same step as the write, so this
     stand-in owes the same refusal."""
 
+    @property
+    def durable(self) -> bool:
+        return True
+
     def __init__(self, redis: FakeRecordRedis) -> None:
         super().__init__(ConversationsSettings())
         self.rows: dict[str, ConversationRoute] = {}
@@ -187,6 +194,27 @@ class _DictManager(BaseConversationsManager):
 
     async def list_routes(self) -> tuple[dict[str, ConversationRoute], int]:
         return dict(self.rows), 0
+
+
+def serve_stores[M: BaseConversationsManager](manager: M, **stores: object) -> M:
+    """Have ``manager``'s named store accessors serve the given doubles; an unknown accessor name is refused."""
+    for name, store in stores.items():
+        if not isinstance(getattr(type(manager), name, None), cached_property):
+            raise AttributeError(f"{type(manager).__name__} has no store accessor {name!r}")
+        setattr(manager, name, store)
+    return manager
+
+
+def fixed_settings(settings: ConversationsSettings) -> Callable[[], ConversationsSettings]:
+    """A settings source that always returns ``settings``, for a caps or lease built outside the singleton."""
+    return lambda: settings
+
+
+def durable_manager(**stores: object) -> RedisConversationsManager:
+    """The real durable manager over the current settings, its named store accessors served by ``stores``."""
+    manager = RedisConversationsManager(conversations_settings())
+    serve_stores(manager, **stores)
+    return manager
 
 
 class _AgentInput(BaseModel):
@@ -474,9 +502,24 @@ class EchoAgent(Agent):
         return f"echo: {text}"
 
 
-class FakeManager:
+class FakeManager(BaseConversationsManager):
+    """A durable manager over fixed routing rows; its accessors serve the real stores on the faked Redis."""
+
     def __init__(self, *routes: ConversationRoute) -> None:
+        super().__init__(conversations_settings())
         self._routes = {r.route_name: r for r in routes}
+
+    @property
+    def durable(self) -> bool:
+        return True
+
+    async def put_route(self, route: ConversationRoute) -> bool:
+        created = route.route_name not in self._routes
+        self._routes[route.route_name] = route
+        return created
+
+    async def delete_route(self, route_name: str) -> bool:
+        return self._routes.pop(route_name, None) is not None
 
     async def list_routes(self):
         return dict(self._routes), 0

@@ -58,6 +58,10 @@ def _channel_route(route_name: str) -> ConversationRoute:
 
 
 class _DictManager(BaseConversationsManager):
+    @property
+    def durable(self) -> bool:
+        return True
+
     def __init__(self, routes: dict[str, ConversationRoute]) -> None:
         super().__init__(ConversationsSettings())
         self._routes = routes

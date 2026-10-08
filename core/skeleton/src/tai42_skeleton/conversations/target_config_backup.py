@@ -18,8 +18,7 @@ from pydantic import ValidationError
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.conversations import TargetConversationConfig
 
-from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
+from tai42_skeleton.conversations.cache import get_conversations_manager
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +34,10 @@ async def export_target_configs() -> dict[str, Any]:
 
     An in-memory deployment provably holds none, so it exports empty rather than refusing.
     """
-    if ConversationsSettings().in_memory:
+    manager = get_conversations_manager()
+    if not manager.durable:
         return {"target_configs": []}
-    configs, _ = await ConversationTargetConfigStore(ConversationsSettings()).list()
+    configs, _ = await manager.target_configs.list()
     return {"target_configs": [config.model_dump(mode="json") for config in configs.values()]}
 
 
@@ -62,12 +62,13 @@ async def import_target_configs(
         # Nothing to write: a no-op on every deployment.
         return report
 
-    if ConversationsSettings().in_memory:
+    manager = get_conversations_manager()
+    if not manager.durable:
         # The store cannot hold a row on a backend-less deployment; refuse the whole section
         # loudly rather than silently drop every config.
         raise RuntimeError("conversation target config requires the redis conversations backend to restore")
 
-    store = ConversationTargetConfigStore(ConversationsSettings())
+    store = manager.target_configs
     # A MUTABLE snapshot of the stored pairs: a row written earlier IN THIS payload is added
     # below, so a later duplicate of the same pair is seen as existing rather than treated as
     # a second fresh create silently overwriting the first.

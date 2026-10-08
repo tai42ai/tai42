@@ -44,6 +44,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+from .conftest import FakeManager
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
@@ -88,17 +89,6 @@ class ToolCallingAgent(Agent):
     async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
         [tool] = await tai42_app.tools.get_client_tools([self._tool])
         return str(await tool.ainvoke(self._arguments))
-
-
-class FakeManager:
-    def __init__(self, route: ConversationRoute) -> None:
-        self._route = route
-
-    async def list_routes(self):
-        return {self._route.route_name: self._route}, 0
-
-    async def get_route(self, name: str):
-        return self._route if name == self._route.route_name else None
 
 
 class FakeChannel:

@@ -13,7 +13,7 @@ from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import NotSupportedError
 from tai42_skeleton.operations.response_models_group_a import ThreadModeSetResult, ThreadModeView
 
-from .backend import _mode_store, _require_backend, _require_route
+from .backend import _require_backend, _require_route
 from .models import ThreadModeSet
 from .routes import _validate_route_name
 from .threads_delete import _thread_delete_routes
@@ -43,7 +43,7 @@ async def get_conversation_thread_mode(route_name: str, thread_id: str) -> dict[
     manager = _require_backend()
     await _require_route(manager, route_name)
     route_names = await _thread_delete_routes(thread_id, route_name)
-    override = await _mode_store().get_mode(thread_id)
+    override = await manager.modes.get_mode(thread_id)
     if override is not None:
         return {"mode": override, "source": "thread"}
     from tai42_skeleton.conversations.mode import default_mode_for_routes
@@ -82,5 +82,5 @@ async def set_conversation_thread_mode(route_name: str, thread_id: str, mode: st
     manager = _require_backend()
     await _require_route(manager, route_name)
     await _thread_delete_routes(thread_id, route_name)
-    stored = await _mode_store().set_mode(thread_id, mode)
+    stored = await manager.modes.set_mode(thread_id, mode)
     return {"route_name": route_name, "thread_id": thread_id, "mode": stored, "source": "thread"}

@@ -61,6 +61,11 @@ def _as_str(value: Any) -> str:
 class RedisConversationsManager(BaseConversationsManager):
     """A Redis-backed conversation-route store over :class:`BaseConversationsManager`."""
 
+    @property
+    def durable(self) -> bool:
+        """``True``: every conversations store persists in the conversations Redis."""
+        return True
+
     async def put_route(self, route: ConversationRoute) -> bool:
         """Store ``route`` atomically; return whether it was newly created (vs a replace).
 
