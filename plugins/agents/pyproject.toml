@@ -182,7 +182,9 @@ source = ["tai42_agents"]
 branch = true
 
 [tool.coverage.report]
+# fail_under is compared to the total rounded to `precision` decimals.
 fail_under = 95
+precision = 2
 
 [tool.pyright]
 include = ["src", "tests"]

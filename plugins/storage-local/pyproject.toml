@@ -93,7 +93,9 @@ filterwarnings = ["error"]
 source = ["tai42_storage_local"]
 
 [tool.coverage.report]
+# fail_under is compared to the total rounded to `precision` decimals.
 fail_under = 100
+precision = 2
 
 [tool.ruff]
 src = ["src"]

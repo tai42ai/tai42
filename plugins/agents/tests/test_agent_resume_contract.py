@@ -461,3 +461,194 @@ def test_drive_whose_lease_a_kill_took_does_not_fire_its_chain_and_raises(
         assert exc.value.outcome == {"status": "aborted", "reason": "thread deleted"}
 
     asyncio.run(go())
+
+
+# ---- the FAILED-terminal raise and the resolution-record encoding -------------------------
+
+
+@pytest.mark.parametrize("status", ["error", "stopped", "aborted"])
+def test_conversion_raises_a_failed_terminal_only_when_asked(status: str) -> None:
+    failed = {"status": status, "reason": "the run did not finish"}
+    # The chain-fire face returns the failed outcome into the firing run's drive ...
+    assert to_contract_outcome(failed) is failed
+    # ... while the platform-continuation face raises it whole for the delivery ladder.
+    with pytest.raises(RunTerminalFailed) as exc:
+        to_contract_outcome(failed, raise_failed=True)
+    assert exc.value.outcome == failed
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        SuspendedInteraction(interaction_id="i1", interaction_ids=["i1", "i2"], caller_interaction_ids=["i2"]),
+        ResumeBuffered(remaining_ids=["i2"]),
+        {"decision": "approved"},
+        "the final answer",
+    ],
+    ids=["suspended", "buffered", "raw-dict", "raw-str"],
+)
+def test_resolution_record_encoding_round_trips_each_outcome_type(outcome: Any) -> None:
+    import json
+
+    stored = json.loads(json.dumps(encode_outcome(outcome)))
+    rebuilt = res.decode_outcome(stored)
+    assert type(rebuilt) is type(outcome)
+    assert rebuilt == outcome
+
+
+# ---- the drive: replay gaps, rejections, and the outcome a drive resolves to --------------------
+
+
+class _ScriptedResumeAgent:
+    """An agent whose ``aresume_park`` face returns, or raises, what a test scripts."""
+
+    def __init__(self, outcome: Any = None, *, raises: BaseException | None = None) -> None:
+        self.outcome = outcome
+        self.raises = raises
+        self.resume_maps: list[dict[str, dict[str, Any]]] = []
+
+    async def aresume_park(self, *, rebuild_kwargs: dict[str, Any], thread_id: str, resume_map: Any) -> Any:
+        self.resume_maps.append(resume_map)
+        if self.raises is not None:
+            raise self.raises
+        return self.outcome
+
+
+def _bind_agent(monkeypatch: pytest.MonkeyPatch, agent: Any) -> None:
+    from .conftest import APP
+
+    # Every park ``_write_park`` seeds names ``tools_agent``; the scripted face answers for it.
+    monkeypatch.setitem(APP.agents.registry, "tools_agent", agent)
+
+
+def test_agent_resume_on_a_tombstone_whose_record_aged_out_is_a_noop(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        superstep_id = await _write_park(["i1"])
+        await _seed_finalized("t", superstep_id, ["i1"], resolution="terminal", value=encode_outcome("done"))
+        # The resolution record expired before the tombstone did: nothing is left to replay.
+        await fake_park_redis.delete(idx._resolution_key("t", superstep_id))
+        assert idx.is_resolved_tombstone(await idx.read_park_entry("i1") or {})
+        assert await agent_resume("i1", "late answer") is None
+
+    asyncio.run(go())
+
+
+def test_agent_resume_rejects_an_answer_the_super_step_does_not_expect(fake_park_redis: Any) -> None:
+    from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
+
+    async def go() -> None:
+        superstep_id = idx.compute_superstep_id(["i1"])
+        entry = {
+            "agent_name": "tools_agent",
+            "thread_id": "t",
+            "superstep_id": superstep_id,
+            "interrupt_id": "int1",
+            "rebuild_kwargs": {},
+            "completion_tool": None,
+            "completion_context": None,
+        }
+        # ``stray`` holds a park entry pointing at the super-step, but the barrier expects only i1.
+        await idx.persist_superstep({"i1": entry, "stray": entry}, "t", superstep_id, {"i1": None}, {"i1": None}, 100)
+        with pytest.raises(AgentResumeInterruptNotPendingError):
+            await agent_resume("stray", "answer")
+        barrier = await idx.read_barrier("t", superstep_id)
+        assert barrier is not None
+        assert barrier["outputs"] == {}
+
+    asyncio.run(go())
+
+
+def test_drive_that_parks_again_resolves_the_super_step_suspended(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repark = SuspendedInteraction(interaction_id="i-next", interaction_ids=["i-next"], caller_interaction_ids=[])
+    agent = _ScriptedResumeAgent(repark)
+    _bind_agent(monkeypatch, agent)
+
+    async def go() -> None:
+        superstep_id = await _write_park(["i1"])
+        assert await agent_resume("i1", "yes") is repark
+        assert agent.resume_maps == [{"int1": {"i1": "yes"}}]
+        record = await idx.read_superstep_resolution("t", superstep_id)
+        assert record is not None
+        assert record["resolution"] == "suspended"
+        # A redrive replays the re-park as the same contract type.
+        assert await agent_resume("i1", "yes") == repark
+
+    asyncio.run(go())
+
+
+def test_drive_terminal_of_a_nested_run_returns_the_ancestors_chain_fire(
+    fake_park_redis: Any, app_tools: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bind_agent(monkeypatch, _ScriptedResumeAgent("leaf terminal"))
+
+    async def go() -> None:
+        superstep_id = await _write_park(
+            ["i1"],
+            completion_tool="deliver_ancestor_chain",
+            completion_context={"chain_key": "tai42:chained-park:anc", "asked_by": ["caller"]},
+        )
+        app_tools.tool_runners["deliver_ancestor_chain"] = lambda **_kwargs: "outermost result"
+        # The leaf's terminal fires the ancestor's chain-delivery tool; its return is the outcome.
+        assert await agent_resume("i1", "answer") == "outermost result"
+        assert len(app_tools.run_tool_calls) == 1
+        record = await idx.read_superstep_resolution("t", superstep_id)
+        assert record is not None
+        assert record["resolution"] == "terminal"
+        assert res.decode_outcome(record["value"]) == "outermost result"
+
+    asyncio.run(go())
+
+
+def test_drive_superseded_mid_resume_raises_failed_and_releases_the_lease(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_contract.conversations import TurnSupersededError
+
+    _bind_agent(monkeypatch, _ScriptedResumeAgent(raises=TurnSupersededError("m2")))
+
+    async def go() -> None:
+        superstep_id = await _write_park(["i1"])
+        with pytest.raises(RunTerminalFailed) as exc:
+            await agent_resume("i1", "answer")
+        assert exc.value.outcome == {"status": "aborted", "reason": "TurnSupersededError"}
+        # The drive released its lease and wrote no resolution: the park stays live.
+        assert await idx.try_claim_drive("t", superstep_id, "next-worker")
+        assert await idx.read_superstep_resolution("t", superstep_id) is None
+        assert not idx.is_resolved_tombstone(await idx.read_park_entry("i1") or {})
+
+    asyncio.run(go())
+
+
+def test_drive_of_an_agent_without_a_resume_face_raises_and_releases_the_lease(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bind_agent(monkeypatch, object())
+
+    async def go() -> None:
+        superstep_id = await _write_park(["i1"])
+        with pytest.raises(RuntimeError, match="exposes no aresume_park face"):
+            await agent_resume("i1", "answer")
+        assert await idx.try_claim_drive("t", superstep_id, "next-worker")
+
+    asyncio.run(go())
+
+
+def test_drive_raises_when_a_siblings_park_entry_is_gone(fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_agents._internal.park.errors import AgentResumeParkEntryNotFoundError
+
+    agent = _ScriptedResumeAgent("never reached")
+    _bind_agent(monkeypatch, agent)
+
+    async def go() -> None:
+        superstep_id = await _write_park(["i1", "i2"])
+        assert await agent_resume("i2", "b") == {"status": "buffered", "remaining_ids": ["i1"]}
+        # i2's park entry is gone (aged out) before the last answer completes the barrier.
+        await fake_park_redis.delete(idx._park_key("i2"))
+        with pytest.raises(AgentResumeParkEntryNotFoundError):
+            await agent_resume("i1", "a")
+        assert agent.resume_maps == []
+        assert await idx.try_claim_drive("t", superstep_id, "next-worker")
+
+    asyncio.run(go())
