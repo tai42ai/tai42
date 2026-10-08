@@ -11,7 +11,7 @@ from tai42_skeleton.template.settings import TemplateCacheSettings, template_cac
 def test_defaults() -> None:
     settings = TemplateCacheSettings()
     assert settings.ttl == 60 * 5
-    assert settings.max_size == 256
+    assert settings.max_size == 1024
 
 
 @pytest.mark.parametrize("raw", ["", "none", "null", "undefined", "NONE", "Null"])

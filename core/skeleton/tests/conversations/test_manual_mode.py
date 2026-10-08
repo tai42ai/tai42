@@ -440,10 +440,8 @@ async def test_manual_mode_keeps_a_pairing_turn_live(env, monkeypatch):
     agent = ManualAgent()
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route(initial_mode="manual")), agent, channel)
-    # Seed the multichannel config row directly (the record fake carries no config put Lua).
-    settings = ConversationsSettings()
-    config = TargetConversationConfig(target_kind="agent", target_name="echo", multichannel=True)
-    env._strings[settings.target_config_key("agent", "echo")] = config.model_dump_json()
+    # Seed the multichannel config row (the record fake carries no config put Lua).
+    env.seed_target_config(TargetConversationConfig(target_kind="agent", target_name="echo", multichannel=True))
 
     await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "/link", "PID1")
     await _settle()

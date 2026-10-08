@@ -55,6 +55,8 @@ dependencies = [
     "pydantic-core>=2",
     "cachetools>=7.0",
     "async-lru>=2.3",
+    # The tool-result surrogate check encodes the result once in C before any Python walk.
+    "orjson>=3.11.8,<4",
     "langchain-core>=1.2,<2",
     "prometheus-client>=0.24",
     "fastapi>=0.135",

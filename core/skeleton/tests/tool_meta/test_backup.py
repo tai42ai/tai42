@@ -130,6 +130,11 @@ class _Conn:
     def transaction(self) -> _Txn:
         return _Txn(self._pg)
 
+    autocommit = False
+
+    async def set_autocommit(self, value: bool) -> None:
+        self.autocommit = value
+
     def cursor(self) -> _Cursor:
         return _Cursor(self._pg)
 

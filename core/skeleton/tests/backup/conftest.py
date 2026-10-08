@@ -86,7 +86,10 @@ def policy_store(monkeypatch):
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
-    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
+    # One settings object, as the cached accessor serves in production: the loop's policy
+    # enforcer is memoized on it.
+    settings = AccessControlSettings(enable=True)
+    monkeypatch.setattr(execution_module, "access_control_settings", lambda: settings)
     with tai42_app.bound(SimpleNamespace(storage=SimpleNamespace(resource_manager=renderer))):
         yield SimpleNamespace(add_policy=pg.add_policy, rendered=renderer.rendered, executed=pg.executed)
 

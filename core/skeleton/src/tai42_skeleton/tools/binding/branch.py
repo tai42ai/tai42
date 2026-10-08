@@ -16,6 +16,7 @@ from tai42_skeleton.tools.binding.extension_schema import _enforce_extension_sch
 from tai42_skeleton.tools.binding.schema import _declares_own_output_schema, _derive_output_schema
 from tai42_skeleton.tools.binding.secret_tool import _SecretRevealingTool
 from tai42_skeleton.tools.binding.state import _ToolBindingBase
+from tai42_skeleton.tools.binding.surface import add_surface_tool
 
 
 @dataclass(frozen=True)
@@ -235,7 +236,7 @@ class _BranchBindingMixin(_ToolBindingBase):
             # (hidden baked args, remaining real arg types/descriptions) survives
             # unchanged; wrapping it in a function would flatten that to one opaque
             # blob. Its own name/description/tags ride on the object.
-            return self._fast_mcp.add_tool(func)
+            return add_surface_tool(self._fast_mcp, func)
         if not callable(func):
             raise TypeError(
                 f"cannot bind {type(func).__name__} as tool {curr_name!r}: expected a callable or a FastMCP Tool object"
@@ -252,7 +253,7 @@ class _BranchBindingMixin(_ToolBindingBase):
             description=description if description is not None else inspect.getdoc(func),
             **kwargs,
         )
-        return self._fast_mcp.add_tool(tool_obj)
+        return add_surface_tool(self._fast_mcp, tool_obj)
 
     def _branch_base_callable(self, tool_obj: Tool) -> Callable[..., Any]:
         """The callable an extension branch wraps when the bound base is a prebuilt Tool object.

@@ -12,6 +12,7 @@ from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.token_injection import evict_pooled_session
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class McpReloadMixin(LifecycleState):
         old_bound = set(self._mcp_bound_tools.get(title, set()))
         for name in sorted(old_bound):
             try:
-                self._fast_mcp.local_provider.remove_tool(name)
+                remove_surface_tool(self._fast_mcp, name)
             except Exception:
                 logger.warning("reload_mcp: could not remove stale tool %s", name, exc_info=True)
 
@@ -255,7 +256,7 @@ class McpReloadMixin(LifecycleState):
             return {"title": title, "status": "absent"}
         for name in bound:
             try:
-                self._fast_mcp.local_provider.remove_tool(name)
+                remove_surface_tool(self._fast_mcp, name)
             except Exception:
                 logger.warning("deregister_mcp: could not remove tool %s", name, exc_info=True)
             self._tool_registry.unregister_tool_base(name)

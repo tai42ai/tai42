@@ -68,10 +68,14 @@ class RecordWriteMixin(RecordStoreBase):
         return keys
 
     def _index_score(self, status: DeliveryStatus, now: float) -> str:
-        """The index member's expiry score for ``status``.
+        """The index member's score for ``status`` at ``now``.
 
-        A terminal row's member is swept with the row it names, a live one's is never swept.
+        A terminal row's member scores its row expiry (swept with the row it names); a
+        ``provisional`` one its grace deadline (the periodic sweep reads only the due ones); every
+        other live one ``+inf``.
         """
+        if status is DeliveryStatus.PROVISIONAL:
+            return str(now + self.settings.delivery_grace_seconds)
         if status not in TERMINAL_STATUSES:
             return _NO_EXPIRY_SCORE
         return str(now + self.settings.answer_retention_ttl_seconds)
@@ -98,8 +102,15 @@ class RecordWriteMixin(RecordStoreBase):
             content.pop(control, None)
         return json.dumps(content, allow_nan=False)
 
-    async def create_record(self, record: ConversationRecord, *, intake_token: str | None = None) -> None:
-        """Persist a freshly minted record in the state it carries (always a create).
+    async def create_record(
+        self,
+        record: ConversationRecord,
+        *,
+        intake_token: str | None = None,
+        claim_key: str | None = None,
+        refresh_mode: bool = False,
+    ) -> str:
+        """Persist a freshly minted record in the state it carries (always a create); return the owning id.
 
         The ``message_id`` is a fresh uuid4, or a caller's stable idempotency id its caller
         dedupes on before calling. A non-terminal record carries NO expiry until it
@@ -107,6 +118,12 @@ class RecordWriteMixin(RecordStoreBase):
 
         An ``accepted`` record REQUIRES ``intake_token`` and is created already holding that
         worker's intake lease; any other state requires none.
+
+        ``claim_key`` (a channel or event dedupe key) claims the inbound pair in the same atomic
+        step, under ``inbound_dedupe_ttl_seconds``: when another message already owns the pair
+        NOTHING is written and that owner's id is returned. ``refresh_mode`` extends the thread's
+        mode override to the retention window in the same step (an absent override stays
+        absent). Otherwise the record's own ``message_id`` is returned.
 
         The thread indexes are written only while the record's route still routes: a door
         resolves its route a round trip before this write, and a delete completing in that
@@ -124,26 +141,34 @@ class RecordWriteMixin(RecordStoreBase):
         ttl_ms = self.settings.answer_retention_ttl_seconds * 1000 if terminal else ""
         lease_until = now + self.settings.intake_claim_lease_seconds
         keys = self._record_keys(record.message_id, record.delivery_status, record, route_row=True)
+        if claim_key is not None:
+            keys.append(claim_key)
+        if refresh_mode:
+            keys.append(self.settings.mode_key(record.thread_id))
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            indexed = int(
-                await eval_script(
-                    r,
-                    _CREATE_LUA,
-                    len(keys),
-                    *keys,
-                    self._content_blob(record),
-                    record.delivery_status.value,
-                    json.dumps(record.outbound_message_ids),
-                    record.attempts,
-                    record.updated_at,
-                    ttl_ms,
-                    f"{intake_token}:{lease_until}" if intake_token is not None else "",
-                    record.message_id,
-                    self._index_score(record.delivery_status, now),
-                    record.thread_id,
-                    record.created_at,
-                )
+            reply = await eval_script(
+                r,
+                _CREATE_LUA,
+                len(keys),
+                *keys,
+                self._content_blob(record),
+                record.delivery_status.value,
+                json.dumps(record.outbound_message_ids),
+                record.attempts,
+                record.updated_at,
+                ttl_ms,
+                f"{intake_token}:{lease_until}" if intake_token is not None else "",
+                record.message_id,
+                self._index_score(record.delivery_status, now),
+                record.thread_id,
+                record.created_at,
+                self.settings.inbound_dedupe_ttl_seconds if claim_key is not None else "",
+                self.settings.answer_retention_ttl_seconds if refresh_mode else "",
             )
+        indexed, owner = int(reply[0]), reply[1]
+        owner = owner.decode() if isinstance(owner, bytes) else str(owner)
+        if indexed < 0:
+            return owner
         if not indexed:
             logger.warning(
                 "conversations: route %r stopped routing while record %r was being accepted; the record stands "
@@ -151,6 +176,7 @@ class RecordWriteMixin(RecordStoreBase):
                 record.route_name,
                 record.message_id,
             )
+        return owner
 
     async def complete_turn(self, record: ConversationRecord) -> int:
         """Move an intake record from ``accepted`` to ``pending_delivery`` carrying its turn's outcome.

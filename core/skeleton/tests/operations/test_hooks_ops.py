@@ -87,8 +87,8 @@ def _gate_on(
         async def get_policy_at(self, user_id: str, _version: int) -> AccessPolicy:
             return stamped.get(user_id, AccessPolicy(scopes=[]))
 
-    monkeypatch.setattr(authority, "PolicyEnforcer", _Enforcer)
-    monkeypatch.setattr(execution, "PolicyEnforcer", _Enforcer)
+    monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
+    monkeypatch.setattr(execution, "policy_enforcer", _Enforcer)
 
 
 def _owned_by(owner: str, *, condition: str | None = None) -> AccessPolicy:

@@ -8,6 +8,7 @@ from tai42_contract.tools import ToolRetryPolicy
 
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.state import _ToolBindingBase
+from tai42_skeleton.tools.binding.surface import remove_surface_tool, tool_surface_generation
 
 if TYPE_CHECKING:
     from tai42_skeleton.authz.identity import CallerIdentity
@@ -71,11 +72,25 @@ class _ResolutionMixin(_ToolBindingBase):
         return {t.name: t for t in await self._fast_mcp.list_tools()}
 
     async def get_tool(self, key: str) -> Tool:
-        mcp_tool = await self._fast_mcp.get_tool(key)
+        """The tool bound to ``key`` on the serving core, from that core's index when it holds it.
+
+        The index and the server it answers for come from ONE core read (the building core
+        during an epoch build, else the live one), and the generation is read before the
+        server is asked, so an answer given while the surface moved is never served after it.
+        """
+        core = self._app._serving_core
+        index, fast_mcp = core._tool_index, core._fast_mcp
+        generation = tool_surface_generation()
+        held = index.lookup(key, generation)
+        if held is not None:
+            return held
+        mcp_tool = await fast_mcp.get_tool(key)
         if mcp_tool is None:
             # FastMCP returns None for an unregistered name; the contract promises
-            # a Tool, so fail loud with the name rather than leaking None.
+            # a Tool, so fail loud with the name rather than leaking None. Never stored,
+            # so a tool registered after this miss is found on the next call.
             raise UnknownToolError(key)
+        index.store(key, mcp_tool, generation)
         return mcp_tool
 
     async def _resolve_run_target(self, key: str) -> Tool:
@@ -100,7 +115,7 @@ class _ResolutionMixin(_ToolBindingBase):
             return await self.get_tool(key)
 
     def remove_tool(self, name: str) -> None:
-        return self._fast_mcp.local_provider.remove_tool(name)
+        remove_surface_tool(self._fast_mcp, name)
 
     def tool_title(self, func) -> str:
         manifest = self._require_manifest()

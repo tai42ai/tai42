@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -31,7 +31,7 @@ async def fetch_categories() -> list[ConnectorCategory]:
     """Read every ``connector_category`` row, ordered for display (``sort_order``, then id)."""
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-        pool.connection() as conn,
+        read_connection(pool) as conn,
         conn.cursor() as cur,
     ):
         await cur.execute("SELECT id, display_name, sort_order FROM connector_category ORDER BY sort_order, id")

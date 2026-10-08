@@ -7,6 +7,7 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from tai42_contract.states.models import StateSubject
+from tai42_kit.clients.impl.postgres import read_connection
 
 from .base import _StoreBase
 from .connection import _pool, _settings
@@ -36,7 +37,7 @@ class _RecordReadStore(_StoreBase):
         """
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             kind, key = await self._resolve_subject(cur, state, subject)
@@ -98,7 +99,7 @@ class _RecordReadStore(_StoreBase):
         """
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -112,7 +113,7 @@ class _RecordReadStore(_StoreBase):
         """Every subject-alias row of a state — the backup exporter's read."""
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(

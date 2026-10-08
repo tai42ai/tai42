@@ -1,8 +1,9 @@
 """Authorization for a fire that runs under a bound EXECUTION KEY.
 
 Everything here is tokenless — a background fire presents no credential, so every fact is
-read LIVE from the policy store at the moment of the fire, and any authority reduction on
-the key or its owner lands on the very next fire with nothing to invalidate.
+read through the version-keyed policy cache with the version read live at the moment of the
+fire; every policy writer bumps that version, so any authority reduction on the key or its
+owner lands on the very next fire.
 
 * :func:`build_execution_identity` / :func:`assert_key_carries_authority` — the tokenless
   analogue of the HTTP auth backend's policy stage, with the owner taken from the key's
@@ -33,7 +34,7 @@ from tai42_contract.access_control import (
 from tai42_contract.access_control.models import AccessPolicy
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.user import is_admin_policy
@@ -71,7 +72,7 @@ async def build_execution_identity(execution_key: str, *, bound_fingerprint: str
         return CallerIdentity(user_id=execution_key, is_admin=True)
 
     owner = await assert_key_carries_authority(
-        PolicyEnforcer(settings), execution_key, bound_fingerprint=bound_fingerprint
+        policy_enforcer(settings), execution_key, bound_fingerprint=bound_fingerprint
     )
     claims = {} if owner is None else {OWNER_USER_ID_CLAIM: owner}
     # The admin verdict for the KEY the fire runs AS, read live from its own (owner-capped)
@@ -192,7 +193,7 @@ async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
     settings = access_control_settings()
     if not settings.enable:
         return True
-    enforcer = PolicyEnforcer(settings)
+    enforcer = policy_enforcer(settings)
     version = await enforcer.current_policy_version()
     policy = await enforcer.get_policy_at(execution_key, version)
     owner = policy.policy_data.get(OWNER_USER_ID_CLAIM)
@@ -260,7 +261,7 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
         # Gate off: every principal is the synthetic admin; the identity carries the key
         # alone (no fingerprint needed, matching ``build_execution_identity``'s gate-off).
         return await build_execution_identity(execution_key, bound_fingerprint="")
-    enforcer = PolicyEnforcer(settings)
+    enforcer = policy_enforcer(settings)
     version = await enforcer.current_policy_version()
     policy = await enforcer.get_policy_at(execution_key, version)
     fingerprint = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
@@ -288,8 +289,7 @@ class ExecutionKeyScan:
     """
 
     def __init__(self) -> None:
-        """Build the scan over a fresh policy enforcer with an empty per-key verdict cache."""
-        self._enforcer = PolicyEnforcer(access_control_settings())
+        """Build the scan with an empty per-key verdict cache."""
         self._verdict: dict[tuple[str, str], ExecutionKeyAuthorityError | ExecutionConditionError | None] = {}
 
     async def assert_usable(self, execution_key: str, *, bound_fingerprint: str) -> None:
@@ -306,7 +306,8 @@ class ExecutionKeyScan:
 
         Returns having asserted nothing when access control is disabled.
         """
-        if not self._enforcer.settings.enable:
+        settings = access_control_settings()
+        if not settings.enable:
             return
         key = (execution_key, bound_fingerprint)
         if key in self._verdict:
@@ -321,8 +322,9 @@ class ExecutionKeyScan:
         try:
             # Authority first: a key with no policy row has no condition, so the evaluable
             # question would pass vacuously and admit a record every fire then dies on.
-            await assert_key_carries_authority(self._enforcer, execution_key, bound_fingerprint=bound_fingerprint)
-            await assert_execution_key_evaluable(self._enforcer, execution_key)
+            enforcer = policy_enforcer(settings)
+            await assert_key_carries_authority(enforcer, execution_key, bound_fingerprint=bound_fingerprint)
+            await assert_execution_key_evaluable(enforcer, execution_key)
         except (ExecutionKeyAuthorityError, ExecutionConditionError) as exc:
             self._verdict[key] = exc
             raise
@@ -372,7 +374,7 @@ async def authorize_execution_tool_call(
             # None never. Refuse rather than re-read with no anchor at all.
             raise PermissionDeniedError("access denied: bound execution identity carries no key fingerprint")
         await assert_key_carries_authority(
-            PolicyEnforcer(settings), identity.user_id, bound_fingerprint=identity.execution_key_fingerprint
+            policy_enforcer(settings), identity.user_id, bound_fingerprint=identity.execution_key_fingerprint
         )
         return
 

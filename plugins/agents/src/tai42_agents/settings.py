@@ -86,6 +86,12 @@ class AgentsLimitsSettings(TaiBaseSettings):
     # instead of looping until the recursion limit. Must be positive.
     structured_output_reprompt_cap: int = Field(default=3, gt=0)
 
+    # How many compiled tools-agent graphs each event loop keeps for reuse (an LRU, the
+    # oldest evicted past this). A run whose inputs match a kept graph reuses it; a tool
+    # registration change, a serving-epoch change or a settings reload makes the next run
+    # compile afresh. Must be positive.
+    graph_cache_size: int = Field(default=64, gt=0)
+
 
 @settings_cache
 def agents_limits_settings() -> AgentsLimitsSettings:

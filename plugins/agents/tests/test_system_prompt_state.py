@@ -36,9 +36,10 @@ from tai42_contract.agent.events import StructuredFinal, ToolCallStep, ToolResul
 
 import tai42_agents._internal.stream_events as stream_events
 from tai42_agents._internal import base_tool_agent as bta
-from tai42_agents._internal.stream_events import _structured_tool_names, astream_tools_agent_events
+from tai42_agents._internal.stream_events import _structured_tool_names
 from tai42_agents._internal.structured import structured_output_stack
 
+from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent_events
 from .conftest import fake_run_trace
 
 
@@ -124,7 +125,7 @@ def _config(thread_id: str) -> dict[str, Any]:
 async def _state_messages(thread_id: str) -> list[BaseMessage]:
     """Read a thread's checkpointed messages back through a freshly built agent over
     the same checkpointer."""
-    agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+    agent, _, config, _, _ = await build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
     snapshot = await agent.aget_state(config)
     return snapshot.values.get("messages", []) if snapshot.values else []
 
@@ -134,7 +135,7 @@ class TestSystemPromptIsPerRun:
         model = RecordingChatModel([AIMessage(content="first"), AIMessage(content="second")])
         _seams(monkeypatch, model, InMemorySaver())
 
-        result = asyncio.run(bta.ainvoke_tools_agent("be brief", ["hi"], [], config=_config("t-per-run")))
+        result = asyncio.run(invoke_tools_agent("be brief", ["hi"], [], config=_config("t-per-run")))
         assert result.output == "first"
 
         # The model call carried the system prompt first, ahead of the user turn.
@@ -151,8 +152,8 @@ class TestSystemPromptIsPerRun:
         saver = InMemorySaver()
         _seams(monkeypatch, model, saver)
 
-        asyncio.run(bta.ainvoke_tools_agent("be brief", ["hi"], [], config=_config("t-reuse")))
-        result = asyncio.run(bta.ainvoke_tools_agent("be brief", ["again"], [], config=_config("t-reuse")))
+        asyncio.run(invoke_tools_agent("be brief", ["hi"], [], config=_config("t-reuse")))
+        result = asyncio.run(invoke_tools_agent("be brief", ["again"], [], config=_config("t-reuse")))
         assert result.output == "second"
 
         # Both model calls led with exactly one system message — the per-run prompt.
@@ -170,7 +171,7 @@ class TestSystemPromptIsPerRun:
         _seams(monkeypatch, model, InMemorySaver())
 
         asyncio.run(
-            bta.ainvoke_tools_agent(
+            invoke_tools_agent(
                 "be brief",
                 ["hi"],
                 [],
@@ -199,7 +200,7 @@ class TestStoredSystemMessageIsPurged:
         async def seed() -> None:
             # Seed a thread whose stored history carries a system message ahead of
             # the conversation, written straight into the checkpoint.
-            agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-stale"))
+            agent, _, config, _, _ = await build_agent_and_input("sys", ["x"], [], config=_config("t-stale"))
             await agent.aupdate_state(
                 config,
                 {
@@ -213,7 +214,7 @@ class TestStoredSystemMessageIsPurged:
             )
 
         asyncio.run(seed())
-        result = asyncio.run(bta.ainvoke_tools_agent("be brief", ["hi"], [], config=_config("t-stale")))
+        result = asyncio.run(invoke_tools_agent("be brief", ["hi"], [], config=_config("t-stale")))
         assert result.output == "ok"
 
         # The model saw exactly one system message: the per-run prompt, first —
@@ -249,8 +250,8 @@ class TestRollingCacheMark:
         _seams(monkeypatch, model, saver)
         kwargs = {"cache_control": {"type": "ephemeral"}}
 
-        asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [], config=_config("t-roll"), user_content_kwargs=kwargs))
-        asyncio.run(bta.ainvoke_tools_agent("sys", ["again"], [], config=_config("t-roll"), user_content_kwargs=kwargs))
+        asyncio.run(invoke_tools_agent("sys", ["hi"], [], config=_config("t-roll"), user_content_kwargs=kwargs))
+        asyncio.run(invoke_tools_agent("sys", ["again"], [], config=_config("t-roll"), user_content_kwargs=kwargs))
 
         # First model call: only the turn-1 user mark exists — inert, one breakpoint.
         assert _mark_count(model._seen[0]) == 1
@@ -317,7 +318,7 @@ class TestToolStrategyEndToEnd:
         _seams(monkeypatch, model, InMemorySaver())
 
         result = asyncio.run(
-            bta.ainvoke_tools_agent("sys", ["hi"], [], config=_config("t-structured"), response_format=schema)
+            invoke_tools_agent("sys", ["hi"], [], config=_config("t-structured"), response_format=schema)
         )
 
         # The tool-calling strategy landed the validated object on the same
@@ -343,9 +344,7 @@ class TestToolStrategyEndToEnd:
         )
         _seams(monkeypatch, model, InMemorySaver())
 
-        result = asyncio.run(
-            bta.ainvoke_tools_agent("sys", ["hi"], [], config=_config("t-retry"), response_format=schema)
-        )
+        result = asyncio.run(invoke_tools_agent("sys", ["hi"], [], config=_config("t-retry"), response_format=schema))
 
         # Two model calls: the first answer was rejected and the model re-prompted.
         assert len(model._seen) == 2
@@ -369,7 +368,7 @@ class TestToolStrategyEndToEnd:
         async def collect() -> list[Any]:
             return [
                 event
-                async for event in astream_tools_agent_events(
+                async for event in stream_tools_agent_events(
                     "sys", ["hi"], [], config=_config("t-stream-structured"), response_format=schema
                 )
             ]
@@ -400,7 +399,7 @@ class TestToolStrategyEndToEnd:
         async def collect() -> list[Any]:
             return [
                 event
-                async for event in astream_tools_agent_events(
+                async for event in stream_tools_agent_events(
                     "sys", ["hi"], [], config=_config("t-stream-union"), response_format=_Cat | _Dog
                 )
             ]
@@ -433,7 +432,7 @@ class TestToolStrategyEndToEnd:
         async def collect() -> list[Any]:
             return [
                 event
-                async for event in astream_tools_agent_events(
+                async for event in stream_tools_agent_events(
                     "sys", ["hi"], [], config=_config("t-stream-oneof"), response_format=schema
                 )
             ]
@@ -474,7 +473,7 @@ class TestToolStrategyEndToEnd:
         _seams(monkeypatch, model, InMemorySaver())
 
         async def drain() -> None:
-            async for _ in astream_tools_agent_events(
+            async for _ in stream_tools_agent_events(
                 "sys", ["hi"], [], config=_config("t-identity"), response_format=schema
             ):
                 pass

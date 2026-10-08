@@ -15,12 +15,20 @@ from tai42_contract.template import TemplatedText
 from tests._tools_agent_support import (
     _STRUCTURED_SCHEMA,
     _get_agent,
+    flatten,
     make_tool,
+    script_graph,
 )
 
 from tai42_agents import tools_agent as tools_agent_module
 from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
+
+
+@pytest.fixture(autouse=True)
+def _scripted_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The face builds its graph through a double that resolves tools for real and compiles nothing."""
+    script_graph(monkeypatch)
 
 
 def test_run_resolves_tools_and_returns_final_text(
@@ -39,7 +47,7 @@ def test_run_resolves_tools_and_returns_final_text(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="the answer", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -107,7 +115,7 @@ def test_run_unset_system_message_renders_empty(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="the answer", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -156,7 +164,7 @@ def test_run_with_response_format_returns_the_structured_object(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="ignored text", usage=CallUsage(0, 0, None), structured=payload)
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -238,7 +246,7 @@ def test_run_renders_message_by_template_id(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="x", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -258,7 +266,7 @@ def test_run_honors_live_tools_and_thread_config(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="ok", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -288,7 +296,7 @@ def test_run_keyless_does_not_pin_thread_id(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="ok", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -304,7 +312,7 @@ def test_run_honors_a_caller_driven_resume(monkeypatch: pytest.MonkeyPatch, app_
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="resumed answer", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -322,7 +330,7 @@ def test_run_honors_recursion_limit_into_config(monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="ok", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -339,7 +347,7 @@ def test_run_threads_content_kwargs_to_the_invoke_seam(
     captured: dict[str, Any] = {}
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         return AgentInvokeResult(output="ok", usage=CallUsage(0, 0, None))
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)

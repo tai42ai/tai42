@@ -388,7 +388,7 @@ def _seed_multichannel_linked_person(monkeypatch, fake, *, pid: str = "person-xy
     dak = json.dumps(["twilio", "+15550001111", "+15550002222"], separators=(",", ":"))
     fake._hashes.setdefault(settings.person_index_key("tool", "echo-tool"), {})[dak] = pid
     config = TargetConversationConfig(target_kind="tool", target_name="echo-tool", multichannel=True)
-    fake._strings[settings.target_config_key("tool", "echo-tool")] = config.model_dump_json()
+    fake.seed_target_config(config)
     return person
 
 

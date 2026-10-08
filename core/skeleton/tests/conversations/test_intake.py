@@ -10,6 +10,7 @@ from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import intake as intake_module
 
@@ -20,6 +21,7 @@ from .conftest import (
     FakeManager,
     MemoryAgent,
     _accepting_callback,
+    _all_record_ids,
     _channel_route,
     _connected,
     _settle,
@@ -190,10 +192,10 @@ async def test_a_blank_provider_message_id_is_refused_with_nothing_written(env, 
     assert (await _store().list_by_status(frozenset(DeliveryStatus))).items == []
 
 
-async def test_a_shed_reply_is_not_deliverable_until_it_owns_its_claim(env, monkeypatch):
-    # The slow-down reply is persisted BEFORE the inbound claim, so its pre-claim state
-    # must be one the delivery machine never drives; otherwise a sweep pass landing in that
-    # window sends a reply for a message another attempt owns.
+async def test_a_shed_reply_that_loses_its_claim_writes_nothing_deliverable(env, monkeypatch):
+    # The slow-down reply's record and its inbound claim land in one atomic step, so a
+    # concurrent attempt that already owns the pair leaves this one with nothing written:
+    # no record a sweep could deliver for a message another attempt owns.
     monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
     caps_module._CAPS_CACHE.clear()
     agent = EchoAgent()
@@ -204,19 +206,20 @@ async def test_a_shed_reply_is_not_deliverable_until_it_owns_its_claim(env, monk
 
     first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
     await _settle()
+    # The concurrent attempt committed between this one's fast-path read and its create.
+    await env.set(ConversationsSettings().dedupe_key("twilio", "PID2"), first)
 
-    async def _claim_lost_after_a_sweep(self, channel_name, provider_message_id, message_id):
-        await delivery_module.sweep_stalled_deliveries()
-        await _settle()
-        return first
+    async def _no_owner_yet(self, channel_name, provider_message_id):
+        return None
 
-    monkeypatch.setattr(ConversationRecordStore, "claim_inbound", _claim_lost_after_a_sweep)
+    monkeypatch.setattr(ConversationRecordStore, "get_inbound_owner", _no_owner_yet)
     owner = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
+    await delivery_module.sweep_stalled_deliveries()
     await _settle()
 
     assert owner == first
     assert [n.message for n in channel.sends] == ["echo: one"]
-    assert (await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))).items == []
+    assert await _all_record_ids(store) == [first]
 
 
 _FORM = {"name": "Alice", "size": 42}

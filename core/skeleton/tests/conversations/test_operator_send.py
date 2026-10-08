@@ -614,7 +614,6 @@ async def test_operator_send_refuses_503_when_a_foreign_worker_holds_the_lease(e
     # rather than blocking the caller unbounded behind the other worker's — possibly HITL-paused —
     # turn. Nothing is written and the foreign lease is untouched.
     monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
-    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
     caps_module._CAPS_CACHE.clear()
     agent = RecordingAgent()
     channel = FakeChannel()

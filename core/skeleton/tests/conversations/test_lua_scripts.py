@@ -560,7 +560,7 @@ async def test_the_scans_report_unfinished_work_and_skip_a_corrupt_row(store, lu
         ConversationsSettings().status_index_key(DeliveryStatus.PENDING_DELIVERY.value), {"m-corrupt": float("inf")}
     )
 
-    work = {item.message_id: item for item in await store.pending_work()}
+    work = {item.message_id: item for item in await store.pending_work(due_only=False)}
 
     # The corrupt row is skipped and every other unfinished record still comes back.
     assert set(work) == {"m-pending", "m-prov"}
@@ -616,7 +616,7 @@ async def test_a_terminal_write_indexes_the_member_to_expire_with_its_row(store,
     # never outlives what it names.
     score = await lua_redis.zscore(ConversationsSettings().status_index_key(terminal), "m1")
     assert score == pytest.approx(now + ConversationsSettings().answer_retention_ttl_seconds)
-    assert await store.pending_work() == []
+    assert await store.pending_work(due_only=False) == []
 
 
 async def test_deleting_a_record_unindexes_it_in_the_same_step(store, lua_redis):

@@ -35,7 +35,7 @@ from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.llm.structured import StructuredOutputPlan, plan_structured_output
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
-from tai42_agents._internal.outcomes import build_reprompt_handler
+from tai42_agents._internal.outcomes import RepromptCounter, build_reprompt_handler
 from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware, reprompt_feedback
 from tai42_agents.settings import agents_limits_settings
 
@@ -129,7 +129,8 @@ async def ainvoke_structured(
     threaded onto every model call so this single-shot door records under the run's trace,
     exactly like the graph doors. ``None`` runs uninstrumented.
     """
-    reprompt = build_reprompt_handler(agents_limits_settings().structured_output_reprompt_cap)
+    counter = RepromptCounter()
+    reprompt = build_reprompt_handler(agents_limits_settings().structured_output_reprompt_cap, lambda: counter)
     conversation = list(messages)
     while True:
         exc: Exception

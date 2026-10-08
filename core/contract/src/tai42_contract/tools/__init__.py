@@ -196,6 +196,14 @@ class AppTools(Protocol):
         """Remove the tool registered under ``name``."""
         ...
 
+    def surface_generation(self) -> int:
+        """A number that changes whenever the set of tools this process lists changes.
+
+        Monotonic within a process; never compared across processes. A consumer that caches
+        anything derived from ``get_tools``/``get_client_tools`` keys the cache on it.
+        """
+        ...
+
     # ``combos`` is the tool's list of extension combos (each combo a stack of
     # extension elements — a bare name or a ``{"name", "config"}`` mapping);
     # ``register`` attaches them to the base ``name``.

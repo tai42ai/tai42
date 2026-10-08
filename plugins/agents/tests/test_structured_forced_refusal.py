@@ -27,9 +27,10 @@ from pydantic import PrivateAttr
 from tai42_contract.agent.events import MessageDelta, MessageFinal, StructuredFinal, ToolCallStep, ToolResultStep
 
 from tai42_agents._internal import base_tool_agent as bta
-from tai42_agents._internal.stream_events import aproject_agent_events, astream_tools_agent_events
+from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 
+from ._graph_support import invoke_tools_agent, stream_tools_agent_events
 from .conftest import fake_run_trace
 
 _SCHEMA = {
@@ -118,9 +119,7 @@ def test_invoke_face_produces_the_structured_object_under_the_native_plan(monkey
     model = _NativeRefusingModel(['{"value": 7}'])
     _patch_seams(monkeypatch, model)
 
-    result = asyncio.run(
-        bta.ainvoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_SCHEMA)
-    )
+    result = asyncio.run(invoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_SCHEMA))
     # No forced tool choice was sent, so the refusing model answered and the native plan
     # landed the validated structured object.
     assert result.structured == {"value": 7}
@@ -136,7 +135,7 @@ def test_stream_face_yields_one_structured_final_and_no_tool_or_message_frames(
     async def _collect() -> list[Any]:
         return [
             event
-            async for event in astream_tools_agent_events(
+            async for event in stream_tools_agent_events(
                 system_message="", user_message=["go"], tools=[], response_format=_SCHEMA
             )
         ]

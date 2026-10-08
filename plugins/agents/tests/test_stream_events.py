@@ -16,6 +16,7 @@ from langgraph.types import Overwrite
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 import tai42_agents._internal.stream_events as stream_events
+from tai42_agents._internal.graph_cache import ToolsAgentGraph
 from tai42_agents._internal.stream_events import (
     MessageDelta,
     MessageFinal,
@@ -337,27 +338,23 @@ def test_media_tool_result_is_media_safe_and_json_native():
 
 
 def test_astream_tools_agent_events_threads_build_into_projection(monkeypatch):
-    """The build->project glue runs its real body: monkeypatch only the underlying
-    build to return a stub agent, and assert the projected events come through."""
+    """The build->project glue runs its real body: a graph over a stub agent and a stubbed
+    input build, and the projected events come through."""
     items = [
         ("updates", {"model": {"messages": [AIMessage(content="answer")]}}),
         ("messages", (AIMessageChunk(content="answer"), {})),
     ]
 
     async def fake_build(*_args, **_kwargs):
-        return _StubAgent(items), {"messages": []}, {}, None, None
+        return {"messages": []}, {}, None
 
     monkeypatch.setattr(stream_events, "_build_agent_and_input", fake_build)
+    graph = ToolsAgentGraph(
+        agent=_StubAgent(items), strategy=None, tools=(), response_format=None, checkpoint_provider=None
+    )
 
     async def go():
-        return [
-            event
-            async for event in astream_tools_agent_events(
-                system_message="sys",
-                user_message=["hi"],
-                tools=[],
-            )
-        ]
+        return [event async for event in astream_tools_agent_events(graph, ["hi"])]
 
     events = asyncio.run(go())
     assert any(isinstance(e, MessageFinal) and e.text == "answer" for e in events)

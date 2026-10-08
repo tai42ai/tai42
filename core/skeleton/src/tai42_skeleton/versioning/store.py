@@ -39,7 +39,7 @@ from tai42_contract.versioning.errors import (
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -118,7 +118,7 @@ class PostgresVersionedStore(VersionedStore):
             return
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             yield cur
@@ -214,7 +214,7 @@ class PostgresVersionedStore(VersionedStore):
         """List every active document of ``kind``, ordered by name."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -245,7 +245,7 @@ class PostgresVersionedStore(VersionedStore):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -269,7 +269,7 @@ class PostgresVersionedStore(VersionedStore):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -293,7 +293,7 @@ class PostgresVersionedStore(VersionedStore):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -311,7 +311,7 @@ class PostgresVersionedStore(VersionedStore):
         """Return the active document record for ``(kind, name)``; unknown raises :class:`DocumentNotFoundError`."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -392,7 +392,7 @@ class PostgresVersionedStore(VersionedStore):
         """List every version oldest first, flagging the current one; unknown raises :class:`DocumentNotFoundError`."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(

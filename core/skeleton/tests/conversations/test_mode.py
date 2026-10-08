@@ -288,21 +288,6 @@ async def test_set_mode_writes_the_retention_ttl(fake) -> None:
     assert fake.ttl_ms[settings.mode_key("bridge:line:+1")] == settings.answer_retention_ttl_seconds * 1000
 
 
-async def test_refresh_ttl_extends_a_live_override(fake) -> None:
-    settings = ConversationsSettings()
-    await _store().set_mode("bridge:line:+1", "manual")
-    fake.advance(settings.answer_retention_ttl_seconds / 2)  # half the window elapses
-
-    assert await _store().refresh_ttl("bridge:line:+1") is True
-    assert fake.ttl_ms[settings.mode_key("bridge:line:+1")] == settings.answer_retention_ttl_seconds * 1000
-
-
-async def test_refresh_ttl_is_a_noop_when_no_override(fake) -> None:
-    # No override set: refresh reports nothing to extend and never creates the key.
-    assert await _store().refresh_ttl("bridge:line:+1") is False
-    assert ConversationsSettings().mode_key("bridge:line:+1") not in fake._strings
-
-
 async def test_override_expires_to_the_route_default(fake) -> None:
     settings = ConversationsSettings()
     await _store().set_mode("bridge:line:+1", "manual")
@@ -311,11 +296,3 @@ async def test_override_expires_to_the_route_default(fake) -> None:
     assert await _store().get_mode("bridge:line:+1") is None
     # A returning address reads the route default again once the override has aged out.
     assert await effective_mode(_route(initial_mode="agent"), "bridge:line:+1") == "agent"
-
-
-async def test_refresh_never_resurrects_a_deleted_override(fake) -> None:
-    await _store().set_mode("bridge:line:+1", "manual")
-    assert await _store().delete_mode("bridge:line:+1") is True
-
-    assert await _store().refresh_ttl("bridge:line:+1") is False
-    assert ConversationsSettings().mode_key("bridge:line:+1") not in fake._strings

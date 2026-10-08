@@ -6,9 +6,11 @@ model is re-prompted. The rail has no counter of its own, so the only bound is t
 ``recursion_limit`` — a runaway that re-prompts until the super-step budget is spent, then
 fails generically. Two mechanisms here make both stops explicit and readable:
 
-* :func:`build_reprompt_handler` — a per-run counting ``ToolStrategy.handle_errors``
-  callable that returns the same re-prompt message the default rail does until the cap is
-  reached, then raises :class:`RepromptCapError`;
+* :func:`build_reprompt_handler` — a counting ``ToolStrategy.handle_errors`` callable that
+  returns the same re-prompt message the default rail does until the cap is reached, then
+  raises :class:`RepromptCapError`; a graph's rails count per drive
+  (:func:`drive_reprompt_scope`), so a compiled graph shared across runs gives each run the
+  full cap;
 * :func:`outcome_for_drive_error` — the map every face applies around its graph drive,
   turning :class:`RepromptCapError` and langgraph's ``GraphRecursionError`` into the
   terminal, non-fatal contract events the doors surface (and logging each once).
@@ -17,7 +19,9 @@ fails generically. Two mechanisms here make both stops explicit and readable:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from langchain.agents.factory import STRUCTURED_OUTPUT_ERROR_TEMPLATE
@@ -60,23 +64,67 @@ def _schema_name_of(exc: Exception) -> str:
     return "response_format"
 
 
-def build_reprompt_handler(cap: int) -> Callable[[Exception], str]:
-    """A fresh per-run ``ToolStrategy.handle_errors`` callable that caps re-prompts at ``cap``.
+class RepromptCounter:
+    """The number of non-conforming structured responses one rail has seen in one drive."""
+
+    def __init__(self) -> None:
+        """Start at zero."""
+        self.attempts = 0
+
+
+_DRIVE_REPROMPT: ContextVar[dict[int, RepromptCounter]] = ContextVar("tai42_agents_drive_reprompt")
+
+
+def drive_reprompt_counter(owner: object) -> RepromptCounter:
+    """The bound drive's counter for ``owner`` (a rail), created on first use.
+
+    Raises ``RuntimeError`` when no drive scope is bound: a compiled graph is shared across
+    runs, so a counter outside a drive would be shared across them too.
+    """
+    try:
+        counters = _DRIVE_REPROMPT.get()
+    except LookupError:
+        raise RuntimeError(
+            "structured-output rail ran outside a drive scope: the code driving this agent graph must bind "
+            "drive_reprompt_scope()"
+        ) from None
+    counter = counters.get(id(owner))
+    if counter is None:
+        counter = counters[id(owner)] = RepromptCounter()
+    return counter
+
+
+@contextmanager
+def drive_reprompt_scope(counters: dict[int, RepromptCounter] | None = None) -> Iterator[dict[int, RepromptCounter]]:
+    """Bind ``counters`` (a fresh map when ``None``) as the current drive's re-prompt counters.
+
+    Every rail of the graph the drive runs counts on its own entry, so each drive gets every
+    rail's full cap. A streaming drive passes the one map it owns into each per-step binding.
+    """
+    bound = counters if counters is not None else {}
+    token = _DRIVE_REPROMPT.set(bound)
+    try:
+        yield bound
+    finally:
+        _DRIVE_REPROMPT.reset(token)
+
+
+def build_reprompt_handler(cap: int, counter: Callable[[], RepromptCounter]) -> Callable[[Exception], str]:
+    """A ``ToolStrategy.handle_errors`` callable that caps re-prompts at ``cap``, counting on ``counter()``.
 
     Each non-conforming structured-output response calls this once. While the count is within
     ``cap`` it returns the SAME re-prompt message the default rail returns (so a capped run
     re-prompts identically up to the bound); on the response past the cap it raises
     :class:`RepromptCapError` carrying the masked last validation error, ending the loop.
-    The counter lives in this closure, so it is scoped to the one run whose strategy holds it.
     """
-    state = {"attempts": 0}
 
     def handle(exc: Exception) -> str:
-        state["attempts"] += 1
-        if state["attempts"] > cap:
+        state = counter()
+        state.attempts += 1
+        if state.attempts > cap:
             raise RepromptCapError(
                 schema_name=_schema_name_of(exc),
-                attempts=state["attempts"],
+                attempts=state.attempts,
                 error=str(mask_secrets(str(exc))),
             )
         return STRUCTURED_OUTPUT_ERROR_TEMPLATE.format(error=str(exc))

@@ -66,7 +66,7 @@ from tai42_contract.connectors.errors import ConnectorError, MalformedConnection
 from tai42_contract.connectors.service import AliasInUseError
 from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import component_store_settings
 
@@ -263,7 +263,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         expiry_filter = "" if include_expired else "AND (session_expires_at IS NULL OR session_expires_at > now())"
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -494,7 +494,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         # would introduce.
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(

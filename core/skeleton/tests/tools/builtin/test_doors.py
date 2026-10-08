@@ -22,6 +22,7 @@ from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
 import tai42_skeleton.conversations as conversations_package
+from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
@@ -99,6 +100,7 @@ def ac(monkeypatch) -> FakeAccessControlPg:
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(verifier_module, "client_ctx", ac_make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", ac_make_client_ctx(redis))
+    monkeypatch.setattr(management, "client_ctx", ac_make_client_ctx(redis))
     role_grants_module.reset_role_grants_cache()
     reset_tool_edge_verifier()
     return pg
@@ -214,6 +216,8 @@ async def test_an_owned_key_whose_owners_scopes_were_narrowed_is_refused(
         # attenuation live and is refused — exactly where the HTTP door refuses it.
         owner = ac.policy("owner1")
         owner["scopes"] = ["unrelated"]
+        # Every policy writer bumps the version the enforcer's policy cache is keyed on.
+        await management.bump_policy_version()
         with pytest.raises(PermissionDeniedError):
             await doors.send_conversation_message("chat", "u-7", "hi again")
 

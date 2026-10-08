@@ -8,6 +8,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from tai42_contract.states.errors import StateNotFoundError
+from tai42_kit.clients.impl.postgres import read_connection
 
 from .base import _StoreBase
 from .connection import _pool, _settings
@@ -19,7 +20,7 @@ class _AttachmentStore(_StoreBase):
     async def get_attachment(self, state: str, template: str) -> dict[str, Any] | None:
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -32,7 +33,7 @@ class _AttachmentStore(_StoreBase):
     async def list_attachments_for_state(self, state: str) -> list[dict[str, Any]]:
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -45,7 +46,7 @@ class _AttachmentStore(_StoreBase):
     async def list_attachments_of_template(self, template: str) -> list[dict[str, Any]]:
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -58,7 +59,7 @@ class _AttachmentStore(_StoreBase):
     async def list_all_attachments(self) -> list[dict[str, Any]]:
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(

@@ -15,10 +15,11 @@ class FakeConfigRedis:
         self._strings: dict[str, str] = {}
         self._sets: dict[str, set[str]] = {}
 
-    def seed_member(self, names_key: str, member: str) -> None:
+    def seed_member(self, names_key: str, member: str, version_key: str) -> None:
         """Plant an index member with no backing row — the corrupt state the list read logs
-        over and skips."""
+        over and skips — and move the map's write token, as a platform write would."""
         self._sets.setdefault(names_key, set()).add(member)
+        self._strings[version_key] = f"seeded:{member}"
 
     async def get(self, key: str) -> str | None:
         return self._strings.get(key)
@@ -32,17 +33,19 @@ class FakeConfigRedis:
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
         keys = [str(k) for k in keys_and_args[:numkeys]]
         argv = [str(a) for a in keys_and_args[numkeys:]]
-        names_key, config_key = keys[0], keys[1]
+        names_key, config_key, version_key = keys[0], keys[1], keys[2]
         if "conversations:config:put:atomic" in script:
-            member, config_json = argv[0], argv[1]
+            member, config_json, token = argv[0], argv[1], argv[2]
             existed = 1 if config_key in self._strings else 0
             self._strings[config_key] = config_json
             self._sets.setdefault(names_key, set()).add(member)
+            self._strings[version_key] = token
             return existed
         if "conversations:config:delete:atomic" in script:
-            member = argv[0]
+            member, token = argv[0], argv[1]
             removed = 1 if self._strings.pop(config_key, None) is not None else 0
             self._sets.get(names_key, set()).discard(member)
+            self._strings[version_key] = token
             return removed
         raise NotImplementedError(f"FakeConfigRedis.eval: unknown script {script[:60]!r}")
 

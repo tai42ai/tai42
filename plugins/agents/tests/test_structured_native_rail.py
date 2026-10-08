@@ -42,6 +42,7 @@ from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 
+from ._graph_support import invoke_tools_agent
 from .conftest import fake_run_trace
 
 _INT_SCHEMA = {
@@ -208,7 +209,7 @@ def test_invoke_face_never_conforming_returns_the_typed_outcome(monkeypatch: pyt
     _patch_invoke_seams(monkeypatch, model, cap=3)
 
     result = asyncio.run(
-        bta.ainvoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_INT_SCHEMA)
+        invoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_INT_SCHEMA)
     )
     assert isinstance(result.outcome, StructuredOutputUnresolvedFinal)
     assert result.outcome.attempts == 4
@@ -220,7 +221,7 @@ def test_invoke_face_violating_then_conforming_returns_validated(monkeypatch: py
     _patch_invoke_seams(monkeypatch, model, cap=3)
 
     result = asyncio.run(
-        bta.ainvoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_INT_SCHEMA)
+        invoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_INT_SCHEMA)
     )
     assert result.outcome is None
     assert result.structured == {"value": 7}
@@ -234,7 +235,7 @@ def test_no_jsonschema_validation_error_escapes(monkeypatch: pytest.MonkeyPatch)
     _patch_invoke_seams(monkeypatch, model, cap=1)
     try:
         result = asyncio.run(
-            bta.ainvoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_INT_SCHEMA)
+            invoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_INT_SCHEMA)
         )
     except JsonSchemaValidationError as exc:  # pragma: no cover - the revision closes this path
         pytest.fail(f"a raw JsonSchemaValidationError escaped the native face: {exc}")

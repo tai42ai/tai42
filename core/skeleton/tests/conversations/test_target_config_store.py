@@ -67,7 +67,9 @@ async def test_list_skips_an_indexed_member_with_no_row(store):
     await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
     # An index member whose row never landed (or was dropped from under it) is logged and
     # skipped, never surfaced as a half-row.
-    store.fake.seed_member(store.settings.target_config_names_key, "tool:ghost")
+    store.fake.seed_member(
+        store.settings.target_config_names_key, "tool:ghost", store.settings.target_config_version_key
+    )
     listed, unreadable = await store.list()
     assert set(listed) == {("agent", "assistant")}
     assert unreadable == 1
@@ -78,7 +80,7 @@ async def test_list_skips_an_unparseable_row(store):
     # A row whose bytes are not a valid config payload is logged and skipped, never aborting
     # the whole listing.
     member = "tool:corrupt"
-    store.fake.seed_member(store.settings.target_config_names_key, member)
+    store.fake.seed_member(store.settings.target_config_names_key, member, store.settings.target_config_version_key)
     store.fake._strings[f"{store.settings.target_config_key_prefix}{member}"] = "{not json"
     listed, unreadable = await store.list()
     assert set(listed) == {("agent", "assistant")}

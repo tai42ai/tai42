@@ -31,8 +31,8 @@ from tai42_contract.agent.base import PresetSpec
 from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal import recovery as rec
 from tai42_agents._internal.resolve_tools import resolve_tools
-from tai42_agents._internal.stream_events import astream_tools_agent_events
 
+from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent_events
 from .conftest import fake_run_trace
 
 _RECOVERY_LOGGER = "tai42_agents._internal.recovery"
@@ -127,7 +127,7 @@ def _config(thread_id: str) -> dict[str, Any]:
 async def _state_messages(saver: InMemorySaver, model: BaseChatModel, thread_id: str) -> list[BaseMessage]:
     """Read a thread's checkpointed messages back through a freshly built agent over
     the same checkpointer."""
-    agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+    agent, _, config, _, _ = await build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
     snapshot = await agent.aget_state(config)
     return snapshot.values.get("messages", []) if snapshot.values else []
 
@@ -145,7 +145,7 @@ class TestToolErrorMiddleware:
         _seams(monkeypatch, model, InMemorySaver())
         tool = _raising_tool(ToolException("tool said no"))
 
-        result = asyncio.run(bta.ainvoke_tools_agent("sys", ["do it"], [tool], config=_config("t-toolexc")))
+        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [tool], config=_config("t-toolexc")))
 
         # The loop continued past the failure and the model produced a final answer.
         assert result.output == "recovered"
@@ -156,7 +156,7 @@ class TestToolErrorMiddleware:
         _seams(monkeypatch, model, saver)
         tool = _raising_tool(ToolException("tool said no"))
 
-        result = asyncio.run(bta.ainvoke_tools_agent("sys", ["do it"], [tool], config=_config("t-toolexc")))
+        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [tool], config=_config("t-toolexc")))
         assert result.output == "recovered"
 
         messages = asyncio.run(_state_messages(saver, model, "t-toolexc"))
@@ -175,7 +175,7 @@ class TestToolErrorMiddleware:
         tool = _raising_tool(ToolException("tool said no"))
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
-            asyncio.run(bta.ainvoke_tools_agent("sys", ["do it"], [tool], config=_config("t-toolexc")))
+            asyncio.run(invoke_tools_agent("sys", ["do it"], [tool], config=_config("t-toolexc")))
 
         assert any(
             "failing" in r.getMessage() and "call_1" in r.getMessage() and "tool said no" in r.getMessage()
@@ -228,7 +228,7 @@ class TestToolErrorMiddleware:
         preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={})
         (preset_tool,) = asyncio.run(resolve_tools(app_tools, [], [], [preset]))
 
-        result = asyncio.run(bta.ainvoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-fail")))
+        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-fail")))
 
         # The loop continued past the base tool's failure and the model produced an answer.
         assert result.output == "recovered"
@@ -268,9 +268,7 @@ class TestToolErrorMiddleware:
         preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={})
         (preset_tool,) = asyncio.run(resolve_tools(app_tools, [], [], [preset]))
 
-        result = asyncio.run(
-            bta.ainvoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-terminal"))
-        )
+        result = asyncio.run(invoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-terminal")))
         assert result.output == "recovered"
         messages = asyncio.run(_state_messages(saver, model, "t-preset-terminal"))
         errors = [m for m in messages if isinstance(m, ToolMessage) and m.status == "error"]
@@ -288,7 +286,7 @@ class TestToolErrorMiddleware:
         tool = _raising_tool(RuntimeError("infra down"))
 
         with pytest.raises(RuntimeError, match="infra down"):
-            asyncio.run(bta.ainvoke_tools_agent("sys", ["do it"], [tool], config=_config("t-runtime")))
+            asyncio.run(invoke_tools_agent("sys", ["do it"], [tool], config=_config("t-runtime")))
 
 
 # --------------------------------------------------------------------------
@@ -300,7 +298,7 @@ class TestDanglingToolCallRepair:
     async def _seed_dangling(self, saver: InMemorySaver, model: BaseChatModel, thread_id: str) -> None:
         """Checkpoint a thread whose last message is an ``AIMessage`` with an
         unanswered tool_call — the poisoned shape an aborted turn leaves behind."""
-        agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+        agent, _, config, _, _ = await build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
         await agent.aupdate_state(
             config,
             {"messages": [HumanMessage(content="first question"), _tool_call("failing", "call_x")]},
@@ -316,7 +314,7 @@ class TestDanglingToolCallRepair:
         asyncio.run(self._seed_dangling(saver, model, "t-repair"))
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
-            result = asyncio.run(bta.ainvoke_tools_agent("sys", ["second question"], [], config=_config("t-repair")))
+            result = asyncio.run(invoke_tools_agent("sys", ["second question"], [], config=_config("t-repair")))
 
         # The run completed on the previously poisoned thread.
         assert result.output == "ok"
@@ -344,7 +342,7 @@ class TestDanglingToolCallRepair:
         _seams(monkeypatch, model, saver)
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
-            result = asyncio.run(bta.ainvoke_tools_agent("sys", ["hello"], [], config=_config("t-fresh")))
+            result = asyncio.run(invoke_tools_agent("sys", ["hello"], [], config=_config("t-fresh")))
 
         assert result.output == "hi"
         # No repair ran on a thread with no prior state.
@@ -362,7 +360,7 @@ class TestDanglingToolCallRepair:
         _seams(monkeypatch, model, saver)
 
         async def seed() -> None:
-            agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-healthy"))
+            agent, _, config, _, _ = await build_agent_and_input("sys", ["x"], [], config=_config("t-healthy"))
             await agent.aupdate_state(
                 config,
                 {"messages": [HumanMessage(content="first"), AIMessage(content="first answer")]},
@@ -372,7 +370,7 @@ class TestDanglingToolCallRepair:
         asyncio.run(seed())
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
-            result = asyncio.run(bta.ainvoke_tools_agent("sys", ["second"], [], config=_config("t-healthy")))
+            result = asyncio.run(invoke_tools_agent("sys", ["second"], [], config=_config("t-healthy")))
 
         assert result.output == "second answer"
         assert not any("repairing dangling tool_calls" in r.getMessage() for r in caplog.records)
@@ -392,7 +390,7 @@ class TestRepairHelper:
         _seams(monkeypatch, model, saver)
 
         async def seed() -> None:
-            agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-events"))
+            agent, _, config, _, _ = await build_agent_and_input("sys", ["x"], [], config=_config("t-events"))
             await agent.aupdate_state(
                 config,
                 {"messages": [HumanMessage(content="first"), _tool_call("failing", "call_e")]},
@@ -401,7 +399,7 @@ class TestRepairHelper:
 
         asyncio.run(seed())
 
-        stream = astream_tools_agent_events("sys", ["second"], [], config=_config("t-events"))
+        stream = stream_tools_agent_events("sys", ["second"], [], config=_config("t-events"))
         events = asyncio.run(self._collect(stream))
         assert events
 

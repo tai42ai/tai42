@@ -290,11 +290,15 @@ def test_retrieval_never_marks_its_system_prompt(monkeypatch: pytest.MonkeyPatch
 def test_voting_voters_route_through_the_chokepoint_without_overriding_the_default(
     monkeypatch: pytest.MonkeyPatch, resource_manager: Any
 ) -> None:
-    """Voting builds no own graph — each voter runs through ``ainvoke_tools_agent``,
-    the tools-agent chokepoint, and passes no system_content_kwargs, so it inherits
-    the default there."""
+    """Voting builds no own graph — each voter's graph comes from the tools-agent graph
+    build and runs through ``ainvoke_tools_agent``, the tools-agent chokepoint, with no
+    system_content_kwargs, so it inherits the default there."""
+    from tests._voting_agent_support import script_voting_graphs
+
     from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
     from tai42_agents.voting_agent.model import VoterSpec
+
+    script_voting_graphs(monkeypatch)
 
     calls: list[dict[str, Any]] = []
 
@@ -308,7 +312,7 @@ def test_voting_voters_route_through_the_chokepoint_without_overriding_the_defau
             judge_message=TemplatedText(content="judge"),
             voter_message=TemplatedText(content="vote"),
             judge_llm_provider="openai",
-            judge_llm_kwargs=None,
+            judge_llm_kwargs={},
             voters=[VoterSpec(provider="openai")],
             voter_tools=[],
             checkpoint_provider=None,
@@ -316,4 +320,4 @@ def test_voting_voters_route_through_the_chokepoint_without_overriding_the_defau
         )
     )
     assert calls
-    assert "system_content_kwargs" not in calls[0]
+    assert calls[0]["graph"].spec.system_content_kwargs is None

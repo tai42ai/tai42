@@ -263,7 +263,6 @@ async def test_delete_person_linked_refuses_503_when_a_foreign_worker_holds_the_
     # live-caller sync door the erase bounds its acquisition and refuses with the loud, retriable
     # ThreadBusyError (a 503) rather than blocking past the proxy timeout; nothing is torn down.
     monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
-    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
     caps_module._CAPS_CACHE.clear()
     person = _person()
     _seed_person(fake, person)
@@ -288,7 +287,6 @@ async def test_delete_person_gone_branch_refuses_503_when_a_foreign_worker_holds
     # aggregated thread, so a foreign worker's lease refuses it with a clean 503 before the
     # checkpoint delete.
     monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
-    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
     caps_module._CAPS_CACHE.clear()
     settings = ConversationsSettings()
     key = settings.thread_lease_key("bridge:@person:never-seen")

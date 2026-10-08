@@ -18,11 +18,19 @@ is a loud ``400``, never a ``500``.
 ``list_resources`` is the op behind ``GET /api/storage/resources``; the write/delete ops
 (``upload_resource``, ``delete_resource``, ``delete_dir``) mutate the store, so they
 are ``destructive``.
+
+**Fleet eviction:** the store these ops write is the one the template manager renders
+from, and every worker holds per-id render state (compiled templates, ids storage
+answered "not found" for). Each write is applied on this worker followed by its
+template eviction, then broadcast as the ``evict_template`` fleet op (``prefix`` for a
+directory delete), so every worker's next render sees the write. An unconfirmed worker
+is logged loudly by the broadcast.
 """
 
 from __future__ import annotations
 
 import base64
+from collections.abc import Awaitable, Callable
 from urllib.parse import quote
 
 from pydantic import BaseModel
@@ -36,6 +44,7 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
+from tai42_skeleton.operations._broadcast import broadcast
 from tai42_skeleton.operations.response_models_group_b import (
     DirDeleted,
     ResourceDeleted,
@@ -86,6 +95,40 @@ def _is_unsafe_path(value: str) -> bool:
 def _reject_unsafe(kind: str, value: str) -> None:
     if _is_unsafe_path(value):
         raise BadRequestError(f"{kind} {value!r} {_UNSAFE_ID_MESSAGE}")
+
+
+async def _write_then_evict(resource_id: str, write: Callable[[], Awaitable[None]]) -> None:
+    """Apply one store write to ``resource_id`` here and on every worker, dropping its render state.
+
+    The write runs as this worker's local apply followed by the template eviction of the
+    id; a failed write raises before anything is evicted or broadcast.
+    """
+    manager = instance.app.storage.resource_manager
+
+    async def _apply() -> None:
+        await write()
+        manager.evict_compiled(resource_id)
+
+    await broadcast({"op": "evict_template", "path": resource_id}, None, _apply)
+
+
+def _upload_write(
+    provider: Storage, resource_id: str, content_text: str | None, content_base64: str | None
+) -> Callable[[], Awaitable[None]]:
+    """The store write for a validated upload: the text verbatim, else the decoded base64 bytes.
+
+    Undecodable base64 is a ``400`` raised here, before anything is written.
+    """
+    if content_text is not None:
+        return lambda: provider.upload(resource_id, content_text)
+    if content_base64 is None:
+        raise AssertionError
+    try:
+        # ``binascii.Error`` (bad padding / alphabet) subclasses ``ValueError``.
+        data = base64.b64decode(content_base64, validate=True)
+    except ValueError as exc:
+        raise BadRequestError(f"'content_base64' is not valid base64: {exc}") from exc
+    return lambda: provider.upload_bytes(resource_id, data)
 
 
 def _content_disposition(filename: str) -> str:
@@ -165,7 +208,7 @@ async def upload_resource(
     The type/shape validation the tool schema cannot express — a non-empty ``id``,
     exactly one content field, and each field's type — is enforced here so the MCP
     tool edge carries it too; the HTTP route's extractor passes the raw body through
-    to the same checks.
+    to the same checks. The stored id's render state is evicted fleet-wide.
     """
     if not isinstance(resource_id, str) or not resource_id:
         raise BadRequestError("body must contain a non-empty string 'id'")
@@ -178,17 +221,9 @@ async def upload_resource(
     if content_base64 is not None and not isinstance(content_base64, str):
         raise BadRequestError("'content_base64' must be a base64 string")
 
-    provider = _require_provider()
+    write = _upload_write(_require_provider(), resource_id, content_text, content_base64)
     try:
-        if content_text is not None:
-            await provider.upload(resource_id, content_text)
-        elif content_base64 is not None:
-            try:
-                # ``binascii.Error`` (bad padding / alphabet) subclasses ``ValueError``.
-                data = base64.b64decode(content_base64, validate=True)
-            except ValueError as exc:
-                raise BadRequestError(f"'content_base64' is not valid base64: {exc}") from exc
-            await provider.upload_bytes(resource_id, data)
+        await _write_then_evict(resource_id, write)
     except StoragePathConflictError as exc:
         # An id cannot be both a file and a directory that still holds objects; the
         # provider names the objects in the way. Surfaced as a 409, not a 500.
@@ -209,11 +244,11 @@ async def upload_resource(
     response_model=ResourceDeleted,
 )
 async def delete_resource(resource_id: str) -> dict:
-    """Remove one object from the store."""
+    """Remove one object from the store; its render state is evicted fleet-wide."""
     _reject_unsafe("resource id", resource_id)
     provider = _require_provider()
     try:
-        await provider.delete(resource_id)
+        await _write_then_evict(resource_id, lambda: provider.delete(resource_id))
     except FileNotFoundError as exc:
         raise NotFoundError(f"resource {resource_id!r} not found") from exc
     except ValueError as exc:
@@ -229,11 +264,32 @@ async def delete_resource(resource_id: str) -> dict:
     response_model=DirDeleted,
 )
 async def delete_dir(dir_path: str) -> dict:
-    """Remove a directory subtree from the store."""
+    """Remove a directory subtree from the store; the render state under it is evicted fleet-wide.
+
+    This worker evicts whatever the outcome. A failure before deletion begins — a missing
+    directory (``404``) or a rejected path (``400``) — broadcasts nothing. A failure once
+    deletion may have begun leaves the store partially changed, so the eviction still fans
+    out before the error propagates (a ``FleetBroadcastError`` carrying the fleet report).
+    """
     _reject_unsafe("directory path", dir_path)
     provider = _require_provider()
+    manager = instance.app.storage.resource_manager
+
+    async def _apply() -> None:
+        try:
+            await provider.delete_dir(dir_path)
+        finally:
+            # A partial delete must never leave content under the directory served stale.
+            manager.evict_dir(dir_path)
+
     try:
-        await provider.delete_dir(dir_path)
+        await broadcast(
+            {"op": "evict_template", "path": dir_path, "prefix": True},
+            None,
+            _apply,
+            publish_on_local_failure=True,
+            pre_mutation_errors=(FileNotFoundError, ValueError),
+        )
     except FileNotFoundError as exc:
         raise NotFoundError(f"directory {dir_path!r} not found") from exc
     except ValueError as exc:

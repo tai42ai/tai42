@@ -29,7 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -133,7 +133,7 @@ class MarketplaceInstallStore:
         """The install record for ``ref``, or ``None`` when it is not installed."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -161,7 +161,7 @@ class MarketplaceInstallStore:
         """Every install record, ordered by ``ref``."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(

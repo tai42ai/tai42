@@ -1,16 +1,17 @@
-"""The tools-agent factory plus its invoke and raw-stream faces.
+"""The tools-agent compile plus its invoke and raw-stream faces.
 
-``_build_agent_and_input`` compiles a LangGraph ``create_agent`` graph and builds
-its input messages and run config. ``ainvoke_tools_agent`` runs it once and
-returns the user text plus per-call usage; ``astream_tools_agent`` yields the raw
-LangGraph chunks (the normalized event projection lives in ``stream_events``).
+``_compile_tools_agent`` compiles a LangGraph ``create_agent`` graph (reused across runs
+through ``graph_cache``); ``_build_agent_and_input`` builds a run's input messages and run
+config over a compiled graph. ``ainvoke_tools_agent`` runs it once and returns the user text
+plus per-call usage; ``astream_tools_agent`` yields the raw LangGraph chunks (the normalized
+event projection lives in ``stream_events``).
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage
@@ -32,12 +33,20 @@ from tai42_kit.logging.settings import logging_settings
 from tai42_agents._internal.append import awrite_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import init_langgraph_config, mark_minted_thread_finished, start_run_thread
-from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
-from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_drive
+from tai42_agents._internal.outcomes import (
+    RepromptCapError,
+    RepromptCounter,
+    drive_reprompt_scope,
+    outcome_for_drive_error,
+)
+from tai42_agents._internal.park import ParkIdentity, bind_resume_per_step, finalize_drive, park_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage, aggregate_usage
+
+if TYPE_CHECKING:
+    from tai42_agents._internal.graph_cache import ToolsAgentGraph
 
 # One shared, stateless park hook leading the tools-agent stack, so an async
 # ``ask`` parked inside a run interrupts its own graph and resumes by id. The
@@ -151,93 +160,55 @@ async def _compile_tools_agent(
 
 
 async def _build_agent_and_input(
-    system_message: str,
+    graph: ToolsAgentGraph,
     user_message: list[str],
-    tools: list[StructuredTool],
-    llm_provider: str | None = None,
-    checkpoint_provider: str | None = None,
-    llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
-    system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
-    response_format: Any = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any], Any, str | None]:
-    """Compile the tools agent, build its input messages and run config, and ready the thread.
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Build a run's input messages and run config over ``graph``, and ready the thread.
 
-    Wraps :func:`_compile_tools_agent` with the input build and the turn-start
-    repair: the single choke point every face builds through, so the thread's
-    dangling tool_calls are repaired here (once the config resolves a ``thread_id``)
-    for every face. The system message is compiled into the graph as its per-run
-    ``system_prompt`` — the input carries only the user messages, so thread state
-    stays system-free. ``system_content_kwargs`` / ``user_content_kwargs`` (e.g.
-    ``cache_control``) carry content-block keys onto the system message and the last
-    user message respectively. A caller-supplied thread leaves the checkpoint
-    finished-thread ledger here, before any face runs the graph. Returns ``(agent,
-    messages, config, strategy, minted_thread)`` — the minted structured-output strategy
-    the projection suppresses the synthetic tool frames by, and the thread id this run
-    minted (``None`` for a caller-supplied thread), which the face marks finished when
-    the run ends without a park.
+    The single choke point every face drives through, so the thread's dangling tool_calls are
+    repaired here (once the config resolves a ``thread_id``) for every face. The system message
+    is compiled into the graph as its per-run ``system_prompt`` — the input carries only the
+    user messages, so thread state stays system-free. ``user_content_kwargs`` (e.g.
+    ``cache_control``) carries content-block keys onto the last user message. A caller-supplied
+    thread leaves the checkpoint finished-thread ledger here, before any face runs the graph.
+    Returns ``(messages, config, minted_thread)`` — the thread id this run minted (``None`` for a
+    caller-supplied thread), which the face marks finished when the run ends without a park.
     """
-    agent, strategy = await _compile_tools_agent(
-        tools,
-        llm_provider=llm_provider,
-        checkpoint_provider=checkpoint_provider,
-        llm_kwargs=llm_kwargs,
-        response_format=response_format,
-        system_message=system_message,
-        system_content_kwargs=system_content_kwargs,
-    )
-
     run_config = init_langgraph_config(config).config
-    minted_thread = await start_run_thread(config, run_config, provider=checkpoint_provider)
+    minted_thread = await start_run_thread(config, run_config, provider=graph.checkpoint_provider)
     messages = build_agent_input(*user_message, user_content_kwargs=user_content_kwargs)
-    await _repair_dangling_tool_calls(agent, run_config)
-    return agent, messages, run_config, strategy, minted_thread
+    await _repair_dangling_tool_calls(graph.agent, run_config)
+    return messages, run_config, minted_thread
 
 
 async def aappend_tools_agent_messages(
-    messages: list[BaseMessage],
-    config: dict[str, Any],
-    llm_provider: str | None = None,
-    checkpoint_provider: str | None = None,
-    llm_kwargs: dict[str, Any] | None = None,
+    graph: ToolsAgentGraph, messages: list[BaseMessage], config: dict[str, Any]
 ) -> None:
-    """Append messages to the thread's checkpoint without running the model.
+    """Append messages to the thread's checkpoint through ``graph`` without running the model.
 
-    Compiles the tools agent to the SAME checkpointer a run resolves (from
-    ``checkpoint_provider``) and writes the pre-converted messages through the
-    ``START`` node. No tool set is needed — the checkpoint write is
-    tool-independent — so the graph compiles with an empty tool set.
+    ``graph`` is compiled to the SAME checkpointer a run resolves; the pre-converted messages
+    are written through the ``START`` node. The checkpoint write is tool-independent, so the
+    caller compiles it with no tools and no structured output.
     """
-    agent, _strategy = await _compile_tools_agent(
-        [],
-        llm_provider=llm_provider,
-        checkpoint_provider=checkpoint_provider,
-        llm_kwargs=llm_kwargs,
-    )
-    await awrite_thread_messages(agent, config, messages)
+    await awrite_thread_messages(graph.agent, config, messages)
 
 
 async def ainvoke_tools_agent(
-    system_message: str,
+    graph: ToolsAgentGraph,
     user_message: list[str],
-    tools: list[StructuredTool],
-    llm_provider: str | None = None,
-    checkpoint_provider: str | None = None,
-    llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
-    system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
-    response_format: Any = None,
     park_builder: ParkBuilder | None = None,
     resume: Any = None,
 ) -> AgentInvokeResult:
-    """Invoke the tools agent and return its output, per-call usage, and the structured response.
+    """Invoke the tools agent ``graph`` and return its output, per-call usage, and the structured response.
 
     Usage is aggregated from every AIMessage in the run state.
 
-    ``.structured`` holds the forced structured output when a ``response_format``
-    was requested — validated against it, raising loudly if missing or
+    ``.structured`` holds the forced structured output when the graph was compiled with a
+    ``response_format`` — validated against it, raising loudly if missing or
     non-conforming — and is ``None`` otherwise.
 
     ``park_builder`` (given the FINAL thread-id-resolved run config) decides whether
@@ -247,18 +218,8 @@ async def ainvoke_tools_agent(
     instead of an answer. ``resume`` drives ``Command(resume=...)`` — answering a
     prior park — in place of a fresh user turn.
     """
-    agent, messages, config, _strategy, minted_thread = await _build_agent_and_input(
-        system_message,
-        user_message,
-        tools,
-        llm_provider,
-        checkpoint_provider,
-        llm_kwargs,
-        config,
-        system_content_kwargs=system_content_kwargs,
-        user_content_kwargs=user_content_kwargs,
-        response_format=response_format,
-    )
+    agent = graph.agent
+    messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = Command(resume=resume) if resume is not None else messages
     # The resume continuation and the chained-park claims ledger are bound for the drive's
@@ -268,7 +229,8 @@ async def ainvoke_tools_agent(
     # drive to a result in one task, never yielding to an external consumer.
     async with park_drive(park):
         try:
-            state = await agent.ainvoke(agent_input, config)
+            with drive_reprompt_scope():
+                state = await agent.ainvoke(agent_input, config)
         except (RepromptCapError, GraphRecursionError) as exc:
             # A capped structured-output loop or a tripped recursion limit ends the invoke with a
             # typed, non-fatal outcome (logged once) in place of an answer — never a generic
@@ -276,7 +238,7 @@ async def ainvoke_tools_agent(
             outcome = outcome_for_drive_error(exc, config)
             if outcome is None:
                 raise
-            await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
+            await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
             return AgentInvokeResult(output="", usage=CallUsage(0, 0, None), structured=None, outcome=outcome)
         park_events = await finalize_drive(agent, config, None, park)
     for event in park_events:
@@ -287,8 +249,9 @@ async def ainvoke_tools_agent(
                 structured=None,
                 suspended=_suspended_receipt(event),
             )
+    response_format = graph.response_format
     structured = extract_structured_output(state, response_format) if response_format is not None else None
-    await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
+    await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
     return AgentInvokeResult(
         output=build_user_output(state),
         usage=aggregate_usage(state),
@@ -297,35 +260,22 @@ async def ainvoke_tools_agent(
 
 
 async def astream_tools_agent(
-    system_message: str,
+    graph: ToolsAgentGraph,
     user_message: list[str],
-    tools: list[StructuredTool],
-    llm_provider: str | None = None,
-    checkpoint_provider: str | None = None,
-    llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
     stream_mode: str = "values",
-    system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
-    response_format: Any = None,
 ) -> AsyncIterator[Any]:
-    """Run the tools agent and yield the raw LangGraph ``astream`` chunks for ``stream_mode``.
+    """Run the tools agent ``graph`` and yield the raw LangGraph ``astream`` chunks for ``stream_mode``.
 
-    The caller decodes the channel shapes. A ``response_format`` forces structured output onto
-    the ``structured_response`` state channel.
+    The caller decodes the channel shapes. A graph compiled with a ``response_format`` forces
+    structured output onto the ``structured_response`` state channel.
     """
-    agent, messages, config, _strategy, minted_thread = await _build_agent_and_input(
-        system_message,
-        user_message,
-        tools,
-        llm_provider,
-        checkpoint_provider,
-        llm_kwargs,
-        config,
-        system_content_kwargs=system_content_kwargs,
-        user_content_kwargs=user_content_kwargs,
-        response_format=response_format,
-    )
-    async for chunk in agent.astream(messages, config, stream_mode=stream_mode):
+    messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
+    # One counter map for the whole drive, bound around each step (never across a yield).
+    counters: dict[int, RepromptCounter] = {}
+    async for chunk in bind_resume_per_step(
+        lambda: drive_reprompt_scope(counters), graph.agent.astream(messages, config, stream_mode=stream_mode)
+    ):
         yield chunk
-    await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
+    await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)

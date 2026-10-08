@@ -10,6 +10,7 @@ through the seam refuses loudly instead of reaching its encode.
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
 from pydantic import BaseModel
@@ -18,10 +19,12 @@ from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.tools.binding import result as result_module
 from tai42_skeleton.tools.binding.result import (
     ToolResultEncodingError,
     UnencodableLeafError,
     _jsonable_or_keep_walkable,
+    _walk_lone_surrogate,
     find_lone_surrogate,
 )
 
@@ -208,3 +211,63 @@ def test_seam_does_not_flag_a_resume_buffered_park() -> None:
     result = _dispatch(emit_buffered)
     assert isinstance(result, ResumeBuffered)
     assert result.remaining_ids == ["i1"]
+
+
+# -- the C-encoder fast path answers exactly as the walk ------------------------------------
+
+
+@dataclass
+class _Leaf:
+    text: str
+
+
+class _ModelLeaf(BaseModel):
+    text: str
+
+
+def _nested(depth: int, leaf: object) -> object:
+    value = leaf
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+_PARITY_CASES: dict[str, object] = {
+    "surrogate in a value": {"a": {"b": ["ok", _LONE_SURROGATE]}},
+    "surrogate in a key": {_LONE_SURROGATE: 1},
+    "surrogate in a nested key": {"a": [{"x": 1}, {f"k{_LONE_SURROGATE}": 2}]},
+    "surrogate in a revealed secret": {"token": SecretValue(f"s{_LONE_SURROGATE}")},
+    "clean secret": {"token": SecretValue("plain")},
+    "surrogate pair held as two code points": chr(0xD83D) + chr(0xDE00),
+    "top-level surrogate string": _LONE_SURROGATE,
+    "surrogate in a tuple item": ("a", (_LONE_SURROGATE,)),
+    "non-str key": {1: _LONE_SURROGATE, 2: "ok"},
+    "non-str key, clean": {1: "a", (2, 3): "b"},
+    "integer beyond 64 bits": {"n": 2**70, "s": _LONE_SURROGATE},
+    "integer beyond 64 bits, clean": {"n": 2**70},
+    "depth 300": _nested(300, _LONE_SURROGATE),
+    "depth 300, clean": _nested(300, "ok"),
+    "dataclass leaf holding a surrogate": {"d": _Leaf(_LONE_SURROGATE)},
+    "pydantic model leaf holding a surrogate": {"m": _ModelLeaf(text=_LONE_SURROGATE)},
+    "clean 1 KB": {"rows": [{"id": i, "name": f"row {i}"} for i in range(40)]},
+    "clean 4 MB": {"blob": "x" * (4 * 1024 * 1024), "items": list(range(1000))},
+    "unicode, clean": {"é": "日本語", "emoji": "😀"},
+}
+
+
+@pytest.mark.parametrize("case", sorted(_PARITY_CASES))
+def test_the_encoder_fast_path_answers_exactly_as_the_walk(case: str) -> None:
+    value = _PARITY_CASES[case]
+    assert find_lone_surrogate(value) == _walk_lone_surrogate(value, "$")
+
+
+def test_a_clean_result_is_decided_without_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    walked: list[object] = []
+    monkeypatch.setattr(result_module, "_walk_lone_surrogate", lambda value, path: walked.append(value))
+
+    assert find_lone_surrogate({"rows": [{"id": 1, "token": SecretValue("plain")}], "t": ("a", "b")}) is None
+    assert walked == []
+
+
+def test_a_failed_encode_runs_the_walk_for_the_path() -> None:
+    assert find_lone_surrogate({"outer": {"in": [0, _LONE_SURROGATE]}}) == "$.outer.in[1]"

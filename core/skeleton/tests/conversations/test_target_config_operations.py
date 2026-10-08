@@ -93,7 +93,9 @@ async def test_list_counts_an_indexed_member_with_no_row(wired):
     # A config member whose row is gone is skipped and COUNTED on the envelope, so the door
     # reports a shorter page as a truthful count and never a silent cut.
     await ops.set_conversation_config("agent", "assistant")
-    wired.seed_member(ConversationsSettings().target_config_names_key, "tool:ghost")
+    wired.seed_member(
+        ConversationsSettings().target_config_names_key, "tool:ghost", ConversationsSettings().target_config_version_key
+    )
     listed = await ops.list_conversation_configs()
     assert listed["total"] == 1
     assert listed["unreadable"] == 1

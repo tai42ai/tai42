@@ -203,9 +203,10 @@ async def _accept_for_turn(
     """Commit an admitted channel message to a turn in the one order that keeps the inbound claim sound.
 
     The release-less order is: reserve the per-thread FIFO slot (the last gate that can refuse,
-    and it refuses with nothing written), persist the intake record, claim the inbound pair,
-    schedule the turn. Losing the claim means a concurrent attempt committed first, so this one
-    releases its slot, discards its record and returns the winner's id.
+    and it refuses with nothing written), persist the intake record with the inbound claim and
+    the thread-mode refresh in one atomic step, schedule the turn. Losing the claim means a
+    concurrent attempt committed first: nothing was written, so this one releases its slot and
+    returns the winner's id.
     """
     caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)
@@ -226,9 +227,12 @@ async def _accept_for_turn(
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
-        await store.create_record(intake, intake_token=intake_token)
-        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
-        owner = await store.claim_inbound(channel, provider_message_id, message_id)
+        owner = await store.create_record(
+            intake,
+            intake_token=intake_token,
+            claim_key=store.settings.dedupe_key(channel, provider_message_id),
+            refresh_mode=True,
+        )
     except asyncio.CancelledError:
         # A cancelled task cannot await the round-trips the resolution needs, so it is
         # handed to a fresh task.
@@ -243,7 +247,6 @@ async def _accept_for_turn(
         raise
     if owner != message_id:
         caps.release_thread_slot(thread_id)
-        await store.delete_record(intake)
         return owner
 
     await _schedule_turn(
@@ -280,10 +283,10 @@ async def _shed_with_reply(
 ) -> str:
     """Answer an over-limit address with its one paid slow-down reply, in the turn path's order.
 
-    The record is persisted at ``accepted`` under an intake lease, the inbound pair is claimed,
-    and only then does the guarded transition make it deliverable. A record the delivery machine
-    drives must never stand behind an unclaimed pair. No turn runs, so no thread slot is
-    reserved.
+    The record is persisted at ``accepted`` under an intake lease with the inbound pair claimed
+    in the same atomic step, and only then does the guarded transition make it deliverable. A
+    record the delivery machine drives must never stand behind an unclaimed pair. No turn runs,
+    so no thread slot is reserved.
     """
     intake_token = uuid4().hex
     intake = _new_record(
@@ -301,8 +304,9 @@ async def _shed_with_reply(
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
-        await store.create_record(intake, intake_token=intake_token)
-        owner = await store.claim_inbound(channel, provider_message_id, message_id)
+        owner = await store.create_record(
+            intake, intake_token=intake_token, claim_key=store.settings.dedupe_key(channel, provider_message_id)
+        )
     except asyncio.CancelledError:
         _spawn_intake_resolution(message_id)
         raise
@@ -312,7 +316,6 @@ async def _shed_with_reply(
         await _resolve_stranded_intake(message_id)
         raise
     if owner != message_id:
-        await store.delete_record(intake)
         return owner
     completed = _with_outcome(intake, "answered", [_text_part(_SLOW_DOWN_TEXT)], None)
     outcome = await store.complete_turn(completed)
@@ -360,10 +363,8 @@ async def _shed_silently(
         delivery_status=DeliveryStatus.SHED,
         error=f"address {client_address!r} was over its rate cap after a prior slow-down reply",
     )
-    await store.create_record(record)
-    owner = await store.claim_inbound(channel, provider_message_id, message_id)
+    owner = await store.create_record(record, claim_key=store.settings.dedupe_key(channel, provider_message_id))
     if owner != message_id:
-        await store.delete_record(record)
         return owner
     logger.warning(
         "conversations: address %r on route %r is over its rate cap; message dropped after a prior slow-down reply",

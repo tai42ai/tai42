@@ -131,3 +131,14 @@ def test_native_pydantic_class_binds_the_portable_schema() -> None:
     assert strategy.to_model_kwargs() == native_structured_output_kwargs(
         "openai", "_Model", to_portable_schema(_Model.model_json_schema())
     )
+
+
+def test_a_native_json_payload_is_read_from_text_blocks_and_strings() -> None:
+    from langchain_core.messages import AIMessage
+
+    from tai42_agents._internal.structured import _native_json
+
+    message = AIMessage(content=[{"type": "text", "text": '{"value": '}, "1", {"type": "image", "url": "x"}, "}"])
+
+    assert _native_json(message) == {"value": 1}
+    assert _native_json(AIMessage(content='{"value": 2}')) == {"value": 2}

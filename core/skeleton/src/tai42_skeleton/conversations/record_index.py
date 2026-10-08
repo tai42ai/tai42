@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -14,7 +15,12 @@ from redis.asyncio import Redis as AsyncRedis
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations import records as _records
-from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.models import (
+    TERMINAL_STATUSES,
+    ConversationRecord,
+    ConversationsIndexLayoutError,
+    DeliveryStatus,
+)
 from tai42_skeleton.conversations.record_keys import _member
 from tai42_skeleton.conversations.record_pages import PendingWork
 from tai42_skeleton.conversations.record_scripts import (
@@ -43,22 +49,45 @@ class StatusListing:
     unreadable: int = 0
 
 
+def _text(member: str | bytes) -> str:
+    return member.decode() if isinstance(member, bytes) else member
+
+
 class RecordIndexMixin(RecordStoreBase):
     """Reads over the per-status record index (keyspace 6)."""
 
     async def _indexed_ids(self, r: AsyncRedis, statuses: frozenset[DeliveryStatus], now: float) -> list[str]:
         """The ``message_id``s indexed under ``statuses``.
 
-        Drops the members whose row has expired out from under the index first.
+        A terminal index's scores are row expiries, so its members whose row has expired out
+        from under the index are dropped first; a live index's scores carry no expiry.
         """
         ids: list[str] = []
         for status in statuses:
             key = self.settings.status_index_key(status.value)
-            await awaited(r.zremrangebyscore(key, "-inf", now))
-            ids.extend(
-                member.decode() if isinstance(member, bytes) else member
-                for member in await awaited(r.zrange(key, 0, -1))
-            )
+            if status in TERMINAL_STATUSES:
+                await awaited(r.zremrangebyscore(key, "-inf", now))
+            ids.extend(_text(member) for member in await awaited(r.zrange(key, 0, -1)))
+        return ids
+
+    async def _provisional_ids(self, r: AsyncRedis, *, due_only: bool, now: float) -> list[str]:
+        """The ``provisional`` members: only those past their grace deadline when ``due_only``.
+
+        The whole read checks the index layout: a member scored ``+inf`` was indexed without its
+        grace deadline, a layout this code does not read, and raises.
+        """
+        key = self.settings.status_index_key(DeliveryStatus.PROVISIONAL.value)
+        if due_only:
+            return [_text(member) for member in await awaited(r.zrangebyscore(key, "-inf", now))]
+        ids: list[str] = []
+        for member, score in await awaited(r.zrange(key, 0, -1, withscores=True)):
+            message_id = _text(member)
+            if math.isinf(float(score)):
+                raise ConversationsIndexLayoutError(
+                    f"provisional record {message_id!r} is indexed without its grace deadline: the conversations "
+                    "store predates this index layout; reset the conversations store"
+                )
+            ids.append(message_id)
         return ids
 
     async def _drop_orphan(self, r: AsyncRedis, message_id: str) -> None:
@@ -70,21 +99,28 @@ class RecordIndexMixin(RecordStoreBase):
         keys = self._record_keys(message_id)
         await eval_script(r, _UNINDEX_LUA, len(keys), *keys, message_id)
 
-    async def pending_work(self) -> list[PendingWork]:
-        """Every record the DELIVERY machine has unfinished work on.
+    async def pending_work(self, *, due_only: bool) -> list[PendingWork]:
+        """The records the DELIVERY machine has unfinished work on.
 
-        The listing behind the boot re-drive and the periodic sweep. Read from the status
-        index, so it costs the work outstanding and not the whole retained keyspace.
-        Terminal and intake records are not read (an intake record is the turn engine's to
-        resolve); an unrecoverable row is moved to the terminal ``failed`` state so it stops
-        being re-enumerated every pass, never silently skipped.
+        The listing behind the boot re-drive (``due_only=False``: every ``pending_delivery``
+        and every ``provisional`` record, so the grace timers of those still inside their grace
+        are rescheduled) and the periodic sweep (``due_only=True``: every ``pending_delivery``
+        record, which a dead worker may have stranded, and only the ``provisional`` ones past
+        their grace deadline). Read from the status index, so it costs the work outstanding and
+        not the whole retained keyspace. Terminal and intake records are not read (an intake
+        record is the turn engine's to resolve); an unrecoverable row is moved to the terminal
+        ``failed`` state so it stops being re-enumerated every pass, never silently skipped.
         """
         work: list[PendingWork] = []
         unreadable_ids: list[str] = []
         wanted = frozenset({DeliveryStatus.PENDING_DELIVERY, DeliveryStatus.PROVISIONAL})
         now = time.time()
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            for message_id in await self._indexed_ids(r, wanted, now):
+            candidates = [
+                *await self._indexed_ids(r, frozenset({DeliveryStatus.PENDING_DELIVERY}), now),
+                *await self._provisional_ids(r, due_only=due_only, now=now),
+            ]
+            for message_id in candidates:
                 hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
                 if not hashed:
                     await self._drop_orphan(r, message_id)

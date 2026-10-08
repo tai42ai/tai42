@@ -6,6 +6,10 @@ store, then broadcasts an ``evict_template`` eviction over the worker bus, so ev
 worker drops the stale compilation; the op response embeds the per-worker ``fanout``
 report.
 
+The raw storage doors (``/api/storage/resources`` upload and delete) write the same
+store, so they broadcast the same eviction: a template id a sibling remembered as
+missing, or still holds compiled, is re-read there on the next render.
+
 Driven over the two-replica ``replicas_stack`` (two ``--workers 1`` masters on ports A
 and B, sharing config/Redis/PG and the worker bus, over the real active storage
 provider): a template is COMPILED into replica B's cache by a render there, then mutated
@@ -135,3 +139,48 @@ async def test_a_resource_upload_rerenders_the_template_jq_that_reads_it_on_ever
     for api in (api_a, api_b):
         evaluated = await api.get(record, retry_on_reloading=True)
         assert evaluated["value"] == "second program", f"a worker served a stale rendered program: {evaluated}"
+
+
+async def test_a_template_created_through_the_storage_door_is_rendered_next_on_a_sibling(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """Replica B renders a missing id and a page whose include target is missing (both
+    remembered missing there); replica A stores both through the raw storage door; B's
+    next renders use them."""
+    base = uniq("created")
+    path, part = f"{base}.txt", f"{base}-part.txt"
+    page = f"{base}-page.txt"
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+
+    _assert_fleet_fanout(await _upload(api_a, page, f"[{{% include '{part}' ignore missing %}}]"))
+    await _render(api_b, path, expect=404)
+    assert (await _render(api_b, page))["rendered"] == "[]"
+
+    for resource_id, body in ((path, "created-body"), (part, "part-body")):
+        stored = await api_a.post(
+            "/api/storage/resources", json={"id": resource_id, "content_text": body}, retry_on_reloading=True
+        )
+        assert stored == {"id": resource_id, "stored": True}, stored
+
+    assert (await _render(api_b, path))["rendered"] == "created-body"
+    assert (await _render(api_b, page))["rendered"] == "[part-body]"
+
+
+async def test_a_template_deleted_through_the_storage_door_is_not_rendered_on_a_sibling(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """Replica B compiles a template; replica A deletes it through the raw storage door;
+    B's next render is a loud 404, not the stale compiled body."""
+    path = f"{uniq('gone')}.txt"
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+
+    _assert_fleet_fanout(await _upload(api_a, path, "gone-body"))
+    assert (await _render(api_b, path))["rendered"] == "gone-body"
+
+    deleted = await api_a.delete(f"/api/storage/resources/{path}", retry_on_reloading=True)
+    assert deleted == {"id": path, "deleted": True}, deleted
+
+    missing = await _render(api_b, path, expect=404)
+    assert path in missing["error"], missing

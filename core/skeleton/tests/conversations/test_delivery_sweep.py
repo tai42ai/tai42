@@ -18,7 +18,7 @@ from tai42_skeleton.conversations import delivery_sweep as delivery_sweep_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import turn as turn_module
-from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.models import ConversationRecord, ConversationsIndexLayoutError, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -217,8 +217,9 @@ async def test_sweep_confirms_a_provisional_record_past_its_grace(monkeypatch, f
     the process would ever close the record. The sweep does."""
     _wire_channel(monkeypatch, FakeChannel())
     await store.create_record(_record("m-prov", "the answer"))
-    await store.mark_provisional("m-prov", ["out-1"], 1, time.time(), "tok")
-    fake._hashes[ConversationsSettings().record_key("m-prov")]["grace_deadline"] = str(time.time() - 1)
+    # Sent a whole grace window (and a second) ago, so its grace has run out.
+    sent_at = time.time() - ConversationsSettings().delivery_grace_seconds - 1
+    await store.mark_provisional("m-prov", ["out-1"], 1, sent_at, "tok")
 
     await delivery_module.sweep_stalled_deliveries()
     await _drain_spawned(store)
@@ -382,7 +383,96 @@ async def test_sweep_moves_unrecoverable_row_to_failed(monkeypatch, fake, store)
     await _drain_spawned(store)
 
     assert fake._hashes[settings.record_key("bad")]["delivery_status"] == "failed"
-    assert [w.message_id for w in await store.pending_work()] == []
+    assert [w.message_id for w in await store.pending_work(due_only=False)] == []
     failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))
     assert failed.items == []
     assert failed.unreadable == 1
+
+
+# -- the provisional index is scored by grace deadline: the sweep reads only what is due --
+
+
+async def _provisional(store: ConversationRecordStore, message_id: str, sent_at: float) -> None:
+    await store.create_record(_record(message_id, "the answer"))
+    await store.mark_provisional(message_id, ["out-1"], 1, sent_at, "tok")
+
+
+def _count_row_reads(fake: FakeRecordRedis) -> list[str]:
+    reads: list[str] = []
+    real = fake.hgetall
+
+    async def hgetall(key: str) -> dict[str, str]:
+        reads.append(key.rsplit(":", 1)[-1])
+        return await real(key)
+
+    fake.hgetall = hgetall  # type: ignore[method-assign]
+    return reads
+
+
+async def test_a_provisional_record_is_indexed_at_its_grace_deadline(fake, store):
+    settings = ConversationsSettings()
+    sent_at = time.time()
+    await _provisional(store, "m-prov", sent_at)
+
+    score = await fake.zscore(settings.status_index_key(DeliveryStatus.PROVISIONAL.value), "m-prov")
+    grace_deadline = float(fake._hashes[settings.record_key("m-prov")]["grace_deadline"])
+    assert score == pytest.approx(sent_at + settings.delivery_grace_seconds)
+    assert score == grace_deadline
+
+
+async def test_the_periodic_sweep_reads_only_the_due_provisional_records(monkeypatch, fake, store):
+    _wire_channel(monkeypatch, FakeChannel())
+    grace = ConversationsSettings().delivery_grace_seconds
+    await _provisional(store, "m-due", time.time() - grace - 1)
+    for index in range(3):
+        await _provisional(store, f"m-young-{index}", time.time())
+    reads = _count_row_reads(fake)
+
+    await delivery_module.sweep_stalled_deliveries()
+    await _drain_spawned(store)
+
+    assert [read for read in reads if read.startswith("m-young")] == []
+    assert (await _get(store, "m-due")).delivery_status is DeliveryStatus.DELIVERED
+    for index in range(3):
+        assert (await _get(store, f"m-young-{index}")).delivery_status is DeliveryStatus.PROVISIONAL
+
+
+async def test_the_boot_redrive_reads_every_provisional_record_and_reschedules_the_young(monkeypatch, fake, store):
+    _wire_channel(monkeypatch, FakeChannel())
+    grace = ConversationsSettings().delivery_grace_seconds
+    await _provisional(store, "m-due", time.time() - grace - 1)
+    await _provisional(store, "m-young", time.time())
+    rescheduled: list[str] = []
+
+    async def _record_reschedule(message_id: str, grace_seconds: float) -> None:
+        rescheduled.append(message_id)
+
+    monkeypatch.setattr(delivery_module, "_confirm_after_grace", _record_reschedule)
+    reads = _count_row_reads(fake)
+
+    await delivery_module.redrive_pending()
+    await _drain_spawned(store)
+
+    assert {"m-due", "m-young"} <= set(reads)
+    assert rescheduled == ["m-young"]
+    assert (await _get(store, "m-due")).delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_a_provisional_member_indexed_without_its_deadline_refuses_the_boot_redrive(monkeypatch, fake, store):
+    _wire_channel(monkeypatch, FakeChannel())
+    await _provisional(store, "m-old-layout", time.time())
+    key = ConversationsSettings().status_index_key(DeliveryStatus.PROVISIONAL.value)
+    await fake.zadd(key, {"m-old-layout": float("inf")})
+
+    with pytest.raises(ConversationsIndexLayoutError, match="m-old-layout"):
+        await delivery_module.redrive_pending()
+
+
+async def test_the_status_listing_lists_every_provisional_record(monkeypatch, fake, store):
+    grace = ConversationsSettings().delivery_grace_seconds
+    await _provisional(store, "m-due", time.time() - grace - 1)
+    await _provisional(store, "m-young", time.time())
+
+    listing = await store.list_by_status(frozenset({DeliveryStatus.PROVISIONAL}))
+
+    assert sorted(record.message_id for record in listing.items) == ["m-due", "m-young"]

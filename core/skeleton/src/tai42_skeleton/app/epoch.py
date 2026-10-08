@@ -705,8 +705,12 @@ async def build_and_swap_epoch(
         # routes — the spine route registry dedups and is never rolled back). The
         # live epoch keeps serving with zero mutation.
         from tai42_skeleton.access_control.role_gate import reset_route_index
+        from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
 
         abort_staging_all()
+        # The discarded build's core is dropped, so the listed tool set reverts to the live
+        # core's: a cache filled from the building core during the build never matches again.
+        bump_tool_surface_generation()
         _restore_env(snapshot, loaded_before)
         reset_all_settings()
         reset_route_index()

@@ -183,7 +183,7 @@ def _seed_config(
     config = TargetConversationConfig(
         target_kind=target_kind, target_name=target_name, multichannel=multichannel, greeting_template=greeting_template
     )
-    fake._strings[ConversationsSettings().target_config_key(target_kind, target_name)] = config.model_dump_json()
+    fake.seed_target_config(config)
 
 
 def _tool_route(

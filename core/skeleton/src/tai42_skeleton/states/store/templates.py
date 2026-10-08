@@ -11,6 +11,7 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from tai42_kit.clients.impl.postgres import read_connection
 
 from .base import _StoreBase
 from .connection import _pool, _settings
@@ -22,7 +23,7 @@ class _TemplateStore(_StoreBase):
     async def get_template(self, name: str) -> dict[str, Any] | None:
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -34,7 +35,7 @@ class _TemplateStore(_StoreBase):
     async def list_templates(self) -> list[dict[str, Any]]:
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute("SELECT name, body, shipped_hash, updated_at, version FROM state_templates ORDER BY name")
@@ -55,7 +56,7 @@ class _TemplateStore(_StoreBase):
         """
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute("SELECT template, count(*) AS n FROM state_attachments GROUP BY template")

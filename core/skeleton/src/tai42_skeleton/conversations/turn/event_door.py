@@ -173,11 +173,15 @@ async def submit_event(
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
-        await store.create_record(intake, intake_token=intake_token)
-        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
-        # The claim is the LAST mutation, mirroring the channel door: an owner id always
-        # names a durable record, and a lost claim discards the record just created.
-        claimed_owner = await store.claim_event(route_name, event_id, message_id)
+        # The record, the event claim and the thread-mode refresh land in one atomic step,
+        # mirroring the channel door: an owner id always names a durable record, and a lost
+        # claim writes nothing.
+        claimed_owner = await store.create_record(
+            intake,
+            intake_token=intake_token,
+            claim_key=store.settings.event_dedupe_key(route_name, event_id),
+            refresh_mode=True,
+        )
     except asyncio.CancelledError:
         caps.release_thread_slot(thread_id)
         _spawn_intake_resolution(message_id)
@@ -188,7 +192,6 @@ async def submit_event(
         raise
     if claimed_owner != message_id:
         caps.release_thread_slot(thread_id)
-        await store.delete_record(intake)
         return ApiSubmitResult(message_id=claimed_owner, thread_id=thread_id, answer=None)
 
     deliver_on_completion = route.door == "channel"

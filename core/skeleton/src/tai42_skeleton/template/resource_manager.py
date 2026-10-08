@@ -24,6 +24,7 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.net import fetch_url
 
+from tai42_skeleton.template.absent_ids import AbsentTemplateIds
 from tai42_skeleton.template.media import ContentPart, MediaBlock
 from tai42_skeleton.template.path_guard import safe_template_path
 from tai42_skeleton.template.settings import template_cache_settings
@@ -175,6 +176,9 @@ class ResourceManager:
         self._cache_enabled = (settings.max_size is None or settings.max_size > 0) and (
             settings.ttl is None or settings.ttl > 0
         )
+        # Ids storage answered "not found" for (an absent locale variant or include target), so a
+        # render does not re-read them; dropped by every eviction seam, so a platform write is seen at once.
+        self._absent = AbsentTemplateIds(ttl=settings.ttl, max_size=settings.max_size, enabled=self._cache_enabled)
         if self._cache_enabled:
             self._get_compiled_template = alru_cache(maxsize=settings.max_size, ttl=settings.ttl)(
                 self._fetch_and_compile
@@ -256,9 +260,12 @@ class ResourceManager:
 
         A genuinely missing dependency becomes ``None`` so Jinja raises
         ``TemplateNotFound`` (keeping ``{% include ... ignore missing %}``
-        working); every other failure propagates loudly instead of being mistaken
-        for a missing template.
+        working) and is remembered absent, so the next render answers ``None`` without a
+        read; every other failure propagates loudly instead of being mistaken for a
+        missing template, and is never remembered.
         """
+        if template_id in self._absent:
+            return None
         if getattr(self._render_loop, "active", False):
             # Inside a render scope (the normal path): reuse the per-render loop so
             # sibling includes share one storage client. Create it on first use.
@@ -269,6 +276,7 @@ class ResourceManager:
             try:
                 return loop.run_until_complete(self._load_by_id(template_id))
             except FileNotFoundError:
+                self._absent.add(template_id)
                 return None
 
         # Standalone fallback (no active render scope): a one-shot loop that
@@ -285,6 +293,7 @@ class ResourceManager:
         try:
             return asyncio.run(_load())
         except FileNotFoundError:
+            self._absent.add(template_id)
             return None
 
     async def _fetch_and_compile(self, template_id: str) -> JinjaTemplate:
@@ -475,6 +484,7 @@ class ResourceManager:
             logger.info("ResourceManager cache cleared.")
         if self._env.cache is not None:
             self._env.cache.clear()
+        self._absent.forget(lambda _template_id: True)
 
     def evict_compiled(self, template_id: str) -> None:
         """Evict a single template from the compiled cache and the engine cache.
@@ -493,6 +503,7 @@ class ResourceManager:
             invalidate(template_id)
         self._cached_template_ids.discard(template_id)
         self._evict_engine_cache(lambda name: name == template_id)
+        self._absent.forget(lambda tracked: tracked == template_id)
 
     def evict_dir(self, path: str) -> None:
         """Evict every compiled template under ``path/`` (no-op if caching is off).
@@ -514,6 +525,7 @@ class ResourceManager:
         """
         self.generation += 1
         self._evict_engine_cache(lambda name: name.startswith(prefix))
+        self._absent.forget(lambda tracked: tracked.startswith(prefix))
         invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
         if invalidate is None:
             # Compiled-template caching disabled: nothing is tracked by id.
@@ -548,6 +560,19 @@ class ResourceManager:
         ids.append(template_id)
         return ids
 
+    async def _compiled_unless_absent(self, template_id: str) -> JinjaTemplate:
+        """The compiled template ``template_id``; a not-found answer is remembered and raised again without a read.
+
+        Only a not-found answer is remembered: a storage error raises as it is, every time.
+        """
+        if template_id in self._absent:
+            raise TemplateNotFoundError(f"Template '{template_id}' not found.")
+        try:
+            return await self._get_compiled_template(template_id)
+        except TemplateNotFoundError:
+            self._absent.add(template_id)
+            raise
+
     async def _compiled_for_locale(self, template_id: str, locale: str | None) -> JinjaTemplate:
         """Resolve ``template_id`` to a compiled template for ``locale``.
 
@@ -558,10 +583,12 @@ class ResourceManager:
         the template and locale, never a silent wrong-language render.
         """
         if locale is None:
-            return await self._get_compiled_template(template_id)
+            return await self._compiled_unless_absent(template_id)
         for candidate in self._locale_variant_ids(template_id, locale):
+            if candidate in self._absent:
+                continue
             try:
-                return await self._get_compiled_template(candidate)
+                return await self._compiled_unless_absent(candidate)
             except TemplateNotFoundError:
                 continue
         raise TemplateLocaleNotFoundError(

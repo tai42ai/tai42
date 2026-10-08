@@ -195,7 +195,7 @@ def _seed_config(
     config = TargetConversationConfig(
         target_kind=target_kind, target_name=target_name, multichannel=multichannel, greeting_template=greeting_template
     )
-    fake._strings[ConversationsSettings().target_config_key(target_kind, target_name)] = config.model_dump_json()
+    fake.seed_target_config(config)
 
 
 def _tool_route(
@@ -415,9 +415,8 @@ async def test_invalid_code_is_an_answered_uniform_reply(env, monkeypatch):
 async def test_cross_target_redeem_is_an_answered_refusal(env, monkeypatch):
     _seed_config(env)
     # A code minted on a DIFFERENT target: redeeming it here merges across targets and refuses.
-    settings = ConversationsSettings()
     other = TargetConversationConfig(target_kind="tool", target_name="pinger", multichannel=True)
-    env._strings[settings.target_config_key("tool", "pinger")] = other.model_dump_json()
+    env.seed_target_config(other)
     tool_route = ConversationRoute(
         route_name="tool-line",
         door="channel",

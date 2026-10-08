@@ -378,7 +378,6 @@ def fake_lease(monkeypatch) -> tuple[FakeRecordRedis, ConversationsSettings]:
     """A shared fake redis wired as the conversations store, so a lease key can be pre-set
     under a FOREIGN token to stand in for a sibling worker holding the thread."""
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
-    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
     fake = FakeRecordRedis()
     monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
     return fake, ConversationsSettings()

@@ -23,7 +23,7 @@ from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.connectors.oauth import crypto
@@ -135,7 +135,7 @@ async def _enumerate_rows() -> list[tuple[str, bytes, datetime | None]]:
     """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-        pool.connection() as conn,
+        read_connection(pool) as conn,
         conn.cursor() as cur,
     ):
         await cur.execute(
@@ -152,7 +152,7 @@ async def _reread_row(connection_id: str) -> tuple[bytes, datetime | None] | Non
     """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-        pool.connection() as conn,
+        read_connection(pool) as conn,
         conn.cursor() as cur,
     ):
         await cur.execute(

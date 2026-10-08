@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import (
     MessageFinal,
@@ -21,11 +22,18 @@ from tests._voting_agent_support import (
     _fake_full_judge_stream,
     _fake_voter_invoke,
     _make_tool,
+    script_voting_graphs,
 )
 
 from tai42_agents.voting_agent import agent as agent_module
 from tai42_agents.voting_agent.agent import VotingAgent
 from tai42_agents.voting_agent.model import VoteInfo, VoterSpec, VotingOutput
+
+
+@pytest.fixture(autouse=True)
+def _scripted_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The voting agent builds its graphs through a double that compiles nothing."""
+    script_voting_graphs(monkeypatch)
 
 
 def test_decorator_registers_a_live_voting_agent() -> None:

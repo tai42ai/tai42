@@ -31,8 +31,13 @@ class TemplateCacheSettings(TaiBaseSettings):
         env_prefix="TEMPLATE_CACHE_",
     )
 
+    # Seconds a compiled template, and a template id storage answered "not found" for, is
+    # kept; the only freshness bound for a template created or edited directly in the
+    # storage backend, outside the platform's write paths (those evict at once).
     ttl: int | None = 60 * 5
-    max_size: int | None = 256
+    # How many compiled templates (and as many remembered-absent ids) each worker keeps; set
+    # it at or above the number of stored templates the deployment renders.
+    max_size: int | None = 1024
 
     @field_validator("ttl", "max_size", mode="before")
     @classmethod

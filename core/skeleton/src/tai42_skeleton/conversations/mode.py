@@ -10,9 +10,10 @@ coerced or silently ignored.
 
 LIFETIME: the override never outlives the conversation. It is written with the same
 ``answer_retention_ttl_seconds`` clock the answer records carry (:meth:`set_mode`), and every
-new activity on the thread — a channel/api accept intake and an operator send — extends that
-window (:meth:`refresh_ttl`, a single ``EXPIRE`` that NEVER recreates a missing key, so
-absence stays the route default). A thread that goes quiet past the retention window loses
+new activity on the thread — each record create of an accept intake, an event, an operator
+send or a completion — extends that window in the create's own atomic step
+(:meth:`ConversationRecordStore.create_record`, an ``EXPIRE`` that NEVER recreates a missing
+key, so absence stays the route default). A thread that goes quiet past the retention window loses
 its override with its records, and a returning address starts at the route default again. An
 explicit operator thread delete (:meth:`ConversationRecordStore.drop_thread`) or route delete
 (:meth:`ConversationRecordStore.drop_route_threads`) reclaims the key at once.
@@ -78,7 +79,7 @@ class ConversationModeStore:
         """Set ``thread_id``'s override to ``mode`` (validated), returning the stored value.
 
         The override carries the record retention TTL, so it never outlives the
-        conversation; thread activity extends it through :meth:`refresh_ttl`.
+        conversation; each record create on the thread extends it.
         """
         checked = _validate_mode(mode)
         async with client_ctx(RedisClient, self.settings.redis) as r:
@@ -86,17 +87,6 @@ class ConversationModeStore:
                 r.set(self.settings.mode_key(thread_id), checked, ex=self.settings.answer_retention_ttl_seconds)
             )
         return checked
-
-    async def refresh_ttl(self, thread_id: str) -> bool:
-        """Extend a live override's TTL to the retention window on new thread activity.
-
-        Returns whether an override was present to extend. A no-op when none is set —
-        ``EXPIRE`` never resurrects a missing key, so absence stays the route default.
-        """
-        async with client_ctx(RedisClient, self.settings.redis) as r:
-            return bool(
-                await awaited(r.expire(self.settings.mode_key(thread_id), self.settings.answer_retention_ttl_seconds))
-            )
 
     async def delete_mode(self, thread_id: str) -> bool:
         """Remove ``thread_id``'s override, returning whether one was removed."""

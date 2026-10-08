@@ -18,7 +18,7 @@ import psycopg
 from psycopg.rows import dict_row
 from tai42_contract.accounts.errors import LoginConflictError
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 
 if TYPE_CHECKING:
     from tai42_kit.clients import PostgresConnectionSettings
@@ -103,7 +103,7 @@ class UsersStore:
         """The user row for ``email``, or ``None`` when none exists."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -116,7 +116,7 @@ class UsersStore:
         """The user row for ``user_id``, or ``None`` when none exists."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -130,7 +130,7 @@ class UsersStore:
         """Every user row, oldest first, each with a ``pending_invite`` flag for a password-less account."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -187,7 +187,7 @@ class UsersStore:
         """
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -293,7 +293,7 @@ class SessionsStore:
         """The session row JOINed with its user, or ``None`` when unknown."""
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
@@ -407,7 +407,7 @@ class InvitesStore:
         """
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(

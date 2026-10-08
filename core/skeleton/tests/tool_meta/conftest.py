@@ -228,6 +228,11 @@ class _FakeConn:
     def transaction(self) -> _FakeTxn:
         return _FakeTxn(self)
 
+    autocommit = False
+
+    async def set_autocommit(self, value: bool) -> None:
+        self.autocommit = value
+
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
 

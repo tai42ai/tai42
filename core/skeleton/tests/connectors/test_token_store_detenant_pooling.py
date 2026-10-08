@@ -113,6 +113,11 @@ class _FakeConn:
     async def __aexit__(self, *exc):
         return False
 
+    autocommit = False
+
+    async def set_autocommit(self, value: bool) -> None:
+        self.autocommit = value
+
     def cursor(self):
         return _FakeCursor(self._rec)
 

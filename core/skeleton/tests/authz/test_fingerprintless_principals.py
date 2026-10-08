@@ -66,7 +66,7 @@ def gate_on(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(authz_execution, "access_control_settings", lambda: _Settings())
 
     def wire(policy: AccessPolicy) -> None:
-        monkeypatch.setattr(authz_execution, "PolicyEnforcer", lambda settings: _FakeEnforcer(policy))
+        monkeypatch.setattr(authz_execution, "policy_enforcer", lambda settings: _FakeEnforcer(policy))
 
     return wire
 

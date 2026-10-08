@@ -36,7 +36,6 @@ from typing import Any
 
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
-from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
 
 # A node may overwrite a reduced channel by returning ``Overwrite(value=...)``;
@@ -57,7 +56,13 @@ from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
 from tai42_agents._internal.config_util import mark_minted_thread_finished
-from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
+from tai42_agents._internal.graph_cache import ToolsAgentGraph
+from tai42_agents._internal.outcomes import (
+    RepromptCapError,
+    RepromptCounter,
+    drive_reprompt_scope,
+    outcome_for_drive_error,
+)
 from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
@@ -124,16 +129,10 @@ def _reasoning_text(message: AIMessage) -> str:
 
 
 async def astream_tools_agent_events(
-    system_message: str,
+    graph: ToolsAgentGraph,
     user_message: list[str],
-    tools: list[StructuredTool],
-    llm_provider: str | None = None,
-    checkpoint_provider: str | None = None,
-    llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
-    system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
-    response_format: Any = None,
     park_builder: ParkBuilder | None = None,
     resume: Any = None,
 ) -> AsyncIterator[StreamEvent]:
@@ -144,9 +143,9 @@ async def astream_tools_agent_events(
     reasoning blocks and tool calls, and the tools' results — and the
     ``messages`` channel surfaces token-level deltas of the final answer.
     Pass a ``thread_id`` in ``config['configurable']`` to resume a checkpointed
-    conversation; omit it for a one-shot run. A ``response_format`` forces the
-    run's structured output, which the projection surfaces as a terminal
-    :class:`StructuredFinal`.
+    conversation; omit it for a one-shot run. A graph compiled with a
+    ``response_format`` forces the run's structured output, which the projection
+    surfaces as a terminal :class:`StructuredFinal`.
 
     ``park_builder`` (given the FINAL thread-id-resolved run config) decides park
     capability and captures the rebuild identity: the resume continuation is bound
@@ -158,22 +157,12 @@ async def astream_tools_agent_events(
     Cancellation (``asyncio.CancelledError``) propagates out unchanged so the
     caller can do its own abort bookkeeping.
     """
-    # The compile seam mints the structured-output strategy ONCE and returns it; that
+    # The compile seam minted the structured-output strategy ONCE with the graph; that
     # same object is bound into both the graph and the projection, so the synthetic
     # tool the graph binds and the names the projection suppresses derive from one
     # object — an untitled ``oneOf`` variant's random name matches by identity.
-    agent, messages, config, strategy, minted_thread = await _build_agent_and_input(
-        system_message,
-        user_message,
-        tools,
-        llm_provider,
-        checkpoint_provider,
-        llm_kwargs,
-        config,
-        system_content_kwargs=system_content_kwargs,
-        user_content_kwargs=user_content_kwargs,
-        response_format=response_format,
-    )
+    agent, strategy, response_format = graph.agent, graph.strategy, graph.response_format
+    messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = Command(resume=resume) if resume is not None else messages
 
@@ -184,7 +173,7 @@ async def astream_tools_agent_events(
             yield event
         pauses = await finalize_drive(agent, config, None, park)
         if not any(isinstance(event, SuspendedFinal | InterruptFinal) for event in pauses):
-            await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
+            await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
         for event in pauses:
             yield event
 
@@ -405,8 +394,14 @@ async def aproject_agent_events(
         native=isinstance(structured_strategy, ProviderStrategy),
     )
 
+    # One counter map for the whole drive, bound around each step (never across a yield): every
+    # structured-output rail of the graph counts per drive, not per compiled graph.
+    counters: dict[int, RepromptCounter] = {}
     try:
-        async for item in agent.astream(agent_input, config, stream_mode=["updates", "messages"]):
+        async for item in bind_resume_per_step(
+            lambda: drive_reprompt_scope(counters),
+            agent.astream(agent_input, config, stream_mode=["updates", "messages"]),
+        ):
             mode, chunk = _split_stream_item(item)
 
             if mode == "messages":

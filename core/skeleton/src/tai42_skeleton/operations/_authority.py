@@ -17,7 +17,7 @@ from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_C
 from tai42_contract.access_control.models import AccessPolicy
 
 from tai42_skeleton.access_control import management
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
+from tai42_skeleton.access_control.policy import policy_enforcer, policy_is_empty
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.user import is_admin_policy
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, assert_key_carries_authority
@@ -87,7 +87,7 @@ async def resolve_caller() -> Caller:
         )
         raise OperationFailedError("access_control: internal authority-resolution failure")
 
-    enforcer = PolicyEnforcer(settings)
+    enforcer = policy_enforcer(settings)
     policy = await enforcer.get_policy(caller_id)
     owner_claim = owner_of(policy.policy_data)
     # The owner's CURRENT policy caps the caller for the admin verdict; a top-level
@@ -199,7 +199,7 @@ async def assert_execution_key_bindable(caller: Caller, execution_key: str) -> s
 
     # One enforcer serves both halves, so the key's policy row the pass-role test reads
     # is the one the token-free scan asserts against rather than a second read of it.
-    enforcer = PolicyEnforcer(settings)
+    enforcer = policy_enforcer(settings)
     policy = await enforcer.get_policy(execution_key)
     exists = not policy_is_empty(policy)
     if caller.is_admin:
