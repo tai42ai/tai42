@@ -17,6 +17,7 @@ from tai42_contract.states import (
     RenderedStateTemplate,
     RenderedTemplateDeclarations,
     RenderedTemplateJq,
+    ResolvedTemplateJq,
     StateDeclaration,
     StateRegimeRule,
     StateTemplateDocument,
@@ -201,6 +202,27 @@ def test_rendered_models_are_frozen_and_refuse_extra_keys() -> None:
         template.name = "other"  # type: ignore[misc]
     with pytest.raises(ValidationError):
         RenderedTemplateJq.model_validate({"purpose": "input", "jq": ".", "params": [], "extra": 1})
+
+
+def test_resolved_template_jq_round_trips_and_is_frozen() -> None:
+    resolved = ResolvedTemplateJq(template="alpha", program="count", purpose="input", params=["v"], path=["alpha"])
+    assert ResolvedTemplateJq.model_validate(resolved.model_dump()) == resolved
+    with pytest.raises(ValidationError):
+        resolved.program = "other"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"template": "alpha", "program": "count", "purpose": "read", "params": [], "path": []},
+        {"template": "alpha", "program": "count", "purpose": "input", "params": [], "path": [""]},
+        {"template": "alpha", "program": "count", "purpose": "input", "params": [], "path": [], "extra": 1},
+        {"template": "alpha", "purpose": "input", "params": [], "path": []},
+    ],
+)
+def test_resolved_template_jq_refuses(raw: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        ResolvedTemplateJq.model_validate(raw)
 
 
 @pytest.mark.parametrize(

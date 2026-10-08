@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from tai42_contract.states.models import (
     ApplyResult,
@@ -24,7 +25,7 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
-from tai42_contract.states.rendered import RenderedAttachment, RenderedStateTemplate
+from tai42_contract.states.rendered import RenderedAttachment, RenderedStateTemplate, ResolvedTemplateJq
 
 
 @runtime_checkable
@@ -121,6 +122,42 @@ class AppStates(Protocol):
 
         Validates the document as a store would; a refusal raises
         :class:`~tai42_contract.states.TemplateValidationError`.
+        """
+        ...
+
+    # --- Resolution ---
+    async def resolve_template_jq(
+        self,
+        state: str,
+        name: str,
+        *,
+        purpose: Literal["input", "update"],
+        declared: Collection[str] = (),
+    ) -> ResolvedTemplateJq:
+        """Resolve the ``template_jq`` reference ``name`` on ``state`` to the program a ``purpose`` call would run.
+
+        ``<template>.<name>`` resolves to that template's program; an unqualified ``name`` to the one
+        template that declares it across every attachment on the state. ``declared`` names templates
+        a caller is about to attach: each one not attached yet is resolved as if attached at
+        ``[<template>]``. A template not attached (nor declared), or no such program, raises
+        :class:`~tai42_contract.states.StateNotFoundError`; a name two templates declare, or a
+        program whose purpose is not ``purpose``, raises
+        :class:`~tai42_contract.states.ValueValidationError`. The rule every ``template_jq`` door
+        evaluates and applies by, so a reference accepted here resolves the same way at run time.
+        """
+        ...
+
+    async def resolve_subject(self, state: str, ref: str | Mapping[str, Any] | None) -> StateSubject:
+        """Resolve a subject reference for ``state`` into a full :class:`~tai42_contract.states.StateSubject`.
+
+        A mapping with both ``target_kind`` and ``target_name`` is the full subject; a ``{kind, key}``
+        mapping takes its target from the ambient :meth:`context`; a key string takes the state's
+        ``default_subject_kind`` and the ambient target; ``None`` takes the ambient candidate for
+        the state's ``default_subject_kind``. A reference that cannot be resolved — one target field
+        without the other, no ambient context where one is needed, a blank key, no ambient
+        candidate, a malformed mapping, any other shape — raises
+        :class:`~tai42_contract.states.SubjectRefusedError` naming the rule; an undeclared state
+        raises :class:`~tai42_contract.states.StateNotFoundError`.
         """
         ...
 

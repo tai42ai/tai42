@@ -95,6 +95,7 @@ from tai42_contract.states.rendered import (
     RenderedStateTemplate,
     RenderedTemplateDeclarations,
     RenderedTemplateJq,
+    ResolvedTemplateJq,
 )
 
 __all__ = [
@@ -131,6 +132,7 @@ __all__ = [
     "RenderedStateTemplate",
     "RenderedTemplateDeclarations",
     "RenderedTemplateJq",
+    "ResolvedTemplateJq",
     "SchemaValidationError",
     "StateAttach",
     "StateBatchWrite",

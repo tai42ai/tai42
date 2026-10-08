@@ -26,6 +26,7 @@ from tai42_contract.states import (
     StateBinding,
     StateInjection,
     StateRecord,
+    StateSubject,
     StateUpdate,
     TemplateJqApplyResult,
     TemplateJqResult,
@@ -57,6 +58,7 @@ class _FakeStates:
         # fakes go on through monkeypatch and are lifted at teardown — a raw assignment would
         # leave them on the shared facet and answer an unrelated later test's states door.
         monkeypatch.setattr(facet, "context", self.context)
+        monkeypatch.setattr(facet, "resolve_subject", self.resolve_subject)
         monkeypatch.setattr(facet, "read", self.read)
         monkeypatch.setattr(facet, "eval_template_jq", self.eval_template_jq)
         monkeypatch.setattr(facet, "apply_template_jq", self.apply_template_jq)
@@ -65,6 +67,10 @@ class _FakeStates:
 
     def context(self):
         return None
+
+    async def resolve_subject(self, state, ref) -> StateSubject:
+        # The bindings here yield full subject objects, which the platform resolver validates as is.
+        return StateSubject.model_validate(ref)
 
     async def read(self, state, subject):
         return StateRecord(state=state, subject=subject, data=self._record, seq=1.0, canonical_subject=subject)

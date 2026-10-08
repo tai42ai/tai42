@@ -6,8 +6,12 @@ and against a real Postgres in ``test_store_integration.py``."""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
+from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import RegimeViolationError, StatesError, ValueValidationError
+from tai42_contract.states.models import CompletedOrigin
 
 from tai42_skeleton.states import store as store_mod
 from tai42_skeleton.states.store import (
@@ -21,7 +25,10 @@ from tai42_skeleton.states.store.trace import (
     _abs_regime_paths,
     _refuse_composing_shape,
     _traced_paths,
+    guard_skip_rows,
+    trace_stamp,
 )
+from tai42_skeleton.states.templates.trace import _TRACE_SCHEMA
 
 _STAMP = {"meta": {"node": "n1"}, "run": "r1", "turn": "t1", "inbound": "i1", "at": "2026-09-06T00:00:00+00:00"}
 
@@ -110,6 +117,40 @@ def test_stamp_trace_noop_without_traced_paths() -> None:
     ops = [{"op": "set", "path": ["a", "obj"], "value": {"k": 1}}]
     stamp_trace(ops, (), _STAMP)
     assert "_trace" not in ops[0]["value"]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        CompletedOrigin(
+            consumer="probe", meta={"node": "n1"}, run_id="r1", door="conversation", turn_id="t1", inbound_id="i1"
+        ),
+        CompletedOrigin(consumer="probe", door="api"),
+    ],
+)
+def test_trace_stamp_carries_the_origin_in_the_traced_shape(origin: CompletedOrigin) -> None:
+    stamp = trace_stamp(origin)
+    assert set(stamp) == set(_TRACE_SCHEMA["properties"])
+    Draft202012Validator(_TRACE_SCHEMA).validate(stamp)
+    assert (stamp["meta"], stamp["run"], stamp["turn"], stamp["inbound"]) == (
+        origin.meta,
+        origin.run_id,
+        origin.turn_id,
+        origin.inbound_id,
+    )
+    assert datetime.fromisoformat(stamp["at"]).tzinfo is not None
+
+
+def test_guard_skip_rows_name_each_skipped_op_and_the_guard() -> None:
+    ops = [
+        {"op": "set", "path": ["a"], "value": 1, "guard": {"absent": ["a"]}},
+        {"op": "remove", "path": ["b"]},
+    ]
+    assert guard_skip_rows(ops) == [
+        {"op": "set", "path": ["a"], "reason": "guard"},
+        {"op": "remove", "path": ["b"], "reason": "guard"},
+    ]
+    assert guard_skip_rows([]) == []
 
 
 def test_store_settings_retention_validates(monkeypatch: pytest.MonkeyPatch) -> None:

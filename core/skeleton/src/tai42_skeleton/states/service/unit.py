@@ -51,7 +51,7 @@ from tai42_skeleton.states.paths import apply_ops as apply_path_ops
 from tai42_skeleton.states.paths import partition_guarded, validate_op
 from tai42_skeleton.states.schema import _validate_document
 from tai42_skeleton.states.service.base import _StatesServiceBase
-from tai42_skeleton.states.store.trace import _iso_now, _refuse_composing_shape, stamp_trace
+from tai42_skeleton.states.store.trace import _refuse_composing_shape, guard_skip_rows, stamp_trace, trace_stamp
 from tai42_skeleton.states.store.writes import ProjectedWrite
 
 if TYPE_CHECKING:
@@ -289,7 +289,7 @@ class _StateUnit:
         # applier the persisted write path runs, so the projection matches the commit.
         _refuse_composing_shape(ops, entry.regime_paths)
         applied_ops, guard_skipped = partition_guarded(current, ops)
-        skipped = [{"op": op.get("op"), "path": op.get("path"), "reason": "guard"} for op in guard_skipped]
+        skipped = guard_skip_rows(guard_skipped)
         if op_id is not None:
             self._staged_op_ids.add(op_id)
         ledger = op_id is not None
@@ -303,14 +303,7 @@ class _StateUnit:
                 ApplyResult(applied=True, data=None, seq=None, skipped=skipped), applied_ops=[], ledger=ledger
             )
         if entry.traced_paths:
-            stamp = {
-                "meta": completed.meta,
-                "run": completed.run_id,
-                "turn": completed.turn_id,
-                "inbound": completed.inbound_id,
-                "at": _iso_now(),
-            }
-            stamp_trace(applied_ops, entry.traced_paths, stamp)
+            stamp_trace(applied_ops, entry.traced_paths, trace_stamp(completed))
         merged = apply_path_ops(current, applied_ops)
         seq = self._next_seq(base_seq if base_seq is not None else 0.0)
         self._projected[key] = merged

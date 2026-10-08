@@ -22,7 +22,8 @@ A ``fixed_kwargs`` scalar leaf written ``!ENV ${VAR[:default]}`` is a secret
 REFERENCE, not a stored credential: :func:`resolve_secret_refs` materialises it
 from the process environment here, baking the resolved value while the store keeps
 only the marker. A present var resolves to a ``SecretValue`` so a value that reaches
-a recording door is masked; :func:`reveal_typed_refs` then reveals a value sitting
+a recording door is masked;
+:func:`~tai42_skeleton.tools.binding.secret_arguments.reveal_for_validation` then reveals a value sitting
 under a TYPED string leaf of the base tool's schema (a ``token: str``, a ``list[str]``
 element, a typed model field, a ``dict[str, str]`` value) to its plain form so it
 passes the base tool's pydantic argument validation, while a value under a PERMISSIVE
@@ -57,7 +58,8 @@ from tai42_kit.utils.data.json_schema_util import (
 )
 from tai42_kit.utils.render import resolve_schema_body
 
-from tai42_skeleton.presets.secret_refs import resolve_secret_refs, reveal_typed_refs
+from tai42_skeleton.presets.secret_refs import resolve_secret_refs
+from tai42_skeleton.tools.binding.secret_arguments import reveal_for_validation
 from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_park, stowed_reveal_payload
 
 if TYPE_CHECKING:
@@ -109,7 +111,7 @@ async def preset_bind(
     # / ``object``) stays wrapped so a value that reaches a recording door is masked.
     # Runs here at the chokepoint so every bind path (plain, agent-forced, validated,
     # input-schema) bakes the reveal decision the base tool's own schema dictates.
-    fixed_kwargs = reveal_typed_refs(fixed_kwargs, base.parameters)
+    fixed_kwargs = reveal_for_validation(fixed_kwargs, base.parameters)
     transform_args = {key: ArgTransform(hide=True, default=value) for key, value in fixed_kwargs.items()}
 
     if input_schema is not None:

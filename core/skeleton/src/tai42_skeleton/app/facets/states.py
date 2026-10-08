@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from tai42_contract.states import ResolvedTemplateJq
+
 from .base import _Facet
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
-    from typing import Any
+    from typing import Any, Literal
 
     from tai42_contract.states import (
         ApplyResult,
@@ -114,6 +116,39 @@ class StatesFacet(_Facet):
     async def render_template(self, doc: StateTemplateDocument) -> RenderedStateTemplate:
         """Render a candidate template document that is not stored (``version`` ``"candidate"``)."""
         return await self._app._states_service.render_template(doc)
+
+    # -- resolution --
+    async def resolve_template_jq(
+        self,
+        state: str,
+        name: str,
+        *,
+        purpose: Literal["input", "update"],
+        declared: Collection[str] = (),
+    ) -> ResolvedTemplateJq:
+        """Resolve the ``template_jq`` reference ``name`` on ``state`` for a ``purpose`` call.
+
+        ``declared`` templates not attached yet take part as if attached at ``[<template>]``.
+        """
+        (
+            template,
+            _version,
+            path,
+            _parameters,
+            _declarations,
+            program,
+        ) = await self._app._states_service.resolve_template_jq(state, name, purpose=purpose, declared=declared)
+        return ResolvedTemplateJq(
+            template=template.name,
+            program=program,
+            purpose=purpose,
+            params=list(template.template_jq[program].params),
+            path=path,
+        )
+
+    async def resolve_subject(self, state: str, ref: str | Mapping[str, Any] | None) -> StateSubject:
+        """Resolve the subject reference ``ref`` for ``state``: a full mapping, ``{kind, key}``, a key or ``None``."""
+        return await self._app._states_service.resolve_subject(state, ref)
 
     # -- attachments --
     async def list_attachments(self, state: str | None = None, *, template: str | None = None) -> list[dict[str, Any]]:

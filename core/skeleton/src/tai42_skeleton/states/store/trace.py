@@ -1,4 +1,4 @@
-"""Composing-shape refusal and the ``_trace`` stamping the write path applies before its ops."""
+"""Composing-shape refusal, the ``_trace`` stamp and its stamping, and the guard-skip rows of the write path."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any
 
 from tai42_contract.states import path_overlaps
 from tai42_contract.states.errors import RegimeViolationError
+from tai42_contract.states.models import CompletedOrigin
 
 from tai42_skeleton.states.paths import APPEND, KEYED_OPS
 
@@ -14,6 +15,26 @@ from tai42_skeleton.states.paths import APPEND, KEYED_OPS
 def _iso_now() -> str:
     """An ISO-8601 UTC timestamp for a ``_trace`` stamp."""
     return datetime.now(UTC).isoformat()
+
+
+def trace_stamp(origin: CompletedOrigin) -> dict[str, Any]:
+    """The ``_trace`` stamp a traced write carries: the completed origin's provenance and the write time.
+
+    ``{"meta", "run", "turn", "inbound", "at"}`` — the shape the effective schema admits under a
+    tracing attachment.
+    """
+    return {
+        "meta": origin.meta,
+        "run": origin.run_id,
+        "turn": origin.turn_id,
+        "inbound": origin.inbound_id,
+        "at": _iso_now(),
+    }
+
+
+def guard_skip_rows(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``skipped`` rows a write reports for the ops its guards skipped: ``{op, path, reason: "guard"}``."""
+    return [{"op": op.get("op"), "path": op.get("path"), "reason": "guard"} for op in ops]
 
 
 def _abs_regime_paths(attachment_rows: list[dict[str, Any]]) -> list[tuple[list[Any], str, str]]:

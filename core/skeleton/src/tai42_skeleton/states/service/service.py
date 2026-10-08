@@ -24,6 +24,7 @@ from tai42_skeleton.states.service.registries import (
     StatesConsumerListerRegistry,
 )
 from tai42_skeleton.states.service.rendered import RenderedTemplates
+from tai42_skeleton.states.service.subjects import _SubjectMixin
 from tai42_skeleton.states.service.template_jq import _TemplateJqMixin
 from tai42_skeleton.states.service.templates import _TemplateMixin
 from tai42_skeleton.states.service.unit import _UnitMixin
@@ -37,6 +38,7 @@ class StatesService(
     _ProvenanceMixin,
     _TemplateMixin,
     _TemplateJqMixin,
+    _SubjectMixin,
     _DeclarationMixin,
     _RecordMixin,
     _AttachmentMixin,

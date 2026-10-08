@@ -23,7 +23,7 @@ from tai42_skeleton.states.schema import _validate_document
 from .base import ApplyEntry, ApplyEntrySource, _StoreBase
 from .connection import _pool, _settings
 from .cursors import _subject_cols
-from .trace import _iso_now, _refuse_composing_shape, stamp_trace
+from .trace import _refuse_composing_shape, stamp_trace, trace_stamp
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,14 +263,7 @@ class _RecordWriteStore(_StoreBase):
 
             # (ii) stamp ``_trace`` under a traced attach, before the apply + validation.
             if traced_paths:
-                stamp = {
-                    "meta": origin.meta,
-                    "run": origin.run_id,
-                    "turn": origin.turn_id,
-                    "inbound": origin.inbound_id,
-                    "at": _iso_now(),
-                }
-                stamp_trace(applied_ops, traced_paths, stamp)
+                stamp_trace(applied_ops, traced_paths, trace_stamp(origin))
 
             merged = apply_path_ops(current, applied_ops)
             if validate:

@@ -8,7 +8,8 @@ path and applied through the same ``apply`` chokepoint as any delta.
 from __future__ import annotations
 
 import copy
-from typing import Any
+from collections.abc import Collection, Mapping, Sequence
+from typing import Any, Literal
 
 from psycopg import AsyncConnection
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
@@ -26,60 +27,115 @@ from tai42_skeleton.states.service.reconcile_support import _rebase_op, _record_
 from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.states.templates import StateTemplate
 
+# ``(template, template_version, path, parameters, declarations, program_name)`` of a resolved program.
+ResolvedProgram = tuple[StateTemplate, int, list[str], dict[str, Any], dict[str, Any], str]
 
-class _TemplateJqMixin(_StatesServiceBase):
-    async def _resolve_template_jq(
-        self, state: str, version: int, name: str
-    ) -> tuple[StateTemplate, int, list[str], dict[str, Any], dict[str, Any], str]:
-        """Resolve a ``template_jq`` program ``name`` across ``state``'s attachments at declaration ``version``.
 
-        Returns ``(template, template_version, path, parameters, declarations, program_name)``. An
-        UNQUALIFIED name resolves to the one attachment whose template declares it — a name two
-        attached templates both declare is a loud :class:`ValueValidationError` (the caller
-        qualifies it). A QUALIFIED ``<template>.<name>`` resolves to that attachment's template — a
-        template not attached on the state is a loud :class:`StateNotFoundError`. An unknown
-        program is a :class:`StateNotFoundError`.
-        """
-        entry = await self._catalog.catalog_entry_at(state, version)
-        if entry is None:
-            raise StateNotFoundError(f"no state declared as {state!r}")
-        attachments = [(await self._template_at(a.template, a.template_version, a.body), a) for a in entry.attachments]
-        if "." in name:
-            template_name, program_name = name.split(".", 1)
-            for template, a in attachments:
-                if template.name == template_name:
-                    if program_name not in template.template_jq:
-                        raise StateNotFoundError(
-                            f"template {template_name!r} attached on state {state!r} declares no "
-                            f"template_jq {program_name!r}"
-                        )
-                    return (
-                        template,
-                        a.template_version,
-                        list(a.path),
-                        copy.deepcopy(a.parameters),
-                        copy.deepcopy(a.declarations),
-                        program_name,
-                    )
+def select_template_jq(
+    state: str, name: str, purpose: str, candidates: Sequence[tuple[str, Mapping[str, Any]]]
+) -> tuple[int, str]:
+    """Pick the program a ``template_jq`` reference ``name`` names among ``candidates``.
+
+    ``candidates`` are ``(template name, its programs by name)`` pairs, each program carrying a
+    ``purpose``; returns ``(index of the declaring candidate, program name)``. A QUALIFIED
+    ``<template>.<name>`` picks that template's program — a template not among the candidates, or
+    one that declares no such program, is a :class:`StateNotFoundError`. An UNQUALIFIED name picks
+    the one candidate that declares it — none is a :class:`StateNotFoundError`, two or more a
+    :class:`ValueValidationError` (the caller qualifies it). A program whose purpose is not
+    ``purpose`` is a :class:`ValueValidationError`.
+    """
+    if "." in name:
+        template_name, program_name = name.split(".", 1)
+        matches = [i for i, (candidate, _programs) in enumerate(candidates) if candidate == template_name]
+        if not matches:
             raise StateNotFoundError(f"template {template_name!r} is not attached on state {state!r}")
-        matches = [(template, a) for template, a in attachments if name in template.template_jq]
+        if program_name not in candidates[matches[0]][1]:
+            raise StateNotFoundError(
+                f"template {template_name!r} attached on state {state!r} declares no template_jq {program_name!r}"
+            )
+    else:
+        program_name = name
+        matches = [i for i, (_candidate, programs) in enumerate(candidates) if name in programs]
         if not matches:
             raise StateNotFoundError(f"no template_jq {name!r} on any template attached on state {state!r}")
         if len(matches) > 1:
-            templates = ", ".join(sorted(t.name for t, _a in matches))
+            templates = ", ".join(sorted(candidates[i][0] for i in matches))
             raise ValueValidationError(
                 f"template_jq {name!r} is declared by more than one template attached on state {state!r} "
                 f"({templates}); qualify it as <template>.{name}"
             )
-        template, a = matches[0]
-        return (
-            template,
-            a.template_version,
-            list(a.path),
-            copy.deepcopy(a.parameters),
-            copy.deepcopy(a.declarations),
-            name,
+    index = matches[0]
+    actual = candidates[index][1][program_name].purpose
+    if actual != purpose:
+        raise ValueValidationError(
+            f"template_jq {program_name!r} on template {candidates[index][0]!r} has purpose {actual!r}, "
+            f"needs {purpose!r}"
         )
+    return index, program_name
+
+
+class _TemplateJqMixin(_StatesServiceBase):
+    async def resolve_template_jq(
+        self,
+        state: str,
+        name: str,
+        *,
+        purpose: Literal["input", "update"],
+        declared: Collection[str] = (),
+    ) -> ResolvedProgram:
+        """Resolve the ``template_jq`` reference ``name`` on ``state`` at its current declaration version.
+
+        The rules are :meth:`_resolve_template_jq`'s; an undeclared state is a :class:`StateNotFoundError`.
+        """
+        self._ensure_available()
+        version = await self._store.declaration_version(state)
+        if version is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        return await self._resolve_template_jq(state, version, name, purpose=purpose, declared=declared)
+
+    async def _resolve_template_jq(
+        self,
+        state: str,
+        version: int,
+        name: str,
+        *,
+        purpose: Literal["input", "update"],
+        declared: Collection[str] = (),
+    ) -> ResolvedProgram:
+        """Resolve a ``template_jq`` program ``name`` across ``state``'s attachments at declaration ``version``.
+
+        The candidates are the state's attached templates plus each ``declared`` template not attached
+        on the state, taking part as if attached at ``[<template>]`` with empty parameters and
+        declarations (a declared template that does not exist is a :class:`StateNotFoundError`);
+        :func:`select_template_jq` picks the program by its rules.
+        """
+        entry = await self._catalog.catalog_entry_at(state, version)
+        if entry is None:
+            raise StateNotFoundError(f"no state declared as {state!r}")
+        candidates: list[tuple[StateTemplate, int, list[str], dict[str, Any], dict[str, Any]]] = [
+            (
+                await self._template_at(a.template, a.template_version, a.body),
+                a.template_version,
+                list(a.path),
+                copy.deepcopy(a.parameters),
+                copy.deepcopy(a.declarations),
+            )
+            for a in entry.attachments
+        ]
+        attached = {a.template for a in entry.attachments}
+        for template_name in dict.fromkeys(declared):
+            if template_name in attached:
+                continue
+            template_entry = await self._template_entry(template_name)
+            if template_entry is None:
+                raise StateNotFoundError(f"no template {template_name!r}")
+            template = await self._template_at(template_name, template_entry.version, template_entry.body)
+            candidates.append((template, template_entry.version, [template_name], {}, {}))
+        index, program_name = select_template_jq(
+            state, name, purpose, [(c[0].name, c[0].template_jq) for c in candidates]
+        )
+        template, template_version, path, parameters, declarations = candidates[index]
+        return template, template_version, path, parameters, declarations, program_name
 
     async def _render_template_jq(self, template: StateTemplate, version: int, program_name: str) -> tuple[str, str]:
         """``program_name``'s rendered body and the sibling input-program prelude, from the rendered-template cache.
@@ -110,14 +166,9 @@ class _TemplateJqMixin(_StatesServiceBase):
         self._ensure_available()
         version, _kinds, _default = await self._admit_subject(state, subject)
         template, template_version, path, parameters, declarations, program_name = await self._resolve_template_jq(
-            state, version, name
+            state, version, name, purpose="input"
         )
         program = template.template_jq[program_name]
-        if program.purpose != "input":
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} has purpose {program.purpose!r}; "
-                f"eval needs an 'input'-purpose program (apply an 'update' one instead)"
-            )
         missing = sorted(set(program.params) - set(args))
         unknown = sorted(set(args) - set(program.params))
         if missing or unknown:
@@ -162,14 +213,9 @@ class _TemplateJqMixin(_StatesServiceBase):
         """
         version, _kinds, _default = await self._admit_subject(state, subject)
         template, template_version, path, parameters, declarations, program_name = await self._resolve_template_jq(
-            state, version, name
+            state, version, name, purpose="update"
         )
         program = template.template_jq[program_name]
-        if program.purpose != "update":
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} has purpose {program.purpose!r}; "
-                f"apply needs an 'update'-purpose program (eval an 'input' one instead)"
-            )
         if program.params:
             if not isinstance(input_, dict):
                 raise ValueValidationError(

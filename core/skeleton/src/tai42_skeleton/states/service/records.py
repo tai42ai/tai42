@@ -38,6 +38,7 @@ from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.rows import _page_limit, _subject_from_row
 from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.states.store import make_cursor, store_settings_retention
+from tai42_skeleton.states.store.trace import guard_skip_rows
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ class _RecordMixin(_StatesServiceBase):
             applied=applied,
             data=data,
             seq=seq,
-            skipped=[{"op": op.get("op"), "path": op.get("path"), "reason": "guard"} for op in skipped],
+            skipped=guard_skip_rows(skipped),
         )
 
     async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:

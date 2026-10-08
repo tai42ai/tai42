@@ -4,12 +4,14 @@ update-after, and the save-time validate-and-attach seam — driven against a li
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from tai42_contract.states import (
     ApplyResult,
+    ResolvedTemplateJq,
     StateAttach,
     StateBatchWrite,
     StateBinding,
@@ -25,9 +27,16 @@ from tai42_contract.states import (
     TemplateJqResult,
     WriteOrigin,
 )
-from tai42_contract.states.errors import AttachConflictError, StateNotFoundError, ValueValidationError
+from tai42_contract.states.errors import (
+    AttachConflictError,
+    StateNotFoundError,
+    SubjectRefusedError,
+    ValueValidationError,
+)
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.states.service.subjects import _SubjectMixin
+from tai42_skeleton.states.service.template_jq import select_template_jq
 from tai42_skeleton.template.resource_manager import TemplateNotFoundError
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
@@ -42,8 +51,22 @@ _DECL = StateDeclaration(
 )
 
 
-class FakeStates:
-    """The subset of the ``states`` facet the binding runtime calls."""
+class _ScalarStore:
+    """The one store read the platform subject resolver makes: the declaration's scalars."""
+
+    async def declaration_scalars(self, name: str) -> tuple[int, list[str], str] | None:
+        if name != _DECL.name:
+            return None
+        return 1, list(_DECL.subject_kinds), _DECL.default_subject_kind
+
+
+class FakeStates(_SubjectMixin):
+    """The subset of the ``states`` facet the binding runtime calls.
+
+    ``resolve_subject`` is the platform's own resolver over the fake's declaration and ambient
+    context; ``resolve_template_jq`` picks through the platform's selection rule over the fake's
+    attached and declared templates.
+    """
 
     def __init__(
         self,
@@ -63,9 +86,42 @@ class FakeStates:
         self.apply_batch_calls: list[list[StateBatchWrite]] = []
         self.read_calls: list[tuple[str, StateSubject]] = []
         self.attached_now: list[tuple[str, str, list[str]]] = []
+        self.resolve_tjq_calls: list[tuple[str, str, str, list[str]]] = []
+        self._store = _ScalarStore()  # type: ignore[assignment]
+
+    @staticmethod
+    def _ensure_available() -> None:
+        return None
 
     def context(self) -> StateContext | None:
         return self._ctx
+
+    async def resolve_template_jq(
+        self,
+        state: str,
+        name: str,
+        *,
+        purpose: Literal["input", "update"],
+        declared: Collection[str] = (),
+    ) -> ResolvedTemplateJq:
+        self.resolve_tjq_calls.append((state, name, purpose, list(declared)))
+        attached = self._attached.get(state, [])
+        names = [*attached, *(t for t in dict.fromkeys(declared) if t not in attached)]
+        programs: list[tuple[str, Mapping[str, Any]]] = []
+        for template in names:
+            doc = self._templates.get(template)
+            if doc is None and template not in attached:
+                raise StateNotFoundError(f"no template {template!r}")
+            programs.append((template, (doc.template_jq or {}) if doc is not None else {}))
+        index, program = select_template_jq(state, name, purpose, programs)
+        template = programs[index][0]
+        return ResolvedTemplateJq(
+            template=template,
+            program=program,
+            purpose=purpose,
+            params=list(programs[index][1][program].params),
+            path=[template],
+        )
 
     async def get_declaration(self, state: str) -> StateDeclaration | None:
         return _DECL if state == "status" else None
@@ -302,7 +358,7 @@ async def test_subject_key_with_no_scope_and_no_ambient_context_is_loud() -> Non
             )
         ]
     )
-    with pytest.raises(ValueValidationError, match="no ambient subject scope"):
+    with pytest.raises(SubjectRefusedError, match="names no target and no ambient context"):
         await apply_binding_injections(_app(states), b, {"tid": "k"})
 
 
@@ -328,6 +384,86 @@ async def test_subject_uses_ambient_context_scope_and_default_kind() -> None:
     assert name == "bound"
     assert params == {}
     assert args["c"] == {"evaluated": "bound"}
+
+
+async def test_subject_kind_key_object_takes_the_ambient_target() -> None:
+    ctx = StateContext(door="conversation", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content='{kind: "thread", key: .tid}'),
+                input_injections=[StateInjection(template_jq="bound", into="c")],
+            )
+        ]
+    )
+    await apply_binding_injections(_app(states), b, {"tid": "k-2"})
+    _state, subject, _name, _params = states.eval_calls[0]
+    assert subject == StateSubject(target_kind="agent", target_name="a", kind="thread", key="k-2")
+
+
+async def test_subject_expr_yielding_null_is_refused_by_the_binding() -> None:
+    ctx = StateContext(door="conversation", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".missing"),
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="x")],
+            )
+        ]
+    )
+    with pytest.raises(ValueValidationError) as excinfo:
+        await apply_binding_injections(_app(states), b, {"tid": "k"})
+    assert str(excinfo.value) == (
+        "state binding subject_expr for state 'status' must yield a non-empty key string or a full subject "
+        "object, got None"
+    )
+
+
+@pytest.mark.parametrize(
+    ("expr", "message"),
+    [
+        ('"  "', "state 'status': a subject key must be a non-empty string, got '  '"),
+        ("7", "state 'status': a subject is a subject object, a key string or omitted, got 7"),
+        (
+            '{target_kind: "agent", kind: "thread", key: "k"}',
+            "state 'status': an explicit subject must give both target_kind and target_name or neither",
+        ),
+    ],
+)
+async def test_an_unresolvable_subject_is_the_platforms_subject_refusal(expr: str, message: str) -> None:
+    ctx = StateContext(door="conversation", candidates=SubjectCandidates(target_kind="agent", target_name="a"))
+    states = FakeStates(record={}, ctx=ctx)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=expr),
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="x")],
+            )
+        ]
+    )
+    with pytest.raises(SubjectRefusedError) as excinfo:
+        await apply_binding_injections(_app(states), b, {})
+    assert str(excinfo.value) == message
+
+
+async def test_a_malformed_full_subject_object_is_a_subject_refusal() -> None:
+    states = FakeStates(record={})
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content='{target_kind: "agent", target_name: "a", kind: "thread"}'),
+                input_injections=[StateInjection(jq=TemplatedText(content="."), into="x")],
+            )
+        ]
+    )
+    with pytest.raises(SubjectRefusedError, match="is not a valid subject: key: "):
+        await apply_binding_injections(_app(states), b, {})
 
 
 # -- injections ---------------------------------------------------------------
@@ -557,6 +693,63 @@ async def test_validate_binding_resolves_a_declared_template_without_attaching()
     )
     await validate_binding(_app(states), b)
     assert states.attached_now == []  # dry run attaches nothing
+
+
+async def test_save_resolves_each_named_program_with_its_purpose_and_the_bindings_templates() -> None:
+    tpl = StateTemplateDocument.model_validate(
+        {
+            "name": "planner",
+            "schema": {"type": "object"},
+            "template_jq": {
+                "v": {"purpose": "input", "jq": {"content": "."}},
+                "put": {"purpose": "update", "params": ["id"], "writes": [], "jq": {"content": "[]"}},
+            },
+        }
+    )
+    states = FakeStates(attached={"status": []}, templates={"planner": tpl})
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".id"),
+                templates=["planner"],
+                input_injections=[StateInjection(template_jq="v", into="x")],
+                updates=[StateUpdate(template_jq="planner.put", adapter=TemplatedText(content="{id: .}"))],
+            )
+        ]
+    )
+    await validate_binding(_app(states), b)
+    assert states.resolve_tjq_calls == [
+        ("status", "v", "input", ["planner"]),
+        ("status", "planner.put", "update", ["planner"]),
+    ]
+
+
+async def test_save_refuses_an_unqualified_name_another_attached_template_also_declares() -> None:
+    # ``mark`` is unique among the binding's own templates, but ``other`` — attached on the state —
+    # declares it too: the run-time resolver would refuse it, so the save refuses it.
+    def _tpl(name: str) -> StateTemplateDocument:
+        return StateTemplateDocument.model_validate(
+            {
+                "name": name,
+                "schema": {"type": "object"},
+                "template_jq": {"mark": {"purpose": "input", "jq": {"content": "."}}},
+            }
+        )
+
+    states = FakeStates(attached={"status": ["other"]}, templates={"planner": _tpl("planner"), "other": _tpl("other")})
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(content=".id"),
+                templates=["planner"],
+                input_injections=[StateInjection(template_jq="mark", into="x")],
+            )
+        ]
+    )
+    with pytest.raises(ValueValidationError, match=r"\(other, planner\); qualify it as <template>\.mark"):
+        await validate_binding(_app(states), b)
 
 
 async def test_validate_binding_compiles_scope_custom_and_qualified_named_exprs() -> None:
