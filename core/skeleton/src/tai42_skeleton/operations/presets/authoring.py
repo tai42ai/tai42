@@ -11,21 +11,18 @@ from typing import Annotated, Any
 
 from pydantic import TypeAdapter, ValidationError
 from tai42_contract.manifest import ExtensionElement
-from tai42_contract.presets import CarryForward, PresetBody
-from tai42_contract.states.binding import StateBinding
+from tai42_contract.presets import PresetBody
+from tai42_contract.states.errors import StatesError
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.data.json_schema_util import (
-    InvalidJsonSchemaError,
-    check_json_schema,
-)
-from tai42_kit.utils.render import SchemaBodyError, resolve_schema_body
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
-from tai42_skeleton.extensions.registry import extension_name
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations._authority import require_admin
+from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.presets.references import _spec_reference_error
+from tai42_skeleton.presets.definition import PresetDefinitionError, check_preset_body, output_schema_body_error
+from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 # This submodule's own package generation, captured at import time (a reload builds a
 # fresh package + submodules together, so each generation's submodule reads its OWN
@@ -106,36 +103,16 @@ async def _output_schema_error(
     Shared by create/save-version/rollback so a bad schema is a 400 that never persists nor
     reaches the bind kernel.
 
-    Rejects, in order: a by-id schema whose stored resource cannot be rendered or does not
-    render to a JSON object (the ``TemplatedText | dict`` union is resolved here the same
-    way the dry-run bake resolves it, so a bad by-id schema is a 400 at save); a schema that
-    fails the draft-2020-12 meta-schema; a non-object schema (both dispatch paths require an
-    object root); a clash with an explicit ``output_schema`` extension entry (the shape
-    declared in two places); and an agent base whose run tool does not advertise
-    ``response_format`` (voting_agent) — that base cannot force structured output, so reject
-    at authoring rather than let the bake target a missing parameter at bind time.
+    The body rules first (:func:`~tai42_skeleton.presets.definition.output_schema_body_error`:
+    the schema resolves to a JSON object, passes the draft-2020-12 meta-schema, has an object
+    root, and does not clash with an ``output_schema`` extension entry), then the live-registry
+    rule: an agent base whose run tool does not advertise ``response_format`` (voting_agent)
+    cannot force structured output, so it is rejected at authoring rather than let the bake
+    target a missing parameter at bind time.
     """
-    if output_schema is None:
-        return None
-    try:
-        resolved = await resolve_schema_body("output_schema", output_schema)
-    except SchemaBodyError as exc:
-        return str(exc)
-    if resolved is None:
-        raise AssertionError
-    try:
-        check_json_schema(resolved)
-    except InvalidJsonSchemaError as exc:
-        return f"output_schema is not a valid JSON Schema: {exc}"
-    if resolved.get("type") != "object":
-        return 'output_schema must be an object schema ("type": "object")'
-    for combo in extensions:
-        for element in combo:
-            if extension_name(element) == "output_schema":
-                return (
-                    "output_schema field conflicts with an explicit 'output_schema' extension entry; "
-                    "declare the output shape in exactly one place"
-                )
+    body_error = await output_schema_body_error(output_schema, extensions)
+    if body_error is not None or output_schema is None:
+        return body_error
     agent = instance.app.agents.all_agents().get(base_tool)
     if agent is not None and "response_format" not in agent.ToolInput.model_fields:
         return f"agent base {base_tool!r} does not support forced structured output (its input has no response_format)"
@@ -188,46 +165,39 @@ async def _write_validator_error(body: PresetBody) -> str | None:
     return None
 
 
-async def _state_binding_error(state_binding: StateBinding | None) -> str | None:
-    """The binding's dry-run verdict: the same shape/state/template/jq/adapter checks, without the attach.
+async def _check_body_at_door(body: PresetBody, *, name: str) -> None:
+    """Run the preset document's save rules at a write door, attaching a carried binding's templates.
 
-    Runs the SAME checks create and save-version run through
-    ``validate_and_attach_binding``, but WITHOUT the attach — the validate door performs no
-    attach. A rejection is a message (the write door would 4xx it); ``None`` when there is no
-    binding or it validates.
+    The shared seam create, save-version and rollback all call at the write that activates the
+    body, so their handling never drifts. A document rule's refusal is a 400 with its own text; a
+    refused binding is a 4xx prefixed ``invalid state_binding:``; any other failure (an unbound or
+    failing states store) is not a client error and propagates.
     """
-    if state_binding is None:
-        return None
-    from tai42_contract.states.errors import StatesError
+    with definition_door("state_binding"):
+        try:
+            await check_preset_body(body, name=name, attach=True)
+        except PresetDefinitionError as exc:
+            raise BadRequestError(str(exc)) from exc
 
-    from tai42_skeleton.tools.state_binding import validate_binding
 
+async def _dry_run_body_error(body: PresetBody, *, name: str) -> str | None:
+    """The document check's dry-run verdict over ``body``: the same rules, the binding validated but never attached.
+
+    A document rule's refusal is its own message; a binding refusal (or any other ``ValueError``)
+    is ``invalid state_binding: …``; ``None`` when the body passes. Any other failure (an unbound
+    or failing states store) is not a verdict on the draft and propagates.
+    """
     try:
-        await validate_binding(instance.app, state_binding)
-    except (StatesError, ValueError) as exc:
+        await check_preset_body(body, name=name, attach=False)
+    except PresetDefinitionError as exc:
+        return str(exc)
+    except ValueError as exc:
+        return f"invalid state_binding: {exc}"
+    except StatesError as exc:
+        if not is_binding_refusal(exc):
+            raise
         return f"invalid state_binding: {exc}"
     return None
-
-
-async def _attach_body_binding(state_binding: StateBinding | CarryForward | None) -> None:
-    """Validate + attach-on-use a NEWLY provided door binding at the write that activates it.
-
-    The shared seam create, save-version and rollback all call so their binding handling
-    never drifts. Its named templates attach idempotently (shared by every door/node that
-    binds the state) and its expressions/adapters compile, so a bad binding is a loud 400
-    that commits or re-points nothing. A carry-forward (already vetted at its own save) and
-    an absent binding attach nothing.
-    """
-    if not isinstance(state_binding, StateBinding):
-        return
-    from tai42_contract.states.errors import StatesError
-
-    from tai42_skeleton.tools.state_binding import validate_and_attach_binding
-
-    try:
-        await validate_and_attach_binding(instance.app, state_binding)
-    except (StatesError, ValueError) as exc:
-        raise BadRequestError(f"invalid state_binding: {exc}") from exc
 
 
 async def _enforce_registration_tier(base_tool: str) -> None:

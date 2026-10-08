@@ -40,9 +40,8 @@ class InMemoryHooksManager(BaseHooksManager):
         """
         return sum(len(bucket) for bucket in self._hooks.values())
 
-    async def register(self, params: HookParams) -> bool:
-        """Register a hook by name, moving it off any prior topic's bucket; returns ``True``."""
-        self.validate_jq_fields(params)
+    async def _store_hook(self, params: HookParams) -> bool:
+        """Store a hook by name, moving it off any prior topic's bucket; returns ``True``."""
         key = self.settings.get_hook_key(params.topic)
 
         prev_topic = self._name_topic_map.get(params.name)

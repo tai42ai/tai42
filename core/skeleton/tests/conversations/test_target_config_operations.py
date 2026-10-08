@@ -182,3 +182,64 @@ async def test_set_gated_off_is_501(gated_off, monkeypatch):
 async def test_delete_gated_off_is_501(gated_off):
     with pytest.raises(NotSupportedError):
         await ops.delete_conversation_config("agent", "assistant")
+
+
+# -- the target-config write service at the door -----------------------------------------------
+
+
+def _tool_binding():
+    from tai42_contract.states import StateBinding
+
+    return StateBinding.model_validate(
+        {"states": [{"state": "ghost", "subject_expr": {"content": ".x"}, "templates": ["t1"]}]}
+    )
+
+
+def _patch_binding_validation(monkeypatch, error: Exception | None) -> list:
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    calls: list = []
+
+    async def _validate_and_attach(app, binding) -> None:
+        calls.append(binding)
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _validate_and_attach)
+    return calls
+
+
+async def test_set_with_a_binding_naming_an_undeclared_state_is_not_found(wired, monkeypatch):
+    from tai42_contract.states.errors import StateNotFoundError
+
+    _patch_binding_validation(monkeypatch, StateNotFoundError("state 'ghost' is not declared"))
+    with pytest.raises(NotFoundError, match=r"^invalid conversation config: state 'ghost' is not declared$"):
+        await ops.set_conversation_config("tool", "lookup", state_binding=_tool_binding())
+    with pytest.raises(NotFoundError, match="conversation config not found"):
+        await ops.get_conversation_config("tool", "lookup")
+
+
+@pytest.mark.parametrize("fault_class", ["StatesError", "StatesNotConfiguredError"])
+async def test_set_with_a_store_fault_during_the_binding_check_propagates(wired, monkeypatch, fault_class):
+    from tai42_contract.states import errors as states_errors
+
+    fault = getattr(states_errors, fault_class)("store down")
+    _patch_binding_validation(monkeypatch, fault)
+    with pytest.raises(type(fault)) as caught:
+        await ops.set_conversation_config("tool", "lookup", state_binding=_tool_binding())
+    assert caught.value is fault
+
+
+async def test_set_attaches_the_binding_before_storing(wired, monkeypatch):
+    calls = _patch_binding_validation(monkeypatch, None)
+    result = await ops.set_conversation_config("tool", "lookup", state_binding=_tool_binding())
+    assert result["created"] is True
+    assert calls == [_tool_binding()]
+
+
+async def test_set_on_a_target_that_does_not_exist_is_refused_before_the_binding(wired, monkeypatch):
+    # Target existence is the door's own rule: it runs before the write service attaches anything.
+    calls = _patch_binding_validation(monkeypatch, None)
+    with pytest.raises(NotFoundError, match=r"^tool not found: 'probe-preset'$"):
+        await ops.set_conversation_config("tool", "probe-preset", state_binding=_tool_binding())
+    assert calls == []

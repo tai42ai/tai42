@@ -230,7 +230,7 @@ async def import_states(payload: dict[str, Any]) -> BackupSectionReport:
 def register_states_backup_section(registry: Any) -> None:
     """Register the ``states`` section on ``registry`` — called once per app construction.
 
-    Registered beside the host's core sections (never on reload).
+    Registered among the host's core sections, right after ``templates`` (never on reload).
     """
     registry.register_section(_SECTION, export_states, import_states, secret=False)
 

@@ -153,3 +153,110 @@ async def test_schedules_import_forwards_overwrite_mode(monkeypatch):
     )["data"]
     assert data["ok"] is True
     assert ("backend_import_schedules", {"schedules": backend_doc, "mode": "overwrite"}) in tools.run_calls
+
+
+# -- the schedule definition check on restore -----------------------------------------------------
+
+
+def _bound_row(name: str, state: str) -> dict:
+    from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
+
+    binding = {"states": [{"state": state, "subject_expr": {"content": ".x"}, "templates": ["t1"]}]}
+    return {"name": name, "kwargs": {"tool": "cleanup", SCHEDULE_STATE_BINDING_ARG: binding}}
+
+
+def _patch_binding_validation(monkeypatch, error_for=None) -> list:
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    calls: list = []
+
+    async def _validate_and_attach(app, binding) -> None:
+        calls.append(binding)
+        error = error_for(binding) if error_for is not None else None
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _validate_and_attach)
+    return calls
+
+
+async def test_a_refused_binding_row_is_not_forwarded_to_the_backend_and_is_reported(monkeypatch):
+    from tai42_contract.states.errors import StateNotFoundError
+
+    calls = _patch_binding_validation(
+        monkeypatch,
+        lambda b: StateNotFoundError("state 'ghost' is not declared") if b.states[0].state == "ghost" else None,
+    )
+    bad, good, plain = _bound_row("bad", "ghost"), _bound_row("good", "status"), {"name": "plain", "kwargs": {}}
+    import_report = {
+        "created": 1,
+        "updated": 0,
+        "skipped": 1,
+        # The backend saw [good, plain]: its row 1 is the payload's row 2.
+        "errors": [{"index": 1, "name": "plain", "error": "unsupported schedule"}],
+    }
+    tools = _FakeTools({"backend_import_schedules": import_report})
+    _install(monkeypatch, tools)
+
+    document = {"version": 1, "sections": {"schedules": [bad, good, plain]}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+
+    assert tools.run_calls == [("backend_import_schedules", {"schedules": [good, plain], "mode": "skip"})]
+    section = data["sections"]["schedules"]
+    assert section["errors"] == [
+        "schedule 'bad' (row 0): state 'ghost' is not declared",
+        "schedule 'plain' (row 2): unsupported schedule",
+    ]
+    assert section["skipped"] == 2
+    assert section["created"] == 1
+    assert [binding.states[0].state for binding in calls] == ["ghost", "status"]
+
+
+async def test_a_malformed_binding_row_is_refused_per_row(monkeypatch):
+    from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
+
+    _patch_binding_validation(monkeypatch)
+    tools = _FakeTools({"backend_import_schedules": {"created": 0, "updated": 0, "skipped": 0, "errors": []}})
+    _install(monkeypatch, tools)
+    malformed = {"name": "bad", "kwargs": {SCHEDULE_STATE_BINDING_ARG: {"states": "not-a-list"}}}
+
+    document = {"version": 1, "sections": {"schedules": [malformed]}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+
+    section = data["sections"]["schedules"]
+    assert section["skipped"] == 1
+    assert section["errors"][0].startswith("schedule 'bad' (row 0): ")
+    assert tools.run_calls == [("backend_import_schedules", {"schedules": [], "mode": "skip"})]
+
+
+async def test_a_store_fault_during_the_binding_check_fails_the_section(monkeypatch):
+    from tai42_contract.states.errors import StatesError, StatesNotConfiguredError
+
+    for fault in (StatesError("store down"), StatesNotConfiguredError("store down")):
+        _patch_binding_validation(monkeypatch, lambda b, fault=fault: fault)
+        tools = _FakeTools({"backend_import_schedules": {"created": 0, "updated": 0, "skipped": 0, "errors": []}})
+        _install(monkeypatch, tools)
+
+        document = {"version": 1, "sections": {"schedules": [_bound_row("nightly", "status")]}}
+        data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+
+        assert data["ok"] is False
+        assert data["sections"]["schedules"]["errors"] == ["store down"]
+        assert data["sections"]["schedules"]["skipped"] == 0
+        assert tools.run_calls == []
+
+
+async def test_a_document_that_is_not_a_row_list_is_forwarded_to_the_backend_unchanged(monkeypatch):
+    # Only a row list carries bindings the platform can read; any other document is the backend's
+    # to judge, forwarded as it is.
+    calls = _patch_binding_validation(monkeypatch)
+    tools = _FakeTools({"backend_import_schedules": {"created": 0, "updated": 0, "skipped": 0, "errors": []}})
+    _install(monkeypatch, tools)
+    opaque = {"format": "backend-native", "rows": [_bound_row("nightly", "status")]}
+
+    document = {"version": 1, "sections": {"schedules": opaque}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+
+    assert data["ok"] is True
+    assert tools.run_calls == [("backend_import_schedules", {"schedules": opaque, "mode": "skip"})]
+    assert calls == []

@@ -154,3 +154,19 @@ class ConversationTargetConfigStore:
                 continue
             configs[(config.target_kind, config.target_name)] = config
         return configs, unreadable
+
+
+async def write_target_config(config: TargetConversationConfig, *, store: ConversationTargetConfigStore) -> bool:
+    """Write ``config`` (an upsert) after its save rules; return whether the row is newly created.
+
+    The one write service the set door and the backup restore share: a carried state binding is
+    validated and its templates attached, then the row is stored. The target's existence is NOT
+    judged here: it is the door's rule against the live registries, so a restored config may name
+    a target a later section restores or a later registration provides.
+    """
+    if config.state_binding is not None:
+        from tai42_skeleton.app import instance
+        from tai42_skeleton.tools import state_binding
+
+        await state_binding.validate_and_attach_binding(instance.app, config.state_binding)
+    return await store.upsert(config)

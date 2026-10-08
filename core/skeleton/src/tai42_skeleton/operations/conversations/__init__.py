@@ -26,9 +26,6 @@ from .models import MAX_THREAD_PAGE, MAX_THREAD_PAGE_SIZE
 from .operator_send import send_conversation_thread_message
 from .persons import get_conversation_person, set_conversation_person_locale
 from .routes import (
-    _unclaimed_channel_identity as _unclaimed_channel_identity,
-)
-from .routes import (
     create_conversation_route,
     delete_conversation_route,
     get_conversation_message,

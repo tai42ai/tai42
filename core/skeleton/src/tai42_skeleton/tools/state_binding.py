@@ -18,7 +18,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from tai42_contract.states import (
     AttachBody,
@@ -29,7 +29,17 @@ from tai42_contract.states import (
     StateTemplateJq,
     WriteOrigin,
 )
-from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
+from tai42_contract.states.errors import (
+    AttachConflictError,
+    InvalidPathError,
+    RegimeViolationError,
+    SchemaValidationError,
+    StateNotFoundError,
+    StatesError,
+    SubjectRefusedError,
+    TemplateValidationError,
+    ValueValidationError,
+)
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import compile_check
@@ -39,6 +49,27 @@ from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
+
+
+# The store errors that refuse a binding's own content. Matched by exact type: a subclass or any other
+# StatesError (a store fault, an unbound store) is not a refusal and propagates.
+BINDING_REFUSALS: Final[frozenset[type[StatesError]]] = frozenset(
+    {
+        SubjectRefusedError,
+        SchemaValidationError,
+        InvalidPathError,
+        ValueValidationError,
+        RegimeViolationError,
+        TemplateValidationError,
+        StateNotFoundError,
+        AttachConflictError,
+    }
+)
+
+
+def is_binding_refusal(exc: BaseException) -> bool:
+    """Whether ``exc`` refuses the binding's content (exact type), as opposed to a store or transport failure."""
+    return type(exc) in BINDING_REFUSALS
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import ValidationError
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.hooks import HookParams
+from tai42_contract.states.errors import StatesError
 
 from tai42_skeleton.authz.execution import ExecutionKeyAuthorityError, ExecutionKeyScan
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
@@ -27,6 +28,7 @@ from tai42_skeleton.hooks.trigger_links import (
     restore_tombstone,
     restore_trigger_link,
 )
+from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 
 async def _export_webhooks() -> dict[str, Any]:
@@ -105,10 +107,19 @@ async def _restore_hooks(
             report.skipped += 1
             continue
         try:
+            # The hook write service the register door uses: the inline jq compiles, a carried
+            # binding is validated and its templates attached, then the hook is stored.
             await manager.register(params)
         except ValueError as exc:
-            # A non-compiling inline condition/expr jq is a per-hook rejection; other
-            # types (store/transport) propagate as the section's failure.
+            # A non-compiling inline condition/expr jq is a per-hook rejection.
+            report.errors.append(f"hook {name!r}: {exc}")
+            report.skipped += 1
+            continue
+        except StatesError as exc:
+            # A binding the states store refuses is the hook's own defect; any other states
+            # error and every other type (store/transport) propagates as the section's failure.
+            if not is_binding_refusal(exc):
+                raise
             report.errors.append(f"hook {name!r}: {exc}")
             report.skipped += 1
             continue

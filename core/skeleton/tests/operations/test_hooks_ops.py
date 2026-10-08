@@ -14,6 +14,8 @@ import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_contract.states import StateAttach, StateBinding
+from tai42_contract.states.errors import StateNotFoundError, StatesError, StatesNotConfiguredError
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.access_control.policy import policy_is_empty
@@ -187,6 +189,68 @@ async def test_register_rejects_invalid_flat_params(manager: InMemoryHooksManage
     # extractor) is a loud BadRequestError, never an escaped ValidationError.
     with pytest.raises(BadRequestError, match="invalid hook params"):
         await hooks_ops.register_hook(name="x", topic="t", tool="noop", execution_key="k-fire", condition=5)  # type: ignore[arg-type]
+
+
+async def test_register_rejects_a_topic_that_is_not_a_url_segment(manager: InMemoryHooksManager) -> None:
+    # The HookParams construction runs inside the door's definition mapping, so a model refusal is
+    # the same 400 with the hook-params prefix and the model's own text.
+    with pytest.raises(BadRequestError, match=r"(?s)^invalid hook params: .*topic 'Bad Topic' must match"):
+        await hooks_ops.register_hook(name="x", topic="Bad Topic", tool="noop", execution_key="k-fire")
+    assert await manager.list_hooks() == {}
+
+
+_STATE_BINDING = StateBinding(states=[StateAttach(state="ghost", subject_expr=TemplatedText(content=".id"))])
+
+
+def _patch_binding_validation(monkeypatch: pytest.MonkeyPatch, error: Exception | None) -> list[StateBinding]:
+    """Patch the binding validate-and-attach seam: record each call, then raise ``error`` (or pass)."""
+    from tai42_skeleton.tools import state_binding as state_binding_module
+
+    calls: list[StateBinding] = []
+
+    async def _validate_and_attach(app: object, binding: StateBinding) -> None:
+        calls.append(binding)
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(state_binding_module, "validate_and_attach_binding", _validate_and_attach)
+    return calls
+
+
+async def test_register_with_a_binding_naming_an_undeclared_state_is_not_found(
+    manager: InMemoryHooksManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_binding_validation(monkeypatch, StateNotFoundError("state 'ghost' is not declared"))
+    with pytest.raises(NotFoundError, match=r"^invalid hook params: state 'ghost' is not declared$"):
+        await hooks_ops.register_hook(
+            name="h1", topic="events", tool="forward", execution_key="k-fire", state_binding=_STATE_BINDING
+        )
+    assert await manager.list_hooks() == {}
+
+
+@pytest.mark.parametrize("fault", [StatesError("store down"), StatesNotConfiguredError("states database unbound")])
+async def test_register_with_a_store_fault_during_the_binding_check_propagates(
+    manager: InMemoryHooksManager, monkeypatch: pytest.MonkeyPatch, fault: StatesError
+) -> None:
+    # A store fault is never a client error: it leaves the operation unmapped (the door's 500).
+    _patch_binding_validation(monkeypatch, fault)
+    with pytest.raises(type(fault)) as caught:
+        await hooks_ops.register_hook(
+            name="h1", topic="events", tool="forward", execution_key="k-fire", state_binding=_STATE_BINDING
+        )
+    assert caught.value is fault
+    assert await manager.list_hooks() == {}
+
+
+async def test_register_validates_and_attaches_the_binding_before_storing(
+    manager: InMemoryHooksManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _patch_binding_validation(monkeypatch, None)
+    await hooks_ops.register_hook(
+        name="h1", topic="events", tool="forward", execution_key="k-fire", state_binding=_STATE_BINDING
+    )
+    assert calls == [_STATE_BINDING]
+    assert set(await manager.list_hooks()) == {"h1"}
 
 
 async def test_unregister_missing_is_not_found(manager: InMemoryHooksManager) -> None:

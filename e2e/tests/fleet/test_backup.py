@@ -24,6 +24,7 @@ from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
 
 from ._fleet import (
+    build_backup_definitions_stack,
     build_backup_populated_stack,
     build_backup_source_stack,
     build_fleet_env_stack_builder,
@@ -324,3 +325,102 @@ async def test_corrupted_manifest_import_reports_error_and_persists_nothing(
     assert result["ok"] is False, f"a corrupted manifest import must not report ok: {result}"
     assert result["sections"]["manifest"]["errors"], f"the section report carried no error: {result}"
     assert manifest_file(target).read_bytes() == before, "a failed manifest import must not have touched the manifest"
+
+
+@pytest.mark.needs(
+    "probe-tools",
+    "mutable",
+    "kind:states",
+    "setting:two-stacks",
+    "setting:conversations:redis",
+)
+async def test_stored_definitions_restore_their_bindings_onto_a_fresh_stack(
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """One backup carries a state, a hook and a per-target conversation config that bind it,
+    and a preset the config targets; restored onto a FRESH stack in one import:
+
+    * ``states`` replays before ``webhooks``, so the hook whose binding names the restored
+      state restores, and its template is attached on the fresh stack by the hook restore
+      itself (the backup carries the state and the template but not the attachment);
+    * the config restores although its target preset does not exist yet when the
+      ``conversation_target_config`` section replays (presets restore later, in
+      ``versioned_documents``): target existence is the set door's rule, never the restore's;
+    * that door still refuses the same body on the fresh stack, whose live registry has not
+      loaded the restored preset.
+    """
+    source = fresh_stack(build_backup_definitions_stack)
+    api = source.api()
+    state = uniq("bkpstatus")
+    template = uniq("bkp-tpl").replace("_", "-")
+    await api.put(
+        f"/api/states/{state}",
+        json={
+            "description": "e2e backup binding target",
+            "schema": {"type": "object", "properties": {"note": {"type": "string"}}},
+            "subject_kinds": ["thread"],
+            "default_subject_kind": "thread",
+        },
+        retry_on_reloading=True,
+    )
+    await api.put(
+        f"/api/state-templates/{template}",
+        json={
+            "kind": "state-template",
+            "name": template,
+            "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
+        },
+        retry_on_reloading=True,
+    )
+    binding = {"states": [{"state": state, "subject_expr": {"content": ".x"}, "templates": [template]}]}
+    hook_name = uniq("bkp-hook").replace("_", "-")
+    await api.post(
+        "/api/hooks",
+        json={
+            "name": hook_name,
+            "topic": uniq("bkp-topic").replace("_", "-"),
+            "tool": "e2e_echo",
+            "execution_key": uniq("bkp-exec"),
+            "state_binding": binding,
+        },
+        retry_on_reloading=True,
+    )
+    preset = uniq("bkp-preset").replace("_", "-")
+    await api.post(
+        "/api/presets",
+        json={"name": preset, "base_tool": "e2e_echo", "description": "backup target", "fixed_kwargs": {}},
+        retry_on_reloading=True,
+    )
+    config_body = {"multichannel": False, "greeting_template": None, "state_binding": binding}
+    await api.put(f"/api/conversation-configs/tool/{preset}", json=config_body, retry_on_reloading=True)
+    sections = ["states", "webhooks", "conversation_target_config", "versioned_documents"]
+    export = await api.request_raw("POST", "/api/backup/export", json={"sections": sections})
+    assert export.status_code == 200, export.text
+    document = export.json()
+    # The source attached the template when the hook was registered; drop that attachment from
+    # the backup so the attachment the fresh stack ends with is the one the restore itself makes.
+    states_payload = document["sections"]["states"]
+    assert any(row["state"] == state for row in states_payload["attachments"]), states_payload
+    states_payload["attachments"] = [row for row in states_payload["attachments"] if row["state"] != state]
+
+    target = fresh_stack(build_backup_definitions_stack)
+    fresh = target.api()
+    result = await fresh.post(
+        "/api/backup/import", json={"document": document, "sections": sections}, retry_on_reloading=True
+    )
+    assert result["ok"], result
+    assert result["sections"]["webhooks"]["created"] == 1, result
+    assert result["sections"]["conversation_target_config"]["created"] == 1, result
+    assert all(result["sections"][name]["errors"] == [] for name in sections), result
+
+    served = await fresh.get(f"/api/states/{state}", retry_on_reloading=True)
+    assert [m["template"] for m in served["attachments"]] == [template], served
+    hooks = await fresh.get("/api/hooks", retry_on_reloading=True)
+    assert hook_name in {item["name"] for item in hooks["items"]}, hooks
+    config = await fresh.get(f"/api/conversation-configs/tool/{preset}", retry_on_reloading=True)
+    restored_attach = config["state_binding"]["states"][0]
+    assert (restored_attach["state"], restored_attach["templates"]) == (state, [template]), config
+
+    refused = await fresh.request_raw("PUT", f"/api/conversation-configs/tool/{preset}", json=config_body)
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["error"] == f"tool not found: {preset!r}", refused.text

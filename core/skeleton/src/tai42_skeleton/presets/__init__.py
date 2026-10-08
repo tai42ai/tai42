@@ -5,7 +5,9 @@ A *preset* is a base tool with a partial set of keyword arguments baked in,
 exposed as a new named tool. :func:`preset_bind` is the kernel that builds the
 live tool (a hidden/fixed transform of the base tool); :class:`PresetStoreView`
 is the typed view over ``app.versioning.store`` with ``kind="preset"`` that
-persists and versions it. tai42-contract owns the ``PresetStore`` Protocol +
+persists and versions it; :func:`check_preset_body` runs the preset document's save rules, the
+ones every write door and the backup restore share (importing this package registers it as the
+preset kind's restore check). tai42-contract owns the ``PresetStore`` Protocol +
 :class:`~tai42_contract.presets.PresetBody` model + the preset errors; this package
 holds the concrete view + the bind kernel.
 
@@ -29,7 +31,16 @@ from __future__ import annotations
 from tai42_contract.presets import PresetSpec
 
 from tai42_skeleton.presets.bind import preset_bind
+from tai42_skeleton.presets.definition import PresetDefinitionError, check_preset_body
 from tai42_skeleton.presets.manager import PresetManager
 from tai42_skeleton.presets.store import PresetStoreView, preset_store
 
-__all__ = ["PresetManager", "PresetSpec", "PresetStoreView", "preset_bind", "preset_store"]
+__all__ = [
+    "PresetDefinitionError",
+    "PresetManager",
+    "PresetSpec",
+    "PresetStoreView",
+    "check_preset_body",
+    "preset_bind",
+    "preset_store",
+]

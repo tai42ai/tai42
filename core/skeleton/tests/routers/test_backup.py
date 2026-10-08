@@ -205,22 +205,25 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
     assert resp.status_code == 200
     sections = _json(resp)["data"]
     by_name = {s["name"]: s["secret"] for s in sections}
-    # Exactly the registered core sections.
-    assert set(by_name) == {
+    # Exactly the registered core sections, in their replay order: ``states`` restores right
+    # after ``templates`` and before every section that restores a binding.
+    assert [s["name"] for s in sections] == [
         "manifest",
         "env",
         "access_control",
         "sub_mcp",
+        "templates",
+        "states",
         "webhooks",
         "conversations",
         "conversation_target_config",
-        "templates",
         "schedules",
         "connector_categories",
         "connector_connections",
         "versioned_documents",
         "tool_meta",
-    }
+    ]
+    assert by_name["states"] is False
     assert by_name["manifest"] is False
     assert by_name["env"] is True
     assert by_name["access_control"] is True

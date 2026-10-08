@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from tai42_contract.conversations import ConversationDoor, ConversationRoute, PersonAddress
 
 from tai42_skeleton.conversations import cache
-from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.pair_codes import MintingConversation
 from tai42_skeleton.conversations.persons import PairingTarget
 from tai42_skeleton.conversations.turn.errors import ConversationRouteResolutionError
@@ -143,18 +142,15 @@ async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichann
 async def _resolve_channel_route(channel: str, our_identity_canonical: str) -> ConversationRoute:
     """The single ``door=channel`` route matching ``(channel, our_identity)`` exactly.
 
-    Matched by EXACT equality on the canonical address form. No match raises
-    :class:`ConversationRouteResolutionError`; more than one is a corrupt table and
-    raises rather than picking one.
+    Matched by EXACT equality on the canonical address form, the form every route write
+    stores. No match raises :class:`ConversationRouteResolutionError`; more than one is a
+    corrupt table and raises rather than picking one.
     """
     routes, _ = await cache.get_conversations_manager().list_routes()
     matches = [
         route
         for route in routes.values()
-        if route.door == "channel"
-        and route.channel == channel
-        and route.our_identity is not None
-        and canonical_address(route.our_identity) == our_identity_canonical
+        if route.door == "channel" and route.channel == channel and route.our_identity == our_identity_canonical
     ]
     if not matches:
         raise ConversationRouteResolutionError(
