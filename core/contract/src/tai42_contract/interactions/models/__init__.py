@@ -58,6 +58,7 @@ from tai42_contract.interactions.models.response import (
     InteractionResponse,
     InteractionState,
     ResumeBuffered,
+    RunFailed,
     SuspendedInteraction,
 )
 
@@ -93,6 +94,7 @@ __all__ = [
     "MediaKind",
     "MediaOrigin",
     "ResumeBuffered",
+    "RunFailed",
     "SuspendedInteraction",
     "check_addressing",
     "check_form_data",

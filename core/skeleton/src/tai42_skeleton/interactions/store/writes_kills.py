@@ -59,6 +59,7 @@ class _StoreKillWrites(_StoreWritesBase):
         delivery: dict[str, Any] | None,
         run_delivery_id: str | None,
         subjects: dict[str, Any] | None,
+        chain_keys: list[str],
         reason: str,
         kill_due_ttl: int,
         first_attempt_at_ms: int,
@@ -81,8 +82,9 @@ class _StoreKillWrites(_StoreWritesBase):
           whole-chain walk has its live due record cleared and nothing redelivers into a run whose
           driver dropped its tombstones;
         * a durable kill-due record + its next-attempt index member are written, carrying the
-          killed run's copied ``delivery`` address, ``run_delivery_id`` and subject descriptor, so
-          the platform's FAILED delivery survives the prune and a crash-redelivery.
+          killed run's copied ``delivery`` address, ``run_delivery_id``, subject descriptor and the
+          ``chain_keys`` the interaction is nested under, so the platform's FAILED delivery and the
+          teardown's resume lineage survive the prune and a crash-redelivery.
 
         ``act_on`` is the door's precondition — the resolved target states the kill may act on. The
         default (:data:`KILL_ACT_ON_ANY`) tears down a pending OR an already-resolved
@@ -92,7 +94,7 @@ class _StoreKillWrites(_StoreWritesBase):
         the MULTI writes NOTHING, and ``"skipped"`` is returned — so the answer's own continuation
         owns the run and the door delivers no FAILED, tears nothing down and clears no due record.
 
-        The caller passes the run's ``delivery``/``run_delivery_id``/``subjects`` it read off the
+        The caller passes the run's ``delivery``/``run_delivery_id``/``subjects``/``chain_keys`` it read off the
         surviving record (state hash or continuation-due), and the kill-due TTL, first-attempt score
         and hard ``deadline_ms`` (the reaper's give-up horizon).
         """
@@ -106,6 +108,7 @@ class _StoreKillWrites(_StoreWritesBase):
             json.dumps(delivery) if delivery is not None else None,
             run_delivery_id,
             json.dumps(subjects) if subjects is not None else None,
+            json.dumps(chain_keys) if chain_keys else None,
         )
 
         async with r.pipeline() as pipe:

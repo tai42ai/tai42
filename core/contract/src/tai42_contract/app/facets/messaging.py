@@ -62,11 +62,14 @@ class AppInteractions(Protocol):
         A driver's continuation face and cross-driver chain-delivery tool call this with the id
         they are about to resume/deliver-to, BEFORE producing any outcome, because those tools are
         dispatchable by name at the run-tool door and the MCP edge. Authorised only inside the
-        platform's own resume of that run: it passes iff the ambient run-authorization context
-        names ``interaction_id`` directly (the resume origin) OR the interaction's stored run
-        delivery identity matches the ambient one (a cross-driver chain re-entry of the same run).
+        platform's own drive (resume, kill or give-up) of that run: it passes iff the ambient
+        run-authorization context names ``interaction_id`` directly (the resume origin), OR the
+        interaction's stored run delivery identity matches the ambient one (another interaction of
+        the same run), OR ``interaction_id`` is a chain key in the driven interaction's recorded
+        chain lineage (a cross-driver chain re-entry of a caller the driven run is nested under).
         Raises :class:`~tai42_contract.interactions.ParkResumeUnauthorizedError` for an external
-        caller (no origin) or an id belonging to another run — never a mere presence test.
+        caller (no origin), an id belonging to another run, or a chain key outside the lineage —
+        never a mere presence test.
         """
         ...
 

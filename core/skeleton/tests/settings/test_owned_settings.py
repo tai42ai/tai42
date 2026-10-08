@@ -94,6 +94,7 @@ def test_the_owning_modules_are_listed() -> None:
         "tai42_skeleton.access_control.settings",
         "tai42_skeleton.interactions.settings",
         "tai42_skeleton.channels.settings",
+        "tai42_kit.llm.settings",
     )
 
 
@@ -174,6 +175,43 @@ def test_app_context_refuses_boot_on_an_unknown_owned_name(monkeypatch: pytest.M
 
     with pytest.raises(UnknownOwnedSettingError, match="ACCESS_CONTROL_ENABEL"):
         asyncio.run(boot())
+
+
+def test_an_unknown_llm_provider_checkpoint_setting_refuses_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_TTL_MINUTES", "43200")
+    with pytest.raises(
+        UnknownOwnedSettingError,
+        match=r"^boot \(process environment\): .*LLM_PROVIDER_CHECKPOINT_TTL_MINUTES \(prefix LLM_PROVIDER_\)",
+    ):
+        require_known_owned_settings()
+
+
+def test_app_context_refuses_boot_on_an_unknown_llm_provider_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_TTL_MINUTES", "43200")
+
+    async def boot() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            pass
+
+    with pytest.raises(UnknownOwnedSettingError, match="LLM_PROVIDER_CHECKPOINT_TTL_MINUTES"):
+        asyncio.run(boot())
+
+
+def test_an_env_write_setting_an_unknown_llm_provider_name_refuses() -> None:
+    with pytest.raises(
+        UnknownOwnedSettingError,
+        match=r"^env write: .*LLM_PROVIDER_CHECKPOINT_TTL_MINUTES \(prefix LLM_PROVIDER_\)",
+    ):
+        refuse_unknown_owned_env_write(["LLM_PROVIDER_CHECKPOINT_TTL_MINUTES", "LLM_PROVIDER_CHECKPOINT"])
+
+
+def test_the_llm_provider_settings_pass_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "2880")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES", "60")
+    require_known_owned_settings()
 
 
 def test_an_interactions_name_of_a_channel_setting_refuses_boot(monkeypatch: pytest.MonkeyPatch) -> None:

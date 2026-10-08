@@ -25,7 +25,7 @@ composition gap, flagged (not silently skipped):
 * Even given such a stack, two concurrent same-``thread_id`` turns serialize FIRST on the
   conversation per-thread FIFO (``run_reserved``'s cross-worker thread lease -> ``ThreadBusyError``)
   and a concurrent park-resume serializes on the park drive-lease
-  (``AgentResumeDriveInProgressError``) — both BEFORE the workspace lease, so its busy path stays
+  (the kit park index's ``DriveInProgressError``) — both BEFORE the workspace lease, so its busy path stays
   masked from every reachable door.
 
 The busy path is therefore a defense-in-depth internal seam, proven at the plugin unit level

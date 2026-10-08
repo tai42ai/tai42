@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -94,6 +94,36 @@ def resume_origin(interaction_id: str) -> Iterator[None]:
         yield
     finally:
         _resume_origin.reset(token)
+
+
+# The ambient resume-lineage deposit, laid beside the resume origin: the chain keys of the
+# chained calls the interaction the platform is currently driving is nested under (the
+# ``chain_keys`` its park recorded), outermost first. Deposited only by the platform's own
+# drives — a resume, a kill teardown, a give-up — so the resume authorization reads only what
+# the platform itself bound. Empty outside a drive and for a park nested under no chained call.
+_resume_lineage: ContextVar[tuple[str, ...]] = ContextVar("tai42_runs_resume_lineage", default=())
+
+
+def get_resume_lineage() -> tuple[str, ...]:
+    """The chain keys the interaction being driven is nested under, outermost first; empty outside a drive.
+
+    A plain contextvar read, never raises.
+    """
+    return _resume_lineage.get()
+
+
+@contextmanager
+def resume_lineage(chain_keys: Sequence[str]) -> Iterator[None]:
+    """Deposit ``chain_keys`` as the ambient resume lineage for the wrapped drive.
+
+    Resets in a ``finally`` (token discipline). Entered beside :func:`resume_origin` by the
+    platform's drives of a parked interaction, with the chain keys its park recorded.
+    """
+    token = _resume_lineage.set(tuple(chain_keys))
+    try:
+        yield
+    finally:
+        _resume_lineage.reset(token)
 
 
 # The ambient delivery-fire deposit: the interactions delivery ladder sets the run's

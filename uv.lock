@@ -5797,12 +5797,13 @@ curl = [
     { name = "curl-cffi" },
 ]
 dev = [
-    { name = "fakeredis" },
+    { name = "fakeredis", extra = ["lua"] },
     { name = "joserfc" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
+    { name = "redis" },
     { name = "ruff" },
 ]
 google = [
@@ -5935,7 +5936,7 @@ requires-dist = [
     { name = "aiosqlite", marker = "extra == 'langgraph-checkpoint-sqlite'", specifier = ">=0.20" },
     { name = "anyio", specifier = ">=4" },
     { name = "curl-cffi", marker = "extra == 'curl'", specifier = ">=0.16.3" },
-    { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.21" },
+    { name = "fakeredis", extras = ["lua"], marker = "extra == 'dev'", specifier = ">=2.21" },
     { name = "fastmcp", specifier = ">=3.4.7,<4" },
     { name = "httpcore", specifier = ">=1" },
     { name = "httpx", specifier = ">=0.28" },
@@ -5975,6 +5976,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "redis", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "redis", marker = "extra == 'llm'", specifier = ">=5" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5" },
     { name = "redisvl", marker = "extra == 'llm'", specifier = ">=0.15.0,<1" },

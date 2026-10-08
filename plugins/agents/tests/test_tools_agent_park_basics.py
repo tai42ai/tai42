@@ -6,10 +6,7 @@ the expiry marker.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -33,11 +30,11 @@ from tests._tools_agent_park_support import (
     _AskStandIn,
     _wire_tools_build,
 )
+from tests.conftest import bind_park_index
 
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.park import agent_resume
-from tai42_agents._internal.park import capability as park_capability
-from tai42_agents._internal.park import index as idx
+from tai42_agents._internal.park.park_binding import agents_park_index
 
 
 @pytest.fixture
@@ -45,15 +42,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the park index at a shared in-memory fakeredis and report the park Redis as
     configured (so a run is judged park-capable)."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(park_capability, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -111,7 +100,7 @@ def test_tools_agent_park_then_answer_exactly_once(
         assert receipt.caller_interaction_ids == []
         assert receipt.expiry_at == ask._expiry_at
         assert ask.calls == 1
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         assert entry["agent_name"] == "tools_agent"
 
@@ -121,9 +110,9 @@ def test_tools_agent_park_then_answer_exactly_once(
         # The parked tool ran exactly once — the resume substituted the answer, never re-ran it.
         assert ask.calls == 1
         # A clean drive finalizes the park entry to a resolved tombstone (not an absent key).
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert _is_resolved(entry)
 
     asyncio.run(go())
 
@@ -158,7 +147,7 @@ def test_tools_agent_run_park_is_outermost_and_captures_no_chain(
             reset_park_completion(token)
         assert isinstance(receipt, SuspendedInteraction)
 
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         assert entry["completion_tool"] is None
         assert entry["completion_context"] is None
@@ -196,7 +185,7 @@ def test_tools_agent_run_park_captures_the_ambient_chain_routing(
             reset_chained_resume(token)
         assert isinstance(receipt, SuspendedInteraction)
 
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         assert entry["completion_tool"] == "deliver_chained_park"
         assert entry["completion_context"] == {"chain_key": "tai42:chained-park:abc", "asked_by": ["caller"]}
@@ -226,7 +215,7 @@ def test_tools_agent_run_park_without_a_completion_binds_none(
             thread_id="t-run-nocompletion",
         )
         assert isinstance(receipt, SuspendedInteraction)
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         assert entry["completion_tool"] is None
         assert entry["completion_context"] is None
@@ -311,9 +300,9 @@ def test_tools_agent_park_then_expiry_feeds_the_expiry_marker(
         result = await agent_resume("i1", EXPIRY_ANSWER)
         assert result == "expired path"
         # A clean drive finalizes the park entry to a resolved tombstone (not an absent key).
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert _is_resolved(entry)
 
     asyncio.run(go())
 
@@ -339,7 +328,7 @@ def test_tools_agent_park_has_no_interrupt_on_collision(
             user_message=TemplatedText(content="go"),
             thread_id="t-hitl",
         )
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         # Exactly one park interrupt id was stored — no second (HITL) interrupt exists.
         assert entry is not None
         assert isinstance(entry["interrupt_id"], str)
@@ -347,3 +336,7 @@ def test_tools_agent_park_has_no_interrupt_on_collision(
         assert result == "done"
 
     asyncio.run(go())
+
+
+def _is_resolved(entry: Any) -> bool:
+    return agents_park_index().tombstone_kind(entry) == "resolved"

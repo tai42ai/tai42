@@ -19,8 +19,7 @@ from tai42_contract.interactions import ChainedResume, current_execution_identit
 from tai42_kit.llm.checkpoint import checkpoint_park_horizon, durable_checkpoint_providers, register_live_thread_filter
 from tai42_kit.llm.settings import llm_provider_settings
 
-from tai42_agents._internal.park.index import threads_with_live_barriers
-from tai42_agents.settings import agents_park_redis_settings
+from tai42_agents._internal.park.park_binding import park_index_configured, threads_with_live_barriers
 
 # A checkpoint thread backing a live park barrier is live: the checkpoint sweep spares it.
 register_live_thread_filter("agents", threads_with_live_barriers)
@@ -113,20 +112,6 @@ def _min_horizon(left: datetime | None, right: datetime | None) -> datetime | No
     if right is None:
         return left
     return min(left, right)
-
-
-def park_index_configured() -> bool:
-    """Whether the agents plugin's durable park index has a Redis to reach.
-
-    The index is an OPTIONAL feature dependency: a deployment that never async-parks configures no
-    ``TAI_AGENTS_REDIS_URL`` and owns no parks. A park read/write goes through the park client, which
-    raises loudly when it is unset; the two callers that must tolerate an unconfigured index gate on
-    this first — the park-capability gate (so an async ask refuses cleanly rather than half-parking)
-    and the globally registered park-kill handler (which fires for EVERY driver's kill, so a
-    deployment with the plugin loaded but no park redis is not crashed by a kill it does not own). A
-    CONFIGURED index that then fails a read still raises.
-    """
-    return agents_park_redis_settings().redis_url is not None
 
 
 def build_park_identity(

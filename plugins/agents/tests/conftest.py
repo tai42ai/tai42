@@ -36,6 +36,7 @@ needs different behavior monkeypatches the exact seam it calls.
 
 from __future__ import annotations
 
+import contextlib
 import mimetypes
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -505,3 +506,34 @@ def resource_manager() -> Iterator[RecordingResourceManager]:
     yield APP.storage.resource_manager
     APP.storage.resource_manager.templates.clear()
     APP.storage.resource_manager.media_calls.clear()
+
+
+def bind_park_index(monkeypatch: pytest.MonkeyPatch, redis: Any, *, configured: bool = True) -> None:
+    """Bind the agents' park index to ``redis`` (an in-process fake) and report the park Redis as
+    configured (or not), so every park read and write in the test goes through the kit library over
+    that one client."""
+    from tai42_kit.interactions.park_index import ParkIndex
+
+    from tai42_agents._internal.park import park_binding
+    from tai42_agents.settings import AgentsParkRedisSettings
+
+    settings = AgentsParkRedisSettings(redis_url="redis://fake" if configured else None)
+
+    @contextlib.asynccontextmanager
+    async def _client() -> AsyncIterator[Any]:
+        yield redis
+
+    monkeypatch.setattr(park_binding, "agents_park_redis_settings", lambda: settings)
+    monkeypatch.setattr(
+        park_binding, "_bound", (settings, ParkIndex(park_binding.AGENTS_PARK_NAMESPACE, settings, client=_client))
+    )
+
+
+@pytest.fixture
+def park_redis(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """An in-process Redis (with Lua) the agents' park index is bound to for the test."""
+    from fakeredis import aioredis
+
+    redis = aioredis.FakeRedis(decode_responses=True)
+    bind_park_index(monkeypatch, redis)
+    return redis

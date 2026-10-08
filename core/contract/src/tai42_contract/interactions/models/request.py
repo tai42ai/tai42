@@ -246,6 +246,12 @@ class InteractionRequest(BaseModel):
     # level matches on the name it knows to any depth. Empty for a run that parked
     # outside any tool/agent frame.
     asked_by: list[str] = Field(default_factory=list)
+    # The chain keys of the chained calls the parking run is nested under, outermost first — each a
+    # call whose waiting caller the run's terminal re-enters through that caller's chain-delivery
+    # tool. The platform admits a chain-delivery fire for one of them only from inside its own drive
+    # of this interaction (its resume, kill or give-up). A re-park inherits the lineage of the
+    # interaction being resumed. Empty when the run is nested under no chained call.
+    chain_keys: list[str] = Field(default_factory=list)
     # The RUN's durable out-of-band delivery address — the ``(tool, context)`` the door
     # that STARTED the run bound as its completion, captured from the ambient run-delivery
     # context at park time. A PER-RUN fact: every ask of the run (``to="user"`` and

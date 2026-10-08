@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.interactions.models.request import InteractionRequest
@@ -113,3 +113,17 @@ class ResumeBuffered(BaseModel):
     """
 
     remaining_ids: list[str] = Field(default_factory=list)
+
+
+class RunFailed(BaseModel):
+    """A run's failed terminal returned across a chain fire; ``outcome`` is the failing driver's opaque mapping.
+
+    A driver that resumes another driver's run through a chain-delivery tool reads the failure by
+    TYPE, never by a status word inside the outcome: the outcome stays the failing driver's own
+    JSON mapping, carried whole. A continuation face raises
+    :class:`~tai42_contract.interactions.RunTerminalFailed` with it, so the platform delivers FAILED.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: dict[str, Any]

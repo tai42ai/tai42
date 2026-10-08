@@ -129,6 +129,7 @@ async def test_kill_teardown_leaves_the_index(fake_redis):
             delivery=target.delivery,
             run_delivery_id=target.run_delivery_id,
             subjects=target.subjects,
+            chain_keys=target.chain_keys,
             reason="thread_deleted",
             kill_due_ttl=86400,
             first_attempt_at_ms=0,

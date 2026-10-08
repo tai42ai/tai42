@@ -34,7 +34,7 @@ from tai42_contract.interactions import (
 from tai42_contract.states import SubjectCandidates
 from tai42_contract.tools import RunDelivery, get_run_delivery, get_run_delivery_id, run_delivery
 
-from tai42_skeleton.interactions import authorization
+from tai42_skeleton.interactions import authorization, giveup_delivery
 from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions.store import ContinuationDue, serde
 from tai42_skeleton.runs.chokepoint import delivery_fire, resume_origin
@@ -460,7 +460,7 @@ async def test_permanent_giveup_delivers_failed_off_the_stored_delivery(wired, m
         run_delivery_id="rd-g",
         delivery=("deliver_tool", {"thread_id": "tg"}),
     )
-    await continuation_module.deliver_park_giveup(wired.store, request)
+    await giveup_delivery.deliver_park_giveup(wired.store, request, fingerprint=None)
     fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
     assert fire["arguments"]["status"] == PARK_COMPLETION_FAILED
     assert fire["arguments"]["completion_id"] == _cid("rd-g")

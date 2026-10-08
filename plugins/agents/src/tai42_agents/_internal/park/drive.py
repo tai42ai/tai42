@@ -28,8 +28,8 @@ from tai42_contract.interactions import (
 
 from tai42_agents._internal.park.capability import ParkIdentity
 from tai42_agents._internal.park.errors import AgentParkNotHostableError
-from tai42_agents._internal.park.index import detach_chained_parks
 from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.persist import persist_park
 from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
 
@@ -104,16 +104,17 @@ async def park_drive(park: ParkIdentity | None) -> AsyncIterator[None]:
 async def detach_dead_chains(claims: set[str]) -> None:
     """Tombstone the chained keys this drive claimed but never parked on.
 
-    So a later terminal lands benignly instead of hunting a park that will never
-    exist. Failures are logged and swallowed: the drive already has its result (or its exception), and
-    a detach that could not run must not replace either — the undetached chain falls back to the
-    delivery tool's own at-least-once retry tail. ``CancelledError`` propagates: a drive being
-    torn down has no time to write, and swallowing it would fight the cancellation.
+    So a later terminal lands benignly (a detached tombstone, written only where no key exists)
+    instead of hunting a park that will never exist. Failures are logged and swallowed: the drive
+    already has its result (or its exception), and a detach that could not run must not replace
+    either — the undetached chain falls back to the delivery tool's own at-least-once retry tail.
+    ``CancelledError`` propagates: a drive being torn down has no time to write, and swallowing it
+    would fight the cancellation.
     """
     if not claims:
         return
     try:
-        await detach_chained_parks(sorted(claims))
+        await agents_park_index().detach(sorted(claims))
     except Exception:
         logger.warning(
             "Agent drive left %d chained call(s) unparked and could not detach them; a later terminal will "

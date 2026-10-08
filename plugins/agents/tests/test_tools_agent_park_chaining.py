@@ -6,9 +6,7 @@ terminal-handling edge cases.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +14,7 @@ from typing import Any
 import pytest
 from fakeredis import aioredis
 from langchain_core.messages import AIMessage
+from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.interactions import (
@@ -23,25 +22,36 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
+    ChainedResume,
+    RunFailed,
     SuspendedInteraction,
+    get_chained_resume,
     is_chained_park_key,
+    reset_chained_resume,
+    set_chained_resume,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome
+from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionRecord, superstep_id
 from tai42_kit.settings import reset_all_settings
 from tests._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
+    _ask_call,
+    _AskStandIn,
     _NestedDriverStandIn,
     _preset_call,
     _tool_messages,
     _wire_tools_build,
 )
+from tests.conftest import bind_park_index
 
-from tai42_agents._internal.park import capability as park_capability
 from tai42_agents._internal.park import deliver_chained_park
-from tai42_agents._internal.park import index as idx
 from tai42_agents._internal.park import persist as park_persist
 from tai42_agents._internal.park.errors import AgentResumeParkEntryNotFoundError
+from tai42_agents._internal.park.park_binding import agents_park_index
+from tai42_agents._internal.park.resume import agent_resume
+from tai42_agents._internal.park.resume_tool import agent_park_giveup_handler
 
 
 @pytest.fixture
@@ -49,15 +59,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the park index at a shared in-memory fakeredis and report the park Redis as
     configured (so a run is judged park-capable)."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(park_capability, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -110,8 +112,8 @@ def test_tools_agent_chains_a_nested_runs_park_and_resumes_with_its_terminal(
         (chain_token,) = receipt.interaction_ids
         assert is_chained_park_key(chain_token)
         assert nested.calls == 1
-        assert await idx.read_park_entry("i-nested") is None
-        entry = await idx.read_park_entry(chain_token)
+        assert await agents_park_index().read_entry("i-nested") is None
+        entry = await agents_park_index().read_entry(chain_token)
         assert entry is not None
         assert entry["agent_name"] == "tools_agent"
 
@@ -133,9 +135,9 @@ def test_tools_agent_chains_a_nested_runs_park_and_resumes_with_its_terminal(
         assert results[0].status == "success"
         assert "approved" in results[0].content
         # The chained park finalizes like any other: a resolved tombstone, never an absent key.
-        entry = await idx.read_park_entry(chain_token)
+        entry = await agents_park_index().read_entry(chain_token)
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert _is_resolved(entry)
 
     asyncio.run(go())
 
@@ -358,7 +360,7 @@ def test_a_re_park_extends_the_chained_parks_inherited_horizon(
             thread_id="t-repark",
         )
         (chain_token,) = receipt.interaction_ids
-        entry = await idx.read_park_entry(chain_token)
+        entry = await agents_park_index().read_entry(chain_token)
         assert entry is not None
         before = await fake_park_redis.ttl(f"agent:park:{chain_token}")
 
@@ -372,7 +374,7 @@ def test_a_re_park_extends_the_chained_parks_inherited_horizon(
         # NEW deadline. Its barrier moves with it, so the answer still finds both.
         assert await fake_park_redis.ttl(f"agent:park:{chain_token}") > before
         assert await fake_park_redis.ttl(f"agent:park:step:t-repark:{entry['superstep_id']}") > before
-        assert not idx.is_resolved_tombstone(await idx.read_park_entry(chain_token) or {})
+        assert not _is_resolved(await agents_park_index().read_entry(chain_token) or {})
 
     asyncio.run(go())
 
@@ -393,28 +395,15 @@ def test_a_re_park_notice_for_an_unparked_chain_is_benign(
     asyncio.run(go())
 
 
-@pytest.mark.parametrize(
-    ("status", "announced"),
-    [
-        # The explicit non-success terminal.
-        (PARK_COMPLETION_FAILED, "non-success terminal"),
-        # An UNSTAMPED fire: a driver that predates the status field, or one that omits it.
-        (None, "carried NO status"),
-        # A value outside the shared vocabulary — a driver/delivery version skew.
-        ("mystery", "unrecognized status"),
-    ],
-)
 def test_a_failed_nested_terminal_re_enters_as_a_model_visible_tool_error(
     fake_park_redis: Any,
     monkeypatch: pytest.MonkeyPatch,
     app_tools: Any,
     caplog: pytest.LogCaptureFixture,
-    status: str | None,
-    announced: str,
 ) -> None:
-    # The nested run ended without a result. The waiting turn is resumed either way — never left
-    # parked — and what it is resumed WITH is a tool ERROR the model reads, never a silent empty
-    # result and never a failure payload dressed as the answer.
+    # The nested run failed. The waiting turn is resumed — never left parked — and what it is
+    # resumed WITH is a tool ERROR the model reads, never a silent empty result and never a failure
+    # payload dressed as the answer.
     saver = InMemorySaver()
     nested = _NestedDriverStandIn("i-nested", "nested_driver_resume")
     model = ScriptedChatModel([_preset_call(), AIMessage(content="I could not run that call")])
@@ -437,16 +426,52 @@ def test_a_failed_nested_terminal_re_enters_as_a_model_visible_tool_error(
         (chain_token,) = receipt.interaction_ids
         with caplog.at_level(logging.WARNING):
             assert (
-                await deliver_chained_park(chain_token=chain_token, completion_id="c-1", status=status)
+                await deliver_chained_park(chain_token=chain_token, completion_id="c-1", status=PARK_COMPLETION_FAILED)
                 == "I could not run that call"
             )
         errors = _tool_messages(model.seen[1])
         assert len(errors) == 1
         assert errors[0].status == "error"
         assert "ended without a result" in errors[0].content
-        # Every non-success shape is ANNOUNCED naming WHICH arrived: a fire this tool cannot read
-        # still resumes the run, so the log is the only detection a version skew has.
-        assert announced in caplog.text
+        assert "the call it waits on failed" in caplog.text
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("status", [None, "mystery"])
+def test_a_fire_with_an_unknown_status_raises_and_leaves_the_park_live(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any, status: str | None
+) -> None:
+    # An unstamped fire or a value outside the contract's three words is a sender's defect: the
+    # face refuses it before anything is buffered, never reading it as a failure.
+    saver = InMemorySaver()
+    nested = _NestedDriverStandIn("i-nested", "nested_driver_resume")
+    model = ScriptedChatModel([_preset_call(), AIMessage(content="unreached")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["nested_driver"] = nested.base_tool()
+    app_tools.tool_runners["nested_driver"] = nested.run
+
+    async def go() -> None:
+        receipt = await _agent().run(
+            presets=[
+                PresetSpec(
+                    name="driver_preset",
+                    base_tool="nested_driver",
+                    description="Run the nested driver.",
+                    fixed_kwargs={},
+                )
+            ],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-unknown",
+        )
+        (chain_token,) = receipt.interaction_ids
+        with pytest.raises(ValueError, match="unknown chain status"):
+            await deliver_chained_park(chain_token=chain_token, completion_id="c-1", status=status)
+        entry = await agents_park_index().read_entry(chain_token)
+        assert entry is not None
+        assert agents_park_index().tombstone_kind(entry) == "live"
+        assert len(model.seen) == 1
 
     asyncio.run(go())
 
@@ -468,7 +493,7 @@ def test_a_terminal_for_a_chain_the_drive_never_parked_on_lands_benignly(
     async def _persist_died(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("the drive died")
 
-    monkeypatch.setattr(park_persist, "persist_superstep", _persist_died)
+    monkeypatch.setattr(agents_park_index(), "persist", _persist_died)
 
     agent = _agent()
     preset = PresetSpec(
@@ -484,9 +509,9 @@ def test_a_terminal_for_a_chain_the_drive_never_parked_on_lands_benignly(
                 thread_id="t-dead",
             )
         (chain_token,) = nested.chained_keys
-        entry = await idx.read_park_entry(chain_token)
+        entry = await agents_park_index().read_entry(chain_token)
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert agents_park_index().tombstone_kind(entry) == "detached"
         # A late terminal reads the record-less detach tombstone and no-ops (None), instead of
         # raising into an endless redelivery against an absent key.
         assert (
@@ -573,7 +598,146 @@ def test_an_unchained_run_still_refuses_a_nested_runs_park(
         assert "agent_resume" not in refusals[0].content
         assert "'nested_driver_resume'" not in refusals[0].content
         # Nothing of THIS run is parked or orphaned, and no chained key was ever minted.
-        assert await idx.read_park_entry("i-nested") is None
+        assert await agents_park_index().read_entry("i-nested") is None
         assert nested.chained_keys == []
+
+    asyncio.run(go())
+
+
+def _is_resolved(entry: Any) -> bool:
+    return agents_park_index().tombstone_kind(entry) == "resolved"
+
+
+# ---- the platform's give-up tells the waiter the agent's park captured --------------------------
+
+_CALLER_KEY = "tai42:chained-park:the-caller"
+_ABANDONED = {"tai42:resume_abandoned": True}
+
+
+class _RoutingRecordingAsk(_AskStandIn):
+    """The async ask stand-in that also records the chained routing bound where its body runs."""
+
+    def __init__(self, interaction_id: str) -> None:
+        super().__init__(interaction_id)
+        self.seen_chain_keys: list[str | None] = []
+
+    def tool(self) -> Any:
+        inner = super().tool()
+
+        def ask() -> dict[str, Any]:
+            routing = get_chained_resume()
+            self.seen_chain_keys.append(None if routing is None else routing.chain_key)
+            return inner.func()  # type: ignore[misc]
+
+        return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+
+
+class _ProbeChainDeliver:
+    """A test chain-delivery tool: records each fire (with the chain it continued) and returns ``reply``."""
+
+    def __init__(self) -> None:
+        self.fired: list[dict[str, Any]] = []
+        self.reply: Any = "the caller handled the failure"
+
+    def __call__(self, **payload: Any) -> Any:
+        self.fired.append(payload)
+        return self.reply
+
+
+async def _park_under_caller(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, *, chained: bool
+) -> tuple[_RoutingRecordingAsk, str]:
+    saver = InMemorySaver()
+    ask = _RoutingRecordingAsk("i-own")
+    _wire_tools_build(monkeypatch, ScriptedChatModel([_ask_call(), AIMessage(content="unreached")]), saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    token = set_chained_resume(
+        ChainedResume(delivery_tool="probe_chain_deliver", chain_key=_CALLER_KEY, asked_by=("caller",))
+        if chained
+        else None
+    )
+    try:
+        receipt = await _agent().run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-giveup",
+        )
+    finally:
+        reset_chained_resume(token)
+    assert isinstance(receipt, SuspendedInteraction)
+    assert receipt.interaction_ids == ["i-own"]
+    return ask, superstep_id(["i-own"])
+
+
+@pytest.mark.parametrize("reply_failed", [False, True])
+def test_the_give_up_fires_the_routing_the_agent_captured_at_its_run_face(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any, reply_failed: bool
+) -> None:
+    probe = _ProbeChainDeliver()
+    probe.reply = RunFailed(outcome={"caller": "failed too"}) if reply_failed else "the caller handled the failure"
+    app_tools.tool_runners["probe_chain_deliver"] = probe
+
+    async def go() -> None:
+        ask, step = await _park_under_caller(monkeypatch, app_tools, chained=True)
+        # The ask's body ran under the agent's per-call dispatch scope, a FRESH key — not the
+        # caller's: the give-up must tell the routing the agent captured at its run face.
+        (per_call_key,) = ask.seen_chain_keys
+        assert per_call_key is not None
+        assert per_call_key != _CALLER_KEY
+
+        handled = await agent_park_giveup_handler("i-own", _ABANDONED)
+
+        assert probe.fired == [{"chain_token": _CALLER_KEY, "status": PARK_COMPLETION_FAILED, "result": _ABANDONED}]
+        assert app_tools.run_tool_calls[-1]["continues_chain"] == ("caller",)
+        assert handled == ParkGiveUpOutcome(probe.reply)
+        record = await agents_park_index().read_resolution("t-giveup", step)
+        assert record == ResolutionRecord("terminal", probe.reply)
+        # A later sibling answer of that super-step replays the stored outcome with no drive.
+        assert await agent_resume("i-own", "too late") == probe.reply
+        assert len(probe.fired) == 1
+
+    asyncio.run(go())
+
+
+def test_the_give_up_of_an_unchained_park_finalizes_and_returns_the_failure(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    async def go() -> None:
+        _ask, step = await _park_under_caller(monkeypatch, app_tools, chained=False)
+        handled = await agent_park_giveup_handler("i-own", _ABANDONED)
+        assert handled == ParkGiveUpOutcome(RunFailed(outcome=_ABANDONED))
+        assert app_tools.run_tool_calls == []
+        assert await agents_park_index().read_resolution("t-giveup", step) == ResolutionRecord(
+            "terminal", RunFailed(outcome=_ABANDONED)
+        )
+        # A resolved tombstone replays its record value.
+        assert await agent_park_giveup_handler("i-own", _ABANDONED) == ParkGiveUpOutcome(RunFailed(outcome=_ABANDONED))
+
+    asyncio.run(go())
+
+
+def test_the_give_up_raises_while_a_drive_holds_the_lease(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    async def go() -> None:
+        _ask, step = await _park_under_caller(monkeypatch, app_tools, chained=True)
+        await agents_park_index().claim("t-giveup", step).acquire()
+        with pytest.raises(DriveInProgressError):
+            await agent_park_giveup_handler("i-own", _ABANDONED)
+        assert app_tools.run_tool_calls == []
+
+    asyncio.run(go())
+
+
+def test_the_give_up_returns_none_for_a_park_it_does_not_own(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def go() -> None:
+        assert await agent_park_giveup_handler("not-an-agent-park", _ABANDONED) is None
+        await agents_park_index().detach(["tai42:chained-park:dead"])
+        assert await agent_park_giveup_handler("tai42:chained-park:dead", _ABANDONED) is None
+        bind_park_index(monkeypatch, None, configured=False)
+        assert await agent_park_giveup_handler("i-own", _ABANDONED) is None
 
     asyncio.run(go())

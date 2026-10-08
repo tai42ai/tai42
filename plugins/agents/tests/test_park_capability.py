@@ -1,25 +1,23 @@
 """Park-capability gating: :func:`build_park_identity` captures a durable, rebuildable run and
 refuses everything that could not be resumed on a fresh worker.
 
-The park index is backed by an in-memory fakeredis routed in through the index module's
-``client_ctx`` seam, and the capability module's park-Redis read is pointed at the same
-configured-looking settings so a run is judged park-capable.
+The agents' park index is bound to an in-memory fakeredis and reported configured, so a run is
+judged park-capable.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fakeredis import aioredis
+from tai42_kit.interactions.park_index import superstep_id
+from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import build_park_identity
 from tai42_agents._internal.park import capability as cap
-from tai42_agents._internal.park import index as idx
+from tai42_agents._internal.park.park_binding import agents_park_index, threads_with_live_barriers
 
 
 @pytest.fixture
@@ -27,15 +25,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the park index at a shared in-memory fakeredis and report the park Redis as
     configured (so a run is judged park-capable)."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(cap, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -100,7 +90,7 @@ def test_build_park_identity_refuses_non_serializable_rebuild(fake_park_redis: A
 
 
 def test_build_park_identity_refuses_unconfigured_park_redis(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cap, "agents_park_redis_settings", lambda: SimpleNamespace(redis_url=None))
+    bind_park_index(monkeypatch, aioredis.FakeRedis(decode_responses=True), configured=False)
     park = build_park_identity(
         agent_name="langchain_deep_agent",
         config={"configurable": {"thread_id": "t1"}},
@@ -153,55 +143,41 @@ def test_retention_horizon_refuses_a_provider_without_one() -> None:
 # --------------------------------------------------------------------------- #
 # The per-thread live-barrier set and the agents live-thread filter
 # --------------------------------------------------------------------------- #
-def test_persist_adds_the_superstep_to_the_thread_live_set_and_finalize_removes_it(
-    fake_park_redis: Any,
-) -> None:
-    async def _go() -> None:
-        await idx.persist_superstep(
-            {"i1": {"x": 1}}, "thread-a", "step-1", {"i1": "int-1"}, {"i1": None}, barrier_ttl_seconds=600
-        )
-        assert await fake_park_redis.smembers("agent:park:live:thread-a") == {"step-1"}
-        assert 0 < await fake_park_redis.ttl("agent:park:live:thread-a") <= 600
-        await fake_park_redis.set("agent:park:step:thread-a:step-1:claim", "tok")
-        await idx.finalize_resolved_superstep(
-            "thread-a", "step-1", ["i1"], resolution="terminal", value="done", token="tok"
-        )
-        assert await fake_park_redis.smembers("agent:park:live:thread-a") == set()
-
-    asyncio.run(_go())
-
-
-def test_the_live_set_ttl_only_grows(fake_park_redis: Any) -> None:
-    async def _go() -> None:
-        await idx.persist_superstep({"i1": {}}, "thread-b", "step-1", {}, {"i1": None}, barrier_ttl_seconds=900)
-        await idx.persist_superstep({"i2": {}}, "thread-b", "step-2", {}, {"i2": None}, barrier_ttl_seconds=300)
-        assert await fake_park_redis.ttl("agent:park:live:thread-b") > 800
-        assert await fake_park_redis.smembers("agent:park:live:thread-b") == {"step-1", "step-2"}
-
-    asyncio.run(_go())
+async def _persist(thread_id: str, member: str) -> str:
+    step = superstep_id([member])
+    await agents_park_index().persist(
+        thread_id=thread_id,
+        superstep=step,
+        entries={member: {}},
+        expected={member: None},
+        entry_ttl={member: 600},
+        barrier_ttl=600,
+    )
+    return step
 
 
 def test_the_filter_claims_a_thread_with_a_live_barrier_only(fake_park_redis: Any) -> None:
     async def _go() -> None:
         from tai42_kit.llm.checkpoint import live_thread_filters
 
-        await idx.persist_superstep({"i1": {}}, "live", "s1", {}, {"i1": None}, barrier_ttl_seconds=600)
-        await idx.persist_superstep({"i2": {}}, "expired", "s2", {}, {"i2": None}, barrier_ttl_seconds=600)
-        await fake_park_redis.delete("agent:park:step:expired:s2")  # its barrier expired
-        await idx.persist_superstep({"i3": {}}, "finalized", "s3", {}, {"i3": None}, barrier_ttl_seconds=600)
-        await fake_park_redis.set("agent:park:step:finalized:s3:claim", "tok")
-        await idx.finalize_resolved_superstep("finalized", "s3", ["i3"], resolution="terminal", value=None, token="tok")
+        index = agents_park_index()
+        await _persist("live", "i1")
+        expired = await _persist("expired", "i2")
+        await fake_park_redis.delete(index.barrier_key("expired", expired))  # its barrier expired
+        finalized = await _persist("finalized", "i3")
+        async with index.claim("finalized", finalized) as lease:
+            await index.finalize(lease, member_ids=["i3"], resolution="terminal", value=None)
 
-        claimed = await idx.threads_with_live_barriers("redis", None, ["live", "expired", "finalized", "never"])
+        claimed = await threads_with_live_barriers("redis", None, ["live", "expired", "finalized", "never"])
         assert claimed == {"live"}
-        assert live_thread_filters()["agents"] is idx.threads_with_live_barriers
+        assert live_thread_filters()["agents"] is threads_with_live_barriers
 
     asyncio.run(_go())
 
 
 def test_the_filter_claims_nothing_without_a_park_index(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _go() -> None:
-        monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: SimpleNamespace(redis_url=None))
-        assert await idx.threads_with_live_barriers("redis", None, ["t"]) == set()
+        bind_park_index(monkeypatch, aioredis.FakeRedis(decode_responses=True), configured=False)
+        assert await threads_with_live_barriers("redis", None, ["t"]) == set()
 
     asyncio.run(_go())

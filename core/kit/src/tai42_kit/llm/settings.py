@@ -12,7 +12,7 @@ left unset.
 """
 
 from collections.abc import Sequence
-from typing import Any, Literal, Self
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
@@ -168,6 +168,7 @@ class LLMProviderSettings(TaiBaseSettings):
     # ``null`` sets an optional value to ``None`` (an empty value means "unset" and keeps the default),
     # so a deployment can turn the inline checkpoint compression off.
     model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_", env_parse_none_str="null")
+    env_prefix_owned: ClassVar[bool] = True
 
     llm: str = "openai"
     embedding: str = "openai"

@@ -9,7 +9,6 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +29,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.sandbox import ExecResult, SandboxError, SandboxPolicy
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_index import superstep_id as compute_superstep_id
 from tests._claude_app import LocalApp, build_local_app
 from tests._claude_stubs import (
     ASYNC_ASK,
@@ -45,14 +45,14 @@ from tests._claude_stubs import (
     payload_for,
 )
 from tests._sandbox_fake import FakeSandboxSession
+from tests.conftest import bind_park_index
 
-import tai42_agents._internal.park.index as idx
 import tai42_agents._internal.park.lease as lease_mod
 import tai42_agents.claude_code.agent as agent_module
 import tai42_agents.claude_code.workspace as workspace_module
 from tai42_agents._internal.park import agent_resume, workspace_lease
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
-from tai42_agents._internal.park.index import compute_superstep_id
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.sandbox_util import workspace_key_for
 from tai42_agents.claude_code.agent import ClaudeCodeAgent
 from tai42_agents.claude_code.errors import ClaudeCodeError
@@ -98,9 +98,7 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     async def _client() -> AsyncIterator[Any]:
         yield redis
 
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", _client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     monkeypatch.setattr(lease_mod, "_lease_client", _client)
     return redis
 
@@ -253,7 +251,7 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
         events = await _astream(
             app, user_message=TemplatedText(content="deploy it"), thread_id="t1", tool_names=["parkingtool"]
         )
-        return events, await idx.read_park_entry("i-tool")
+        return events, await agents_park_index().read_entry("i-tool")
 
     token = set_request_user_id("user-1")
     try:
@@ -327,7 +325,7 @@ def test_proxied_tool_park_this_session_does_not_own_is_refused_to_the_model(
         events = await _astream(
             app, user_message=TemplatedText(content="deploy it"), thread_id="t1", tool_names=["parkingtool"]
         )
-        return events, await idx.read_park_entry("i-nested")
+        return events, await agents_park_index().read_entry("i-nested")
 
     token = set_request_user_id("user-1")
     try:
@@ -445,11 +443,11 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
                 async for event in agent.astream(user_message=TemplatedText(content="deploy it"), thread_id="te2e")
             ]
             # The REAL async ask actually parked: the interaction is durable and resumable.
-            assert await idx.read_park_entry("int-e2e") is not None
+            assert await agents_park_index().read_entry("int-e2e") is not None
             # Resume drives a fresh session to a clean terminal (swap in the resume stub).
             monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(RESUME_ONCE))
             result = await agent_resume("int-e2e", "yes ship it")
-            entry = await idx.read_park_entry("int-e2e")
+            entry = await agents_park_index().read_entry("int-e2e")
             return events, result, entry
 
     token = set_request_user_id("user-1")
@@ -466,7 +464,7 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
     # The clean drive tombstoned the park entry (resolved, not absent), so a lapped redelivery
     # clears benignly instead of storming on a vanished key.
     assert entry is not None
-    assert idx.is_resolved_tombstone(entry)
+    assert _is_resolved(entry)
 
 
 @pytest.mark.usefixtures("fake_redis")
@@ -483,7 +481,7 @@ def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, 
 
     async def _park_then_read() -> Any:
         await _astream(build_local_app(ask=ask), user_message=TemplatedText(content="deploy"), thread_id="t9")
-        return await idx.read_park_entry("int-9")
+        return await agents_park_index().read_entry("int-9")
 
     entry = asyncio.run(_park_then_read())
     assert entry is not None
@@ -651,3 +649,7 @@ def test_forged_terminal_record_is_ignored_and_redrives(monkeypatch: pytest.Monk
     assert first == "done-once"
     # The forged record was ignored, so the redelivery RE-DROVE (the swapped stub's value).
     assert second == "re-driven"
+
+
+def _is_resolved(entry: Any) -> bool:
+    return agents_park_index().tombstone_kind(entry) == "resolved"

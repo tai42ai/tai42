@@ -46,41 +46,6 @@ class AgentResumeInterruptNotPendingError(RuntimeError):
         super().__init__(f"agent park interrupt {interrupt_id!r} for interaction {interaction_id!r} is not pending")
 
 
-class AgentResumeDriveInProgressError(RuntimeError):
-    """The barrier is complete but another live worker already holds the drive lease.
-
-    Raised (never a benign return) so the platform keeps this continuation's durable
-    retry ticket — the reaper redelivers until the live drive completes or its lease
-    expires.
-    """
-
-    def __init__(self, thread_id: str, superstep_id: str) -> None:
-        self.thread_id = thread_id
-        self.superstep_id = superstep_id
-        super().__init__(f"agent resume drive already in progress for thread {thread_id!r} super-step {superstep_id!r}")
-
-
-class AgentSuperstepLeaseLostError(RuntimeError):
-    """The caller no longer holds the super-step drive lease its write is guarded by.
-
-    A super-step's terminal finalize is guarded by the caller's drive-lease token: the write
-    lands only while the claim key still holds that token. When another writer (a whole-chain
-    kill that reclaimed a lapsed lease) has taken the lease, the finalize is refused and this
-    raises — so the winning writer's resolution record is never overwritten. The drive also raises
-    it when a re-check between the drive and its terminal chain fire finds the lease gone, so it
-    fires no chain routing for a super-step it no longer owns. Raised (never a silent return) so
-    the platform redelivers and the redrive lands on the winner's resolution.
-    """
-
-    def __init__(self, thread_id: str, superstep_id: str) -> None:
-        self.thread_id = thread_id
-        self.superstep_id = superstep_id
-        super().__init__(
-            f"agent super-step drive lease lost for thread {thread_id!r} super-step {superstep_id!r}; "
-            "another writer holds it"
-        )
-
-
 class ParkKillNotReadyError(RuntimeError):
     """A whole-chain kill reached a live super-step whose drive lease another worker holds.
 

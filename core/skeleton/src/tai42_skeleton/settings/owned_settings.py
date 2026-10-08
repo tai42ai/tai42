@@ -20,6 +20,7 @@ OWNED_SETTINGS_MODULES: tuple[str, ...] = (
     "tai42_skeleton.access_control.settings",
     "tai42_skeleton.interactions.settings",
     "tai42_skeleton.channels.settings",
+    "tai42_kit.llm.settings",
 )
 
 # The ``.env`` file ``TaiBaseSettings`` reads (its ``env_file``), relative to the working directory.

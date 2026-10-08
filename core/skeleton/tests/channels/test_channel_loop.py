@@ -1145,6 +1145,7 @@ async def test_async_park_callback_door_answerable_through_reaper_margin(
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):

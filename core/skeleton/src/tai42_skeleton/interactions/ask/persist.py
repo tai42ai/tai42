@@ -104,6 +104,9 @@ def build_request(
         deferred_binding=park_binding.deferred_binding,
         run_input=park_binding.run_input,
         door_id=park_binding.door_id,
+        # The chained calls the parking run is nested under (empty for a sync ask, whose binding is
+        # empty), so the platform admits the run's chain re-entry from inside its drive of this park.
+        chain_keys=list(park_binding.chain_keys),
         expiry_at=expiry_at,
     )
 

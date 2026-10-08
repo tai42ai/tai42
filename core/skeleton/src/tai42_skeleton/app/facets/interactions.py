@@ -46,8 +46,8 @@ class InteractionsFacet(_Facet):
         """Authorise the caller to resume/deliver-for ``interaction_id``'s run — or raise.
 
         Delegates to :func:`tai42_skeleton.interactions.authorization.assert_resume_authorized`:
-        passes only inside the platform's own resume of that run, else raises
-        ``ParkResumeUnauthorizedError``.
+        passes only inside the platform's own drive of that run — for a chain key, a drive of an
+        interaction nested under that chained call — else raises ``ParkResumeUnauthorizedError``.
         """
         from tai42_skeleton.interactions.authorization import assert_resume_authorized
 

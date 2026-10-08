@@ -40,6 +40,7 @@ from tai42_contract.interactions import (
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_index import superstep_id as park_superstep_id
 from tai42_kit.llm import resolve_trace_context
 
 from tai42_agents._internal.park import (
@@ -52,7 +53,6 @@ from tai42_agents._internal.park import (
     register_agent_resume_tool,
     workspace_lease,
 )
-from tai42_agents._internal.park.index import compute_superstep_id
 from tai42_agents._internal.park.lease import LEASE_HEADROOM_SECONDS
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
@@ -275,7 +275,7 @@ class ClaudeCodeAgent(Agent):
         under the SAME materialize+scrub path — the kit driver fires the stored completion tool.
 
         CRASH-AFTER-TERMINAL IDEMPOTENCE: the drive is keyed by the super-step's
-        ``compute_superstep_id`` (over the SAME interaction ids the park persisted, so it is
+        ``superstep_id`` (over the SAME interaction ids the park persisted, so it is
         identically derivable here). A resume that reaches a clean terminal writes a durable
         ``.runner/terminal/<superstep_id>.json`` record BEFORE reporting; a redelivered resume
         (the winner crashed between the terminal and the index finalize) reads that record and
@@ -290,7 +290,7 @@ class ClaudeCodeAgent(Agent):
         # The super-step id over the resumed interaction ids — identical to the id the park
         # persisted (``persist_park`` computed it over the same interaction-id set), so a
         # redelivery keys the terminal record to the same name the terminal drive wrote.
-        superstep_id = compute_superstep_id(flat.keys())
+        superstep_id = park_superstep_id(flat.keys())
         options_snapshot = snapshot["options_snapshot"]
         events = [
             event
