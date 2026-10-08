@@ -765,3 +765,53 @@ def test_boot_warns_when_the_limiter_is_on_but_no_proxy_trust_is_declared(monkey
     with caplog.at_level(logging.WARNING, logger=log.name):
         rate_limit.warn_if_rate_limiting_off(log)
     assert [r for r in caplog.records if "no proxy trust declared" in r.getMessage()]
+
+
+# -- the downstream call holds no settings ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "redis_configured"),
+    [
+        ("/universal_webhook/events", True),  # a throttled public door, under budget
+        ("/api/hooks", True),  # an authed route
+        ("/mcp", True),  # a path that declares no door
+        ("/universal_webhook/events", False),  # rate limiting off: no Redis
+    ],
+)
+def test_the_downstream_call_runs_without_the_middleware_holding_its_settings(
+    monkeypatch, path: str, redis_configured: bool
+):
+    # A config reload can retire the settings generation while a request is inside
+    # the downstream app (the reload's own request among them); the middleware must
+    # not keep the retired instance alive across that call.
+    import gc
+    import weakref
+
+    from tai42_skeleton.settings.rate_limit import rate_limit_settings
+
+    if not redis_configured:
+        monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL")
+    rate_limit_settings.cache_clear()
+    fake = FakeRedis()
+
+    @asynccontextmanager
+    async def _ctx(cls, s=None, *, fresh=False, **kw):
+        yield fake
+
+    monkeypatch.setattr(rate_limit, "client_ctx", _ctx)
+    still_held: list[bool] = []
+
+    async def downstream(scope, receive, send) -> None:
+        settings_ref = weakref.ref(rate_limit_settings())
+        rate_limit_settings.cache_clear()
+        gc.collect()
+        still_held.append(settings_ref() is not None)
+        await PlainTextResponse("ok")(scope, receive, send)
+
+    client = TestClient(rate_limit.RateLimitMiddleware(downstream))
+    try:
+        assert client.get(path).status_code == 200
+    finally:
+        rate_limit_settings.cache_clear()
+    assert still_held == [False], "the middleware kept its settings alive across the downstream call"

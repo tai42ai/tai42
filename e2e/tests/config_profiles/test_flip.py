@@ -103,16 +103,15 @@ async def test_hot_profile_flip_converges_and_fans_out(replicas_stack: TaiStack,
     after = await _snapshot(replicas_stack)
     assert _level_field(after)["value"] == new_level, f"the singleton did not re-read the flipped level: {after}"
     assert after["settings_epoch"] > base_epoch, f"the settings epoch did not advance: {before} -> {after}"
-    # No retired-epoch settings LEAK from the flip. Two holders are expected baseline, NOT
-    # leaks: the app-lifetime ``WorkerBus`` intentionally pins its epoch-0 ``BusSettings``
-    # across every reload (an epoch-immune subscription), and a swept entry with no
-    # live holder is benign roster residue. A real leak is any OTHER retired-epoch singleton
-    # still held — in particular the flipped ``LoggingSettings`` must have been released.
-    leaked = [
-        holder
-        for holder in after["stale_holders"]
-        if holder["holders"] and holder["holders"] != ["tai42_skeleton.app.bus.WorkerBus"]
-    ]
+    # No retired-epoch settings LEAK from the flip. The sweep reports only instances still
+    # reachable after collecting cyclic garbage, naming each holder (a referrer's type, or
+    # the function and ``file:line`` of a frame or coroutine), so every reported entry is a
+    # real hold. One is expected baseline, NOT a leak: the app-lifetime ``WorkerBus``
+    # intentionally pins its epoch-0 ``BusSettings`` across every reload (an epoch-immune
+    # subscription). Any OTHER retired-epoch singleton still held is a leak, an entry with
+    # no named holder included — in particular the flipped ``LoggingSettings`` must have
+    # been released.
+    leaked = [holder for holder in after["stale_holders"] if holder["holders"] != ["tai42_skeleton.app.bus.WorkerBus"]]
     assert not leaked, f"the flip leaked a retired-epoch settings singleton: {leaked}"
     assert after["stale_pool_epochs"] == [], (
         f"a retired client-pool epoch was not drained: {after['stale_pool_epochs']}"

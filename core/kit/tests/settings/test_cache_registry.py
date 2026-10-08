@@ -260,3 +260,187 @@ def test_unhashable_settings_are_rostered_by_weakref():
         hash(inst)  # the unhashable shape the roster (a list of weakrefs) tolerates
     retired = advance_client_epoch()
     assert _of_type(sweep_stale_settings(retired), _UnhashableSettings)
+
+
+def test_sweep_does_not_report_an_instance_only_cyclic_garbage_keeps():
+    class _CycledSettings(BaseSettings):
+        value: int = 1
+
+    gc.collect()
+    gc.disable()  # keep the cycle uncollected until the sweep looks
+    try:
+        cycle: list[object] = [_CycledSettings()]
+        cycle.append(cycle)
+        cache_registry._stamp_settings(cycle[0])
+        retired = advance_client_epoch()
+        del cycle  # now unreachable: only the cycle itself keeps the instance
+        found = _of_type(sweep_stale_settings(retired), _CycledSettings)
+    finally:
+        gc.enable()
+
+    assert found == []
+
+
+def _hold_while_sweeping(accessor) -> list:
+    held = accessor()
+    retired = advance_client_epoch()
+    found = sweep_stale_settings(retired)
+    assert held.value == 1
+    return found
+
+
+def test_sweep_names_an_executing_frame_holding_the_instance(caplog):
+    class _FrameHeldSettings(BaseSettings):
+        value: int = 1
+
+    @settings_cache
+    def accessor() -> _FrameHeldSettings:
+        return _FrameHeldSettings()
+
+    found = _of_type(_hold_while_sweeping(accessor), _FrameHeldSettings)
+    reset_all_settings()
+
+    assert len(found) == 1
+    frame_holders = [h for h in found[0].holders if h.startswith("frame ")]
+    assert len(frame_holders) == 1
+    assert frame_holders[0].startswith("frame _hold_while_sweeping (")
+    assert frame_holders[0].endswith(f"{__file__}:{_hold_while_sweeping.__code__.co_firstlineno + 3})")
+    assert "<unknown>" not in caplog.text
+    assert "frame _hold_while_sweeping (" in caplog.text
+
+
+async def _hold_across_await(accessor, gate) -> None:
+    held = accessor()
+    await gate
+    assert held.value == 1
+
+
+async def test_sweep_names_a_suspended_coroutine_holding_the_instance():
+    import asyncio
+
+    class _CoroHeldSettings(BaseSettings):
+        value: int = 1
+
+    @settings_cache
+    def accessor() -> _CoroHeldSettings:
+        return _CoroHeldSettings()
+
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    task = asyncio.create_task(_hold_across_await(accessor, gate))
+    await asyncio.sleep(0)  # the task now waits on the gate, holding its settings
+    retired = advance_client_epoch()
+    reset_all_settings()
+    found = _of_type(sweep_stale_settings(retired), _CoroHeldSettings)
+    gate.set_result(None)
+    await task
+
+    assert len(found) == 1
+    line = _hold_across_await.__code__.co_firstlineno + 2
+    assert f"coroutine _hold_across_await ({__file__}:{line})" in found[0].holders
+
+
+def _hold_across_yield(accessor):
+    held = accessor()
+    yield
+    assert held.value == 1
+
+
+def test_sweep_names_a_suspended_generator_holding_the_instance():
+    class _GenHeldSettings(BaseSettings):
+        value: int = 1
+
+    @settings_cache
+    def accessor() -> _GenHeldSettings:
+        return _GenHeldSettings()
+
+    suspended = _hold_across_yield(accessor)
+    next(suspended)  # the generator now waits at its yield, holding its settings
+    retired = advance_client_epoch()
+    reset_all_settings()
+    found = _of_type(sweep_stale_settings(retired), _GenHeldSettings)
+    with pytest.raises(StopIteration):
+        next(suspended)
+
+    assert len(found) == 1
+    line = _hold_across_yield.__code__.co_firstlineno + 2
+    assert f"generator _hold_across_yield ({__file__}:{line})" in found[0].holders
+
+
+async def _hold_across_async_yield(accessor):
+    held = accessor()
+    yield
+    assert held.value == 1
+
+
+async def test_sweep_names_a_suspended_async_generator_holding_the_instance():
+    class _AsyncGenHeldSettings(BaseSettings):
+        value: int = 1
+
+    @settings_cache
+    def accessor() -> _AsyncGenHeldSettings:
+        return _AsyncGenHeldSettings()
+
+    suspended = _hold_across_async_yield(accessor)
+    await anext(suspended)  # the async generator now waits at its yield, holding its settings
+    retired = advance_client_epoch()
+    reset_all_settings()
+    found = _of_type(sweep_stale_settings(retired), _AsyncGenHeldSettings)
+    with pytest.raises(StopAsyncIteration):
+        await anext(suspended)
+
+    assert len(found) == 1
+    line = _hold_across_async_yield.__code__.co_firstlineno + 2
+    assert f"async generator _hold_across_async_yield ({__file__}:{line})" in found[0].holders
+
+
+_KEPT_ERRORS: list[BaseException] = []
+_KEPT_SETTINGS: list[BaseSettings] = []
+
+
+def _raise_holding(accessor) -> None:
+    held = accessor()
+    raise RuntimeError(f"failed with {held.value}")
+
+
+def test_sweep_names_a_finished_frame_a_kept_traceback_holds():
+    class _TracebackHeldSettings(BaseSettings):
+        value: int = 1
+
+    @settings_cache
+    def accessor() -> _TracebackHeldSettings:
+        return _TracebackHeldSettings()
+
+    try:
+        _raise_holding(accessor)
+    except RuntimeError as exc:
+        _KEPT_ERRORS.append(exc)  # a live traceback keeps the finished frame and its locals
+    try:
+        retired = advance_client_epoch()
+        reset_all_settings()
+        found = _of_type(sweep_stale_settings(retired), _TracebackHeldSettings)
+    finally:
+        _KEPT_ERRORS.clear()
+
+    assert len(found) == 1
+    line = _raise_holding.__code__.co_firstlineno + 2
+    assert f"frame _raise_holding ({__file__}:{line})" in found[0].holders
+
+
+def test_sweep_still_reports_a_module_level_reference_after_collecting():
+    class _ModuleHeldSettings(BaseSettings):
+        value: int = 1
+
+    @settings_cache
+    def accessor() -> _ModuleHeldSettings:
+        return _ModuleHeldSettings()
+
+    _KEPT_SETTINGS.append(accessor())
+    try:
+        retired = advance_client_epoch()
+        reset_all_settings()
+        found = _of_type(sweep_stale_settings(retired), _ModuleHeldSettings)
+    finally:
+        _KEPT_SETTINGS.clear()
+
+    assert len(found) == 1
+    assert found[0].holders == ("builtins.list",)

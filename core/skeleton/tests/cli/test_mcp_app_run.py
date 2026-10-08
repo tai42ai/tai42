@@ -478,6 +478,30 @@ def test_cli_forwards_parsed_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["uvicorn_kwargs"]["timeout_keep_alive"] == 5
 
 
+def test_cli_holds_no_launch_settings_while_the_server_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The server runs inside ``run_mcp_app`` for the life of the process, while config
+    # reloads retire settings generations; the serve command must not keep the launch
+    # settings instance alive across that call.
+    import gc
+    import weakref
+
+    still_held: list[bool] = []
+
+    def _serve(**_kw) -> int:
+        launch_settings = weakref.ref(mcp_app.app_args_settings())
+        mcp_app.app_args_settings.cache_clear()
+        gc.collect()
+        still_held.append(launch_settings() is not None)
+        return 0
+
+    monkeypatch.setattr(mcp_app, "run_mcp_app", _serve)
+    mcp_app.app_args_settings.cache_clear()
+    result = CliRunner().invoke(mcp_app.cli, ["--manifest-path", "m.yaml"])
+
+    assert result.exit_code == 0, result.output
+    assert still_held == [False], "the serve command kept its launch settings alive while serving"
+
+
 def test_cli_manifest_default_comes_from_tai_manifest_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """TAI_MANIFEST_PATH is the single manifest env var: with no --manifest-path
     flag, the CLI resolves its default from it (via CoreSettings) end-to-end."""

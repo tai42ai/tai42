@@ -348,6 +348,25 @@ def run_mcp_app(
     return 0
 
 
+def _launch_arguments(
+    transport: str | None, host: str | None, port: int | None, uds: str | None
+) -> tuple[str, str, int, str | None]:
+    """Fill each launch argument the command line left unset from the app-args settings.
+
+    Read here (not at option-decoration time, which runs at import): ``main`` has
+    already bootstrapped the env, so a local ``.env`` is in effect. Only the values
+    leave this call, so the serving command keeps no settings instance alive while
+    the server runs and config reloads retire settings generations.
+    """
+    defaults = app_args_settings()
+    return (
+        transport if transport is not None else defaults.transport,
+        host if host is not None else defaults.host,
+        port if port is not None else defaults.port,
+        uds if uds is not None else defaults.uds,
+    )
+
+
 @click.command("tai-mcp-server", context_settings={"ignore_unknown_options": True})
 @click.option(
     "--manifest-path",
@@ -428,17 +447,10 @@ def cli(
     the ASGI factory with its own --workers bypasses it, so set TAI_BUS_REDIS_URL
     in any multi-process deployment.
     """
-    # Resolve the launch arguments from settings here (not at option-decoration
-    # time, which runs at import): ``main`` has already bootstrapped the env, so
-    # a local ``.env`` is in effect when these settings are read.
-    defaults = app_args_settings()
     manifest_path = manifest_path if manifest_path is not None else default_manifest_path()
     if manifest_path is None:
         raise click.BadParameter("A manifest path is required.", param_hint="'--manifest-path'")
-    transport = transport if transport is not None else defaults.transport
-    host = host if host is not None else defaults.host
-    port = port if port is not None else defaults.port
-    uds = uds if uds is not None else defaults.uds
+    transport, host, port, uds = _launch_arguments(transport, host, port, uds)
 
     uvicorn_kwargs = parse_and_validate_uvicorn_args(extra_args)
 
