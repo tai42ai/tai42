@@ -35,7 +35,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
-from tai42_agents._internal.outcomes import build_reprompt_handler
+from tai42_agents._internal.outcomes import build_reprompt_handler, drive_reprompt_counter
 
 #: A produced value that is well-formed but does not conform to the authored schema.
 _VALIDATION_ERRORS = (JsonSchemaValidationError, pydantic.ValidationError)
@@ -72,17 +72,18 @@ class StructuredOutputRailMiddleware(AgentMiddleware):
     """Validate every structured payload in-node and re-prompt under the per-run cap.
 
     ``validation_schema`` is the ORIGINAL authored dict or pydantic class (what every
-    door validates against); ``cap`` is the per-run re-prompt ceiling. The rail is the
+    door validates against); ``cap`` is the per-run re-prompt ceiling, counted per drive
+    (the driving code binds :func:`~tai42_agents._internal.outcomes.drive_reprompt_scope`). The rail is the
     innermost ``wrap_model_call`` middleware so its handler is the model execution that
     parses the structured output.
     """
 
     def __init__(self, validation_schema: object, cap: int) -> None:
-        """Carry the authored validation schema and build the per-run re-prompt counter."""
+        """Carry the authored validation schema and the re-prompt handler counting per drive."""
         super().__init__()
         self.tools = []
         self._validation_schema = validation_schema
-        self._reprompt = build_reprompt_handler(cap)
+        self._reprompt = build_reprompt_handler(cap, lambda: drive_reprompt_counter(self))
 
     async def awrap_model_call(
         self,
@@ -90,6 +91,8 @@ class StructuredOutputRailMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         """Run the model, judge its structured payload, and re-prompt in-node until it conforms or the cap trips."""
+        # The drive's own counter, resolved up front so a drive with no scope fails loudly at once.
+        drive_reprompt_counter(self)
         current = request
         while True:
             exc: Exception

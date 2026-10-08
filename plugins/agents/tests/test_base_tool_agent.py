@@ -1,6 +1,6 @@
 """Tests for the tools-agent factory + its invoke / raw-stream faces.
 
-Every provider seam ``_build_agent_and_input`` reaches (LLM, checkpointer,
+Every provider seam the graph compile (``_compile_tools_agent``) reaches (LLM, checkpointer,
 middleware, ``create_agent``) is monkeypatched to a scripted double, so the
 factory's wiring — default-provider fallback, config init, message build, and
 the ``ainvoke`` / ``astream`` faces — is exercised with no LLM, checkpointer, or
@@ -22,9 +22,11 @@ from langchain_core.tools import StructuredTool
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal import base_tool_agent as bta
+from tai42_agents._internal import graph_cache
 from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware
 from tai42_agents._internal.usage import CallUsage
 
+from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent
 from .conftest import fake_run_trace
 
 
@@ -114,7 +116,7 @@ class TestBuildAgentAndInput:
         tool = _tool("search")
 
         agent, messages, config, _strategy, minted = asyncio.run(
-            bta._build_agent_and_input("sys-prompt", ["hi"], [tool], llm_kwargs={"temperature": 0})
+            build_agent_and_input("sys-prompt", ["hi"], [tool], llm_kwargs={"temperature": 0})
         )
 
         assert agent is not None
@@ -127,7 +129,8 @@ class TestBuildAgentAndInput:
         assert captured["llm_kwargs"] == {"temperature": 0}
         # create_agent wired with the resolved model, tools, checkpointer, middleware.
         assert captured["create"]["llm"] == "llm-obj"
-        assert captured["create"]["tools"] == [tool]
+        # The run's tools are bound delivery-scoped (``resolve_tools``), one per input tool.
+        assert [bound.name for bound in captured["create"]["tools"]] == [tool.name]
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
         # The park hook leads (it is the loop's first before_model hook, so it recognizes an
         # async-ask park before any compacting hook could evict its marked ToolMessage);
@@ -153,7 +156,7 @@ class TestBuildAgentAndInput:
     def test_system_content_kwargs_become_a_system_prompt_content_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)
         asyncio.run(
-            bta._build_agent_and_input(
+            build_agent_and_input(
                 "sys-prompt", ["hi"], [], system_content_kwargs={"cache_control": {"type": "ephemeral"}}
             )
         )
@@ -165,7 +168,7 @@ class TestBuildAgentAndInput:
     def test_user_content_kwargs_mark_the_last_input_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_seams(monkeypatch)
         _, messages, _, _, _ = asyncio.run(
-            bta._build_agent_and_input(
+            build_agent_and_input(
                 "sys", ["first", "last"], [], user_content_kwargs={"cache_control": {"type": "ephemeral"}}
             )
         )
@@ -183,7 +186,7 @@ class TestBuildAgentAndInput:
     def test_system_and_user_content_kwargs_apply_together(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)
         _, messages, _, _, _ = asyncio.run(
-            bta._build_agent_and_input(
+            build_agent_and_input(
                 "sys-prompt",
                 ["hi"],
                 [],
@@ -204,7 +207,7 @@ class TestBuildAgentAndInput:
     ) -> None:
         captured = _patch_seams(monkeypatch)
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
-        asyncio.run(bta._build_agent_and_input("sys", ["hi"], [], response_format=schema))
+        asyncio.run(build_agent_and_input("sys", ["hi"], [], response_format=schema))
         # The fake model carries no profile, so the plan takes the tool tier: the raw schema
         # dict is bound as an int64-tightened pydantic-model ToolStrategy (handle_errors=False —
         # the platform rail owns the retry) whose parse yields an instance while enforcing the
@@ -225,7 +228,7 @@ class TestBuildAgentAndInput:
     def test_explicit_providers_override_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)
         asyncio.run(
-            bta._build_agent_and_input("sys", ["hi"], [], llm_provider="my_llm", checkpoint_provider="my_checkpoint")
+            build_agent_and_input("sys", ["hi"], [], llm_provider="my_llm", checkpoint_provider="my_checkpoint")
         )
         assert captured["llm_provider"] == "my_llm"
         assert captured["checkpoint"][0] == "my_checkpoint"
@@ -239,7 +242,7 @@ class TestAinvoke:
         monkeypatch.setattr(bta, "build_user_output", lambda s: f"out:{s['messages'][0]}")
         monkeypatch.setattr(bta, "aggregate_usage", lambda s: usage)
 
-        result = asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [_tool("t")]))
+        result = asyncio.run(invoke_tools_agent("sys", ["hi"], [_tool("t")]))
 
         assert result.output == "out:state"
         assert result.usage is usage
@@ -253,7 +256,7 @@ class TestAinvoke:
         monkeypatch.setattr(bta, "aggregate_usage", lambda s: CallUsage(0, 0, None))
 
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
-        result = asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
+        result = asyncio.run(invoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
 
         # The structured output the run wrote to state["structured_response"] is
         # surfaced on the invoke result for the direct-invoke structured path.
@@ -267,7 +270,7 @@ class TestAinvoke:
 
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
         with pytest.raises(RuntimeError, match="no structured_response"):
-            asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
+            asyncio.run(invoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
 
     def test_nonconforming_structured_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A structured output violating a schema constraint keyword raises loudly
@@ -284,7 +287,7 @@ class TestAinvoke:
             "required": ["value"],
         }
         with pytest.raises(JsonSchemaValidationError):
-            asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
+            asyncio.run(invoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
 
 
 class TestUserContentKwargsReachTheInvokeCall:
@@ -311,12 +314,12 @@ class TestUserContentKwargsReachTheInvokeCall:
         async def fake_compile(*args: Any, **kwargs: Any) -> Any:
             return fake_agent, None
 
-        monkeypatch.setattr(bta, "_compile_tools_agent", fake_compile)
+        monkeypatch.setattr(graph_cache, "_compile_tools_agent", fake_compile)
         monkeypatch.setattr(bta, "build_user_output", lambda s: "")
         monkeypatch.setattr(bta, "aggregate_usage", lambda s: CallUsage(0, 0, None))
 
         asyncio.run(
-            bta.ainvoke_tools_agent(
+            invoke_tools_agent(
                 "sys",
                 ["first", "last"],
                 [],
@@ -342,7 +345,7 @@ class TestAstream:
     def test_yields_raw_chunks_and_threads_stream_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch, chunks=["chunk-a", "chunk-b"])
 
-        chunks = asyncio.run(_collect(bta.astream_tools_agent("sys", ["hi"], [_tool("t")], stream_mode="updates")))
+        chunks = asyncio.run(_collect(stream_tools_agent("sys", ["hi"], [_tool("t")], stream_mode="updates")))
 
         assert chunks == ["chunk-a", "chunk-b"]
         _, config, stream_mode = captured["stream"]

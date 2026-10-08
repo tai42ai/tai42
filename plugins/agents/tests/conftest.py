@@ -143,6 +143,36 @@ class RecordingMonitoringFacet:
         return self._backend
 
 
+class _SurfaceMap(dict[str, StructuredTool]):
+    """A name-to-tool map that counts its own mutations, so the double's surface generation moves on each."""
+
+    mutations = 0
+
+    def _moved(self) -> None:
+        self.mutations += 1
+
+    def __setitem__(self, key: str, value: StructuredTool) -> None:
+        super().__setitem__(key, value)
+        self._moved()
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        self._moved()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self._moved()
+
+    def pop(self, *args: Any) -> Any:
+        value = super().pop(*args)
+        self._moved()
+        return value
+
+    def clear(self) -> None:
+        super().clear()
+        self._moved()
+
+
 class RecordingTools:
     """An ``AppTools`` impl backed by mutable maps a test populates.
 
@@ -155,7 +185,8 @@ class RecordingTools:
     """
 
     def __init__(self) -> None:
-        self.client_tools: dict[str, StructuredTool] = {}
+        self.client_tools: dict[str, StructuredTool] = _SurfaceMap()
+        self._registrations = 0
         self.tool_runners: dict[str, Callable[..., Any]] = {}
         self.registered_tools: dict[str, Callable[..., Any]] = {}
         # Every ``run_tool`` dispatch, so a test can assert a cross-driver chain fire and the
@@ -173,11 +204,18 @@ class RecordingTools:
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             name = kwargs.get("name") or getattr(func, "__name__", repr(func))
             self.registered_tools[name] = func
+            self._registrations += 1
             return func
 
         if args and callable(args[0]):
             return decorator(args[0])
         return decorator
+
+    def surface_generation(self) -> int:
+        """Moves on every registration and every change of ``client_tools``, as the real surface does."""
+        client_tools = self.client_tools
+        mutations = client_tools.mutations if isinstance(client_tools, _SurfaceMap) else 0
+        return self._registrations + mutations
 
     async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
         if names is None:
@@ -475,6 +513,16 @@ def _route_workspace_lease(monkeypatch: pytest.MonkeyPatch) -> None:
         yield redis
 
     monkeypatch.setattr(lease_mod, "_lease_client", _fake_lease_client)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_graph_cache() -> Iterator[None]:
+    """Every test starts and ends with no compiled tools-agent graph cached."""
+    from tai42_agents._internal.graph_cache import reset_tools_agent_graphs
+
+    reset_tools_agent_graphs()
+    yield
+    reset_tools_agent_graphs()
 
 
 @pytest.fixture

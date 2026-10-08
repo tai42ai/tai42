@@ -87,6 +87,13 @@ OVERLAP_DELIVERY_STATUSES = frozenset({DeliveryStatus.MERGED, DeliveryStatus.SUP
 SUCCESSOR_ANSWER_STATUSES: frozenset[AnswerStatus] = frozenset({"merged", "superseded"})
 
 
+class ConversationsIndexLayoutError(RuntimeError):
+    """The conversations store holds an index member in a layout this code does not read.
+
+    Raised at boot by the delivery re-drive; the store is reset, never read around.
+    """
+
+
 class ConversationRecord(BaseModel):
     """One accepted message's durable record — its admission, the answer its turn produced, and its delivery state.
 

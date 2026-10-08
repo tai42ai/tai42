@@ -40,7 +40,7 @@ from tai42_contract.tool_meta import (
     ToolMetaStore,
 )
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -158,7 +158,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         """Every folder, ordered by name."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute("SELECT id, name, parent_id FROM tool_folders ORDER BY name")
@@ -264,7 +264,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         """The overlay row for ``tool_name``, or ``None`` when it owns none."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -278,7 +278,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         """Every overlay row, ordered by tool name."""
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(

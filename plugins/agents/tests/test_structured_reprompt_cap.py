@@ -31,6 +31,7 @@ from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult
 
+from ._graph_support import invoke_tools_agent
 from .conftest import fake_run_trace
 
 _SCHEMA = {
@@ -208,9 +209,7 @@ def test_invoke_face_returns_reprompt_outcome(monkeypatch: pytest.MonkeyPatch) -
     model = _ScriptedModel([_answer_call("bad")])
     _patch_invoke_seams(monkeypatch, model, recursion_limit=50)
 
-    result = asyncio.run(
-        bta.ainvoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_SCHEMA)
-    )
+    result = asyncio.run(invoke_tools_agent(system_message="", user_message=["go"], tools=[], response_format=_SCHEMA))
 
     assert isinstance(result, AgentInvokeResult)
     assert isinstance(result.outcome, StructuredOutputUnresolvedFinal)
@@ -223,7 +222,7 @@ def test_invoke_face_returns_recursion_outcome(monkeypatch: pytest.MonkeyPatch) 
     _patch_invoke_seams(monkeypatch, model, recursion_limit=4)
 
     result = asyncio.run(
-        bta.ainvoke_tools_agent(system_message="", user_message=["go"], tools=[_loop_tool()], response_format=_SCHEMA)
+        invoke_tools_agent(system_message="", user_message=["go"], tools=[_loop_tool()], response_format=_SCHEMA)
     )
 
     assert isinstance(result.outcome, RecursionLimitFinal)

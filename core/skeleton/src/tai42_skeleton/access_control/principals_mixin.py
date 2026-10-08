@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from psycopg.errors import UniqueViolation
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.access_control import store as _store
@@ -263,7 +263,7 @@ class PrincipalsStoreMixin:
         """The principal row for ``user_id``, or ``None`` when none exists."""
         async with (
             _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -278,7 +278,7 @@ class PrincipalsStoreMixin:
         """Every principal row, ordered by ``created_at`` then ``user_id``."""
         async with (
             _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -292,7 +292,7 @@ class PrincipalsStoreMixin:
         """Whether ANY principal row exists — the ``needs_setup`` / setup-door 409 predicate."""
         async with (
             _store.client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute("SELECT 1 FROM access_control_principals LIMIT 1")

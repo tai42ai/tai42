@@ -532,7 +532,7 @@ async def test_pending_work_reports_non_terminal_only(monkeypatch):
     await store.create_record(_record("done"))
     await store.mark_delivered("done", [], 1, time.time(), "tok")
 
-    work = {w.message_id: w for w in await store.pending_work()}
+    work = {w.message_id: w for w in await store.pending_work(due_only=False)}
     assert set(work) == {"pend", "prov"}
     assert work["pend"].delivery_status is DeliveryStatus.PENDING_DELIVERY
     assert work["prov"].delivery_status is DeliveryStatus.PROVISIONAL
@@ -566,16 +566,17 @@ async def test_pending_work_skips_corrupt_rows_and_still_reports_the_rest(monkey
             "updated_at": "1",
         },
     )
-    # The pass reads the status index, so a corrupt row only reaches it while indexed.
-    for message_id, indexed_as in (
-        ("unknown-status", "pending_delivery"),
-        ("non-numeric-attempts", "pending_delivery"),
-        ("foreign-row", "pending_delivery"),
-        ("bad-grace", "provisional"),
+    # The pass reads the status index, so a corrupt row only reaches it while indexed. A
+    # live ``pending_delivery`` member scores ``+inf``; a ``provisional`` one its grace deadline.
+    for message_id, indexed_as, score in (
+        ("unknown-status", "pending_delivery", float("inf")),
+        ("non-numeric-attempts", "pending_delivery", float("inf")),
+        ("foreign-row", "pending_delivery", float("inf")),
+        ("bad-grace", "provisional", 1.0),
     ):
-        await fake.zadd(settings.status_index_key(indexed_as), {message_id: float("inf")})
+        await fake.zadd(settings.status_index_key(indexed_as), {message_id: score})
 
-    work = await store.pending_work()
+    work = await store.pending_work(due_only=False)
     assert [w.message_id for w in work] == ["good"]
 
 
@@ -649,7 +650,7 @@ async def test_a_transition_moves_the_record_between_status_indexes(monkeypatch)
     assert await fake.zrange(failed, 0, -1) == ["m1"]
     # A terminal member is scored to expire with the row it names.
     assert fake._zsets[failed]["m1"] <= time.time() + settings.answer_retention_ttl_seconds
-    assert await store.pending_work() == []
+    assert await store.pending_work(due_only=False) == []
 
 
 async def test_a_terminal_index_member_expires_with_its_row(monkeypatch):
@@ -670,7 +671,7 @@ async def test_a_member_whose_row_is_gone_is_unindexed(monkeypatch):
     # The row removed from under the index rather than through ``delete_record``.
     fake._hashes.pop(settings.record_key("gone"))
 
-    assert await store.pending_work() == []
+    assert await store.pending_work(due_only=False) == []
     assert await fake.zrange(settings.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
 
 
@@ -681,7 +682,7 @@ async def test_delete_record_unindexes_the_row_it_removes(monkeypatch):
     await store.create_record(record)
 
     assert await store.delete_record(record) is True
-    assert await store.pending_work() == []
+    assert await store.pending_work(due_only=False) == []
     assert (
         await fake.zrange(ConversationsSettings().status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
     )
@@ -709,11 +710,11 @@ async def test_pending_work_moves_a_corrupt_row_to_terminal_failed(monkeypatch):
     )
     await fake.zadd(settings.status_index_key("pending_delivery"), {"bad-data": float("inf")})
 
-    work = await store.pending_work()
+    work = await store.pending_work(due_only=False)
     assert [w.message_id for w in work] == ["good"]
     # The corrupt row is now terminal ``failed`` and is not re-enumerated by a second pass.
     assert fake._hashes[settings.record_key("bad-data")]["delivery_status"] == "failed"
-    assert [w.message_id for w in await store.pending_work()] == ["good"]
+    assert [w.message_id for w in await store.pending_work(due_only=False)] == ["good"]
     # It rides the FAILED index but stays unreadable (its blob is still corrupt), so the
     # failed listing counts it rather than silently dropping it.
     failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))

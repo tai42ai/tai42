@@ -34,6 +34,7 @@ from tai42_kit.llm.structured import plan_structured_output
 from tai42_kit.utils.data.json_schema_util import inject_int64_bounds, json_schema_to_pydantic_model
 
 from tai42_agents._internal import structured as structured_mod
+from tai42_agents._internal.outcomes import drive_reprompt_scope
 from tai42_agents._internal.structured import ainvoke_structured, structured_output_stack
 from tai42_agents._internal.structured_rail import StructuredOutputRailMiddleware
 
@@ -153,7 +154,13 @@ def _run_graph(
     _cap(monkeypatch, 3)
     strategy, rail = structured_output_stack(cast(BaseChatModel, model), "openai", schema)
     agent = create_agent(model, tools=[], response_format=strategy, middleware=[rail] if rail else [])
-    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage(content="go")]}))
+
+    async def drive() -> Any:
+        # The test is the graph's driver, so it binds the drive's re-prompt counters.
+        with drive_reprompt_scope():
+            return await agent.ainvoke({"messages": [HumanMessage(content="go")]})
+
+    out = asyncio.run(drive())
     return out, strategy
 
 
@@ -197,7 +204,8 @@ async def _run_rail_success(rail: StructuredOutputRailMiddleware, response: Mode
         return response
 
     # The success path does not read the request, so a bare object stands in for it.
-    return await rail.awrap_model_call(cast(ModelRequest, object()), handler)
+    with drive_reprompt_scope():
+        return await rail.awrap_model_call(cast(ModelRequest, object()), handler)
 
 
 def test_rail_normalizes_a_pydantic_structured_response_to_a_dict() -> None:

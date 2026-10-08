@@ -39,7 +39,11 @@ class RecordStoreBase(ABC):
 
     @abstractmethod
     def _index_score(self, status: DeliveryStatus, now: float) -> str:
-        """The index member's expiry score for ``status`` at ``now``."""
+        """The index member's score for ``status`` at ``now``.
+
+        The row expiry for a terminal status, the grace deadline for ``provisional``, ``+inf`` for
+        every other live status.
+        """
 
     @abstractmethod
     def _from_hash(self, hashed: dict[str, str]) -> ConversationRecord:

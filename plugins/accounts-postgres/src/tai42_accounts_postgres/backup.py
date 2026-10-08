@@ -39,7 +39,7 @@ from psycopg.rows import dict_row
 from tai42_contract.app import tai42_app
 from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_accounts_postgres.db import COMPONENT, accounts_store_configured
@@ -63,7 +63,7 @@ class _BackupUserStore:
     async def export_users(self) -> list[dict[str, Any]]:
         async with (
             client_ctx(PostgresClient, self._settings) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(

@@ -18,7 +18,6 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
-from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, RunUsage, StreamEvent, StructuredFinal
@@ -29,7 +28,7 @@ from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
 from tai42_agents._internal.config_util import with_run_trace_lineage
-from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
+from tai42_agents._internal.graph_cache import ToolsAgentGraph, ToolsAgentGraphSpec, tools_agent_graph
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import astream_tools_agent_events
@@ -41,30 +40,27 @@ from tai42_agents.voting_agent.prompt import JUDGE_SYSTEM_MESSAGE, VOTER_SYSTEM_
 async def _run_voters(
     judge_message: TemplatedText | None,
     voter_message: TemplatedText | None,
-    judge_llm_provider: str | None,
-    judge_llm_kwargs: dict[str, Any] | None,
+    judge_llm_provider: str,
+    judge_llm_kwargs: dict[str, Any],
     voters: list[VoterSpec] | None,
-    voter_tools: list[StructuredTool] | None,
+    voter_tools: list[str] | None,
     checkpoint_provider: str | None,
     voter_config: dict[str, Any] | None,
-) -> tuple[list[str], list[VoteInfo], str, dict[str, Any]]:
+) -> tuple[list[str], list[VoteInfo]]:
     """Render the messages, run every voter in parallel, and assemble the judge's input.
 
-    Returns ``(user_messages, voters_info, judge_llm_provider, judge_llm_kwargs)``.
-    ``judge_llm_provider`` / ``judge_llm_kwargs`` come back already defaulted (never
-    ``None``); ``user_messages`` is the rendered judge message followed by one line
-    per voter. When ``voters`` is empty, a single voter runs on the judge's provider.
+    Returns ``(user_messages, voters_info)``: ``user_messages`` is the rendered judge
+    message followed by one line per voter. When ``voters`` is empty, a single voter runs
+    on the judge's (already defaulted) provider. Every voter's graph is built before any
+    voter runs, so an unknown voter tool raises before any voter LLM is called.
 
     Each ``VoteInfo.model`` records the model the voter actually ran on when known,
     else the model its spec pinned, else ``None`` — never a placeholder.
     """
     rendered_judge_message: str = await render_message(judge_message, allow_empty=False, field="judge_message")
     rendered_voter_message: str = await render_message(voter_message, allow_empty=False, field="voter_message")
-    resolved_judge_llm_provider = judge_llm_provider or llm_provider_settings().llm
-    resolved_judge_llm_kwargs = judge_llm_kwargs or {}
 
-    voters = voters or [VoterSpec(provider=resolved_judge_llm_provider, llm_kwargs=resolved_judge_llm_kwargs or None)]
-    voter_tools = voter_tools or []
+    voters = voters or [VoterSpec(provider=judge_llm_provider, llm_kwargs=judge_llm_kwargs or None)]
 
     limits = agents_limits_settings()
     if len(voters) > limits.max_voters:
@@ -72,21 +68,25 @@ async def _run_voters(
             f"voting_agent got {len(voters)} voters; the limit is {limits.max_voters} (TAI_AGENTS_MAX_VOTERS)"
         )
 
+    graphs = [
+        await tools_agent_graph(
+            ToolsAgentGraphSpec(
+                tool_names=tuple(voter_tools or ()),
+                system_message=VOTER_SYSTEM_MESSAGE,
+                llm_provider=spec.provider,
+                llm_kwargs=spec.effective_llm_kwargs(),
+                checkpoint_provider=checkpoint_provider,
+            )
+        )
+        for spec in voters
+    ]
     sem = asyncio.Semaphore(limits.voter_concurrency)
 
-    async def _run_one(spec: VoterSpec) -> Any:
+    async def _run_one(graph: ToolsAgentGraph) -> Any:
         async with sem:
-            return await ainvoke_tools_agent(
-                system_message=VOTER_SYSTEM_MESSAGE,
-                user_message=[rendered_voter_message],
-                tools=voter_tools,
-                llm_provider=spec.provider,
-                checkpoint_provider=checkpoint_provider,
-                llm_kwargs=spec.effective_llm_kwargs(),
-                config=voter_config,
-            )
+            return await ainvoke_tools_agent(graph=graph, user_message=[rendered_voter_message], config=voter_config)
 
-    results = await asyncio.gather(*(_run_one(spec) for spec in voters))
+    results = await asyncio.gather(*(_run_one(graph) for graph in graphs))
 
     voters_info = [
         VoteInfo(
@@ -101,7 +101,7 @@ async def _run_voters(
         f"Provider: {info.provider}, Model: {info.model}, Verdict: {info.verdict}" for info in voters_info
     ]
     user_messages = [rendered_judge_message, *voter_messages]
-    return user_messages, voters_info, resolved_judge_llm_provider, resolved_judge_llm_kwargs
+    return user_messages, voters_info
 
 
 # ABC ``Agent.run`` parameters the voting runtime has no seat for, mapped to the
@@ -268,13 +268,19 @@ class VotingAgent(Agent):
         rejected loudly here in parity with :meth:`run`.
         """
         _reject_unhonored("voting_agent.astream", response_format, kwargs)
-        # Delivery-scoped: a tool a judge or voter dispatches must not capture the completion
-        # binding addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
-        resolved_judge_tools: list[StructuredTool] = scope_nested_dispatch_all(
-            await tai42_app.tools.get_client_tools(judge_tools) if judge_tools else []
-        )
-        resolved_voter_tools: list[StructuredTool] = scope_nested_dispatch_all(
-            await tai42_app.tools.get_client_tools(voter_tools) if voter_tools else []
+        # The judge's and voters' tools resolve delivery-scoped (``resolve_tools``): a tool a judge
+        # or voter dispatches must not capture the completion binding addressing the agent's OWN
+        # deferred answer (see ``_internal.nested_dispatch``).
+        judge_llm_provider = judge_llm_provider or llm_provider_settings().llm
+        judge_llm_kwargs = judge_llm_kwargs or {}
+        judge_graph = await tools_agent_graph(
+            ToolsAgentGraphSpec(
+                tool_names=tuple(judge_tools or ()),
+                system_message=JUDGE_SYSTEM_MESSAGE,
+                llm_provider=judge_llm_provider,
+                llm_kwargs=judge_llm_kwargs,
+                checkpoint_provider=checkpoint_provider,
+            )
         )
 
         # One trace per voting run: resolve the run's lineage once (the judge config is the
@@ -285,13 +291,13 @@ class VotingAgent(Agent):
         voter_config = with_run_trace_lineage(voter_langgraph_config, run_context)
         judge_config = with_run_trace_lineage(judge_langgraph_config, run_context)
 
-        user_messages, voters_info, judge_llm_provider, judge_llm_kwargs = await _run_voters(
+        user_messages, voters_info = await _run_voters(
             judge_message,
             voter_message,
             judge_llm_provider,
             judge_llm_kwargs,
             voters,
-            resolved_voter_tools,
+            voter_tools,
             checkpoint_provider,
             voter_config,
         )
@@ -299,14 +305,7 @@ class VotingAgent(Agent):
         judge_verdict = ""
         judge_model: str | None = None
         async for event in astream_tools_agent_events(
-            system_message=JUDGE_SYSTEM_MESSAGE,
-            user_message=user_messages,
-            tools=resolved_judge_tools,
-            llm_provider=judge_llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            llm_kwargs=judge_llm_kwargs,
-            config=judge_config,
-            user_content_kwargs=user_content_kwargs,
+            graph=judge_graph, user_message=user_messages, config=judge_config, user_content_kwargs=user_content_kwargs
         ):
             if isinstance(event, MessageFinal):
                 judge_verdict = event.text

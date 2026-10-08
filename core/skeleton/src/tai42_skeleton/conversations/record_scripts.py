@@ -52,7 +52,8 @@ redis.call('ZADD', {_TARGET_INDEX_KEY}, {score_argv}, {member_argv})
 
 
 # Atomic get-or-set of the inbound-dedupe marker: returns the message_id owning the pair —
-# the caller's on a fresh claim, the prior turn's on a redelivery.
+# the caller's on a fresh claim, the prior turn's on a redelivery. The create folds the same
+# get-or-set into its own step; this one serves a re-claim of an existing record.
 # KEYS[1]=dedupe key; ARGV = message_id, ttl_seconds.
 _CLAIM_INBOUND_LUA = """
 -- conversations:dedupe:claim
@@ -69,25 +70,46 @@ return ARGV[1]
 # stand outside the transcript it belongs to — but ONLY while the routing row still stands:
 # a door resolves its route a round trip before it lands here, and a delete completing in
 # that window has already reclaimed both indexes, so writing them would re-create a pair
-# for a route that no longer routes. Returns 1 when the thread indexes were written, 0 when
-# the route was gone — in which case the record's ``route_missing`` field is set, so the
-# operator read carries the honest marker and not only a log line. ARGV = content_json,
-# delivery_status, outbound_json, attempts,
+# for a route that no longer routes; the record's ``route_missing`` field is then set, so
+# the operator read carries the honest marker and not only a log line.
+#
+# The same step optionally claims the inbound pair and refreshes the thread's mode override.
+# Two OPTIONAL keys follow the routing row, in this order and each only when its ARGV flag is
+# set: the dedupe key (ARGV[12] = its TTL seconds, '' for no claim), then the thread's mode
+# key (ARGV[13] = the retention TTL seconds, '' for no refresh). The claim is the
+# get-or-set of ``_CLAIM_INBOUND_LUA``, decided FIRST: a pair another message owns writes
+# nothing and answers ``{-1, owner}``. Otherwise the record is written, the pair claimed, the
+# mode refreshed (``EXPIRE`` never resurrects an absent override) and the script answers
+# ``{indexed, message_id}`` — indexed 1 when the thread indexes were written, 0 when the
+# route was gone. ARGV = content_json, delivery_status, outbound_json, attempts,
 # updated_at, ttl_ms ('' for a record that must not expire yet), intake_claim ('' off the
-# intake path), message_id, index_score, thread_id, created_at.
+# intake path), message_id, index_score, thread_id, created_at, claim_ttl, mode_ttl.
 _CREATE_LUA = f"""
 -- conversations:record:create
+local optional = {6 + len(_INDEXED_STATUSES)}
+local claim_key, mode_key
+if ARGV[12] ~= '' then claim_key = KEYS[optional]; optional = optional + 1 end
+if ARGV[13] ~= '' then mode_key = KEYS[optional] end
+local owner
+if claim_key then
+  owner = redis.call('GET', claim_key)
+  if owner and owner ~= ARGV[8] then return {{-1, owner}} end
+end
 redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', ARGV[2], 'outbound_ids', ARGV[3],
   'attempts', ARGV[4], 'claim', '', 'grace_deadline', '', 'updated_at', ARGV[5], 'intake_claim', ARGV[7])
 if ARGV[6] ~= '' then redis.call('PEXPIRE', KEYS[1], ARGV[6]) end
 {_reindex("ARGV[8]", "ARGV[9]")}
+local indexed = 1
 if redis.call('EXISTS', {_ROUTE_ROW_KEY}) == 0 then
   redis.call('HSET', KEYS[1], 'route_missing', '1')
-  return 0
+  indexed = 0
+else
+  redis.call('ZADD', {_THREAD_INDEX_KEY}, ARGV[11], ARGV[8])
+  redis.call('ZADD', {_ROUTE_THREADS_KEY}, ARGV[11], ARGV[10])
 end
-redis.call('ZADD', {_THREAD_INDEX_KEY}, ARGV[11], ARGV[8])
-redis.call('ZADD', {_ROUTE_THREADS_KEY}, ARGV[11], ARGV[10])
-return 1
+if claim_key and not owner then redis.call('SET', claim_key, ARGV[8], 'EX', ARGV[12]) end
+if mode_key then redis.call('EXPIRE', mode_key, ARGV[13]) end
+return {{indexed, ARGV[8]}}
 """
 
 # Re-stamp the thread's last-activity moment on the route index, but ONLY while the

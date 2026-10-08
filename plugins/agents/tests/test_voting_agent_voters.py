@@ -23,10 +23,17 @@ from tests._voting_agent_support import (
     _fake_overlap_recording_invoke,
     _fake_voter_invoke,
     _make_tool,
+    script_voting_graphs,
 )
 
 from tai42_agents.voting_agent import agent as agent_module
 from tai42_agents.voting_agent.model import VoteInfo, VoterSpec
+
+
+@pytest.fixture(autouse=True)
+def _scripted_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The voting agent builds its graphs through a double that compiles nothing."""
+    script_voting_graphs(monkeypatch)
 
 
 def test_default_voter_uses_judge_provider(monkeypatch, app_tools, resource_manager) -> None:

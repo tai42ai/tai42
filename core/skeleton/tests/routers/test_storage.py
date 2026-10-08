@@ -23,6 +23,9 @@ from tai42_contract.storage import ObjectStat, Storage, assert_not_root
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations.storage import _content_disposition
 from tai42_skeleton.routers import storage as router
+from tai42_skeleton.template import ResourceManager
+
+from .._fakes.bus import FakeBus
 
 
 class _FakeStorage(Storage):
@@ -79,6 +82,9 @@ class _FakeStorage(Storage):
 def install(monkeypatch):
     def _install(provider: Storage | None) -> Storage | None:
         monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
+        # A write evicts the template render state of what it wrote, here and fleet-wide.
+        monkeypatch.setattr(instance.app, "_resource_manager_cache", ResourceManager(provider))
+        monkeypatch.setattr(instance.app, "_bus", FakeBus())
         return provider
 
     return _install

@@ -25,12 +25,19 @@ from tests._voting_agent_support import (
     _install_reject_fakes,
     _make_tool,
     _NotVotingOutput,
+    script_voting_graphs,
 )
 
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.voting_agent import agent as agent_module
 from tai42_agents.voting_agent.agent import VotingAgentInput
 from tai42_agents.voting_agent.model import VoterSpec, VotingOutput
+
+
+@pytest.fixture(autouse=True)
+def _scripted_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The voting agent builds its graphs through a double that compiles nothing."""
+    script_voting_graphs(monkeypatch)
 
 
 def test_checkpoint_provider_reaches_the_seam_on_both_faces(monkeypatch, app_tools, resource_manager) -> None:

@@ -42,7 +42,7 @@ from typing import Any
 
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.access_control.principals_mixin import PrincipalsStoreMixin
@@ -113,7 +113,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         public = self._settings().public_resource_id
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -131,7 +131,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute("SELECT url, scope_id FROM access_control_routes ORDER BY url")
@@ -146,7 +146,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute("SELECT url, pattern FROM access_control_routes WHERE pattern IS NOT NULL ORDER BY url")
@@ -162,7 +162,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute("SELECT scope_id FROM access_control_routes WHERE url = %s", (path,))
@@ -177,7 +177,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute("SELECT pattern, url FROM access_control_routes WHERE pattern IS NOT NULL")
@@ -254,7 +254,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         public = self._settings().public_resource_id
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -384,7 +384,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -405,7 +405,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(
@@ -427,7 +427,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            pool.connection() as conn,
+            read_connection(pool) as conn,
             conn.cursor() as cur,
         ):
             await cur.execute(

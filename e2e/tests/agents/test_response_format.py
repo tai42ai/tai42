@@ -11,7 +11,8 @@ grammar cannot carry falls to the tool tier on the same provider:
   ``tool_choice``; the SSE stream carries no ``tool_call_step``/``tool_result_step`` and no
   ``message_delta`` (the JSON payload is not streamed), just one terminal ``structured_final``.
 * A well-formed but schema-violating payload is re-prompted in-node up to the cap, then the
-  run ends on the typed ``structured_output_unresolved_final`` outcome.
+  run ends on the typed ``structured_output_unresolved_final`` outcome; the cap is per run, so
+  two runs sharing one compiled graph each get all of it.
 * With a stub that refuses a forced ``tool_choice``, the structured run still succeeds —
   proof the native plan sends no forced choice.
 * A map-object schema (schema-valued ``additionalProperties``) is not natively representable,
@@ -163,6 +164,25 @@ async def test_native_reprompt_cap_yields_the_typed_outcome(agents_stack: TaiSta
     # The second request carries the re-prompt fed back as a user message.
     second = llm_stub.requests[1]
     assert any(message.get("role") == "user" for message in second["messages"][1:]), second
+
+
+@pytest.mark.needs("setting:TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP=3")
+async def test_two_sequential_runs_each_get_the_full_reprompt_cap(agents_stack: TaiStack, llm_stub: LlmStub) -> None:
+    """Two runs of the same inputs share one compiled graph; each still gets the whole per-run
+    re-prompt cap — the second run ends on the typed outcome after cap + 1 attempts of its own."""
+    schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}
+    oversized = json.dumps({"value": 9223372036854775808})  # one past the platform int64 ceiling
+    body = {"user_message": {"content": "answer with a number"}, "response_format": schema}
+    for _run in range(2):
+        llm_stub.reset()
+        llm_stub.script([{"content": oversized} for _ in range(4)])
+
+        frames = await _run_sse(agents_stack, "/api/agents/tools_agent/runs", body)
+
+        outcome = [frame for frame in frames if frame.get("type") == "structured_output_unresolved_final"]
+        assert len(outcome) == 1, f"expected the typed re-prompt-cap outcome: {frames}"
+        assert outcome[0]["attempts"] == 4, outcome
+        assert len(llm_stub.requests) == 4, f"expected 4 LLM round-trips, saw {len(llm_stub.requests)}"
 
 
 async def test_native_structured_run_sends_no_forced_tool_choice(agents_stack: TaiStack, llm_stub: LlmStub) -> None:

@@ -9,7 +9,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.states.db import STATES_COMPONENT
@@ -89,7 +89,7 @@ class _StoreConnection(_StoreBase):
             return
         async with (
             _pool(_settings()) as pool,
-            pool.connection() as own,
+            read_connection(pool) as own,
             own.cursor(row_factory=dict_row) as cur,
         ):
             yield cur

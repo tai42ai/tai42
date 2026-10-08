@@ -145,7 +145,6 @@ async def operator_send(
             origin="operator",
             operator_send=True,
         )
-        await cache.get_conversations_manager().records.create_record(record)
-        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
+        await cache.get_conversations_manager().records.create_record(record, refresh_mode=True)
         spawn_delivery(message_id)
     return message_id

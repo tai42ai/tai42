@@ -68,6 +68,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
 from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
 
+from ._tools_agent_support import flatten, script_graph
 from .conftest import APP as RECORDING_APP
 
 # One agents entry: the real generic tools-agent, gated in by its registration name.
@@ -240,11 +241,13 @@ def test_tools_agent_authored_and_streamed_through_the_skeleton(skeleton: Any, m
             # that module's globals at call time, so the scripted generator runs.
             live_module = sys.modules["tai42_agents.tools_agent"]
 
-            async def fake_events(**kwargs: Any) -> Any:
+            async def fake_events(**seen: Any) -> Any:
+                kwargs = flatten(seen)
                 captured.update(kwargs)
                 yield MessageFinal(text=f"system={kwargs.get('system_message', '')}")
 
             monkeypatch.setattr(live_module, "astream_tools_agent_events", fake_events)
+            script_graph(monkeypatch, live_module)
 
             # 1. The real tools_agent is registered and reports its capability marker.
             items = _data(await skeleton.agents.list_agents(_json_request("GET", "/api/agents")))["items"]
@@ -308,11 +311,13 @@ def test_tools_agent_response_format_streams_structured_through_the_skeleton(
         async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
             live_module = sys.modules["tai42_agents.tools_agent"]
 
-            async def fake_events(**kwargs: Any) -> Any:
+            async def fake_events(**seen: Any) -> Any:
+                kwargs = flatten(seen)
                 captured.update(kwargs)
                 yield StructuredFinal(data={"value": 7})
 
             monkeypatch.setattr(live_module, "astream_tools_agent_events", fake_events)
+            script_graph(monkeypatch, live_module)
 
             await instance.app.preset_manager.register(
                 "struct_bot",
@@ -350,11 +355,13 @@ def test_tools_agent_content_kwargs_reach_astream_through_the_skeleton(
         async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
             live_module = sys.modules["tai42_agents.tools_agent"]
 
-            async def fake_events(**kwargs: Any) -> Any:
+            async def fake_events(**seen: Any) -> Any:
+                kwargs = flatten(seen)
                 captured.update(kwargs)
                 yield MessageFinal(text="ok")
 
             monkeypatch.setattr(live_module, "astream_tools_agent_events", fake_events)
+            script_graph(monkeypatch, live_module)
 
             await instance.app.preset_manager.register(
                 "cache_bot",

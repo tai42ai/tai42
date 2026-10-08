@@ -87,6 +87,12 @@ class ToolsFacet(_Facet):
         """Unregister the tool named ``name``."""
         return self._app._tool_binding.remove_tool(name)
 
+    def surface_generation(self) -> int:
+        """A number that changes whenever the set of tools this process lists changes."""
+        from tai42_skeleton.tools.binding.surface import tool_surface_generation
+
+        return tool_surface_generation()
+
     def register_tool_info(self, name: str, combos: Sequence[Sequence[ExtensionElement]] | None = None):
         """Record extension-combo metadata for the base tool ``name``."""
         return self._app._tool_binding.register_tool_info(name, combos)

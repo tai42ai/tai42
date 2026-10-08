@@ -19,6 +19,8 @@ from tai42_contract.agent import (
 from tai42_contract.app import tai42_app
 
 from tai42_agents import tools_agent as tools_agent_module
+from tai42_agents._internal.graph_cache import ToolsAgentGraph, ToolsAgentGraphSpec
+from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 from tai42_agents.tools_agent import ToolsAgent
 
@@ -38,6 +40,47 @@ def make_tool(name: str, props: dict[str, Any] | None = None) -> StructuredTool:
     )
 
 
+class ScriptedGraph(ToolsAgentGraph):
+    """A graph double carrying the spec the face built it from (no model, no compile)."""
+
+    spec: ToolsAgentGraphSpec
+
+
+def script_graph(monkeypatch: pytest.MonkeyPatch, module: Any = tools_agent_module) -> None:
+    """Replace the face's graph build (in ``module``) with one that resolves the spec's tools and compiles nothing."""
+
+    async def fake_graph(spec: ToolsAgentGraphSpec) -> ToolsAgentGraph:
+        tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.live_tools), list(spec.presets))
+        graph = ScriptedGraph(
+            agent=None,
+            strategy=None,
+            tools=tuple(tools),
+            response_format=spec.response_format,
+            checkpoint_provider=spec.checkpoint_provider,
+        )
+        object.__setattr__(graph, "spec", spec)
+        return graph
+
+    monkeypatch.setattr(module, "tools_agent_graph", fake_graph)
+
+
+def flatten(seen: dict[str, Any]) -> dict[str, Any]:
+    """A drive call's keywords with its scripted graph's spec spread out under the spec's own names."""
+    out = dict(seen)
+    graph = out.pop("graph")
+    spec = graph.spec
+    out.update(
+        tools=list(graph.tools),
+        system_message=spec.system_message,
+        system_content_kwargs=spec.system_content_kwargs,
+        response_format=spec.response_format,
+        llm_provider=spec.llm_provider,
+        llm_kwargs=spec.llm_kwargs,
+        checkpoint_provider=spec.checkpoint_provider,
+    )
+    return out
+
+
 def _get_agent() -> ToolsAgent:
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     assert isinstance(agent, ToolsAgent)
@@ -53,11 +96,12 @@ def _capture_config(monkeypatch: pytest.MonkeyPatch, face: str, **kwargs: Any) -
     faces and prove they agree."""
     captured: dict[str, Any] = {}
     agent = _get_agent()
+    script_graph(monkeypatch)
 
     if face == "run":
 
         async def fake_invoke(**seen: Any) -> AgentInvokeResult:
-            captured.update(seen)
+            captured.update(flatten(seen))
             return AgentInvokeResult(output="ok", usage=CallUsage(0, 0, None))
 
         monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
@@ -69,8 +113,10 @@ def _capture_config(monkeypatch: pytest.MonkeyPatch, face: str, **kwargs: Any) -
 
 
 def _script_astream(monkeypatch: pytest.MonkeyPatch, events: list[StreamEvent], captured: dict[str, Any]) -> None:
+    script_graph(monkeypatch)
+
     async def fake_events(**kwargs: Any) -> AsyncIterator[StreamEvent]:
-        captured.update(kwargs)
+        captured.update(flatten(kwargs))
         for event in events:
             yield event
 

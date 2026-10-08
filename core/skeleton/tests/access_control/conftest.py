@@ -747,6 +747,11 @@ class _PgConn:
     async def __aexit__(self, *exc) -> bool:
         return False
 
+    autocommit = False
+
+    async def set_autocommit(self, value: bool) -> None:
+        self.autocommit = value
+
     def cursor(self) -> _PgCursor:
         return _PgCursor(self._pg)
 

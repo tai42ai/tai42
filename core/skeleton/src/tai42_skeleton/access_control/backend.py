@@ -14,7 +14,7 @@ from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path, strip_root_path
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import DenialCause
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -111,10 +111,14 @@ class AccessControlAuthBackend(AuthenticationBackend):
     """Starlette auth backend: verifies a request's credential and resolves its authorized policy."""
 
     def __init__(self, verifier: AccessControlVerifier, settings: AccessControlSettings):
-        """Bind the credential ``verifier`` and access-control ``settings``, building the policy enforcer."""
+        """Bind the credential ``verifier`` and access-control ``settings``."""
         self.verifier = verifier
         self.settings = settings
-        self.enforcer = PolicyEnforcer(settings)
+
+    @property
+    def enforcer(self) -> PolicyEnforcer:
+        """The running loop's policy enforcer for this backend's settings, shared with every other decision site."""
+        return policy_enforcer(self.settings)
 
     async def _get_access_token(self, conn):
         candidates = extract_credential_candidates(conn)

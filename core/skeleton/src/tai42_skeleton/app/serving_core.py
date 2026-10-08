@@ -40,6 +40,7 @@ from tai42_skeleton.tools import (
     ToolTierRegistry,
 )
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.binding.surface import SurfaceToolIndex, bump_tool_surface_generation
 from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
 from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
@@ -130,6 +131,10 @@ class ServingCore:
         # FRESH per epoch, so a profile that flips ACCESS_CONTROL_* rebuilds the
         # adapter and its verifier chain.
         self._fast_mcp: FastMCP = FastMCP(*args, on_duplicate="error", auth=auth, **kwargs)
+        # A new server lists a new tool set: every cache keyed on the surface generation misses.
+        bump_tool_surface_generation()
+        # This server's name lookups, born empty with it and dropped with it.
+        self._tool_index = SurfaceToolIndex()
 
         # Active-MCP-session registry + the middleware that captures live sessions on
         # every incoming message, so the list_changed broadcast primitive sees every

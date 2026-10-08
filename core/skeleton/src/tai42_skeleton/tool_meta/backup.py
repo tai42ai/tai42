@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -71,7 +71,7 @@ async def export_tool_meta() -> dict[str, Any]:
     """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-        pool.connection() as conn,
+        read_connection(pool) as conn,
         conn.cursor() as cur,
     ):
         await cur.execute("SELECT id, name, parent_id, created_at FROM tool_folders ORDER BY id")

@@ -420,8 +420,8 @@ async def test_a_refused_key_is_read_once_and_refuses_every_record_naming_it(sto
 
 
 async def test_keys_of_one_owner_read_the_owner_row_once_for_the_batch(store, policy_store) -> None:
-    # The batch holds ONE enforcer, so the OWNER row two distinct execution keys share
-    # is fetched once for the whole restore instead of once per key.
+    # The batch reads through the loop's ONE enforcer, so the OWNER row two distinct execution
+    # keys share is fetched once for the whole restore instead of once per key.
     owner_claim = {"owner_user_id": "acct", KEY_FINGERPRINT_CLAIM: "fp"}
     policy_store.add_policy("acct", scopes=["hooks"], condition={"content": _EVALUABLE})
     policy_store.add_policy("k-one", scopes=["hooks"], policy_data=owner_claim)

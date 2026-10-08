@@ -95,6 +95,7 @@ def test_the_owning_modules_are_listed() -> None:
         "tai42_skeleton.interactions.settings",
         "tai42_skeleton.channels.settings",
         "tai42_kit.llm.settings",
+        "tai42_skeleton.conversations.settings",
     )
 
 

@@ -63,7 +63,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control import management
-from tai42_skeleton.access_control.policy import PolicyEnforcer
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer
 from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
@@ -418,7 +418,7 @@ async def _build_uncached(
     claims = wrapper.claims
     carve_out = frozenset(settings.authenticated_always_allowed_paths)
 
-    enforcer = PolicyEnforcer(settings)
+    enforcer = policy_enforcer(settings)
     verifier = AccessControlVerifier(settings, providers=[])
 
     policy = await enforcer.get_policy(user_id)

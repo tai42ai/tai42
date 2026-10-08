@@ -33,7 +33,7 @@ from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control.backend import effective_scopes
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path
-from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
+from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.role_grants import role_level_decision_for_route
 from tai42_skeleton.access_control.settings import access_control_settings
@@ -265,7 +265,7 @@ async def _authorize_pinned_route(
     # The store's policy VERSION, read ONCE and threaded through EVERY versioned read
     # below, so no layer serves a pre-bump cached copy while another serves a post-bump
     # one. A read fault denies fail-closed.
-    enforcer = PolicyEnforcer(ac_settings)
+    enforcer = policy_enforcer(ac_settings)
     version = await _read_pinned_policy_version(enforcer, user_id)
 
     # 1. Route -> resource ids, through the edge's one memoized verifier.

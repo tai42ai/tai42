@@ -19,7 +19,9 @@ from tai42_contract.agent.events import (
     ToolCallStep,
     ToolResultStep,
 )
+from tests._tools_agent_support import ScriptedGraph, flatten
 
+from tai42_agents._internal.graph_cache import ToolsAgentGraphSpec
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 from tai42_agents.voting_agent import agent as agent_module
 
@@ -39,6 +41,27 @@ def _make_tool(name: str) -> StructuredTool:
     )
 
 
+def script_voting_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the voting agent's graph build with one that resolves the named tools and compiles nothing."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_agents._internal.resolve_tools import resolve_tools
+
+    async def fake_graph(spec: ToolsAgentGraphSpec) -> ScriptedGraph:
+        tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.live_tools), list(spec.presets))
+        graph = ScriptedGraph(
+            agent=None,
+            strategy=None,
+            tools=tuple(tools),
+            response_format=spec.response_format,
+            checkpoint_provider=spec.checkpoint_provider,
+        )
+        object.__setattr__(graph, "spec", spec)
+        return graph
+
+    monkeypatch.setattr(agent_module, "tools_agent_graph", fake_graph)
+
+
 async def _collect(agen: Any) -> list[StreamEvent]:
     return [event async for event in agen]
 
@@ -49,7 +72,8 @@ def _fake_voter_invoke(calls: list[dict[str, Any]], usage_model: str | None = No
     run reports back (as a real provider response would); ``None`` mirrors a
     provider that omits the model."""
 
-    async def fake(**kwargs: Any) -> AgentInvokeResult:
+    async def fake(**seen: Any) -> AgentInvokeResult:
+        kwargs = flatten(seen)
         calls.append(kwargs)
         return AgentInvokeResult(
             output=f"voter-{kwargs['llm_provider']}",
@@ -64,7 +88,8 @@ def _fake_full_judge_stream(captured: dict[str, Any]):
     per-step event kind the projection can produce, ending with the assembled
     ``MessageFinal``."""
 
-    async def fake(**kwargs: Any):
+    async def fake(**seen: Any):
+        kwargs = flatten(seen)
         captured["judge_tools"] = kwargs["tools"]
         captured["judge_llm_provider"] = kwargs["llm_provider"]
         yield ReasoningStep(text="weighing the voters")
@@ -87,8 +112,8 @@ class _NotVotingOutput(BaseModel):
 def _fake_checkpoint_judge_stream(captured: dict[str, Any]):
     """A judge stream that records the ``checkpoint_provider`` it was handed."""
 
-    async def fake(**kwargs: Any):
-        captured["judge_checkpoint_provider"] = kwargs["checkpoint_provider"]
+    async def fake(**seen: Any):
+        captured["judge_checkpoint_provider"] = flatten(seen)["checkpoint_provider"]
         yield MessageFinal(text="VERDICT")
 
     return fake
@@ -106,7 +131,8 @@ def _fake_overlap_recording_invoke(state: dict[str, Any]):
     """A fake voter that tracks how many voters are concurrently in-flight, so a
     test can assert a bounded semaphore never lets two overlap."""
 
-    async def fake(**kwargs: Any) -> AgentInvokeResult:
+    async def fake(**seen: Any) -> AgentInvokeResult:
+        kwargs = flatten(seen)
         state["active"] += 1
         state["max_active"] = max(state["max_active"], state["active"])
         # Yield to the loop: without the semaphore both gathered voters would be
@@ -126,8 +152,8 @@ def _fake_delayed_invoke(delays: dict[str, float]):
     """A fake voter whose per-provider delay makes voters COMPLETE out of input
     order, so a test can pin that verdict assembly still follows input order."""
 
-    async def fake(**kwargs: Any) -> AgentInvokeResult:
-        provider = kwargs["llm_provider"]
+    async def fake(**seen: Any) -> AgentInvokeResult:
+        provider = flatten(seen)["llm_provider"]
         await asyncio.sleep(delays.get(provider, 0.0))
         return AgentInvokeResult(
             output=f"voter-{provider}",

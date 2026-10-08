@@ -392,7 +392,6 @@ async def test_delete_thread_door_answers_503_when_a_foreign_worker_holds_the_le
     # past the proxy timeout; nothing is torn down while it waits.
     client, saver = delete_client
     monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
-    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
     caps_module._CAPS_CACHE.clear()
 
     key = ConversationsSettings().thread_lease_key(_DELETE_THREAD)

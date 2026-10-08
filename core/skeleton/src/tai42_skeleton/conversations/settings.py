@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from typing import ClassVar
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
@@ -48,13 +49,15 @@ class ConversationsSettings(TaiBaseSettings):
     """Conversation-bridge configuration (``CONVERSATIONS_*`` env).
 
     Without ``CONVERSATIONS_REDIS_URL`` there is no durable store and every routing operation refuses
-    with a loud 501.
+    with a loud 501. The ``CONVERSATIONS_`` prefix is owned: an env name under it that no
+    conversations setting declares is refused.
     """
 
     model_config = SettingsConfigDict(
         env_prefix="CONVERSATIONS_",
         frozen=True,
     )
+    env_prefix_owned: ClassVar[bool] = True
 
     redis: ConversationsRedisSettings = Field(default_factory=ConversationsRedisSettings)
 
@@ -92,9 +95,6 @@ class ConversationsSettings(TaiBaseSettings):
 
     # Seconds between thread-lease refreshes; must stay under the lease.
     thread_lease_refresh_seconds: int = Field(default=30, gt=0)
-
-    # Seconds a waiter sleeps between thread-lease acquisition attempts.
-    thread_lease_poll_seconds: float = Field(default=0.5, gt=0)
 
     # Seconds the overlap-cancel watcher sleeps between reads of a thread's cancel marker while a
     # ``running="cancel"`` turn runs. Must stay under the thread lease, or the marker naming a newer
@@ -367,6 +367,14 @@ class ConversationsSettings(TaiBaseSettings):
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:thread_lease:{thread_id}"
 
+    @property
+    def thread_lease_released_channel(self) -> str:
+        """The pub/sub channel a released thread lease is announced on; each message is the thread id.
+
+        A turn waiting for a busy thread listens here and retries the moment the holder releases.
+        """
+        return f"{self.prefix}:thread_lease_released"
+
     def overlap_cancel_key(self, thread_id: str) -> str:
         """Per-thread overlap-cancel marker key → the newest participant message's ``{message_id, created_at}``.
 
@@ -401,6 +409,14 @@ class ConversationsSettings(TaiBaseSettings):
         Kept in lockstep with the per-route keys by the create/delete scripts.
         """
         return f"{self.prefix}:route_names"
+
+    @property
+    def route_version_key(self) -> str:
+        """The route table's write token: set to a fresh value by every route write script.
+
+        A reader's route snapshot is current while this key still holds the token it was loaded under.
+        """
+        return f"{self.prefix}:route_version"
 
     # -- Person-linking keyspaces --------------------------------------------
 
@@ -494,6 +510,14 @@ class ConversationsSettings(TaiBaseSettings):
         :attr:`target_config_key_prefix` rebuilds the row key it names.
         """
         return f"{self.prefix}:config_names"
+
+    @property
+    def target_config_version_key(self) -> str:
+        """The target-config map's write token: set to a fresh value by every config write script.
+
+        A reader's config snapshot is current while this key still holds the token it was loaded under.
+        """
+        return f"{self.prefix}:target_config_version"
 
     # -- Redeem-throttle keyspace --------------------------------------------
 

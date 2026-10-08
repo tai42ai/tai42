@@ -220,7 +220,7 @@ async def redrive_pending() -> None:
     """
     store = get_conversations_manager().records
     now = time.time()
-    for work in await store.pending_work():
+    for work in await store.pending_work(due_only=False):
         if work.delivery_status is DeliveryStatus.PENDING_DELIVERY:
             _spawn(deliver(work.message_id))
         elif work.delivery_status is DeliveryStatus.PROVISIONAL:
@@ -242,7 +242,7 @@ async def sweep_stalled_deliveries() -> None:
     """
     store = get_conversations_manager().records
     now = time.time()
-    for work in await store.pending_work():
+    for work in await store.pending_work(due_only=True):
         if work.delivery_status is DeliveryStatus.PENDING_DELIVERY:
             _spawn(deliver(work.message_id))
         elif (

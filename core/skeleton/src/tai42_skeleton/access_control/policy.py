@@ -1,13 +1,18 @@
 """Access-policy fetch, caching, and condition enforcement for the access-control gate."""
 
+import asyncio
 import json
+import threading
+from asyncio import AbstractEventLoop
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from async_lru import alru_cache
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, hgetall
+from tai42_kit.settings import register_settings_reset
 from tai42_kit.utils.data import run_jq_first
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -184,3 +189,37 @@ class PolicyEnforcer:
             # swallowing it as a deny, while the runtime gate's broad ``except`` still
             # fails closed on it.
             raise PolicyEvaluationError(f"Policy error: {e!s}") from e
+
+
+# One enforcer per running loop: its policy cache (async-lru) binds to the first loop that
+# uses it. The cache also keeps that loop referenced, so a closed loop's entry is dropped
+# explicitly when the next enforcer is built rather than left to the weak key.
+_enforcers: "WeakKeyDictionary[AbstractEventLoop, tuple[AccessControlSettings, PolicyEnforcer]]" = WeakKeyDictionary()
+_enforcers_lock = threading.Lock()
+
+
+def policy_enforcer(settings: AccessControlSettings) -> PolicyEnforcer:
+    """The running loop's ``PolicyEnforcer`` for ``settings``, built on first use.
+
+    Memoized on the settings OBJECT: a different settings object gets a new enforcer, and a
+    settings reset drops every one. The policy cache it carries is keyed on the policy version
+    each decision reads live, so sharing it across decisions costs nothing against revocation.
+    Raises ``RuntimeError`` when no event loop is running.
+    """
+    loop = asyncio.get_running_loop()
+    with _enforcers_lock:
+        held = _enforcers.get(loop)
+        if held is not None and held[0] is settings:
+            return held[1]
+        enforcer = PolicyEnforcer(settings)
+        for closed in [other for other in _enforcers if other.is_closed()]:
+            del _enforcers[closed]
+        _enforcers[loop] = (settings, enforcer)
+        return enforcer
+
+
+@register_settings_reset
+def reset_policy_enforcers() -> None:
+    """Drop every loop's enforcer so a settings reload rebuilds them."""
+    with _enforcers_lock:
+        _enforcers.clear()

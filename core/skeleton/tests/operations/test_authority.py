@@ -38,7 +38,7 @@ def _gate_on(monkeypatch: pytest.MonkeyPatch, *, caller_id: str | None, policies
         async def get_policy(self, user_id: str) -> AccessPolicy:
             return policies.get(user_id, AccessPolicy(scopes=[]))
 
-    monkeypatch.setattr(authority, "PolicyEnforcer", _Enforcer)
+    monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
 
 
 @asynccontextmanager

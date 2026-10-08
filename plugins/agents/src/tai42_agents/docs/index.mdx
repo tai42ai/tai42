@@ -20,6 +20,7 @@ Limits shared by every agent in this package:
 | `TAI_AGENTS_DEFAULT_RECURSION_LIMIT` | `50` | Default LangGraph `recursion_limit` when a run pins none; a caller-supplied limit wins. |
 | `TAI_AGENTS_SYSTEM_PROMPT_CACHE_DEFAULT` | `true` | Mark the per-run system prompt for prompt caching on providers that support it (see [System-prompt caching](#system-prompt-caching)). |
 | `TAI_AGENTS_STRUCTURED_OUTPUT_REPROMPT_CAP` | `3` | How many times a run re-prompts a model whose response fails to parse against a requested `response_format` before it ends with a typed outcome (see [Structured-output outcomes](#structured-output-outcomes)). |
+| `TAI_AGENTS_GRAPH_CACHE_SIZE` | `64` | How many compiled tools-agent graphs each event loop keeps for reuse (an LRU); a tool registration change or a settings reload makes the next run compile afresh. |
 
 ### Structured-output outcomes
 

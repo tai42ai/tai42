@@ -272,8 +272,7 @@ async def deliver_agent_completion(
         answer_parts=answer_parts,
         origin="operator",
     )
-    await cache.get_conversations_manager().records.create_record(record)
-    await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
+    await cache.get_conversations_manager().records.create_record(record, refresh_mode=True)
     spawn_delivery(completion_id)
     return {"message_id": completion_id}
 
@@ -423,7 +422,6 @@ async def deliver_tool_completion(
         answer_parts=answer_parts,
         origin="operator",
     )
-    await cache.get_conversations_manager().records.create_record(record)
-    await cache.get_conversations_manager().modes.refresh_ttl(delivery_thread_id)
+    await cache.get_conversations_manager().records.create_record(record, refresh_mode=True)
     spawn_delivery(completion_id)
     return {"message_id": completion_id}

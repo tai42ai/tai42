@@ -97,27 +97,26 @@ async def test_a_failed_persist_leaves_the_inbound_pair_unclaimed(env, monkeypat
 
 
 async def test_an_indeterminate_inbound_claim_is_resolved_not_left_at_intake(env, monkeypatch):
-    # The commit point: the claim's EVAL is APPLIED and only its reply is lost. The pair is
-    # now committed to this record, so the provider's redelivery dedupes to it forever —
-    # the accept must resolve it before it re-raises, never leave it stranded at intake.
+    # The commit point: the create's EVAL — the record and the claim in one step — is APPLIED
+    # and only its reply is lost. The pair is now committed to this record, so the provider's
+    # redelivery dedupes to it forever — the accept must resolve it before it re-raises, never
+    # leave it stranded at intake.
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": EchoAgent()})
     store = _store()
-    claim_inbound = records_module.ConversationRecordStore.claim_inbound
+    create_record = records_module.ConversationRecordStore.create_record
 
     lost: list[str] = []
 
-    async def _claim_then_lose_the_reply(self, channel_name, provider_message_id, message_id):
-        owner = await claim_inbound(self, channel_name, provider_message_id, message_id)
+    async def _create_then_lose_the_reply(self, record, **kwargs):
+        owner = await create_record(self, record, **kwargs)
         if not lost:
-            # Only the commit-point call loses its reply; the resolution's own arbitration
-            # reaches the same claim and reads back what landed.
-            lost.append(message_id)
+            lost.append(record.message_id)
             raise TimeoutError("the reply never came back")
         return owner
 
-    monkeypatch.setattr(records_module.ConversationRecordStore, "claim_inbound", _claim_then_lose_the_reply)
+    monkeypatch.setattr(records_module.ConversationRecordStore, "create_record", _create_then_lose_the_reply)
 
     with pytest.raises(TimeoutError):
         await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-lost")
@@ -186,7 +185,7 @@ async def test_a_settings_reload_mid_accept_does_not_leak_the_reserved_slot(env,
     async def _reload_then_create(self, record, **kwargs):
         # The reload lands after the reservation and before the turn is scheduled.
         caps_module._CAPS_CACHE.clear()
-        await create_record(self, record, **kwargs)
+        return await create_record(self, record, **kwargs)
 
     monkeypatch.setattr(records_module.ConversationRecordStore, "create_record", _reload_then_create)
 
@@ -506,4 +505,4 @@ async def test_an_overlap_terminal_record_is_never_redriven_or_stranded(env, mon
     assert channel.sends == []
     # Neither scan the re-drive and the delivery sweep read ever names it.
     assert (await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED}))).items == []
-    assert [work.message_id for work in await store.pending_work()] == []
+    assert [work.message_id for work in await store.pending_work(due_only=False)] == []

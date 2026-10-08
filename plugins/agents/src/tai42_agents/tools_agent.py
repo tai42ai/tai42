@@ -56,13 +56,13 @@ from tai42_kit.llm.runtime import build_user_output, extract_structured_output
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
 from tai42_agents._internal.base_tool_agent import (
     ParkBuilder,
-    _compile_tools_agent,
     _suspended_receipt,
     aappend_tools_agent_messages,
     ainvoke_tools_agent,
 )
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config, unmark_caller_thread
-from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
+from tai42_agents._internal.graph_cache import ToolsAgentGraphSpec, tools_agent_graph
+from tai42_agents._internal.outcomes import RepromptCapError, drive_reprompt_scope, outcome_for_drive_error
 from tai42_agents._internal.park import (
     ParkIdentity,
     build_park_identity,
@@ -81,7 +81,6 @@ from tai42_agents._internal.reject import (
     resolve_response_format,
 )
 from tai42_agents._internal.render import render_message
-from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.stream_events import astream_tools_agent_events
 
 # ABC ``run`` parameters this agent's runtime cannot honor, mapped to the reason
@@ -343,8 +342,20 @@ class ToolsAgent(Agent):
                 raise ValueError(
                     "tools_agent.run: user_content_kwargs applies to a fresh user_message turn, not a resume"
                 )
-        resolved_tools = await resolve_tools(tai42_app.tools, list(tool_names), list(tools), list(presets or []))
         rendered_system = await render_message(system_message)
+        graph = await tools_agent_graph(
+            ToolsAgentGraphSpec(
+                tool_names=tuple(tool_names),
+                presets=tuple(presets or ()),
+                live_tools=tuple(tools),
+                system_message=rendered_system,
+                system_content_kwargs=system_content_kwargs,
+                response_format=response_format,
+                llm_provider=llm_provider,
+                llm_kwargs=llm_kwargs,
+                checkpoint_provider=checkpoint_provider,
+            )
+        )
         rendered_user = (
             "" if resume is not None else await render_message(user_message, allow_empty=False, field="user_message")
         )
@@ -388,16 +399,10 @@ class ToolsAgent(Agent):
             )
 
         result = await ainvoke_tools_agent(
-            system_message=rendered_system,
+            graph=graph,
             user_message=[rendered_user],
-            tools=resolved_tools,
-            llm_provider=llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            llm_kwargs=llm_kwargs,
             config=config,
-            system_content_kwargs=system_content_kwargs,
             user_content_kwargs=user_content_kwargs,
-            response_format=response_format,
             park_builder=build_park,
             resume=resume,
         )
@@ -504,8 +509,20 @@ class ToolsAgent(Agent):
         response_format = await resolve_response_format("tools_agent", response_format)
         if resume is not None and user_message is not None:
             raise ValueError("tools_agent.astream requires exactly one of user_message or resume, not both.")
-        resolved_tools = await resolve_tools(tai42_app.tools, list(tool_names), list(tools), list(presets or []))
         rendered_system = await render_message(system_message)
+        graph = await tools_agent_graph(
+            ToolsAgentGraphSpec(
+                tool_names=tuple(tool_names),
+                presets=tuple(presets or ()),
+                live_tools=tuple(tools),
+                system_message=rendered_system,
+                system_content_kwargs=system_content_kwargs,
+                response_format=response_format,
+                llm_provider=llm_provider,
+                llm_kwargs=llm_kwargs,
+                checkpoint_provider=checkpoint_provider,
+            )
+        )
         rendered_user = "" if resume is not None else await render_message(user_message)
         config = build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
         park_builder = self._astream_park_builder(
@@ -524,16 +541,10 @@ class ToolsAgent(Agent):
         saw_structured = False
         saw_outcome = False
         async for event in astream_tools_agent_events(
-            system_message=rendered_system,
+            graph=graph,
             user_message=[rendered_user],
-            tools=resolved_tools,
-            llm_provider=llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            llm_kwargs=llm_kwargs,
             config=config,
-            system_content_kwargs=system_content_kwargs,
             user_content_kwargs=user_content_kwargs,
-            response_format=response_format,
             park_builder=park_builder,
             resume=resume,
         ):
@@ -574,13 +585,12 @@ class ToolsAgent(Agent):
         reject_blank_memory_keys("tools_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None)
         config = build_run_config(langgraph_config, thread_id)
         require_thread_id("tools_agent.append_thread_messages", config)
-        await aappend_tools_agent_messages(
-            converted,
-            config,
-            llm_provider=llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            llm_kwargs=llm_kwargs,
+        graph = await tools_agent_graph(
+            ToolsAgentGraphSpec(
+                llm_provider=llm_provider, llm_kwargs=llm_kwargs, checkpoint_provider=checkpoint_provider
+            )
         )
+        await aappend_tools_agent_messages(graph, converted, config)
 
     @staticmethod
     def _rebuild_kwargs(
@@ -702,18 +712,19 @@ class ToolsAgent(Agent):
         recursion_limit = rebuild.pop("recursion_limit", None)
         validated = ToolsAgentInput.model_validate(rebuild)
         resolved_response_format = await resolve_response_format("tools_agent", validated.response_format)
-        resolved_tools = await resolve_tools(
-            tai42_app.tools, list(validated.tool_names), [], list(validated.presets or [])
+        graph = await tools_agent_graph(
+            ToolsAgentGraphSpec(
+                tool_names=tuple(validated.tool_names),
+                presets=tuple(validated.presets or ()),
+                system_message=(validated.system_message.content or "") if validated.system_message else "",
+                system_content_kwargs=validated.system_content_kwargs,
+                response_format=resolved_response_format,
+                llm_provider=validated.llm_provider,
+                llm_kwargs=validated.llm_kwargs,
+                checkpoint_provider=validated.checkpoint_provider,
+            )
         )
-        agent, _strategy = await _compile_tools_agent(
-            resolved_tools,
-            llm_provider=validated.llm_provider,
-            checkpoint_provider=validated.checkpoint_provider,
-            llm_kwargs=validated.llm_kwargs,
-            response_format=resolved_response_format,
-            system_message=(validated.system_message.content or "") if validated.system_message else "",
-            system_content_kwargs=validated.system_content_kwargs,
-        )
+        agent = graph.agent
         config = init_langgraph_config(
             build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)
         ).config
@@ -754,7 +765,8 @@ class ToolsAgent(Agent):
         )
         async with park_drive(park):
             try:
-                state = await agent.ainvoke(Command(resume=resume_map), config)
+                with drive_reprompt_scope():
+                    state = await agent.ainvoke(Command(resume=resume_map), config)
             except (RepromptCapError, GraphRecursionError) as exc:
                 # A capped structured-output loop or a tripped recursion limit ends the resumed
                 # run with a typed, non-fatal outcome instead of an answer — never a generic

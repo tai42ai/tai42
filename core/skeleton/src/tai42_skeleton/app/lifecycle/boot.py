@@ -25,6 +25,7 @@ from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
 from tai42_skeleton.operations.registry import operation_registry
 from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_applied_env
 from tai42_skeleton.tools import ToolRegistry
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +283,7 @@ class BootMixin(LifecycleState):
         provider = self._fast_mcp.local_provider
         tools, prompts, resources, templates = run_blocking(lambda: _provider_surface(provider))
         for name in {tool.name for tool in tools}:
-            provider.remove_tool(name)
+            remove_surface_tool(self._fast_mcp, name)
         for name in {prompt.name for prompt in prompts}:
             provider.remove_prompt(name)
         for uri_template in {template.uri_template for template in templates}:

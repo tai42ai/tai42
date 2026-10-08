@@ -2,8 +2,9 @@
 
 Covers the HASH + STRING commands the record store calls, the LIST commands the send
 ledger calls, the ZSET commands the status and thread record indexes use, plus the record
-Lua scripts (dispatched by marker comment, re-implemented here). Single-threaded async, so
-each faked ``eval`` runs atomically.
+Lua scripts (dispatched by marker comment, re-implemented here), and the pub/sub the thread
+lease's release announcement travels on. Single-threaded async, so each faked ``eval`` runs
+atomically.
 
 ``ttl_ms`` records the expiry each command applied, so a test can assert the retention
 TTL lands only on a terminal record.
@@ -13,19 +14,62 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from tai42_contract.conversations import TargetConversationConfig
+
 from tai42_skeleton.conversations.settings import ConversationsSettings
+
+
+class FakeRecordPubSub:
+    """A subscriber of :class:`FakeRecordRedis`: confirmations and published messages, in order."""
+
+    def __init__(self, fake: FakeRecordRedis) -> None:
+        self._fake = fake
+        self._messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._channels: set[str] = set()
+
+    def deliver(self, message: dict[str, Any]) -> None:
+        self._messages.put_nowait(message)
+
+    async def subscribe(self, *channels: str) -> None:
+        for channel in channels:
+            self._channels.add(channel)
+            self._fake._subscribers.setdefault(channel, set()).add(self)
+            self.deliver({"type": "subscribe", "pattern": None, "channel": channel, "data": len(self._channels)})
+
+    async def get_message(
+        self, ignore_subscribe_messages: bool = False, timeout: float | None = 0.0
+    ) -> dict[str, Any] | None:
+        try:
+            if timeout is None:
+                message = await self._messages.get()
+            else:
+                async with asyncio.timeout(timeout):
+                    message = await self._messages.get()
+        except TimeoutError:
+            return None
+        if ignore_subscribe_messages and message["type"] == "subscribe":
+            return None
+        return message
+
+    async def aclose(self) -> None:
+        for channel in self._channels:
+            self._fake._subscribers.get(channel, set()).discard(self)
+        self._channels.clear()
 
 
 class FakeRecordRedis:
     def __init__(self) -> None:
+        self._subscribers: dict[str, set[FakeRecordPubSub]] = {}
         self._strings: dict[str, str] = {}
         self._hashes: dict[str, dict[str, str]] = {}
         self._lists: dict[str, list[str]] = {}
         self._zsets: dict[str, dict[str, float]] = {}
+        self._sets: dict[str, set[str]] = {}
         # The live expiry (in milliseconds) each key carries, so a test can assert the
         # retention TTL lands only on a terminal transition.
         self.ttl_ms: dict[str, int] = {}
@@ -53,11 +97,29 @@ class FakeRecordRedis:
         one landing after the route's delete and index nothing."""
         self._strings[ConversationsSettings().route_key(route_name)] = "{}"
 
+    def seed_target_config(self, config: TargetConversationConfig) -> None:
+        """Plant a per-target config row the way the config store's upsert writes it: the
+        row, its name-index member and a fresh write token for the map (the fake carries no
+        config put Lua)."""
+        settings = ConversationsSettings()
+        self._strings[settings.target_config_key(config.target_kind, config.target_name)] = config.model_dump_json()
+        self._sets.setdefault(settings.target_config_names_key, set()).add(f"{config.target_kind}:{config.target_name}")
+        self._strings[settings.target_config_version_key] = uuid.uuid4().hex
+
     def drop_route(self, route_name: str) -> None:
         """Remove the routing row, so a create lands as one racing the route's delete."""
         self._strings.pop(ConversationsSettings().route_key(route_name), None)
 
     # -- sorted-set commands (the status / thread record indexes) ------------
+    def pubsub(self) -> FakeRecordPubSub:
+        return FakeRecordPubSub(self)
+
+    async def publish(self, channel: str, message: str) -> int:
+        receivers = list(self._subscribers.get(channel, ()))
+        for receiver in receivers:
+            receiver.deliver({"type": "message", "pattern": None, "channel": channel, "data": message})
+        return len(receivers)
+
     async def zadd(self, key: str, mapping: dict[str, float]) -> int:
         target = self._zsets.setdefault(key, {})
         added = sum(1 for member in mapping if member not in target)
@@ -159,7 +221,14 @@ class FakeRecordRedis:
         held = [store.pop(key, None) for store in (self._strings, self._hashes, self._lists, self._zsets)]
         return 1 if any(value is not None for value in held) else 0
 
+    # -- set commands (the config name index) -------------------------------
+    async def smembers(self, key: str) -> set[str]:
+        return set(self._sets.get(key, set()))
+
     # -- string commands -----------------------------------------------------
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        return [self._strings.get(key) for key in keys]
+
     async def get(self, key: str) -> str | None:
         # Captures the value THEN yields (as a real single-server redis does: each command runs
         # to completion server-side, so two concurrent readers both observe pre-write state).
@@ -432,17 +501,35 @@ class FakeRecordRedis:
                 self.ttl_ms[key] = lease_ms
                 return 1
             return 0
+        if "conversations:thread_lease:acquire" in script:
+            token, lease_ms = argv[0], int(argv[1])
+            if key in self._strings:
+                return [0, self.ttl_ms.get(key, -1)]
+            self._strings[key] = token
+            self.ttl_ms[key] = lease_ms
+            return [1, 0]
         if "conversations:thread_lease:release" in script:
-            token = argv[0]
+            token, channel, thread_id = argv[0], argv[1], argv[2]
             if self._strings.get(key) == token:
-                return await self.delete(key)
+                await self.delete(key)
+                await self.publish(channel, thread_id)
+                return 1
             return 0
         h = self._hashes.get(key)
         status = h.get("delivery_status") if h else None
         if "conversations:record:create" in script:
-            # The create carries the ROUTING ROW behind its two thread index keys, so the
-            # slicing the sibling scripts share shifts by one here.
-            created_threaded, created_thread_keys, route_row_key = keys[1:-3], keys[-3:-1], keys[-1]
+            # The create carries the ROUTING ROW behind its two thread index keys, then the
+            # optional dedupe key and mode key its two trailing ARGV flags announce.
+            claim_ttl, mode_ttl = argv[11], argv[12]
+            optional = keys[len(keys) - (claim_ttl != "") - (mode_ttl != "") :]
+            base = keys[: len(keys) - len(optional)]
+            claim_key = optional[0] if claim_ttl != "" else None
+            mode_key = optional[-1] if mode_ttl != "" else None
+            message_id = argv[7]
+            owner = self._strings.get(claim_key) if claim_key is not None else None
+            if owner is not None and owner != message_id:
+                return [-1, owner]
+            created_threaded, created_thread_keys, route_row_key = base[1:-3], base[-3:-1], base[-1]
             self._hashes[key] = {
                 "data": argv[0],
                 "delivery_status": argv[1],
@@ -455,17 +542,24 @@ class FakeRecordRedis:
             }
             if argv[5]:
                 self.ttl_ms[key] = int(argv[5])
-            self._reindex(created_threaded, argv[7], argv[8])
+            self._reindex(created_threaded, message_id, argv[8])
             # Written only while the route still routes, as the script's guard does: the
             # indexes of a route whose row is gone are reclaimed already and nothing walks
             # the name again, so re-creating them would strand the pair. The record is marked
             # so the operator read carries the honest marker, not only a log line.
+            indexed = 1
             if await self.exists(route_row_key) == 0:
                 self._hashes[key]["route_missing"] = "1"
-                return 0
-            self._zsets.setdefault(created_thread_keys[0], {})[argv[7]] = float(argv[10])
-            self._zsets.setdefault(created_thread_keys[1], {})[argv[9]] = float(argv[10])
-            return 1
+                indexed = 0
+            else:
+                self._zsets.setdefault(created_thread_keys[0], {})[message_id] = float(argv[10])
+                self._zsets.setdefault(created_thread_keys[1], {})[argv[9]] = float(argv[10])
+            if claim_key is not None and owner is None:
+                self._strings[claim_key] = message_id
+            # As the script's EXPIRE: lands only on a live key, never recreates a missing one.
+            if mode_key is not None and mode_key in self._strings:
+                self.ttl_ms[mode_key] = int(mode_ttl) * 1000
+            return [indexed, message_id]
         if "conversations:record:complete_turn" in script:
             if status is None:
                 return -1

@@ -3,19 +3,25 @@
 Two ``TurnCaps`` instances sharing one fake Redis stand in for two workers: their per-worker
 FIFOs are independent, so the ONLY thing serializing a turn on the same thread across them is
 the Redis lease. The fake ages a lease's TTL through its ``advance`` time-travel, and the
-lease module's ``asyncio.sleep`` is replaced by a controllable clock so the heartbeat and the
-acquisition poll step deterministically.
+lease module's ``asyncio.sleep`` is replaced by a controllable clock so the heartbeat steps
+deterministically. A waiting worker wakes on the release the holder publishes.
 """
 
 from __future__ import annotations
 
 import asyncio as _aio
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from itertools import count
+from typing import Any
 
 import pytest
+from fakeredis import FakeServer, aioredis
+from redis.asyncio.client import PubSub
 from tai42_contract.conversations import ConversationRoute
+from tai42_kit.settings import UnknownOwnedSettingError
 
 from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations import caps as caps_module
@@ -26,6 +32,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.thread_lease import ThreadLeaseLostError, ThreadTurnLease
 from tai42_skeleton.conversations.turn import operator_send
 from tai42_skeleton.operations import conversations as ops
+from tai42_skeleton.settings.owned_settings import require_known_owned_settings
 
 from .conftest import durable_manager, fixed_settings
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
@@ -53,12 +60,11 @@ class _ShimAsyncio:
 
 
 class _Clock:
-    """The lease module's clock: the acquisition poll retries at once, and each heartbeat tick
-    is granted one at a time so a test can interleave TTL time-travel between refreshes."""
+    """The lease module's clock: each heartbeat tick is granted one at a time so a test can
+    interleave TTL time-travel between refreshes; any other sleep yields once."""
 
-    def __init__(self, refresh_seconds: float, poll_seconds: float) -> None:
+    def __init__(self, refresh_seconds: float) -> None:
         self._refresh = refresh_seconds
-        self._poll = poll_seconds
         self._beats: _aio.Queue[None] = _aio.Queue()
 
     async def sleep(self, delay: float) -> None:
@@ -97,7 +103,6 @@ def _wire(monkeypatch, fake: FakeRecordRedis) -> None:
 @pytest.fixture
 def fake(monkeypatch) -> FakeRecordRedis:
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
-    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
     caps_module._CAPS_CACHE.clear()
     f = FakeRecordRedis()
     _wire(monkeypatch, f)
@@ -142,7 +147,7 @@ async def test_headline_two_workers_serialize_and_keep_both_turns(fake):
     ta = _aio.create_task(_worker(worker_a, "A", memory, spans, order, hold, a_in))
     tb = _aio.create_task(_worker(worker_b, "B", memory, spans, order, hold, b_in))
     await _aio.wait_for(a_in.wait(), 1)
-    # A holds the lease; B is polling for it and cannot enter — its turn has not started.
+    # A holds the lease; B is waiting for its release and cannot enter — its turn has not started.
     await _aio.sleep(0.1)
     assert not b_in.is_set()
 
@@ -187,7 +192,7 @@ async def test_interrupt_spanning_turn_holds_the_lease_across_its_heartbeats(fak
     # refreshing the lease; a sibling worker never acquires until it releases.
     monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_SECONDS", "2")
     monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_REFRESH_SECONDS", "1")
-    clock = _Clock(refresh_seconds=1, poll_seconds=ConversationsSettings().thread_lease_poll_seconds)
+    clock = _Clock(refresh_seconds=1)
     monkeypatch.setattr(thread_lease_module, "asyncio", _ShimAsyncio(clock.sleep))
 
     source = fixed_settings(ConversationsSettings())
@@ -203,7 +208,7 @@ async def test_interrupt_spanning_turn_holds_the_lease_across_its_heartbeats(fak
     await _aio.wait_for(a_in.wait(), 1)
 
     # Age the lease most of the way to expiry, then let the heartbeat refresh it — three times
-    # over, well past one lease. Each refresh resets the TTL before B's poll can find it gone.
+    # over, well past one lease. Each refresh resets the TTL before B's retry can find it gone.
     for _ in range(3):
         fake.advance(1.2)
         await clock.beat()
@@ -221,7 +226,7 @@ async def test_crash_steal_lost_lease_cancels_the_turn(fake, monkeypatch):
     # its turn with ThreadLeaseLostError — one error outcome, no fork.
     monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_SECONDS", "2")
     monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_REFRESH_SECONDS", "1")
-    clock = _Clock(refresh_seconds=1, poll_seconds=ConversationsSettings().thread_lease_poll_seconds)
+    clock = _Clock(refresh_seconds=1)
     monkeypatch.setattr(thread_lease_module, "asyncio", _ShimAsyncio(clock.sleep))
 
     source = fixed_settings(ConversationsSettings())
@@ -267,12 +272,12 @@ async def test_partition_holder_self_cancels_once_the_lease_can_no_longer_be_pro
     # ThreadLeaseLostError.
     monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_SECONDS", "2")
     monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_REFRESH_SECONDS", "1")
-    clock = _Clock(refresh_seconds=1, poll_seconds=ConversationsSettings().thread_lease_poll_seconds)
+    clock = _Clock(refresh_seconds=1)
     monkeypatch.setattr(thread_lease_module, "asyncio", _ShimAsyncio(clock.sleep))
     mono = _FakeMonotonic()
     monkeypatch.setattr(thread_lease_module, "monotonic", mono)
 
-    # Every lease refresh raises (the partition); acquire, poll, and release still reach the
+    # Every lease refresh raises (the partition); acquire and release still reach the
     # fake, so a peer can adopt the lapsed lease.
     real_eval = fake.eval
 
@@ -378,10 +383,10 @@ async def test_release_is_token_guarded(fake):
     key = settings.thread_lease_key(_THREAD)
     await fake.set(key, "adopter", px=2000, nx=True)
 
-    await lease._release(key, "stale")
+    await lease._release(key, "stale", _THREAD)
     assert fake._strings.get(key) == "adopter"
 
-    await lease._release(key, "adopter")
+    await lease._release(key, "adopter", _THREAD)
     assert key not in fake._strings
 
 
@@ -510,3 +515,380 @@ async def test_door_person_gone_branch_serializes_behind_a_turn(fake, monkeypatc
     result = await _aio.wait_for(delete, 2)
     assert result == {"person_id": "PID1", "removed": 0, "erased": False}
     assert saver.deleted == [thread_id]
+
+
+# -- the lease handed over by notification ------------------------------------------------
+#
+# These cases run the REAL Lua and the REAL pub/sub of ``fakeredis``: the release script
+# publishes the thread id on the release channel, and a waiting turn's listener wakes it.
+
+
+class _LuaRedis(aioredis.FakeRedis):
+    """A Lua-executing fake that records every command it is sent."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.commands: list[tuple[str, ...]] = []
+
+    async def execute_command(self, *args: Any, **options: Any) -> Any:
+        self.commands.append(tuple(str(arg) for arg in args))
+        return await super().execute_command(*args, **options)
+
+    def acquire_attempts(self) -> int:
+        return sum(1 for command in self.commands if "conversations:thread_lease:acquire" in " ".join(command))
+
+
+class _LuaServer:
+    """One fake Redis server: the pooled command client and the dedicated listener connections."""
+
+    def __init__(self) -> None:
+        self.server = FakeServer()
+        self.client = _LuaRedis(server=self.server, decode_responses=True)
+        self.fresh_opened = 0
+        self.fresh_settings: list[dict[str, Any]] = []
+        # Set by a test to drop the listener's subscription: its pending read raises once.
+        self.lose_subscription = _aio.Event()
+        # The listener subscriptions currently open (subscribed and not yet closed).
+        self.open_subscriptions = 0
+        # Set by a test to make the next subscribe fail.
+        self.refuse_subscribe = False
+
+    def client_ctx(self):
+        server = self
+
+        @asynccontextmanager
+        async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+            if not fresh:
+                yield server.client
+                return
+            server.fresh_opened += 1
+            options = settings.client_kwargs() if settings is not None else kwargs
+            server.fresh_settings.append(options)
+            conn = _ListenerRedis(server, server=server.server, decode_responses=options["decode_responses"])
+            try:
+                yield conn
+            finally:
+                await conn.aclose()
+
+        return _ctx
+
+
+class _FailingPubSub(PubSub):
+    """A pub/sub whose pending listening read raises once the test sets ``lose_subscription``."""
+
+    def __init__(self, owner: _LuaServer, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+        self._open = False
+
+    async def subscribe(self, *args: Any, **kwargs: Any) -> None:
+        if self._owner.refuse_subscribe:
+            self._owner.refuse_subscribe = False
+            raise ConnectionError("subscribe refused")
+        await super().subscribe(*args, **kwargs)
+        self._open = True
+        self._owner.open_subscriptions += 1
+
+    async def aclose(self) -> None:
+        if self._open:
+            self._open = False
+            self._owner.open_subscriptions -= 1
+        await super().aclose()
+
+    async def get_message(self, ignore_subscribe_messages: bool = False, timeout: float | None = 0.0):
+        if not ignore_subscribe_messages:
+            return await super().get_message(ignore_subscribe_messages, timeout)
+        read = _aio.ensure_future(super().get_message(ignore_subscribe_messages, timeout))
+        trip = _aio.ensure_future(self._owner.lose_subscription.wait())
+        try:
+            done, _ = await _aio.wait({read, trip}, return_when=_aio.FIRST_COMPLETED)
+        finally:
+            for pending in (read, trip):
+                if not pending.done():
+                    pending.cancel()
+        if trip in done and read not in done:
+            self._owner.lose_subscription.clear()
+            raise ConnectionError("simulated lost subscription")
+        return read.result()
+
+
+class _ListenerRedis(aioredis.FakeRedis):
+    def __init__(self, owner: _LuaServer, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+
+    def pubsub(self, **kwargs: Any) -> PubSub:
+        return _FailingPubSub(self._owner, self.connection_pool, **kwargs)
+
+
+@pytest.fixture
+def lua(monkeypatch) -> _LuaServer:
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
+    server = _LuaServer()
+    monkeypatch.setattr(thread_lease_module, "client_ctx", server.client_ctx())
+    return server
+
+
+async def _hold(lease: ThreadTurnLease, thread_id: str, entered: _aio.Event, release: _aio.Event) -> float:
+    """Hold ``thread_id``'s lease until ``release`` is set; return the moment the body ends."""
+    async with lease.held(thread_id):
+        entered.set()
+        await release.wait()
+        return time.perf_counter()
+
+
+async def _wait_and_take(lease: ThreadTurnLease, thread_id: str, waiting: _aio.Event) -> float:
+    """Take ``thread_id``'s lease once free; return the moment it was acquired."""
+    waiting.set()
+    async with lease.held(thread_id):
+        return time.perf_counter()
+
+
+async def test_a_waiter_takes_the_lease_within_one_listener_round_of_the_release(lua):
+    settings = ConversationsSettings()
+    worker_a, worker_b = ThreadTurnLease(lambda: settings), ThreadTurnLease(lambda: settings)
+    a_in, a_release, b_waiting = _aio.Event(), _aio.Event(), _aio.Event()
+    holder = _aio.create_task(_hold(worker_a, _THREAD, a_in, a_release))
+    await _aio.wait_for(a_in.wait(), 1)
+    lua.client.commands.clear()
+
+    waiter = _aio.create_task(_wait_and_take(worker_b, _THREAD, b_waiting))
+    await _aio.wait_for(b_waiting.wait(), 1)
+    await _aio.sleep(0.6)  # still waiting while A holds
+    assert not waiter.done()
+
+    a_release.set()
+    released_at = await holder
+    acquired_at = await _aio.wait_for(waiter, 1)
+    assert acquired_at - released_at < 0.1
+    # One attempt before the listener, one after it subscribed, one after the release.
+    assert lua.client.acquire_attempts() == 3
+
+
+async def test_a_listener_without_decoded_responses_wakes_the_waiter(lua, monkeypatch):
+    monkeypatch.setenv("CONVERSATIONS_DECODE_RESPONSES", "false")
+    settings = ConversationsSettings()
+    worker_a, worker_b = ThreadTurnLease(lambda: settings), ThreadTurnLease(lambda: settings)
+    a_in, a_release, b_waiting = _aio.Event(), _aio.Event(), _aio.Event()
+    holder = _aio.create_task(_hold(worker_a, _THREAD, a_in, a_release))
+    await _aio.wait_for(a_in.wait(), 1)
+    waiter = _aio.create_task(_wait_and_take(worker_b, _THREAD, b_waiting))
+    await _aio.wait_for(b_waiting.wait(), 1)
+    await _aio.sleep(0.05)
+    a_release.set()
+    released_at = await holder
+    acquired_at = await _aio.wait_for(waiter, 1)
+    assert lua.fresh_settings[0]["decode_responses"] is False
+    assert acquired_at - released_at < 0.1
+
+
+async def test_an_uncontended_turn_takes_the_lease_without_a_listener(lua):
+    settings = ConversationsSettings()
+    lease = ThreadTurnLease(lambda: settings)
+    async with lease.held(_THREAD):
+        assert await lua.client.get(settings.thread_lease_key(_THREAD)) is not None
+    assert lua.fresh_opened == 0
+    assert lua.client.acquire_attempts() == 1
+
+
+async def test_a_holder_that_dies_is_taken_over_when_its_lease_ends(lua, monkeypatch):
+    settings = ConversationsSettings()
+    key = settings.thread_lease_key(_THREAD)
+    await lua.client.set(key, "crashed-holder", px=60_000)
+    waits: list[float] = []
+
+    async def _lapse(woken: _aio.Event, seconds: float) -> None:
+        # The holder never releases: the wait runs its full length, and the lease lapses at its end.
+        waits.append(seconds)
+        await lua.client.delete(key)
+
+    monkeypatch.setattr(thread_lease_module, "_wait_for_release", _lapse)
+    lease = ThreadTurnLease(lambda: settings)
+    async with lease.held(_THREAD):
+        assert await lua.client.get(key) != "crashed-holder"
+    assert len(waits) == 1
+    assert 59 < waits[0] <= 60
+
+
+async def test_a_lease_without_expiry_is_waited_for_one_lease_length(lua, monkeypatch):
+    settings = ConversationsSettings()
+    key = settings.thread_lease_key(_THREAD)
+    await lua.client.set(key, "holder-without-expiry")
+    waits: list[float] = []
+
+    async def _lapse(woken: _aio.Event, seconds: float) -> None:
+        waits.append(seconds)
+        await lua.client.delete(key)
+
+    monkeypatch.setattr(thread_lease_module, "_wait_for_release", _lapse)
+    async with ThreadTurnLease(lambda: settings).held(_THREAD):
+        pass
+    assert waits == [settings.thread_lease_seconds]
+
+
+async def test_a_release_during_a_resubscribe_is_not_missed(lua, monkeypatch, caplog):
+    settings = ConversationsSettings()
+    backoff_gate = _aio.Event()
+    backoffs: list[float] = []
+    real_sleep = _aio.sleep
+
+    async def _gated_sleep(delay: float) -> None:
+        if delay == thread_lease_module._RESUBSCRIBE_BACKOFF_INITIAL:
+            backoffs.append(delay)
+            await backoff_gate.wait()
+        else:
+            await real_sleep(delay)
+
+    monkeypatch.setattr(thread_lease_module, "asyncio", _ShimAsyncio(_gated_sleep))
+    worker_a, worker_b = ThreadTurnLease(lambda: settings), ThreadTurnLease(lambda: settings)
+    a_in, a_release, b_waiting = _aio.Event(), _aio.Event(), _aio.Event()
+    holder = _aio.create_task(_hold(worker_a, _THREAD, a_in, a_release))
+    await _aio.wait_for(a_in.wait(), 1)
+    waiter = _aio.create_task(_wait_and_take(worker_b, _THREAD, b_waiting))
+    await _aio.wait_for(b_waiting.wait(), 1)
+    for _ in range(100):
+        if lua.open_subscriptions == 1:
+            break
+        await real_sleep(0.01)
+    assert lua.open_subscriptions == 1
+
+    # The subscription is lost; while the listener backs off, A releases — nobody hears it.
+    lua.lose_subscription.set()
+    for _ in range(100):
+        if backoffs:
+            break
+        await real_sleep(0.01)
+    assert backoffs == [1.0]
+    assert lua.open_subscriptions == 0
+    a_release.set()
+    await holder
+    await real_sleep(0.1)
+
+    # The re-subscribe wakes every waiter, so B re-attempts and takes the released lease.
+    backoff_gate.set()
+    await _aio.wait_for(waiter, 1)
+    assert "thread lease release listener lost its subscription; re-subscribing" in caplog.text
+
+
+async def test_the_listener_subscribes_for_the_first_waiter_and_closes_after_the_last(lua):
+    settings = ConversationsSettings()
+    holder_lease = ThreadTurnLease(lambda: settings)
+    a_in, a_release = _aio.Event(), _aio.Event()
+    b_in, b_release = _aio.Event(), _aio.Event()
+    holders = [
+        _aio.create_task(_hold(holder_lease, "thread-1", a_in, a_release)),
+        _aio.create_task(_hold(holder_lease, "thread-2", b_in, b_release)),
+    ]
+    await _aio.wait_for(_aio.gather(a_in.wait(), b_in.wait()), 1)
+    assert lua.open_subscriptions == 0
+
+    w1, w2 = _aio.Event(), _aio.Event()
+    waiters = [
+        _aio.create_task(_wait_and_take(ThreadTurnLease(lambda: settings), "thread-1", w1)),
+        _aio.create_task(_wait_and_take(ThreadTurnLease(lambda: settings), "thread-2", w2)),
+    ]
+    await _aio.wait_for(_aio.gather(w1.wait(), w2.wait()), 1)
+    await _aio.sleep(0.05)
+    # Two waiters on two threads share this loop's one subscription.
+    assert lua.open_subscriptions == 1
+    assert lua.fresh_opened == 1
+
+    a_release.set()
+    await _aio.wait_for(waiters[0], 1)
+    assert lua.open_subscriptions == 1
+    b_release.set()
+    await _aio.wait_for(waiters[1], 1)
+    await _aio.gather(*holders)
+    assert lua.open_subscriptions == 0
+    # The listener reads on a dedicated connection with no read timeout: it waits for releases indefinitely.
+    assert "socket_timeout" not in lua.fresh_settings[0]
+
+
+async def test_a_first_subscription_that_fails_raises_to_the_waiter(lua):
+    settings = ConversationsSettings()
+    holder = ThreadTurnLease(lambda: settings)
+    a_in, a_release = _aio.Event(), _aio.Event()
+    holding = _aio.create_task(_hold(holder, _THREAD, a_in, a_release))
+    await _aio.wait_for(a_in.wait(), 1)
+
+    lua.refuse_subscribe = True
+    with pytest.raises(ConnectionError, match="subscribe refused"):
+        async with ThreadTurnLease(lambda: settings).held(_THREAD):
+            pass
+
+    # The next waiter starts a fresh listener, which subscribes and wakes it on the release.
+    b_waiting = _aio.Event()
+    waiter = _aio.create_task(_wait_and_take(ThreadTurnLease(lambda: settings), _THREAD, b_waiting))
+    await _aio.wait_for(b_waiting.wait(), 1)
+    await _aio.sleep(0.05)
+    a_release.set()
+    await holding
+    await _aio.wait_for(waiter, 1)
+
+
+def test_two_loops_get_two_listeners() -> None:
+    settings = ConversationsSettings()
+    barrier = threading.Barrier(2)
+    seen: list[object] = []
+
+    def _run() -> None:
+        async def _listener() -> object:
+            listener = thread_lease_module._release_listener(lambda: settings)
+            assert thread_lease_module._release_listener(lambda: settings) is listener
+            return listener
+
+        async def _both() -> None:
+            seen.append(await _listener())
+            await _aio.to_thread(barrier.wait)
+
+        _aio.run(_both())
+
+    threads = [threading.Thread(target=_run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(seen) == 2
+    assert seen[0] is not seen[1]
+
+
+async def test_a_stale_release_neither_deletes_nor_publishes(lua):
+    settings = ConversationsSettings()
+    lease = ThreadTurnLease(lambda: settings)
+    key = settings.thread_lease_key(_THREAD)
+    await lua.client.set(key, "adopter", px=2000)
+    pubsub = lua.client.pubsub()
+    await pubsub.subscribe(settings.thread_lease_released_channel)
+    await pubsub.get_message(timeout=1)
+
+    await lease._release(key, "stale", _THREAD)
+    assert await lua.client.get(key) == "adopter"
+    assert await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.05) is None
+
+    await lease._release(key, "adopter", _THREAD)
+    assert await lua.client.get(key) is None
+    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    assert message is not None
+    assert message["data"] == _THREAD
+    await pubsub.aclose()
+
+
+def test_the_release_channel_lives_under_the_prefix(monkeypatch) -> None:
+    monkeypatch.setenv("CONVERSATIONS_PREFIX", "acme")
+    assert ConversationsSettings().thread_lease_released_channel == "acme:thread_lease_released"
+
+
+def test_the_removed_poll_setting_refuses_boot(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.5")
+    with pytest.raises(UnknownOwnedSettingError, match="CONVERSATIONS_THREAD_LEASE_POLL_SECONDS"):
+        require_known_owned_settings()
+
+
+def test_every_conversations_setting_boots(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
+    monkeypatch.setenv("CONVERSATIONS_SOCKET_TIMEOUT", "5")
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_SECONDS", "120")
+    monkeypatch.setenv("CONVERSATIONS_PREFIX", "conversations")
+    require_known_owned_settings()

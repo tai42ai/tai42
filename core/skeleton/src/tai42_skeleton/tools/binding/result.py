@@ -5,6 +5,7 @@ Keeps ``SecretValue`` wrapped.
 
 from typing import Any
 
+import orjson
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
@@ -70,6 +71,29 @@ def _child_path(path: str, key: Any) -> str:
 def find_lone_surrogate(value: Any, path: str = "$") -> str | None:
     """The JSON path of the first ``str`` KEY or leaf holding a lone UTF-16 surrogate, else ``None``.
 
+    Decided by one C encode first: ``orjson`` visits every key, value and item the walk below
+    visits (``SecretValue`` revealed through ``default``) and refuses any string holding a
+    surrogate, so an encode that succeeds proves the walk would answer ``None``. Any refusal (a
+    surrogate, or anything else orjson does not encode: an integer beyond 64 bits, a non-``str``
+    key, deep nesting, an unknown type) runs the walk, whose answer is the result.
+    """
+    try:
+        orjson.dumps(value, default=_reveal_for_encode_check)
+    except TypeError:
+        return _walk_lone_surrogate(value, path)
+    return None
+
+
+def _reveal_for_encode_check(obj: Any) -> Any:
+    """The ``orjson`` ``default`` of :func:`find_lone_surrogate`: reveals a ``SecretValue``, refuses anything else."""
+    if isinstance(obj, SecretValue):
+        return obj.reveal()
+    raise TypeError(f"{type(obj).__name__} is not encoded by the surrogate check")
+
+
+def _walk_lone_surrogate(value: Any, path: str) -> str | None:
+    """The JSON path of the first ``str`` KEY or leaf holding a lone UTF-16 surrogate, else ``None``.
+
     A single bounded DFS over a reduced JSON-native ``value`` in the same order the
     ``json.dumps`` that follows would visit it — a dict recurses each entry KEY then value
     (``path`` gains ``.<key>``), a list/tuple recurses by index (``path`` gains ``[<i>]``), a
@@ -84,7 +108,7 @@ def find_lone_surrogate(value: Any, path: str = "$") -> str | None:
     leaf is JSON-native and cannot hold a surrogate, so it returns ``None``.
     """
     if isinstance(value, SecretValue):
-        return find_lone_surrogate(value.reveal(), path)
+        return _walk_lone_surrogate(value.reveal(), path)
     if isinstance(value, str):
         return path if _holds_lone_surrogate(value) else None
     if isinstance(value, dict):
@@ -94,13 +118,13 @@ def find_lone_surrogate(value: Any, path: str = "$") -> str | None:
             # key is coerced to a clean string by the JSON encoder and can hold no surrogate.
             if isinstance(key, str) and _holds_lone_surrogate(key):
                 return _child_path(path, key)
-            hit = find_lone_surrogate(item, _child_path(path, key))
+            hit = _walk_lone_surrogate(item, _child_path(path, key))
             if hit is not None:
                 return hit
         return None
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
-            hit = find_lone_surrogate(item, f"{path}[{index}]")
+            hit = _walk_lone_surrogate(item, f"{path}[{index}]")
             if hit is not None:
                 return hit
         return None
@@ -118,14 +142,17 @@ def _tool_result_value(result: Any) -> Any:
     no structured content, fall back to the text blocks; a media return
     (Image/Audio/File) carries no structured and no text, so serialize its
     remaining content blocks to their JSON wire dicts — the same media shape the
-    direct-run path preserves. Only a genuinely empty result reduces to ``None``.
+    direct-run path preserves. Only a genuinely empty result reduces to ``None``. The returned
+    structured value is the ``ToolResult``'s own object, not a copy.
     """
     structured = result.structured_content
     meta = result.meta or {}
+    # ``ToolResult.__init__`` already reduced ``structured_content`` with ``to_jsonable_python``
+    # (a ``SecretValue`` or a surrogate key raises there), so it is JSON-native as it stands.
     if isinstance(structured, dict) and meta.get("fastmcp", {}).get("wrap_result"):
-        return _jsonable_or_keep_walkable(structured["result"])
+        return structured["result"]
     if structured is not None:
-        return _jsonable_or_keep_walkable(structured)
+        return structured
     texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
     if texts:
         return texts[0] if len(texts) == 1 else texts

@@ -42,7 +42,6 @@ from tests._deep_agent_fakes import _FakeCompiledGraph, _install_fake_resolve
 from tests._retrieval_tools_agent_support import StubStore
 
 from tai42_agents._internal import base_tool_agent as bta
-from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
 from tai42_agents.refine_agent import agent as refine_mod
 from tai42_agents.refine_agent.agent import RefineAgent
@@ -54,6 +53,7 @@ from tai42_agents.voting_agent.agent import VotingAgent
 from tai42_agents.voting_agent.model import VoterSpec
 from tai42_agents.vqa_agent import VqaAgent
 
+from ._graph_support import invoke_tools_agent
 from .conftest import RecordingMonitoringWriter
 
 
@@ -157,7 +157,7 @@ async def _empty_middlewares() -> list[Any]:
 
 def test_tools_agent_model_call_records_under_the_run_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_tools_seams(monkeypatch, _RecordingChatModel([AIMessage(content="done")]))
-    asyncio.run(ainvoke_tools_agent(system_message="sys", user_message=["hi"], tools=[]))
+    asyncio.run(invoke_tools_agent(system_message="sys", user_message=["hi"], tools=[]))
     _assert_model_call_recorded_under_the_run_trace()
 
 
@@ -433,7 +433,7 @@ def test_tools_agent_records_each_message_once_and_every_chain_record_resolves(
         return _marker("RESULT", n)
 
     tool = StructuredTool.from_function(echo, name="echo", description="Return the n-th result marker.")
-    asyncio.run(ainvoke_tools_agent(system_message="sys", user_message=["start"], tools=[tool]))
+    asyncio.run(invoke_tools_agent(system_message="sys", user_message=["start"], tools=[tool]))
 
     spans = _writer().spans()
     markers = [_marker("ANSWER", n) for n in (1, 2, 3)] + [_marker("RESULT", n) for n in (1, 2)]

@@ -23,7 +23,7 @@ from typing import Any, Literal
 from psycopg.errors import UniqueViolation
 from tai42_contract.backup import BackupSectionReport
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient, read_connection
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import component_store_settings
 
@@ -48,7 +48,7 @@ async def export_connector_categories() -> dict[str, Any]:
     """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-        pool.connection() as conn,
+        read_connection(pool) as conn,
         conn.cursor() as cur,
     ):
         await cur.execute(
@@ -119,7 +119,7 @@ async def export_connector_connections() -> list[dict[str, Any]]:
     """
     async with (
         client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-        pool.connection() as conn,
+        read_connection(pool) as conn,
         conn.cursor() as cur,
     ):
         await cur.execute(

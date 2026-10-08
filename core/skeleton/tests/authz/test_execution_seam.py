@@ -30,7 +30,7 @@ from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.policy_store import ac_policy_store
 from tai42_skeleton.access_control.role_gate import reset_route_index, resolve_route_meta
 from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY, role_store
-from tai42_skeleton.access_control.settings import access_control_settings
+from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import route_registry
@@ -562,6 +562,9 @@ def test_the_binding_is_released_so_later_dispatches_are_unguarded(ac) -> None:
 
 
 # -- automatic revocation, with ZERO revocation-specific code -----------------
+#
+# Each edit below writes the store and bumps the policy version, as every policy writer does:
+# the enforcer's policy cache is keyed on that version.
 
 
 def test_de_scoping_the_owner_denies_the_next_fire(ac) -> None:
@@ -572,6 +575,7 @@ def test_de_scoping_the_owner_denies_the_next_fire(ac) -> None:
             assert await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("owner")["scopes"] = [_KEPT_SCOPE]
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -622,6 +626,7 @@ def test_de_scoping_the_key_denies_the_next_dispatch_of_a_fire_already_running(a
             assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("k-scoped")["scopes"] = [_KEPT_SCOPE]
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -636,6 +641,7 @@ def test_de_scoping_the_owner_denies_the_next_dispatch_of_a_fire_already_running
             assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("owner")["scopes"] = [_KEPT_SCOPE]
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -649,6 +655,7 @@ def test_disabling_the_key_denies_the_next_fire(ac) -> None:
             assert await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("k-scoped")["policy_data"] = {"disabled": True}
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="is disabled"):
                 await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -664,6 +671,7 @@ def test_deleting_the_key_denies_the_next_dispatch_of_a_fire_already_running(ac)
             assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policies.remove(ac.policy("k-scoped"))
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="principal has no policy"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -679,6 +687,7 @@ def test_deleting_the_key_denies_the_next_CAPABILITY_dispatch_too(ac) -> None:
             assert await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"}) == "hi"
 
             ac.policies.remove(ac.policy("k-scoped"))
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="execution key 'k-scoped' has no policy"):
                 await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"})
@@ -693,6 +702,7 @@ def test_disabling_the_key_denies_the_next_CAPABILITY_dispatch_too(ac) -> None:
             assert await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"}) == "hi"
 
             ac.policy("k-scoped")["policy_data"] = {"disabled": True}
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="execution key 'k-scoped' is disabled"):
                 await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"})
@@ -712,6 +722,7 @@ def test_reminting_the_key_denies_the_next_OPERATION_dispatch_of_a_running_fire(
             # The same user_id, reminted: a new fingerprint and admin grants.
             ac.policy("k-scoped")["scopes"] = ["*"]
             ac.policy("k-scoped")["policy_data"] = {KEY_FINGERPRINT_CLAIM: "fp-k-scoped-2"}
+            await management.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="no longer matches the bound key identity"):
                 await app.tools.run_tool(_FENCED_OP, _FENCED_ARGS)
@@ -775,3 +786,44 @@ def _policy_body(scopes: list[str]) -> dict:
 async def _stored_policy_version() -> int:
     """The stored policy version — the cache-invalidation counter, read as the enforcer reads it."""
     return await policy_module.PolicyEnforcer(access_control_settings()).current_policy_version()
+
+
+# -- one policy enforcer per event loop -----------------------------------------
+
+
+def test_a_hundred_nested_decisions_build_one_enforcer(monkeypatch: pytest.MonkeyPatch, ac) -> None:
+    constructions = 0
+    real_init = policy_module.PolicyEnforcer.__init__
+
+    def counting_init(self: policy_module.PolicyEnforcer, settings: AccessControlSettings) -> None:
+        nonlocal constructions
+        constructions += 1
+        real_init(self, settings)
+
+    monkeypatch.setattr(policy_module.PolicyEnforcer, "__init__", counting_init)
+
+    async def run() -> None:
+        async with app.app_context(_manifest()), bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
+            for _ in range(100):
+                assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
+
+    asyncio.run(run())
+    assert constructions == 1
+
+
+def test_a_policy_edit_with_its_version_bump_lands_on_the_next_decision(ac) -> None:
+    # The shared enforcer's cache is keyed on the live version, so a writer's bump is the revocation.
+    async def run() -> None:
+        async with app.app_context(_manifest()), bind_execution_identity("k-scoped", bound_fingerprint="fp-k-scoped"):
+            assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
+            assert policy_module.policy_enforcer(access_control_settings()) is policy_module.policy_enforcer(
+                access_control_settings()
+            )
+
+            ac.policy("k-scoped")["scopes"] = [_KEPT_SCOPE]
+            await management.bump_policy_version()
+
+            with pytest.raises(PermissionDeniedError, match="insufficient scope"):
+                await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
+
+    asyncio.run(run())

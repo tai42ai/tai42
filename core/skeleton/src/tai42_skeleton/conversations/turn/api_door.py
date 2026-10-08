@@ -129,8 +129,9 @@ async def submit_api_message(
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
-        await cache.get_conversations_manager().records.create_record(intake, intake_token=intake_token)
-        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
+        await cache.get_conversations_manager().records.create_record(
+            intake, intake_token=intake_token, refresh_mode=True
+        )
     except BaseException:
         caps.release_thread_slot(thread_id)
         raise

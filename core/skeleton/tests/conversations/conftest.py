@@ -123,7 +123,7 @@ class FakeRedis:
         Signature-compatible with ``redis.eval(script, numkeys, *keys, *args)``.
         """
         if "conversations:route:put:atomic" in script:
-            names_key, route_key, threads_key, route_name, route_json, door = keys_and_args
+            names_key, route_key, threads_key, version_key, route_name, route_json, door, token = keys_and_args
             existing = self._strings.get(route_key)
             if existing is not None:
                 stored_door = json.loads(existing)["door"]
@@ -132,11 +132,13 @@ class FakeRedis:
                     return [held, stored_door]
             self._strings[route_key] = route_json
             self._sets.setdefault(names_key, set()).add(route_name)
+            self._strings[version_key] = token
             return 1 if existing is not None else 0
         if "conversations:route:delete:atomic" in script:
-            names_key, route_key, route_name = keys_and_args
+            names_key, route_key, version_key, route_name, token = keys_and_args
             removed = 1 if self._strings.pop(route_key, None) is not None else 0
             self._sets.get(names_key, set()).discard(route_name)
+            self._strings[version_key] = token
             return removed
         raise NotImplementedError("FakeRedis.eval only emulates the put/delete route scripts")
 
