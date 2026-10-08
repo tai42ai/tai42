@@ -5,11 +5,12 @@ monitoring READ contract (``tai42_contract.monitoring``): aggregate metrics, a
 filterable run list, single-run trace detail, and CSV/JSON exports. A "run" is a
 monitoring **trace** (keyed by ``trace_id``); there is no other source.
 
-All six routes are AUTHED. A trace embeds the full input/output of every tool
+All eight routes are AUTHED. A trace embeds the full input/output of every tool
 and model call in a run — arguments, results, prompts, completions — so these
 reads are data-bearing and must sit behind the Studio credential, never public.
 
-The four enveloped reads (metrics, run list, single-trace detail, one span's resolved value) are thin
+The six enveloped reads (capabilities, metrics, run list, single-trace detail and outline, one span's
+resolved value) are thin
 adapters over operations in ``tai42_skeleton.operations.observability``: the query
 string is decoded into the neutral filter/paging types here at the HTTP edge (the
 context extractors raise ``BadRequestError`` → 400), then the operation runs
@@ -55,12 +56,15 @@ from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.observability import ExportRunsQuery
 from tai42_skeleton.operations.observability import get_metrics as _get_metrics_op
+from tai42_skeleton.operations.observability import (
+    get_observability_capabilities as _get_observability_capabilities_op,
+)
 from tai42_skeleton.operations.observability import get_resolved_span_value as _get_resolved_span_value_op
 from tai42_skeleton.operations.observability import get_run_trace as _get_run_trace_op
+from tai42_skeleton.operations.observability import get_run_trace_outline as _get_run_trace_outline_op
 from tai42_skeleton.operations.observability import list_observability_runs as _list_observability_runs_op
 from tai42_skeleton.routers.observability_support import (
     EXPORT_FORMATS,
-    PAGE_CHUNK,
     RequestParseError,
     csv_safe,
     derive_run,
@@ -147,6 +151,14 @@ get_metrics = register_operation_route(
     action="read",
 )
 
+get_observability_capabilities = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_observability_capabilities_op),
+    path="/api/observability/capabilities",
+    method="GET",
+    action="read",
+)
+
 list_runs = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_observability_runs_op),
@@ -160,6 +172,14 @@ get_run_trace = register_operation_route(
     tai42_app,
     operation_metadata_of(_get_run_trace_op),
     path="/api/observability/runs/{trace_id}/trace",
+    method="GET",
+    action="read",
+)
+
+get_run_trace_outline = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_run_trace_outline_op),
+    path="/api/observability/runs/{trace_id}/trace/outline",
     method="GET",
     action="read",
 )
@@ -273,8 +293,9 @@ async def export_runs(request: Request) -> Response:
         return _error(f"format must be {one_of(EXPORT_FORMATS)}", 400)
 
     reader = get_monitoring().reader
-    # Drain pages of ``PAGE_CHUNK`` (the reader rejects oversized pages) until the
-    # cap is exceeded or a short/empty page signals the end.
+    # Drain pages of the reader's declared maximum size until the cap is exceeded or
+    # a short/empty page signals the end.
+    chunk = reader.max_page_size()
     summaries: list[MonitoringTraceSummary] = []
     page = 1
     try:
@@ -282,13 +303,13 @@ async def export_runs(request: Request) -> Response:
             batch = await reader.list_traces(
                 from_timestamp=t0,
                 to_timestamp=t1,
-                limit=PAGE_CHUNK,
+                limit=chunk,
                 page=page,
                 filter_=run_filter,
                 order_by=order_by,
             )
             summaries.extend(batch)
-            if len(batch) < PAGE_CHUNK:
+            if len(batch) < chunk:
                 break
             page += 1
     except MonitoringReadNotSupportedError as exc:

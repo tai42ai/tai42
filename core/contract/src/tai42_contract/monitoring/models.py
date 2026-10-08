@@ -7,13 +7,11 @@ pure-tracing backend (no LLM-observability extension) still fits.
 
 from __future__ import annotations
 
-import ast
-import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SpanKind(StrEnum):
@@ -89,6 +87,23 @@ class MetricsCapability(BaseModel):
 
     measures: frozenset[Measure]
     dimensions: frozenset[Dimension]
+
+
+class ListCapability(BaseModel):
+    """What a backend's ``list_traces`` can sort on, and which filters each sort cannot combine with.
+
+    A pure declaration (no I/O). ``sort_fields`` are the ``OrderBy.field`` values
+    ``list_traces`` serves. ``incompatible_filters`` maps a sort field to the
+    :class:`MonitoringFilter` field names it cannot be combined with; a sort field
+    absent from the map combines with every filter. ``list_traces`` raises
+    ``MonitoringReadNotSupportedError`` for a sort or a combination outside this
+    declaration.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sort_fields: frozenset[str]
+    incompatible_filters: dict[str, frozenset[str]] = Field(default_factory=dict[str, frozenset[str]])
 
 
 class TokenUsage(BaseModel):
@@ -320,17 +335,20 @@ class MonitoringObservation(BaseModel):
     id: str
     trace_id: str | None = None
     parent_id: str | None = None
-    # Free-form observation type from the backend (e.g. TOOL / GENERATION /
-    # EVENT / SPAN / CHAIN). Kept as a string — backends differ on the set.
-    type: str | None = None
+    # The backend maps its own observation types onto the four neutral kinds.
+    kind: SpanKind | None = None
     name: str | None = None
     level: str | None = None
     status_message: str | None = None
     input: Any = None
     output: Any = None
+    # The producer's metadata, including the promoted keys (``tai42.step_role``, ``tai42.timing``).
     metadata: dict[str, Any] | None = None
-    usage: dict[str, Any] | None = None
     model: str | None = None
+    # Token counts the producer reported for the observation; ``None`` when not reported.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
     start: datetime | None = None
     end: datetime | None = None
 
@@ -353,106 +371,12 @@ class MonitoringTrace(BaseModel):
     observations: list[MonitoringObservation] = Field(default_factory=list[MonitoringObservation])
 
 
-# Structural bounds for a run-list preview: keep the row payload small while
-# staying VALID JSON (clip at the structure level, not mid-string), so the client
-# always renders the preview as a parsed tree. The full value lives on
-# ``get_trace``. ``TRACE_PREVIEW_MAX_CHARS`` caps a string leaf; the field name
-# says "preview", so the cut is explicit, not a silent truncation of a complete
-# value.
-TRACE_PREVIEW_MAX_CHARS = 512  # max chars per string leaf
-_PREVIEW_ITEMS = 20  # max entries per object / array
-_PREVIEW_DEPTH = 6  # max nesting depth
-_PREVIEW_PARSE_MAX = 20_000  # never structurally parse a string larger than this
-
-
-def _maybe_json(text: str) -> Any:
-    """Parse a string that is itself an object/array, else return ``None``.
-
-    JSON is tried first, then a Python ``repr`` (single quotes, ``True``/``False``/``None``) via
-    ``literal_eval``. Lets a stringified structure be bounded structurally (and rendered as a tree)
-    instead of char-clipped into garbage. A string over ``_PREVIEW_PARSE_MAX`` is not parsed — it would
-    be fully materialized just to keep a few items — so the caller char-clips it instead.
-    """
-    s = text.strip()
-    if len(s) < 2 or len(s) > _PREVIEW_PARSE_MAX or s[0] not in "{[":
-        return None
-    try:
-        return json.loads(s)
-    except ValueError:
-        pass
-    try:
-        # literal_eval is safe — only Python literals, no code execution.
-        return ast.literal_eval(s)
-    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-        return None
-
-
-def _preview_str(value: str, depth: int) -> JsonValue:
-    # A stringified structure is parsed and bounded as a tree; a plain/non-JSON string leaf
-    # (dates, etc.) is char-clipped at ``TRACE_PREVIEW_MAX_CHARS``.
-    parsed = _maybe_json(value)
-    if isinstance(parsed, (dict, list)):
-        return preview(parsed, depth)
-    return value if len(value) <= TRACE_PREVIEW_MAX_CHARS else value[:TRACE_PREVIEW_MAX_CHARS] + "…"
-
-
-def _preview_mapping(obj: dict[Any, Any], depth: int) -> JsonValue:
-    # An object capped at ``_PREVIEW_ITEMS`` entries with a per-item recurse; nesting past
-    # ``_PREVIEW_DEPTH`` is elided to a terminal marker.
-    if depth >= _PREVIEW_DEPTH:
-        return {"…": "…"}
-    out: dict[str, JsonValue] = {}
-    for i, (k, v) in enumerate(obj.items()):
-        if i >= _PREVIEW_ITEMS:
-            out["…"] = f"+{len(obj) - _PREVIEW_ITEMS} more"
-            break
-        out[str(k)] = preview(v, depth + 1)
-    return out
-
-
-def _preview_sequence(seq: list[Any] | tuple[Any, ...], depth: int) -> JsonValue:
-    # An array capped at ``_PREVIEW_ITEMS`` entries with a per-item recurse; nesting past
-    # ``_PREVIEW_DEPTH`` is elided to a terminal marker.
-    if depth >= _PREVIEW_DEPTH:
-        return ["…"]
-    items: list[JsonValue] = [preview(v, depth + 1) for v in seq[:_PREVIEW_ITEMS]]
-    if len(seq) > _PREVIEW_ITEMS:
-        items.append(f"+{len(seq) - _PREVIEW_ITEMS} more")
-    return items
-
-
-def _preview_scalar(value: Any) -> JsonValue:
-    # A number/bool/None passthrough; anything else (dates, etc.) is a str-fallback clip.
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    text = str(value)  # dates, etc. — JSON-safe fallback
-    return text if len(text) <= TRACE_PREVIEW_MAX_CHARS else text[:TRACE_PREVIEW_MAX_CHARS] + "…"
-
-
-def preview(value: Any, depth: int = 0) -> JsonValue:
-    """Build a structurally-bounded run-list preview of a trace's input/output.
-
-    String leaves cut to ``TRACE_PREVIEW_MAX_CHARS``, objects/arrays capped at ``_PREVIEW_ITEMS`` entries,
-    nesting elided past ``_PREVIEW_DEPTH`` — each with a terminal marker — so the result is small but still
-    valid JSON the client renders as a tree. ``None`` stays ``None``; a stringified structure is parsed and
-    bounded, a plain string or non-JSON leaf (dates, etc.) char-clipped. The cut is by design — the full
-    value lives on ``get_trace``.
-    """
-    if isinstance(value, str):
-        return _preview_str(value, depth)
-    if isinstance(value, dict):
-        return _preview_mapping(cast("dict[Any, Any]", value), depth)
-    if isinstance(value, (list, tuple)):
-        return _preview_sequence(cast("list[Any] | tuple[Any, ...]", value), depth)
-    return _preview_scalar(value)
-
-
 class MonitoringTraceSummary(BaseModel):
     """One run-list row: the backend's list-surface attributes plus its batched aggregates, never a per-trace body.
 
-    ``input_preview`` / ``output_preview`` are server-bounded previews (see
-    ``preview``) — a structurally-clipped JSON value; the full input/output are
-    read through ``get_trace``. ``total_tokens`` is ``None`` when the backend
+    ``input`` / ``output`` are the trace's own input and output values as the
+    backend's list surface returns them; a consumer that shows a bounded view
+    bounds them itself. ``total_tokens`` is ``None`` when the backend
     returned no usage for the trace (never coerced to ``0``). ``status`` is
     ``error`` when the run carries an error observation, ``ok`` otherwise — a
     malformed backend row fails the page loudly rather than being kept as a
@@ -465,8 +389,8 @@ class MonitoringTraceSummary(BaseModel):
     timestamp: datetime | None = None
     name: str | None = None
     tags: list[str] = Field(default_factory=list)
-    input_preview: JsonValue = None
-    output_preview: JsonValue = None
+    input: Any = None
+    output: Any = None
     latency_ms: float | None = None
     total_cost: float | None = None
     total_tokens: int | None = None

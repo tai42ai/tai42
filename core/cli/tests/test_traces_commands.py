@@ -121,3 +121,30 @@ def test_traces_value_defaults_to_the_whole_input(monkeypatch: pytest.MonkeyPatc
 
     result = run_cli(monkeypatch, handler, ["traces", "value", "t", "s"])
     assert result.exit_code == 0, result.output
+
+
+def test_traces_outline_reads_the_span_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/observability/runs/t1/trace/outline"
+        return data_response({"traceId": "t1", "spans": [{"id": "s1", "parentId": None, "kind": "TOOL"}]})
+
+    result = run_cli(monkeypatch, handler, ["traces", "outline", "t1"])
+    assert result.exit_code == 0, result.output
+    assert "s1" in result.output
+
+
+def test_traces_capabilities_reads_the_backend_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/observability/capabilities"
+        return data_response(
+            {
+                "pageSizeMax": 100,
+                "sortKeys": ["createdAt", "cost"],
+                "incompatibleFilters": {"cost": ["minCost"]},
+                "metrics": {"measures": ["count"], "dimensions": []},
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["traces", "capabilities"])
+    assert result.exit_code == 0, result.output
+    assert "pageSizeMax" in result.output

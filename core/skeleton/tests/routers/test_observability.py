@@ -20,6 +20,7 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.monitoring import (
     Dimension,
+    ListCapability,
     Measure,
     MetricsCapability,
     MetricsResult,
@@ -109,6 +110,12 @@ class _FakeReader:
 
     def metrics_capability(self) -> MetricsCapability:
         return self.capability
+
+    def list_capability(self) -> ListCapability:
+        return ListCapability(sort_fields=frozenset(_SORT_FIELDS.values()))
+
+    def max_page_size(self) -> int:
+        return 100
 
     async def query_metrics(self, query) -> MetricsResult:
         if self.query_error is not None:
@@ -333,8 +340,8 @@ async def test_runs_list_and_derive_shape():
             latency_ms=2000.0,
             total_tokens=150,
             status="ok",
-            input_preview={"q": "hi"},
-            output_preview="done",
+            input={"q": "hi"},
+            output="done",
         )
     ]
 
@@ -461,12 +468,6 @@ async def test_runs_pagesize_non_int_400():
     assert resp.status_code == 400
 
 
-async def test_runs_pagesize_capped_at_100():
-    reader = _install(_FakeReader())
-    await router.list_runs(_req(_q(pageSize="500")))
-    assert reader.list_calls[0]["limit"] == 100
-
-
 async def test_runs_paging_sub_one_is_400():
     # A 0/negative page or pageSize is malformed → rejected as a 400, never
     # silently clamped to a floor of 1.
@@ -491,12 +492,14 @@ async def test_get_trace_maps_full_detail():
         id="o1",
         trace_id="t1",
         parent_id=None,
-        type="LLM",
+        kind="LLM",
         name="call",
         level="DEFAULT",
         status_message=None,
         model="gpt-4o",
-        usage={"input": 1},
+        input_tokens=1,
+        output_tokens=2,
+        total_tokens=3,
         start=_T0,
         end=_T1,
         metadata={"node_id": "n1"},
@@ -531,13 +534,15 @@ async def test_get_trace_maps_full_detail():
                 "parentId": None,
                 "traceId": "t1",
                 "name": "call",
-                "type": "LLM",
+                "kind": "LLM",
                 "level": "DEFAULT",
                 "statusMessage": None,
                 "start": _T0.isoformat(),
                 "end": _T1.isoformat(),
                 "model": "gpt-4o",
-                "usage": {"input": 1},
+                "inputTokens": 1,
+                "outputTokens": 2,
+                "totalTokens": 3,
                 "metadata": {"node_id": "n1"},
                 "input": {"p": 1},
                 "output": "ok",
@@ -654,7 +659,7 @@ async def test_export_runs_json_download():
 async def test_export_runs_csv_download_and_injection_guard():
     reader = _install(_FakeReader())
     # An output preview whose leading char a spreadsheet reads as a formula.
-    reader.summaries = [_summary(id="t1", timestamp=_T0, total_cost=0.2, output_preview="=SUM(A1)")]
+    reader.summaries = [_summary(id="t1", timestamp=_T0, total_cost=0.2, output="=SUM(A1)")]
 
     resp = await router.export_runs(_req(""))  # csv is the default
     assert resp.media_type == "text/csv"

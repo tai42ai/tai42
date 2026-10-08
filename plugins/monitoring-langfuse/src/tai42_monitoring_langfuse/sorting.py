@@ -15,12 +15,12 @@ from tai42_contract.monitoring import MonitoringReadNotSupportedError, OrderBy, 
 # native trace sort and are ranked GLOBALLY via the metrics API instead.
 _TRACE_NATIVE_SORT: dict[str, str] = {"timestamp": "timestamp", "name": "name", "id": "id"}
 # Neutral OrderBy.field -> Langfuse metrics measure, for the global metric rank.
-_TRACE_METRIC_MEASURE: dict[str, str] = {
+TRACE_METRIC_MEASURE: dict[str, str] = {
     "total_cost": "totalCost",
     "latency": "latency",
     "total_tokens": "totalTokens",
 }
-_TRACE_SORT_FIELDS = {"timestamp", "total_cost", "name", "id", "latency", "total_tokens"}
+TRACE_SORT_FIELDS: frozenset[str] = frozenset({"timestamp", "total_cost", "name", "id", "latency", "total_tokens"})
 # get_many has no native sort -> every span-window sort is client-side.
 _SPAN_SORT_FIELDS = {"start", "end", "duration", "name", "id"}
 
@@ -35,14 +35,14 @@ def _trace_sort(order_by: OrderBy | None) -> tuple[str, Any]:
     """
     if order_by is None:
         return "native", "timestamp.desc"
-    if order_by.field not in _TRACE_SORT_FIELDS:
+    if order_by.field not in TRACE_SORT_FIELDS:
         raise MonitoringReadNotSupportedError(
-            f"list_traces cannot sort on {order_by.field!r}; supported: {sorted(_TRACE_SORT_FIELDS)}"
+            f"list_traces cannot sort on {order_by.field!r}; supported: {sorted(TRACE_SORT_FIELDS)}"
         )
     native = _TRACE_NATIVE_SORT.get(order_by.field)
     if native is not None:
         return "native", f"{native}.{order_by.direction}"
-    return "metric", (_TRACE_METRIC_MEASURE[order_by.field], order_by.direction)
+    return "metric", (TRACE_METRIC_MEASURE[order_by.field], order_by.direction)
 
 
 def _sort_window_items(items: list[SpanWindowItem], order_by: OrderBy | None) -> list[SpanWindowItem]:

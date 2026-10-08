@@ -410,13 +410,26 @@ def test_callback_documents_its_error_statuses(spec: dict, api_routes: list[Rout
         assert status in responses, f"callback POST is missing the {status} response"
 
 
+# The one observability route that issues no backend read: it serves the reader's pure
+# declarations (``list_capability``, ``metrics_capability``, ``max_page_size``), which never
+# raise ``MonitoringReadNotSupportedError``.
+_OBSERVABILITY_DECLARATION_ROUTE = "/api/observability/capabilities"
+
+
 def test_observability_routes_document_the_501(api_routes: list[RouteMetadata]) -> None:
-    # Every observability route answers 501 when monitoring reads are unsupported
-    # (MonitoringReadNotSupportedError), so each declares it.
+    # Every observability route that reads the backend answers 501 when monitoring reads
+    # are unsupported (MonitoringReadNotSupportedError), so each declares it.
     observability = [m for m in api_routes if m.path.startswith("/api/observability/")]
     assert observability, "no observability routes enumerated"
-    for meta in observability:
+    reads = [m for m in observability if m.path != _OBSERVABILITY_DECLARATION_ROUTE]
+    assert len(reads) == len(observability) - 1, "the capabilities route is not enumerated"
+    for meta in reads:
         assert 501 in meta.error_statuses, f"{meta.path} lost the 501"
+
+
+def test_observability_capabilities_route_declares_no_501(api_routes: list[RouteMetadata]) -> None:
+    (capabilities,) = [m for m in api_routes if m.path == _OBSERVABILITY_DECLARATION_ROUTE]
+    assert 501 not in capabilities.error_statuses
 
 
 # The uniform-gating doors that refuse with a 501 ``NotSupportedError`` (carrying

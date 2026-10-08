@@ -215,11 +215,11 @@ async def test_list_traces_error_full_page_without_count_raises(
 ):
     # A full page but no page count to bound the walk: raise, never stop quietly
     # on a partial error set.
-    from tai42_monitoring_langfuse.query_base import _PAGE_SIZE
+    from tai42_monitoring_langfuse.query_base import PAGE_SIZE
 
     list_returns([trace_row(id="a")])
     route_metrics(tokens={"a": 1})
-    full = [obs(id=f"e{i}", trace_id="a", level="ERROR") for i in range(_PAGE_SIZE)]
+    full = [obs(id=f"e{i}", trace_id="a", level="ERROR") for i in range(PAGE_SIZE)]
     mock_client.api.legacy.observations_v1.get_many.return_value = SimpleNamespace(data=full, meta=None)
     with pytest.raises(MonitoringReadNotSupportedError):
         await LangfuseReader(manager).list_traces()

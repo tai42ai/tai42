@@ -53,14 +53,14 @@ async def test_every_kind_round_trips(writer: OtelWriter, reader: InMemoryOtelRe
         span.end()
     writer.flush()
     obs = await reader.get_observation(_TRACE, span.id)
-    assert obs.type == kind.value
+    assert obs.kind is kind
     assert obs.name == "r"
     assert obs.trace_id == _TRACE
     assert obs.parent_id is None
     assert obs.input == {"in": [1, 2]}
     assert obs.output == {"out": True}
     assert obs.metadata == {"k": "v", "tai42.step_role": "sub_step", "tai42.timing": "absent"}
-    assert obs.usage == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3, "cost_usd": 0.5}
+    assert (obs.input_tokens, obs.output_tokens, obs.total_tokens) == (1, 2, 3)
     assert obs.model == "resp"
     assert obs.level == "WARNING"
     assert obs.status_message == "careful"
@@ -112,6 +112,8 @@ async def test_absent_trace_and_observation(writer: OtelWriter, reader: InMemory
 async def test_list_and_aggregate_reads_are_not_supported(reader: InMemoryOtelReader):
     now = datetime.now(UTC)
     assert reader.metrics_capability().measures == frozenset()
+    assert reader.list_capability().sort_fields == frozenset()
+    assert reader.max_page_size() >= 1
     with pytest.raises(MonitoringReadNotSupportedError):
         await reader.list_traces()
     with pytest.raises(MonitoringReadNotSupportedError):

@@ -16,6 +16,7 @@ from tai42_contract.monitoring import (
     MonitoringReadNotSupportedError,
     ObservationNotFoundError,
     OrderBy,
+    SpanKind,
     TraceNotFoundError,
 )
 
@@ -30,7 +31,7 @@ async def test_get_trace_maps_to_neutral(manager, mock_client, trace_body):
         "input": {"q": 1},
         "output": {"a": 2},
         "parent_observation_id": "p",
-        "usage_details": {"input": 5},
+        "usage_details": {"input": 5, "output": 3, "total": 8},
         "start_time": datetime(2026, 1, 1, tzinfo=UTC),
     }
     mock_client.api.trace.get.return_value = trace_body(observations=[obs])
@@ -42,11 +43,47 @@ async def test_get_trace_maps_to_neutral(manager, mock_client, trace_body):
     assert len(t.observations) == 1
     o = t.observations[0]
     assert o.name == "search"
-    assert o.type == "TOOL"
+    assert o.kind is SpanKind.TOOL
     assert o.parent_id == "p"
-    assert o.usage == {"input": 5}
+    assert (o.input_tokens, o.output_tokens, o.total_tokens) == (5, 3, 8)
     assert o.input == {"q": 1}
     assert o.output == {"a": 2}
+
+
+@pytest.mark.parametrize(
+    ("langfuse_type", "kind"),
+    [
+        ("GENERATION", SpanKind.LLM),
+        ("EMBEDDING", SpanKind.LLM),
+        ("TOOL", SpanKind.TOOL),
+        ("RETRIEVER", SpanKind.TOOL),
+        ("EVENT", SpanKind.EVENT),
+        ("SPAN", SpanKind.CHAIN),
+        ("CHAIN", SpanKind.CHAIN),
+        ("AGENT", SpanKind.CHAIN),
+        ("EVALUATOR", SpanKind.CHAIN),
+        ("GUARDRAIL", SpanKind.CHAIN),
+        ("SOMETHING_NEW", SpanKind.CHAIN),
+    ],
+)
+async def test_each_langfuse_type_maps_to_a_neutral_kind(manager, mock_client, trace_body, langfuse_type, kind):
+    obs = {"id": "o1", "type": langfuse_type, "start_time": None}
+    mock_client.api.trace.get.return_value = trace_body(observations=[obs])
+    (o,) = (await LangfuseReader(manager).get_trace("t1")).observations
+    assert o.kind is kind
+
+
+async def test_tokens_are_read_from_the_usage_details(manager, mock_client, trace_body):
+    observations = [
+        {"id": "full", "type": "GENERATION", "usage_details": {"input": 7, "output": 2, "total": 9}},
+        {"id": "partial", "type": "GENERATION", "usage_details": {"input": 7}},
+        {"id": "none", "type": "SPAN", "usage_details": {}},
+    ]
+    mock_client.api.trace.get.return_value = trace_body(observations=observations)
+    full, partial, none = (await LangfuseReader(manager).get_trace("t1")).observations
+    assert (full.input_tokens, full.output_tokens, full.total_tokens) == (7, 2, 9)
+    assert (partial.input_tokens, partial.output_tokens, partial.total_tokens) == (7, None, None)
+    assert (none.input_tokens, none.output_tokens, none.total_tokens) == (None, None, None)
 
 
 async def test_map_preserves_present_falsy_values(manager, mock_client, trace_body):
@@ -94,8 +131,8 @@ async def test_list_traces_summarizes_without_bodies(
     assert a.latency_ms == 1500.0
     assert a.total_cost == 0.25
     assert a.total_tokens == 42
-    assert a.input_preview == "hi"
-    assert a.output_preview == {"r": 1}
+    assert a.input == "hi"
+    assert a.output == {"r": 1}
     assert a.tags == ["run:7"]
     assert a.status == "ok"
     # b carries an error observation and no usage row.

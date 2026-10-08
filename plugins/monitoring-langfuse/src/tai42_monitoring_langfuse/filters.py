@@ -115,33 +115,18 @@ def _metrics_supported_clauses(filter_: MonitoringFilter) -> list[dict[str, Any]
     return clauses
 
 
-def _metrics_unsupported_clauses(filter_: MonitoringFilter) -> list[str]:
-    """List the ``filter`` clause names the metrics ``traces`` view has no column for.
+# The ``MonitoringFilter`` fields the metrics ``traces`` view has no column for: a metric
+# SORT combined with any of them is refused, and ``list_capability`` declares exactly
+# this set as each metric sort's incompatible filters. ``version`` is a native trace.list
+# column (served on the timestamp sort) but the view exposes no version dimension.
+METRIC_SORT_UNSUPPORTED_FILTERS: frozenset[str] = frozenset(
+    {"level", "model", "version", "min_cost", "max_cost", "min_tokens", "max_tokens", "min_latency", "max_latency"}
+)
 
-    ``level`` / ``model`` / ``version`` and the cost / token / latency ranges.
-    ``version`` is a native trace.list column (used on the timestamp-sort path) but
-    the metrics ``traces`` view exposes no version dimension, so a metric SORT
-    combined with a version filter raises here rather than misranking a page on a
-    silently-dropped clause.
-    """
-    unsupported: list[str] = []
-    if filter_.level is not None:
-        unsupported.append("level")
-    if filter_.model is not None:
-        unsupported.append("model")
-    if filter_.version is not None:
-        unsupported.append("version")
-    for name, value in (
-        ("min_cost", filter_.min_cost),
-        ("max_cost", filter_.max_cost),
-        ("min_tokens", filter_.min_tokens),
-        ("max_tokens", filter_.max_tokens),
-        ("min_latency", filter_.min_latency),
-        ("max_latency", filter_.max_latency),
-    ):
-        if value is not None:
-            unsupported.append(name)
-    return unsupported
+
+def _metrics_unsupported_clauses(filter_: MonitoringFilter) -> list[str]:
+    """List the set ``filter`` clauses the metrics ``traces`` view has no column for, in a stable order."""
+    return sorted(name for name in METRIC_SORT_UNSUPPORTED_FILTERS if getattr(filter_, name) is not None)
 
 
 def _trace_metric_filter(filter_: MonitoringFilter | None) -> list[dict[str, Any]]:

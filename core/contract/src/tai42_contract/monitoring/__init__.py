@@ -24,9 +24,9 @@ from tai42_contract.monitoring.models import (
     STEP_ROLE_METADATA_KEY,
     TIMING_ABSENT,
     TIMING_METADATA_KEY,
-    TRACE_PREVIEW_MAX_CHARS,
     UNRECORDED_KEY,
     Dimension,
+    ListCapability,
     Measure,
     MetricsCapability,
     MetricsQuery,
@@ -48,7 +48,6 @@ from tai42_contract.monitoring.models import (
     StepRole,
     TokenUsage,
     TraceContext,
-    preview,
 )
 from tai42_contract.monitoring.monitoring import Monitoring
 from tai42_contract.monitoring.reader import MonitoringReader
@@ -80,9 +79,9 @@ __all__ = [
     "STEP_ROLE_METADATA_KEY",
     "TIMING_ABSENT",
     "TIMING_METADATA_KEY",
-    "TRACE_PREVIEW_MAX_CHARS",
     "UNRECORDED_KEY",
     "Dimension",
+    "ListCapability",
     "Measure",
     "MetricsCapability",
     "MetricsQuery",
@@ -115,7 +114,6 @@ __all__ = [
     "ambient_trace_context",
     "attribute_run",
     "get_ambient_trace_context",
-    "preview",
     "reset_ambient_trace_context",
     "set_ambient_trace_context",
 ]

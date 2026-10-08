@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.settings import TaiBaseSettings, settings_cache
@@ -22,6 +24,9 @@ class LangfuseSettings(TaiBaseSettings):
     """
 
     model_config = SettingsConfigDict(env_prefix="LANGFUSE_")
+    # The prefix is owned: a ``LANGFUSE_*`` env name that is not one of these five fields
+    # (a Langfuse SDK export or debug setting, a typo) refuses boot and every env write.
+    env_prefix_owned: ClassVar[bool] = True
 
     public_key: str = ""
     # SecretStr so the secret never surfaces in a repr, log, traceback, or model_dump.

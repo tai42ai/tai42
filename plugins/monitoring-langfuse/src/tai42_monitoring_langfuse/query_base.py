@@ -7,7 +7,8 @@ from typing import Any
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
 
-_PAGE_SIZE = 100
+# The largest page one Langfuse list call serves.
+PAGE_SIZE = 100
 
 
 class _LangfuseQuery:

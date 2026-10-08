@@ -14,15 +14,18 @@ from functools import partial
 from typing import Any
 
 from tai42_contract.monitoring import (
+    STEP_ROLE_METADATA_KEY,
     MonitoringFilter,
     OrderBy,
     SpanKind,
     SpanWindowItem,
+    StepRole,
 )
 
 from tai42_monitoring_langfuse.filters import _level_value, _observation_advanced_filter
-from tai42_monitoring_langfuse.query_base import _PAGE_SIZE, _LangfuseQuery
+from tai42_monitoring_langfuse.query_base import PAGE_SIZE, _LangfuseQuery
 from tai42_monitoring_langfuse.sorting import _sort_window_items
+from tai42_monitoring_langfuse.trace_query import observation_kind, observation_type, producer_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +42,11 @@ class _TraceTags:
     available: bool
 
 
-# Observation types that are never a tool/node execution.
-_EXCLUDED_TYPES = {"GENERATION", "EVENT", "TRACE"}
-# Grouping chains emitted around the real work, not work themselves.
-_GROUPING_NAMES = {"tools", "model"}
-
-# Neutral SpanKind -> Langfuse observation type, for the optional ``kind``
-# narrowing within the tool-granularity set.
-_KIND_TO_TYPE: dict[SpanKind, str] = {
-    SpanKind.LLM: "GENERATION",
-    SpanKind.TOOL: "TOOL",
-    SpanKind.CHAIN: "SPAN",
-    SpanKind.EVENT: "EVENT",
-}
+# The Langfuse observation types a step can be; generations, embeddings, events and
+# the trace wrapper never are.
+_STEP_TYPES = frozenset({"SPAN", "TOOL", "AGENT", "CHAIN", "RETRIEVER"})
+# The producer step-role markers that make a record part of the outline but not a step.
+_NOT_A_STEP = frozenset({StepRole.GROUPING.value, StepRole.SUB_STEP.value})
 
 
 class SpanWindowQuery(_LangfuseQuery):
@@ -71,7 +66,6 @@ class SpanWindowQuery(_LangfuseQuery):
         client = await self._active_client()
         source = self._m.active_source()
 
-        type_filter = _KIND_TO_TYPE.get(kind) if kind is not None else None
         advanced = _observation_advanced_filter(filter_)
         filter_json = json.dumps(advanced) if advanced else None
 
@@ -80,7 +74,6 @@ class SpanWindowQuery(_LangfuseQuery):
             t0,
             t1,
             run=run,
-            type_filter=type_filter,
             filter_json=filter_json,
             environment=source,
             name=filter_.name if filter_ else None,
@@ -95,6 +88,7 @@ class SpanWindowQuery(_LangfuseQuery):
             trace_ids = await self._session_trace_ids(client, filter_.session_id, source)
             observations = [obs for obs in observations if obs.trace_id in trace_ids]
 
+        # Narrowing by kind is client-side: one neutral kind spans several Langfuse types.
         selected = [obs for obs in observations if self._is_tool_granularity(obs, kind)]
 
         trace_tags = await self._resolve_trace_tags(client, {obs.trace_id for obs in selected if obs.trace_id})
@@ -109,7 +103,6 @@ class SpanWindowQuery(_LangfuseQuery):
         t1: datetime,
         *,
         run: str | None,
-        type_filter: str | None,
         filter_json: str | None,
         environment: str,
         name: str | None,
@@ -125,13 +118,12 @@ class SpanWindowQuery(_LangfuseQuery):
                     from_start_time=t0,
                     to_start_time=t1,
                     trace_id=run,
-                    type=type_filter,
                     name=name,
                     user_id=user_id,
                     level=level,
                     environment=environment,
                     filter=filter_json,
-                    limit=_PAGE_SIZE,
+                    limit=PAGE_SIZE,
                     page=page,
                     request_options=self._request_options(),
                 )
@@ -154,7 +146,7 @@ class SpanWindowQuery(_LangfuseQuery):
                     client.api.trace.list,
                     session_id=session_id,
                     environment=source,
-                    limit=_PAGE_SIZE,
+                    limit=PAGE_SIZE,
                     page=page,
                     request_options=self._request_options(),
                 )
@@ -168,29 +160,19 @@ class SpanWindowQuery(_LangfuseQuery):
         return ids
 
     @staticmethod
-    def _type_str(raw: Any) -> str:
-        return (raw.value if hasattr(raw, "value") else str(raw or "")).upper()
+    def _is_tool_granularity(obs: Any, kind: SpanKind | None) -> bool:
+        """One item per tool/node execution, selected by type and the producers' step marker.
 
-    @classmethod
-    def _is_tool_granularity(cls, obs: Any, kind: SpanKind | None) -> bool:
-        """One item per tool/node execution.
-
-        Keeps SPAN/TOOL-type node/tool observations; drops generations, events,
-        the trace wrapper, grouping chains (``tools`` / ``model``), and jq
-        sub-steps (``<expr_type>:<name>``). ``kind`` narrows within this set.
+        Keeps SPAN/TOOL/AGENT/CHAIN/RETRIEVER observations; drops generations, embeddings,
+        events, the trace wrapper, and any record whose producer metadata marks it a
+        grouping or a sub-step. ``kind`` narrows within this set by the mapped neutral kind.
         """
-        obs_type = cls._type_str(obs.type)
-        if obs_type in _EXCLUDED_TYPES:
+        if observation_type(obs.type) not in _STEP_TYPES:
             return False
-        if kind is not None and obs_type != _KIND_TO_TYPE.get(kind, obs_type):
+        if kind is not None and observation_kind(obs.type) is not kind:
             return False
-        name = obs.name or ""
-        if name in _GROUPING_NAMES:
-            return False
-        if ":" in name:
-            # jq <expr_type>:<name> sub-steps are not tool-granularity steps.
-            return False
-        return obs_type in {"SPAN", "TOOL", "AGENT", "CHAIN", "RETRIEVER"}
+        metadata = producer_metadata(obs.metadata, obs.id) or {}
+        return metadata.get(STEP_ROLE_METADATA_KEY) not in _NOT_A_STEP
 
     async def _resolve_trace_tags(self, client: Any, trace_ids: set[str]) -> dict[str, _TraceTags]:
         """Tags per trace, resolved from the parent trace, fetching each distinct trace once.

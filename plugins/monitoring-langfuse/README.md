@@ -81,6 +81,12 @@ The reader's settings are the `LANGFUSE_` environment group (see
 | `LANGFUSE_TIMEOUT_SECONDS` | `30` | Read request timeout |
 | `LANGFUSE_TRACING_ENVIRONMENT` | `tai` | The `source` marker: stamps every record (`deployment.environment.name`, Langfuse's environment) and scopes every read to it |
 
+These five are the only `LANGFUSE_*` names the backend reads, and the `LANGFUSE_`
+prefix is owned: any other `LANGFUSE_*` name (the Langfuse SDK's own
+`LANGFUSE_FLUSH_AT`, `LANGFUSE_FLUSH_INTERVAL`, `LANGFUSE_OTEL_TRACES_EXPORT_PATH`,
+`LANGFUSE_MEDIA_UPLOAD_ENABLED`, `LANGFUSE_DEBUG`, or a mistyped name) refuses boot
+and every env write with an error naming it.
+
 The `source` marker lets several deployments share one Langfuse project while
 each reads back only its own data. `get_trace` and `get_observation` are the
 unscoped reads — their ids are globally unique.
@@ -134,7 +140,7 @@ govern. Two operator responsibilities:
 - **Reader**: `async` per the contract; the synchronous Langfuse API client is
   dispatched off the event loop. `list_traces` returns row SUMMARIES, never
   trace bodies. For the native (timestamp) sort a page costs one trace-list call
-  for the row attributes and previews, one metrics query for the page's token
+  for the row attributes and the trace input/output, one metrics query for the page's token
   totals, and one bounded error-observations query for the page's error status —
   no per-trace body fetch. A metric sort (cost/latency/tokens) adds one ranking
   metrics query and a bounded trace-list walk in place of that single list call.
@@ -144,7 +150,17 @@ govern. Two operator responsibilities:
   observation (`ObservationNotFoundError` when absent or in another trace); an
   observation's `metadata` is the producer metadata the writer recorded (the
   decoded `tai42.metadata` attribute plus the promoted `tai42.step_role` /
-  `tai42.timing`).
+  `tai42.timing`). Each observation's `kind` maps the Langfuse type:
+  `GENERATION` / `EMBEDDING` → `LLM`, `TOOL` / `RETRIEVER` → `TOOL`, `EVENT` →
+  `EVENT`, every other type → `CHAIN`; its token counts come from the usage keys
+  `input` / `output` / `total`.
+- **Step window**: `list_spans_in_window` selects one item per step by the
+  producers' `tai42.step_role` marker (a `grouping` or `sub_step` record is never
+  an item) and by type (generations, embeddings and events never are).
+- **Declarations**: `max_page_size()` is 100 (a larger `limit` raises
+  `ValueError`); `list_capability()` serves the sorts `timestamp`, `name`, `id`,
+  `total_cost`, `latency` and `total_tokens`, and declares that each metric sort
+  cannot combine with `level`, `model`, `version` or a cost / token / latency range.
 - **Metric sorts**: `list_traces` ordered by `total_cost` / `latency` /
   `total_tokens` ranks globally through the Langfuse metrics API (trace.list
   cannot sort on aggregates) and requires `from_timestamp` + `limit`;

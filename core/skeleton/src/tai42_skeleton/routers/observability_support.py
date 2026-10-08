@@ -11,8 +11,8 @@ Two groups, neither of which owns a reader instance:
 * **Output transforms** — pure functions over plain values / contract models:
   the metrics summary + series + by-model row readers (which read neutral measures
   off the typed :class:`MetricsRow`, never hunting a column or a date), the trace →
-  run / trace mapping, the structurally-bounded input/output preview, and the
-  CSV-injection guard.
+  run / trace / outline mapping (the run row bounds its input/output with the kit's
+  ``preview``), the backend declarations in wire names, and the CSV-injection guard.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from tai42_contract.monitoring import (
     Dimension,
+    ListCapability,
     Measure,
+    MetricsCapability,
     MetricsResult,
     MetricsRow,
     MonitoringFilter,
@@ -33,6 +35,7 @@ from tai42_contract.monitoring import (
     MonitoringTraceSummary,
     OrderBy,
 )
+from tai42_kit.monitoring import preview
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -92,9 +95,22 @@ _SORT_FIELDS: dict[RunSortKey, str] = {
     "totalTokens": "total_tokens",
 }
 
-# Max page size the reader accepts per ``list_traces`` call; the run list caps
-# ``pageSize`` here and the export drains pages of this size up to ``_EXPORT_CAP``.
-PAGE_CHUNK = 100
+# Run-list filter query param → the ``MonitoringFilter`` field it sets. ``status``
+# sets ``level`` (``error`` only); the ``*LatencyMs`` params are milliseconds on the
+# wire and seconds in the contract. ``meta.<key>`` params are dynamic and not listed.
+_FILTER_PARAMS: dict[str, str] = {
+    "status": "level",
+    "user": "user_id",
+    "session": "session_id",
+    "version": "version",
+    "tags": "tags",
+    "minLatencyMs": "min_latency",
+    "maxLatencyMs": "max_latency",
+    "minCost": "min_cost",
+    "maxCost": "max_cost",
+    "minTokens": "min_tokens",
+    "maxTokens": "max_tokens",
+}
 
 
 def one_of(values: tuple[str, ...]) -> str:
@@ -156,14 +172,18 @@ def select_granularity(t0: datetime, t1: datetime, override: str | None) -> str:
     return "week"
 
 
-def _q_float(q: Any, key: str) -> float | None:
-    raw = q.get(key)
+def _q_float(raw: str | None, key: str) -> float | None:
     if raw is None or raw == "":
         return None
     try:
         return float(raw)
     except ValueError as exc:
         raise RequestParseError(f"{key} must be a number") from exc
+
+
+def _wire_param(field: str) -> str:
+    """The run-list query param that sets ``MonitoringFilter`` field ``field``; ``KeyError`` when none does."""
+    return next(param for param, target in _FILTER_PARAMS.items() if target == field)
 
 
 def _parse_tags(raw: str | None) -> list[str]:
@@ -226,59 +246,32 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
     latencyMs, totalTokens} with ``dir`` ∈ {asc, desc} (default desc).
     """
     q = request.query_params
+    raw = {field: q.get(param) for param, field in _FILTER_PARAMS.items()}
 
-    tags = _parse_tags(q.get("tags"))
-    status = q.get("status")
+    status = raw["level"]
     if status not in (None, "", *RUN_STATUSES):
         raise RequestParseError(f"status must be {one_of(RUN_STATUSES)}")
-    level = MonitoringLevel.ERROR if status == "error" else None
+    values: dict[str, Any] = {
+        "tags": _parse_tags(raw["tags"]),
+        "level": MonitoringLevel.ERROR if status == "error" else None,
+        "user_id": raw["user_id"] or None,
+        "session_id": raw["session_id"] or None,
+        "version": raw["version"] or None,
+        "metadata": _parse_meta(q),
+    }
+    for field in ("min_cost", "max_cost"):
+        values[field] = _q_float(raw[field], _wire_param(field))
+    for field in ("min_tokens", "max_tokens"):
+        tokens = _q_float(raw[field], _wire_param(field))
+        values[field] = int(tokens) if tokens is not None else None
+    for field in ("min_latency", "max_latency"):
+        latency_ms = _q_float(raw[field], _wire_param(field))
+        values[field] = latency_ms / 1000 if latency_ms is not None else None
 
-    user_id = q.get("user") or None
-    session_id = q.get("session") or None
-    version = q.get("version") or None
-    metadata = _parse_meta(q)
-
-    min_latency_ms = _q_float(q, "minLatencyMs")
-    max_latency_ms = _q_float(q, "maxLatencyMs")
-    min_cost = _q_float(q, "minCost")
-    max_cost = _q_float(q, "maxCost")
-    min_tokens = _q_float(q, "minTokens")
-    max_tokens = _q_float(q, "maxTokens")
-
-    has_clause = any(
-        v is not None and v != [] and v != {}
-        for v in (
-            tags or None,
-            level,
-            user_id,
-            session_id,
-            version,
-            metadata or None,
-            min_cost,
-            max_cost,
-            min_tokens,
-            max_tokens,
-            min_latency_ms,
-            max_latency_ms,
-        )
-    )
     filter_: MonitoringFilter | None = None
-    if has_clause:
+    if any(v not in (None, [], {}) for v in values.values()):
         try:
-            filter_ = MonitoringFilter(
-                tags=tags,
-                level=level,
-                user_id=user_id,
-                session_id=session_id,
-                version=version,
-                metadata=metadata,
-                min_cost=min_cost,
-                max_cost=max_cost,
-                min_tokens=int(min_tokens) if min_tokens is not None else None,
-                max_tokens=int(max_tokens) if max_tokens is not None else None,
-                min_latency=min_latency_ms / 1000 if min_latency_ms is not None else None,
-                max_latency=max_latency_ms / 1000 if max_latency_ms is not None else None,
-            )
+            filter_ = MonitoringFilter(**values)
         except ValueError as exc:  # inverted range → contract rejects at construction
             raise RequestParseError(str(exc)) from exc
 
@@ -296,11 +289,11 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
 
 
 def parse_paging(request: Request) -> tuple[int, int]:
-    """``page`` (default 1) and ``pageSize`` (default 50), validated and capped.
+    """``page`` (default 1) and ``pageSize`` (default 50), validated.
 
     A ``page`` or ``pageSize`` below 1 is malformed and raises ``RequestParseError`` (→ 400), consistent
-    with the from/to and granularity checks — never silently clamped. ``pageSize`` above ``PAGE_CHUNK`` is
-    capped to that documented server limit (valid data, not an error). A non-integer value is a 400.
+    with the from/to and granularity checks — never silently clamped. A non-integer value is a 400. The
+    run-list operation caps ``pageSize`` to the monitoring backend's declared maximum.
     """
     q = request.query_params
     try:
@@ -310,8 +303,34 @@ def parse_paging(request: Request) -> tuple[int, int]:
         raise RequestParseError("page and pageSize must be integers") from exc
     if page < 1 or page_size < 1:
         raise RequestParseError("page and pageSize must be >= 1")
-    page_size = min(page_size, PAGE_CHUNK)
     return page, page_size
+
+
+def capabilities_view(
+    list_capability: ListCapability, metrics: MetricsCapability, page_size_max: int
+) -> dict[str, Any]:
+    """The backend's declarations in the run list's wire names.
+
+    A contract sort field or filter field with no run-list wire form is not served.
+    """
+    served = [key for key, field in _SORT_FIELDS.items() if field in list_capability.sort_fields]
+    sort_key = {field: key for key, field in _SORT_FIELDS.items()}
+    filter_param = {field: param for param, field in _FILTER_PARAMS.items()}
+    incompatible: dict[str, list[str]] = {}
+    for field, filters in list_capability.incompatible_filters.items():
+        key = sort_key.get(field)
+        params = sorted(filter_param[f] for f in filters if f in filter_param)
+        if key in served and params:
+            incompatible[key] = params
+    return {
+        "pageSizeMax": page_size_max,
+        "sortKeys": served,
+        "incompatibleFilters": incompatible,
+        "metrics": {
+            "measures": sorted(m.value for m in metrics.measures),
+            "dimensions": sorted(d.value for d in metrics.dimensions),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -435,8 +454,8 @@ def derive_run(row: MonitoringTraceSummary) -> dict[str, Any]:
     """A run-list row projected from a trace SUMMARY.
 
     Every list field is first-class on the summary: the input/output previews are
-    the backend's server-bounded JSON values, latency / tokens / status come from
-    its batched aggregates. ``status`` maps ``error`` -> ``error`` and ``ok`` ->
+    the summary's raw values bounded by the kit's ``preview``, latency / tokens /
+    status come from the backend's batched aggregates. ``status`` maps ``error`` -> ``error`` and ``ok`` ->
     ``success``; a malformed backend row never reaches here — it fails the page
     loudly at the reader.
     """
@@ -449,12 +468,12 @@ def derive_run(row: MonitoringTraceSummary) -> dict[str, Any]:
         "cost": row.total_cost,
         "latencyMs": int(row.latency_ms) if row.latency_ms is not None else None,
         "totalTokens": row.total_tokens,
-        "inputPreview": row.input_preview,
-        "outputPreview": row.output_preview,
+        "inputPreview": preview(row.input),
+        "outputPreview": preview(row.output),
     }
 
 
-def _map_span(o: MonitoringObservation) -> dict[str, Any]:
+def _map_span_outline(o: MonitoringObservation) -> dict[str, Any]:
     # ``metadata`` passes through WHOLE and opaque — the platform reads no consumer
     # key out of it.
     return {
@@ -462,17 +481,21 @@ def _map_span(o: MonitoringObservation) -> dict[str, Any]:
         "parentId": o.parent_id,
         "traceId": o.trace_id,
         "name": o.name,
-        "type": o.type,
+        "kind": o.kind.value if o.kind is not None else None,
         "level": o.level,
         "statusMessage": o.status_message,
         "start": o.start.isoformat() if o.start else None,
         "end": o.end.isoformat() if o.end else None,
         "model": o.model,
-        "usage": o.usage,
+        "inputTokens": o.input_tokens,
+        "outputTokens": o.output_tokens,
+        "totalTokens": o.total_tokens,
         "metadata": o.metadata,
-        "input": o.input,
-        "output": o.output,
     }
+
+
+def _map_span(o: MonitoringObservation) -> dict[str, Any]:
+    return {**_map_span_outline(o), "input": o.input, "output": o.output}
 
 
 def map_trace(trace: MonitoringTrace) -> dict[str, Any]:
@@ -487,3 +510,8 @@ def map_trace(trace: MonitoringTrace) -> dict[str, Any]:
         "metadata": trace.metadata,
         "spans": [_map_span(o) for o in (trace.observations or [])],
     }
+
+
+def map_trace_outline(trace: MonitoringTrace) -> dict[str, Any]:
+    """The span tree of one run: every span without its input and output."""
+    return {"traceId": trace.id, "spans": [_map_span_outline(o) for o in (trace.observations or [])]}
