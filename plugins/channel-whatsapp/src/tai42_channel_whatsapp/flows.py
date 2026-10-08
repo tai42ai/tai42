@@ -96,7 +96,9 @@ from tai42_channel_whatsapp.flows_components import (
     _valid_iso_date,
     _value_type_decl,
     component_names,
+    data_source_item,
     emit_field_variants,
+    field_caption,
     form_ref,
     payload_labels,
     screen_field_variants,
@@ -109,6 +111,7 @@ __all__ = [
     "build_flow_data",
     "build_form_flow",
     "component_names",
+    "data_source_item",
     "payload_labels",
     "slot_datanames",
 ]
@@ -508,9 +511,10 @@ def _build_form_screen(
         component = _dynamic_component(
             name, spec.properties[name], name in spec.required, spec.option_fields, spec.names
         )
+        caption = field_caption(component, spec.properties[name])
         if name in spec.field_changed:
             component = _attach_field_reaction(component, name, this_fields, earlier_fields, spec.names, variants)
-        components.extend(emit_field_variants(component, variants[name]))
+        components.extend(emit_field_variants(component, variants[name], caption))
     readback = _review_readback(spec) if page.get("kind") == "review" else []
     footer = (
         _terminal_footer(this_fields, earlier_fields, spec, variants)
@@ -720,7 +724,7 @@ def _choice_data_source(
     Raises ``ChannelInputError`` when neither is available (a choice control with no options to show).
     """
     if name in options:
-        return [{"id": choice["value"], "title": choice.get("label") or choice["value"]} for choice in options[name]]
+        return [data_source_item(choice) for choice in options[name]]
     enum = _choice_options_enum(prop)
     if enum is None:
         raise ChannelInputError(

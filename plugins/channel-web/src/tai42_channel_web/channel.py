@@ -135,23 +135,27 @@ def _section_frame_item(section: OptionSection) -> dict[str, object]:
 
 
 def _form_option_frame_item(option: FormOption) -> dict[str, str]:
-    """One per-send form option as its transcript-frame shape: ``{"value", "label"?}``.
+    """One per-send form option as its transcript-frame shape: ``{"value", "label"?, "description"?}``.
 
-    ``label`` is omitted when absent (the widget shows the value in its place), so there is no
+    ``label`` is omitted when absent (the widget shows the value in its place) and ``description``
+    (the option's optional second line, shown under the label) when absent, so there is no
     empty-value key.
     """
     entry = {"value": option.value}
     if option.label is not None:
         entry["label"] = option.label
+    if option.description is not None:
+        entry["description"] = option.description
     return entry
 
 
 def _form_data_frame(data: FormData) -> dict[str, object]:
     """A form question's per-send enrichment as its transcript-frame shape: ``{"values", "options"}``.
 
-    The prefilled values verbatim and each property's per-send option list as ``{"value", "label"?}``
-    items. The widget prefills the controls from ``values`` and renders ``options`` as the field's choices
-    (labels shown, values posted).
+    The prefilled values verbatim and each property's per-send option list as
+    ``{"value", "label"?, "description"?}`` items. The widget prefills the controls from ``values`` and
+    renders ``options`` as the field's choices (labels shown, values posted, a description drawn as the
+    option's second line).
     """
     return {
         "values": data.values,

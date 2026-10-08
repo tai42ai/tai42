@@ -5,8 +5,12 @@ one page display block) onto the pieces of Flow JSON that render it — the
 identifier-safe component names and human-readable labels, the control classification
 (choice / date / text / opt-in), the field control itself, its screen-``data``
 declarations and forward-carriers, the display components, and the client-side
-visibility wrapper. The screen/footer assembly and the public ``build_form_flow`` /
-``build_flow_data`` entry points consume these builders from :mod:`tai42_channel_whatsapp.flows`.
+visibility wrapper. A field's optional second line (its schema ``description``) draws as the
+control's ``helper-text`` where Meta allows it (text and date controls) and as a sibling
+``TextCaption`` otherwise (a choice control / opt-in); an option's optional second line (its
+``description``) draws under the option title in the data-source item. The screen/footer assembly
+and the public ``build_form_flow`` / ``build_flow_data`` entry points consume these builders from
+:mod:`tai42_channel_whatsapp.flows`.
 """
 
 from __future__ import annotations
@@ -284,16 +288,17 @@ def _dynamic_component(
     cname = names[name]
     prop_type = prop.get("type")
     init = f"${{data.{cname}__init}}"
+    component: dict[str, Any]
     if _is_array_of_strings(prop):
         if _choice_options_enum(prop) is None and name not in option_fields:
             raise ChannelInputError(
                 f"form property {name!r}: a multiple-choice (array of strings) field needs an 'items' enum "
                 "or per-send options to render as a CheckboxGroup"
             )
-        return _checkbox_component(cname, label, required, prop, init)
-    if _is_choice_field(name, prop, option_fields):
+        component = _checkbox_component(cname, label, required, prop, init)
+    elif _is_choice_field(name, prop, option_fields):
         kind = _choice_component_type(prop)
-        return {
+        component = {
             "type": kind,
             "name": cname,
             "label": label,
@@ -301,19 +306,20 @@ def _dynamic_component(
             "data-source": f"${{data.{cname}__ds}}",
             "init-value": init,
         }
-    if _is_date_field(prop):
+    elif _is_date_field(prop):
         if _date_has_constraints(prop):
-            return _calendar_component(cname, label, required, prop, init)
-        # A plain (unconstrained) date stays a bare DatePicker: its reference defines no
-        # ``required`` parameter (unlike every other input control) and Meta rejects an unknown
-        # component property at publish, so the required flag is deliberately not emitted here.
-        return {"type": "DatePicker", "name": cname, "label": label, "init-value": init}
-    if prop_type == "string":
-        return {"type": "TextInput", "name": cname, "label": label, "required": required, "init-value": init}
-    if prop_type == "boolean":
-        return {"type": "OptIn", "name": cname, "label": label, "required": required, "init-value": init}
-    if prop_type in ("integer", "number"):
-        return {
+            component = _calendar_component(cname, label, required, prop, init)
+        else:
+            # A plain (unconstrained) date stays a bare DatePicker: its reference defines no
+            # ``required`` parameter (unlike every other input control) and Meta rejects an unknown
+            # component property at publish, so the required flag is deliberately not emitted here.
+            component = {"type": "DatePicker", "name": cname, "label": label, "init-value": init}
+    elif prop_type == "string":
+        component = {"type": "TextInput", "name": cname, "label": label, "required": required, "init-value": init}
+    elif prop_type == "boolean":
+        component = {"type": "OptIn", "name": cname, "label": label, "required": required, "init-value": init}
+    elif prop_type in ("integer", "number"):
+        component = {
             "type": "TextInput",
             "name": cname,
             "label": label,
@@ -321,14 +327,72 @@ def _dynamic_component(
             "input-type": "number",
             "init-value": init,
         }
-    raise ChannelInputError(
-        f"form property {name!r}: unsupported schema type {prop_type!r} — a form field must be "
-        "string, string+enum, an array of strings, boolean, integer, or number (no nested objects, "
-        "arrays of non-strings, or unions)"
-    )
+    else:
+        raise ChannelInputError(
+            f"form property {name!r}: unsupported schema type {prop_type!r} — a form field must be "
+            "string, string+enum, an array of strings, boolean, integer, or number (no nested objects, "
+            "arrays of non-strings, or unions)"
+        )
+    return _with_helper_text(component, prop)
 
 
-_DS_ITEM_EXAMPLE = [{"id": "a", "title": "a"}]
+#: The Flow controls that take a ``helper-text`` (a field's second line drawn under its label):
+#: Meta allows it on these text/date inputs, NOT on a Dropdown/RadioButtonsGroup/CheckboxGroup/OptIn.
+#: A field's second line on a control outside this set is drawn as a sibling ``TextCaption`` instead
+#: (:func:`field_caption`), so its content is never dropped.
+_HELPER_TEXT_TYPES = frozenset({"TextInput", "DatePicker", "CalendarPicker"})
+
+
+def _field_second_line(prop: dict[str, Any]) -> str | None:
+    """A field's optional second line — its schema ``description`` when a non-blank string, else None.
+
+    A blank/whitespace-only description counts as absent (nothing to draw), the same rule
+    :func:`_field_label` applies to a blank ``title``.
+    """
+    description = prop.get("description")
+    return description if isinstance(description, str) and description.strip() else None
+
+
+def _with_helper_text(component: dict[str, Any], prop: dict[str, Any]) -> dict[str, Any]:
+    """Add the field's second line as ``helper-text`` when the control supports it.
+
+    A control outside :data:`_HELPER_TEXT_TYPES` (a choice control or an OptIn) keeps no
+    helper-text; its second line is drawn as a sibling :func:`field_caption` so it is never lost.
+    """
+    description = _field_second_line(prop)
+    if description is not None and component["type"] in _HELPER_TEXT_TYPES:
+        component["helper-text"] = description
+    return component
+
+
+def field_caption(component: dict[str, Any], prop: dict[str, Any]) -> dict[str, Any] | None:
+    """A ``TextCaption`` node carrying a field's second line for a control that cannot hold ``helper-text``.
+
+    Returns None when the field has no second line or its control already drew it as ``helper-text``
+    (:data:`_HELPER_TEXT_TYPES`). The caption is emitted immediately after the control and, for a
+    conditional field, inside the same ``If`` wrapper so it shows and hides with the control.
+    """
+    description = _field_second_line(prop)
+    if description is None or component["type"] in _HELPER_TEXT_TYPES:
+        return None
+    return {"type": "TextCaption", "text": description}
+
+
+_DS_ITEM_EXAMPLE = [{"id": "a", "title": "a", "description": "a"}]
+
+
+def data_source_item(choice: dict[str, Any]) -> dict[str, str]:
+    """One ``data-source`` row for a per-send option (shared by the publish and reaction paths).
+
+    Carries the option's ``id``/``title`` and, when the option declares a non-blank second line,
+    its ``description`` (drawn under the option title on a choice control). The ``description`` key
+    is omitted when absent, so an option without a second line renders exactly as before.
+    """
+    item: dict[str, str] = {"id": choice["value"], "title": choice.get("label") or choice["value"]}
+    description = choice.get("description")
+    if isinstance(description, str) and description.strip():
+        item["description"] = description
+    return item
 
 
 def _value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
@@ -361,7 +425,14 @@ def _field_data_decls(
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"id": {"type": "string"}, "title": {"type": "string"}},
+                # ``description`` (an option's optional second line) is ALWAYS declared on the item,
+                # whether or not a given send carries one, so the published Flow shape — and so its
+                # cache key — does not depend on a per-send option list having descriptions.
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                },
             },
             "__example__": _DS_ITEM_EXAMPLE,
         }
@@ -550,20 +621,26 @@ def _guard_coalescible(name: str, prop: dict[str, Any], variants: list[_Variant]
         )
 
 
-def emit_field_variants(component: dict[str, Any], variants: list[_Variant]) -> list[dict[str, Any]]:
+def emit_field_variants(
+    component: dict[str, Any], variants: list[_Variant], caption: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """A control's render nodes: one per variant, the control (uniquely renamed) under its nested ``If``s.
 
     An unconditional single variant returns the control itself. A conditional variant wraps the
     control — renamed with the variant suffix when it is one of several — in an ``If`` per condition,
-    outermost first, so the controller's own condition encloses the dependent's.
+    outermost first, so the controller's own condition encloses the dependent's. A ``caption`` (a
+    field's second line on a control that cannot hold ``helper-text``) rides immediately after the
+    control inside the SAME wrapper, so it shows and hides with the control; its text is identical
+    across variants (the control's name is suffixed, the caption is not).
     """
     base_name = component["name"]
     nodes: list[dict[str, Any]] = []
     for suffix, conditions in variants:
-        node = component if suffix == "" else {**copy.deepcopy(component), "name": base_name + suffix}
+        control = component if suffix == "" else {**copy.deepcopy(component), "name": base_name + suffix}
+        group = [control] if caption is None else [control, copy.deepcopy(caption)]
         for condition in reversed(conditions):
-            node = {"type": "If", "condition": condition, "then": [node]}
-        nodes.append(node)
+            group = [{"type": "If", "condition": condition, "then": group}]
+        nodes.extend(group)
     return nodes
 
 

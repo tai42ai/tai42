@@ -145,6 +145,40 @@ async def test_deliver_omits_the_optional_form_option_label(fake_redis: FakeRedi
     assert _only_entry(fake_redis)["data"]["options"] == {"colour": [{"value": "r"}]}
 
 
+async def test_deliver_carries_the_form_option_description(fake_redis: FakeRedis):
+    # An option's second line rides the frame under ``description``, beside its value and label;
+    # the widget draws it as the option's second line.
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="form",
+            options=None,
+            schema=schema,
+            data=FormData(
+                values={},
+                options={"colour": [FormOption(value="r", label="Red", description="Warm tone")]},
+            ),
+        )
+    )
+    assert _only_entry(fake_redis)["data"]["options"] == {
+        "colour": [{"value": "r", "label": "Red", "description": "Warm tone"}]
+    }
+
+
+async def test_deliver_omits_the_optional_form_option_description(fake_redis: FakeRedis):
+    # An option with no second line carries no ``description`` key — no empty-value shape.
+    schema = {"type": "object", "properties": {"colour": {"type": "string"}}}
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="form",
+            options=None,
+            schema=schema,
+            data=FormData(values={}, options={"colour": [FormOption(value="r", label="Red")]}),
+        )
+    )
+    assert _only_entry(fake_redis)["data"]["options"] == {"colour": [{"value": "r", "label": "Red"}]}
+
+
 async def test_deliver_omits_form_data_and_pages_when_absent(fake_redis: FakeRedis):
     # A plain form ask (no per-send enrichment, one page) carries neither key.
     await WebChannel().deliver(make_delivery(answer_format="form", options=None, schema=_FORM_SCHEMA))

@@ -25,11 +25,14 @@ over the items' ``enum`` or per-send ``options`` (a free array with no choices i
 multiline ``plain_text_input``, one entry per line); ``boolean`` → ``radio_buttons``
 (Yes/No → ``true``/``false``); ``integer``/``number`` → ``number_input``. Anything
 else, or a value past a Slack cap, raises :class:`FormSchemaError` naming the
-property — never a silently dropped or truncated field.
+property — never a silently dropped or truncated field. A property schema's
+``description`` renders as the input block's ``hint`` (the field's second line); a
+blank/whitespace-only ``description`` is absent.
 
 Per-send enrichment rides the same mapping: a ``values`` map prefills each named
 property's control; an ``options`` map supplies a per-send choice list (its labels
-shown, its values submitted) replacing a string/array property's ``enum`` for this
+shown, its values submitted, each option's optional ``description`` drawn as the
+option object's second line) replacing a string/array property's ``enum`` for this
 send.
 
 Display, review and conditionals (capabilities D and B) ride the ``pages`` layout.
@@ -90,6 +93,9 @@ _CLOSE_LABEL = "Cancel"
 # Slack Block Kit caps: exceeding one is a loud error, never a truncation.
 _MAX_MODAL_BLOCKS = 100
 _MAX_LABEL_LEN = 2000
+# An ``input`` block's optional ``hint`` plain_text cap — the surface a field's second line
+# (the property schema's ``description``) renders on.
+_MAX_HINT_LEN = 2000
 _MAX_SECTION_TEXT_LEN = 3000
 _MAX_BUTTON_VALUE_LEN = 2000
 # A ``header`` block's plain_text cap — the surface a form page's title (and a
@@ -167,6 +173,15 @@ def _input_block(
         "label": {"type": "plain_text", "text": label},
         "element": element,
     }
+    hint = spec.get("description")
+    if isinstance(hint, str) and hint.strip():
+        # The field's second line: the property schema's ``description`` drawn as the input
+        # block's ``hint``. A blank/whitespace-only description is absent (drawn as nothing),
+        # the same rule the title takes; its content carries answer-relevant data, so a value
+        # past Slack's hint cap is refused naming the property, never truncated or dropped.
+        if len(hint) > _MAX_HINT_LEN:
+            raise FormSchemaError(f"form schema property {name!r} hint exceeds {_MAX_HINT_LEN} characters")
+        block["hint"] = {"type": "plain_text", "text": hint}
     if dispatch:
         # The change of a reaction/conditional trigger field emits a ``block_actions`` the
         # interactivity door routes to the reaction door / a conditional re-render.
@@ -496,10 +511,12 @@ def validate_form_schema(schema: dict[str, Any], question: str) -> None:
     Raises :class:`FormSchemaError` naming the offending property/limit on any violation.
 
     Covers every limit knowable before delivery: the question-text section cap, the supported
-    property subset, the per-label cap, the option count and per-option text caps, and the
-    modal's 100-block cap. The per-send layout (pages/display) and the button-value cap depend
-    on the per-send interaction, not the schema or question, so they stay at delivery. Every
-    field is counted shown (``values`` left unset), the modal's upper bound.
+    property subset, the per-label cap, the field hint cap (the property schema's
+    ``description`` second line), the option count and per-option text caps, and the modal's
+    100-block cap. The per-send layout (pages/display), the per-send option descriptions and
+    the button-value cap depend on the per-send interaction, not the schema or question, so
+    they stay at delivery. Every field is counted shown (``values`` left unset), the modal's
+    upper bound.
     """
     if len(question) > _MAX_SECTION_TEXT_LEN:
         raise FormSchemaError(f"form question exceeds {_MAX_SECTION_TEXT_LEN} characters")

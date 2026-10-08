@@ -432,7 +432,9 @@ composite a delivery uses. A composite that is not of that shape raises
 `form` / `external`) are delivered as transcript entries the page renders as widgets;
 the `form` entry carries the interaction's answer schema, which the page renders as a
 schema-driven form widget (the visitor's answer posts back as a JSON object through
-this plugin's own answer door), and only the `external` entry carries the
+this plugin's own answer door) — a field's **second line** (its schema `description`)
+drawn as a hint under the field, and a per-send option's **second line** (its
+`description`) shown with the option — and only the `external` entry carries the
 interaction's `callback_url`, because only its widget opens one. A `notify` also carries
 the full rich-card vocabulary, appended as one `chat.media` entry the page renders as a card:
 media items rendered by kind (an `image` inline, a `document` as a download card labelled by

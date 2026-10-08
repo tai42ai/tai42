@@ -221,6 +221,18 @@ def _validate_visible_when(name: str, prop: dict[str, Any]) -> None:
         raise ValueError(f"form schema property {name!r} visibleWhen 'notEmpty' must be true")
 
 
+def _validate_description(name: str, prop: dict[str, Any]) -> None:
+    # The JSON-Schema ``description`` is the field's optional second line (drawn under its
+    # ``title`` label where a surface can). It must be a string when present; a non-string
+    # already fails loudly at the answer door's schema meta-check, so refusing it here only
+    # moves that failure to send time. A blank/whitespace-only description counts as absent
+    # (nothing to draw) — the same rule the renderers apply to a blank ``title`` — and is NOT
+    # refused: a pydantic-declared schema emits ``"description": ""`` for an empty field doc.
+    description = prop.get("description")
+    if description is not None and not isinstance(description, str):
+        raise ValueError(f"form schema property {name!r} description must be a string when present")
+
+
 def _validate_property(name: str, prop: Any) -> None:
     if not isinstance(prop, dict):
         raise ValueError(f"form schema property {name!r} must be an object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
@@ -236,6 +248,7 @@ def _validate_property(name: str, prop: Any) -> None:
             f"type ({', '.join(_SCALAR_TYPES)}) or an array of strings — a property without one (nested "
             f"object, array of non-strings, bare anyOf/oneOf/$ref, missing type) cannot be rendered into a control"
         )
+    _validate_description(name, prop)
     _validate_visible_when(name, prop)
 
 

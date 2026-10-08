@@ -78,6 +78,56 @@ async def test_get_form_ticket_renders_prefill_and_per_send_options(wired):
     assert ">blue<" not in body
 
 
+async def test_get_form_ticket_renders_field_and_option_second_lines(wired):
+    # A field's schema ``description`` draws as a <small class="hint"> second line; a per-send
+    # option's ``description`` draws as a <small class="choice-desc"> under a radio/checkbox
+    # label and folds onto the label of a <select> row (which has no second-line slot). A blank
+    # description is absent.
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "title": "Your note", "description": "Keep it short"},
+            "blank": {"type": "string", "title": "Blank", "description": "   "},
+            "tier": {"type": "string", "enum": ["a", "b"]},
+            "many": {"type": "string", "enum": ["a", "b", "c", "d", "e", "f"]},
+            "extras": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    data = {
+        "options": {
+            "tier": [
+                {"value": "a", "label": "Standard", "description": "2 hours, 50"},
+                {"value": "b", "label": "Express", "description": "1 hour, 90"},
+            ],
+            "many": [
+                {"value": "a", "label": "A", "description": "first"},
+                {"value": "b", "label": "B"},
+                {"value": "c", "label": "C"},
+                {"value": "d", "label": "D"},
+                {"value": "e", "label": "E"},
+                {"value": "f", "label": "F"},
+            ],
+            "extras": [{"value": "x", "label": "Extra", "description": "adds 10"}],
+        }
+    }
+    await _seed_form_payload(wired, format_payload={"schema": schema, "data": data})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # A field's description is a hint between the label and the control.
+    assert '<small class="hint">Keep it short</small>' in body
+    # A blank description draws no hint.
+    assert "Blank<br><small" not in body
+    # A radio option (<= threshold) carries its description as a <small> second line.
+    assert '> Standard<small class="choice-desc">2 hours, 50</small></label>' in body
+    assert '> Express<small class="choice-desc">1 hour, 90</small></label>' in body
+    # A long enum renders a <select>; the description folds onto the option text (no second-line slot).
+    assert ">A — first</option>" in body
+    assert ">B</option>" in body
+    # A checkbox (array) option carries its description as a <small> second line.
+    assert '> Extra<small class="choice-desc">adds 10</small></label>' in body
+
+
 async def test_get_form_ticket_renders_format_controls(wired):
     schema = {
         "type": "object",

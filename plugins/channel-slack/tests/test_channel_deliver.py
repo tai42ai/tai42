@@ -375,6 +375,23 @@ async def test_deliver_form_stores_the_per_send_data_and_pages_on_the_record(htt
     assert "reactions" not in record
 
 
+async def test_deliver_form_threads_the_option_second_line_onto_the_record(http_script, fake_redis):
+    # A per-send option's second line (``description``) rides the record so the modal, built
+    # at click time, draws it on the option object.
+    http_script.results.append(_ok_response(ts="1.1"))
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}}
+    delivery = make_delivery(
+        answer_format="form",
+        schema=schema,
+        data=FormData(options={"plan": [FormOption(value="s", label="Standard", description="2-3 days")]}),
+    )
+
+    await SlackChannel().deliver(delivery)
+
+    record = json.loads(fake_redis.store[_FORM_KEY])
+    assert record["data"]["options"] == {"plan": [{"value": "s", "label": "Standard", "description": "2-3 days"}]}
+
+
 async def test_deliver_form_unmappable_per_send_option_raises_before_any_io(http_script, fake_redis):
     # A per-send option on a non-string property can never render — refused before any
     # store or send, naming the field, never a fallback plain-text delivery.

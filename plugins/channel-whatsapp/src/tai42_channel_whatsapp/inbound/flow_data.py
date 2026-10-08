@@ -53,6 +53,7 @@ from tai42_channel_whatsapp.flows import (
     _screen_id,
     build_flow_data,
     component_names,
+    data_source_item,
     payload_labels,
     slot_datanames,
 )
@@ -277,9 +278,7 @@ def _update_data(
         prop = prop if isinstance(prop, dict) else {}
         out[f"{names[name]}__init"] = _init_value(prop.get("type"), value)
     for name, option_list in (update.get("options") or {}).items():
-        out[f"{names[name]}__ds"] = [
-            {"id": option["value"], "title": option.get("label") or option["value"]} for option in option_list
-        ]
+        out[f"{names[name]}__ds"] = [data_source_item(option) for option in option_list]
     for slot, value in (update.get("display") or {}).items():
         if slot in slots:
             out[slots[slot]] = value

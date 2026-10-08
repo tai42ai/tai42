@@ -573,6 +573,111 @@ def test_flow_data_per_send_options_on_a_non_string_field_raise_naming_it():
         build_flow_data(schema, {}, {"agree": [{"value": "x"}]})
 
 
+# -- the second line: a field's helper-text / caption and an option's description ----------
+
+
+def test_field_description_renders_as_helper_text_on_text_and_date_controls():
+    # A field's schema ``description`` draws as the control's ``helper-text`` on the controls Meta
+    # allows it on (TextInput — string and number — DatePicker, CalendarPicker).
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "Keep it short"},
+            "count": {"type": "integer", "description": "A whole number"},
+            "day": {"type": "string", "format": "date", "description": "When to start"},
+            "slot": {"type": "string", "format": "date", "minDate": "2026-01-01", "description": "Within the window"},
+        },
+    }
+    by_name = {c["name"]: c for c in _controls(build_form_flow(schema)[0])}
+    assert [by_name[n]["type"] for n in ("note", "count", "day", "slot")] == [
+        "TextInput",
+        "TextInput",
+        "DatePicker",
+        "CalendarPicker",
+    ]
+    assert by_name["note"]["helper-text"] == "Keep it short"
+    assert by_name["count"]["helper-text"] == "A whole number"
+    assert by_name["day"]["helper-text"] == "When to start"
+    assert by_name["slot"]["helper-text"] == "Within the window"
+
+
+def test_choice_and_boolean_field_description_renders_as_a_text_caption_after_the_control():
+    # A Dropdown/RadioButtonsGroup/CheckboxGroup/OptIn cannot hold ``helper-text`` (Meta), so a
+    # field's second line on one draws as a sibling ``TextCaption`` immediately after the control —
+    # the content is never dropped.
+    schema = {
+        "type": "object",
+        "properties": {
+            "tier": {"type": "string", "enum": ["g", "s"], "description": "Pick one tier"},
+            "agree": {"type": "boolean", "description": "Read the terms first"},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    types = [c["type"] for c in children if c["type"] != "Footer"]
+    # Each control is immediately followed by its caption.
+    assert types == ["RadioButtonsGroup", "TextCaption", "OptIn", "TextCaption"]
+    captions = [c["text"] for c in children if c["type"] == "TextCaption"]
+    assert captions == ["Pick one tier", "Read the terms first"]
+    # The control carries no helper-text (Meta would reject it on these controls).
+    assert "helper-text" not in next(c for c in children if c["type"] == "RadioButtonsGroup")
+
+
+def test_conditional_choice_field_caption_rides_inside_the_if():
+    # A choice field shown by a ``visibleWhen`` carries its caption INSIDE the same If, so the
+    # caption shows and hides with the control.
+    schema = {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string"},
+            "tier": {
+                "type": "string",
+                "enum": ["g", "s"],
+                "visibleWhen": {"field": "role", "equals": "admin"},
+                "description": "Pick one tier",
+            },
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    conditional = next(c for c in children if c.get("type") == "If")
+    inner = [node["type"] for node in conditional["then"]]
+    assert inner == ["RadioButtonsGroup", "TextCaption"]
+    assert conditional["then"][1]["text"] == "Pick one tier"
+
+
+def test_blank_field_description_draws_neither_helper_text_nor_caption():
+    schema = {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "   "},
+            "tier": {"type": "string", "enum": ["g"], "description": ""},
+        },
+    }
+    children = _screen_children(build_form_flow(schema)[0])
+    assert all(c["type"] != "TextCaption" for c in children)
+    assert "helper-text" not in next(c for c in children if c["type"] == "TextInput")
+
+
+def test_option_description_rides_the_data_source_and_the_published_item_shape_is_stable():
+    schema = {"type": "object", "properties": {"tier": {"type": "string", "enum": ["g"]}}}
+    options = {
+        "tier": [
+            {"value": "g", "label": "Gold", "description": "2 hours, 50"},
+            {"value": "s", "label": "Silver"},
+        ]
+    }
+    data = build_flow_data(schema, {}, options)
+    # The option carrying a second line gets a ``description`` item key; the one without omits it.
+    assert data["tier__ds"] == [
+        {"id": "g", "title": "Gold", "description": "2 hours, 50"},
+        {"id": "s", "title": "Silver"},
+    ]
+    # The published Flow ALWAYS declares ``description`` on the data-source item type, so its shape
+    # — and so its cache key — does not depend on a given send carrying option descriptions.
+    screen = build_form_flow(schema, option_fields={"tier"})[0]["screens"][0]
+    item_props = screen["data"]["tier__ds"]["items"]["properties"]
+    assert set(item_props) == {"id", "title", "description"}
+
+
 # -- component_names: the identifier-safe naming rule --------------------------
 
 

@@ -38,63 +38,97 @@ def _attr(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _string_choices(prop: dict[str, Any], options: list[dict[str, Any]] | None) -> list[tuple[str, str]] | None:
-    # The ``(value, label)`` choice pairs for a string property: the per-send option list when
-    # given (it replaces the enum for this send), else the property's own ``enum``, else None
-    # (a free-text string).
+def _second_line(text: Any) -> str | None:
+    # A non-blank secondary line (a field's or an option's ``description``), else None. A
+    # blank/whitespace-only value counts as absent — the same rule a blank ``title`` gets.
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _string_choices(
+    prop: dict[str, Any], options: list[dict[str, Any]] | None
+) -> list[tuple[str, str, str | None]] | None:
+    # The ``(value, label, description)`` choice triples for a string property: the per-send option
+    # list when given (it replaces the enum for this send), else the property's own ``enum``, else
+    # None (a free-text string). A schema ``enum`` carries no labels or second lines.
     if options is not None:
-        return [(str(option["value"]), str(option.get("label") or option["value"])) for option in options]
+        return [
+            (str(option["value"]), str(option.get("label") or option["value"]), _second_line(option.get("description")))
+            for option in options
+        ]
     enum = prop.get("enum")
     if enum is not None:
-        return [(str(choice), str(choice)) for choice in enum]
+        return [(str(choice), str(choice), None) for choice in enum]
     return None
 
 
-def _array_choices(prop: dict[str, Any], options: list[dict[str, Any]] | None) -> list[tuple[str, str]] | None:
-    # The choice pairs for an array-of-strings property: the per-send option list, else the
+def _array_choices(
+    prop: dict[str, Any], options: list[dict[str, Any]] | None
+) -> list[tuple[str, str, str | None]] | None:
+    # The choice triples for an array-of-strings property: the per-send option list, else the
     # string ``items`` enum, else None (a free list the human types one entry per line).
     if options is not None:
-        return [(str(option["value"]), str(option.get("label") or option["value"])) for option in options]
+        return [
+            (str(option["value"]), str(option.get("label") or option["value"]), _second_line(option.get("description")))
+            for option in options
+        ]
     items = prop.get("items")
     enum = items.get("enum") if isinstance(items, dict) else None
     if isinstance(enum, list):
-        return [(str(choice), str(choice)) for choice in enum]
+        return [(str(choice), str(choice), None) for choice in enum]
     return None
 
 
-def _string_select(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any) -> str:
-    # A ``<select>`` over ``(value, label)`` pairs: a leading blank option lets an
-    # optional select stay empty and forces a required one to a real choice on submit.
+def _option_text(label: str, description: str | None) -> str:
+    # A single-line option caption for a control that has no second-line slot (a ``<select>``
+    # row): the second line is folded onto the label after an em dash so its content is never
+    # dropped. A control that CAN draw a second line (radio/checkbox) uses ``description`` directly.
+    if description is None:
+        return html.escape(label)
+    return f"{html.escape(label)} — {html.escape(description)}"
+
+
+def _string_select(esc_name: str, req_attr: str, choices: list[tuple[str, str, str | None]], value: Any) -> str:
+    # A ``<select>`` over ``(value, label, description)`` triples: a leading blank option lets an
+    # optional select stay empty and forces a required one to a real choice on submit. A native
+    # ``<option>`` has no second-line slot, so a description folds onto the option text.
     parts = ['<option value="">—</option>']
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         selected = " selected" if value is not None and str(value) == opt_value else ""
-        parts.append(f'<option value="{_attr(opt_value)}"{selected}>{html.escape(opt_label)}</option>')
+        parts.append(f'<option value="{_attr(opt_value)}"{selected}>{_option_text(opt_label, opt_desc)}</option>')
     return f'<select data-field="{esc_name}" data-kind="string"{req_attr}>' + "".join(parts) + "</select>"
 
 
-def _string_radio(esc_name: str, req_attr: str, choices: list[tuple[str, str]], value: Any) -> str:
-    # A radio group over ``(value, label)`` pairs — the short-list control. ``required`` on
-    # every radio makes the browser demand one selection in the group.
+def _choice_second_line(description: str | None) -> str:
+    # The ``<small>`` second line under a radio/checkbox option label, or empty when absent.
+    return f'<small class="choice-desc">{html.escape(description)}</small>' if description is not None else ""
+
+
+def _string_radio(esc_name: str, req_attr: str, choices: list[tuple[str, str, str | None]], value: Any) -> str:
+    # A radio group over ``(value, label, description)`` triples — the short-list control.
+    # ``required`` on every radio makes the browser demand one selection in the group; a
+    # description renders as a ``<small>`` second line under the option label.
     parts = []
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         checked = " checked" if value is not None and str(value) == opt_value else ""
         parts.append(
             f'<label class="choice"><input type="radio" name="{esc_name}" data-field="{esc_name}" '
-            f'data-kind="string" value="{_attr(opt_value)}"{checked}{req_attr}> {html.escape(opt_label)}</label>'
+            f'data-kind="string" value="{_attr(opt_value)}"{checked}{req_attr}> {html.escape(opt_label)}'
+            f"{_choice_second_line(opt_desc)}</label>"
         )
     return "".join(parts)
 
 
-def _checkbox_group(esc_name: str, choices: list[tuple[str, str]], value: Any) -> str:
+def _checkbox_group(esc_name: str, choices: list[tuple[str, str, str | None]], value: Any) -> str:
     # A checkbox group for an array-of-strings (multiple-choice) field: each checked box
-    # contributes its value to the submitted list.
+    # contributes its value to the submitted list; a description renders as a ``<small>`` second
+    # line under the option label.
     selected = {str(item) for item in value} if isinstance(value, list) else set()
     parts = []
-    for opt_value, opt_label in choices:
+    for opt_value, opt_label, opt_desc in choices:
         checked = " checked" if opt_value in selected else ""
         parts.append(
             f'<label class="choice"><input type="checkbox" data-field="{esc_name}" data-kind="array" '
-            f'value="{_attr(opt_value)}"{checked}> {html.escape(opt_label)}</label>'
+            f'value="{_attr(opt_value)}"{checked}> {html.escape(opt_label)}{_choice_second_line(opt_desc)}</label>'
         )
     return "".join(parts)
 
@@ -115,12 +149,15 @@ def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any) 
     return f'<input data-field="{esc_name}" data-kind="string" type="date"{bounds}{val_attr}{req_attr}>'
 
 
-def _labelled(esc_label: str, control: str, *, grouped: bool, group_attr: str = "") -> str:
+def _labelled(esc_label: str, control: str, *, grouped: bool, group_attr: str = "", hint: str | None = None) -> str:
     # Wrap a control in its label — a ``<fieldset>``/``<legend>`` for a radio/checkbox group
-    # (one label cannot own several inputs), a ``<label>`` for a single control.
+    # (one label cannot own several inputs), a ``<label>`` for a single control. A field's
+    # second line (its schema ``description``) renders as a ``<small class="hint">`` between the
+    # label text and the control.
+    hint_html = f'<small class="hint">{html.escape(hint)}</small>' if hint is not None else ""
     if grouped:
-        return f"<fieldset{group_attr}><legend>{esc_label}</legend>{control}</fieldset>"
-    return f"<label>{esc_label}<br>{control}</label>"
+        return f"<fieldset{group_attr}><legend>{esc_label}</legend>{hint_html}{control}</fieldset>"
+    return f"<label>{esc_label}<br>{hint_html}{control}</label>"
 
 
 def _render_field(
@@ -143,39 +180,42 @@ def _render_field(
     """
     esc_name = _attr(name)
     esc_label = html.escape(str(prop.get("title") or name))
+    hint = _second_line(prop.get("description"))
     req_attr = " required" if is_required else ""
     ptype = prop.get("type")
     if ptype == "array":
         choices = _array_choices(prop, options)
         if choices is not None:
             group_attr = ' data-array-required="1"' if is_required else ""
-            return _labelled(esc_label, _checkbox_group(esc_name, choices, value), grouped=True, group_attr=group_attr)
+            return _labelled(
+                esc_label, _checkbox_group(esc_name, choices, value), grouped=True, group_attr=group_attr, hint=hint
+            )
         # No declared choices: a free list, one entry per line (the submit script splits it).
         text = "\n".join(str(item) for item in value) if isinstance(value, list) else ""
         control = f'<textarea data-field="{esc_name}" data-kind="arraytext"{req_attr}>{html.escape(text)}</textarea>'
-        return _labelled(esc_label, control, grouped=False)
+        return _labelled(esc_label, control, grouped=False, hint=hint)
     if ptype == "string":
         choices = _string_choices(prop, options)
         if choices is not None:
             if len(choices) <= RADIO_OPTION_THRESHOLD:
-                return _labelled(esc_label, _string_radio(esc_name, req_attr, choices, value), grouped=True)
-            return _labelled(esc_label, _string_select(esc_name, req_attr, choices, value), grouped=False)
+                return _labelled(esc_label, _string_radio(esc_name, req_attr, choices, value), grouped=True, hint=hint)
+            return _labelled(esc_label, _string_select(esc_name, req_attr, choices, value), grouped=False, hint=hint)
         if prop.get("format") == "date":
-            return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False)
+            return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value), grouped=False, hint=hint)
         val_attr = f' value="{_attr(value)}"' if value is not None else ""
         control = f'<input data-field="{esc_name}" data-kind="string" type="text"{val_attr}{req_attr}>'
-        return _labelled(esc_label, control, grouped=False)
+        return _labelled(esc_label, control, grouped=False, hint=hint)
     if ptype == "boolean":
         # A checkbox always submits a boolean (checked/unchecked), so the field is always
         # present — no ``required`` attribute, which would force it checked.
         checked = " checked" if value is True else ""
         control = f'<input data-field="{esc_name}" data-kind="boolean" type="checkbox"{checked}>'
-        return _labelled(esc_label, control, grouped=False)
+        return _labelled(esc_label, control, grouped=False, hint=hint)
     if ptype in ("integer", "number"):
         step = ' step="1"' if ptype == "integer" else ' step="any"'
         val_attr = f' value="{_attr(value)}"' if value is not None else ""
         control = f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{val_attr}{req_attr}>'
-        return _labelled(esc_label, control, grouped=False)
+        return _labelled(esc_label, control, grouped=False, hint=hint)
     raise _FormRenderError(f"form schema property {name!r} has unsupported type {ptype!r}")
 
 
@@ -289,6 +329,7 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
         "<style>body{font-family:system-ui,sans-serif;margin:3rem;max-width:40rem}"
         "label{display:block;margin:1rem 0}label.choice{display:block;margin:.3rem 0}"
         "input,select,textarea{font-size:1rem;margin-top:.3rem}"
+        "small.hint,small.choice-desc{display:block;font-size:.85rem;color:#666}"
         "fieldset{margin:1rem 0;border:1px solid #ccc;padding:.5rem 1rem}"
         "h2{font-size:1.1rem;margin-top:1.5rem}h3{font-size:1rem;margin:1rem 0 .3rem}"
         "dl{margin:1rem 0}dt{font-weight:600;margin-top:.6rem}dd{margin:0 0 .3rem}"

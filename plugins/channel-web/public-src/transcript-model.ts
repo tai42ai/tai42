@@ -29,11 +29,13 @@ export const ANSWER_FORMATS: ReadonlySet<string> = new Set<AnswerFormat>([
 ]);
 
 /** One per-send choice for a form field: `value` is submitted as the answer,
- * `label` is shown in its place (`null` shows the value itself). A per-send option
- * list REPLACES a property's schema choices for this one delivery. */
+ * `label` is shown in its place (`null` shows the value itself), and `description`
+ * is an optional second line shown under the label (`null`/absent shows none). A
+ * per-send option list REPLACES a property's schema choices for this one delivery. */
 export interface FormOptionData {
   readonly value: string;
   readonly label: string | null;
+  readonly description?: string | null;
 }
 
 /** A form question's per-send enrichment: `values` prefills top-level properties

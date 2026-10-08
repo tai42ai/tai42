@@ -72,6 +72,22 @@ def test_form_option_value_and_label_non_blank():
         FormOption(value="x", label="  ")
 
 
+def test_form_option_description_is_optional_and_non_blank_when_present():
+    # The second line is optional (absent by default, no length bound) and, like the label,
+    # must be non-blank when set.
+    assert FormOption(value="x").description is None
+    assert FormOption(value="x", label="X", description="2 hours, 88.28").description == "2 hours, 88.28"
+    with pytest.raises(ValueError, match="option description must be non-blank"):
+        FormOption(value="x", description="  ")
+
+
+def test_form_option_description_survives_the_dump_rehydrate_seam():
+    # Options cross the send seam as a dumped dict and are rehydrated for delivery; the second
+    # line must ride that seam by key.
+    option = FormOption(value="green", label="Green", description="in stock")
+    assert FormOption.model_validate(option.model_dump()).description == "in stock"
+
+
 def test_form_data_value_replaced_by_per_send_option():
     # A per-send option list REPLACES the property's enum, so a value outside the enum
     # but inside the per-send list is accepted.

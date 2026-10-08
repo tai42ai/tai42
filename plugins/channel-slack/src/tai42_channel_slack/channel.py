@@ -344,15 +344,19 @@ def _error_detail(body: dict[str, Any]) -> str:
 def _form_data_dict(delivery: ChannelDelivery) -> dict[str, Any] | None:
     """The form's per-send ``{values, options}`` as plain JSON for the record and the modal builder.
 
-    Each option is ``{"value", "label"?}`` (label omitted when absent). ``None``
-    when the ask carried no data.
+    Each option is ``{"value", "label"?, "description"?}`` (``label`` and the second-line
+    ``description`` each omitted when absent). ``None`` when the ask carried no data.
     """
     if delivery.data is None:
         return None
     options: dict[str, list[dict[str, Any]]] = {}
     for name, choices in delivery.data.options.items():
         options[name] = [
-            {"value": choice.value, **({"label": choice.label} if choice.label is not None else {})}
+            {
+                "value": choice.value,
+                **({"label": choice.label} if choice.label is not None else {}),
+                **({"description": choice.description} if choice.description is not None else {}),
+            }
             for choice in choices
         ]
     return {"values": delivery.data.values, "options": options}

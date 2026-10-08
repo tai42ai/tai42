@@ -155,6 +155,32 @@ async def test_field_changed_routes_to_react_and_applies_the_update(
     assert out["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
 
 
+async def test_reaction_option_second_line_rides_the_data_source(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A reaction that replaces a field's choices mid-form carries each option's second line into
+    # the data-source ``description`` exactly as the publish path does.
+    await _seed(fake_redis)
+    stub = stub_app.interactions
+    stub.react_result = {
+        "options": {"tier": [{"value": "g", "label": "Gold", "description": "2 hours, 50"}, {"value": "s"}]}
+    }
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "tier", "tier": "g", "qty": "5"},
+    }
+    request, aes_key, iv = _request(payload)
+    response = await flow_handler(request)
+
+    out = _decrypt_response(response, aes_key, iv)
+    assert out["data"]["tier__ds"] == [
+        {"id": "g", "title": "Gold", "description": "2 hours, 50"},
+        {"id": "s", "title": "s"},
+    ]
+
+
 async def test_submit_with_no_errors_completes_the_flow(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):

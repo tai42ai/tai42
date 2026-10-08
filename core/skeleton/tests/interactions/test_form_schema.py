@@ -83,6 +83,26 @@ def test_accepts_the_full_valid_subset():
     ]
 
 
+def test_admits_a_string_description_as_the_field_second_line():
+    # The JSON-Schema ``description`` is the field's optional second line; a string (including an
+    # empty string, which pydantic-declared schemas emit for an empty field doc) is admitted.
+    assert (
+        validate_channel_form_schema(
+            {"type": "object", "properties": {"x": {"type": "string", "description": "a hint"}}}
+        )
+        is None
+    )
+    assert (
+        validate_channel_form_schema({"type": "object", "properties": {"x": {"type": "string", "description": ""}}})
+        is None
+    )
+
+
+def test_rejects_a_non_string_description():
+    with pytest.raises(ValueError, match="description must be a string when present"):
+        validate_channel_form_schema({"type": "object", "properties": {"x": {"type": "string", "description": 7}}})
+
+
 def test_rejects_non_object_root():
     with pytest.raises(ValueError, match="top-level type must be 'object'"):
         validate_channel_form_schema({"type": "array", "properties": {"x": {"type": "string"}}})

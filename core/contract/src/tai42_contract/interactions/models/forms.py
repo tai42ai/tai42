@@ -50,15 +50,20 @@ class FormOption(BaseModel):
     """One per-send choice for a form field. Frozen.
 
     ``value`` is the string submitted as the answer, ``label`` (when set) is shown
-    to the human in its place. A per-send option list REPLACES a property's schema
-    ``enum`` for ONE send — the published form is unchanged, so a variant needs no
-    re-publish.
+    to the human in its place, and ``description`` (when set) is an OPTIONAL secondary
+    line shown under ``label`` — a surface keeps a short label and moves the rest (a
+    time, a price) onto the second line. A per-send option list REPLACES a property's
+    schema ``enum`` for ONE send — the published form is unchanged, so a variant needs
+    no re-publish. The ``description`` carries content, so a surface whose control has
+    no native second-line affordance draws it by that surface's own documented rule —
+    never silently drops it; a per-medium length cap is each channel's own.
     """
 
     model_config = ConfigDict(frozen=True)
 
     value: str
     label: str | None = None
+    description: str | None = None
 
     @field_validator("value")
     @classmethod
@@ -72,6 +77,13 @@ class FormOption(BaseModel):
     def _label_non_blank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
             raise ValueError("form option label must be non-blank when present")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _description_non_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("form option description must be non-blank when present")
         return value
 
 
