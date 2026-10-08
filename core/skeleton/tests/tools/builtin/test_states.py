@@ -249,6 +249,11 @@ async def test_explicit_kind_key_without_target_and_no_context_refused(app) -> N
         await builtin_states.state_read("notes", subject={"kind": "session", "key": "s-7"})
 
 
+async def test_a_malformed_explicit_subject_is_a_subject_refusal(app) -> None:
+    with pytest.raises(SubjectRefusedError, match="is not a valid subject: key: "):
+        await builtin_states.state_read("notes", subject={"target_kind": "agent", "target_name": "a", "kind": "thread"})
+
+
 async def test_no_subject_and_no_context_refused(app) -> None:
     with pytest.raises(SubjectRefusedError, match="no subject in scope"):
         await builtin_states.state_read("notes")

@@ -14,7 +14,7 @@ fails, a subject that cannot be resolved — each raises and the run's outcome c
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -26,7 +26,6 @@ from tai42_contract.states import (
     StateBatchWrite,
     StateBinding,
     StateSubject,
-    StateTemplateJq,
     WriteOrigin,
 )
 from tai42_contract.states.errors import (
@@ -181,36 +180,20 @@ async def _scope_engaged(app: TaiMCP, attach: StateAttach, run_input: dict[str, 
 async def _resolve_subject(app: TaiMCP, attach: StateAttach, run_input: dict[str, Any]) -> StateSubject:
     """Resolve the record subject for ``attach`` from its ``subject_expr`` over the run input.
 
-    ``subject_expr`` yields either a FULL subject object (``{target_kind, target_name, kind,
-    key}``) or a bare KEY string. A key string takes its scope ``(target_kind, target_name)``
-    from the ambient :class:`~tai42_contract.states.StateContext` the door deposited and its
-    ``kind`` from the state's ``default_subject_kind``. Any other shape, or a key with no
-    ambient scope, is a loud refusal — never a silent skip.
+    ``subject_expr`` must yield something: a jq ``null`` is a loud refusal here. Any other value
+    is a subject reference the platform's :meth:`app.states.resolve_subject` resolves — a full
+    subject object, a ``{kind, key}`` object or a bare key string under the ambient
+    :class:`~tai42_contract.states.StateContext` — refusing an unresolvable one with
+    :class:`~tai42_contract.states.SubjectRefusedError`.
     """
     expr = await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr)
     resolved = await run_jq_first(expr, run_input)
-    if isinstance(resolved, dict):
-        return StateSubject.model_validate(resolved)
-    if not isinstance(resolved, str) or not resolved.strip():
+    if resolved is None:
         raise ValueValidationError(
             f"state binding subject_expr for state {attach.state!r} must yield a non-empty key string or a full "
             f"subject object, got {resolved!r}"
         )
-    ctx = app.states.context()
-    if ctx is None:
-        raise ValueValidationError(
-            f"state binding subject_expr for state {attach.state!r} yielded key {resolved!r} but no ambient "
-            f"subject scope is set — yield a full subject object instead"
-        )
-    decl = await app.states.get_declaration(attach.state)
-    if decl is None:
-        raise StateNotFoundError(f"no state declared as {attach.state!r}")
-    return StateSubject(
-        target_kind=ctx.candidates.target_kind,
-        target_name=ctx.candidates.target_name,
-        kind=decl.default_subject_kind,
-        key=resolved,
-    )
+    return await app.states.resolve_subject(attach.state, resolved)
 
 
 async def apply_binding_injections(app: TaiMCP, binding: StateBinding, arguments: dict[str, Any]) -> None:
@@ -440,7 +423,9 @@ async def _validate_injections(app: TaiMCP, attach: StateAttach) -> None:
         else:
             if injection.template_jq is None:
                 raise AssertionError
-            await _require_program(app, attach.state, injection.template_jq, "input", declared=attach.templates)
+            await app.states.resolve_template_jq(
+                attach.state, injection.template_jq, purpose="input", declared=attach.templates
+            )
 
 
 async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
@@ -459,7 +444,9 @@ async def _validate_updates(app: TaiMCP, attach: StateAttach) -> None:
         else:
             if update.template_jq is None:
                 raise AssertionError
-            program = await _require_program(app, attach.state, update.template_jq, "update", declared=attach.templates)
+            program = await app.states.resolve_template_jq(
+                attach.state, update.template_jq, purpose="update", declared=attach.templates
+            )
             if update.adapter is not None:
                 compile_check(
                     await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter),
@@ -486,38 +473,3 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
             compile_check(await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr))
         await _validate_injections(app, attach)
         await _validate_updates(app, attach)
-
-
-async def _require_program(
-    app: TaiMCP, state: str, name: str, purpose: str, *, declared: Iterable[str] = ()
-) -> StateTemplateJq:
-    """Resolve a named ``template_jq`` across ``state``'s attachments, assert its purpose, and return its entry.
-
-    The caller can read declared ``params`` off the entry. An unknown or ambiguous name, or a
-    wrong purpose, is a loud refusal. ``declared`` names the binding's own would-be-attached
-    templates: on the SAVE seam they are already attached and appear here anyway, so this only
-    matters to the dry-run seam, where a self-declared template resolves without being attached.
-    """
-    attachments = await app.states.list_attachments(state)
-    templates = {row["template"] for row in attachments} | set(declared)
-    target, program_name = name.split(".", 1) if "." in name else (None, name)
-    matches: list[StateTemplateJq] = []
-    for template_name in templates:
-        if target is not None and template_name != target:
-            continue
-        doc = await app.states.get_template(template_name)
-        entry = (doc.template_jq or {}).get(program_name) if doc is not None else None
-        if entry is not None:
-            matches.append(entry)
-    if target is not None and target not in templates:
-        raise StateNotFoundError(f"template {target!r} is not attached on state {state!r}")
-    if not matches:
-        raise StateNotFoundError(f"no template_jq {name!r} on any template attached on state {state!r}")
-    if len(matches) > 1:
-        raise ValueValidationError(f"template_jq {name!r} is declared by more than one template on state {state!r}")
-    entry = matches[0]
-    if entry.purpose != purpose:
-        raise ValueValidationError(
-            f"template_jq {name!r} on state {state!r} has purpose {entry.purpose!r}, needs {purpose!r}"
-        )
-    return entry

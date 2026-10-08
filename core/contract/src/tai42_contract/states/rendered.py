@@ -1,4 +1,4 @@
-"""The rendered state-template models the states facet serves.
+"""The rendered and resolved state-template models the states facet serves.
 
 A stored template rendered by the platform: every program body as jq text, the fragment as a
 plain schema, and the input programs in dependency order. Frozen, ``extra="forbid"``.
@@ -76,3 +76,19 @@ class RenderedAttachment(BaseModel):
     parameters: dict[str, Any]
     declarations: dict[str, Any]
     version: str
+
+
+class ResolvedTemplateJq(BaseModel):
+    """A ``template_jq`` reference resolved on a state: the declaring ``template``, its ``program`` name and facts.
+
+    ``purpose`` is the program's purpose (the one the resolution asked for), ``params`` its declared
+    parameter names and ``path`` the attachment path the program's record subtree sits under.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    template: str
+    program: str
+    purpose: Literal["input", "update"]
+    params: list[str]
+    path: list[PathSegment]

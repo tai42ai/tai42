@@ -182,7 +182,7 @@ async def test_undeclared_param_is_refused(svc: StatesService) -> None:
 
 async def test_eval_refuses_an_update_purpose_program(svc: StatesService) -> None:
     await _attached(svc)
-    with pytest.raises(ValueValidationError, match="eval needs an 'input'-purpose"):
+    with pytest.raises(ValueValidationError, match="has purpose 'update', needs 'input'"):
         await svc.eval_template_jq(_STATE.name, _subject(), "add", {})
 
 
@@ -215,7 +215,7 @@ async def test_unknown_update_program_is_a_not_found(svc: StatesService) -> None
 
 async def test_apply_refuses_an_input_purpose_program(svc: StatesService) -> None:
     await _attached(svc)
-    with pytest.raises(ValueValidationError, match="apply needs an 'update'-purpose"):
+    with pytest.raises(ValueValidationError, match="has purpose 'input', needs 'update'"):
         await svc.apply_template_jq(_STATE.name, _subject(), "anything_due", None, op_id=None, origin=_ORIGIN)
 
 

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.states.store import PostgresStatesStore
     from tai42_skeleton.states.templates import StateTemplate
 
-    from .catalog import CatalogSnapshot, StateEntry
+    from .catalog import CatalogSnapshot, StateEntry, TemplateEntry
     from .registries import (
         StatesAttachReconcilerRegistry,
         StatesAttachValidatorRegistry,
@@ -76,6 +76,8 @@ class _StatesServiceBase:
     async def _get_template_or_raise(self, name: str) -> StateTemplate: ...
 
     async def _resolve_template_body(self, name: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
+
+    async def _template_entry(self, name: str) -> TemplateEntry | None: ...
 
     async def _template_at(self, name: str, version: int, body: dict[str, Any]) -> StateTemplate: ...
 

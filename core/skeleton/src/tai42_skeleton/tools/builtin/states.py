@@ -15,8 +15,10 @@ A *state* is a declared JSON document, one per *subject*
   conversation turn or a hook fire writes the subject it is already about without
   the agent naming it.
 
-With no subject in scope (an explicit ``{kind, key}`` or an omitted subject and no
-ambient context) the tool raises loudly rather than writing an unaddressed record.
+The platform's subject resolver (``tai42_app.states.resolve_subject``) applies these rules: with
+no subject in scope (an explicit ``{kind, key}`` or an omitted subject and no ambient context),
+or a subject that does not validate, the tool raises loudly rather than writing an unaddressed
+record.
 
 Write provenance follows the platform's chokepoint discipline: each tool
 supplies ONLY what it knows — its own name as ``consumer``, the run's session as
@@ -34,12 +36,7 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.states import (
-    StateNotFoundError,
-    StateSubject,
-    SubjectRefusedError,
-    WriteOrigin,
-)
+from tai42_contract.states import WriteOrigin
 from tai42_contract.tools import current_tool_invocation
 
 from tai42_skeleton.tools.attribution import get_run_attribution
@@ -73,59 +70,6 @@ def _origin(op_id: str | None = None) -> WriteOrigin:
     )
 
 
-async def _resolve_subject(state: str, subject: dict[str, Any] | None) -> StateSubject:
-    """Resolve the subject a state tool addresses.
-
-    An explicit ``{target_kind, target_name, kind, key}`` is used verbatim; an explicit
-    ``{kind, key}`` takes its target from the ambient context; an omitted subject
-    resolves the candidate the door knows for the state's ``default_subject_kind``.
-    Every unresolvable case raises :class:`SubjectRefusedError` naming what is missing —
-    never a silent unaddressed write.
-    """
-    ctx = tai42_app.states.context()
-    if subject is not None:
-        has_target_kind = "target_kind" in subject
-        has_target_name = "target_name" in subject
-        if has_target_kind != has_target_name:
-            raise SubjectRefusedError(
-                f"state {state!r}: an explicit subject must give both target_kind and target_name or neither"
-            )
-        if has_target_kind:
-            return StateSubject.model_validate(subject)
-        if ctx is None:
-            raise SubjectRefusedError(
-                f"state {state!r}: subject {subject!r} names no target and no ambient "
-                "context is in scope to supply one — pass target_kind and target_name"
-            )
-        return StateSubject.model_validate(
-            {
-                "target_kind": ctx.candidates.target_kind,
-                "target_name": ctx.candidates.target_name,
-                **subject,
-            }
-        )
-    if ctx is None:
-        raise SubjectRefusedError(f"state {state!r}: no subject in scope: pass subject explicitly")
-    declaration = await tai42_app.states.get_declaration(state)
-    if declaration is None:
-        raise StateNotFoundError(f"no state declared as {state!r}")
-    kind = declaration.default_subject_kind
-    key = ctx.candidates.by_kind.get(kind)
-    if key is None:
-        raise SubjectRefusedError(
-            f"state {state!r}: the ambient {ctx.door!r} door resolved no subject of kind "
-            f"{kind!r} (the state's default_subject_kind) — pass subject explicitly"
-        )
-    return StateSubject.model_validate(
-        {
-            "target_kind": ctx.candidates.target_kind,
-            "target_name": ctx.candidates.target_name,
-            "kind": kind,
-            "key": key,
-        }
-    )
-
-
 @tai42_app.tools.tool(output_schema=_RESULT_SCHEMA, tags={"states"})
 async def state_read(state: str, subject: dict[str, Any] | None = None) -> Any:
     """Read the calling subject's document for a state.
@@ -148,7 +92,7 @@ async def state_read(state: str, subject: dict[str, Any] | None = None) -> Any:
         StateNotFoundError: No state is declared under ``state``.
         StatesNotConfiguredError: The states component's database is unbound.
     """
-    resolved = await _resolve_subject(state, subject)
+    resolved = await tai42_app.states.resolve_subject(state, subject)
     record = await tai42_app.states.read(state, resolved)
     return record.model_dump(mode="json") if record is not None else None
 
@@ -172,7 +116,7 @@ async def state_replace(state: str, data: dict[str, Any], subject: dict[str, Any
         StateNotFoundError: No state is declared under ``state``.
         StatesNotConfiguredError: The states component's database is unbound.
     """
-    resolved = await _resolve_subject(state, subject)
+    resolved = await tai42_app.states.resolve_subject(state, subject)
     record = await tai42_app.states.replace(state, resolved, data, origin=_origin())
     return record.model_dump(mode="json")
 
@@ -197,7 +141,7 @@ async def state_merge(state: str, patch: dict[str, Any], subject: dict[str, Any]
         StateNotFoundError: No state is declared under ``state``.
         StatesNotConfiguredError: The states component's database is unbound.
     """
-    resolved = await _resolve_subject(state, subject)
+    resolved = await tai42_app.states.resolve_subject(state, subject)
     record = await tai42_app.states.merge(state, resolved, patch, origin=_origin())
     return record.model_dump(mode="json")
 
@@ -232,6 +176,6 @@ async def state_apply(
         StateNotFoundError: No state is declared under ``state``.
         StatesNotConfiguredError: The states component's database is unbound.
     """
-    resolved = await _resolve_subject(state, subject)
+    resolved = await tai42_app.states.resolve_subject(state, subject)
     result = await tai42_app.states.apply(state, resolved, ops, op_id=op_id, origin=_origin(op_id))
     return result.model_dump(mode="json")

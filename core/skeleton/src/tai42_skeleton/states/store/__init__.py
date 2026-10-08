@@ -46,12 +46,10 @@ from .cursors import make_cursor
 from .retention import store_settings_default_retention, store_settings_retention
 from .store import PostgresStatesStore
 
-# ``_iso_now`` / ``_traced_paths`` keep their original ``states.store`` public path (the pure
-# trace helpers are imported from here by the service test suite); the redundant alias marks
-# the re-export explicit.
-from .trace import _iso_now as _iso_now
+# ``_traced_paths`` keeps its ``states.store`` public path (the pure trace helpers are imported
+# from here by the service test suite); the redundant alias marks the re-export explicit.
 from .trace import _traced_paths as _traced_paths
-from .trace import stamp_trace
+from .trace import stamp_trace, trace_stamp
 
 __all__ = [
     "PostgresStatesStore",
@@ -61,4 +59,5 @@ __all__ = [
     "states_settings",
     "store_settings_default_retention",
     "store_settings_retention",
+    "trace_stamp",
 ]

@@ -19,7 +19,7 @@ from tai42_contract.states.models import StateDeclaration, StateSubject, StateTe
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.states.schema import _validate_document
-from tai42_skeleton.states.store import _iso_now, _traced_paths, stamp_trace
+from tai42_skeleton.states.store import _traced_paths, stamp_trace, trace_stamp
 
 _ORIGIN = WriteOrigin(consumer="c")
 
@@ -283,14 +283,7 @@ class FakeStatesStore:
         ]
         traced = _traced_paths(attach_rows)
         if traced:
-            stamp = {
-                "meta": origin.meta,
-                "run": origin.run_id,
-                "turn": origin.turn_id,
-                "inbound": origin.inbound_id,
-                "at": _iso_now(),
-            }
-            stamp_trace(ops, traced, stamp)
+            stamp_trace(ops, traced, trace_stamp(origin))
         doc: dict[str, Any] = {}
         for op in ops:
             if op["op"] == "set":
