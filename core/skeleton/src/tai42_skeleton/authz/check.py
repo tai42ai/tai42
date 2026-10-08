@@ -285,10 +285,11 @@ async def _authorize_pinned_route(
     verifier = _tool_edge_verifier(ac_settings)
     resource_ids = await _resolve_pinned_resource_ids(verifier, path, method, version)
 
-    # The pre-auth login surface is public regardless of the policy layers and
-    # short-circuits ahead of every one of them, as it does at the HTTP edge; running them
-    # would make it HARDER to reach as a tool than as its route.
-    if is_always_public_prefix(path, ac_settings):
+    # A pre-auth surface (the pinned route's ``pre_auth`` declaration, or an operator's
+    # always-public prefix) is public regardless of the policy layers and short-circuits ahead
+    # of every one of them, as it does at the HTTP edge; running them would make it HARDER to
+    # reach as a tool than as its route.
+    if route.pre_auth or is_always_public_prefix(path, ac_settings):
         return
 
     public = ac_settings.public_resource_id

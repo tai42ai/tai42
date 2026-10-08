@@ -20,11 +20,9 @@ from tai42_skeleton.access_control.backend import (
     AccessControlAuthBackend,
     AuthorizationError,
 )
-from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.user import TaiUser, effective_scopes
-from tai42_skeleton.access_control.verifier import is_always_public_prefix
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
@@ -490,28 +488,46 @@ async def test_owner_condition_denies_when_gated_on_attenuated_length(monkeypatc
         await backend.authenticate(_conn({"X-Api-Key": "k"}))
 
 
-async def test_public_path_short_circuits_without_verifying(monkeypatch):
+async def test_pre_auth_route_short_circuits_without_verifying(monkeypatch):
     settings = AccessControlSettings()
     spy = _SpyVerifier()
     backend = _backend(spy, settings)
-    # A garbage credential on the always-public login surface yields the
-    # unauthenticated result with the verifier NEVER called.
+    # A garbage credential on a route declaring ``pre_auth=True`` (the login methods door)
+    # yields the unauthenticated result with the verifier NEVER called.
     creds, user = await backend.authenticate(_conn({"Authorization": "Bearer garbage"}, path="/api/login/methods"))
     assert isinstance(user, UnauthenticatedUser)
     assert "unauthenticated" in creds.scopes
     assert spy.called == 0
 
 
-@pytest.mark.parametrize("path", ["/api//login/methods", "/api/login/./methods", "/api/login/"])
-async def test_step0_decides_the_login_surface_on_the_canonical_form(path):
-    """Step 0 and the resource guard ask ONE predicate over ONE canonical form, so a
+async def test_operator_prefix_short_circuits_without_verifying(monkeypatch):
+    # An operator's own always-public prefix feeds the same skip as a route's declaration.
+    settings = AccessControlSettings(always_public_path_prefixes=("/portal",))
+    spy = _SpyVerifier()
+    backend = _backend(spy, settings)
+    creds, user = await backend.authenticate(_conn({"Authorization": "Bearer garbage"}, path="/portal/form"))
+    assert isinstance(user, UnauthenticatedUser)
+    assert "unauthenticated" in creds.scopes
+    assert spy.called == 0
+
+
+async def test_a_served_method_decides_the_pre_auth_skip():
+    # The declaration is per served method: ``POST /api/login/methods`` is no declared route,
+    # so a presented credential there is verified.
+    spy = _SpyVerifier()
+    backend = _backend(spy, AccessControlSettings())
+    assert backend._is_pre_auth_surface("/api/login/methods", "GET") is True
+    assert backend._is_pre_auth_surface("/api/login/methods", "POST") is False
+    assert backend._is_pre_auth_surface("/api/login/methods", None) is False
+
+
+@pytest.mark.parametrize("path", ["/api//login/methods", "/api/login/./methods", "/api/login/methods/"])
+async def test_step0_decides_the_pre_auth_surface_on_the_canonical_form(path):
+    """Step 0 and the resource guard read ONE route declaration over ONE canonical form, so a
     non-canonical login path cannot be public to the guard yet credential-verified here."""
     settings = AccessControlSettings()
     spy = _SpyVerifier()
     backend = _backend(spy, settings)
-
-    # Non-vacuous: the guard's own resolution really does call these paths public.
-    assert is_always_public_prefix(canonicalize_path(path), settings) is True
 
     creds, user = await backend.authenticate(_conn({"Authorization": "Bearer garbage"}, path=path))
     assert isinstance(user, UnauthenticatedUser)
@@ -519,22 +535,34 @@ async def test_step0_decides_the_login_surface_on_the_canonical_form(path):
     assert spy.called == 0
 
 
-@pytest.mark.parametrize("path", ["/api/login/../auth/api-keys", "/apiary/login", "/api/login\\x"])
-async def test_step0_never_admits_a_path_that_only_looks_like_the_login_surface(path):
-    """A traversal out of the login prefix, a neighbour the segment-aware match must not
-    swallow, and a path with no canonical form: none may skip credential verification.
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/login/../auth/api-keys",
+        "/api/login",
+        "/api/login%2Fmethods",
+        "/api/login\\x",
+        "/portal/../api/auth/api-keys",
+        "/portalx/form",
+        "/portal\\x",
+    ],
+)
+async def test_step0_never_admits_a_path_that_only_looks_like_the_pre_auth_surface(path):
+    """A traversal out of a declared login route or an operator prefix, a path no route
+    declares, a neighbour the segment-aware prefix match must not swallow, and a path with no
+    canonical form: none may skip credential verification.
 
     ``authenticate`` canonicalizes the raw target FIRST (dot-resolved, malformed → ``None``)
-    then asks ``_is_always_public_path`` of that form — the same two steps composed here."""
+    then asks ``_is_pre_auth_surface`` of that form — the same two steps composed here."""
     from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 
-    settings = AccessControlSettings()
+    settings = AccessControlSettings(always_public_path_prefixes=("/portal",))
     backend = _backend(_SpyVerifier(), settings)
     try:
         canonical = request_canonical_path({"raw_path": path.encode("ascii"), "path": path})
     except MalformedPathError:
         canonical = None
-    assert backend._is_always_public_path(canonical) is False
+    assert backend._is_pre_auth_surface(canonical, "GET") is False
 
 
 async def test_same_credential_on_protected_path_still_verifies(monkeypatch, bound_app, store_pg):

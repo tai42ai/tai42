@@ -158,7 +158,7 @@ def _spa_match(raw: str, *, method: str = "GET", root_path: str = "") -> Match:
 
 
 @pytest.mark.parametrize("path", ["/api", "/api/tools", "/mcp", "/mcp/x", "/api/deep/link"])
-def test_spa_fallback_never_matches_an_api_or_mcp_path(path) -> None:
+def test_spa_fallback_never_matches_an_api_or_mcp_path(path, streamable_http_mounted) -> None:
     assert _spa_match(path) is Match.NONE
     # Even a wrong method stays NONE — never a PARTIAL that could 405 the shell surface, so an
     # unknown /api or /mcp path always falls to the router's native 404.

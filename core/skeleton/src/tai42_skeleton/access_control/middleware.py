@@ -23,7 +23,7 @@ from tai42_skeleton.access_control.request_scopes import (
     set_request_identity_claims,
     set_request_is_admin,
 )
-from tai42_skeleton.access_control.role_gate import refusal_route
+from tai42_skeleton.access_control.role_gate import declares_any_authenticated, refusal_route
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 from tai42_skeleton.middleware.audit_log import UNAUTHENTICATED, emit_audit_line
 from tai42_skeleton.settings.audit_log import audit_log_settings
@@ -47,36 +47,28 @@ _DISABLE_HINT = "set ACCESS_CONTROL_ENABLE=false to disable access control for l
 
 
 class ResourceGuardMiddleware:
-    """The route-authorization guard, resolving three prefix/path families.
+    """The route-authorization guard.
 
     * RESERVED (``reserved_public_pin_prefixes``) — never public. Resolved in the
       verifier BEFORE this middleware: it drops the public marker for a reserved-prefix
       path, so the control plane stays authenticated regardless of the route table.
       Reserved affects only public-pin writes and that resolution drop.
-    * ALWAYS-PUBLIC (``always_public_path_prefixes``) — public regardless of the table.
-      Also resolved in the verifier before this middleware sees a decision (it answers
-      the public resource id unconditionally), surfacing here as CASE B.
-    * AUTHENTICATED-ALWAYS-ALLOWED (``authenticated_always_allowed_paths``) — allowed for
-      ANY authenticated identity regardless of the table. This is the one family THIS
-      middleware decides: a member — matched on the canonical request path — is checked
-      BEFORE table resolution, so it is reachable even with no route row; an
-      unauthenticated caller is denied 401. The backend's jq enforcement already ran
-      upstream on the same canonical path, so a role condition still gates it.
+    * PUBLIC (a route declared ``authed=False``, or an operator's always-public prefix or
+      pattern) — also resolved in the verifier before this middleware sees a decision (it
+      answers the public resource id), surfacing here as CASE B.
+    * ANY-AUTHENTICATED (a route declared ``any_authenticated=True``) — allowed for ANY
+      authenticated identity regardless of the table. This is the one reach THIS middleware
+      decides: the route the canonical request ``(path, method)`` resolves to is read BEFORE
+      table resolution, so it is reachable even with no route row; an unauthenticated caller
+      is denied 401. The backend's jq enforcement already ran upstream on the same canonical
+      path, so a role condition still gates it.
     """
 
-    def __init__(
-        self,
-        app: ASGIApp,
-        verifier: AccessControlVerifier,
-        public_resource_id: str,
-        authenticated_always_allowed_paths: tuple[str, ...] = (),
-    ):
-        """Bind the wrapped ``app``, the ``verifier``, the public resource id, and the always-allowed paths."""
+    def __init__(self, app: ASGIApp, verifier: AccessControlVerifier, public_resource_id: str):
+        """Bind the wrapped ``app``, the ``verifier``, and the public resource id."""
         self.app = app
         self.verifier = verifier
         self.public_id = public_resource_id
-        # Stored as a frozenset for O(1) exact-path membership on every request.
-        self.authenticated_always_allowed_paths = frozenset(authenticated_always_allowed_paths)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         """Guard the request: resolve its route's resource, enforce access, then pass to the wrapped app."""
@@ -104,17 +96,17 @@ class ResourceGuardMiddleware:
         user = scope.get("user", UnauthenticatedUser())
         auth = scope.get("auth", AuthCredentials())
 
-        # AUTHENTICATED-ALWAYS-ALLOWED carve-out: a member is reachable by ANY authenticated
-        # identity regardless of the route table. Checked BEFORE table resolution (CASE A
-        # below) so the path is reachable even with no route row; the backend's jq
-        # enforcement already ran upstream on the same canonical path, so a role condition
-        # still gates it and the two sides admit the same spellings (``/api/auth/me/`` is
-        # ``/api/auth/me`` on both). An unauthenticated caller is denied 401 exactly like a
-        # protected route.
-        if canonical_path in self.authenticated_always_allowed_paths:
+        # ANY-AUTHENTICATED reach: a route declaring it is reachable by ANY authenticated
+        # identity regardless of the route table. Read BEFORE table resolution (CASE A below)
+        # so the route is reachable even with no route row; the backend's jq enforcement
+        # already ran upstream on the same canonical path, so a role condition still gates it
+        # and the two sides admit the same spellings (``/api/auth/me/`` is ``/api/auth/me`` on
+        # both). A method the route does not serve resolves to no route and falls to
+        # resolution. An unauthenticated caller is denied 401 exactly like a protected route.
+        if declares_any_authenticated(canonical_path, scope.get("method")):
             if not user.is_authenticated:
                 logger.warning(
-                    "access_control: denied %s — unauthenticated request to an authenticated-always-allowed route; %s",
+                    "access_control: denied %s — unauthenticated request to an any-authenticated route; %s",
                     canonical_path,
                     _DISABLE_HINT,
                 )

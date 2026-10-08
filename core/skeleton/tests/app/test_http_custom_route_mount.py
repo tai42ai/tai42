@@ -311,3 +311,116 @@ def test_self_service_defaults_false_through_the_facade(monkeypatch: pytest.Monk
     meta = registry.match("/api/thing", "POST")
     assert meta is not None
     assert meta.self_service is False
+
+
+# -- route reach declarations: pre_auth / any_authenticated against publicness ---------
+
+
+def test_core_route_records_its_declared_reach(surface: HttpSurface) -> None:
+    _register(surface, "/api/entry/exchange", ["POST"], authed=False, pre_auth=True)
+    _register(surface, "/api/whoami", ["GET"], action="read", any_authenticated=True)
+    registry = cast(RouteRegistry, surface._registry)  # type: ignore[attr-defined]
+    entry = registry.match("/api/entry/exchange", "POST")
+    whoami = registry.match("/api/whoami", "GET")
+    assert entry is not None
+    assert (entry.pre_auth, entry.any_authenticated, entry.public) == (True, False, True)
+    assert whoami is not None
+    assert (whoami.pre_auth, whoami.any_authenticated, whoami.public) == (False, True, False)
+
+
+def test_pre_auth_on_an_authenticated_core_route_is_a_registration_error(surface: HttpSurface) -> None:
+    with pytest.raises(ValueError, match=r"^route '/api/entry/exchange' declares pre_auth=True but is authenticated$"):
+        _register(surface, "/api/entry/exchange", ["POST"], action="write", pre_auth=True)
+    registry = cast(RouteRegistry, surface._registry)  # type: ignore[attr-defined]
+    assert registry.routes() == []
+    assert _fastmcp_paths(surface) == []
+
+
+def test_any_authenticated_on_a_public_core_route_is_a_registration_error(surface: HttpSurface) -> None:
+    with pytest.raises(ValueError, match=r"^route '/api/whoami' declares any_authenticated=True but is public$"):
+        _register(surface, "/api/whoami", ["GET"], authed=False, any_authenticated=True)
+    assert _fastmcp_paths(surface) == []
+
+
+def test_declared_public_plugin_route_may_declare_pre_auth(surface: HttpSurface) -> None:
+    with bind_module(_binding()):
+        _register(surface, "/ping", ["GET"], pre_auth=True)
+    meta = surface._registry.match("/api/acme/one/ping", "GET")  # type: ignore[attr-defined]
+    assert meta is not None
+    assert meta.pre_auth is True
+    assert meta.public is True
+
+
+def test_pre_auth_on_a_declared_authenticated_plugin_route_is_a_registration_error(surface: HttpSurface) -> None:
+    with (
+        pytest.raises(ValueError, match=r"^route '/api/acme/one/gate' declares pre_auth=True but is authenticated$"),
+        bind_module(_binding(path="/gate", public=False)),
+    ):
+        _register(surface, "/gate", ["GET"], action="read", pre_auth=True)
+
+
+def test_any_authenticated_on_a_declared_public_plugin_route_is_a_registration_error(surface: HttpSurface) -> None:
+    with (
+        pytest.raises(ValueError, match=r"^route '/api/acme/one/ping' declares any_authenticated=True but is public$"),
+        bind_module(_binding()),
+    ):
+        _register(surface, "/ping", ["GET"], any_authenticated=True)
+
+
+def test_operation_route_passes_its_declared_reach_through(surface: HttpSurface) -> None:
+    from tai42_skeleton.operations import register_operation_route
+    from tai42_skeleton.operations.decorator import operation
+    from tai42_skeleton.operations.registry import OperationRegistry
+
+    ops = OperationRegistry()
+
+    @operation(summary="Exchange an entry code", tags=["t"], no_body_reason="test fixture", registry=ops)
+    async def exchange_entry() -> None:
+        """Exchange."""
+
+    @operation(summary="Describe the caller", tags=["t"], no_body_reason="test fixture", registry=ops)
+    async def describe_caller() -> None:
+        """Describe."""
+
+    @operation(summary="Rotate an own item", tags=["t"], no_body_reason="test fixture", registry=ops)
+    async def rotate_own() -> None:
+        """Rotate."""
+
+    holder = type("_App", (), {"_http_surface": surface})()
+    register_operation_route(
+        holder, ops.get("exchange_entry"), path="/api/entry/exchange", method="POST", authed=False, pre_auth=True
+    )
+    register_operation_route(
+        holder, ops.get("describe_caller"), path="/api/whoami", method="GET", action="read", any_authenticated=True
+    )
+    register_operation_route(
+        holder, ops.get("rotate_own"), path="/api/auth/own/rotate", method="POST", action="write", self_service=True
+    )
+    registry = cast(RouteRegistry, surface._registry)  # type: ignore[attr-defined]
+    entry = registry.match("/api/entry/exchange", "POST")
+    whoami = registry.match("/api/whoami", "GET")
+    rotate = registry.match("/api/auth/own/rotate", "POST")
+    assert entry is not None
+    assert entry.pre_auth is True
+    assert whoami is not None
+    assert whoami.any_authenticated is True
+    assert rotate is not None
+    assert rotate.self_service is True
+
+
+def test_operation_route_refuses_pre_auth_while_authenticated(surface: HttpSurface) -> None:
+    from tai42_skeleton.operations import register_operation_route
+    from tai42_skeleton.operations.decorator import operation
+    from tai42_skeleton.operations.registry import OperationRegistry
+
+    ops = OperationRegistry()
+
+    @operation(summary="Exchange an entry code", tags=["t"], no_body_reason="test fixture", registry=ops)
+    async def exchange_entry() -> None:
+        """Exchange."""
+
+    holder = type("_App", (), {"_http_surface": surface})()
+    with pytest.raises(ValueError, match=r"^route '/api/entry/exchange' declares pre_auth=True but is authenticated$"):
+        register_operation_route(
+            holder, ops.get("exchange_entry"), path="/api/entry/exchange", method="POST", pre_auth=True
+        )

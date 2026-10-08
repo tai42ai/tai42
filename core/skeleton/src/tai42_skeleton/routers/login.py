@@ -2,14 +2,14 @@
 
 Two doors fanning out over the accounts-provider registry:
 
-- ``GET /api/login/methods`` — PUBLIC (the always-public ``/api/login`` prefix makes
-  it reachable pre-auth with no route rows). Aggregates every registered accounts
+- ``GET /api/login/methods`` — PUBLIC and ``pre_auth`` (reachable with no route rows, a
+  presented credential never verified). Aggregates every registered accounts
   provider's declared ``LoginMethod`` metadata plus ``needs_setup`` (whether the
   deployment is still uninitialized) and ``setup_login`` (what the setup door can attach,
   or ``null``), so a generic login screen can render without knowing which providers are
   installed. An empty registry answers ``{"methods": [], "needs_setup": <bool>,
   "setup_login": null}`` — the Studio's key-paste-only signal.
-- ``POST /api/login/claim`` — PUBLIC (same always-public prefix). Burns a one-time
+- ``POST /api/login/claim`` — PUBLIC and ``pre_auth``. Burns a one-time
   claim token and returns the raw API key it carried — the QR-onboarding exchange leg.
 - ``POST /api/auth/logout`` — the single AUTHED logout dispatcher (logout is
   application surface so two installed accounts plugins never race to own the route).
@@ -39,17 +39,19 @@ login_methods = register_operation_route(
     path="/api/login/methods",
     method="GET",
     authed=False,
+    pre_auth=True,
 )
 
-# PUBLIC (the always-public ``/api/login`` prefix): the exchange leg of a one-time claim
-# link. The operation validates its own ``ClaimExchange`` body; ``authority_changing``
-# on the operation keeps it off the MCP tool surface.
+# PUBLIC and pre-auth: the exchange leg of a one-time claim link. The operation validates
+# its own ``ClaimExchange`` body; ``authority_changing`` on the operation keeps it off the
+# MCP tool surface.
 exchange_claim_token = register_operation_route(
     tai42_app,
     operation_metadata_of(_exchange_claim_token_op),
     path="/api/login/claim",
     method="POST",
     authed=False,
+    pre_auth=True,
 )
 
 
@@ -69,4 +71,5 @@ logout = register_operation_route(
     method="POST",
     context_extractor=_logout_candidates,
     action="write",
+    self_service=True,
 )

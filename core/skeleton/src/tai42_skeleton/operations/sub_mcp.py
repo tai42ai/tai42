@@ -24,6 +24,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.app.sub_mcp_app import sub_mcp_access_pattern, sub_mcp_mount_url
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.response_models_group_c import (
     SubMcpMapListing,
@@ -48,12 +49,19 @@ class SubMcpRegistration(BaseModel):
 
 @operation(summary="List the registered sub-MCP apps", tags=["sub-mcp"], response_model=SubMcpMapListing)
 async def list_sub_mcp() -> dict:
-    """List the registered sub-MCP apps from the durable store, keyed by slug."""
+    """List the registered sub-MCP apps from the durable store, keyed by slug, with each served mount."""
     # Read the durable store, not this worker's in-process cache, so the list is
     # coherent across workers. RouteConfig is a pydantic model; model_dump yields
     # the JSON-safe fields (tools + transport) so no live object leaks into the body.
     routes = await get_sub_mcp_store().list_routes()
-    return {slug: config.model_dump() for slug, config in routes.items()}
+    return {
+        slug: {
+            **config.model_dump(),
+            "mount_url": sub_mcp_mount_url(slug),
+            "access_pattern": sub_mcp_access_pattern(slug),
+        }
+        for slug, config in routes.items()
+    }
 
 
 @operation(

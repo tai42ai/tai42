@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import re
 import threading
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -27,7 +28,13 @@ from starlette.types import ASGIApp
 from tai42_contract.sub_mcp import RouteConfig
 
 from tai42_skeleton.app import sub_mcp_app as sub_mcp_app_module
-from tai42_skeleton.app.sub_mcp_app import ROOT_PREFIX, SubAppLifespan, SubMcpAppRouter
+from tai42_skeleton.app.sub_mcp_app import (
+    ROOT_PREFIX,
+    SubAppLifespan,
+    SubMcpAppRouter,
+    sub_mcp_access_pattern,
+    sub_mcp_mount_url,
+)
 
 
 class _FakeLifespan(SubAppLifespan):
@@ -97,6 +104,17 @@ def _router() -> SubMcpAppRouter:
 
 
 # -- route management ---------------------------------------------------------
+
+
+def test_mount_url_and_access_pattern_are_served_per_slug():
+    # The mount URL is the route-table key of the mount; the access pattern maps every
+    # sub-path of exactly that mount, the slug escaped as a literal.
+    assert sub_mcp_mount_url("chat-line") == "/app/chat-line"
+    pattern = re.compile(sub_mcp_access_pattern("chat-line"))
+    assert pattern.fullmatch("/app/chat-line/mcp")
+    assert pattern.fullmatch("/app/chat-line/") is not None
+    assert pattern.fullmatch("/app/chat-line") is None
+    assert pattern.fullmatch("/app/chat-linex/mcp") is None
 
 
 async def test_root_prefix_and_routes_properties():

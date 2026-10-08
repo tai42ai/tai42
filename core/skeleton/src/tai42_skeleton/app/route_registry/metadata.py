@@ -86,6 +86,17 @@ class RouteMetadata:
     # ``tai42_skeleton.access_control.roles``), so a provider that ships a self-service route
     # under ``/api/auth`` keeps it reachable for non-admins without the platform naming it.
     self_service: bool = False
+    # Whether this route is reachable by ANY authenticated identity, whatever its scopes and
+    # whatever the route table maps (an identity-introspection route). The resource guard and
+    # the capability projection admit it before table resolution; the base-tier jq still
+    # applies, and an unauthenticated caller is denied 401. Only an authenticated route
+    # declares it.
+    any_authenticated: bool = False
+    # Whether this route is a pre-authentication surface (login, recovery, claim exchange):
+    # the auth backend never verifies a credential presented on it, so a stale one cannot
+    # lock a caller out of the door that replaces it, and the tool edge runs no policy layer
+    # for it. Only a public route declares it.
+    pre_auth: bool = False
     # A model whose fields the emitter publishes as ``in: query`` parameters for ANY
     # method, additive to ``request_model`` (which stays a body on a write, query on a
     # read). It is the only way a WRITE-method door documents the query it reads.

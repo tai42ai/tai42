@@ -488,12 +488,12 @@ async def test_websocket_resolve_error_fails_closed_with_close():
     assert sent == [{"type": "websocket.close", "code": 1008}]
 
 
-# -- authenticated-always-allowed carve-out ----------------------------------
+# -- any-authenticated reach: read from the route's declaration --------------------
 
 
 class _SpyResolveVerifier(AccessControlVerifier):
-    """Records every path it is asked to resolve, so a test can prove the carve-out is
-    decided BEFORE (and without) route resolution."""
+    """Records every path it is asked to resolve, so a test can prove the any-authenticated
+    reach is decided BEFORE (and without) route resolution."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -505,23 +505,24 @@ class _SpyResolveVerifier(AccessControlVerifier):
         return []
 
 
-async def test_carve_out_authenticated_reaches_app_without_route_rows():
-    # An authenticated caller reaches a carve-out path with NO route rows, and the
-    # verifier's resolution is never consulted (the store is never queried).
+async def test_any_authenticated_route_reaches_app_without_route_rows():
+    # ``GET /api/auth/me`` declares ``any_authenticated=True``: an authenticated caller holding
+    # no ``*`` reaches it with NO route rows, and the verifier's resolution is never consulted
+    # (the store is never queried).
     captured: dict = {}
     spy = _SpyResolveVerifier()
-    mw = ResourceGuardMiddleware(_make_app(captured), spy, PUBLIC_ID, ("/api/auth/me",))
+    mw = ResourceGuardMiddleware(_make_app(captured), spy, PUBLIC_ID)
     scope = _http_scope(path="/api/auth/me", user=_authed_user("u1"), auth=AuthCredentials(["read"]))
     sent = await _drive(mw, scope)
     assert _status(sent) == 200
     assert captured["called"] is True
-    # The identity contextvar is bound for the carved request (the /me handler reads it).
+    # The identity contextvar is bound for the admitted request (the /me handler reads it).
     assert captured["user_id_in_ctx"] == "u1"
     assert spy.calls == []
 
 
-async def test_carve_out_unauthenticated_is_401(caplog):
-    mw = ResourceGuardMiddleware(_make_app({}), _FakeVerifier([]), PUBLIC_ID, ("/api/auth/me",))
+async def test_any_authenticated_route_unauthenticated_is_401(caplog):
+    mw = ResourceGuardMiddleware(_make_app({}), _FakeVerifier([]), PUBLIC_ID)
     scope = _http_scope(path="/api/auth/me", user=UnauthenticatedUser(), auth=AuthCredentials())
     with caplog.at_level("WARNING"):
         sent = await _drive(mw, scope)
@@ -529,23 +530,23 @@ async def test_carve_out_unauthenticated_is_401(caplog):
     assert DISABLE_HINT in caplog.text
 
 
-async def test_carve_out_is_exact_path_not_prefix():
-    # A DIFFERENT unmapped /api/auth path still 403s (CASE A) — the carve-out is
-    # exact-path, so it can never swallow a future sibling route.
-    mw = ResourceGuardMiddleware(_make_app({}), _FakeVerifier([]), PUBLIC_ID, ("/api/auth/me",))
+async def test_any_authenticated_reach_is_the_declared_route_not_a_prefix():
+    # A DIFFERENT unmapped /api/auth path still 403s (CASE A): the reach is the declaring
+    # route's own, so it can never swallow a sibling route.
+    mw = ResourceGuardMiddleware(_make_app({}), _FakeVerifier([]), PUBLIC_ID)
     scope = _http_scope(path="/api/auth/xyz", user=_authed_user(), auth=AuthCredentials(["*"]))
     sent = await _drive(mw, scope)
     assert _status(sent) == 403
 
 
-async def test_carve_out_matches_the_jq_fence_on_the_canonical_path():
-    # The carve-out membership and the backend's jq fence read ONE path — the canonical
-    # one — so every spelling of a carved path is decided alike on both sides: the
-    # trailing-slash ``/api/auth/me/`` is ``/api/auth/me``, admitted by the carve-out AND by
-    # the editor fence (the router then answers its own redirect).
+async def test_any_authenticated_reach_matches_the_jq_fence_on_the_canonical_path():
+    # The declaration lookup and the backend's jq fence read ONE path — the canonical one —
+    # so every spelling of the route is decided alike on both sides: the trailing-slash
+    # ``/api/auth/me/`` is ``/api/auth/me``, admitted by the declaration AND by the editor
+    # fence (the router then answers its own redirect).
     for spelling in ("/api/auth/me", "/api/auth/me/", "/api//auth/./me"):
         captured: dict = {}
-        mw = ResourceGuardMiddleware(_make_app(captured), _FakeVerifier([]), PUBLIC_ID, ("/api/auth/me",))
+        mw = ResourceGuardMiddleware(_make_app(captured), _FakeVerifier([]), PUBLIC_ID)
         scope = _http_scope(path=spelling, user=_authed_user(), auth=AuthCredentials(["read"]))
         assert _status(await _drive(mw, scope)) == 200, spelling
         assert captured["called"] is True
@@ -556,31 +557,33 @@ async def test_carve_out_matches_the_jq_fence_on_the_canonical_path():
     await enforcer.enforce({"request": {"path": canonicalize_path("/api/auth/me/"), "method": "GET"}}, rendered)
 
 
-async def test_carve_out_membership_is_root_path_stripped():
-    # Under a mount prefix the carve-out membership test reasons on the canonical,
-    # ROOT-STRIPPED path, exactly as the companion jq fence does: an authenticated caller to
-    # ``/mnt/api/auth/me`` is the ``/api/auth/me`` carve-out and reaches the app — a
-    # prefix-kept check would miss it and fall through to resolution (here unmapped → 403).
+async def test_any_authenticated_reach_is_root_path_stripped():
+    # Under a mount prefix the declaration lookup reasons on the canonical, ROOT-STRIPPED
+    # path, exactly as the companion jq fence does: an authenticated caller to
+    # ``/mnt/api/auth/me`` is the ``/api/auth/me`` route and reaches the app — a prefix-kept
+    # lookup would miss it and fall through to resolution (here unmapped → 403).
     captured: dict = {}
     spy = _SpyResolveVerifier()
-    mw = ResourceGuardMiddleware(_make_app(captured), spy, PUBLIC_ID, ("/api/auth/me",))
+    mw = ResourceGuardMiddleware(_make_app(captured), spy, PUBLIC_ID)
     scope = _http_scope(
         path="/mnt/api/auth/me", user=_authed_user("u1"), auth=AuthCredentials(["read"]), root_path="/mnt"
     )
     sent = await _drive(mw, scope)
     assert _status(sent) == 200
     assert captured["called"] is True
-    # Resolution is never consulted — the carve-out decided it on the stripped path.
+    # Resolution is never consulted — the declaration decided it on the stripped path.
     assert spy.calls == []
 
 
-async def test_no_carve_out_configured_leaves_path_to_resolution():
-    # With an empty carve-out set (the default ctor value), the path falls through to the
-    # normal resolution path and 403s as an unknown route.
-    mw = ResourceGuardMiddleware(_make_app({}), _FakeVerifier([]), PUBLIC_ID)
-    scope = _http_scope(path="/api/auth/me", user=_authed_user(), auth=AuthCredentials(["*"]))
+async def test_a_method_the_route_does_not_serve_falls_to_resolution():
+    # The reach is per served method: ``POST /api/auth/me`` resolves to no route, so it falls
+    # to the normal resolution path and 403s as an unknown route.
+    spy = _SpyResolveVerifier()
+    mw = ResourceGuardMiddleware(_make_app({}), spy, PUBLIC_ID)
+    scope = _http_scope(path="/api/auth/me", user=_authed_user(), auth=AuthCredentials(["*"]), method="POST")
     sent = await _drive(mw, scope)
     assert _status(sent) == 403
+    assert spy.calls == ["/api/auth/me"]
 
 
 # -- SPA-shell public fallback: H4 terminal deny, public deep link, H5 walk ---
@@ -652,8 +655,9 @@ async def test_unregistered_post_terminal_denies(monkeypatch, caplog):
     assert _one_reject(caplog).group("reason") == "route-unconfigured"
 
 
-async def test_h4_terminal_deny_unmatched_control_plane(monkeypatch):
-    # H4: an UNMATCHED /api or /mcp path terminal-denies (JSON 401/403), NEVER the shell.
+async def test_h4_terminal_deny_unmatched_control_plane(monkeypatch, streamable_http_mounted):
+    # H4: an UNMATCHED path under a control-plane prefix (``/api`` and the mounted
+    # streamable-http transport) terminal-denies (JSON 401/403), NEVER the shell.
     mw = _real_guard(monkeypatch, FakeAccessControlPg())
     for path in ("/api/does-not-exist", "/mcp/does-not-exist"):
         sent = await _drive(mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials()))
@@ -673,7 +677,6 @@ async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
     # Backstop invariant — the control plane never leaks unauthenticated, hostile
     # /api-canonicalizing forms never reach data, genuine deep links reach the shell.
     from tai42_skeleton.access_control.path_canon import under_prefix
-    from tai42_skeleton.access_control.verifier import matches_always_public_route_pattern
     from tai42_skeleton.app.route_registry import load_all_routes
 
     settings = AccessControlSettings()
@@ -682,7 +685,6 @@ async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
     def concretize(path: str) -> str:
         return re.sub(r"\{[^}]+\}", "probe", path)
 
-    always_public = settings.always_public_path_prefixes
     for meta in load_all_routes():
         # A mounted transport serves behind its own credential gate, not as a handler door;
         # it is covered by the declared-protection/mount tier, not this public-surface walk.
@@ -693,20 +695,17 @@ async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
         # GET-only shell fallback can never reach it).
         for method in meta.methods:
             path = concretize(meta.path)
-            # The always-public login surface is legitimately public; skip it.
-            if any(under_prefix(path, prefix) for prefix in always_public):
-                continue
             sent = await _drive(
                 mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials(), method=method)
             )
             status = _status(sent)
-            if meta.public or matches_always_public_route_pattern(path, settings):
+            if meta.public:
                 # A DECLARED-PUBLIC door is served public by design, whatever its path shape or
-                # method: the interactions callback and served-media /api doors, the readiness
-                # probes, and the webhook/trigger ingress doors all register ``authed=False``,
-                # and the verifier's owner-agnostic declared-public tier grants them the public
-                # id by that declaration; the plugin studio bundles resolve public via the
-                # always-public route pattern. Carving these out is NOT a weakening — the deny
+                # method: the login doors, the interactions callback and served-media /api
+                # doors, the plugin studio-asset door, the readiness probes, and the
+                # webhook/trigger ingress doors all register ``authed=False``, and the
+                # verifier's owner-agnostic declared-public tier grants them the public id by
+                # that declaration. Carving these out is NOT a weakening — the deny
                 # invariant below still holds for every NON-public route.
                 assert status == 200, f"declared-public door {method} {path} not served public: {status}"
             elif under_prefix(path, "/api") or under_prefix(path, "/mcp"):

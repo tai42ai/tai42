@@ -26,6 +26,7 @@ from starlette.routing import Match, Route
 from starlette.types import Scope
 
 from tai42_skeleton.access_control.path_canon import strip_root_path, under_prefix
+from tai42_skeleton.app.route_registry import route_registry
 
 
 class RawPathRoute(Route):
@@ -74,24 +75,25 @@ def _raw_route_path(raw_path: bytes, root_path: str) -> str:
 
 
 class SpaFallbackRoute(Route):
-    """The Studio SPA catch-all route, held out of the ``/api`` and ``/mcp`` path spaces.
+    """The Studio SPA catch-all route, held out of the control-plane path spaces.
 
     The catch-all is registered on ``/{spa_path:path}`` and so path-matches every request,
-    ``/api/...`` and ``/mcp/...`` included. Those segments own their own routes; an unknown
-    path under them is a genuine 404 the router raises natively, never the SPA shell, and a
-    known route addressed with the wrong method keeps its own native 405. :meth:`matches`
-    therefore returns :attr:`~starlette.routing.Match.NONE` when the request path's first
-    segment is ``api`` or ``mcp`` — the SAME segment-aware exclusion the access-control shell
-    tier applies (:func:`~tai42_skeleton.access_control.path_canon.under_prefix`), so the two
-    layers cannot drift — and delegates to the ordinary match otherwise.
+    the control plane included (``/api`` and the mounted streamable-http transport, see
+    :meth:`~tai42_skeleton.app.route_registry.RouteRegistry.control_plane_prefixes`). Those
+    own their own routes; an unknown path under them is a genuine 404 the router raises
+    natively, never the SPA shell, and a known route addressed with the wrong method keeps its
+    own native 405. :meth:`matches` therefore returns :attr:`~starlette.routing.Match.NONE`
+    for a path under a control-plane prefix — the SAME segment-aware exclusion the
+    access-control shell tier applies, so the two layers cannot drift — and delegates to the
+    ordinary match otherwise.
     """
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
-        """Never match an ``/api`` or ``/mcp`` path; delegate to the ordinary match otherwise."""
+        """Never match a control-plane path; delegate to the ordinary match otherwise."""
         if scope["type"] == "http":
             # ``strip_root_path`` removes a mounted ``root_path`` exactly as Starlette's own
             # route matching does, so the segment check reads the router-relative path.
             route_path = strip_root_path(scope["path"], scope.get("root_path", ""))
-            if under_prefix(route_path, "/api") or under_prefix(route_path, "/mcp"):
+            if any(under_prefix(route_path, prefix) for prefix in route_registry.control_plane_prefixes()):
                 return Match.NONE, {}
         return super().matches(scope)

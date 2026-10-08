@@ -69,10 +69,11 @@ _SETUP_LOGIN_KINDS = [PasswordCredential.model_fields["kind"].default, InviteCre
 async def login_methods() -> dict:
     """Aggregate every registered accounts provider's login methods + the setup state.
 
-    ``authed=False`` is OpenAPI truth-telling only; runtime public-ness comes from the
-    always-public ``/api/login`` prefix. Each method is serialized with
-    ``model_dump(exclude_none=True)`` so a ``None``-valued optional (icon/autocomplete)
-    is OMITTED, never ``null`` (the Studio's zod schemas accept absent but reject
+    Its route is public by declaration (``authed=False``) and a pre-authentication surface
+    (``pre_auth=True``): it is served without a credential, and a presented credential is
+    never verified, so a stale one cannot lock a caller out of login. Each method is
+    serialized with ``model_dump(exclude_none=True)`` so a ``None``-valued optional
+    (icon/autocomplete) is OMITTED, never ``null`` (the Studio's zod schemas accept absent but reject
     ``null``). ``needs_setup`` is the one platform fact "no principal exists"; ``setup_login``
     names what the setup door can attach (``kinds`` from a configured login-attaching
     provider, ``null`` when none). Provider errors propagate (loud, never a silently empty
@@ -100,8 +101,9 @@ async def login_methods() -> dict:
 async def exchange_claim_token(token: str) -> dict:
     """Burn a one-time claim token and return the raw API key it carried — the public exchange leg.
 
-    The public exchange leg of QR onboarding (``authed=False``; runtime public-ness comes
-    from the always-public ``/api/login`` prefix).
+    The public exchange leg of QR onboarding: its route is public by declaration
+    (``authed=False``) and a pre-authentication surface (``pre_auth=True``), so a presented
+    credential is never verified.
 
     The claim record is single-use: a used / unknown / expired token all answer the SAME
     404 (no oracle distinguishing them). The handed-out key is guaranteed not-REVOKED

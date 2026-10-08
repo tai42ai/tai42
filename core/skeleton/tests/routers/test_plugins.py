@@ -167,6 +167,20 @@ async def test_asset_unlisted_file_404(studio_env):
     assert ok.status_code == 200
 
 
+async def test_asset_door_and_integrity_map_share_the_asset_prefix(studio_env, monkeypatch):
+    # The asset door checks the URL it serves against the integrity map's keys, so both must
+    # spell it from the one prefix constant: under a different prefix the integrity keys move
+    # and the door still finds the pinned bundle.
+    prefix = "/api/plugins/{name}/ui/"
+    monkeypatch.setattr(reg, "STUDIO_ASSET_PREFIX", prefix)
+    monkeypatch.setattr(router, "STUDIO_ASSET_PREFIX", prefix)
+    registry = build_registry(["acme_plugin"], str(studio_env.dist))
+    assert "/api/plugins/acme_plugin/ui/index-a1b2c3.js" in registry.plugins["acme_plugin"].integrity_by_url
+    set_current_registry(registry)
+    resp = await router.serve_studio_asset(_req(name="acme_plugin", path="index-a1b2c3.js"))
+    assert resp.status_code == 200
+
+
 # -- SPA hosting -------------------------------------------------------------
 
 
@@ -330,7 +344,7 @@ def _spa_matrix_client(studio_env) -> TestClient:
 
 
 @pytest.mark.parametrize("path", ["/api/x", "/mcp/x"])
-def test_unknown_api_or_mcp_path_is_json_404_for_every_method(studio_env, path):
+def test_unknown_api_or_mcp_path_is_json_404_for_every_method(studio_env, streamable_http_mounted, path):
     client = _spa_matrix_client(studio_env)
     for method in _HTTP_METHODS:
         resp = client.request(method, path)

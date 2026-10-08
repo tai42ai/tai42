@@ -11,9 +11,9 @@ How the invariant is held:
 - **Scopes are READ, never recomputed** — ``build_projection`` consumes the effective
   (owner-attenuated) scopes the backend already committed to the request, so the
   projection filters against the SAME scope set the edge enforces.
-- **Reachability is the gate's own resolution** — the authenticated-always-allowed
-  carve-out short-circuits BEFORE resolution (exactly as ``ResourceGuardMiddleware``
-  checks it); otherwise every candidate path is resolved through
+- **Reachability is the gate's own resolution** — a route declaring
+  ``any_authenticated`` short-circuits BEFORE resolution (exactly as
+  ``ResourceGuardMiddleware`` checks it); otherwise every candidate path is resolved through
   :meth:`AccessControlVerifier.resolve_resource_ids` and coverage-checked exactly as the
   middleware does (deny wins: ALL resolved protected ids covered, or ``"*"``).
 - **jq is exact, per (path, method)** — every reachable candidate is evaluated through
@@ -65,14 +65,16 @@ from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
 from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition, policy_enforcer, render_condition
 from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern
+from tai42_skeleton.access_control.role_gate import declares_any_authenticated
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.access_control.standing import JqPass, Standing, StandingDenied, jq_passes, resolve_standing
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes
-from tai42_skeleton.app.sub_mcp_app import ROOT_PREFIX
+from tai42_skeleton.app.sub_mcp_app import sub_mcp_access_pattern, sub_mcp_mount_url
 from tai42_skeleton.operations.errors import PermissionDeniedError
+from tai42_skeleton.routers.paths import RUN_TOOL_PATH, TOOL_RUNS_PATH, agent_run_path
 from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 
 logger = logging.getLogger(__name__)
@@ -82,9 +84,8 @@ logger = logging.getLogger(__name__)
 NO_AUTH_USER_ID = "__no_auth__"
 
 # The global tool-execution doors: iff the caller can reach one of these, the whole
-# registry tool surface is projected (there is no per-tool ACL). Located by route, not
-# divined.
-_TOOL_RUN_DOORS: frozenset[tuple[str, str]] = frozenset({("POST", "/api/run-tool"), ("POST", "/api/tool-runs")})
+# registry tool surface is projected (there is no per-tool ACL).
+_TOOL_RUN_DOORS: frozenset[tuple[str, str]] = frozenset({("POST", RUN_TOOL_PATH), ("POST", TOOL_RUNS_PATH)})
 
 
 # -- Response models ---------------------------------------------------------
@@ -109,11 +110,13 @@ class PatternEntry(BaseModel):
 
 
 class SubMcpEntry(BaseModel):
-    """A sub-MCP mount the caller can reach."""
+    """A sub-MCP mount the caller can reach, with the served URL and access pattern a route row maps it by."""
 
     slug: str
     tools: list[str]
     transport: str
+    mount_url: str
+    access_pattern: str
 
 
 class PrincipalRef(BaseModel):
@@ -131,6 +134,8 @@ class ProjectionResult(BaseModel):
     owner_user_id: str | None
     principal: PrincipalRef | None
     admin: bool
+    # The reserved route-table marker a public route is mapped to (never a scope).
+    public_resource_id: str
     scopes: list[str]
     routes: list[RouteEntry]
     route_patterns: list[PatternEntry]
@@ -241,22 +246,21 @@ async def _path_reachable(
     verifier: AccessControlVerifier,
     settings: AccessControlSettings,
     scope_set: set[str],
-    carve_out: frozenset[str],
     version: int,
     path: str,
     method: str,
 ) -> bool:
-    """Whether ``(path, method)`` clears the route-resolution + scope-coverage gate or the carve-out.
+    """Whether ``(path, method)`` clears the route-resolution + scope-coverage gate or is any-authenticated.
 
-    The carve-out is the authenticated-always-allowed one. This is the SAME decision
-    ``ResourceGuardMiddleware`` reaches, jq excluded (jq is a separate per-method pass). The
-    ``method`` is threaded so the declared-protection tier resolves a registered authenticated
-    surface to the universal scope per method, keeping projection ⊆ gate exact.
+    This is the SAME decision ``ResourceGuardMiddleware`` reaches, jq excluded (jq is a
+    separate per-method pass). The ``method`` is threaded so the declared-protection tier
+    resolves a registered authenticated surface to the universal scope per method, keeping
+    projection ⊆ gate exact.
     """
-    # The carve-out is checked BEFORE resolution, exactly as the middleware does, so a
-    # carve-out path that ALSO carries a route row is not under-shown by falling through
-    # to a scope-coverage test the middleware never reaches.
-    if path in carve_out:
+    # A route declaring ``any_authenticated`` is admitted BEFORE resolution, exactly as the
+    # middleware does, so one that ALSO carries a route row is not under-shown by falling
+    # through to a scope-coverage test the middleware never reaches.
+    if declares_any_authenticated(path, method):
         return True
     ids = await verifier.resolve_resource_ids(path, method=method, policy_version=version)
     if not ids:
@@ -345,7 +349,6 @@ async def _build_uncached(
     effective_scopes = scopes.scopes
     scope_set = set(effective_scopes)
     claims = wrapper.claims
-    carve_out = frozenset(settings.authenticated_always_allowed_paths)
 
     enforcer = policy_enforcer(settings)
     verifier = AccessControlVerifier(settings, providers=[])
@@ -371,17 +374,18 @@ async def _build_uncached(
 
     admits = await _build_admits(enforcer, standing, effective_scopes, claims, live_ctx, user_id, version)
 
-    routes, projected_pairs = await _project_routes(verifier, settings, scope_set, carve_out, version, admits)
-    route_patterns = await _project_route_patterns(verifier, settings, scope_set, carve_out, version, admits)
-    sub_mcp = await _project_sub_mcp(verifier, settings, scope_set, carve_out, version, admits)
+    routes, projected_pairs = await _project_routes(verifier, settings, scope_set, version, admits)
+    route_patterns = await _project_route_patterns(verifier, settings, scope_set, version, admits)
+    sub_mcp = await _project_sub_mcp(verifier, settings, scope_set, version, admits)
     tools = await _project_tools(projected_pairs, sub_mcp)
-    agents = await _project_agents(verifier, settings, scope_set, carve_out, version, admits)
+    agents = await _project_agents(verifier, settings, scope_set, version, admits)
 
     return ProjectionResult(
         user_id=user_id,
         owner_user_id=owner_claim,
         principal=principal,
         admin=admin,
+        public_resource_id=settings.public_resource_id,
         scopes=effective_scopes,
         routes=routes,
         route_patterns=route_patterns,
@@ -456,7 +460,6 @@ async def _project_routes(
     verifier: AccessControlVerifier,
     settings: AccessControlSettings,
     scope_set: set[str],
-    carve_out: frozenset[str],
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> tuple[list[RouteEntry], set[tuple[str, str]]]:
@@ -478,7 +481,7 @@ async def _project_routes(
         allowed = [
             method
             for method in meta.methods
-            if await _path_reachable(verifier, settings, scope_set, carve_out, version, probe, method)
+            if await _path_reachable(verifier, settings, scope_set, version, probe, method)
             and await admits(probe, method)
         ]
         if allowed:
@@ -492,7 +495,6 @@ async def _project_route_patterns(
     verifier: AccessControlVerifier,
     settings: AccessControlSettings,
     scope_set: set[str],
-    carve_out: frozenset[str],
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> list[PatternEntry]:
@@ -512,7 +514,7 @@ async def _project_route_patterns(
             logger.info("access_control: projection excluding non-sampleable route pattern %r", regex)
             continue
         representative = canonicalize_path(sample)
-        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, representative, "GET"):
+        if not await _path_reachable(verifier, settings, scope_set, version, representative, "GET"):
             continue
         if not await admits(representative, "GET"):
             continue
@@ -524,7 +526,6 @@ async def _project_sub_mcp(
     verifier: AccessControlVerifier,
     settings: AccessControlSettings,
     scope_set: set[str],
-    carve_out: frozenset[str],
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> list[SubMcpEntry]:
@@ -538,12 +539,20 @@ async def _project_sub_mcp(
     sub_routes = await _sub_mcp_routes()
     for slug in sorted(sub_routes):
         config = sub_routes[slug]
-        mount_root = canonicalize_path(f"{ROOT_PREFIX}/{slug}")
-        if not await _path_reachable(verifier, settings, scope_set, carve_out, version, mount_root, "GET"):
+        mount_root = canonicalize_path(sub_mcp_mount_url(slug))
+        if not await _path_reachable(verifier, settings, scope_set, version, mount_root, "GET"):
             continue
         if not await admits(mount_root, "GET"):
             continue
-        sub_mcp.append(SubMcpEntry(slug=slug, tools=list(config.tools), transport=config.transport))
+        sub_mcp.append(
+            SubMcpEntry(
+                slug=slug,
+                tools=list(config.tools),
+                transport=config.transport,
+                mount_url=sub_mcp_mount_url(slug),
+                access_pattern=sub_mcp_access_pattern(slug),
+            )
+        )
     return sub_mcp
 
 
@@ -564,7 +573,6 @@ async def _project_agents(
     verifier: AccessControlVerifier,
     settings: AccessControlSettings,
     scope_set: set[str],
-    carve_out: frozenset[str],
     version: int,
     admits: Callable[[str, str], Awaitable[bool]],
 ) -> list[str]:
@@ -574,8 +582,8 @@ async def _project_agents(
     """
     agents: list[str] = []
     for name in _all_agent_names():
-        run_path = canonicalize_path(f"/api/agents/{name}/runs")
-        if await _path_reachable(verifier, settings, scope_set, carve_out, version, run_path, "POST") and await admits(
+        run_path = canonicalize_path(agent_run_path(name))
+        if await _path_reachable(verifier, settings, scope_set, version, run_path, "POST") and await admits(
             run_path, "POST"
         ):
             agents.append(name)
@@ -603,6 +611,7 @@ def synthetic_full_projection() -> ProjectionResult:
         owner_user_id=None,
         principal=None,
         admin=True,
+        public_resource_id=access_control_settings().public_resource_id,
         scopes=[UNIVERSAL_SCOPE],
         routes=[],
         route_patterns=[],

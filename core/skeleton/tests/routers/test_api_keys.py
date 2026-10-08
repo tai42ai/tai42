@@ -1360,6 +1360,7 @@ async def test_get_me_gate_on_wraps_projection(store: _Fakes, monkeypatch: pytes
             owner_user_id=None,
             principal=None,
             admin=False,
+            public_resource_id="public",
             scopes=list(effective_scopes),
             routes=[],
             route_patterns=[],

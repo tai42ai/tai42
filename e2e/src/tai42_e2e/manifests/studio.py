@@ -44,10 +44,10 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     Members page, so the accounts plugin contributes no Studio page of its own. The setup
     door's gate is pinned to ``_SETUP_TOKEN``.
 
-    TRAP: ``/api/login``'s public-ness comes from the code-side
-    ``always_public_path_prefixes`` default, not a route row or ``ACCESS_CONTROL_PATH_PATTERNS``.
-    Any stack that sets ``ACCESS_CONTROL_ALWAYS_PUBLIC_PATH_PREFIXES`` REPLACES that default
-    wholesale (pydantic env-list semantics) and must re-include ``/api/login``."""
+    The login doors (the platform's and the accounts plugin's ``/api/login/*`` routes) are
+    public by their own route declaration (``authed=False`` with ``pre_auth=True``: a
+    presented credential is never verified there), not a route row,
+    ``ACCESS_CONTROL_PATH_PATTERNS`` or an always-public prefix."""
     if res.studio_dist_path is None:
         raise RuntimeError("build_studio_stack requires resources.studio_dist_path (the built Studio dist)")
     manifest = {

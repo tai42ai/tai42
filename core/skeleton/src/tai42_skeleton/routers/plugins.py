@@ -21,14 +21,14 @@ callback doors + static Studio UI assets; everything carrying data stays authed)
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 
-ORDERING (load-bearing): the SPA catch-all matches ANY non-``/api``/``/mcp`` path,
+ORDERING (load-bearing): the SPA catch-all matches ANY path outside the control plane,
 and FastMCP matches custom routes in registration (import) order, so this router
 MUST be listed LAST in ``manifest.routers_modules`` — otherwise its catch-all
 shadows sibling routes registered after it. The catch-all is upgraded to a
 ``SpaFallbackRoute`` (the call at the bottom of this module), whose ``matches()``
-never matches an ``/api`` / ``/mcp`` path: an unknown one falls to the router's
-native 404 (rendered as the shared JSON error envelope) and a known route keeps
-its native method match, so a misorder surfaces as a visible 404 on the shadowed
+never matches a control-plane path (``/api`` and the streamable-http transport): an
+unknown one falls to the router's native 404 (rendered as the shared JSON error
+envelope) and a known route keeps its native method match, so a misorder surfaces as a visible 404 on the shadowed
 route rather than a silent wrong-serve, but correct ordering is the contract.
 """
 
@@ -59,6 +59,7 @@ from tai42_skeleton.plugins.serving import (
     security_headers,
 )
 from tai42_skeleton.plugins.settings import plugins_settings
+from tai42_skeleton.routers.paths import STUDIO_ASSET_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ list_studio_plugins = register_operation_route(
 
 
 @http_surface().custom_route(
-    "/api/plugins/{name}/studio/{path:path}",
+    f"{STUDIO_ASSET_PREFIX}{{path:path}}",
     methods=["GET"],
     summary="Serve a studio plugin asset",
     tags=["plugins"],
@@ -159,7 +160,7 @@ async def serve_studio_asset(request: Request) -> Response:
     # and the load-time byte-scan covers). An unlisted file shipped in the dist —
     # un-hashed and un-scanned — resolves under-root but is not served, so the
     # "every served byte is SRI-pinned and specifier-scanned" invariant holds.
-    served_url = f"/api/plugins/{name}/studio/{target.relative_to(plugin.dist_root).as_posix()}"
+    served_url = STUDIO_ASSET_PREFIX.format(name=name) + target.relative_to(plugin.dist_root).as_posix()
     if served_url not in plugin.integrity_by_url:
         return _error("not found", 404)
     if not target.is_file():
@@ -228,8 +229,8 @@ def _serve_static(dist_root: Path, rel: str, target: Path) -> Response:
 
 
 # The Studio SPA history-fallback catch-all. Registered on this path and, at the bottom of
-# this module, upgraded in place to a ``SpaFallbackRoute`` so it never matches an ``/api``/
-# ``/mcp`` path — one spelling, shared by the registration and the upgrade.
+# this module, upgraded in place to a ``SpaFallbackRoute`` so it never matches a control-plane
+# path — one spelling, shared by the registration and the upgrade.
 _SPA_CATCH_ALL_PATH = "/{spa_path:path}"
 
 

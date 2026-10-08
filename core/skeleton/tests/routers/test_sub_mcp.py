@@ -118,7 +118,18 @@ async def test_list_serializes_routes(install):
     install({"weather": RouteConfig(tools=["get_forecast"], transport="http")})
     resp = await router.list_sub_mcp(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"weather": {"tools": ["get_forecast"], "transport": "http"}}}
+    # Each entry carries the served mount: the URL the app is served at and the access pattern
+    # mapping every sub-path of it, so a client never rebuilds either.
+    assert _json(resp) == {
+        "data": {
+            "weather": {
+                "tools": ["get_forecast"],
+                "transport": "http",
+                "mount_url": "/app/weather",
+                "access_pattern": r"^/app/weather/.*$",
+            }
+        }
+    }
 
 
 async def test_list_empty(install):
@@ -256,7 +267,16 @@ async def test_list_reads_store_not_local_cache(install):
     await fake.store.save_route("remote", RouteConfig(tools=["get_forecast"], transport="sse"))
     resp = await router.list_sub_mcp(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"remote": {"tools": ["get_forecast"], "transport": "sse"}}}
+    assert _json(resp) == {
+        "data": {
+            "remote": {
+                "tools": ["get_forecast"],
+                "transport": "sse",
+                "mount_url": "/app/remote",
+                "access_pattern": r"^/app/remote/.*$",
+            }
+        }
+    }
     # It is store-only — the local router cache never bound it.
     assert "remote" not in fake.routes
 

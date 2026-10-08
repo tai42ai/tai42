@@ -264,8 +264,8 @@ def build_app() -> TaiMCP:
             # probed and roles seeded so the serviceability check can resolve the mint
             # provider and the mint path is ready.
             app.lifecycle.on_startup(ensure_setup_token)
-            # The always-public login surface is enumerated (visible at every boot) and
-            # an accidental authed mount under it fails the boot closed.
+            # The pre-auth surface is enumerated (visible at every boot) and an
+            # authenticated route on it fails the boot closed.
             app.lifecycle.on_startup(check_always_public_routes)
             # The non-/api public route surface is audited on every method: the derived
             # reserved set is printed, an unacknowledged public-by-declaration non-/api route

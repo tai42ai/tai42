@@ -64,11 +64,14 @@ def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
     family and audit it unauthenticated).
 
     A STATELESS deployment binds no GET on the endpoint — there is no session to stream
-    notifications from — so a GET to it is not a served surface: it is under ``/mcp`` (the
-    SPA-shell fallback excludes ``/mcp``) and no record claims it, so it resolves to nothing
+    notifications from — so a GET to it is not a served surface: it is under the control-plane
+    prefix this record sets (the SPA-shell fallback excludes it) and no record claims it, so it resolves to nothing
     and is admin-only (CASE A) / 404, never a public door. Statelessness alone decides the
     method set; naming the methods the protocol uses only under-claims anything else the
     endpoint answers, which stays the catch-all's.
+
+    The endpoint's path is the control-plane transport prefix
+    (:meth:`RouteRegistry.control_plane_prefixes`).
     """
     methods = ["POST", "DELETE"] if stateless else ["GET", "POST", "DELETE"]
     route_registry.record_mounted(
@@ -76,6 +79,7 @@ def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
         methods=methods,
         name="mcp_streamable_http",
         summary="MCP streamable-http transport endpoint",
+        control_plane=True,
     )
 
 

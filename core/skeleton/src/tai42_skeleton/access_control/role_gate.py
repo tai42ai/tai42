@@ -102,7 +102,12 @@ _mounted_matchers: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] |
 _TEMPLATE_SEGMENT = re.compile(r"\{([^}:]+)(:path)?\}")
 
 
-def _template_to_regex(template: str) -> re.Pattern[str]:
+def route_template_regex(template: str) -> re.Pattern[str]:
+    """The anchored regex a concrete request path matches when it is served by route ``template``.
+
+    A ``{name}`` segment matches one path segment; a ``{name:path}`` segment matches the rest.
+    """
+
     def _sub(match: re.Match[str]) -> str:
         return "(?:.+)" if match.group(2) else "(?:[^/]+)"
 
@@ -110,7 +115,7 @@ def _template_to_regex(template: str) -> re.Pattern[str]:
     return re.compile(f"^{pattern}$")
 
 
-def _served_methods(meta: RouteMetadata) -> frozenset[str]:
+def served_methods(meta: RouteMetadata) -> frozenset[str]:
     """The methods the ASGI router actually serves ``meta`` on.
 
     Starlette adds ``HEAD`` to every ``GET`` route while the registry stores only the
@@ -134,10 +139,10 @@ def _index_entry(
     lookup decide on the identical form — a registered route can never fail to resolve
     through a shape mismatch.
     """
-    methods = _served_methods(meta)
+    methods = served_methods(meta)
     canonical = canonicalize_path(meta.path)
     if "{" in canonical:
-        templated.append((_template_to_regex(canonical), methods, meta))
+        templated.append((route_template_regex(canonical), methods, meta))
     else:
         for method in methods:
             concrete[canonical, method] = meta
@@ -278,6 +283,21 @@ def _fail_closed_on_encoded_slash(meta: RouteMetadata, canonical: str, carries_e
             f"path {canonical!r} carries an encoded slash but route {meta.path!r} is not raw-path-matched"
         )
     return meta
+
+
+def declares_any_authenticated(path: str, method: str | None) -> bool:
+    """Whether the registered route a request ``(path, method)`` resolves to declares ``any_authenticated``.
+
+    The resource guard and the capability projection read the declaration through this one
+    lookup. A path :func:`resolve_route_meta` refuses to reason about (an encoded slash off a
+    route that is not raw-path-matched) is not such a route: it falls to resolution, which
+    denies it.
+    """
+    try:
+        meta = resolve_route_meta(path, method)
+    except MalformedPathError:
+        return False
+    return meta is not None and meta.any_authenticated
 
 
 def refusal_route(path: str, method: str | None) -> str:

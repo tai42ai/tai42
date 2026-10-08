@@ -26,26 +26,22 @@ existing scoped key. The base-tier jq carries ``.request.method``/``.request.pat
   access-control administration. Its per-tag pass is SKIPPED at enforcement; it is
   reserved, permanent, and un-lockable.
 - ``editor``: ``["*"]`` under :func:`editor_jq` (the ``/api/auth`` control-plane gate with
-  self-service carve-outs), with ``write`` on every grantable feature tag — everything
-  EXCEPT the admin-only fence and the access-control admin area, self-service surfaces
-  carved back in (own API keys, tokens payload, mint capabilities, ``/api/auth/logout``,
-  the read-only scopes listing, ``/api/auth/me``, one-time claim-link creation) plus every
-  self-service route the registered accounts providers declare.
+  self-service carve-ins), with ``write`` on every grantable feature tag — everything
+  EXCEPT the admin-only fence and the access-control admin area, every route that declares
+  ``self_service=True`` carved back in on the methods it serves.
 - ``viewer``: ``["*"]`` under :func:`viewer_jq` (the viewer read-only ceiling), with ``read``
-  on every grantable feature tag — read-only plus login/logout and own-key management.
+  on every grantable feature tag — read-only plus the state-changing self-service routes.
 
-The base-tier jq is BUILT per deployment: the platform-owned clauses are fixed, and each
-registered accounts provider's declared self-service routes are appended, so the platform
-names no provider's route.
+The base-tier jq is BUILT per deployment from the registered routes' ``self_service``
+declarations (core and plugin alike), so the platform names no route in it. Seeding is
+create-only: a store seeded earlier keeps its text, which grants the same reach.
 
-No ``/api/login`` clause exists in either base-tier string: always-public paths
-short-circuit to the public resource id before any jq evaluates, so a login-namespace
-carve-out would be dead text.
+No ``/api/login`` clause exists in either base-tier string: a public route resolves to the
+public resource id before any jq evaluates, so a login-namespace carve-out would be dead text.
 
-The :func:`editor_jq`/:func:`viewer_jq` carve-in admits the whole ``/api/auth/api-keys`` subtree
-for own-key CRUD, but the policy-administration routes beneath it
-(``/api/auth/api-keys/{user_id}/policy/versions`` and ``.../policy/rollback``) are
-enforced ADMIN-ONLY at the route level: a non-admin editor/viewer is denied there
+A self-service route that is ``secret``/``fenced`` (the policy-administration routes
+``/api/auth/api-keys/{user_id}/policy/versions`` and ``.../policy/rollback``) is still
+enforced ADMIN-ONLY by its action class: a non-admin editor/viewer is denied there
 regardless of this jq, so it can never read another user's policy history nor roll an
 enforced policy back to a prior version.
 """
@@ -53,6 +49,7 @@ enforced policy back to a prior version.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -82,80 +79,102 @@ RESERVED_ADMIN_ROLE = "admin"
 # no pointer so that discriminator holds byte-for-byte.
 ROLE_POINTER_KEY = "role"
 
-# The platform-owned control-plane carve-ins (editor ceiling): the skeleton's own
-# self-service surfaces — own keys, tokens-payload, capabilities, me, one-time
-# claim-link creation, GET scopes, logout — plus "everything outside /api/auth". The
-# routes an accounts provider owns for self-service (own-credential change and the
-# like) are NOT named here: they are appended at build time from the registered
-# providers (see :func:`_self_service_route_clauses`), so the platform never names an
-# implementation's route. This is the base-tier control-plane ceiling; the admin-only
-# mutation fence is the route action-class (enforced in code), not composed here.
-_EDITOR_FIXED_CARVE = (
-    '((.request.path | startswith("/api/auth")) | not) '
-    'or (.request.path | startswith("/api/auth/api-keys")) '
-    'or (.request.path == "/api/auth/tokens-payload") '
-    'or (.request.path == "/api/auth/capabilities") '
-    'or (.request.path == "/api/auth/me") '
-    'or (.request.path == "/api/auth/claim-links") '
-    'or ((.request.path == "/api/auth/scopes") and (.request.method == "GET")) '
-    'or (.request.path == "/api/auth/logout")'
-)
+# The platform-owned control-plane ceiling clause: everything OUTSIDE ``/api/auth`` (the
+# control-plane boundary the seed fences, not a route). Every caller self-service surface
+# under it is carved back in from its route's ``self_service`` declaration (see
+# :func:`_self_service_route_clauses`), so the platform names no route here — its own or a
+# provider's. The admin-only mutation fence is the route action-class (enforced in code), not
+# composed here.
+_EDITOR_FIXED_CARVE = '((.request.path | startswith("/api/auth")) | not)'
 
-# The platform-owned state-changing self-service surfaces a VIEWER may still invoke
-# (own keys, logout, one-time claim-link creation); the provider-owned self-service
-# routes are appended at build time, as in the editor carve. The read-method clause
-# completes the viewer's first conjunct.
-_VIEWER_FIXED_WRITE_CARVE = (
-    '(.request.path | startswith("/api/auth/api-keys")) '
-    'or (.request.path == "/api/auth/logout") '
-    'or (.request.path == "/api/auth/claim-links")'
-)
+# The methods a viewer's read-only ceiling admits on any surface.
+_READ_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
-def self_service_route_paths() -> set[str]:
-    """Every registered route that DECLARES itself a caller self-service surface.
+def self_service_routes() -> list[tuple[str, frozenset[str]]]:
+    """Every registered route that DECLARES itself a caller self-service surface, with its served methods.
 
-    A self-service route (``self_service=True`` at registration) is reachable by a
-    non-admin editor/viewer even under an otherwise admin-gated prefix. Derived from
-    the live route registry exactly as :func:`grantable_feature_tags` derives the grant
-    map, so the platform names no provider's route — a provider that ships a
-    self-service route under ``/api/auth`` declares it, and the seed carves it in.
+    Sorted ``(canonical path, served methods)`` pairs for every route registered with
+    ``self_service=True``, core or plugin, derived from the live route registry exactly as
+    :func:`grantable_feature_tags` derives the grant map. A templated route keeps its
+    template; the carve-in matches it as one.
     """
+    from tai42_skeleton.access_control.path_canon import canonicalize_path
+    from tai42_skeleton.access_control.role_gate import served_methods
     from tai42_skeleton.app.route_registry import load_all_routes
 
-    return {meta.path for meta in load_all_routes() if meta.self_service}
+    routes = {(canonicalize_path(meta.path), served_methods(meta)) for meta in load_all_routes() if meta.self_service}
+    return sorted(routes, key=lambda route: (route[0], sorted(route[1])))
+
+
+def _self_service_clauses() -> list[str]:
+    """One jq clause per distinct served-method set, admitting every self-service route serving it.
+
+    Routes serving the same methods share one clause: those methods, and the request path
+    matching one anchored alternation of the routes' paths (a concrete path literally, a
+    templated one by its template). A string literal is one token whatever its length, so the
+    ceiling's size grows with the number of distinct method sets, not of routes, and stays
+    inside the token-free scan's allowance an execution-key bind runs over the role condition.
+    """
+    from tai42_skeleton.access_control.role_gate import route_template_regex
+
+    groups: dict[frozenset[str], list[str]] = {}
+    for path, methods in self_service_routes():
+        body = route_template_regex(path).pattern[1:-1] if "{" in path else re.escape(path)
+        groups.setdefault(methods, []).append(body)
+    clauses = []
+    for methods in sorted(groups, key=sorted):
+        method_set = ",".join(json.dumps(method) for method in sorted(methods))
+        alternation = json.dumps(f"^(?:{'|'.join(sorted(groups[methods]))})$")
+        clauses.append(f"((.request.method | IN({method_set})) and (.request.path | test({alternation})))")
+    return clauses
 
 
 def _self_service_route_clauses() -> str:
-    """The jq ``or``-clauses for every declared self-service route.
+    """The jq ``or``-clauses carving every declared self-service route into the ceiling.
 
-    Each declared self-service route becomes an exact-path equality clause carved into
-    the editor/viewer reach. Returns ``""`` when no route declares itself self-service
-    (an identity-only or external-issuer deployment), leaving the base-tier ceiling to
-    the platform-owned clauses alone.
+    Each admits a route's served methods on its path (a templated route matched by its
+    template). Returns ``""`` when no route declares itself self-service, leaving the ceiling
+    to the platform-owned clause alone.
     """
-    return "".join(f" or (.request.path == {json.dumps(path)})" for path in sorted(self_service_route_paths()))
+    return "".join(f" or {clause}" for clause in _self_service_clauses())
+
+
+def _viewer_write_clauses() -> str:
+    """The self-service clauses whose methods include a state-changing one — a viewer's only writes.
+
+    ``"false"`` when no self-service route serves one.
+    """
+    clauses = [
+        clause
+        for clause, methods in zip(_self_service_clauses(), _method_sets(), strict=True)
+        if any(method not in _READ_METHODS for method in methods)
+    ]
+    return " or ".join(clauses) if clauses else "false"
+
+
+def _method_sets() -> list[frozenset[str]]:
+    """The distinct served-method sets of the self-service routes, in :func:`_self_service_clauses` order."""
+    return sorted({methods for _path, methods in self_service_routes()}, key=sorted)
 
 
 def editor_jq() -> str:
-    """The editor base-tier jq ceiling: the platform-owned carve-ins plus the providers' self-service routes."""
+    """The editor base-tier jq ceiling: everything outside ``/api/auth`` plus every declared self-service route."""
     return f"({_EDITOR_FIXED_CARVE}{_self_service_route_clauses()})"
 
 
 def viewer_jq() -> str:
     """The viewer base-tier jq ceiling.
 
-    Read-only methods OR the platform-owned self-service surfaces OR the providers'
-    self-service routes (first conjunct), intersected with the editor control-plane
-    ceiling (second conjunct), so a viewer's state-changing calls are confined to the
-    self-service surfaces. The admin-only mutation fence is the route action-class
-    (enforced in code), not composed here.
+    Read-only methods OR a declared self-service route serving a state-changing method
+    (first conjunct), intersected with the editor control-plane ceiling (second conjunct), so
+    a viewer's state-changing calls are confined to the self-service surfaces. The admin-only
+    mutation fence is the route action-class (enforced in code), not composed here.
     """
-    self_service = _self_service_route_clauses()
-    read_methods = '(.request.method | IN("GET","HEAD","OPTIONS"))'
-    write_conjunct = f"({_VIEWER_FIXED_WRITE_CARVE}{self_service} or {read_methods})"
-    ceiling = f"({_EDITOR_FIXED_CARVE}{self_service})"
-    return f"({write_conjunct} and {ceiling})"
+    read_methods = f"(.request.method | IN({','.join(json.dumps(m) for m in _READ_METHODS)}))"
+    return (
+        f"((({_viewer_write_clauses()}) or {read_methods}) and ({_EDITOR_FIXED_CARVE}{_self_service_route_clauses()}))"
+    )
 
 
 def grantable_feature_tags() -> set[str]:

@@ -31,6 +31,7 @@ from mcp.types import ToolAnnotations
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
 from tai42_skeleton.operations.errors import OperationError
 from tai42_skeleton.operations.registry import OperationRegistry, operation_registry
+from tai42_skeleton.routers.paths import AUTH_API_PREFIX
 
 if TYPE_CHECKING:
     from tai42_contract.manifest import ApiToolsConfig
@@ -45,11 +46,11 @@ logger = logging.getLogger(__name__)
 # whose author forgets the flag.
 TIER1_META_EXECUTORS: frozenset[str] = frozenset({"run_tool"})
 
-# Tier 2: the route-prefix that marks an authority-changing operation family.
-# The backup-import op and ``update_manifest`` carry the ``authority_changing``
-# metadata flag instead (they own no shared prefix); an authority-changing op that
-# shares no route prefix is marked by setting that same flag.
-_TIER2_ROUTE_PREFIX = "/api/auth/"
+# Tier 2: an operation served under the access-control administration surface
+# (``AUTH_API_PREFIX``) is an authority-changing family. The backup-import
+# op and ``update_manifest`` carry the ``authority_changing`` metadata flag instead (they own
+# no shared prefix); an authority-changing op that shares no route prefix is marked by
+# setting that same flag.
 
 
 def _tier1_reason(op: OperationMetadata) -> str | None:
@@ -75,7 +76,7 @@ def is_tier2(op: OperationMetadata) -> bool:
     """Whether ``op`` is default-excluded (authority-changing; includable)."""
     if op.authority_changing:
         return True
-    return op.route_template is not None and op.route_template.startswith(_TIER2_ROUTE_PREFIX)
+    return op.route_template is not None and op.route_template.startswith(f"{AUTH_API_PREFIX}/")
 
 
 def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:

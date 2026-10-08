@@ -145,6 +145,24 @@ def _preserve_generation_globals() -> Iterator[None]:
         yield
 
 
+@pytest.fixture
+def streamable_http_mounted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record the streamable-http transport at its default ``/mcp`` path, as a served app does.
+
+    The control-plane prefix set (``RouteRegistry.control_plane_prefixes``) is ``/api`` plus
+    the recorded transport path, so a test of the ``/mcp`` exclusion records the transport
+    the way ``http_app`` does instead of depending on an app an earlier test happened to
+    build in the same worker. The process registry's records are restored afterwards.
+    """
+    from tai42_skeleton.app.route_registry import route_registry
+    from tai42_skeleton.app.serving_core import record_streamable_http_surface
+
+    monkeypatch.setattr(route_registry, "_routes", dict(route_registry._routes))
+    monkeypatch.setattr(route_registry, "_control_plane_mount", route_registry._control_plane_mount)
+    monkeypatch.setattr(route_registry, "_version", route_registry._version)
+    record_streamable_http_surface("/mcp", stateless=False)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _load_full_route_universe():
     """Load the whole offline route universe once per worker, before any test boots an app.

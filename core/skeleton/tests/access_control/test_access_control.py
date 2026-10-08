@@ -147,13 +147,13 @@ def test_spa_settings_defaults_are_canonical_and_valid():
         ("reserved_operational_supplement", ("/a/../b",)),  # non-canonical (dot segments)
         ("reserved_operational_supplement", ("/a//b",)),  # non-canonical (double slash)
         ("reserved_operational_supplement", ("/a%2Fb",)),  # non-canonical (encoded byte)
-        ("reserved_operational_supplement", ("/api/login/x",)),  # overlaps always-public
-        ("acknowledged_public_routes", ("/api/secret",)),  # under /api — a contradiction
-        ("acknowledged_public_routes", ("/mcp/x",)),  # under /mcp — a contradiction
-        ("acknowledged_public_routes", ("/api/login",)),  # overlaps always-public
+        ("reserved_operational_supplement", ("/portal/x",)),  # overlaps always-public
+        ("acknowledged_public_routes", ("/portal",)),  # overlaps always-public
         ("acknowledged_public_routes", ("relative",)),  # not absolute
     ],
 )
 def test_spa_settings_reject_invalid_entries(field, value):
-    with pytest.raises(ValueError, match=r"entry|absolute|canonical|overlaps|contradiction|under"):
-        AccessControlSettings(**{field: value})
+    # An entry under a control-plane prefix is refused by the boot audit, which reads the
+    # served control-plane prefixes (``tests/access_control/test_startup.py``).
+    with pytest.raises(ValueError, match=r"entry|absolute|canonical|overlaps"):
+        AccessControlSettings(always_public_path_prefixes=("/portal",), **{field: value})

@@ -77,6 +77,8 @@ class AppHttp(Protocol):
         destructive: bool = False,
         action: RouteAction | None = None,
         self_service: bool = False,
+        any_authenticated: bool = False,
+        pre_auth: bool = False,
         declared: DeclaredRouteMetadata | None = None,
         no_body_reason: str | None = None,
         enveloped: bool = True,
@@ -130,6 +132,16 @@ class AppHttp(Protocol):
           under an otherwise admin-gated prefix (an own-credential change under
           ``/api/auth``). The seed derives the carve-in from every route declaring
           this, so the platform names no provider's route.
+        * ``any_authenticated`` — whether this route is reachable by ANY authenticated
+          identity whatever its scopes and whatever the route table maps (an
+          identity-introspection route); the base-tier jq still applies; an
+          unauthenticated caller is denied 401. Requires the route to be authenticated.
+        * ``pre_auth`` — whether this route is a pre-authentication surface (login,
+          recovery, claim exchange): presented credentials are NOT verified, so a stale
+          credential can never lock a caller out of the door that replaces it; the route
+          is public and no policy layer runs. Requires the route to be public. A declared
+          plugin route passes either flag itself; a flag contradicting the route's
+          publicness is a registration error.
         * ``declared`` — the route's behavioral OpenAPI properties (a
           :class:`DeclaredRouteMetadata`): its ``reload_gated`` / ``reads_body`` /
           error statuses / success status. A route in the ``/api/*`` spec surface

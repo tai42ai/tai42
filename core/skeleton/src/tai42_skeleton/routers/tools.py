@@ -31,6 +31,7 @@ from tai42_skeleton.operations.tools import tool_schema as _tool_schema_op
 from tai42_skeleton.operations.tools import tool_tags as _tool_tags_op
 from tai42_skeleton.operations.tools import tools_schema as _tools_schema_op
 from tai42_skeleton.routers._tool_call import ToolCallRequestError, read_tool_call
+from tai42_skeleton.routers.paths import RUN_TOOL_PATH
 
 
 async def _extract_run_tool(request: Request) -> dict[str, Any]:
@@ -82,7 +83,7 @@ tools_schema = register_operation_route(
 run_tool = register_operation_route(
     tai42_app,
     operation_metadata_of(_run_tool_op),
-    path="/api/run-tool",
+    path=RUN_TOOL_PATH,
     method="POST",
     context_extractor=_extract_run_tool,
     action="fenced",

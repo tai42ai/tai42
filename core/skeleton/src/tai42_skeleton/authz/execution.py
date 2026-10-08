@@ -51,6 +51,7 @@ from tai42_skeleton.authz.execution_identity import reset_execution_identity, se
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.resolver import resolve_dispatch
 from tai42_skeleton.operations.errors import PermissionDeniedError
+from tai42_skeleton.routers.paths import agent_run_path
 
 if TYPE_CHECKING:
     from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -378,7 +379,7 @@ async def authorize_execution_agent_run(
     if user_id is None:
         raise PermissionDeniedError("access denied: no caller identity for an agent run")
 
-    run_door = f"/api/agents/{agent_name}/runs"
+    run_door = agent_run_path(agent_name)
     method = "POST"
     try:
         path = canonicalize_path(run_door)

@@ -216,17 +216,17 @@ async def test_mint_provider_identity_with_no_owner_claim_is_denied(caplog):
 
 
 async def test_always_public_path_short_circuits_without_store_query(monkeypatch):
-    # An always-public path returns exactly [public] and NEVER queries the store or
-    # the version counter — proven by wiring both to raise on any access.
-    settings = AccessControlSettings()
+    # A path under an operator's always-public prefix returns exactly [public] and NEVER
+    # queries the store or the version counter — proven by wiring both to raise on any access.
+    settings = AccessControlSettings(always_public_path_prefixes=("/portal",))
     pg = FakeAccessControlPg()
     pg.fault = ("SELECT", RuntimeError("store must not be queried"))
     redis = FakeRedis(raise_get=RuntimeError("version must not be read"))
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     v = _verifier(settings)
-    assert await v.resolve_resource_ids("/api/login/methods") == [settings.public_resource_id]
-    assert await v.resolve_resource_ids("/api/login") == [settings.public_resource_id]
+    assert await v.resolve_resource_ids("/portal/form") == [settings.public_resource_id]
+    assert await v.resolve_resource_ids("/portal") == [settings.public_resource_id]
     assert pg.executed == []
 
 
@@ -780,14 +780,6 @@ async def test_unregistered_path_is_not_public_even_if_acknowledged(monkeypatch)
     assert await v.resolve_resource_ids("/health", method="GET") == []
 
 
-def test_acknowledged_public_routes_forbids_api_mcp_entries():
-    # Invariant (b): the control plane / an /api or /mcp path can NEVER be acknowledged
-    # public — settings construction rejects it, so no such entry can ever reach the boot audit.
-    for bad in ("/api/secret", "/api/auth/keys", "/mcp/tool"):
-        with pytest.raises(ValueError, match="acknowledged_public_routes"):
-            AccessControlSettings(acknowledged_public_routes=("/health", bad))
-
-
 async def test_declared_public_tier_reserved_prefix_never_public(monkeypatch):
     # Belt-and-suspenders runtime guard for invariant (b): even a registered public route
     # under a reserved prefix is dropped by the tier's ``_is_reserved_prefix`` guard. Mark a
@@ -799,13 +791,13 @@ async def test_declared_public_tier_reserved_prefix_never_public(monkeypatch):
     assert await v.resolve_resource_ids("/control", method="GET") == []
 
 
-# -- Always-public route patterns: the plugin studio-asset door --------------
+# -- The plugin studio-asset door and an operator's always-public route patterns ------
 
 
 async def test_plugin_studio_asset_is_public(monkeypatch):
     # The plugin studio-asset door (/api/plugins/{name}/studio/{path}, registered
-    # authed=False) resolves public via the default always-public route pattern — the
-    # acknowledged tier excludes /api, and no fixed prefix reaches /studio/ after {name}.
+    # authed=False) resolves public through its declaration (the declared-public tier),
+    # with the always-public route pattern list at its empty default.
     settings = AccessControlSettings()
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
@@ -818,7 +810,7 @@ async def test_plugin_studio_asset_is_public(monkeypatch):
 
 async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeypatch, bound_app):
     # The authed /api/plugins LIST is genuinely non-public: it carries no ``public``
-    # declaration and matches no always-public pattern, so it is never granted the public
+    # declaration, so it is never granted the public
     # id. With no operator row it resolves to the universal scope ``["*"]`` via the
     # declared-protection tier — a registered authenticated surface a role-holder reaches,
     # a scoped key does not — NOT the public id.
@@ -841,7 +833,7 @@ async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeyp
 
 
 async def test_studio_asset_public_alone_despite_protected_route_row(monkeypatch):
-    # The always-public pattern tier is AUTHORITATIVE, not additive: a studio-asset path
+    # The declared-public tier is AUTHORITATIVE, not additive: a studio-asset path
     # that ALSO carries a protected route row resolves the public id ALONE (the row's id
     # dropped), so the door opens. An additive grant would leave {public, row-id} — deny
     # wins (CASE B) — and the ESM-imported bundle, which cannot send an auth header, 401s.

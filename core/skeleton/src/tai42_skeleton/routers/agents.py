@@ -77,6 +77,7 @@ from tai42_skeleton.operations import agents as agent_ops
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.agents import list_agents as _list_agents_op
 from tai42_skeleton.operations.agents import list_spec_runnable_agents as _list_spec_runnable_agents_op
+from tai42_skeleton.routers.paths import AGENT_RUNS_TEMPLATE
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
 logger = logging.getLogger(__name__)
@@ -456,7 +457,7 @@ async def _agent_event_stream(
 
 
 @http_surface().custom_route(
-    "/api/agents/{name}/runs",
+    AGENT_RUNS_TEMPLATE,
     methods=["POST"],
     summary="Stream a run of an agent",
     tags=["agents"],
