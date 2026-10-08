@@ -26,10 +26,10 @@ from tai42_skeleton.interactions.continuation import (
     EXPIRY_ANSWER,
     EXPIRY_ANSWERED_BY,
     continuation_due_timing,
-    deliver_park_giveup,
     dispatch_continuation,
     redeliver_continuation,
 )
+from tai42_skeleton.interactions.giveup_delivery import deliver_park_giveup
 from tai42_skeleton.interactions.kill import kill_park, redeliver_kill
 from tai42_skeleton.interactions.settings import (
     InteractionsSettings,
@@ -230,16 +230,17 @@ async def redeliver_due_continuations_once() -> int:
                         "its retention horizon; its continuation will never re-drive",
                         interaction_id,
                     )
-                    # The PLATFORM delivers the run's single FAILED itself, off the interaction's
-                    # stored delivery — fire the run's address, else a ``failed`` waiting outcome on
-                    # its subject, else drop — keyed by the run's ``completion_id`` so it dedupes
-                    # against any FAILED already delivered. The bound caller learns the run failed
-                    # rather than waiting to its own deadline. The interaction's own state carries
-                    # the durable ``delivery``; when even that has aged out there is no address left
-                    # to deliver to, so the loud drop above stands alone.
+                    # The parking driver ends the park through the routing it captured (a chained
+                    # caller, a parent run), else the PLATFORM delivers the run's single FAILED
+                    # itself, off the interaction's stored delivery, keyed by the run's
+                    # ``completion_id`` so it dedupes against any FAILED already delivered. The
+                    # interaction's own state carries the durable ``delivery`` and the park's
+                    # captured key fingerprint; when it has aged out there is no address left to
+                    # deliver to, so the loud drop above stands alone.
                     state = await store.get_state(r, interaction_id)
                     if state is not None:
-                        await deliver_park_giveup(store, state.request)
+                        fingerprint = await store.continuation_fingerprint(r, interaction_id)
+                        await deliver_park_giveup(store, state.request, fingerprint=fingerprint)
                     continue
                 redeliver_continuation(store, due)
                 redelivered += 1

@@ -9,10 +9,7 @@ leaves the ledger before the graph runs.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,23 +27,13 @@ from tests._tools_agent_park_support import (
     _AskStandIn,
     _wire_tools_build,
 )
-
-from tai42_agents._internal.park import capability as park_capability
-from tai42_agents._internal.park import index as idx
+from tests.conftest import bind_park_index
 
 
 @pytest.fixture
 def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(park_capability, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 

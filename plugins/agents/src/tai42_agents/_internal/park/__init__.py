@@ -4,8 +4,9 @@ The three pieces behind a park-capable agent run that async-parks on an ``ask``:
 
 * :class:`AsyncParkMiddleware` — the ``before_model`` hook that interrupts the loop once
   per super-step of async-ask parks and substitutes their answers back on resume.
-* the durable park :mod:`~tai42_agents._internal.park.index` — reverses a parked
-  interaction id back to its parked run, in the agents plugin's own Redis.
+* the durable park index (:mod:`~tai42_agents._internal.park.park_binding`, the agents' binding of
+  the kit park index) — reverses a parked interaction id back to its parked run, in the agents
+  plugin's own Redis.
 * the :mod:`~tai42_agents._internal.park.capability`, :mod:`~tai42_agents._internal.park.persist`,
   :mod:`~tai42_agents._internal.park.drive`, and :mod:`~tai42_agents._internal.park.resume`
   modules — park capability, the persist seam, the drive-side finalizer, and the

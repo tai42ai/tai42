@@ -77,6 +77,9 @@ class ContinuationDue:
     deferred_binding: StateBinding | None = None
     run_input: dict[str, Any] | None = None
     door_id: str | None = None
+    # The chained calls the park is nested under (``InteractionRequest.chain_keys``), deposited
+    # around the reaper's redelivery as the drive's resume lineage. Empty when nested under none.
+    chain_keys: list[str] = field(default_factory=list)
 
 
 class ContinuationRetryDrop(enum.Enum):
@@ -122,6 +125,7 @@ def _continuation_due_mapping(
     deferred_binding: str | None = None,
     run_input: str | None = None,
     door_id: str | None = None,
+    chain_keys: str | None = None,
 ) -> dict[str, str]:
     """The flow-blind continuation-due record fields.
 
@@ -130,7 +134,8 @@ def _continuation_due_mapping(
     round-trips), a zeroed attempt count, and the original door's state context (JSON) when the
     park carried one, so a redelivery keeps the same door/actor as the immediate fire. It also
     copies the parking run's call chain (``asked_by``, JSON) so a redelivery restores the same
-    chain the immediate fire did, and the run's ``delivery`` address (JSON) and ``run_delivery_id``
+    chain the immediate fire did, the chained calls it is nested under (``chain_keys``, JSON) so a
+    redelivery deposits the same resume lineage, and the run's ``delivery`` address (JSON) and ``run_delivery_id``
     when the park carried them, so the reaper's DETACHED redelivery binds the run's address and
     re-establishes its delivery identity without re-reading the request. It carries no
     consumer-specific data. Written into the SAME MULTI as the resolving claim
@@ -160,6 +165,8 @@ def _continuation_due_mapping(
         mapping["run_input"] = run_input
     if door_id is not None:
         mapping["door_id"] = door_id
+    if chain_keys is not None:
+        mapping["chain_keys"] = chain_keys
     return mapping
 
 
@@ -173,7 +180,9 @@ class KillTarget:
     ``None`` for the other kinds. ``delivery`` (the run's out-of-band address ``{tool, context}``),
     ``run_delivery_id`` and ``subjects`` (the descriptor) are the run's delivery identity the kill
     copies onto its durable record and delivers its single FAILED under — ``None`` when the run
-    carried none (a receiver-less door, no subject).
+    carried none (a receiver-less door, no subject). ``chain_keys`` are the chained calls the
+    interaction is nested under, copied onto the kill-due record and deposited as the resume
+    lineage around the driver teardown — empty when nested under none (and for an outcome).
     """
 
     kind: Literal["park", "running", "outcome"]
@@ -181,6 +190,7 @@ class KillTarget:
     delivery: dict[str, Any] | None
     run_delivery_id: str | None
     subjects: dict[str, Any] | None
+    chain_keys: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -190,9 +200,10 @@ class KillDue:
     Written in the kill's teardown MULTI and cleared only when every driver teardown returned
     normally AND the platform's FAILED delivery for the killed run committed. Carries the killed
     run's OWN copied ``delivery`` address and ``run_delivery_id`` (so the FAILED delivery and its
-    dedup id survive the prune and a redelivery), the subject descriptor it subject-tracks a
-    receiver-less FAILED under, the removal ``reason``, and the hard ``deadline_ms`` past which the
-    reaper gives the kill up. It carries no consumer-specific data.
+    dedup id survive the prune and a redelivery), the ``chain_keys`` the killed interaction is
+    nested under (deposited as the resume lineage around a redelivered teardown), the subject
+    descriptor it subject-tracks a receiver-less FAILED under, the removal ``reason``, and the hard
+    ``deadline_ms`` past which the reaper gives the kill up. It carries no consumer-specific data.
     """
 
     interaction_id: str
@@ -202,6 +213,7 @@ class KillDue:
     delivery: dict[str, Any] | None = None
     run_delivery_id: str | None = None
     subjects: dict[str, Any] | None = None
+    chain_keys: list[str] = field(default_factory=list)
 
 
 def _kill_due_mapping(
@@ -210,13 +222,15 @@ def _kill_due_mapping(
     delivery: str | None = None,
     run_delivery_id: str | None = None,
     subjects: str | None = None,
+    chain_keys: str | None = None,
 ) -> dict[str, str]:
     """The kill-due record fields.
 
     The removal ``reason``, a zeroed attempt count, the hard ``deadline_ms`` (created + retention
     horizon) past which the reaper gives the kill up, and — when the killed run carried them — the
-    run's ``delivery`` address (JSON), its ``run_delivery_id`` and its subject descriptor (JSON),
-    so a detached redelivery re-fires the driver teardown and delivers the run's single FAILED
+    run's ``delivery`` address (JSON), its ``run_delivery_id``, its subject descriptor (JSON) and
+    the ``chain_keys`` the interaction is nested under (JSON), so a detached redelivery re-fires the
+    driver teardown under the same resume lineage and delivers the run's single FAILED
     without re-reading a state hash the kill already pruned. Written into the kill's teardown MULTI,
     so the outbox enqueue commits atomically with the prune.
     """
@@ -227,6 +241,8 @@ def _kill_due_mapping(
         mapping["run_delivery_id"] = run_delivery_id
     if subjects is not None:
         mapping["subjects"] = subjects
+    if chain_keys is not None:
+        mapping["chain_keys"] = chain_keys
     return mapping
 
 

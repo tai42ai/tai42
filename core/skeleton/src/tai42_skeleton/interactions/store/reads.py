@@ -43,6 +43,16 @@ def _raw_field(raw: dict[str | bytes, str | bytes], field: str) -> str | None:
     return None
 
 
+def _chain_keys(fields: dict[str, str]) -> list[str]:
+    """The ``chain_keys`` (JSON) a state hash or a due / kill-due record carries; empty when the field is absent.
+
+    The writers set the field only for a park nested under a chained call, so its absence is the
+    empty lineage.
+    """
+    raw = fields.get("chain_keys")
+    return json.loads(raw) if raw is not None else []
+
+
 # The read-only ``list_pending`` admin audit truncates each question to this many
 # characters so one over-long question can never bloat the audit frame; the full
 # text stays on the durable record (this preview is display-only).
@@ -309,6 +319,7 @@ class _StoreReads(_StoreKeys):
             deferred_binding=StateBinding.model_validate_json(raw_binding) if raw_binding is not None else None,
             run_input=json.loads(raw_run_input) if raw_run_input is not None else None,
             door_id=fields.get("door_id"),
+            chain_keys=_chain_keys(fields),
         )
 
     async def read_kill_target(self, r: Redis, interaction_id: str) -> KillTarget | None:
@@ -318,8 +329,9 @@ class _StoreReads(_StoreKeys):
         ``"running"``), then the waiting-outcome hash (``"outcome"``, a completed run's result),
         then the continuation-due record (``"running"``, an entry whose state hash aged out). Returns
         ``None`` when nothing live names this id. The ``delivery``/``run_delivery_id``/``subjects``
-        are the run's, self-contained so the kill's durable record and FAILED delivery survive the
-        prune.
+        are the run's, and ``chain_keys`` the chained calls the interaction is nested under,
+        self-contained so the kill's durable record, its teardown's resume lineage and its FAILED
+        delivery survive the prune.
         """
         raw_state = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id)))
         if raw_state:
@@ -332,6 +344,7 @@ class _StoreReads(_StoreKeys):
                 delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+                chain_keys=_chain_keys(fields),
             )
         raw_outcome = await cast(
             "Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.outcome_key(interaction_id))
@@ -364,6 +377,7 @@ class _StoreReads(_StoreKeys):
                 delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=subjects,
+                chain_keys=_chain_keys(fields),
             )
         return None
 
@@ -419,6 +433,7 @@ class _StoreReads(_StoreKeys):
             delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
             run_delivery_id=fields.get("run_delivery_id"),
             subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
+            chain_keys=_chain_keys(fields),
         )
 
     async def due_untaken_outcomes(self, r: Redis, now: datetime, horizon_seconds: int) -> list[str]:

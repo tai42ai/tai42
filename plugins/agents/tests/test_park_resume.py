@@ -3,8 +3,8 @@ super-step barrier, the ``finalize_drive`` raise branch, and the full cross-work
 
 A real ``DeepAgent.run`` parks and returns a suspended receipt, then ``agent_resume`` rebuilds
 the graph on a fresh runtime (same checkpointer + the durable park index) and drives it to
-completion, running the parked tool exactly once. The park index is backed by an in-memory
-fakeredis routed in through the index module's ``client_ctx`` seam; the checkpoint is an
+completion, running the parked tool exactly once. The agents' park index is bound to an in-memory
+fakeredis; the checkpoint is an
 ``InMemorySaver`` shared between the park run and the resume, standing in for the durable
 checkpoint a cross-worker resume reads.
 """
@@ -12,10 +12,8 @@ checkpoint a cross-worker resume reads.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,22 +27,24 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    ResumeBuffered,
+    RunFailed,
+    RunTerminalFailed,
     SuspendedInteraction,
     get_resume_continuation_tool,
     suspended_interaction_marker,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_index import DriveInProgressError, superstep_id
+from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import agent_resume, finalize_drive
 from tai42_agents._internal.park import capability as cap
-from tai42_agents._internal.park import index as idx
-from tai42_agents._internal.park import resume as res
 from tai42_agents._internal.park.errors import (
     AgentParkNotHostableError,
-    AgentResumeDriveInProgressError,
-    AgentResumeInterruptNotPendingError,
     AgentResumeParkEntryNotFoundError,
 )
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents.langchain_deep_agent import agent as agent_mod
 from tai42_agents.langchain_deep_agent import run_thread as run_thread_mod
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
@@ -106,15 +106,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the park index at a shared in-memory fakeredis and report the park Redis as
     configured (so a run is judged park-capable)."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(cap, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -122,12 +114,12 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
 
 
 async def _write_park(entry_ids: list[str], interrupt_id: str = "int1", thread_id: str = "t") -> str:
-    superstep_id = idx.compute_superstep_id(entry_ids)
+    step = superstep_id(entry_ids)
     entries = {
         interaction_id: {
             "agent_name": "langchain_deep_agent",
             "thread_id": thread_id,
-            "superstep_id": superstep_id,
+            "superstep_id": step,
             "interrupt_id": interrupt_id,
             # Engine facts (checkpoint provider, recursion limit) ride inside rebuild_kwargs,
             # never top-level entry fields, on the provider-free index.
@@ -139,27 +131,32 @@ async def _write_park(entry_ids: list[str], interrupt_id: str = "int1", thread_i
         }
         for interaction_id in entry_ids
     }
-    expected: dict[str, Any] = dict.fromkeys(entry_ids)
-    await idx.persist_superstep(entries, thread_id, superstep_id, expected, dict.fromkeys(entry_ids), 100)
-    return superstep_id
+    await agents_park_index().persist(
+        thread_id=thread_id,
+        superstep=step,
+        entries=entries,
+        expected=dict.fromkeys(entry_ids),
+        entry_ttl=dict.fromkeys(entry_ids, 100),
+        barrier_ttl=100,
+    )
+    return step
 
 
-async def _seed_finalized(thread_id: str, superstep_id: str, ids: list[str], *, resolution: str, value: Any) -> None:
-    """Claim the drive lease and finalize the super-step under it — the token guard the production
-    drive and kill both satisfy, so a test seeding a tombstone holds a lease exactly as they do."""
-    token = "seed-token"
-    assert await idx.try_claim_drive(thread_id, superstep_id, token)
-    await idx.finalize_resolved_superstep(thread_id, superstep_id, ids, resolution=resolution, value=value, token=token)
+async def _seed_finalized(thread_id: str, step: str, ids: list[str], *, resolution: Any, value: Any) -> None:
+    """Claim the drive lease and finalize the super-step under it, as the drive and the kill both do."""
+    index = agents_park_index()
+    async with index.claim(thread_id, step) as lease:
+        await index.finalize(lease, member_ids=ids, resolution=resolution, value=value)
 
 
 def test_agent_resume_buffers_until_all_siblings_answered(fake_park_redis: Any) -> None:
     async def go() -> None:
         await _write_park(["iA", "iB"])
         out = await agent_resume("iA", "answer-a")
-        assert out == {"status": "buffered", "remaining_ids": ["iB"]}
+        assert out == ResumeBuffered(remaining_ids=["iB"])
         # The still-pending sibling keeps the park entries in place.
-        assert await idx.read_park_entry("iA") is not None
-        assert await idx.read_park_entry("iB") is not None
+        assert await agents_park_index().read_entry("iA") is not None
+        assert await agents_park_index().read_entry("iB") is not None
 
     asyncio.run(go())
 
@@ -168,11 +165,11 @@ def test_agent_resume_raises_on_lost_drive_lease(fake_park_redis: Any) -> None:
     async def go() -> None:
         superstep_id = await _write_park(["i1"])
         # Another live worker already holds the drive lease.
-        assert await idx.try_claim_drive("t", superstep_id, "other-worker")
-        with pytest.raises(AgentResumeDriveInProgressError):
+        await agents_park_index().claim("t", superstep_id).acquire()
+        with pytest.raises(DriveInProgressError):
             await agent_resume("i1", "the answer")
         # The park index is LEFT intact so the platform's reaper redelivers.
-        assert await idx.read_park_entry("i1") is not None
+        assert await agents_park_index().read_entry("i1") is not None
 
     asyncio.run(go())
 
@@ -224,89 +221,17 @@ def test_finalize_drive_raises_on_a_park_with_no_identity_bound(fake_park_redis:
     asyncio.run(go())
 
 
-# ---- drive-lease behavior (token-checked claim / renew / release, TTL reclaim) ------------
-
-
-def test_drive_lease_release_lets_a_fresh_claim_win(fake_park_redis: Any) -> None:
-    async def go() -> None:
-        assert await idx.try_claim_drive("t", "s", "tok1")
-        # A second claim while the lease is live loses.
-        assert not await idx.try_claim_drive("t", "s", "tok2")
-        # The holder releases; a fresh claim now wins.
-        await idx.release_claim("t", "s", "tok1")
-        assert await idx.try_claim_drive("t", "s", "tok2")
-
-    asyncio.run(go())
-
-
-def test_drive_lease_release_with_wrong_token_leaves_the_lease(fake_park_redis: Any) -> None:
-    async def go() -> None:
-        assert await idx.try_claim_drive("t", "s", "tok1")
-        # A stale holder's release names the wrong token, so the live lease is untouched.
-        await idx.release_claim("t", "s", "wrong")
-        assert not await idx.try_claim_drive("t", "s", "tok2")
-
-    asyncio.run(go())
-
-
-def test_drive_lease_renew_only_extends_for_the_holder(fake_park_redis: Any) -> None:
-    async def go() -> None:
-        assert await idx.try_claim_drive("t", "s", "tok1")
-        # The holder renews; a stale token does not.
-        assert await idx.renew_claim("t", "s", "tok1")
-        assert not await idx.renew_claim("t", "s", "wrong")
-        # A renew of an absent lease is False.
-        assert not await idx.renew_claim("t", "absent", "tok1")
-
-    asyncio.run(go())
-
-
-def test_drive_lease_expiry_reclaims_with_no_manual_delete(
-    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(idx, "_DRIVE_LEASE_SECONDS", 1)
-
-    async def go() -> None:
-        assert await idx.try_claim_drive("t", "s", "tok1")
-        assert not await idx.try_claim_drive("t", "s", "tok2")
-        # A crashed winner's lease simply expires — a later reclaim wins with no manual delete.
-        await asyncio.sleep(1.2)
-        assert await idx.try_claim_drive("t", "s", "tok2")
-
-    asyncio.run(go())
-
-
-# ---- buffer_answer redelivery idempotency -------------------------------------------------
-
-
-def test_buffer_answer_is_idempotent_across_redeliveries(fake_park_redis: Any) -> None:
-    async def go() -> None:
-        superstep_id = await _write_park(["iA", "iB"])
-        present, total, remaining = await idx.buffer_answer("t", superstep_id, "iA", "answer-a")
-        assert (present, total, remaining) == (1, 2, ["iB"])
-        # A redelivered answer for the SAME interaction is a no-op — present stays stable.
-        present, total, remaining = await idx.buffer_answer("t", superstep_id, "iA", "answer-a-again")
-        assert (present, total, remaining) == (1, 2, ["iB"])
-        # The buffered value is the FIRST answer (HSETNX never overwrites).
-        barrier = await idx.read_barrier("t", superstep_id)
-        assert barrier is not None
-        assert barrier["outputs"]["iA"] == "answer-a"
-
-    asyncio.run(go())
-
-
 def test_agent_resume_on_resolved_tombstone_replays_the_stored_terminal(fake_park_redis: Any) -> None:
     async def go() -> None:
         superstep_id = await _write_park(["i1"])
         # The super-step already drove cleanly: its entry is a resolved tombstone plus a resolution
         # record holding the terminal outcome.
-        await _seed_finalized("t", superstep_id, ["i1"], resolution="terminal", value=res.encode_outcome("all done"))
-        entry = await idx.read_park_entry("i1")
+        await _seed_finalized("t", superstep_id, ["i1"], resolution="terminal", value="all done")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert _is_resolved(entry)
         # The tombstone carries the coordinates that LOCATE the resolution record.
-        assert entry["thread_id"] == "t"
-        assert entry["superstep_id"] == superstep_id
+        assert agents_park_index().tombstone_coordinates(entry) == ("t", superstep_id)
         # A lapped redelivery of an orphaned due-record REPLAYS the stored terminal — no raise, no
         # re-drive; the platform re-runs its idempotent ladder.
         out = await agent_resume("i1", "the answer")
@@ -315,18 +240,14 @@ def test_agent_resume_on_resolved_tombstone_replays_the_stored_terminal(fake_par
     asyncio.run(go())
 
 
-def test_agent_resume_on_aborted_tombstone_raises_park_resume_failed(fake_park_redis: Any) -> None:
-    from tai42_contract.interactions import RunTerminalFailed
-
+def test_agent_resume_on_aborted_tombstone_replays_the_aborted_run_failed(fake_park_redis: Any) -> None:
     async def go() -> None:
         superstep_id = await _write_park(["i1"])
-        aborted = {"status": "aborted", "reason": "killed"}
-        await _seed_finalized("t", superstep_id, ["i1"], resolution="aborted", value=res.encode_outcome(aborted))
-        # A redrive of a killed super-step RAISES RunTerminalFailed carrying the aborted outcome, so
-        # the platform delivers FAILED (deduped against the kill's own FAILED).
-        with pytest.raises(RunTerminalFailed) as exc:
-            await agent_resume("i1", "the answer")
-        assert exc.value.outcome == aborted
+        aborted = RunFailed(outcome={"status": "aborted", "reason": "killed"})
+        await _seed_finalized("t", superstep_id, ["i1"], resolution="aborted", value=aborted)
+        # A redrive of a killed super-step replays the aborted RunFailed (the platform face raises
+        # it, so the platform delivers FAILED deduped against the kill's own FAILED).
+        assert await agent_resume("i1", "the answer") == aborted
 
     asyncio.run(go())
 
@@ -335,10 +256,10 @@ def test_agent_resume_on_benign_detach_tombstone_is_a_noop(fake_park_redis: Any)
     async def go() -> None:
         # A detached chain writes a record-LESS tombstone (no thread/superstep, no resolution
         # record), so a fire that lands on it reads no resolution and no-ops.
-        await idx.detach_chained_parks(["chain-key"])
-        entry = await idx.read_park_entry("chain-key")
+        await agents_park_index().detach(["chain-key"])
+        entry = await agents_park_index().read_entry("chain-key")
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert agents_park_index().tombstone_kind(entry) == "detached"
         assert await agent_resume("chain-key", "late fire") is None
 
     asyncio.run(go())
@@ -347,50 +268,21 @@ def test_agent_resume_on_benign_detach_tombstone_is_a_noop(fake_park_redis: Any)
 def test_two_completers_race_loser_then_replays_on_redelivery(fake_park_redis: Any) -> None:
     async def go() -> None:
         superstep_id = await _write_park(["i1"])
+        index = agents_park_index()
         # Worker A won the barrier and holds a live drive lease.
-        assert await idx.try_claim_drive("t", superstep_id, "worker-A")
+        worker_a = await index.claim("t", superstep_id).acquire()
         # Worker B's redelivery completes the barrier but loses the drive: it raises so the
         # platform retains its durable retry ticket.
-        with pytest.raises(AgentResumeDriveInProgressError):
+        with pytest.raises(DriveInProgressError):
             await agent_resume("i1", "the answer")
-        assert await idx.read_park_entry("i1") is not None
+        assert await index.read_entry("i1") is not None
 
         # Worker A finishes and finalizes the super-step to a tombstone + terminal resolution.
-        await idx.finalize_resolved_superstep(
-            "t", superstep_id, ["i1"], resolution="terminal", value=res.encode_outcome("done-by-A"), token="worker-A"
-        )
+        await index.finalize(worker_a, member_ids=["i1"], resolution="terminal", value="done-by-A")
+        await worker_a.close()
         # Worker B redelivers again and now replays A's terminal on the tombstone.
         out = await agent_resume("i1", "the answer")
         assert out == "done-by-A"
-
-    asyncio.run(go())
-
-
-def test_finalize_resolved_superstep_is_atomic_single_batch(fake_park_redis: Any) -> None:
-    async def go() -> None:
-        superstep_id = await _write_park(["iA", "iB"])
-        assert await idx.try_claim_drive("t", superstep_id, "winner")
-        # Pre-state: two live park entries, a barrier, and a claim lease.
-        assert await idx.read_park_entry("iA") is not None
-        assert await idx.read_park_entry("iB") is not None
-        assert await idx.read_barrier("t", superstep_id) is not None
-
-        await idx.finalize_resolved_superstep(
-            "t", superstep_id, ["iA", "iB"], resolution="terminal", value=res.encode_outcome("value"), token="winner"
-        )
-
-        # Post-state after finalize: EVERY entry is a resolved tombstone, a resolution record holds
-        # the outcome, and the barrier and claim lease are both gone.
-        for interaction_id in ("iA", "iB"):
-            entry = await idx.read_park_entry(interaction_id)
-            assert entry is not None
-            assert idx.is_resolved_tombstone(entry)
-        record = await idx.read_superstep_resolution("t", superstep_id)
-        assert record is not None
-        assert record["resolution"] == "terminal"
-        assert res.decode_outcome(record["value"]) == "value"
-        assert await idx.read_barrier("t", superstep_id) is None
-        assert await fake_park_redis.get(idx._claim_key("t", superstep_id)) is None
 
     asyncio.run(go())
 
@@ -467,7 +359,7 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
         assert receipt.caller_interaction_ids == []
         assert receipt.expiry_at == _WITHIN_HORIZON
         assert ask.calls == 1
-        assert await idx.read_park_entry("i1") is not None
+        assert await agents_park_index().read_entry("i1") is not None
 
         # Resume on a fresh runtime: same shared saver stands in for the durable checkpoint.
         result = await agent_resume("i1", "the answer")
@@ -476,9 +368,9 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
         assert ask.calls == 1
         # A clean drive finalizes the park entry to a resolved tombstone (not an absent key), so
         # a lapped redelivery clears benignly instead of storming on a vanished entry.
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert _is_resolved(entry)
 
     asyncio.run(go())
 
@@ -504,17 +396,26 @@ def test_agent_resume_rejects_a_no_longer_pending_interrupt(
         )
 
         # Corrupt the stored interrupt id so it no longer matches the pending park interrupt.
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         entry["interrupt_id"] = "bogus-interrupt-id"
-        await idx.persist_superstep(
-            {"i1": entry}, entry["thread_id"], entry["superstep_id"], {"i1": None}, {"i1": None}, 100
+        await agents_park_index().persist(
+            thread_id=entry["thread_id"],
+            superstep=entry["superstep_id"],
+            entries={"i1": entry},
+            expected={"i1": None},
+            entry_ttl={"i1": 100},
+            barrier_ttl=100,
         )
 
-        with pytest.raises(AgentResumeInterruptNotPendingError):
+        # The resumed run's raise is its failed terminal: an unchained park is finalized with the
+        # failure and the platform face raises it, so the platform delivers FAILED once.
+        with pytest.raises(RunTerminalFailed) as raised:
             await agent_resume("i1", "the answer")
-        # A rejected drive leaves the index for the reaper (never a silent clear).
-        assert await idx.read_park_entry("i1") is not None
+        assert raised.value.outcome["error_type"] == "AgentResumeInterruptNotPendingError"
+        record = await agents_park_index().read_resolution(entry["thread_id"], entry["superstep_id"])
+        assert record is not None
+        assert record.value == RunFailed(outcome=raised.value.outcome)
 
     asyncio.run(go())
 
@@ -647,8 +548,8 @@ async def _park_two_parallel_subagents(agent: Any, subagent: Any, ask_calls: dic
     assert set(receipt.interaction_ids) == {"iA", "iB"}
     # Each subagent's ask ran exactly once — two parks, one interaction apiece.
     assert ask_calls["n"] == 2
-    assert await idx.read_park_entry("iA") is not None
-    assert await idx.read_park_entry("iB") is not None
+    assert await agents_park_index().read_entry("iA") is not None
+    assert await agents_park_index().read_entry("iB") is not None
 
 
 def test_two_parallel_subagent_parks_resume_iA_first(
@@ -660,7 +561,7 @@ def test_two_parallel_subagent_parks_resume_iA_first(
     async def go() -> None:
         await _park_two_parallel_subagents(agent, subagent, ask_calls, thread_id)
         # Answer iA first: it buffers, no drive yet (its sibling is still outstanding).
-        assert await agent_resume("iA", "for-iA") == {"status": "buffered", "remaining_ids": ["iB"]}
+        assert await agent_resume("iA", "for-iA") == ResumeBuffered(remaining_ids=["iB"])
         # Answering iB completes the barrier and drives the whole super-step to ONE terminal.
         result = await agent_resume("iB", "for-iB")
         # Each task echoed its OWN subagent's answer — ``ta`` carried iA's, ``tb`` carried iB's.
@@ -670,10 +571,10 @@ def test_two_parallel_subagent_parks_resume_iA_first(
         assert ask_calls["n"] == 2
         # Both entries tombstoned in one finalize; the barrier is gone (single terminal).
         for interaction_id in ("iA", "iB"):
-            entry = await idx.read_park_entry(interaction_id)
+            entry = await agents_park_index().read_entry(interaction_id)
             assert entry is not None
-            assert idx.is_resolved_tombstone(entry)
-        assert await idx.read_barrier(thread_id, idx.compute_superstep_id(["iA", "iB"])) is None
+            assert _is_resolved(entry)
+        assert await agents_park_index().read_barrier(thread_id, superstep_id(["iA", "iB"])) is None
 
     asyncio.run(go())
 
@@ -687,16 +588,20 @@ def test_two_parallel_subagent_parks_resume_iB_first(
     async def go() -> None:
         await _park_two_parallel_subagents(agent, subagent, ask_calls, thread_id)
         # Reverse the answer order: iB first buffers, iA completes the barrier and drives.
-        assert await agent_resume("iB", "for-iB") == {"status": "buffered", "remaining_ids": ["iA"]}
+        assert await agent_resume("iB", "for-iB") == ResumeBuffered(remaining_ids=["iA"])
         result = await agent_resume("iA", "for-iA")
         # Answer order does not change routing — ``ta`` still carries iA's answer and ``tb`` iB's;
         # each answer reached its own interrupt.
         assert result == "ta=for-iA;tb=for-iB"
         assert ask_calls["n"] == 2
         for interaction_id in ("iA", "iB"):
-            entry = await idx.read_park_entry(interaction_id)
+            entry = await agents_park_index().read_entry(interaction_id)
             assert entry is not None
-            assert idx.is_resolved_tombstone(entry)
-        assert await idx.read_barrier(thread_id, idx.compute_superstep_id(["iA", "iB"])) is None
+            assert _is_resolved(entry)
+        assert await agents_park_index().read_barrier(thread_id, superstep_id(["iA", "iB"])) is None
 
     asyncio.run(go())
+
+
+def _is_resolved(entry: Any) -> bool:
+    return agents_park_index().tombstone_kind(entry) == "resolved"

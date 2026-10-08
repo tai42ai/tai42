@@ -12,14 +12,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from tai42_contract.interactions import attach_chained_park, is_chained_park_key
+from tai42_kit.interactions.park_index import barrier_ttl_seconds, entry_ttl_seconds, superstep_id
 
 from tai42_agents._internal.park.capability import ParkIdentity
 from tai42_agents._internal.park.errors import ParkExpiryExceedsRetentionError
-from tai42_agents._internal.park.index import (
-    barrier_ttl_seconds,
-    compute_superstep_id,
-    persist_superstep,
-)
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents.settings import agents_limits_settings
 
 
@@ -91,7 +88,7 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
     engine-specific fact — a LangGraph checkpoint provider / recursion limit — rides inside
     ``rebuild_kwargs``, never a top-level entry field). Keyed by interaction id, so a re-run
     super-step re-parking the same interaction rewrites identically rather than corrupting the
-    index. Entries and the barrier are written in ONE MULTI/EXEC (:func:`persist_superstep`),
+    index. Entries and the barrier are written in ONE transaction (the kit index's ``persist``),
     all-or-nothing; each entry's TTL is sized to ITS ask's deadline and the barrier's TTL to
     the LATEST deadline, so the barrier expires no earlier than every entry it must outlive.
 
@@ -124,13 +121,13 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
             )
             interrupt_by_interaction[interaction_id] = interrupt_id
     _gate_expiry_within_retention(identity.retention_bound, union)
-    superstep_id = compute_superstep_id(union.keys())
+    step = superstep_id(union.keys())
     entries: dict[str, dict[str, Any]] = {}
     for interaction_id in union:
         entries[interaction_id] = {
             "agent_name": identity.agent_name,
             "thread_id": identity.thread_id,
-            "superstep_id": superstep_id,
+            "superstep_id": step,
             # The interrupt THIS interaction's answer targets — its own park interrupt, so a
             # multi-interrupt super-step resumes each interrupt by id.
             "interrupt_id": interrupt_by_interaction[interaction_id],
@@ -159,8 +156,13 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
         interaction_id: (datetime.fromisoformat(expiry) if expiry is not None else None)
         for interaction_id, expiry in union.items()
     }
-    await persist_superstep(
-        entries, identity.thread_id, superstep_id, expected, expiries, barrier_ttl_seconds(expiries.values())
+    await agents_park_index().persist(
+        thread_id=identity.thread_id,
+        superstep=step,
+        entries=entries,
+        expected=expected,
+        entry_ttl={interaction_id: entry_ttl_seconds(expiry) for interaction_id, expiry in expiries.items()},
+        barrier_ttl=barrier_ttl_seconds(expiries.values()),
     )
     for interaction_id in union:
         # Parked on now, so no longer a dead chain the drive must detach. A key the ledger never

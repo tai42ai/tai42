@@ -12,9 +12,10 @@ Per kill, in order:
   redelivers into a torn-down run), and a durable kill-due record carrying the killed run's own
   copied delivery identity — so the FAILED delivery survives a crash and the reaper redelivers;
 * the driver teardown fire (``fire_park_killed``) with the run-authorization context BOUND around
-  it (``resume_origin`` = the killed interaction, the killed run's ``run_delivery_id`` re-established
-  as the ambient), so a handler's cross-driver teardown notify authorizes on the shared delivery
-  identity. A handler that RAISES propagates — the kill-due record is kept and the reaper redelivers;
+  it (``resume_origin`` = the killed interaction, ``resume_lineage`` = the chained calls it recorded
+  it is nested under, the killed run's ``run_delivery_id`` re-established as the ambient), so a
+  handler's cross-driver teardown notify to a waiting caller authorizes on that lineage. A handler
+  that RAISES propagates — the kill-due record is kept and the reaper redelivers;
 * the run's single FAILED delivered ONCE through the platform ladder (``_deliver_terminal``), keyed
   by the run's ``completion_id`` off the copied ``delivery``/``run_delivery_id`` — the door FAILED
   for a receiver-started run, else a ``failed`` waiting outcome on its subject, else a drop;
@@ -37,7 +38,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.interactions.continuation import _deliver_terminal
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import KILL_ACT_ON_ANY, InteractionStore, KillDue, PruneResult
-from tai42_skeleton.runs.chokepoint import resume_origin
+from tai42_skeleton.runs.chokepoint import resume_lineage, resume_origin
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -73,20 +74,22 @@ async def _teardown_and_deliver(
     delivery: dict[str, Any] | None,
     run_delivery_id: str | None,
     subjects: dict[str, Any] | None,
+    chain_keys: list[str],
     reason: str,
 ) -> None:
     """Fire the driver teardown, then deliver the killed run's single FAILED through the platform ladder.
 
     Binds the run-authorization context around ``fire_park_killed`` (origin = the killed
-    interaction, ambient run-delivery = the killed run's identity) so a handler's cross-driver
-    teardown notify authorizes on the shared ``run_delivery_id``. A handler raise propagates (the
+    interaction, resume lineage = the ``chain_keys`` it is nested under, ambient run-delivery = the
+    killed run's identity) so a handler's cross-driver teardown notify to a waiting caller
+    authorizes on that lineage. A handler raise propagates (the
     caller keeps the kill-due record for the reaper). The FAILED is keyed by the run's
     ``completion_id`` off ``run_delivery_id``, so a kill entering at ANY interaction of the run
     delivers once and any second fire dedupes.
     """
     delivery_tuple = _delivery_tuple(delivery)
     bound: RunDelivery | None = RunDelivery(run_delivery_id, delivery_tuple) if run_delivery_id is not None else None
-    with resume_origin(interaction_id), run_delivery(bound):
+    with resume_origin(interaction_id), resume_lineage(chain_keys), run_delivery(bound):
         await fire_park_killed(interaction_id, reason)
     await _deliver_terminal(
         store,
@@ -149,6 +152,7 @@ async def kill_park(
         delivery=target.delivery,
         run_delivery_id=target.run_delivery_id,
         subjects=target.subjects,
+        chain_keys=target.chain_keys,
         reason=reason,
         # A generous TTL backstop; the record's own ``deadline_ms`` (one horizon out) governs the
         # reaper's give-up while the record still stands, so ``run_delivery_id`` is readable then.
@@ -169,6 +173,7 @@ async def kill_park(
         delivery=target.delivery,
         run_delivery_id=target.run_delivery_id,
         subjects=target.subjects,
+        chain_keys=target.chain_keys,
         reason=reason,
     )
     await store.clear_kill_due(r, interaction_id)
@@ -178,9 +183,10 @@ async def kill_park(
 async def redeliver_kill(store: InteractionStore, due: KillDue) -> None:
     """The reaper's kill-due redelivery: re-fire the driver teardown + the run's FAILED, then clear the record.
 
-    Reads the run's delivery identity off the durable kill-due record (the kill already pruned the
-    state), so it never re-reads a state hash. A handler raise propagates (the reaper's per-member
-    guard logs and leaves the record for the next backoff window); a clean pass clears the record.
+    Reads the run's delivery identity and the killed interaction's chain lineage off the durable
+    kill-due record (the kill already pruned the state), so it never re-reads a state hash. A
+    handler raise propagates (the reaper's per-member guard logs and leaves the record for the next
+    backoff window); a clean pass clears the record.
     """
     await _teardown_and_deliver(
         store,
@@ -188,6 +194,7 @@ async def redeliver_kill(store: InteractionStore, due: KillDue) -> None:
         delivery=due.delivery,
         run_delivery_id=due.run_delivery_id,
         subjects=due.subjects,
+        chain_keys=due.chain_keys,
         reason=due.reason,
     )
     async with client_ctx(RedisClient, interactions_settings().redis) as r:

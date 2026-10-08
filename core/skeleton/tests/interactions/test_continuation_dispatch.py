@@ -402,6 +402,7 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):
@@ -527,6 +528,7 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):

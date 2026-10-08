@@ -15,11 +15,9 @@ beside their own suite (see ``tests/_delivery_scope.py``).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -46,13 +44,14 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
+from tests.conftest import bind_park_index
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch, scope_nested_dispatch
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME, agent_resume
 from tai42_agents._internal.park import capability as cap
-from tai42_agents._internal.park import index as idx
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents.langchain_deep_agent import agent as deep_mod
 from tai42_agents.langchain_deep_agent import run_thread as deep_run_thread_mod
 
@@ -113,15 +112,7 @@ class _LlmSettings:
 @pytest.fixture
 def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(cap, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -232,7 +223,7 @@ def test_nested_tool_captures_a_chain_while_the_agent_park_is_outermost(
 
         # The agent's own park, raised outside any tool body, is OUTERMOST: it captured no chain
         # (its terminal fires nothing; the platform delivers to the run's own address).
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         assert entry["completion_tool"] is None
         assert entry["completion_context"] is None

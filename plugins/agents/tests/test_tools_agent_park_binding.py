@@ -6,9 +6,7 @@ per-step binding boundary.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -36,10 +34,10 @@ from tests._tools_agent_park_support import (
     _tool_messages,
     _wire_tools_build,
 )
+from tests.conftest import bind_park_index
 
-from tai42_agents._internal.park import capability as park_capability
 from tai42_agents._internal.park import drive as park_drive_mod
-from tai42_agents._internal.park import index as idx
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.resume import AGENT_RESUME_TOOL_NAME
 
 
@@ -48,15 +46,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the park index at a shared in-memory fakeredis and report the park Redis as
     configured (so a run is judged park-capable)."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(park_capability, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -109,7 +99,7 @@ def test_tools_agent_under_ambient_binding_does_not_answer_with_a_marker_when_no
         assert "i-relayed" not in result
         assert result == "cannot host that here"
         # Nothing was parked under this non-hostable run.
-        assert await idx.read_park_entry("i-relayed") is None
+        assert await agents_park_index().read_entry("i-relayed") is None
 
     asyncio.run(go())
 
@@ -135,7 +125,7 @@ def test_tools_agent_run_refuses_non_durable_checkpoint(
                 user_message=TemplatedText(content="go"),
                 thread_id="t-nondurable",
             )
-        assert await idx.read_park_entry("i1") is None
+        assert await agents_park_index().read_entry("i1") is None
 
     asyncio.run(go())
 
@@ -160,7 +150,7 @@ def test_tools_agent_run_refuses_live_tools(
                 user_message=TemplatedText(content="go"),
                 thread_id="t-livetools",
             )
-        assert await idx.read_park_entry("i1") is None
+        assert await agents_park_index().read_entry("i1") is None
 
     asyncio.run(go())
 
@@ -188,7 +178,7 @@ def test_tools_agent_astream_refuses_async_ask_without_a_run_delivery_context(
                 thread_id="t-astream",
             ):
                 pass
-        assert await idx.read_park_entry("i1") is None
+        assert await agents_park_index().read_entry("i1") is None
 
     asyncio.run(go())
 
@@ -222,7 +212,7 @@ def test_tools_agent_astream_parks_under_a_run_delivery_context_without_an_addre
         # The ask ran exactly once and parked; the stream reached the suspended terminal.
         assert ask.calls == 1
         assert [event for event in events if isinstance(event, SuspendedFinal)], events
-        entry = await idx.read_park_entry("i1")
+        entry = await agents_park_index().read_entry("i1")
         assert entry is not None
         # Receiver-less: no out-of-band delivery tool is stored on the park.
         assert entry["completion_tool"] is None
@@ -279,7 +269,7 @@ def test_tools_agent_refuses_to_claim_a_marker_it_does_not_own(
         # The refusal never names the bound resume continuation (the forgery string).
         assert "agent_resume" not in refusals[0].content
         # Nothing of the relayed park was claimed: no index entry under this run.
-        assert await idx.read_park_entry("i-relayed") is None
+        assert await agents_park_index().read_entry("i-relayed") is None
 
     asyncio.run(go())
 

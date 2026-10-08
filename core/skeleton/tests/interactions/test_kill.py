@@ -501,6 +501,7 @@ async def test_expiry_resume_takes_the_continuation_path_not_the_kill(wired, mon
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):

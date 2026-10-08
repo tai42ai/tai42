@@ -181,6 +181,7 @@ def _terminal_stub(output: Any):
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):
@@ -508,6 +509,7 @@ async def test_re_park_carries_the_deferred_binding_to_the_final_terminal(monkey
                 park_context=None,
                 park_asked_by=(),
                 caller_ask_landing=None,
+                chain_keys=(),
                 *,
                 mark_detached=True,
             ):

@@ -297,6 +297,13 @@ def test_delivery_defaults_none_for_a_receiverless_run():
     assert req.run_delivery_id is None
 
 
+def test_chain_keys_default_empty_and_json_round_trip_in_order():
+    assert _caller().chain_keys == []
+    req = _caller(chain_keys=["tai42:chained-park:outer", "tai42:chained-park:inner"])
+    restored = InteractionRequest.model_validate_json(req.model_dump_json())
+    assert restored.chain_keys == ["tai42:chained-park:outer", "tai42:chained-park:inner"]
+
+
 # === interactions/models.py — SuspendedInteraction ==========================
 
 

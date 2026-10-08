@@ -1,28 +1,26 @@
 """The provider-free park persist seam: the expiry-vs-retention gate, chained-key horizon
 clamping, and the atomic super-step write.
 
-The park index is backed by an in-memory fakeredis routed in through the index module's
-``client_ctx`` seam; a directly-constructed :class:`ParkIdentity` carries the retention bound
-the generalized persist gate reads.
+The agents' park index is bound to an in-memory fakeredis; a directly-constructed
+:class:`ParkIdentity` carries the retention bound the generalized persist gate reads.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fakeredis import aioredis
+from tai42_kit.interactions.park_index import BARRIER_TTL_MARGIN_SECONDS, ENTRY_TTL_FLOOR_SECONDS, superstep_id
+from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import ParkIdentity, persist_park
-from tai42_agents._internal.park import capability as cap
-from tai42_agents._internal.park import index as idx
 from tai42_agents._internal.park import persist as persist_mod
 from tai42_agents._internal.park.errors import ParkExpiryExceedsRetentionError
+from tai42_agents._internal.park.park_binding import agents_park_index
 
 
 @pytest.fixture
@@ -30,15 +28,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the park index at a shared in-memory fakeredis and report the park Redis as
     configured (so a run is judged park-capable)."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    settings = SimpleNamespace(redis_url="redis://fake")
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
-    monkeypatch.setattr(idx, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(cap, "agents_park_redis_settings", lambda: settings)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -69,8 +59,8 @@ def test_park_persist_allows_expiry_within_retention(fake_park_redis: Any) -> No
     async def go() -> None:
         interactions = {"i1": _iso_in(30), "i2": _iso_in(10)}
         await persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
-        assert await idx.read_park_entry("i1") is not None
-        assert await idx.read_park_entry("i2") is not None
+        assert await agents_park_index().read_entry("i1") is not None
+        assert await agents_park_index().read_entry("i2") is not None
 
     asyncio.run(go())
 
@@ -83,8 +73,8 @@ def test_park_persist_refuses_expiry_beyond_retention_all_or_nothing(fake_park_r
             await persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert excinfo.value.interaction_id == "i2"
         # All-or-nothing: not a single index key was written.
-        assert await idx.read_park_entry("i1") is None
-        assert await idx.read_park_entry("i2") is None
+        assert await agents_park_index().read_entry("i1") is None
+        assert await agents_park_index().read_entry("i2") is None
 
     asyncio.run(go())
 
@@ -96,8 +86,8 @@ def test_park_persist_refuses_mixed_within_and_beyond_all_or_nothing(fake_park_r
         with pytest.raises(ParkExpiryExceedsRetentionError) as excinfo:
             await persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert excinfo.value.interaction_id == "i_bad"
-        assert await idx.read_park_entry("i_bad") is None
-        assert await idx.read_park_entry("i_ok") is None
+        assert await agents_park_index().read_entry("i_bad") is None
+        assert await agents_park_index().read_entry("i_ok") is None
 
     asyncio.run(go())
 
@@ -110,8 +100,8 @@ def test_park_persist_refuses_missing_expiry_under_bounded_retention(fake_park_r
             await persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert excinfo.value.interaction_id == "i2"
         assert excinfo.value.expiry_at is None
-        assert await idx.read_park_entry("i1") is None
-        assert await idx.read_park_entry("i2") is None
+        assert await agents_park_index().read_entry("i1") is None
+        assert await agents_park_index().read_entry("i2") is None
 
     asyncio.run(go())
 
@@ -122,8 +112,8 @@ def test_park_persist_allows_any_expiry_under_keep_forever_redis(fake_park_redis
         # park both pass.
         interactions: dict[str, Any] = {"i1": _iso_in(10_000_000), "i2": None}
         await persist_park(_park_identity(None), [("int1", interactions)])
-        assert await idx.read_park_entry("i1") is not None
-        assert await idx.read_park_entry("i2") is not None
+        assert await agents_park_index().read_entry("i1") is not None
+        assert await agents_park_index().read_entry("i2") is not None
 
     asyncio.run(go())
 
@@ -143,7 +133,7 @@ def test_a_chained_key_clamps_its_inherited_horizon_into_retention(fake_park_red
         bound = _bound_in(60)
         written = await persist_park(_park_identity(bound), [("int1", {_CHAIN: _iso_in(9999)})])
         assert datetime.fromisoformat(written[_CHAIN]) == bound
-        assert await idx.read_park_entry(_CHAIN) is not None
+        assert await agents_park_index().read_entry(_CHAIN) is not None
 
     asyncio.run(go())
 
@@ -161,7 +151,7 @@ def test_a_chained_key_with_no_inherited_deadline_takes_the_cap(
         written = await persist_park(_park_identity(None), [("int1", {_CHAIN: None})])
         capped = datetime.fromisoformat(written[_CHAIN])
         assert capped <= datetime.now(UTC) + timedelta(hours=2)
-        entry = await idx.read_park_entry(_CHAIN)
+        entry = await agents_park_index().read_entry(_CHAIN)
         assert entry is not None
         # The bound the persist gated against rides the entry, so a later extension re-clamps
         # against the same one instead of guessing.
@@ -184,20 +174,16 @@ def test_an_interaction_id_keeps_its_own_ask_deadline(fake_park_redis: Any) -> N
 def test_extending_a_park_horizon_never_shortens_it(fake_park_redis: Any) -> None:
     async def go() -> None:
         await persist_park(_park_identity(None), [("int1", {_CHAIN: _iso_in(60)})])
-        entry = await idx.read_park_entry(_CHAIN)
+        entry = await agents_park_index().read_entry(_CHAIN)
         assert entry is not None
         before = await fake_park_redis.ttl(f"agent:park:{_CHAIN}")
+        index = agents_park_index()
         # A NEARER deadline than the park already holds: an extension is not a re-sizing, so it
         # leaves both keys alone rather than cutting a park short.
-        assert await idx.extend_park_horizon(_CHAIN, "t-gate", entry["superstep_id"], _bound_in(1)) is False
+        assert await index.extend_horizon(_CHAIN, _bound_in(1)) is True
         assert await fake_park_redis.ttl(f"agent:park:{_CHAIN}") == before
         # A LATER one moves both the entry and the barrier out.
-        assert (
-            await idx.extend_park_horizon(
-                _CHAIN, "t-gate", entry["superstep_id"], datetime.now(UTC) + timedelta(days=90)
-            )
-            is True
-        )
+        assert await index.extend_horizon(_CHAIN, datetime.now(UTC) + timedelta(days=90)) is True
         assert await fake_park_redis.ttl(f"agent:park:{_CHAIN}") > before
         assert await fake_park_redis.ttl(f"agent:park:step:t-gate:{entry['superstep_id']}") > before
 
@@ -206,10 +192,10 @@ def test_extending_a_park_horizon_never_shortens_it(fake_park_redis: Any) -> Non
 
 def test_detaching_a_dead_chain_leaves_a_benign_tombstone(fake_park_redis: Any) -> None:
     async def go() -> None:
-        await idx.detach_chained_parks([_CHAIN])
-        entry = await idx.read_park_entry(_CHAIN)
+        await agents_park_index().detach([_CHAIN])
+        entry = await agents_park_index().read_entry(_CHAIN)
         assert entry is not None
-        assert idx.is_resolved_tombstone(entry)
+        assert agents_park_index().tombstone_kind(entry) == "detached"
 
     asyncio.run(go())
 
@@ -219,10 +205,10 @@ def test_detaching_never_overwrites_a_live_park(fake_park_redis: Any) -> None:
         # A key that DOES hold a park (a concurrent re-drive that reached the persist first) is
         # left exactly as it is — the detach is written NX, so it can only fill an empty slot.
         await persist_park(_park_identity(None), [("int1", {_CHAIN: None})])
-        await idx.detach_chained_parks([_CHAIN])
-        entry = await idx.read_park_entry(_CHAIN)
+        await agents_park_index().detach([_CHAIN])
+        entry = await agents_park_index().read_entry(_CHAIN)
         assert entry is not None
-        assert not idx.is_resolved_tombstone(entry)
+        assert agents_park_index().tombstone_kind(entry) == "live"
         assert entry["agent_name"] == "langchain_deep_agent"
 
     asyncio.run(go())
@@ -236,18 +222,18 @@ def test_park_persist_records_multiple_parks_as_one_superstep(fake_park_redis: A
         # A keep-forever (None) bound lets the None-expiry parks pass the retention gate.
         parks = [("intA", {"iA": None}), ("intB", {"iB": None})]
         await persist_park(_park_identity(None), parks)
-        entry_a = await idx.read_park_entry("iA")
-        entry_b = await idx.read_park_entry("iB")
+        entry_a = await agents_park_index().read_entry("iA")
+        entry_b = await agents_park_index().read_entry("iB")
         assert entry_a is not None
         assert entry_b is not None
         assert entry_a["interrupt_id"] == "intA"
         assert entry_b["interrupt_id"] == "intB"
         assert entry_a["superstep_id"] == entry_b["superstep_id"]
-        superstep_id = idx.compute_superstep_id(["iA", "iB"])
-        assert entry_a["superstep_id"] == superstep_id
-        barrier = await idx.read_barrier("t-gate", superstep_id)
+        step = superstep_id(["iA", "iB"])
+        assert entry_a["superstep_id"] == step
+        barrier = await agents_park_index().read_barrier("t-gate", step)
         assert barrier is not None
-        assert set(barrier["expected"]) == {"iA", "iB"}
+        assert set(barrier.expected) == {"iA", "iB"}
 
     asyncio.run(go())
 
@@ -258,19 +244,15 @@ def test_park_persist_allows_any_expiry_under_postgres_keep_forever(fake_park_re
         # deadline passes — the generalized gate reads the bound off the identity, not a provider.
         interactions: dict[str, Any] = {"i1": _iso_in(10_000_000), "i2": None}
         await persist_park(_park_identity(None), [("int1", interactions)])
-        assert await idx.read_park_entry("i1") is not None
-        assert await idx.read_park_entry("i2") is not None
+        assert await agents_park_index().read_entry("i1") is not None
+        assert await agents_park_index().read_entry("i2") is not None
 
     asyncio.run(go())
 
 
-def test_persist_superstep_is_atomic_all_or_nothing(fake_park_redis: Any) -> None:
+def test_park_persist_is_atomic_all_or_nothing(fake_park_redis: Any) -> None:
     async def go() -> None:
-        entries: dict[str, dict[str, Any]] = {
-            "iA": {"agent_name": "langchain_deep_agent", "thread_id": "t", "superstep_id": "s"},
-            "iB": {"agent_name": "langchain_deep_agent", "thread_id": "t", "superstep_id": "s"},
-        }
-        expected: dict[str, Any] = {"iA": None, "iB": None}
+        parks = [("int1", {"iA": None, "iB": None})]
 
         # A crash before the single EXEC flushes: every entry and the barrier are buffered in
         # the pipeline, never written incrementally, so the post-state is ABSENT — no partial set.
@@ -285,21 +267,23 @@ def test_persist_superstep_is_atomic_all_or_nothing(fake_park_redis: Any) -> Non
             pipe.execute = boom
             return pipe
 
+        index = agents_park_index()
+        step = superstep_id(["iA", "iB"])
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(fake_park_redis, "pipeline", crashing_pipeline)
             with pytest.raises(RuntimeError, match="crash before EXEC"):
-                await idx.persist_superstep(entries, "t", "s", expected, {"iA": None, "iB": None}, 100)
-        assert await idx.read_park_entry("iA") is None
-        assert await idx.read_park_entry("iB") is None
-        assert await idx.read_barrier("t", "s") is None
+                await persist_park(_park_identity(None), parks)
+        assert await index.read_entry("iA") is None
+        assert await index.read_entry("iB") is None
+        assert await index.read_barrier("t-gate", step) is None
 
         # A clean persist flushes the whole set in one EXEC: every entry AND the barrier land.
-        await idx.persist_superstep(entries, "t", "s", expected, {"iA": None, "iB": None}, 100)
-        assert await idx.read_park_entry("iA") is not None
-        assert await idx.read_park_entry("iB") is not None
-        barrier = await idx.read_barrier("t", "s")
+        await persist_park(_park_identity(None), parks)
+        assert await index.read_entry("iA") is not None
+        assert await index.read_entry("iB") is not None
+        barrier = await index.read_barrier("t-gate", step)
         assert barrier is not None
-        assert set(barrier["expected"]) == {"iA", "iB"}
+        assert set(barrier.expected) == {"iA", "iB"}
 
     asyncio.run(go())
 
@@ -313,17 +297,20 @@ def test_park_entry_ttl_scales_to_the_ask_deadline(fake_park_redis: Any) -> None
         near = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
         await persist_park(_park_identity(None), [("int1", {"i_far": far, "i_near": near})])
 
-        margin = idx._BARRIER_TTL_MARGIN_SECONDS
-        far_ttl = await fake_park_redis.ttl(idx._park_key("i_far"))
-        near_ttl = await fake_park_redis.ttl(idx._park_key("i_near"))
+        index = agents_park_index()
+        far_ttl = await fake_park_redis.ttl(index.entry_key("i_far"))
+        near_ttl = await fake_park_redis.ttl(index.entry_key("i_near"))
         # The far entry outlasts its 40-day deadline plus the margin — above the 30-day floor.
-        assert far_ttl > idx._PARK_ENTRY_TTL_SECONDS
-        assert far_ttl >= 40 * 24 * 60 * 60 + margin - 5
+        assert far_ttl > ENTRY_TTL_FLOOR_SECONDS
+        assert far_ttl >= 40 * 24 * 60 * 60 + BARRIER_TTL_MARGIN_SECONDS - 5
         # A short-horizon entry keeps the 30-day backstop floor.
-        assert near_ttl == idx._PARK_ENTRY_TTL_SECONDS
+        assert near_ttl == ENTRY_TTL_FLOOR_SECONDS
         # The barrier floors at or above every entry it coordinates.
-        superstep_id = idx.compute_superstep_id(["i_far", "i_near"])
-        barrier_ttl = await fake_park_redis.ttl(idx._barrier_key("t-gate", superstep_id))
+        barrier_ttl = await fake_park_redis.ttl(index.barrier_key("t-gate", superstep_id(["i_far", "i_near"])))
         assert barrier_ttl >= far_ttl
 
     asyncio.run(go())
+
+
+def _is_resolved(entry: Any) -> bool:
+    return agents_park_index().tombstone_kind(entry) == "resolved"

@@ -52,7 +52,9 @@ Redis URL:
 | `TAI_AGENTS_REDIS_URL` | falls back to `TAI_DEFAULT_REDIS_URL` | The park index store. With neither set there is no durable park index, so a park-capable run refuses the async ask loudly rather than parking where it cannot be resumed. |
 
 The park index is the agents plugin's own Redis, independent of the checkpoint provider
-and the interactions store.
+and the interactions store. It is the platform kit's shared park index library
+(`tai42_kit.interactions.park_index`) under the agents' own key namespace (`agent:park`);
+the settings above are unchanged.
 
 A parked run needs a durable checkpoint provider (`redis` or `postgres`), which keeps a
 thread `LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES` (default 7 days) after its last
@@ -73,6 +75,15 @@ run's own address — the agent never delivers it itself; a caller that needs th
 the agent through a door that receives it out of band (a conversation route). A whole-chain
 kill (a cancel, a thread delete, a person erase) tears the parked run down and delivers a
 single failed outcome to that address.
+
+A resumed run that **fails** — its graph raises, for example a model or provider error that
+outlasts the model client's own retries — ends as a failed terminal instead of being retried:
+an outermost run's address receives a failed outcome, and a run nested under another run (a
+flow holding the agent, an agent calling it) reaches that caller as a **failure**, so the
+caller's own error handling runs (a flow holder's `on_error`). The same holds when the
+platform gives up on a park whose resume could not be driven at all within the redelivery
+horizon: the caller the parked run was nested under is told it failed rather than waiting
+out its own deadline.
 
 An async ask may address the run's own **caller** (`ask(to="caller")`) instead of a human
 (`to="user"`): the run parks the same way and resumes when the caller answers, so an agent

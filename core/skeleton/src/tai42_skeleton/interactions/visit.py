@@ -339,7 +339,8 @@ async def _resume_one(
     The claim MULTI writes the durable continuation-due record whose ``delivery`` and
     ``run_delivery_id`` are the run's stored values; a lost claim raises
     :class:`ParkedEntryGoneError`. The continuation then runs INLINE, awaited, through
-    :func:`drive_and_deliver`, which binds ``resume_origin`` unconditionally and settles delivery by
+    :func:`drive_and_deliver`, which binds ``resume_origin`` and the park's recorded chain lineage
+    (``resume_lineage``) unconditionally and settles delivery by
     ``receives_outcome``. The deposited state context is MIXED — the resumer's door/turn/actor with
     the PARK's subject candidates. ``answer`` is the EFFECTIVE answer ``check_answer`` returned (a
     FORM's hidden fields dropped) — recorded and delivered, so a resumed run receives the same
@@ -382,6 +383,7 @@ async def _resume_one(
         park_context=_mixed_context(ctx, park_candidates, request),
         park_asked_by=request.asked_by,
         caller_ask_landing=request.caller_ask_landing,
+        chain_keys=request.chain_keys,
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=park_candidates,

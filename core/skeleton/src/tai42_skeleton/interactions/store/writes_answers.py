@@ -34,6 +34,7 @@ class _AnswerClaim:
     to: AskTo
     subjects: str | None
     asked_by: list[str] | None
+    chain_keys: str | None
     delivery: str | None
     run_delivery_id: str | None
     continuation_tool: str | None
@@ -182,6 +183,9 @@ class _StoreAnswerWrites(_StoreWritesBase):
         subjects = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "subjects")))
         asked_by_field = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "asked_by")))
         asked_by = json.loads(asked_by_field) if asked_by_field is not None else None
+        # The chained calls the park is nested under (JSON), copied onto the due record so the
+        # reaper's redelivery deposits the same lineage the immediate drive does.
+        chain_keys = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "chain_keys")))
         delivery = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "delivery")))
         run_delivery_id = serde.as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "run_delivery_id")))
         # The door's merged binding + the run input it saw + the door id, denormalized at add time:
@@ -232,6 +236,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
             to=to,
             subjects=subjects,
             asked_by=asked_by,
+            chain_keys=chain_keys,
             delivery=delivery,
             run_delivery_id=run_delivery_id,
             continuation_tool=continuation_tool,
@@ -335,6 +340,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 claim.deferred_binding,
                 claim.run_input,
                 claim.door_id,
+                claim.chain_keys,
             )
             pipe.hset(due_key, mapping=due_mapping)
             pipe.expire(due_key, continuation_due_ttl)

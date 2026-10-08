@@ -8,7 +8,6 @@ with no live LLM or real store. Async code is driven with ``asyncio.run``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -45,10 +44,10 @@ from tests._deep_agent_fakes import (
     _install_fake_resolve,
     _scripted_chunks,
 )
+from tests.conftest import bind_park_index
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME
-from tai42_agents._internal.park import index as idx
-from tai42_agents._internal.park.index import is_resolved_tombstone, read_park_entry
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
 
 
@@ -279,12 +278,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
     """Route the agent park index at an in-memory fakeredis so a streamed drive's dead-chain
     tombstone is observable."""
     redis = aioredis.FakeRedis(decode_responses=True)
-
-    @contextlib.asynccontextmanager
-    async def fake_park_client() -> AsyncIterator[Any]:
-        yield redis
-
-    monkeypatch.setattr(idx, "_park_client", fake_park_client)
+    bind_park_index(monkeypatch, redis)
     return redis
 
 
@@ -343,14 +337,14 @@ def test_astream_detaches_a_dead_chain_claimed_mid_stream_without_clobbering_a_l
 
     async def go() -> None:
         # A live park entry for a DIFFERENT interaction, pre-written, must be left exactly as is.
-        await fake_park_redis.set(idx._park_key("i-live"), '{"thread_id": "t-live"}')
+        await fake_park_redis.set(agents_park_index().entry_key("i-live"), '{"thread_id": "t-live"}')
         events = [event async for event in agent.astream(user_message=TemplatedText(content="go"), thread_id="t")]
         assert events
         # The dead chain was tombstoned on the way out — detach fired from the streaming finally.
-        entry = await read_park_entry(chain_key)
+        entry = await agents_park_index().read_entry(chain_key)
         assert entry is not None
-        assert is_resolved_tombstone(entry)
+        assert agents_park_index().tombstone_kind(entry) == "detached"
         # The unrelated live park is untouched.
-        assert await read_park_entry("i-live") == {"thread_id": "t-live"}
+        assert await agents_park_index().read_entry("i-live") == {"thread_id": "t-live"}
 
     asyncio.run(go())

@@ -56,6 +56,7 @@ async def test_crash_before_run_tool_is_redelivered_by_reaper(wired, monkeypatch
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):

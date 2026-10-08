@@ -50,6 +50,7 @@ def captured(monkeypatch):
         park_context=None,
         park_asked_by=(),
         caller_ask_landing=None,
+        chain_keys=(),
         *,
         mark_detached=True,
     ):

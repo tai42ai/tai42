@@ -18,6 +18,7 @@ from tai42_contract.interactions import (
     CallerAskLanding,
     RunTerminalFailed,
     caller_ask_no_landing_outcome,
+    chained_lineage,
     current_caller_ask_landing,
     get_park_completion,
     get_resume_continuation_tool,
@@ -25,6 +26,8 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.states import StateBinding, StateContext
 from tai42_contract.tools import get_run_delivery, get_run_delivery_id
+
+from tai42_skeleton.runs.chokepoint import get_resume_lineage
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,10 @@ class AsyncParkBinding:
     deferred_binding: StateBinding | None = None
     run_input: dict[str, Any] | None = None
     door_id: str | None = None
+    # The chain keys of the chained calls the parking run is nested under, outermost first: the
+    # lineage of the interaction the platform is driving (a re-park inherits it), then every key of
+    # the ambient chained dispatches not already in it. Empty for a run nested under no chained call.
+    chain_keys: tuple[str, ...] = ()
 
 
 def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncParkBinding:
@@ -134,6 +141,7 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
 
     deferred = current_deferred_binding()
     return AsyncParkBinding(
+        chain_keys=park_chain_keys(),
         continuation_tool=continuation_tool,
         continuation_identity=identity.user_id,
         continuation_fingerprint=continuation_fingerprint,
@@ -146,6 +154,19 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
         run_input=dict(deferred.run_input) if deferred is not None else None,
         door_id=deferred.door_id if deferred is not None else None,
     )
+
+
+def park_chain_keys() -> tuple[str, ...]:
+    """The chain keys a park records: the lineage it inherits, then the ambient chained calls, outermost first.
+
+    Inside a platform drive the lineage of the interaction being driven comes first (a re-park is
+    nested under every chained call its resumed run was), followed by each key of the ambient
+    chained dispatches (:func:`~tai42_contract.interactions.chained_lineage`) not already in it, in
+    order — so a driver re-binding its captured routing adds nothing and a new nested chained call
+    is appended. Outside a drive it is the ambient chained lineage alone.
+    """
+    inherited = get_resume_lineage()
+    return inherited + tuple(key for key in chained_lineage() if key not in inherited)
 
 
 def bound_park_thread_id() -> str | None:

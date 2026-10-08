@@ -29,6 +29,7 @@ from tai42_contract.interactions import (
     NestedParkOwnershipError,
     assert_park_adoptable,
     attach_chained_park,
+    chained_lineage,
     chained_park_claims,
     failed_outcome_text,
     get_chained_resume,
@@ -576,6 +577,89 @@ def test_chained_resume_seam_binds_gets_and_resets():
     assert get_chained_resume() is None
 
 
+def _routing(key: str) -> ChainedResume:
+    return ChainedResume(delivery_tool="deliver_chained_park", chain_key=key, asked_by=("main",))
+
+
+def test_the_chained_lineage_nests_the_enclosing_chain_keys_outermost_first():
+    assert chained_lineage() == ()
+    outer = set_chained_resume(_routing("tai42:chained-park:outer"))
+    try:
+        assert chained_lineage() == ("tai42:chained-park:outer",)
+        inner = set_chained_resume(_routing("tai42:chained-park:inner"))
+        try:
+            assert chained_lineage() == ("tai42:chained-park:outer", "tai42:chained-park:inner")
+            assert get_chained_resume() == _routing("tai42:chained-park:inner")
+        finally:
+            reset_chained_resume(inner)
+        # The reset restores the outer frame, routing and lineage alike.
+        assert chained_lineage() == ("tai42:chained-park:outer",)
+        assert get_chained_resume() == _routing("tai42:chained-park:outer")
+    finally:
+        reset_chained_resume(outer)
+    assert chained_lineage() == ()
+    assert get_chained_resume() is None
+
+
+def test_an_unchained_binding_starts_an_empty_lineage():
+    outer = set_chained_resume(_routing("tai42:chained-park:outer"))
+    try:
+        cleared = set_chained_resume(None)
+        try:
+            assert chained_lineage() == ()
+            assert get_chained_resume() is None
+            # A chained dispatch under the cleared one starts its own lineage.
+            nested = set_chained_resume(_routing("tai42:chained-park:fresh"))
+            try:
+                assert chained_lineage() == ("tai42:chained-park:fresh",)
+            finally:
+                reset_chained_resume(nested)
+        finally:
+            reset_chained_resume(cleared)
+        assert chained_lineage() == ("tai42:chained-park:outer",)
+    finally:
+        reset_chained_resume(outer)
+
+
+def test_re_binding_the_innermost_routing_does_not_repeat_its_key():
+    # A driver re-binds, for its resume, the routing it captured at park time.
+    outer = set_chained_resume(_routing("tai42:chained-park:outer"))
+    try:
+        inner = set_chained_resume(_routing("tai42:chained-park:inner"))
+        try:
+            again = set_chained_resume(_routing("tai42:chained-park:inner"))
+            try:
+                assert chained_lineage() == ("tai42:chained-park:outer", "tai42:chained-park:inner")
+            finally:
+                reset_chained_resume(again)
+        finally:
+            reset_chained_resume(inner)
+    finally:
+        reset_chained_resume(outer)
+
+
+def test_the_chained_lineage_is_isolated_per_task():
+    async def _nested(key: str) -> tuple[str, ...]:
+        token = set_chained_resume(_routing(key))
+        try:
+            await asyncio.sleep(0)
+            return chained_lineage()
+        finally:
+            reset_chained_resume(token)
+
+    async def scenario() -> tuple[tuple[str, ...], tuple[str, ...]]:
+        outer = set_chained_resume(_routing("tai42:chained-park:outer"))
+        try:
+            a, b = await asyncio.gather(_nested("tai42:chained-park:a"), _nested("tai42:chained-park:b"))
+        finally:
+            reset_chained_resume(outer)
+        return a, b
+
+    a, b = asyncio.run(scenario())
+    assert a == ("tai42:chained-park:outer", "tai42:chained-park:a")
+    assert b == ("tai42:chained-park:outer", "tai42:chained-park:b")
+
+
 def test_failed_outcome_text_renders_the_whole_nested_outcome_as_json():
     # A TEXT delivery door renders the WHOLE failed outcome as JSON — every nested level present,
     # no key read out of it — so a text caller receives the driver's own graceful surface intact.
@@ -604,3 +688,23 @@ def test_failed_outcome_text_raises_loudly_on_an_unencodable_outcome():
     outcome = {"bad": {1, 2, 3}}  # a set is not JSON-serializable
     with pytest.raises(TypeError):
         failed_outcome_text(outcome)
+
+
+def test_run_failed_round_trips_json_and_is_frozen():
+    from pydantic import ValidationError
+
+    from tai42_contract.interactions import RunFailed
+
+    failed = RunFailed(outcome={"status": "error", "error": "provider down", "nested": {"k": [1, 2]}})
+    restored = RunFailed.model_validate_json(failed.model_dump_json())
+    assert restored == failed
+    assert restored.outcome == {"status": "error", "error": "provider down", "nested": {"k": [1, 2]}}
+    with pytest.raises(ValidationError):
+        failed.outcome = {}  # type: ignore[misc]
+
+
+def test_run_failed_is_exported_beside_resume_buffered():
+    from tai42_contract.interactions import RunFailed as InteractionsRunFailed
+    from tai42_contract.interactions.models import RunFailed as ModelsRunFailed
+
+    assert InteractionsRunFailed is ModelsRunFailed

@@ -209,12 +209,14 @@ class _StoreWrites(_StoreWritesBase):
         claim / prune frees the RIGHT open-slot index and every read surface gates on it from a
         single ``hget``. ``subjects`` is the descriptor the entry is indexed under, so any path that
         deletes the state key drops it from every subject-parks set without re-deriving from the
-        full request. ``asked_by`` (the parking run's call chain), ``delivery`` (the run's durable
-        address, JSON) and ``run_delivery_id`` are copied onto the continuation-due record by the
-        answer path so the reaper's detached redelivery restores the chain and binds the address
-        without re-reading the request. ``deferred_binding`` (the door's merged binding, JSON),
-        ``run_input`` (the input it saw, JSON) and ``door_id`` are copied the same way, so the
-        reaper's redelivery applies the deferred UPDATES at the run's real terminal.
+        full request. ``asked_by`` (the parking run's call chain), ``chain_keys`` (the chained calls
+        it is nested under, JSON), ``delivery`` (the run's durable address, JSON) and
+        ``run_delivery_id`` are copied onto the continuation-due record by the answer path so the
+        reaper's detached redelivery restores the chain, deposits the lineage and binds the address
+        without re-reading the request; a kill copies ``chain_keys`` onto its kill-due record.
+        ``deferred_binding`` (the door's merged binding, JSON), ``run_input`` (the input it saw,
+        JSON) and ``door_id`` are copied the same way, so the reaper's redelivery applies the
+        deferred UPDATES at the run's real terminal.
         """
         if to != "user":
             state_mapping["to"] = to
@@ -224,6 +226,8 @@ class _StoreWrites(_StoreWritesBase):
             )
         if request.asked_by:
             state_mapping["asked_by"] = json.dumps(request.asked_by)
+        if request.chain_keys:
+            state_mapping["chain_keys"] = json.dumps(request.chain_keys)
         if delivery is not None:
             state_mapping["delivery"] = json.dumps(delivery)
         if run_delivery_id is not None:

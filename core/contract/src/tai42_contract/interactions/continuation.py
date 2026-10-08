@@ -77,6 +77,7 @@ __all__ = [
     "assert_park_adoptable",
     "attach_chained_park",
     "bound_execution_identity_for_fire",
+    "chained_lineage",
     "chained_park_claims",
     "current_execution_identity",
     "failed_outcome_text",
@@ -132,21 +133,56 @@ class ChainedResume(NamedTuple):
     asked_by: tuple[str, ...]
 
 
-_chained_resume: ContextVar[ChainedResume | None] = ContextVar("tai42_chained_resume", default=None)
+class _ChainedFrame(NamedTuple):
+    """The chain routing bound around the current nested dispatch and the chain keys it is nested in.
+
+    ``lineage`` holds the chain key of every chained dispatch the current context is nested in,
+    outermost first, the current routing's own key last; it is empty when ``routing`` is ``None``.
+    """
+
+    routing: ChainedResume | None
+    lineage: tuple[str, ...]
+
+
+# The frame outside any chained dispatch: no routing, an empty lineage.
+_UNCHAINED: Final[_ChainedFrame] = _ChainedFrame(None, ())
+
+_chained_resume: ContextVar[_ChainedFrame] = ContextVar("tai42_chained_resume", default=_UNCHAINED)
 
 
 def get_chained_resume() -> ChainedResume | None:
     """The chain routing bound around the current nested dispatch, or ``None`` when unchained."""
-    return _chained_resume.get()
+    return _chained_resume.get().routing
 
 
-def set_chained_resume(routing: ChainedResume | None) -> Token[ChainedResume | None]:
-    """Bind ``routing`` as the current nested dispatch's chain routing and return the reset token."""
-    return _chained_resume.set(routing)
+def chained_lineage() -> tuple[str, ...]:
+    """The chain keys of every chained dispatch the current context is nested in, outermost first.
+
+    The innermost entry is the key of :func:`get_chained_resume`; empty when unchained. A run that
+    parks here is nested under each of these chained calls, so each is a call whose waiting caller
+    the run's terminal may re-enter.
+    """
+    return _chained_resume.get().lineage
 
 
-def reset_chained_resume(token: Token[ChainedResume | None]) -> None:
-    """Restore the chain routing to the value captured in ``token``."""
+def set_chained_resume(routing: ChainedResume | None) -> Token[_ChainedFrame]:
+    """Bind ``routing`` as the current nested dispatch's chain routing and return the reset token.
+
+    A routing extends the enclosing lineage with its chain key, unless that key is already the
+    innermost one (a driver re-binding, for its resume, the routing it captured at park time). A
+    ``None`` routing starts a new, empty lineage: a dispatch nothing can wait on keeps no chain of
+    an outer dispatch.
+    """
+    if routing is None:
+        return _chained_resume.set(_UNCHAINED)
+    lineage = _chained_resume.get().lineage
+    if not lineage or lineage[-1] != routing.chain_key:
+        lineage = (*lineage, routing.chain_key)
+    return _chained_resume.set(_ChainedFrame(routing, lineage))
+
+
+def reset_chained_resume(token: Token[_ChainedFrame]) -> None:
+    """Restore the chain routing and its lineage to the values captured in ``token``."""
     _chained_resume.reset(token)
 
 
@@ -205,7 +241,8 @@ class ParkResumeUnauthorizedError(Exception):
     A driver's resume face and cross-driver chain-delivery tool are dispatchable by name at the
     run-tool door and the MCP edge, so the platform gates them: a face may produce a run's outcome
     ONLY inside the platform's resume of that run. Raised when the ambient run-authorization
-    context does not name the resumed interaction (or its run's delivery identity).
+    context does not name the resumed interaction, its run's delivery identity, or a chained call
+    the resumed interaction is nested under.
     """
 
     # A refusal to authorize the caller, not a caller input error or a transient unavailability.
@@ -298,7 +335,8 @@ async def bound_execution_identity_for_fire(execution_key: str | None, fingerpri
 # tears its OWN state down (its checkpoint, its resolution records, and every run it linked above
 # it). The platform holds only registration slots the drivers fill; it FIRES them from
 # ``kill_park`` with the run-authorization context bound around the fire (so a handler's
-# cross-driver teardown notify authorizes on the killed run's shared delivery identity), and it —
+# cross-driver teardown notify authorizes on the chain lineage the killed interaction recorded),
+# and it —
 # never a driver — delivers the run's single FAILED afterward.
 #
 # A handler is fired with ``(interaction_id, reason)`` and returns None. It owns ONLY its driver's

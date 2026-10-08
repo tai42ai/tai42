@@ -34,8 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import AbstractContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import NAMESPACE_URL, uuid5
@@ -48,6 +48,7 @@ from tai42_contract.interactions import (
     CallerAskLanding,
     InteractionRequest,
     ResumeBuffered,
+    RunFailed,
     RunTerminalFailed,
     SuspendedInteraction,
     declare_caller_ask_landing,
@@ -64,7 +65,7 @@ from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
-from tai42_skeleton.runs.chokepoint import delivery_fire, resume_origin
+from tai42_skeleton.runs.chokepoint import delivery_fire, resume_lineage, resume_origin
 from tai42_skeleton.states.context import current_state_context, state_context
 
 # The out-of-band delivery address the platform captured on a resumed interaction: the
@@ -80,7 +81,6 @@ __all__ = [
     "EXPIRY_ANSWER",
     "EXPIRY_ANSWERED_BY",
     "continuation_due_timing",
-    "deliver_park_giveup",
     "dispatch_continuation",
     "drive_and_deliver",
     "fire_continuation_after_claim",
@@ -141,6 +141,46 @@ async def _clear_due(store: InteractionStore, interaction_id: str) -> None:
         await store.clear_continuation_due(r, interaction_id)
 
 
+@asynccontextmanager
+async def _continuation_scope(
+    identity: str,
+    fingerprint: str | None,
+    interaction_id: str,
+    park_context: StateContext | None,
+    caller_ask_landing: CallerAskLanding | None,
+    chain_keys: Sequence[str],
+    *,
+    mark_detached: bool,
+) -> AsyncIterator[None]:
+    """Bind the frame a park's continuation work runs in: its identity, origin, lineage, state context and landing.
+
+    Rebinds the park's stored execution ``identity`` (never the answerer's), names
+    ``resume_origin(interaction_id)`` and deposits ``resume_lineage(chain_keys)`` — the chained
+    calls the park recorded it is nested under, whose chain-delivery fires the resume authorization
+    admits inside this frame — re-deposits the park's ``StateContext`` (so the resumed run's
+    writes complete their provenance from the SAME door the park entered through) and RE-ESTABLISHES
+    the park's caller-ask landing (so a re-ask is judged by the SAME door declaration the first ask
+    was). ``mark_detached`` flags the work detached so a set synchronous turn budget never cancels a
+    legitimately long out-of-band resume.
+    """
+    detached_token = mark_detached_run() if mark_detached else None
+    try:
+        park_ctx: AbstractContextManager[Any] = (
+            state_context(park_context) if park_context is not None else nullcontext()
+        )
+        async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
+            with (
+                resume_origin(interaction_id),
+                resume_lineage(chain_keys),
+                park_ctx,
+                declare_caller_ask_landing(caller_ask_landing),
+            ):
+                yield
+    finally:
+        if detached_token is not None:
+            reset_detached_run(detached_token)
+
+
 async def _run_continuation(
     identity: str,
     fingerprint: str | None,
@@ -150,39 +190,28 @@ async def _run_continuation(
     park_context: StateContext | None = None,
     park_asked_by: Sequence[str] = (),
     caller_ask_landing: CallerAskLanding | None = None,
+    chain_keys: Sequence[str] = (),
     *,
     mark_detached: bool = True,
 ) -> Any:
-    """Rebind ``identity`` and run ``tool`` with the park's ``{interaction_id, answer}``; RETURN its result.
+    """Run ``tool`` with the park's ``{interaction_id, answer}`` in the park's continuation frame; RETURN its result.
 
-    Binds ``resume_origin(interaction_id)`` UNCONDITIONALLY (the origin names the interaction being
-    resumed regardless of who receives the outcome), re-deposits the park's ``StateContext``
-    (so the resumed run's writes complete their provenance from the SAME door the park entered
-    through), RE-ESTABLISHES the park's caller-ask landing (so a re-ask during this out-of-band resume
-    is judged by the SAME door declaration the first ask was — a park under an absent landing is only
-    ever a user ask, and a caller re-ask there fails at the seam), restores the parking run's call
-    chain (passed as ``continues_chain`` so the continuation tool's own name is not re-added), and
-    ALWAYS takes the ``run_tool`` return value.
+    The frame (:func:`_continuation_scope`) binds ``resume_origin(interaction_id)`` UNCONDITIONALLY
+    (the origin names the interaction being resumed regardless of who receives the outcome); the
+    parking run's call chain is restored (passed as ``continues_chain`` so the continuation tool's
+    own name is not re-added), and the ``run_tool`` return value is ALWAYS taken.
 
-    ``mark_detached`` flags the run detached (the default) so a set synchronous turn budget never
-    cancels a legitimately long out-of-band resume; an inline resume under a live caller passes
-    ``False`` to run under that caller's budget. The run-DELIVERY context settle (re-establishing the
-    stored context, or leaving the resumer's own in place) is the caller's — :func:`drive_and_deliver`
-    binds it around this drive by ``receives_outcome``.
+    An inline resume under a live caller passes ``mark_detached=False`` to run under that caller's
+    budget. The run-DELIVERY context settle (re-establishing the stored context, or leaving the
+    resumer's own in place) is the caller's — :func:`drive_and_deliver` binds it around this drive
+    by ``receives_outcome``.
     """
-    detached_token = mark_detached_run() if mark_detached else None
-    try:
-        park_ctx: AbstractContextManager[Any] = (
-            state_context(park_context) if park_context is not None else nullcontext()
+    async with _continuation_scope(
+        identity, fingerprint, interaction_id, park_context, caller_ask_landing, chain_keys, mark_detached=mark_detached
+    ):
+        return await tai42_app.tools.run_tool(
+            tool, {"interaction_id": interaction_id, "answer": answer}, continues_chain=park_asked_by
         )
-        async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
-            with resume_origin(interaction_id), park_ctx, declare_caller_ask_landing(caller_ask_landing):
-                return await tai42_app.tools.run_tool(
-                    tool, {"interaction_id": interaction_id, "answer": answer}, continues_chain=park_asked_by
-                )
-    finally:
-        if detached_token is not None:
-            reset_detached_run(detached_token)
 
 
 async def _deliver_terminal(
@@ -301,6 +330,7 @@ async def drive_and_deliver(
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
     caller_ask_landing: CallerAskLanding | None = None,
+    chain_keys: Sequence[str] = (),
     delivery: _Delivery,
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
@@ -373,6 +403,7 @@ async def drive_and_deliver(
                 park_context,
                 park_asked_by,
                 caller_ask_landing,
+                chain_keys,
                 mark_detached=not receives_outcome,
             )
     except RunTerminalFailed as exc:
@@ -420,6 +451,52 @@ async def drive_and_deliver(
         await _clear_due(store, interaction_id)
         return result
 
+    await _deliver_run_outcome(
+        store,
+        interaction_id=interaction_id,
+        result=result,
+        delivery=delivery,
+        run_delivery_id=run_delivery_id,
+        candidates=candidates,
+        deferred_binding=deferred_binding,
+        run_input=run_input,
+        door_id=door_id,
+    )
+    await _clear_due(store, interaction_id)
+    return None
+
+
+async def _deliver_run_outcome(
+    store: InteractionStore,
+    *,
+    interaction_id: str,
+    result: Any,
+    delivery: _Delivery,
+    run_delivery_id: str | None,
+    candidates: SubjectCandidates | None,
+    deferred_binding: StateBinding | None,
+    run_input: Mapping[str, Any] | None,
+    door_id: str | None,
+) -> None:
+    """Deliver a run's outermost outcome to the run's address with no live receiver.
+
+    A still-parked step (a re-park, a buffered step) delivers nothing; a :class:`RunFailed` delivers
+    FAILED with its outcome; any other value is a SUCCESS: the run's deferred door binding updates
+    apply over it, then SUCCEEDED is delivered.
+    """
+    if _is_nonterminal(result):
+        return
+    if isinstance(result, RunFailed):
+        await _deliver_terminal(
+            store,
+            interaction_id=interaction_id,
+            outcome=result.outcome,
+            status=PARK_COMPLETION_FAILED,
+            delivery=delivery,
+            run_delivery_id=run_delivery_id,
+            candidates=candidates,
+        )
+        return
     await _apply_deferred_binding(
         deferred_binding=deferred_binding,
         run_input=run_input,
@@ -436,37 +513,6 @@ async def drive_and_deliver(
         run_delivery_id=run_delivery_id,
         candidates=candidates,
     )
-    await _clear_due(store, interaction_id)
-    return None
-
-
-# The failed-terminal outcome the platform delivers when a resume is permanently abandoned
-# (the reaper dropped its due record past the retention horizon). The delivery tool surfaces a
-# FAILED status as its uniform notice and ignores this ``result``; a subject-tracked give-up stores
-# it as the failure error a subject owner reads.
-_RESUME_ABANDONED_OUTCOME: Final[dict[str, Any]] = {"tai42:resume_abandoned": True}
-
-
-async def deliver_park_giveup(store: InteractionStore, request: InteractionRequest) -> None:
-    """Deliver the run's single FAILED for a PERMANENTLY abandoned park through the platform ladder.
-
-    The reaper dropped the continuation-due record past its retention horizon, so no redelivery will
-    ever re-drive this resume. The platform reads the interaction's stored ``delivery`` and delivers
-    FAILED itself — fire the run's address, else a ``failed`` waiting outcome on its subject, else
-    drop — keyed by the run's ``completion_id`` so it dedupes against any FAILED already delivered.
-    """
-    candidates = (
-        request.continuation_state_context.candidates if request.continuation_state_context is not None else None
-    )
-    await _deliver_terminal(
-        store,
-        interaction_id=request.interaction_id,
-        outcome=_RESUME_ABANDONED_OUTCOME,
-        status=PARK_COMPLETION_FAILED,
-        delivery=request.delivery,
-        run_delivery_id=request.run_delivery_id,
-        candidates=candidates,
-    )
 
 
 def _spawn_detached_delivery(
@@ -480,6 +526,7 @@ def _spawn_detached_delivery(
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
     caller_ask_landing: CallerAskLanding | None,
+    chain_keys: Sequence[str],
     delivery: _Delivery,
     run_delivery_id: str | None,
     candidates: SubjectCandidates | None,
@@ -505,6 +552,7 @@ def _spawn_detached_delivery(
             park_context=park_context,
             park_asked_by=park_asked_by,
             caller_ask_landing=caller_ask_landing,
+            chain_keys=chain_keys,
             delivery=delivery,
             run_delivery_id=run_delivery_id,
             candidates=candidates,
@@ -566,6 +614,7 @@ def dispatch_continuation(
         park_context=request.continuation_state_context,
         park_asked_by=request.asked_by,
         caller_ask_landing=request.caller_ask_landing,
+        chain_keys=request.chain_keys,
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=candidates,
@@ -582,8 +631,9 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
     and clears the record; a raised ``run_tool`` (or a raised delivery) leaves it for the next
     backoff window. At-least-once — the ladder's per-run ``completion_id`` dedup covers a redelivery
     that races the original fire to completion. The stored ``delivery`` address and
-    ``run_delivery_id`` are re-established off the due record, so this detached redelivery binds the
-    run's address and delivery identity without re-reading the request.
+    ``run_delivery_id`` are re-established off the due record, and its ``chain_keys`` deposited as
+    the drive's resume lineage, so this detached redelivery binds the run's address, delivery
+    identity and chain lineage without re-reading the request.
     """
     candidates = due.state_context.candidates if due.state_context is not None else None
     delivery: _Delivery = (due.delivery["tool"], due.delivery["context"]) if due.delivery is not None else None
@@ -597,6 +647,7 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
         park_context=due.state_context,
         park_asked_by=due.asked_by,
         caller_ask_landing=due.caller_ask_landing,
+        chain_keys=due.chain_keys,
         delivery=delivery,
         run_delivery_id=due.run_delivery_id,
         candidates=candidates,

@@ -25,9 +25,11 @@ Three statuses arrive, and each has one job:
 * :data:`~tai42_contract.interactions.PARK_COMPLETION_REPARKED` — not a terminal at all: the
   nested run asked again, so the chained park's INHERITED horizon is extended to the new
   deadline and nothing is resumed;
-* everything else — the explicit ``FAILED``, an unstamped fire, an unrecognized value — is a
-  non-success terminal, resumed as a model-visible tool ERROR, so the model reads that the call
-  came back empty and answers around it instead of the turn stalling on silence.
+* :data:`~tai42_contract.interactions.PARK_COMPLETION_FAILED` — the nested run failed: it is
+  resumed as a model-visible tool ERROR, so the model reads that the call came back empty and
+  answers around it instead of the turn stalling on silence.
+
+Any other status is a sender's defect and RAISES before anything is resumed.
 """
 
 from __future__ import annotations
@@ -43,8 +45,8 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_SUCCEEDED,
 )
 
-from tai42_agents._internal.park.index import extend_park_horizon, is_resolved_tombstone, read_park_entry
 from tai42_agents._internal.park.middleware import park_error_answer
+from tai42_agents._internal.park.park_binding import agents_park_index
 from tai42_agents._internal.park.persist import chained_park_horizon
 from tai42_agents._internal.park.resume import agent_resume, to_contract_outcome
 
@@ -56,39 +58,12 @@ logger = logging.getLogger(__name__)
 CHAINED_PARK_DELIVERY_TOOL_NAME: Final[str] = "deliver_chained_park"
 
 
-def _terminal_succeeded(chain_token: str, completion_id: str | None, status: str | None) -> bool:
-    """Whether a terminal fire's ``status`` names the clean-success terminal.
-
-    The one place a non-success fire is ANNOUNCED.
-
-    The shared contract vocabulary carries exactly one success value. Every other shape is
-    non-success — an UNSTAMPED fire (``None``: a driver that predates the status field, or one
-    that omits it) and an UNRECOGNIZED value alike — because resuming an unknown terminal as if
-    it were the answer would hand the model a failure payload dressed as a result.
-
-    Those two shapes are a driver/delivery version skew, and the skew is otherwise INVISIBLE:
-    the fire still resumes the run, so a whole fleet can silently degrade every successful
-    outcome into an error. This warning is the only detection, so EVERY non-success fire — the
-    explicit failure included — names the chained call and WHICH shape arrived.
-    """
-    if status == PARK_COMPLETION_SUCCEEDED:
-        return True
-    if status is None:
-        reason = "it carried NO status (an unstamped fire — a driver that predates the status field)"
-    elif status == PARK_COMPLETION_FAILED:
-        # Phrased about the VALUE, not the sender: a caller whose own default supplies this
-        # constant reaches here without having reported anything.
-        reason = f"its status is the non-success terminal {PARK_COMPLETION_FAILED!r}"
-    else:
-        reason = f"it carried the unrecognized status {status!r} (not in the contract vocabulary)"
-    logger.warning(
-        "agents: %s (%s, completion %s) resumes the waiting run with a tool error instead of a result because %s",
-        CHAINED_PARK_DELIVERY_TOOL_NAME,
-        chain_token,
-        completion_id,
-        reason,
+def chain_status_error(status: Any) -> ValueError:
+    """The refusal of a chain fire whose ``status`` is not one of the contract's three words."""
+    return ValueError(
+        f"unknown chain status {status!r}; expected one of {PARK_COMPLETION_SUCCEEDED!r}, "
+        f"{PARK_COMPLETION_FAILED!r}, {PARK_COMPLETION_REPARKED!r}"
     )
-    return False
 
 
 async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, Any]:
@@ -103,18 +78,20 @@ async def _extend_horizon(chain_token: str, expiry_at: str | None) -> dict[str, 
     fault: the first park of a chained call always notifies before the waiting run has finished
     recording its own park (the nested run parks first, by construction); a park the caller
     ADOPTED as its own — an ``ask`` raised directly by a chained dispatch — notifies a chain
-    nothing ever parks on; and a resolved or detached chain has nothing left to extend.
+    nothing ever parks on; and a resolved or detached chain has nothing left to extend. The
+    extension only ever grows the park's TTLs.
     """
-    entry = await read_park_entry(chain_token)
-    if entry is None or is_resolved_tombstone(entry):
+    index = agents_park_index()
+    entry = await index.read_entry(chain_token)
+    if entry is None or index.tombstone_kind(entry) != "live":
         logger.debug("agents: re-park notice for chained call %s has no live park to extend", chain_token)
         return {"status": "not_parked"}
     retention = entry.get("retention_bound")
     horizon = chained_park_horizon(expiry_at, datetime.fromisoformat(retention) if retention else None)
-    extended = await extend_park_horizon(
-        chain_token, entry["thread_id"], entry["superstep_id"], datetime.fromisoformat(horizon)
-    )
-    return {"status": "extended" if extended else "unchanged", "expiry_at": horizon}
+    if not await index.extend_horizon(chain_token, datetime.fromisoformat(horizon)):
+        logger.debug("agents: chained call %s stopped being parked before its horizon could be extended", chain_token)
+        return {"status": "not_parked"}
+    return {"status": "extended", "expiry_at": horizon}
 
 
 async def deliver_chained_park(
@@ -137,19 +114,20 @@ async def deliver_chained_park(
     ``status`` decides the outcome: ``succeeded`` resumes the waiting run with ``result`` as the
     awaited tool's result; ``reparked`` is not a terminal at all — the nested run asked again,
     so the chained park's inherited horizon is extended to ``expiry_at`` and nothing is resumed;
-    every other shape (the explicit ``failed``, an unstamped fire, an unrecognized value) is a
-    non-success terminal, resumed as a model-visible tool ERROR naming what arrived. An OMITTED
-    ``status`` keeps this tool's published fail-safe default, so it is reported as that terminal
-    rather than as an unstamped fire. A ``succeeded`` fire's ``result`` is passed through
-    exactly as the nested run produced it, empty included — the model reads what the call
+    ``failed`` (also this tool's published default for an omitted ``status``) resumes the waiting
+    run with a model-visible tool ERROR. Any other status — an unstamped fire, an unrecognized
+    value — RAISES ``ValueError`` before anything is buffered: a delivery this face cannot classify
+    is a sender's defect, never read as a failure. A ``succeeded`` fire's ``result`` is passed
+    through exactly as the nested run produced it, empty included — the model reads what the call
     returned, not an interpretation of it.
 
     AUTHORISATION: the tool is hidden but dispatchable by name at the run-tool door and the MCP
     edge, so it asserts ``assert_resume_authorized(chain_token)`` FIRST (after the presence check),
-    before it re-enters or returns anything — the ancestor shares the leaf's ``run_delivery_id``
-    (one id spans the cross-driver chain), so a legitimate terminal fire from inside the leaf's
-    resume drive, and a whole-chain kill's teardown notify (which ``kill_park`` runs with the
-    run-authorization context bound), pass; an external run-tool / MCP caller is refused loudly.
+    before it re-enters or returns anything — a legitimate fire runs inside the platform's own drive
+    of an interaction nested under this chained call (its resume, its whole-chain kill's teardown
+    notify, its give-up), whose recorded chain lineage holds ``chain_token``, so it passes; an
+    external run-tool / MCP caller, or a fire for a chained call outside that lineage, is refused
+    loudly.
 
     Delivery is at-least-once, and the resume is idempotent for it: the super-step barrier
     buffers an answer once (a redelivery is a no-op) and a resolved super-step replays its stored
@@ -159,9 +137,10 @@ async def deliver_chained_park(
     Returns the OUTERMOST run's outcome in CONTRACT types
     (:func:`~tai42_agents._internal.park.resume.to_contract_outcome`): a ``SuspendedInteraction``
     if the re-entered ancestor parked again, a ``ResumeBuffered`` while sibling parks of the same
-    super-step are outstanding, the final result on a clean terminal, or ``None`` for a benign
-    detach landing — so a CROSS-DRIVER caller (another driver firing this when its run ran under
-    an agent) can read the outcome without interpreting an agents-private envelope.
+    super-step are outstanding, the final result on a clean terminal, a ``RunFailed`` when the
+    re-entered run (or an ancestor above it) failed, or ``None`` for a benign detach landing — so a
+    CROSS-DRIVER caller (another driver firing this when its run ran under an agent) reads the
+    outcome by type, never by an agents-private envelope.
 
     A fire with NO ``chain_token`` is unroutable and no retry can ever land it, so it is dropped
     LOUDLY rather than raising into an endless redelivery. A token whose park entry is ABSENT
@@ -185,13 +164,21 @@ async def deliver_chained_park(
     await tai42_app.interactions.assert_resume_authorized(chain_token)
     if status == PARK_COMPLETION_REPARKED:
         return await _extend_horizon(chain_token, expiry_at)
-    if _terminal_succeeded(chain_token, completion_id, status):
+    if status == PARK_COMPLETION_SUCCEEDED:
         answer: Any = result
-    else:
+    elif status == PARK_COMPLETION_FAILED:
+        logger.warning(
+            "agents: %s (%s, completion %s) resumes the waiting run with a tool error: the call it waits on failed",
+            CHAINED_PARK_DELIVERY_TOOL_NAME,
+            chain_token,
+            completion_id,
+        )
         answer = park_error_answer(
             f"the call this run is waiting on ended without a result (terminal status {status!r}); "
             "nothing was delivered, so continue without it"
         )
+    else:
+        raise chain_status_error(status)
     return to_contract_outcome(await agent_resume(chain_token, answer))
 
 
