@@ -12,7 +12,9 @@ stale-config leak, reported loudly and never dropped.
 import contextlib
 import functools
 import gc
+import inspect
 import logging
+import sys
 import threading
 import types
 import weakref
@@ -159,46 +161,111 @@ class StaleHolder:
     holders: tuple[str, ...]
 
 
-def _summarize_holders(instance: object) -> tuple[str, ...]:
-    # Referrers minus this sweep's own transient scaffolding: the frame walking
-    # the roster and the referrers list itself would otherwise show up as holders.
+def _describe_frame(kind: str, name: str, frame: types.FrameType | None) -> str:
+    if frame is None:
+        return f"{kind} {name}"
+    return f"{kind} {name} ({frame.f_code.co_filename}:{frame.f_lineno})"
+
+
+def _describe_referrer(referrer: object) -> str:
+    # A frame or a suspended coroutine/generator is named by its function and the
+    # line it stands at, so an ERROR line points at the code that keeps the instance.
+    if isinstance(referrer, types.FrameType):
+        return _describe_frame("frame", referrer.f_code.co_qualname, referrer)
+    if isinstance(referrer, types.CoroutineType):
+        return _describe_frame("coroutine", referrer.cr_code.co_qualname, referrer.cr_frame)
+    if isinstance(referrer, types.GeneratorType):
+        return _describe_frame("generator", referrer.gi_code.co_qualname, referrer.gi_frame)
+    if isinstance(referrer, types.AsyncGeneratorType):
+        return _describe_frame("async generator", referrer.ag_code.co_qualname, referrer.ag_frame)
+    return f"{type(referrer).__module__}.{type(referrer).__qualname__}"
+
+
+_SUSPENDABLE_CODE_FLAGS = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+
+
+def _executing_frame_holders(instance: object, sweep_frame: types.FrameType) -> list[str]:
+    """Name every executing plain-function frame, on any thread, that has ``instance`` as a local.
+
+    An executing frame is not a gc referrer of its locals, so ``gc.get_referrers``
+    cannot see it. Generator and coroutine frames are skipped here: their
+    generator/coroutine object is a gc referrer and is named from there. The
+    sweep's own frames (``sweep_frame`` and the frames it called) hold the
+    instance only to inspect it, so they are skipped too.
+    """
+    own: list[types.FrameType] = []
+    frame: types.FrameType | None = sys._getframe()
+    try:
+        while frame is not None and frame is not sweep_frame.f_back:
+            own.append(frame)
+            frame = frame.f_back
+        found: list[str] = []
+        for top in sys._current_frames().values():
+            frame = top
+            while frame is not None:
+                if (
+                    not frame.f_code.co_flags & _SUSPENDABLE_CODE_FLAGS
+                    and not any(frame is mine for mine in own)
+                    and any(value is instance for value in frame.f_locals.values())
+                ):
+                    found.append(_describe_frame("frame", frame.f_code.co_qualname, frame))
+                frame = frame.f_back
+        return found
+    finally:
+        own.clear()
+        del frame
+
+
+def _summarize_holders(instance: object, sweep_frame: types.FrameType) -> tuple[str, ...]:
+    # The referrers list itself is this sweep's own scaffolding, never a holder.
     referrers = gc.get_referrers(instance)
-    return tuple(
-        f"{type(r).__module__}.{type(r).__qualname__}"
-        for r in referrers
-        if not isinstance(r, types.FrameType) and r is not referrers
-    )
+    try:
+        held_by = [_describe_referrer(r) for r in referrers if r is not referrers]
+    finally:
+        del referrers
+    return (*held_by, *_executing_frame_holders(instance, sweep_frame))
+
+
+def _retired_instances(retired_epoch: int) -> list["weakref.ref[BaseSettings]"]:
+    with _roster_lock:
+        roster = list(_stamp_roster)
+    return [ref for ref in roster if getattr(ref(), _EPOCH_STAMP_ATTR, None) == retired_epoch]
 
 
 def sweep_stale_settings(retired_epoch: int) -> list[StaleHolder]:
-    """Report every live cached settings instance still stamped with ``retired_epoch``.
+    """Report every settings instance stamped with ``retired_epoch`` that something still holds.
 
     Walks the roster for instances whose stamp is the retired epoch and are still
-    alive (a holder is keeping them past the cache clear), summarising each via
-    ``gc.get_referrers``. Logs ERROR naming the holders — a retired-epoch instance
-    still reachable is a stale-config leak, never dropped silently — and returns
-    the findings so a probe/e2e can assert zero.
+    alive. When any is found, cyclic garbage is collected first, so an instance
+    that only unreachable objects keep (the finished frame of a cancelled task
+    awaiting collection) is freed rather than reported. Each instance still alive
+    after that is reachable, which is a stale-config leak: it is logged at ERROR
+    naming its holders (a referrer's type, or the function and ``file:line`` of a
+    frame or coroutine that keeps it) and returned, so a probe/e2e can assert zero.
+    Nothing is dropped.
     """
     if retired_epoch >= _current_epoch():
         raise ValueError(
             f"sweep_stale_settings requires a retired epoch, but {retired_epoch} is the current or a future epoch"
         )
-    with _roster_lock:
-        roster = list(_stamp_roster)
+    if not _retired_instances(retired_epoch):
+        return []
+    gc.collect()
+    sweep_frame = sys._getframe()
     stale: list[StaleHolder] = []
-    for ref in roster:
+    for ref in _retired_instances(retired_epoch):
         instance = ref()
         if instance is None:
-            continue
-        if getattr(instance, _EPOCH_STAMP_ATTR, None) != retired_epoch:
             continue
         stale.append(
             StaleHolder(
                 settings_type=f"{type(instance).__module__}.{type(instance).__qualname__}",
                 epoch=retired_epoch,
-                holders=_summarize_holders(instance),
+                holders=_summarize_holders(instance, sweep_frame),
             )
         )
+        del instance
+    del sweep_frame
     for holder in stale:
         logger.error(
             "Stale settings instance %s (epoch %d) still held by: %s",

@@ -441,6 +441,9 @@ class _RelayBindApp:
         self.agents = _RelayBindApp._Agents()
         self._target_validator_registry = TargetBindValidatorRegistry()
 
+    def target_validator(self, target_kind, target_name):
+        return self._target_validator_registry.get(target_kind, target_name)
+
 
 class _FlipRefusingManager(_DictManager):
     """A store whose existing row ``held`` holds threads on its door: a restore that flips that

@@ -230,6 +230,64 @@ async def _retry_after(r: AsyncRedis, prefix: str, family: str, bucket: str, lim
     return None
 
 
+async def _refusal(scope: Scope) -> JSONResponse | None:
+    """The 429 response for an HTTP request over its door's budget, else ``None``.
+
+    Reads the rate-limit settings in this call only: the caller runs the downstream app
+    after it returns, so a request never keeps a settings instance alive across a config
+    reload that retires it.
+    """
+    settings = rate_limit_settings()
+    # No Redis configured → rate limiting is OFF for EVERY door: the counters have
+    # nowhere to live, so every request flows straight through. The
+    # once-per-process boot WARNING is where an operator learns the public doors
+    # are unthrottled — never a boot refusal.
+    if not settings.redis.redis_url:
+        return None
+    # Look the door up on the root_path-stripped path — the same canonical path the
+    # router (Starlette's ``get_route_path``) and access control (``strip_root_path``)
+    # match on — so a deployment that carries the mount prefix in ``scope["path"]``
+    # and one whose proxy strips it resolve the same registered door.
+    door = _door_for(strip_root_path(scope["path"], scope.get("root_path", "")), scope["method"].upper())
+    # An authed route is gated by its credential; an unrecognised path declares no
+    # public door. Neither is this limiter's business.
+    if door is None or door.payload.authed:
+        return None
+    budget = settings.budget_for(door.payload.family)
+    # A disabled family means pass through, not block: an off switch opens the
+    # door it names, it never closes it.
+    if not budget.enabled:
+        return None
+
+    conn = HTTPConnection(scope)
+    bucket = client_bucket(conn.client.host if conn.client else None, conn.headers.get(XFF_HEADER, ""))
+    async with client_ctx(RedisClient, settings.redis) as r:
+        retry_after = await _retry_after(
+            r, settings.key_prefix, door.payload.family, bucket, budget.limit, budget.burst
+        )
+    if retry_after is None:
+        return None
+    # Refusal audit at the outer door: the limiter rejects BEFORE the gate, so
+    # the caller is unauthenticated. The matched route's TEMPLATE is the whole
+    # of what the line may state — a path-borne token rides in a parameter and
+    # is never recorded. Duration is 0: rejected at the door. Gated on the
+    # same audit switch.
+    if audit_log_settings().enable:
+        emit_audit_line(
+            UNAUTHENTICATED,
+            scope["method"],
+            door.template,
+            429,
+            0,
+            datetime.now(UTC).isoformat(),
+        )
+    return JSONResponse(
+        {"error": "rate limit exceeded"},
+        status_code=429,
+        headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
+    )
+
+
 class RateLimitMiddleware:
     """Rate-limits every public door; passes everything else through."""
 
@@ -238,63 +296,10 @@ class RateLimitMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Rate-limit the request when it matches an enabled public door, else pass it through."""
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        settings = rate_limit_settings()
-        conn = HTTPConnection(scope)
-        # No Redis configured → rate limiting is OFF for EVERY door: the counters have
-        # nowhere to live, so every request flows straight through. The
-        # once-per-process boot WARNING is where an operator learns the public doors
-        # are unthrottled — never a boot refusal.
-        if not settings.redis.redis_url:
-            await self.app(scope, receive, send)
-            return
-        # Look the door up on the root_path-stripped path — the same canonical path the
-        # router (Starlette's ``get_route_path``) and access control (``strip_root_path``)
-        # match on — so a deployment that carries the mount prefix in ``scope["path"]``
-        # and one whose proxy strips it resolve the same registered door.
-        door = _door_for(strip_root_path(scope["path"], scope.get("root_path", "")), scope["method"].upper())
-        # An authed route is gated by its credential; an unrecognised path declares no
-        # public door. Neither is this limiter's business.
-        if door is None or door.payload.authed:
-            await self.app(scope, receive, send)
-            return
-        budget = settings.budget_for(door.payload.family)
-        # A disabled family means pass through, not block: an off switch opens the
-        # door it names, it never closes it.
-        if not budget.enabled:
-            await self.app(scope, receive, send)
-            return
-
-        bucket = client_bucket(conn.client.host if conn.client else None, conn.headers.get(XFF_HEADER, ""))
-        async with client_ctx(RedisClient, settings.redis) as r:
-            retry_after = await _retry_after(
-                r, settings.key_prefix, door.payload.family, bucket, budget.limit, budget.burst
-            )
-        if retry_after is not None:
-            # Refusal audit at the outer door: the limiter rejects BEFORE the gate, so
-            # the caller is unauthenticated. The matched route's TEMPLATE is the whole
-            # of what the line may state — a path-borne token rides in a parameter and
-            # is never recorded. Duration is 0: rejected at the door. Gated on the
-            # same audit switch.
-            if audit_log_settings().enable:
-                emit_audit_line(
-                    UNAUTHENTICATED,
-                    scope["method"],
-                    door.template,
-                    429,
-                    0,
-                    datetime.now(UTC).isoformat(),
-                )
-            response = JSONResponse(
-                {"error": "rate limit exceeded"},
-                status_code=429,
-                headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
-            )
-            await response(scope, receive, send)
-            return
-
+        """Answer 429 when the request matches an enabled public door over its budget, else pass it through."""
+        if scope["type"] == "http":
+            response = await _refusal(scope)
+            if response is not None:
+                await response(scope, receive, send)
+                return
         await self.app(scope, receive, send)

@@ -273,6 +273,32 @@ async def test_cancel_poll_cancels_and_forgets_the_running_task(monkeypatch: pyt
         marketplace_settings.cache_clear()
 
 
+async def test_a_stopped_poll_leaves_no_retired_settings_for_the_sweep_to_report(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The retire stops the poll and then sweeps the retired settings generation: the
+    # stopped loop's settings must not be reported as still held.
+    from tai42_kit.clients.base import advance_client_epoch
+    from tai42_kit.settings import reset_all_settings, sweep_stale_settings
+
+    monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")
+    marketplace_settings.cache_clear()
+    try:
+        advisories.start_poll()
+        await asyncio.sleep(0)  # the loop runs up to its first sleep, holding its settings
+        await advisories.stop_poll()
+        retired = advance_client_epoch()
+        reset_all_settings()
+        with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+            held = [h for h in sweep_stale_settings(retired) if h.settings_type.endswith(".MarketplaceSettings")]
+    finally:
+        await advisories.stop_poll()
+        marketplace_settings.cache_clear()
+
+    assert held == []
+    assert "MarketplaceSettings" not in caplog.text
+
+
 async def test_start_poll_twice_leaves_exactly_one_task_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")
     marketplace_settings.cache_clear()
@@ -353,9 +379,11 @@ async def test_poll_loop_survives_one_failing_refresh(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     calls = {"n": 0}
+    slept: list[float] = []
 
-    async def _fake_sleep(_seconds: float) -> None:
+    async def _fake_sleep(seconds: float) -> None:
         # One-shot: allow one refresh, then stop the loop.
+        slept.append(seconds)
         calls["n"] += 1
         if calls["n"] >= 2:
             raise asyncio.CancelledError
@@ -369,9 +397,11 @@ async def test_poll_loop_survives_one_failing_refresh(
         caplog.at_level(logging.WARNING, logger="tai42_skeleton.marketplace.advisories"),
         pytest.raises(asyncio.CancelledError),
     ):
-        await advisories._poll_loop()
-    # The failing poll logged a WARNING and the loop continued to the next sleep.
-    assert any("poll failed" in r.getMessage() for r in caplog.records)
+        await advisories._poll_loop(30.0, "https://registry.example")
+    # The failing poll logged a WARNING naming the registry, and the loop continued to
+    # the next sleep of the same interval.
+    assert any("poll failed for https://registry.example" in r.getMessage() for r in caplog.records)
+    assert slept == [30.0, 30.0]
 
 
 async def test_poll_loop_warns_on_high_or_critical_advisory(
@@ -401,7 +431,7 @@ async def test_poll_loop_warns_on_high_or_critical_advisory(
         caplog.at_level(logging.WARNING, logger="tai42_skeleton.marketplace.advisories"),
         pytest.raises(asyncio.CancelledError),
     ):
-        await advisories._poll_loop()
+        await advisories._poll_loop(30.0, "https://registry.example")
     warnings = [r.getMessage() for r in caplog.records]
     assert any("tai42/toolbox" in m and "critical" in m and "RCE" in m for m in warnings)
     # The low-severity advisory is not warned about.

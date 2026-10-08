@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients import advance_client_epoch, current_client_epoch, drain_epoch
 from tai42_kit.settings import reset_all_settings
-from tai42_kit.settings.cache_registry import register_settings_reset, sweep_stale_settings
+from tai42_kit.settings.cache_registry import sweep_stale_settings
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -258,10 +258,6 @@ _building_epoch: Epoch | None = None
 # mirrors ``_loaded_env_keys`` in the in-place reload path.
 _loaded_env_keys: set[str] = set()
 
-# Set to the retiring epoch number for the span of the retire's settings reset so
-# the registered sweep hook sweeps exactly that generation; ``None`` otherwise.
-_retiring_epoch: int | None = None
-
 # True within the context of an HTTP request (set by ``EpochAdmissionApp``). A
 # door-triggered reload (``write_env`` / ``reload_config`` / ``fleet_reload_config``, incl.
 # when invoked as an MCP tool) runs the swap synchronously WHILE its own request is still
@@ -376,19 +372,16 @@ async def clear_epoch() -> None:
     _loaded_env_keys = set()
 
 
-@register_settings_reset
-def _sweep_retiring_epoch() -> None:
-    """Settings-reset hook that sweeps the retiring generation for stale-config leaks.
+def _reset_settings_and_sweep(retired: int) -> None:
+    """Drop every settings cache and settings-derived singleton, then sweep ``retired`` for stale-config leaks.
 
-    Runs only when a retire triggers the reset. A no-op for every other reset
-    (the retire flag is unset), so the global reset stays cheap. Never drops
-    anything — a retired-epoch settings instance still reachable is reported
-    loudly by ``sweep_stale_settings``.
+    The sweep runs only after ``reset_all_settings`` has run every reset hook, so a
+    singleton that a hook releases (a manager cache over its settings) is gone before
+    the sweep looks. Never drops anything: a retired-epoch settings instance still
+    reachable after the full reset is reported loudly by ``sweep_stale_settings``.
     """
-    retiring = _retiring_epoch
-    if retiring is None:
-        return
-    sweep_stale_settings(retiring)
+    reset_all_settings()
+    sweep_stale_settings(retired)
 
 
 def _apply_env(proposed: Mapping[str, str]) -> None:
@@ -469,7 +462,7 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
 
     Cancels the generation's periodic loops first (no timer outlives its epoch),
     drains its in-flight requests and background supervisors, closes its retired
-    client pools, and sweeps its stale settings (via the registered reset hook). Each
+    client pools, and sweeps its stale settings after the full settings reset. Each
     step is independent so one failure cannot skip the rest — the fresh epoch already
     serves new traffic, so a retire fault is loud but never fatal.
 
@@ -524,14 +517,9 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
         except Exception:
             logger.exception("epoch %d retire: serving-lifespan close failed", old.number)
 
-    # Sweep the retired generation's stale settings through the registered reset
-    # hook: the flag scopes the sweep to exactly this generation.
-    global _retiring_epoch
-    _retiring_epoch = retired
-    try:
-        reset_all_settings()
-    finally:
-        _retiring_epoch = None
+    # Reset every settings-derived singleton, then sweep the retired generation for
+    # a settings instance still reachable past the reset.
+    _reset_settings_and_sweep(retired)
 
     try:
         await drain_epoch(retired, budget)

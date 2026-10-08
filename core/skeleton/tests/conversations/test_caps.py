@@ -265,19 +265,16 @@ async def test_a_settings_reload_keeps_a_live_thread_serialized(monkeypatch, fre
     assert inside == ["B"]
 
 
-def test_a_retired_settings_generation_is_not_held_by_the_caps(monkeypatch, fresh_caps_singleton, caplog):
+def test_a_retired_settings_generation_is_not_held_by_the_caps(fresh_caps_singleton, caplog):
     # The caps singleton outlives every reload; it must not keep the retired generation's
     # settings instance alive, or every retire sweep reports a stale-config leak.
-    monkeypatch.setattr(epoch_module, "_retiring_epoch", None)
     reset_all_settings()
     caps = caps_module.get_turn_caps()
     retired = current_client_epoch()
     advance_client_epoch()
 
-    monkeypatch.setattr(epoch_module, "_retiring_epoch", retired)
     with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
-        reset_all_settings()
-    monkeypatch.setattr(epoch_module, "_retiring_epoch", None)
+        epoch_module._reset_settings_and_sweep(retired)
 
     held = [h for h in sweep_stale_settings(retired) if h.settings_type.endswith(".ConversationsSettings")]
     assert held == []

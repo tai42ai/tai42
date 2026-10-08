@@ -43,7 +43,7 @@ class _StagingRefusedError(RuntimeError):
 @pytest.fixture(autouse=True)
 def _isolated_epoch() -> Iterator[None]:
     """A boot epoch to keep serving, and the spine globals restored after."""
-    saved = {name: getattr(epoch_mod, name) for name in ("_current", "_serving_slot", "_retiring_epoch")}
+    saved = {name: getattr(epoch_mod, name) for name in ("_current", "_serving_slot")}
     loaded_before = set(epoch_mod._loaded_env_keys)
     epoch_mod._current = Epoch(number=current_client_epoch(), serving_app=None)
     epoch_mod._serving_slot = {}

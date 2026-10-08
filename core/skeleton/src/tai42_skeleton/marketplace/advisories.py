@@ -210,7 +210,9 @@ def _spawn_poll_if_enabled() -> None:
         settings.url,
         settings.advisories_interval_s,
     )
-    task = asyncio.create_task(_poll_loop(), name="tai-marketplace-advisories")
+    task = asyncio.create_task(
+        _poll_loop(settings.advisories_interval_s, settings.url), name="tai-marketplace-advisories"
+    )
     task.add_done_callback(_on_poll_done)
     _poll_task = task
     _register_task_with_epoch(task)
@@ -261,22 +263,20 @@ def _on_poll_done(task: asyncio.Task[None]) -> None:
         logger.error("marketplace advisories poll task died unexpectedly", exc_info=exc)
 
 
-async def _poll_loop() -> None:
-    """Refresh advisories every interval; one failed poll logs and continues.
+async def _poll_loop(interval_s: float, url: str) -> None:
+    """Refresh advisories every ``interval_s`` seconds; one failed poll logs and continues.
 
     A single unreachable poll must never kill the loop. A fresh snapshot carrying
     high or critical advisories logs each at WARNING naming the listing, severity,
-    and summary.
+    and summary. The loop takes plain values rather than the settings instance, so a
+    stopped loop keeps no settings generation alive.
     """
-    settings = marketplace_settings()
     while True:
-        await asyncio.sleep(settings.advisories_interval_s)
+        await asyncio.sleep(interval_s)
         try:
             state = await refresh()
         except Exception:
-            logger.warning(
-                "marketplace advisories poll failed for %s; retrying next interval", settings.url, exc_info=True
-            )
+            logger.warning("marketplace advisories poll failed for %s; retrying next interval", url, exc_info=True)
             continue
         for advisory in state.advisories:
             if advisory.get("severity") in ("high", "critical"):

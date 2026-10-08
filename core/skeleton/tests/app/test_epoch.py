@@ -65,13 +65,13 @@ def _reset_epoch_state() -> Iterator[None]:
     These tests drive ``build_and_swap_epoch`` with INJECTED no-op ``rebuild`` seams, so
     a successful build promotes EMPTY generations over the per-generation registries;
     the suite-wide ``_preserve_generation_globals`` fixture restores them after each test."""
-    for name in ("_current", "_serving_slot", "_retiring_epoch"):
+    for name in ("_current", "_serving_slot"):
         setattr(epoch_mod, name, None)
     epoch_mod._loaded_env_keys = set()
     try:
         yield
     finally:
-        for name in ("_current", "_serving_slot", "_retiring_epoch", "_building_epoch"):
+        for name in ("_current", "_serving_slot", "_building_epoch"):
             setattr(epoch_mod, name, None)
         epoch_mod._loaded_env_keys = set()
 
@@ -575,7 +575,7 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
 # -- stale-settings sweep ------------------------------------------------------
 
 
-async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> None:
+async def test_a_clean_build_and_swap_cycle_leaves_no_stale_settings() -> None:
     # The boot app bound at import (under process epoch 0) permanently holds an
     # epoch-0 AccessControlSettings through its AuthAdapter/verifier/backend/policy
     # singletons — legitimate live holders of the boot generation. Advance past epoch
@@ -588,9 +588,8 @@ async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> Non
     advance_client_epoch()
     _install_boot("boot-app")
 
-    # The retire's settings reset sweeps the retired generation through the
-    # registered hook; a clean cycle (no holder pins a retired-epoch settings
-    # instance) reports zero.
+    # The retire resets the settings and then sweeps the retired generation; a clean
+    # cycle (no holder pins a retired-epoch settings instance) reports zero.
     retired_number = current_epoch().number
     await build_and_swap_epoch(
         {"K": "v"},
@@ -600,7 +599,7 @@ async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> Non
     assert sweep_stale_settings(retired_number) == []
 
 
-def test_sweep_hook_flags_a_leaked_retired_settings_instance() -> None:
+def test_the_sweep_flags_a_leaked_retired_settings_instance() -> None:
     from pydantic_settings import BaseSettings
 
     class _Leaky(BaseSettings):
