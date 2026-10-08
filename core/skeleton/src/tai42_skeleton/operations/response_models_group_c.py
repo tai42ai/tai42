@@ -110,14 +110,19 @@ class ChannelListing(BaseModel):
 class CheckpointSweepResult(BaseModel):
     """The checkpoint-sweep report.
 
-    ``skipped`` is present ONLY on a no-op branch (an unsweepable provider or an
-    unset TTL); a real sweep omits it and reports the swept threads.
+    ``finished_swept`` / ``waiting_swept`` list the threads deleted past each horizon;
+    ``spared`` lists the threads past a horizon a live-thread filter reported live.
+    ``skipped`` is set only when the provider has no waiting-horizon sweep (its threads
+    expire by key TTL, or live as long as the process).
     """
 
     provider: str
-    ttl_minutes: int | None = None
+    waiting_minutes: int
+    finished_minutes: int
     swept_count: int
-    swept_threads: list[str]
+    finished_swept: list[str]
+    waiting_swept: list[str]
+    spared: list[str]
     skipped: str | None = None
 
 

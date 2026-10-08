@@ -46,6 +46,7 @@ from tai42_agents._internal.park.errors import (
     AgentResumeParkEntryNotFoundError,
 )
 from tai42_agents.langchain_deep_agent import agent as agent_mod
+from tai42_agents.langchain_deep_agent import run_thread as run_thread_mod
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
 from .conftest import fake_run_trace
@@ -412,9 +413,6 @@ class _ProviderSettings:
     llm = "fake"
     checkpoint = "redis"
     checkpoint_conn_string = None
-    # Keep-forever retention, so the park-persist expiry-vs-retention gate bounds nothing
-    # and this full-cycle test's synthetic None-expiry park passes it.
-    checkpoint_ttl_minutes = None
     store = "memory"
     store_conn_string = None
 
@@ -443,7 +441,7 @@ def _wire_real_build(
     monkeypatch.setattr(agent_mod, "llm_settings", _LlmSettings)
     # The recording app's monitoring writer hands back string callback sentinels; keep
     # them out of the run config (the config already carries the pinned thread_id).
-    monkeypatch.setattr(agent_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(run_thread_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
 
 
 def test_full_park_resume_cycle_runs_ask_once_and_clears_index(

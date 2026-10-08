@@ -54,6 +54,7 @@ from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DEL
 from tai42_agents._internal.park import capability as cap
 from tai42_agents._internal.park import index as idx
 from tai42_agents.langchain_deep_agent import agent as deep_mod
+from tai42_agents.langchain_deep_agent import run_thread as deep_run_thread_mod
 
 from .conftest import fake_run_trace
 
@@ -100,7 +101,6 @@ class _ProviderSettings:
     llm = "fake"
     checkpoint = "redis"
     checkpoint_conn_string = None
-    checkpoint_ttl_minutes = None
     store = "memory"
     store_conn_string = None
 
@@ -203,7 +203,7 @@ def test_nested_tool_captures_a_chain_while_the_agent_park_is_outermost(
     model = ScriptedChatModel([_call("c1", "peek"), _call("c2", "ask"), AIMessage(content="all done")])
     _wire(monkeypatch, model, saver)
     app_tools.client_tools["peek"] = nested.tool()
-    app_tools.client_tools["ask"] = _ParkingAsk("i1").tool()
+    app_tools.client_tools["ask"] = _ParkingAsk("i1", expiry_at=datetime.now(UTC) + timedelta(hours=1)).tool()
 
     agent = _agent()
 
@@ -259,7 +259,7 @@ def test_nested_tool_captures_a_chain_on_the_deep_agent_resume_drive(
     monkeypatch.setattr(deep_mod, "store_registry", lambda: _Registry(store))
     monkeypatch.setattr(deep_mod, "llm_provider_settings", _ProviderSettings)
     monkeypatch.setattr(deep_mod, "llm_settings", _LlmSettings)
-    monkeypatch.setattr(deep_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(deep_run_thread_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
     monkeypatch.setattr(cap, "llm_provider_settings", _ProviderSettings)
 
     app_tools.client_tools["peek"] = nested.tool()

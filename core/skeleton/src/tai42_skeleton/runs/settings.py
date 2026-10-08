@@ -19,10 +19,8 @@ class RunIndexSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="TAI_RUNS_INDEX_")
 
     # Opt-in retention window in DAYS. ``None`` (the default) keeps every run row
-    # forever — retention is off unless a deployment sets it, mirroring the
-    # checkpoint-retention ``checkpoint_ttl_minutes`` knob (unset = kept forever). The
-    # prune deletes rows whose ``started_at`` is older than this; a set value must be
-    # positive.
+    # forever — retention is off unless a deployment sets it. The prune deletes rows
+    # whose ``started_at`` is older than this; a set value must be positive.
     retention_days: int | None = Field(default=None, ge=1)
 
     # The list door caps a requested page size to this: it deliberately CLAMPS an

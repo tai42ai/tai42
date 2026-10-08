@@ -142,6 +142,9 @@ dev = [
     # The monitoring feature's OpenTelemetry writer: the masking and counting tests
     # record through it over an in-memory exporter.
     "tai42-kit[monitoring]>=7.7,<8",
+    # The LangGraph Postgres checkpoint saver, for the checkpoint-retention integration
+    # tests that run the sweep against a real Postgres store.
+    "tai42-kit[langgraph-checkpoint-postgres]",
     "pytest>=8",
     "pytest-asyncio>=1.3",
     "pytest-cov>=5",

@@ -35,10 +35,10 @@ class ConfigReloadMixin(LifecycleState):
         driven_by_request = _reload_driven_by_request.get()
 
         async def _swap() -> dict[str, Any]:
-            # Release the loop-bound langgraph checkpoint/store pools before the
-            # build's settings reset drops their per-loop registries — it refuses to
-            # drop a registry still holding live resources on a running loop.
-            await self._close_llm_registries()
+            # Release the loop-bound kit resources before the build's settings reset
+            # drops their per-loop registries — it refuses to drop a registry still
+            # holding live resources on a running loop.
+            await _lifecycle.release_loop_bound_resources()
             await build_and_swap_epoch(env, drain_tolerate_driver=driven_by_request)
             return {"status": "ok", "env_keys": len(env)}
 
@@ -55,11 +55,3 @@ class ConfigReloadMixin(LifecycleState):
         # No serving loop bound (a pure-sync context / test): drive the swap on a
         # throwaway loop of this caller's own.
         return asyncio.run(_swap())
-
-    async def _close_llm_registries(self) -> None:
-        """Close the langgraph checkpoint + store resource pools.
-
-        The release a settings reset requires before it can drop the per-loop registries.
-        """
-        await _lifecycle.checkpoint_registry().close_all()
-        await _lifecycle.store_registry().close_all()

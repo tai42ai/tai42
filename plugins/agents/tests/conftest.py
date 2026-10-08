@@ -114,9 +114,14 @@ def fake_run_trace(config: dict[str, Any] | None = None) -> RunTrace:
 
     Wraps the given run config under a fixed ``"t"`` trace id, so a test double can
     stand in for ``init_langgraph_config`` with the return type the callers consume
-    (``.config``) without resolving a lineage or touching a live backend.
+    (``.config``) without resolving a lineage or touching a live backend. Like the real
+    builder, a keyless config gets a thread id (the fixed ``"t"``).
     """
-    return RunTrace(context=TraceContext(trace_id="t"), config=dict(config or {}))
+    run_config = dict(config or {})
+    configurable = dict(run_config.get("configurable") or {})
+    configurable.setdefault("thread_id", "t")
+    run_config["configurable"] = configurable
+    return RunTrace(context=TraceContext(trace_id="t"), config=run_config)
 
 
 class RecordingMonitoring:
@@ -364,6 +369,53 @@ os.environ.setdefault("TAI_AGENTS_CLAUDE_SESSION_IMAGE", "registry.example/claud
 
 APP = RecordingApp()
 tai42_app.bind(APP)
+
+
+class LedgerBook:
+    """The finished-thread ledgers a run's marks land in, one in-process ledger per checkpoint store."""
+
+    def __init__(self) -> None:
+        from tai42_kit.llm.checkpoint.ledger import MemoryFinishedThreadLedger
+
+        self._factory = MemoryFinishedThreadLedger
+        self.ledgers: dict[tuple[str, str | None], Any] = {}
+
+    async def ledger(self, provider: str | None, conn_string: str | None) -> Any:
+        from tai42_kit.llm.settings import llm_provider_settings
+
+        settings = llm_provider_settings()
+        key = (
+            settings.checkpoint if provider is None else provider,
+            settings.checkpoint_conn_string if conn_string is None else conn_string,
+        )
+        if key not in self.ledgers:
+            self.ledgers[key] = self._factory()
+        return self.ledgers[key]
+
+    def finished(self, provider: str, conn_string: str | None = None) -> list[str]:
+        """The thread ids marked finished in ``provider``'s ledger (oldest first)."""
+        import asyncio
+        from datetime import UTC, datetime
+
+        ledger = self.ledgers.get((provider, conn_string))
+        if ledger is None:
+            return []
+        return asyncio.run(ledger.finished_before(datetime.now(UTC), limit=1000))
+
+
+@pytest.fixture(autouse=True)
+def ledger_book(monkeypatch: pytest.MonkeyPatch) -> LedgerBook:
+    """Route the kit's finished-thread ledger calls at in-process ledgers, one per checkpoint store.
+
+    A run takes a caller-supplied thread out of its store's ledger and marks a thread it minted
+    finished; the kit's ledgers live in the checkpoint stores themselves, which this offline suite
+    does not have. The kit proves the store ledgers on their own.
+    """
+    from tai42_kit.llm.checkpoint import ledger as ledger_mod
+
+    book = LedgerBook()
+    monkeypatch.setattr(ledger_mod, "_ledger", book.ledger)
+    return book
 
 
 @pytest.fixture(autouse=True)

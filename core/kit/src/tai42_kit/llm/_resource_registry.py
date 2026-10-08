@@ -4,7 +4,8 @@ A registry caches long-lived async resources (connection pools, savers, stores)
 that bind to the event loop that first opened them. ``ResourceRegistry`` owns the
 per-key create-once/cache lifecycle and the collect-all-errors ``close_all``;
 ``LoopRegistryMap`` owns the per-loop instance map, its accessor, and the
-settings-reset hook. Both the checkpoint and store registries are thin subclasses
+settings-reset hook; ``release_loop_bound_resources`` closes every map's registries
+on the running loop. Both the checkpoint and store registries are thin subclasses
 that only supply a cache-key + a factory coroutine.
 """
 
@@ -14,7 +15,7 @@ import threading
 from asyncio import AbstractEventLoop
 from collections.abc import Awaitable, Callable
 from typing import Any
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakSet
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,15 @@ class LoopRegistryMap[R: ResourceRegistry]:
         self._label = label
         self._registries: WeakKeyDictionary[AbstractEventLoop, dict[int, R]] = WeakKeyDictionary()
         self._lock = threading.Lock()
+        _LOOP_REGISTRY_MAPS.add(self)
+
+    def _held_for_running_loop(self, *, all_epochs: bool) -> list[R]:
+        """The registries this map holds for the running loop: the current epoch's, or every epoch's."""
+        loop = asyncio.get_running_loop()
+        epoch = _current_epoch()
+        with self._lock:
+            per_epoch = self._registries.get(loop) or {}
+            return [registry for held, registry in per_epoch.items() if all_epochs or held == epoch]
 
     def current(self) -> R:
         """Return the current-epoch registry for the running loop, rebuilding after close_all."""
@@ -211,3 +221,25 @@ class LoopRegistryMap[R: ResourceRegistry]:
                     per_epoch.pop(epoch, None)
                     if not per_epoch:
                         del self._registries[loop]
+
+
+# Every loop-registry map the kit builds; each adds itself, so a release covers any map.
+_LOOP_REGISTRY_MAPS: WeakSet[LoopRegistryMap[Any]] = WeakSet()
+
+
+async def release_loop_bound_resources(*, all_epochs: bool = False) -> None:
+    """Close every loop-bound kit registry's resources on the running loop.
+
+    Closes the current epoch's registry of every map (with ``all_epochs``, every retired
+    epoch's registry held for this loop too). Every registry is tried even after a failure;
+    the failures are raised together as one ``ExceptionGroup``.
+    """
+    errors: list[Exception] = []
+    for rmap in list(_LOOP_REGISTRY_MAPS):
+        for registry in rmap._held_for_running_loop(all_epochs=all_epochs):
+            try:
+                await registry.close_all()
+            except Exception as exc:
+                errors.append(exc)
+    if errors:
+        raise ExceptionGroup("errors releasing loop-bound kit resources", errors)

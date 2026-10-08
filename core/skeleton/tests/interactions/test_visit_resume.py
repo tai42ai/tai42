@@ -55,9 +55,10 @@ def _caller_park(
     fmt: AnswerFormat = AnswerFormat.FREE,
     format_payload: dict | None = None,
     run_delivery_id: str | None = None,
+    expiry_at: datetime | None = None,
 ) -> InteractionRequest:
     now = datetime.now(UTC)
-    expiry = now + timedelta(minutes=60)
+    expiry = expiry_at or now + timedelta(minutes=60)
     return InteractionRequest(
         interaction_id=iid,
         group_id=gid,
@@ -202,6 +203,57 @@ async def test_inline_resume_returns_buffered_partitions_by_to(store, fake_redis
         )
     assert outcome.kind == "asks"
     assert [entry.id for entry in outcome.asks] == ["r1"]  # only the caller sibling surfaces
+
+
+async def test_inline_resume_buffered_sentinels_carry_the_earliest_open_deadline(store, fake_redis):
+    # The re-park sentinel over the still-open siblings carries the earliest of their stored
+    # deadlines, so a caller re-parking on it can bound its own park.
+    now = datetime.now(UTC)
+    await store.add(fake_redis, _caller_park(store, "i1"), idle_ttl=86400, to="caller")
+    await store.add(
+        fake_redis, _caller_park(store, "r1", expiry_at=now + timedelta(hours=3)), idle_ttl=86400, to="caller"
+    )
+    await store.add(
+        fake_redis,
+        _caller_park(store, "r2", to="user", fmt=AnswerFormat.TEXT, expiry_at=now + timedelta(minutes=20)),
+        idle_ttl=86400,
+        to="user",
+    )
+    async with _app():
+        outcome = await visit_module.visit(
+            target_name="t",
+            cancel=[],
+            resume=[ResumeItem(id="i1", payload={"kind": "buffered", "remaining": ["r1", "r2"]})],
+            start=None,
+            extras={},
+        )
+    assert outcome.kind == "asks"
+    assert outcome.suspended is not None
+    assert outcome.suspended.expiry_at == now + timedelta(minutes=20)
+
+
+async def test_inline_resume_buffered_user_only_sentinel_carries_the_earliest_deadline(store, fake_redis):
+    now = datetime.now(UTC)
+    await store.add(fake_redis, _caller_park(store, "i1"), idle_ttl=86400, to="caller")
+    for iid, minutes in (("u1", 90), ("u2", 40)):
+        await store.add(
+            fake_redis,
+            _caller_park(store, iid, to="user", fmt=AnswerFormat.TEXT, expiry_at=now + timedelta(minutes=minutes)),
+            idle_ttl=86400,
+            to="user",
+        )
+    async with _app():
+        outcome = await visit_module.visit(
+            target_name="t",
+            cancel=[],
+            resume=[ResumeItem(id="i1", payload={"kind": "buffered", "remaining": ["u1", "u2"]})],
+            start=None,
+            extras={},
+        )
+    assert outcome.kind == "parked"
+    assert outcome.suspended is not None
+    assert outcome.suspended.interaction_ids == ["u1", "u2"]
+    assert outcome.suspended.expiry_at == now + timedelta(minutes=40)
 
 
 async def test_inline_resume_reparks_a_new_caller_ask(store, fake_redis):

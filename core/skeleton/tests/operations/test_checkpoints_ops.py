@@ -1,21 +1,28 @@
 """Op-level oracles for the checkpoint retention sweep.
 
-The sweep deletes threads whose newest checkpoint is older than the configured
-idle TTL, leaves fresh threads untouched, is a no-op for the TTL-less / non-DB
-cases, and surfaces a deletion failure loudly. It also projects as a tool, so it
-is schedulable through the existing ``/api/schedules`` create door.
+The sweep deletes finished threads past the finished horizon on every provider and, on the
+``postgres``/``sqlite`` providers, any thread past the waiting horizon; a thread a registered
+live-thread filter claims is spared, logged, counted and listed; a deletion that leaves documents
+behind is retried and then raised. It also projects as a tool, so it is schedulable through the
+existing ``/api/schedules`` create door. The memory and sqlite stores are the kit's real ones.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.base import empty_checkpoint
+from prometheus_client import REGISTRY
 from tai42_contract.app import tai42_app
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_kit.llm.checkpoint import liveness, register_live_thread_filter
+from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.operations import OperationRegistry, operation_metadata_of
 from tai42_skeleton.operations import checkpoints as checkpoints_ops
@@ -23,177 +30,280 @@ from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools.binding import UnknownToolError
 
-
-def _iso(dt: datetime) -> str:
-    return dt.isoformat()
+_METADATA: dict[str, Any] = {"source": "input", "step": 0, "parents": {}}
 
 
-class _FakeSaver:
-    """A saver over an in-memory ``{thread_id: [checkpoint_ts, ...]}`` map."""
-
-    def __init__(self, threads: dict[str, list[str]]) -> None:
-        self._threads = threads
-        self.deleted: list[str] = []
-
-    async def alist(self, config: object) -> AsyncIterator[Any]:
-        for thread_id, timestamps in list(self._threads.items()):
-            for ts in timestamps:
-                yield SimpleNamespace(
-                    config={"configurable": {"thread_id": thread_id}},
-                    checkpoint={"ts": ts},
-                )
-
-    async def adelete_thread(self, thread_id: str) -> None:
-        self.deleted.append(thread_id)
-        self._threads.pop(thread_id, None)
+@pytest.fixture(autouse=True)
+def _filters_of_this_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each test registers only the filters it states.
+    monkeypatch.setattr(liveness, "_filters", {})
 
 
-class _FakeParkStore:
-    """A thread/subject index that reports the configured threads as backing a live park."""
+@pytest.fixture
+async def store_env(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
+    """Configure the deployment's checkpoint store (waiting 60 min, finished 30 min); return its registry.
 
-    def __init__(self, parked_threads: set[str]) -> None:
-        self._parked = parked_threads
+    The registry is read after the settings reset, so the sweep and the test share it; every
+    resource it opened is closed on the test's loop.
+    """
+    opened: list[Any] = []
 
-    async def thread_park_members(self, conn: object, thread_id: str) -> list[str]:
-        return ["i-parked"] if thread_id in self._parked else []
+    def _configure(provider: str, conn_string: str | None = None) -> Any:
+        monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT", provider)
+        if conn_string is not None:
+            monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_CONN_STRING", conn_string)
+        monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "60")
+        monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES", "30")
+        reset_all_settings()
+        registry = checkpoint_registry()
+        opened.append(registry)
+        return registry
 
-    async def subject_members(self, conn: object, kind: str, key: str) -> list[str]:
-        return []
-
-
-def _install_parks(monkeypatch: pytest.MonkeyPatch, *, parked_threads: set[str], configured: bool = True) -> None:
-    from contextlib import asynccontextmanager
-
-    monkeypatch.setattr(
-        checkpoints_ops,
-        "interactions_settings",
-        lambda: SimpleNamespace(redis=SimpleNamespace(redis_url="redis://x" if configured else None), key_prefix="ix:"),
-    )
-    monkeypatch.setattr(checkpoints_ops, "InteractionStore", lambda prefix: _FakeParkStore(parked_threads))
-
-    @asynccontextmanager
-    async def _ctx(cls: object, settings: object):
-        yield object()
-
-    monkeypatch.setattr(checkpoints_ops, "client_ctx", _ctx)
+    yield _configure
+    for registry in opened:
+        await registry.close_all()
+    reset_all_settings()
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, *, provider: str, ttl_minutes: int | None, saver: object) -> None:
-    monkeypatch.setattr(
-        checkpoints_ops,
-        "llm_provider_settings",
-        lambda: SimpleNamespace(
-            checkpoint=provider,
-            checkpoint_ttl_minutes=ttl_minutes,
-            checkpoint_conn_string="postgresql://u@h/db",
-        ),
-    )
-
-    async def _get_checkpointer(*, provider: str, conn_string: str) -> object:
-        return saver
-
-    monkeypatch.setattr(
-        checkpoints_ops, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=_get_checkpointer)
-    )
+async def _put(saver: Any, thread_id: str, *, ts: datetime | None = None) -> None:
+    checkpoint = empty_checkpoint()
+    if ts is not None:
+        checkpoint["ts"] = ts.isoformat()
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    await saver.aput(config, checkpoint, _METADATA, {})
 
 
-async def test_sweeps_stale_and_keeps_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+async def _threads(saver: Any) -> set[str]:
+    return {tup.config["configurable"]["thread_id"] async for tup in saver.alist(None)}
+
+
+def _claiming(*thread_ids: str):
+    async def _filter(provider: str, conn_string: str | None, candidates: Any) -> set[str]:
+        return {thread_id for thread_id in candidates if thread_id in thread_ids}
+
+    return _filter
+
+
+def _spared_count(horizon: str, owner: str) -> float:
+    value = REGISTRY.get_sample_value("tai42_checkpoint_sweep_spared_total", {"horizon": horizon, "owner": owner})
+    return value or 0.0
+
+
+# --------------------------------------------------------------------------- #
+# finished horizon (every provider) — the real in-process store and ledger
+# --------------------------------------------------------------------------- #
+async def test_finished_past_the_horizon_is_deleted_and_forgotten(store_env) -> None:
+    registry = store_env("memory")
+    saver = await registry.get_checkpointer("memory", None)
+    ledger = await registry.ledger("memory", None)
     now = datetime.now(UTC)
-    saver = _FakeSaver(
-        {
-            "bridge:sms:old": [_iso(now - timedelta(hours=3)), _iso(now - timedelta(hours=2))],
-            "bridge:sms:fresh": [_iso(now - timedelta(minutes=5))],
-        }
-    )
-    _install(monkeypatch, provider="postgres", ttl_minutes=60, saver=saver)
+    for thread_id in ("done-old", "done-new", "open"):
+        await _put(saver, thread_id)
+    await ledger.mark(["done-old"], now - timedelta(minutes=45))
+    await ledger.mark(["done-new"], now - timedelta(minutes=5))
 
     result = await checkpoints_ops.sweep_checkpoints()
 
+    assert result["finished_swept"] == ["done-old"]
+    assert result["waiting_swept"] == []
     assert result["swept_count"] == 1
-    assert result["swept_threads"] == ["bridge:sms:old"]
-    assert saver.deleted == ["bridge:sms:old"]
-    assert result["provider"] == "postgres"
-    assert result["ttl_minutes"] == 60
+    assert result["spared"] == []
+    assert result["provider"] == "memory"
+    assert result["waiting_minutes"] == 60
+    assert result["finished_minutes"] == 30
+    assert result["skipped"] == "waiting horizon: provider 'memory' keeps threads for the process lifetime"
+    assert await _threads(saver) == {"done-new", "open"}
+    assert await ledger.finished_before(now, limit=10) == ["done-new"]
 
 
-async def test_keeps_a_thread_backing_a_live_park(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A parked run writes its checkpoint at park time, so after the idle TTL its newest checkpoint
-    # looks stale though the run is alive and waiting (e.g. a 24h park under a 60-min sweep TTL).
-    # The sweep must keep such a thread — deleting it would destroy the parked run's state.
+async def test_a_finished_thread_a_filter_claims_is_spared_logged_counted_and_kept(
+    store_env, caplog: pytest.LogCaptureFixture
+) -> None:
+    registry = store_env("memory")
+    saver = await registry.get_checkpointer("memory", None)
+    ledger = await registry.ledger("memory", None)
     now = datetime.now(UTC)
-    saver = _FakeSaver(
-        {
-            "bridge:sms:parked": [_iso(now - timedelta(hours=2))],
-            "bridge:sms:idle": [_iso(now - timedelta(hours=2))],
-        }
-    )
-    _install(monkeypatch, provider="postgres", ttl_minutes=60, saver=saver)
-    _install_parks(monkeypatch, parked_threads={"bridge:sms:parked"})
+    await _put(saver, "claimed")
+    await _put(saver, "free")
+    await ledger.mark(["claimed", "free"], now - timedelta(hours=2))
+    register_live_thread_filter("probe", _claiming("claimed"))
+    before = _spared_count("finished", "probe")
+
+    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.operations.checkpoints"):
+        result = await checkpoints_ops.sweep_checkpoints()
+
+    assert result["finished_swept"] == ["free"]
+    assert result["spared"] == ["claimed"]
+    assert await _threads(saver) == {"claimed"}
+    assert await ledger.finished_before(now, limit=10) == ["claimed"]  # re-checked by the next sweep
+    assert _spared_count("finished", "probe") == before + 1
+    assert "thread claimed is past the finished horizon but probe reports it live; kept" in caplog.text
+
+
+async def test_pages_past_spared_threads_until_the_ledger_is_done(store_env, monkeypatch) -> None:
+    registry = store_env("memory")
+    monkeypatch.setattr(checkpoints_ops, "_PAGE", 2)
+    saver = await registry.get_checkpointer("memory", None)
+    ledger = await registry.ledger("memory", None)
+    ids = [f"t{i}" for i in range(7)]
+    for thread_id in ids:
+        await _put(saver, thread_id)
+    await ledger.mark(ids, datetime.now(UTC) - timedelta(hours=2))
+    register_live_thread_filter("probe", _claiming("t0", "t1", "t4"))
 
     result = await checkpoints_ops.sweep_checkpoints()
 
-    assert saver.deleted == ["bridge:sms:idle"]
-    assert result["swept_threads"] == ["bridge:sms:idle"]
-    assert result["swept_count"] == 1
-    assert "bridge:sms:parked" in saver._threads  # the live park's thread survives the sweep
+    assert sorted(result["finished_swept"]) == ["t2", "t3", "t5", "t6"]
+    assert sorted(result["spared"]) == ["t0", "t1", "t4"]
 
 
-async def test_swept_thread_gone_on_next_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    # After the sweep the deleted thread is gone from the store, so the client's next
-    # message on that thread_id starts a fresh conversation.
-    now = datetime.now(UTC)
-    saver = _FakeSaver({"bridge:sms:old": [_iso(now - timedelta(hours=2))]})
-    _install(monkeypatch, provider="postgres", ttl_minutes=60, saver=saver)
+async def test_a_filter_raise_fails_the_operation(store_env) -> None:
+    registry = store_env("memory")
+    ledger = await registry.ledger("memory", None)
+    await ledger.mark(["t"], datetime.now(UTC) - timedelta(hours=2))
 
-    await checkpoints_ops.sweep_checkpoints()
+    async def _broken(provider: str, conn_string: str | None, candidates: Any) -> set[str]:
+        raise RuntimeError("liveness store unreachable")
 
-    remaining = [tup.config["configurable"]["thread_id"] async for tup in saver.alist(None)]
-    assert remaining == []
-
-
-async def test_deletion_failure_propagates_loud(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime.now(UTC)
-
-    class _BoomSaver(_FakeSaver):
-        async def adelete_thread(self, thread_id: str) -> None:
-            raise RuntimeError("delete failed")
-
-    saver = _BoomSaver({"bridge:sms:old": [_iso(now - timedelta(hours=2))]})
-    _install(monkeypatch, provider="postgres", ttl_minutes=60, saver=saver)
-
-    with pytest.raises(RuntimeError, match="delete failed"):
+    register_live_thread_filter("broken", _broken)
+    with pytest.raises(RuntimeError, match="liveness store unreachable"):
         await checkpoints_ops.sweep_checkpoints()
 
 
-async def test_noop_when_ttl_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    saver = _FakeSaver({"bridge:sms:old": ["2000-01-01T00:00:00+00:00"]})
-    _install(monkeypatch, provider="postgres", ttl_minutes=None, saver=saver)
+# --------------------------------------------------------------------------- #
+# waiting horizon — sqlite (the real store) and postgres (the adapter query)
+# --------------------------------------------------------------------------- #
+async def test_sqlite_waiting_past_the_horizon_is_deleted_unless_claimed(store_env, tmp_path) -> None:
+    pytest.importorskip("aiosqlite")
+    db = str(tmp_path / "checkpoints.db")
+    registry = store_env("sqlite", db)
+    saver = await registry.get_checkpointer("sqlite", db)
+    now = datetime.now(UTC)
+    await _put(saver, "stale", ts=now - timedelta(hours=3))
+    await _put(saver, "stale", ts=now - timedelta(hours=2))
+    await _put(saver, "parked", ts=now - timedelta(hours=2))
+    await _put(saver, "fresh", ts=now - timedelta(minutes=5))
+    register_live_thread_filter("probe", _claiming("parked"))
 
     result = await checkpoints_ops.sweep_checkpoints()
 
-    assert result["swept_count"] == 0
-    assert saver.deleted == []
-    assert "retention disabled" in result["skipped"]
+    assert result["waiting_swept"] == ["stale"]
+    assert result["spared"] == ["parked"]
+    assert result["skipped"] is None
+    assert await _threads(saver) == {"parked", "fresh"}
 
 
-@pytest.mark.parametrize("provider", ["redis", "memory"])
-async def test_noop_for_non_db_provider(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
-    # A saver whose alist would raise proves the sweep never touches the store for
-    # these providers.
-    class _Unusable:
-        async def alist(self, config: object) -> AsyncIterator[Any]:
-            raise AssertionError("must not walk the store for a non-DB provider")
-            yield
+class _Store:
+    """A checkpoint store over ``{thread_id: rounds_left}``: each delete removes one round of documents."""
 
-    _install(monkeypatch, provider=provider, ttl_minutes=60, saver=_Unusable())
+    def __init__(self, rounds: dict[str, int]) -> None:
+        self.rounds = rounds
+        self.deletes: list[str] = []
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        self.deletes.append(thread_id)
+        if self.rounds.get(thread_id, 0) > 0:
+            self.rounds[thread_id] -= 1
+        if self.rounds.get(thread_id) == 0:
+            self.rounds.pop(thread_id)
+
+    async def alist(self, config: Any, *, limit: int | None = None) -> AsyncIterator[Any]:
+        if config["configurable"]["thread_id"] in self.rounds:
+            yield SimpleNamespace(config=config)
+
+
+class _Ledger:
+    def __init__(self, finished: list[str] | None = None) -> None:
+        self.finished = list(finished or [])
+        self.forgotten: list[str] = []
+
+    async def finished_before(self, cutoff: datetime, limit: int) -> list[str]:
+        return self.finished[:limit]
+
+    async def forget(self, thread_ids: list[str]) -> None:
+        self.forgotten.extend(thread_ids)
+        self.finished = [t for t in self.finished if t not in thread_ids]
+
+
+def _install_store(monkeypatch: pytest.MonkeyPatch, store_env: Any, provider: str, store: _Store, ledger: _Ledger):
+    store_env(provider)
+    resource = SimpleNamespace(provider=provider, handle="pool", ledger=ledger)
+
+    async def _resource(provider: str, conn_string: str | None) -> Any:
+        return resource
+
+    async def _get_checkpointer(provider: str, conn_string: str | None) -> Any:
+        return store
+
+    monkeypatch.setattr(
+        checkpoints_ops,
+        "checkpoint_registry",
+        lambda: SimpleNamespace(resource=_resource, get_checkpointer=_get_checkpointer),
+    )
+
+
+async def test_postgres_waiting_past_the_horizon_is_deleted_unless_claimed(monkeypatch, store_env) -> None:
+    from tai42_kit.llm.checkpoint import postgres_store
+
+    store = _Store({"stale": 1, "parked": 1, "fresh": 1})
+    ledger = _Ledger()
+    _install_store(monkeypatch, store_env, "postgres", store, ledger)
+    cutoffs: list[datetime] = []
+
+    async def _stale(pool: Any, *, cutoff: datetime) -> list[str]:
+        assert pool == "pool"
+        cutoffs.append(cutoff)
+        return ["parked", "stale"]
+
+    monkeypatch.setattr(postgres_store, "stale_threads", _stale)
+    register_live_thread_filter("probe", _claiming("parked"))
 
     result = await checkpoints_ops.sweep_checkpoints()
 
-    assert result["swept_count"] == 0
-    assert result["provider"] == provider
-    assert "no swept store" in result["skipped"]
+    assert result["waiting_swept"] == ["stale"]
+    assert result["spared"] == ["parked"]
+    assert set(store.rounds) == {"parked", "fresh"}
+    assert ledger.forgotten == ["stale"]
+    assert datetime.now(UTC) - timedelta(minutes=61) < cutoffs[0] < datetime.now(UTC) - timedelta(minutes=59)
 
 
+async def test_redis_waiting_is_left_to_the_key_ttl(monkeypatch, store_env) -> None:
+    store = _Store({"waiting": 1, "done": 1})
+    ledger = _Ledger(["done"])
+    _install_store(monkeypatch, store_env, "redis", store, ledger)
+
+    result = await checkpoints_ops.sweep_checkpoints()
+
+    assert result["finished_swept"] == ["done"]
+    assert result["waiting_swept"] == []
+    assert result["skipped"] == "waiting horizon: provider 'redis' expires threads by their key TTL"
+    assert set(store.rounds) == {"waiting"}
+
+
+async def test_a_thread_that_survives_a_delete_round_is_deleted_on_the_next(monkeypatch, store_env) -> None:
+    store = _Store({"big": 3})
+    _install_store(monkeypatch, store_env, "redis", store, _Ledger(["big"]))
+
+    result = await checkpoints_ops.sweep_checkpoints()
+
+    assert result["finished_swept"] == ["big"]
+    assert store.deletes == ["big", "big", "big"]
+
+
+async def test_a_thread_that_survives_every_delete_round_raises(monkeypatch, store_env) -> None:
+    store = _Store({"stuck": 10_000})
+    ledger = _Ledger(["stuck"])
+    _install_store(monkeypatch, store_env, "redis", store, ledger)
+
+    with pytest.raises(checkpoints_ops.CheckpointSweepError, match="thread stuck still holds checkpoints after 100"):
+        await checkpoints_ops.sweep_checkpoints()
+    assert len(store.deletes) == 100
+    assert ledger.forgotten == []
+
+
+# --------------------------------------------------------------------------- #
+# projection and scheduling
+# --------------------------------------------------------------------------- #
 def test_projects_as_a_schedulable_tool() -> None:
     reg = OperationRegistry()
     reg.register(operation_metadata_of(checkpoints_ops.sweep_checkpoints))

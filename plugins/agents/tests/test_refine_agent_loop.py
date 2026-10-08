@@ -289,3 +289,47 @@ def test_evaluator_graph_rolls_accumulated_cache_marks_on_a_reused_thread(monkey
     # the next turn re-rolls from the same history rather than losing the record.
     snapshot = asyncio.run(created[-2].aget_state(eval_cfg))
     assert _mark_count(snapshot.values.get("messages", [])) == 2
+
+
+def test_the_role_threads_the_run_minted_are_marked_finished_at_its_end(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
+) -> None:
+    evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
+    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    _patch_loop(monkeypatch, [evaluator, critic])
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    _collect(
+        agent,
+        evaluator_message=TemplatedText(content="write it"),
+        critic_message=TemplatedText(content="review it"),
+        checkpoint_provider="sqlite",
+    )
+    # The test run builder mints the fixed thread id "t" for each keyless role config.
+    assert ledger_book.finished("sqlite") == ["t"]
+
+
+def test_caller_role_threads_leave_the_ledger_and_are_never_marked(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
+) -> None:
+    evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
+    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    _patch_loop(monkeypatch, [evaluator, critic])
+
+    async def premark() -> None:
+        ledger = await ledger_book.ledger("sqlite", None)
+        from datetime import UTC, datetime
+
+        await ledger.mark(["eval-thread", "critic-thread"], datetime.now(UTC))
+
+    asyncio.run(premark())
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    _collect(
+        agent,
+        evaluator_message=TemplatedText(content="write it"),
+        critic_message=TemplatedText(content="review it"),
+        checkpoint_provider="sqlite",
+        evaluator_langgraph_config={"configurable": {"thread_id": "eval-thread"}},
+        critic_langgraph_config={"configurable": {"thread_id": "critic-thread"}},
+    )
+    assert ledger_book.finished("sqlite") == []

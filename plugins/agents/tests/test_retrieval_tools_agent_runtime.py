@@ -225,11 +225,12 @@ class TestStreamEvents:
 
 class TestTerminalResultSurfacing:
     def _agent_over_graph(self, monkeypatch: pytest.MonkeyPatch, graph: Any) -> RetrievalToolsAgent:
-        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
+        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any, str | None]:
             return (
                 graph,
                 {"messages": [{"role": "user", "content": "do it"}]},
                 {"configurable": {"thread_id": "t1"}},
+                None,
                 None,
             )
 
@@ -279,8 +280,8 @@ class TestTerminalResultSurfacing:
         assert asyncio.run(agent.run(user_message=TemplatedText(content="x"))) == "FINAL ANSWER"
 
     def test_astream_raises_when_no_terminal_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
-            return "graph", "messages", "config", None
+        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any, str | None]:
+            return "graph", "messages", "config", None, None
 
         async def fake_project(agent: Any, messages: Any, config: Any) -> AsyncIterator[Any]:
             yield ReasoningStep(text="thinking")
@@ -295,8 +296,8 @@ class TestTerminalResultSurfacing:
         """A live provider streams the per-step status envelope as ``MessageDelta``
         tokens; those are dropped so only the terminal ``result`` surfaces."""
 
-        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
-            return "graph", "messages", "config", None
+        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any, str | None]:
+            return "graph", "messages", "config", None, None
 
         async def fake_project(agent: Any, messages: Any, config: Any) -> AsyncIterator[Any]:
             yield MessageDelta(text='{"status":"continue"')

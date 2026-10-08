@@ -363,9 +363,9 @@ def test_astream_response_format_without_title_raises_loudly(fake_llm: None) -> 
 
 
 def test_native_oversized_int_is_reprompted_then_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An integer past the platform int64 range is well-formed JSON but non-conforming:
-    the in-node int64 walk re-prompts it under the cap (it never aborts the serializer),
-    and a model that keeps returning it ends on the typed outcome."""
+    """An integer past the platform int64 range at an integer-typed site is well-formed JSON but
+    non-conforming: the int64 bound injected onto the dict schema's integer site re-prompts it under
+    the cap, and a model that keeps returning it ends on the typed outcome."""
     from tai42_contract.agent.events import StructuredOutputUnresolvedFinal
 
     schema = {

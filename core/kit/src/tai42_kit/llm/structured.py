@@ -106,8 +106,8 @@ def _bounded_typed_dict(schema_dict: dict[str, Any], name: str, validation_schem
     (``convert_to_openai_tool`` / ``PydanticToolsParser``), so the injected int64 bounds
     ride on every integer value site and the parsed value is validated on the way out. If
     the converter cannot express the schema (it raises ``ValueError``) and the authored
-    schema is itself a pydantic class, that class is bound instead; its oversized-int door
-    is still closed by the downstream ``validate_structured_output`` int64 walk.
+    schema is itself a pydantic class, that class is bound instead; an integer outside the
+    storage range is then refused at the checkpoint write by the checkpoint serializer guard.
     """
     try:
         return json_schema_to_pydantic_model(inject_int64_bounds(schema_dict), model_name=name)

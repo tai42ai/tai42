@@ -42,7 +42,7 @@ class TestBuild:
         captured = _patch_build_seams(monkeypatch)
         agent = RetrievalToolsAgent()
 
-        compiled, messages, config, llm = asyncio.run(
+        compiled, messages, config, llm, minted = asyncio.run(
             agent._build(
                 system_message=TemplatedText(content="be brief"),
                 user_message=TemplatedText(content="do it"),
@@ -52,6 +52,7 @@ class TestBuild:
 
         assert compiled is captured["compiled"]
         assert config == {"configurable": {"thread_id": "t"}}
+        assert minted == "t"
         # ``_build`` hands back the resolved llm for the structured finalization pass.
         assert llm == "llm-obj"
         # The rendered user message is the whole agent input; the system prompt is
@@ -136,12 +137,14 @@ _COLLECTION_REJECT_PARAMS = sorted(_UNHONORED_REASONS.keys() & _EMPTY_COLLECTION
 
 
 class TestAstreamAndRun:
-    def _script(self, monkeypatch: pytest.MonkeyPatch, events: list[Any], llm: Any = None) -> dict[str, Any]:
+    def _script(
+        self, monkeypatch: pytest.MonkeyPatch, events: list[Any], llm: Any = None, minted: str | None = None
+    ) -> dict[str, Any]:
         captured: dict[str, Any] = {}
 
-        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
+        async def fake_build(self: RetrievalToolsAgent, **kwargs: Any) -> tuple[Any, Any, Any, Any, str | None]:
             captured["build_kwargs"] = kwargs
-            return "graph", "messages", "config", llm
+            return "graph", "messages", "config", llm, minted
 
         async def fake_project(agent: Any, messages: Any, config: Any) -> AsyncIterator[Any]:
             captured["project"] = (agent, messages, config)
@@ -154,6 +157,29 @@ class TestAstreamAndRun:
 
     def _final(self, result: str) -> MessageFinal:
         return MessageFinal(text=json.dumps({"status": "success", "message": "m", "result": result}))
+
+    def test_a_run_marks_the_thread_it_minted_at_its_terminal(
+        self, monkeypatch: pytest.MonkeyPatch, ledger_book: Any
+    ) -> None:
+        self._script(monkeypatch, [self._final("done")], minted="minted-1")
+        asyncio.run(
+            _collect(
+                RetrievalToolsAgent().astream(user_message=TemplatedText(content="hi"), checkpoint_provider="postgres")
+            )
+        )
+        assert ledger_book.finished("postgres") == ["minted-1"]
+
+    def test_a_run_without_a_terminal_marks_nothing(self, monkeypatch: pytest.MonkeyPatch, ledger_book: Any) -> None:
+        self._script(monkeypatch, [], minted="minted-1")
+        with pytest.raises(ValueError, match="produced no terminal message"):
+            asyncio.run(
+                _collect(
+                    RetrievalToolsAgent().astream(
+                        user_message=TemplatedText(content="hi"), checkpoint_provider="postgres"
+                    )
+                )
+            )
+        assert ledger_book.finished("postgres") == []
 
     def test_astream_honors_thread_id_and_forwards_build_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # thread_id is an honored ABC parameter: it is mapped into the run config's

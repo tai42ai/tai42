@@ -12,18 +12,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from datetime import UTC, datetime
+from typing import Any
 
 from tai42_contract.interactions import ChainedResume, current_execution_identity, get_chained_resume
+from tai42_kit.llm.checkpoint import checkpoint_park_horizon, durable_checkpoint_providers, register_live_thread_filter
 from tai42_kit.llm.settings import llm_provider_settings
 
+from tai42_agents._internal.park.index import threads_with_live_barriers
 from tai42_agents.settings import agents_park_redis_settings
 
-# Checkpoint providers that survive a cross-worker resume: a parked run's paused graph
-# must be readable by whatever worker later fires its continuation. ``memory``/``sqlite``
-# are single-process and disqualified.
-DURABLE_CHECKPOINT_PROVIDERS: Final[frozenset[str]] = frozenset({"redis", "postgres"})
+# A checkpoint thread backing a live park barrier is live: the checkpoint sweep spares it.
+register_live_thread_filter("agents", threads_with_live_barriers)
 
 
 class ParkIdentity:
@@ -164,7 +164,9 @@ def build_park_identity(
     bound, so the bound is the checkpoint horizon alone).
     """
     resolved_provider = checkpoint_provider or llm_provider_settings().checkpoint
-    if resolved_provider not in DURABLE_CHECKPOINT_PROVIDERS:
+    # A parked run's paused graph must be readable by whatever worker later fires its
+    # continuation, so only a provider whose checkpoints survive a process restart qualifies.
+    if resolved_provider not in durable_checkpoint_providers():
         return None
     if not park_index_configured():
         # No durable park index to record the park into — refuse capability so the async
@@ -204,25 +206,18 @@ def build_park_identity(
     )
 
 
-def _checkpoint_retention_horizon(provider: str) -> datetime | None:
+def _checkpoint_retention_horizon(provider: str) -> datetime:
     """The latest wall-time a parked graph's checkpoint is guaranteed to still exist (LangGraph-only).
 
-    ``None`` when retention is unbounded (keep-forever).
-    ``redis`` is an idle-TTL saver: the checkpoint is swept ``checkpoint_ttl_minutes`` after
-    its last read/write. The park write is itself a write, so it (re)starts that idle clock —
-    the deadline comparison against ``now + ttl`` is sound. ``checkpoint_ttl_minutes is None``
-    means keep-forever, so no horizon bounds it. ``postgres`` carries no TTL on its saver, so
-    it too is keep-forever. Any other provider is not park-capable (never reaches here); an
-    unexpected one raises rather than assuming a retention it cannot know.
+    A durable provider keeps a thread the kit's waiting retention after its last write; the park
+    write is itself a write, so ``now + horizon`` bounds the park. A provider with no such horizon
+    is not park-capable (never reaches here); one that does raises rather than assuming a retention
+    it cannot know.
     """
-    if provider == "postgres":
-        return None
-    if provider == "redis":
-        ttl_minutes = llm_provider_settings().checkpoint_ttl_minutes
-        if ttl_minutes is None:
-            return None
-        return datetime.now(UTC) + timedelta(minutes=ttl_minutes)
-    raise RuntimeError(f"unexpected checkpoint provider {provider!r} at park-persist time")
+    horizon = checkpoint_park_horizon(provider)
+    if horizon is None:
+        raise RuntimeError(f"unexpected checkpoint provider {provider!r} at park-persist time")
+    return datetime.now(UTC) + horizon
 
 
 def assert_park_capable(identity: ParkIdentity, *, durable: bool, retention_bound: datetime | None) -> None:

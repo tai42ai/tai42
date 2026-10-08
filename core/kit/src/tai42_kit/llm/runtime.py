@@ -6,14 +6,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel
 
-from tai42_kit.utils.data.json_schema_util import (
-    INT64_MAX,
-    INT64_MIN,
-    JsonSchemaValidationError,
-    find_oversized_int,
-    inject_int64_bounds,
-    validate_against_json_schema,
-)
+from tai42_kit.utils.data.json_schema_util import inject_int64_bounds, validate_against_json_schema
 
 
 def build_agent_input(*user_messages: str, user_content_kwargs: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -115,23 +108,21 @@ def validate_structured_output(structured: Any, response_format: Any) -> Any:
     ``datetime`` field becomes its ISO string — and under each field's alias, so a
     property whose authored name the bound model had to sanitize to a legal field name
     (a python keyword or builtin, a ``$``/``@``/``-`` key) reduces back to its AUTHORED
-    key — while a value that is already a dict is used as-is. That form is walked
-    UNCONDITIONALLY for an integer outside the platform
-    int64 range: such an integer cannot be represented as a signed 64-bit integer — the
-    platform structured-output ceiling — so it is rejected here with a
-    :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError` naming the
-    path — closing the native ``with_structured_output`` doors (which have no retry rail)
-    whatever the ``response_format`` shape. Then, by shape:
+    key — while a value that is already a dict is used as-is. Then, by shape:
 
     * a pydantic model class → ``model_validate`` that produced form and return the
       validated instance (the model-omitted fields fall back to the class defaults);
     * a JSON-Schema ``dict`` → validate the produced form with the faithful
       draft-2020-12 validator — every constraint keyword enforced, plus the platform
-      int64 range injected onto every integer node — and return it, so a dict-authored
-      schema always yields a plain ``dict`` whether the tool tier produced a pydantic
-      instance or a raw dict;
+      int64 range injected onto every integer-typed node — and return it, so a
+      dict-authored schema always yields a plain ``dict`` whether the tool tier produced
+      a pydantic instance or a raw dict;
     * anything else (e.g. a langchain union of models / response strategy) → the value
       is returned exactly as produced.
+
+    The storage integer range is not checked here: the checkpoint serializer guard owns
+    it (the native msgpack range ``[-2**63, 2**64-1]``) and names the offending path of a
+    value outside it at the checkpoint write.
 
     A value that does not match raises loudly (``pydantic.ValidationError`` /
     :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError`) —
@@ -142,15 +133,6 @@ def validate_structured_output(structured: Any, response_format: Any) -> Any:
         if isinstance(structured, BaseModel)
         else structured
     )
-    overflow = find_oversized_int(emitted, minimum=INT64_MIN, maximum=INT64_MAX)
-    if overflow is not None:
-        path, value = overflow
-        raise JsonSchemaValidationError(
-            f"structured output at {path} = {value} exceeds the platform int64 range "
-            f"[{INT64_MIN}, {INT64_MAX}] and cannot be represented as a signed 64-bit integer",
-            json_path=path,
-            offending_value=value,
-        )
     if isinstance(response_format, type) and issubclass(response_format, BaseModel):
         return response_format.model_validate(emitted)
     if isinstance(response_format, dict):

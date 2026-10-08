@@ -309,3 +309,40 @@ def test_open_timeout_falls_back_on_unparseable_connect_timeout():
 def test_open_timeout_falls_back_on_malformed_dsn():
     # A bare word is not a valid conninfo; conninfo_to_dict raises and the budget defaults.
     assert pg_mod._open_timeout("not a dsn", 3) == pg_mod._DEFAULT_OPEN_TIMEOUT
+
+
+# --------------------------------------------------------------------------- #
+# open_dedicated_pool — the one public builder of a dedicated (non-shared) pool
+# --------------------------------------------------------------------------- #
+async def test_dedicated_pool_on_settings_uses_the_settings_dsn_and_sizes(monkeypatch):
+    from pydantic import SecretStr
+
+    from tai42_kit.clients.settings import PostgresConnectionSettings
+
+    _install_probe(monkeypatch)
+    pools = _install_ok_pool(monkeypatch)
+    settings = PostgresConnectionSettings(pg_host="h", pg_user="u", pg_password=SecretStr("secret"), pg_db="db")
+    settings_dsn = settings.pg_dsn
+    pool = await pg_mod.open_dedicated_pool(settings, role="checkpoint", connection_kwargs={"autocommit": True})
+    assert pool is pools[0]
+    assert pools[0].kwargs["conninfo"] == settings_dsn
+    assert pools[0].kwargs["min_size"] == settings.pg_min_connections
+    assert pools[0].kwargs["max_size"] == settings.pg_max_connections
+    assert pools[0].kwargs["name"] == "postgres@h/db:checkpoint"
+    assert pools[0].kwargs["kwargs"] == {"autocommit": True}
+    assert pools[0].opened is True
+
+
+async def test_dedicated_pool_on_an_explicit_dsn_uses_the_explicit_dsn_sizes(monkeypatch):
+    _install_probe(monkeypatch)
+    pools = _install_ok_pool(monkeypatch)
+    await pg_mod.open_dedicated_pool("postgresql://u:secret@h2/other", role="langgraph-store")
+    assert pools[0].kwargs["conninfo"] == "postgresql://u:secret@h2/other"
+    assert pools[0].kwargs["min_size"] == pg_mod.EXPLICIT_DSN_POOL_MIN_SIZE == 1
+    assert pools[0].kwargs["max_size"] == pg_mod.EXPLICIT_DSN_POOL_MAX_SIZE == 20
+    assert pools[0].kwargs["name"] == "postgres@h2/other:langgraph-store"
+    assert pools[0].kwargs["kwargs"] is None
+
+
+def test_dedicated_pool_is_public():
+    assert "open_dedicated_pool" in pg_mod.__all__

@@ -43,17 +43,20 @@ from langgraph.errors import GraphRecursionError
 # the ``updates`` stream then yields the wrapper, so it must be unwrapped.
 from langgraph.types import Command, Overwrite
 from tai42_contract.agent.events import (
+    InterruptFinal,
     MessageDelta,
     MessageFinal,
     ReasoningStep,
     StreamEvent,
     StructuredFinal,
+    SuspendedFinal,
     ToolCallStep,
     ToolResultStep,
 )
 from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
+from tai42_agents._internal.config_util import mark_minted_thread_finished
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
 from tai42_agents._internal.text import text_of
@@ -159,7 +162,7 @@ async def astream_tools_agent_events(
     # same object is bound into both the graph and the projection, so the synthetic
     # tool the graph binds and the names the projection suppresses derive from one
     # object — an untitled ``oneOf`` variant's random name matches by identity.
-    agent, messages, config, strategy = await _build_agent_and_input(
+    agent, messages, config, strategy, minted_thread = await _build_agent_and_input(
         system_message,
         user_message,
         tools,
@@ -179,7 +182,10 @@ async def astream_tools_agent_events(
             agent, agent_input, config, response_format=response_format, structured_strategy=strategy
         ):
             yield event
-        for event in await finalize_drive(agent, config, None, park):
+        pauses = await finalize_drive(agent, config, None, park)
+        if not any(isinstance(event, SuspendedFinal | InterruptFinal) for event in pauses):
+            await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
+        for event in pauses:
             yield event
 
     # Bind the resume continuation and the chained-park claims ledger around each drive step,

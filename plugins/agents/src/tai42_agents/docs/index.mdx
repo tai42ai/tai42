@@ -54,6 +54,19 @@ Redis URL:
 The park index is the agents plugin's own Redis, independent of the checkpoint provider
 and the interactions store.
 
+A parked run needs a durable checkpoint provider (`redis` or `postgres`), which keeps a
+thread `LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES` (default 7 days) after its last
+write. The park write is the parked run's last write, so every async ask must carry a
+deadline within that horizon: an ask with no deadline, or one past the horizon, is refused
+loudly before anything is parked. While a park's barrier is live, the checkpoint sweep
+spares its thread.
+
+A run with no `thread_id` mints its own thread and marks it finished when it ends without
+a park, so the checkpoint sweep removes it
+`LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES` (default 1 day) later. A
+caller-supplied `thread_id` is the caller's: a run on it takes it out of the finished set
+when it starts and never marks it.
+
 When the ask is answered (or expires), the platform resumes the parked run and drives it
 to its next outcome. The resumed run's final outcome is delivered by the **platform** to the
 run's own address — the agent never delivers it itself; a caller that needs the answer runs

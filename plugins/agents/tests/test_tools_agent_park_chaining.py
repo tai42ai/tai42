@@ -27,6 +27,7 @@ from tai42_contract.interactions import (
     is_chained_park_key,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.settings import reset_all_settings
 from tests._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,
@@ -335,6 +336,9 @@ def test_a_re_park_extends_the_chained_parks_inherited_horizon(
     monkeypatch.setattr(
         park_persist, "agents_limits_settings", lambda: SimpleNamespace(chained_park_horizon_cap_hours=24 * 365)
     )
+    # A checkpoint retention past the extended deadline, so the extension is not clamped to it.
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", str(90 * 24 * 60))
+    reset_all_settings()
     nested = _NestedDriverStandIn("i-nested", "nested_driver_resume", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     model = ScriptedChatModel([_preset_call(), AIMessage(content="unreached")])
     _wire_tools_build(monkeypatch, model, saver)

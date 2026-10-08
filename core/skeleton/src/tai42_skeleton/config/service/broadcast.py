@@ -8,28 +8,11 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-from tai42_kit.llm.store.store_registry import store_registry
-
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service.base import _ConfigServiceBase
 from tai42_skeleton.config.service.results import ApplyResult
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, log_non_convergence, snapshot_membership
-
-
-async def _release_llm_pools() -> None:
-    """Close the loop-bound langgraph checkpoint and store resource pools.
-
-    A following ``build_and_swap_epoch`` can then reset settings: its resource-registry
-    reset REFUSES to drop a per-loop registry still holding live resources on a running
-    loop. The default ``release_llm_pools`` seam of :meth:`ConfigService.apply_replace_env`,
-    mirroring :meth:`AppLifecycle._reload_config` (the other ``build_and_swap_epoch``
-    caller). Must run on the serving loop that owns the registries (the apply holds the
-    reload gate on that loop).
-    """
-    await checkpoint_registry().close_all()
-    await store_registry().close_all()
 
 
 class _BroadcastMixin(_ConfigServiceBase):

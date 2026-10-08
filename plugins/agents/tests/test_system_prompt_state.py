@@ -124,7 +124,7 @@ def _config(thread_id: str) -> dict[str, Any]:
 async def _state_messages(thread_id: str) -> list[BaseMessage]:
     """Read a thread's checkpointed messages back through a freshly built agent over
     the same checkpointer."""
-    agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+    agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
     snapshot = await agent.aget_state(config)
     return snapshot.values.get("messages", []) if snapshot.values else []
 
@@ -199,7 +199,7 @@ class TestStoredSystemMessageIsPurged:
         async def seed() -> None:
             # Seed a thread whose stored history carries a system message ahead of
             # the conversation, written straight into the checkpoint.
-            agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-stale"))
+            agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-stale"))
             await agent.aupdate_state(
                 config,
                 {

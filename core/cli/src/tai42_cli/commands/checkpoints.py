@@ -1,4 +1,4 @@
-"""``tai checkpoints`` — conversation checkpoint retention.
+"""``tai checkpoints`` — checkpoint retention.
 
 A thin wrapper over the ``/api/checkpoints/sweep`` route.
 """
@@ -11,7 +11,7 @@ from tai42_cli.commands._common import app_context, covers, emit_result
 
 app = typer.Typer(
     name="checkpoints",
-    help="Manage conversation checkpoint retention.",
+    help="Manage checkpoint retention.",
     no_args_is_help=True,
 )
 
@@ -19,7 +19,7 @@ app = typer.Typer(
 @app.command("sweep")
 @covers(("POST", "/api/checkpoints/sweep"))
 def sweep(ctx: typer.Context) -> None:
-    """Delete conversation checkpoints idle longer than the configured lifetime.
+    """Delete checkpoint threads past their retention horizon (finished, then waiting).
 
     Example: ``tai checkpoints sweep``
     """

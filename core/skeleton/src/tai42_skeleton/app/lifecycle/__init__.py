@@ -6,8 +6,7 @@ Also holds the module-global seam the tests patch at this package path.
 from tai42_kit.access_control.registry import reset_registry as reset_identity_registry
 from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.clients.impl.mcp import FastMCPClient
-from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-from tai42_kit.llm.store.store_registry import store_registry
+from tai42_kit.llm import release_loop_bound_resources
 
 from tai42_skeleton.app.epoch import is_epoch_rebuild_in_progress
 from tai42_skeleton.app.importer import import_or_reload_package
@@ -37,15 +36,14 @@ __all__ = [
     "CoreSettings",
     "FastMCPClient",
     "TaiMCPLifecycleMixin",
-    "checkpoint_registry",
     "collect_kind_status",
     "get_monitoring",
     "import_or_reload_package",
     "is_epoch_rebuild_in_progress",
+    "release_loop_bound_resources",
     "reset_identity_registry",
     "route_registry",
     "shutdown_all_clients",
-    "store_registry",
 ]
 
 

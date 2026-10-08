@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Final
 
 from psycopg import AsyncConnection
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -17,7 +17,16 @@ from tai42_kit.clients.settings import PostgresConnectionSettings
 # ``Json`` is re-exported so callers wrap jsonb params through the pooled
 # client's own module rather than importing psycopg directly — every pg
 # primitive the app touches is reached through the kit client layer.
-__all__ = ["Json", "PostgresClient", "pinned_connection", "postgres_pool_name", "read_connection"]
+__all__ = [
+    "EXPLICIT_DSN_POOL_MAX_SIZE",
+    "EXPLICIT_DSN_POOL_MIN_SIZE",
+    "Json",
+    "PostgresClient",
+    "open_dedicated_pool",
+    "pinned_connection",
+    "postgres_pool_name",
+    "read_connection",
+]
 
 # A callback psycopg_pool runs with one connection (``configure=`` on every new
 # connection, ``reset=`` on every connection returned to the pool).
@@ -210,6 +219,35 @@ async def read_connection(pool: AsyncConnectionPool[Any]) -> AsyncIterator[Async
     async with pool.connection() as conn:
         await conn.set_autocommit(True)
         yield conn
+
+
+# The kit's sizes for a dedicated pool on an explicit DSN: a DSN string names a database other
+# than a settings namespace, so no deployment sizes apply to it.
+EXPLICIT_DSN_POOL_MIN_SIZE: Final = 1
+EXPLICIT_DSN_POOL_MAX_SIZE: Final = 20
+
+
+async def open_dedicated_pool(
+    target: PostgresConnectionSettings | str, *, role: str, connection_kwargs: dict[str, Any] | None = None
+) -> _Pool:
+    """Open a dedicated (not shared) named pool for ``role``, its first connection proven and its fill awaited.
+
+    A settings object supplies the DSN and the deployment's pool sizes; a DSN string gets
+    :data:`EXPLICIT_DSN_POOL_MIN_SIZE` / :data:`EXPLICIT_DSN_POOL_MAX_SIZE`. The pool is named
+    ``postgres@<host>/<db>:<role>``; ``connection_kwargs`` apply to every connection it opens. The
+    caller owns the pool and closes it.
+    """
+    if isinstance(target, str):
+        dsn, min_size, max_size = target, EXPLICIT_DSN_POOL_MIN_SIZE, EXPLICIT_DSN_POOL_MAX_SIZE
+    else:
+        dsn, min_size, max_size = target.pg_dsn, target.pg_min_connections, target.pg_max_connections
+    return await _open_named_pool(
+        dsn,
+        min_size=min_size,
+        max_size=max_size,
+        name=postgres_pool_name(dsn, _pool_owner(None), role),
+        connection_kwargs=connection_kwargs,
+    )
 
 
 class PostgresClient(PooledClient[_Pool]):

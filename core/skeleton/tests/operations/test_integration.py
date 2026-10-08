@@ -281,3 +281,29 @@ def test_dispatch_scope_middleware_registered_after_authz_on_main_and_sub_mcp(mo
     assert instances, "no sub-MCP FastMCP was built"
     for inst in instances:
         assert _index_of(inst.middleware, DispatchScopeMiddleware) > _index_of(inst.middleware, AuthzMiddleware)
+
+
+def test_boot_with_no_checkpoint_store_reachable_builds_no_saver(monkeypatch):
+    """A full boot on the shipped ``redis`` checkpoint default, with no store reachable, succeeds:
+    boot builds no checkpoint saver (the store-format check runs at the first saver build, never
+    at boot) and the sweep is projected for a later call."""
+    from tai42_kit.llm.checkpoint import checkpoint_registry as registry_module
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT", "redis")
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_CONN_STRING", "redis://127.0.0.1:1/0")
+    reset_all_settings()
+    builds: list[str] = []
+
+    async def _no_build(provider: str, conn_string: str | None):
+        builds.append(provider)
+        raise AssertionError("boot built a checkpoint saver")
+
+    monkeypatch.setattr(registry_module, "create_checkpoint_resource", _no_build)
+
+    async def run():
+        async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": True}})):
+            assert "sweep_checkpoints" in await app.tools.get_tools()
+
+    asyncio.run(run())
+    assert builds == []

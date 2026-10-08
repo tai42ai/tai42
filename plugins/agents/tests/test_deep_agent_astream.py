@@ -149,9 +149,9 @@ def test_astream_honors_tool_names(monkeypatch: pytest.MonkeyPatch, app_tools: A
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any], Any]:
+    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any], Any, str | None]:
         captured.update(kwargs)
-        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}, None
+        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}, None, None
 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)

@@ -11,6 +11,10 @@
 * :func:`with_run_trace_lineage` threads a resolved trace context onto a base config so
   a FEATURE run that drives several sub-runs (an evaluator/critic loop, parallel voters
   plus a judge) binds ONE lineage at its entry and nests every sub-run under it.
+* :func:`minted_thread_id` / :func:`unmark_caller_thread` / :func:`mark_minted_thread_finished`
+  keep the checkpoint finished-thread ledger: a caller-supplied thread leaves the ledger when
+  a run starts on it; a thread the run minted is marked finished when the run ends without
+  a park.
 
 Both builders treat the caller's config as read-only, copying the mapping, its
 ``configurable``, and its ``callbacks`` by value so one base config can feed many
@@ -25,6 +29,7 @@ from typing import Any
 
 from tai42_contract.monitoring import MONITORING_PARENT_SPAN_ID_KEY, MONITORING_TRACE_ID_KEY, TraceContext
 from tai42_kit.llm import RunTrace, bind_run_trace
+from tai42_kit.llm.checkpoint import mark_threads_active, mark_threads_finished
 
 from tai42_agents.settings import agents_limits_settings
 
@@ -89,6 +94,46 @@ def init_langgraph_config(config: dict[str, Any] | None = None) -> RunTrace:
         new_config["recursion_limit"] = agents_limits_settings().default_recursion_limit
 
     return bind_run_trace(new_config, grouping_nodes=CREATE_AGENT_GROUPING_NODES)
+
+
+def minted_thread_id(source: dict[str, Any] | None, run_config: dict[str, Any]) -> str | None:
+    """The thread id :func:`init_langgraph_config` minted for this run, or ``None`` when ``source`` carried one."""
+    if "thread_id" in ((source or {}).get("configurable") or {}):
+        return None
+    return run_config["configurable"]["thread_id"]
+
+
+async def unmark_caller_thread(thread_id: str, *, provider: str | None) -> None:
+    """Take a caller-supplied thread out of the finished-thread ledger before a run starts on it.
+
+    ``provider`` is the run's checkpoint provider (``None`` = the deployment's), so the ledger is
+    the one of the store that holds the thread.
+    """
+    await mark_threads_active([thread_id], provider=provider)
+
+
+async def mark_minted_thread_finished(thread_id: str | None, *, provider: str | None) -> None:
+    """Mark the thread this run minted finished, in its checkpoint provider's ledger (no-op for ``None``).
+
+    The run owns a minted thread: nobody else knows its id, so its end is the thread's end. A
+    caller-supplied thread is the caller's and is never marked here.
+    """
+    if thread_id is not None:
+        await mark_threads_finished([thread_id], provider=provider)
+
+
+async def start_run_thread(
+    source: dict[str, Any] | None, run_config: dict[str, Any], *, provider: str | None
+) -> str | None:
+    """Ready the run's thread in the finished-thread ledger; return the minted thread id, if any.
+
+    A caller-supplied thread is unmarked (a thread used again never sits in the ledger while live);
+    a minted one is new and needs nothing.
+    """
+    minted = minted_thread_id(source, run_config)
+    if minted is None:
+        await unmark_caller_thread(run_config["configurable"]["thread_id"], provider=provider)
+    return minted
 
 
 def with_run_trace_lineage(config: dict[str, Any] | None, context: TraceContext) -> dict[str, Any]:

@@ -32,7 +32,9 @@ from tests._deep_agent_fakes import (
 from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
 from tai42_agents.langchain_deep_agent import agent as agent_mod
+from tai42_agents.langchain_deep_agent import run_thread as run_thread_mod
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
+from tai42_agents.langchain_deep_agent.run_thread import start_run_config
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
@@ -78,7 +80,7 @@ def _patch_build(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> N
     monkeypatch.setattr(agent_mod, "store_registry", _FakeRegistry)
     monkeypatch.setattr(agent_mod, "llm_provider_settings", _FakeProviderSettings)
     monkeypatch.setattr(agent_mod, "llm_settings", _FakeLlmSettings)
-    monkeypatch.setattr(agent_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(run_thread_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
 
 
 def _build_kwargs(**overrides: Any) -> dict[str, Any]:
@@ -134,25 +136,26 @@ def test_build_agent_forwards_inline_skills(monkeypatch: pytest.MonkeyPatch) -> 
 def test_build_agent_caps_recursion_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_build(monkeypatch, {})
     agent: Any = DeepAgent()
-    _, config, _ = asyncio.run(agent._build_agent(**_build_kwargs(recursion_limit=4242)))
+    _, config, _, _ = asyncio.run(agent._build_agent(**_build_kwargs(recursion_limit=4242)))
     assert config["recursion_limit"] == 4242
 
 
 def test_build_agent_pins_resume_checkpoint_in_config(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_build(monkeypatch, {})
     agent: Any = DeepAgent()
-    _, config, _ = asyncio.run(agent._build_agent(**_build_kwargs(resume_checkpoint_id="cp-7")))
+    _, config, _, _ = asyncio.run(agent._build_agent(**_build_kwargs(resume_checkpoint_id="cp-7")))
     assert config["configurable"]["checkpoint_id"] == "cp-7"
 
 
-def test_build_agent_omits_thread_id_when_keyless(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_agent_mints_a_thread_when_keyless(monkeypatch: pytest.MonkeyPatch) -> None:
     """A keyless one-shot stream must not pin ``thread_id=None`` (which collides all
-    keyless runs on the shared checkpoint thread); the config carries no thread_id
-    key, so ``init_langgraph_config`` mints a fresh isolated one instead."""
+    keyless runs on the shared checkpoint thread); ``init_langgraph_config`` mints a fresh
+    isolated one, returned as the run's minted thread for its end-of-run mark."""
     _patch_build(monkeypatch, {})
     agent: Any = DeepAgent()
-    _, config, _ = asyncio.run(agent._build_agent(**_build_kwargs(thread_id=None)))
-    assert "thread_id" not in config["configurable"]
+    _, config, _, minted = asyncio.run(agent._build_agent(**_build_kwargs(thread_id=None)))
+    assert config["configurable"]["thread_id"]
+    assert minted == config["configurable"]["thread_id"]
 
 
 def test_pending_interrupts_reads_paused_snapshot() -> None:
@@ -455,9 +458,9 @@ def test_astream_dispatched_tools_are_delivery_scoped(monkeypatch: pytest.Monkey
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any], Any]:
+    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any], Any, str | None]:
         captured.update(kwargs)
-        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}, None
+        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}, None, None
 
     agent: Any = DeepAgent()
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
@@ -513,10 +516,12 @@ def test_astream_rejects_non_string_memory_key(key: str, value: Any) -> None:
         _drain_astream(DeepAgent().astream(user_message=TemplatedText(content="go"), **{key: value}))  # type: ignore[arg-type]
 
 
-def test_run_config_pins_thread_and_checkpoint() -> None:
-    """_run_config overlays an explicit thread_id / resume_checkpoint_id /
-    recursion_limit onto a caller-supplied langgraph_config base."""
-    config = DeepAgent._run_config({"configurable": {"extra": 1}}, "t", "cp-7", 99)
+def test_run_config_pins_thread_and_checkpoint(ledger_book: Any) -> None:
+    """start_run_config overlays an explicit thread_id / resume_checkpoint_id /
+    recursion_limit onto a caller-supplied langgraph_config base; the caller's thread is
+    not minted."""
+    config, minted = asyncio.run(start_run_config({"configurable": {"extra": 1}}, "t", "cp-7", 99, None))
+    assert minted is None
     assert config["configurable"]["thread_id"] == "t"
     assert config["configurable"]["checkpoint_id"] == "cp-7"
     assert config["configurable"]["extra"] == 1
@@ -570,10 +575,70 @@ def test_astream_explicit_thread_id_wins_over_langgraph_config(monkeypatch: pyte
 def test_run_config_mints_fresh_thread_when_keyless() -> None:
     """With no thread pinned, each run gets a fresh isolated thread_id (never a
     shared/None key that would collide runs on one checkpoint thread)."""
-    first = DeepAgent._run_config(None, None, None, None)
-    second = DeepAgent._run_config(None, None, None, None)
+    first, minted_first = asyncio.run(start_run_config(None, None, None, None, None))
+    second, minted_second = asyncio.run(start_run_config(None, None, None, None, None))
     t1 = first["configurable"]["thread_id"]
     t2 = second["configurable"]["thread_id"]
     assert t1
     assert t2
     assert t1 != t2
+    assert (minted_first, minted_second) == (t1, t2)
+
+
+# --------------------------------------------------------------------------- #
+# The checkpoint finished-thread ledger
+# --------------------------------------------------------------------------- #
+def test_a_keyless_run_marks_its_minted_thread(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
+) -> None:
+    graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+    agent: Any = DeepAgent()
+    _install_fake_resolve(monkeypatch, agent, graph)
+    asyncio.run(agent.run(user_message=TemplatedText(content="go"), checkpoint_provider="postgres"))
+    assert ledger_book.finished("postgres") == [graph.received_config["configurable"]["thread_id"]]
+
+
+def test_a_keyless_streamed_run_marks_its_minted_thread(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
+) -> None:
+    graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+    agent: Any = DeepAgent()
+    _install_fake_resolve(monkeypatch, agent, graph)
+    _drain_astream(agent.astream(user_message=TemplatedText(content="go"), checkpoint_provider="postgres"))
+    assert ledger_book.finished("postgres") == [graph.received_config["configurable"]["thread_id"]]
+
+
+def test_an_interrupted_run_marks_nothing(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
+) -> None:
+    graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[SimpleNamespace(id="i-run", value={"q": "pick"})])
+    agent: Any = DeepAgent()
+    _install_fake_resolve(monkeypatch, agent, graph)
+    with pytest.raises(AgentInterruptedError):
+        asyncio.run(
+            agent.run(
+                user_message=TemplatedText(content="go"), interrupt_on={"task": True}, checkpoint_provider="postgres"
+            )
+        )
+    _drain_astream(
+        agent.astream(
+            user_message=TemplatedText(content="go"), interrupt_on={"task": True}, checkpoint_provider="postgres"
+        )
+    )
+    assert ledger_book.finished("postgres") == []
+
+
+def test_a_caller_thread_leaves_the_ledger_and_is_never_marked(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
+) -> None:
+    from datetime import UTC, datetime
+
+    async def premark() -> None:
+        await (await ledger_book.ledger("postgres", None)).mark(["T-7", "other"], datetime.now(UTC))
+
+    asyncio.run(premark())
+    graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+    agent: Any = DeepAgent()
+    _install_fake_resolve(monkeypatch, agent, graph)
+    asyncio.run(agent.run(user_message=TemplatedText(content="go"), thread_id="T-7", checkpoint_provider="postgres"))
+    assert ledger_book.finished("postgres") == ["other"]

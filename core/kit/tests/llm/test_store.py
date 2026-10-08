@@ -121,10 +121,7 @@ async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypa
 
     store_mod: Any = types.ModuleType("langgraph.store.postgres")
     store_mod.AsyncPostgresStore = _FakeStore
-    rows_mod: Any = types.ModuleType("psycopg.rows")
-    rows_mod.dict_row = object()
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
-    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
     _resource, closer = await st.create_store_resource("postgres", None)
     assert captured["conninfo"].startswith("postgresql://")
@@ -389,10 +386,7 @@ async def test_postgres_resource_builds_and_closes(monkeypatch):
 
     store_mod: Any = types.ModuleType("langgraph.store.postgres")
     store_mod.AsyncPostgresStore = _FakeStore
-    rows_mod: Any = types.ModuleType("psycopg.rows")
-    rows_mod.dict_row = object()
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
-    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
     _resource, closer = await st.create_store_resource("postgres", "postgresql://u@h/db")
     # An explicit conn string is named for the langgraph store role, keeps the
@@ -401,11 +395,9 @@ async def test_postgres_resource_builds_and_closes(monkeypatch):
     assert captured["name"] == "postgres@h/db:langgraph-store"
     assert captured["min_size"] == 1
     assert captured["max_size"] == 20
-    assert captured["kwargs"] == {
-        "autocommit": True,
-        "prepare_threshold": 0,
-        "row_factory": rows_mod.dict_row,
-    }
+    from psycopg.rows import dict_row
+
+    assert captured["kwargs"] == {"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row}
     assert captured["open_wait"] is True
     await closer()
     assert closed == [True]
@@ -457,10 +449,7 @@ async def test_postgres_resource_closes_pool_on_setup_failure(monkeypatch):
 
     store_mod: Any = types.ModuleType("langgraph.store.postgres")
     store_mod.AsyncPostgresStore = _FakeStore
-    rows_mod: Any = types.ModuleType("psycopg.rows")
-    rows_mod.dict_row = object()
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres", store_mod)
-    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
     with pytest.raises(RuntimeError, match="setup boom"):
         await st.create_store_resource("postgres", "postgresql://u@h/db")

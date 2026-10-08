@@ -497,7 +497,7 @@ async def _normalise_suspended(
     if sentinel.caller_interaction_ids:
         asks = await _entries_for(store, settings, candidates, sentinel.caller_interaction_ids)
         open_sentinel = await _open_step_sentinel(
-            store, settings, sentinel.interaction_ids, sentinel.caller_interaction_ids
+            store, settings, sentinel.interaction_ids, sentinel.caller_interaction_ids, sentinel.expiry_at
         )
         return "asks", None, asks, open_sentinel
     return "parked", None, [], sentinel
@@ -526,23 +526,35 @@ async def _normalise_buffered(
 
 
 async def _open_step_sentinel(
-    store: InteractionStore | None, settings: Any, open_ids: list[str], caller_ids: list[str]
+    store: InteractionStore | None,
+    settings: Any,
+    open_ids: list[str],
+    caller_ids: list[str],
+    reported_expiry: datetime | None = None,
 ) -> SuspendedInteraction | None:
     """Build the re-park sentinel over the still-open ids of one super-step (user + caller).
 
     ``interaction_ids`` is every still-open id; ``caller_interaction_ids`` is the ``to="caller"``
     subset; ``resume_owner`` is the continuation tool stored on those interactions, which one step
     shares. Differing resume owners across the open ids is a corrupt step and raises rather than
-    picking one. ``None`` when nothing remains.
+    picking one. ``expiry_at`` is the step's earliest deadline: the earliest of every open ask's
+    stored ``expiry_at`` and ``reported_expiry`` (the deadline the run's own sentinel reported,
+    which also covers an open id the store does not hold, such as a chained key). A caller that
+    re-parks on this sentinel bounds its own park by it. ``None`` when nothing remains.
     """
     if not open_ids or store is None:
         return None
     owners: set[str] = set()
+    deadlines = [reported_expiry] if reported_expiry is not None else []
     async with client_ctx(RedisClient, settings.redis) as r:
         for iid in open_ids:
             state = await store.get_state(r, iid)
-            if state is not None and state.request.continuation_tool is not None:
+            if state is None:
+                continue
+            if state.request.continuation_tool is not None:
                 owners.add(state.request.continuation_tool)
+            if state.request.expiry_at is not None:
+                deadlines.append(state.request.expiry_at)
     if len(owners) > 1:
         raise RuntimeError(
             f"a suspended super-step's interactions carry differing resume owners {sorted(owners)}; "
@@ -553,6 +565,7 @@ async def _open_step_sentinel(
         interaction_ids=list(open_ids),
         caller_interaction_ids=list(caller_ids),
         resume_owner=next(iter(owners), None),
+        expiry_at=min(deadlines) if deadlines else None,
     )
 
 

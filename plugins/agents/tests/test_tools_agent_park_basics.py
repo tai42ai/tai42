@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -82,7 +82,7 @@ def test_tools_agent_caller_ask_park_carries_both_id_lists(
         assert receipt.interaction_id == "i1"
         assert receipt.interaction_ids == ["i1"]
         assert receipt.caller_interaction_ids == ["i1"]
-        assert receipt.expiry_at is None
+        assert receipt.expiry_at == ask._expiry_at
 
     asyncio.run(go())
 
@@ -109,7 +109,7 @@ def test_tools_agent_park_then_answer_exactly_once(
         assert receipt.interaction_id == "i1"
         assert receipt.interaction_ids == ["i1"]
         assert receipt.caller_interaction_ids == []
-        assert receipt.expiry_at is None
+        assert receipt.expiry_at == ask._expiry_at
         assert ask.calls == 1
         entry = await idx.read_park_entry("i1")
         assert entry is not None
@@ -292,7 +292,7 @@ def test_tools_agent_park_then_expiry_feeds_the_expiry_marker(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
     saver = InMemorySaver()
-    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+    deadline = (datetime.now(UTC) + timedelta(days=2)).replace(microsecond=0)
     ask = _AskStandIn("i1", expiry_at=deadline)
     model = ScriptedChatModel([_ask_call(), AIMessage(content="expired path")])
     _wire_tools_build(monkeypatch, model, saver)

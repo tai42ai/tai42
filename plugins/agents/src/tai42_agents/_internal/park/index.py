@@ -36,7 +36,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
@@ -64,6 +64,10 @@ async def _park_client() -> AsyncIterator[Any]:
 # ``hset_mapping``: the shared sync/async command stubs annotate a ``Awaitable[T] | T``
 # return, so ``await client.hget(...)`` fails type checking though the async client
 # always returns an awaitable. These pin the async half.
+def _smembers(client: Any, key: str) -> Awaitable[set[str]]:
+    return cast("Awaitable[set[str]]", client.smembers(key))
+
+
 def _hget(client: Any, key: str, field: str) -> Awaitable[str | None]:
     return cast("Awaitable[str | None]", client.hget(key, field))
 
@@ -117,12 +121,13 @@ if redis.call('get', KEYS[1]) ~= ARGV[1] then
     return 0
 end
 local ttl = tonumber(ARGV[2])
-for i = 5, #KEYS do
+for i = 6, #KEYS do
     redis.call('set', KEYS[i], ARGV[3], 'EX', ttl)
 end
 redis.call('set', KEYS[3], ARGV[4], 'EX', ttl)
 redis.call('hset', KEYS[4], ARGV[5], ARGV[6])
 redis.call('expire', KEYS[4], ttl)
+redis.call('srem', KEYS[5], ARGV[5])
 redis.call('del', KEYS[2])
 redis.call('del', KEYS[1])
 return 1
@@ -179,6 +184,10 @@ _RESOLUTION_KEY_PREFIX = "agent:park:resolution:"
 # longer.
 _RUN_RESOLUTION_INDEX_PREFIX = "agent:park:run-resolutions:"
 
+# One set per thread of its super-steps whose barrier is live (persisted, not yet finalized). The
+# agents live-thread filter reads it so the checkpoint sweep never deletes a parked run's thread.
+_LIVE_SET_PREFIX = "agent:park:live:"
+
 
 def _resolved_tombstone_ttl_seconds() -> int:
     """TTL for a resolution record and its tombstones: twice the platform's redelivery horizon.
@@ -201,6 +210,10 @@ def _resolution_key(thread_id: str, superstep_id: str) -> str:
 
 def _run_resolution_index_key(thread_id: str) -> str:
     return f"{_RUN_RESOLUTION_INDEX_PREFIX}{thread_id}"
+
+
+def _live_set_key(thread_id: str) -> str:
+    return f"{_LIVE_SET_PREFIX}{thread_id}"
 
 
 def _barrier_key(thread_id: str, superstep_id: str) -> str:
@@ -280,7 +293,8 @@ async def finalize_resolved_superstep(
 
     On the guarded write it replaces every one of its M park entries with a resolved tombstone,
     writes the super-step's ONE resolution record (``{resolution, value}`` — the outcome the driver
-    returned to the platform), AND drops the barrier plus its drive-claim lease, all-or-nothing.
+    returned to the platform), AND drops the barrier plus its drive-claim lease and the super-step's
+    membership of its thread's live set, all-or-nothing.
     Atomicity closes the crash window a per-key loop would leave — a hard crash mid-loop could
     tombstone only some siblings, and a redelivery of an un-tombstoned sibling would re-claim and
     storm on a not-pending resume until the interaction group's give-up. Each tombstone carries this
@@ -307,11 +321,12 @@ async def finalize_resolved_superstep(
         landed = await _eval(
             client,
             _FINALIZE_SUPERSTEP_SCRIPT,
-            4 + len(ids),
+            5 + len(ids),
             _claim_key(thread_id, superstep_id),
             _barrier_key(thread_id, superstep_id),
             _resolution_key(thread_id, superstep_id),
             _run_resolution_index_key(thread_id),
+            _live_set_key(thread_id),
             *(_park_key(interaction_id) for interaction_id in ids),
             token,
             str(ttl),
@@ -382,7 +397,8 @@ async def persist_superstep(
 ) -> None:
     """Persist a suspended super-step in ONE Redis MULTI/EXEC.
 
-    Writes every one of its M park entries AND the barrier they converge on, all-or-nothing. Atomicity closes the
+    Writes every one of its M park entries, the barrier they converge on, and the super-step's
+    membership of its thread's live set, all-or-nothing. Atomicity closes the
     crash window a per-key loop would leave — a hard crash mid-loop could write some entries without the
     barrier, or the barrier without every entry, stranding a resume that finds an entry with no
     barrier (buffer raises not-found) or a barrier expecting an interaction whose entry is
@@ -402,7 +418,33 @@ async def persist_superstep(
         barrier = _barrier_key(thread_id, superstep_id)
         pipe.hset(barrier, mapping={"expected": json.dumps(expected)})
         pipe.expire(barrier, barrier_ttl_seconds)
+        # The thread's live set lasts as long as its longest-lived barrier: NX sets a TTL on a new
+        # set, GT only ever extends it (GT alone never sets a TTL on a key that has none).
+        live = _live_set_key(thread_id)
+        pipe.sadd(live, superstep_id)
+        pipe.expire(live, barrier_ttl_seconds, nx=True)
+        pipe.expire(live, barrier_ttl_seconds, gt=True)
         await pipe.execute()
+
+
+async def threads_with_live_barriers(provider: str, conn_string: str | None, thread_ids: Sequence[str]) -> set[str]:
+    """The subset of ``thread_ids`` with at least one live park barrier — the agents live-thread filter.
+
+    A thread is live while any super-step its live set lists still has its barrier key (a barrier
+    expires with its TTL and is dropped at finalize). Empty when no park index is configured: no
+    park could ever have been persisted. The park index names the thread whatever checkpoint store
+    holds it.
+    """
+    if agents_park_redis_settings().redis_url is None:
+        return set()
+    live: set[str] = set()
+    async with _park_client() as client:
+        for thread_id in thread_ids:
+            for superstep_id in await _smembers(client, _live_set_key(thread_id)):
+                if await client.exists(_barrier_key(thread_id, superstep_id)):
+                    live.add(thread_id)
+                    break
+    return live
 
 
 async def detach_chained_parks(keys: Iterable[str]) -> None:
