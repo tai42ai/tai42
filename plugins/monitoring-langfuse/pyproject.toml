@@ -27,16 +27,13 @@ dependencies = [
     # protocols, the neutral data models, and the tai42_app handle.
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=16.2,<17",
-    # TaiBaseSettings + the settings cache registry.
-    "tai42-kit>=7.7,<8",
-    # The Langfuse SDK. Pinned to a minor: sdk_internals.py reaches into private
-    # SDK members that have no public equivalent, verified against this version.
+    # TaiBaseSettings + the settings cache registry, and the monitoring feature's
+    # OpenTelemetry writer every record is written through (the monitoring extra).
+    "tai42-kit[monitoring]>=7.7,<8",
+    # The Langfuse SDK: read API only (``tracing_enabled=False``).
     "langfuse~=4.0.6",
-    # Required by langfuse.langchain — the CallbackHandler that
-    # get_monitoring_callbacks returns (part of the MonitoringWriter contract).
-    "langchain>=1.2",
-    # The OTel context API used to emit an explicit-time span (record_span).
-    "opentelemetry-api>=1.33,<2",
+    # Decodes the recorded ``tai42.metadata`` attribute (trace_query.py).
+    "orjson>=3.11",
     # SecretStr for the Langfuse secret key and the settings base/config.
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",

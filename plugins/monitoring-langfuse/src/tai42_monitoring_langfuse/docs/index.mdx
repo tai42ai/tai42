@@ -1,11 +1,17 @@
 ---
 title: Langfuse monitoring
-description: Configure the Langfuse monitoring backend — the LANGFUSE_ env group, the required key pair, and scoping several deployments onto one project.
+description: Configure the Langfuse monitoring backend — records exported over OpenTelemetry through a collector, the LANGFUSE_ env group the reader uses, and scoping several deployments onto one project.
 ---
 
-The Langfuse monitoring backend writes tool-run and agent-turn traces to a
+The Langfuse monitoring backend records tool-run and agent-turn traces into a
 Langfuse project — cloud or self-hosted — and the Studio reads them back through
 the same interface.
+
+Records are written by the platform's OpenTelemetry writer: each process exports
+OTLP to an **OpenTelemetry collector** running as its own container, and the
+collector maps the platform's attribute names onto Langfuse's and sends them to
+Langfuse's OTLP endpoint. The Langfuse SDK is used for reading only (its tracing is
+turned off).
 
 ## Enable it
 
@@ -15,36 +21,70 @@ monitoring_module: tai42_monitoring_langfuse
 
 ## Configuration
 
-The `LANGFUSE_` env group. Create a project in Langfuse Cloud or a self-hosted
-instance and copy its key pair from the project settings.
+### The reader: the `LANGFUSE_` env group
+
+Create a project in Langfuse Cloud or a self-hosted instance and copy its key pair
+from the project settings.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `LANGFUSE_PUBLIC_KEY` | unset | Project public key. Required. |
 | `LANGFUSE_SECRET_KEY` | unset | Project secret key. Required. Secret. |
 | `LANGFUSE_HOST` | unset | Langfuse base URL — the cloud endpoint or your own instance. Required. |
-| `LANGFUSE_TIMEOUT_SECONDS` | `30` | Client timeout, applied per read request too. |
-| `LANGFUSE_TRACING_ENVIRONMENT` | `tai` | Langfuse `environment` stamped on every write, and the scope every read filters by. |
+| `LANGFUSE_TIMEOUT_SECONDS` | `30` | Read request timeout. |
+| `LANGFUSE_TRACING_ENVIRONMENT` | `tai` | Langfuse `environment` stamped on every record (as `deployment.environment.name`), and the scope every read filters by. |
+
+These five are the only `LANGFUSE_*` names the backend reads. The Langfuse SDK's
+own export settings (`LANGFUSE_FLUSH_AT`, `LANGFUSE_FLUSH_INTERVAL`,
+`LANGFUSE_OTEL_TRACES_EXPORT_PATH`, `LANGFUSE_MEDIA_UPLOAD_ENABLED`,
+`LANGFUSE_DEBUG`) have no effect: the export is tuned through the `OTEL_*`
+environment below and the collector.
+
+### The writer: the standard OpenTelemetry environment
+
+| Variable | Required | Effect |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) | yes | The collector's OTLP/HTTP endpoint, e.g. `http://otel-collector:4318/v1/traces`. |
+| `OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED` | yes, `true` | Turns on the span processor's own counter, through which records dropped by a full export queue are counted. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | no | The resource every record carries. |
+| `OTEL_BSP_MAX_QUEUE_SIZE` / `OTEL_BSP_SCHEDULE_DELAY` / `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | no | Export queue and batching (SDK defaults 2048 / 5000 ms / 512). |
+| `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`, `…_COMPRESSION`, `…_HEADERS` | no | The exporter's request options. |
+| `OTEL_METRIC_EXPORT_INTERVAL` | no | How often the queue-drop count is collected (default 60000 ms); every flush collects it too. |
+
+`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` and `OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT`
+have no effect: the writer never truncates a recorded value.
+
+### The collector
+
+The collector holds the backend credential, named outside the `LANGFUSE_` prefix:
+`OTEL_COLLECTOR_LANGFUSE_AUTH` is the base64 of `public_key:secret_key`, sent as
+`Authorization: Basic …` to `${LANGFUSE_HOST}/api/public/otel`. Its pipeline maps
+the platform's `tai42.trace.*`, `tai42.run.version`, `tai42.level`,
+`tai42.status_message`, `tai42.span.kind` and `tai42.usage.cost_usd` attributes onto
+Langfuse's names; GenAI messages, tool arguments and results, and chain inputs and
+outputs use the OpenTelemetry names Langfuse reads natively. Its sending queue lives
+on a volume and retries until delivered.
 
 <Warning>
-Selecting `monitoring_module` without the three required keys raises at startup,
-naming all three — a monitoring backend that silently drops traces is worse than
-a server that will not boot. To run without monitoring, omit `monitoring_module`
-entirely; the runtime falls back to a built-in no-op.
+Selecting `monitoring_module` without the three required `LANGFUSE_*` keys, without
+an OTLP endpoint, or without `OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED=true` raises
+at startup, naming what is missing — a monitoring backend that silently drops traces
+is worse than a server that will not boot. To run without monitoring, omit
+`monitoring_module` entirely; the runtime falls back to a built-in no-op.
 </Warning>
 
 ## Share one project between deployments
 
-`LANGFUSE_TRACING_ENVIRONMENT` both stamps writes and scopes reads, so several
+`LANGFUSE_TRACING_ENVIRONMENT` both stamps records and scopes reads, so several
 deployments can share one Langfuse project by diverging on it — staging and
 production write into the same project and each reads only its own traces.
-Reading a trace by id is the one unscoped call, because trace ids are globally
+Reading a trace or an observation by id is unscoped, because ids are globally
 unique.
 
 ## Run attribution and data retention
 
 The platform tags each run's trace with generic identity at its shared
-chokepoints, and this backend forwards them to Langfuse's native trace
+chokepoints, and the collector maps them onto Langfuse's native trace
 dimensions: `user_id`, `session_id`, `version`, and `tags` — so runs are
 filterable and groupable by exactly those, including from the observability
 `user` / `session` / `meta.<key>` query params.
@@ -66,12 +106,12 @@ one deletable key.
 
 ## Quirks
 
-- The package pins the Langfuse SDK to a narrow range because it reaches into SDK
-  internals for the read paths. Upgrading the Langfuse **server** is safe;
-  changing the pinned SDK is not.
+- The package pins the Langfuse SDK to a narrow range for its read API. Upgrading
+  the Langfuse **server** is safe; changing the pinned SDK is not.
 - A self-hosted Langfuse is a standalone stack (its own Postgres, ClickHouse,
-  Redis, and object store); wire the runtime to it with the four variables above.
+  Redis, and object store); the collector and the reader both reach it at
+  `LANGFUSE_HOST`.
 
 ## See also
 
-- [Observe](/operate/observe) — metrics, traces, and what the runtime emits.
+- [Observe](/operate/observe) — metrics, traces, the collector, and what the runtime emits.

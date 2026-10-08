@@ -152,6 +152,11 @@ class LifecycleState(ABC):
         # runs until cancelled at shutdown.
         self._media_reaper_task: asyncio.Task[None] | None = None
 
+        # The monitoring health watch, owned by app_context: raises one platform event per
+        # growth of the run family's monitoring delivery-failure counters. Runs until
+        # cancelled at shutdown.
+        self._monitoring_health_watch_task: asyncio.Task[None] | None = None
+
         # The module → mount-binding map for the CURRENT registration pass, rebuilt at
         # the top of ``_initialize_components`` before any manifest module imports.
         self._mount_map: dict[str, MountBinding] = {}

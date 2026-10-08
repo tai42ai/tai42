@@ -9,14 +9,11 @@ from tai42_monitoring_langfuse.factory import build_langfuse_backend
 from tai42_monitoring_langfuse.monitoring import LangfuseMonitoring
 from tai42_monitoring_langfuse.reader import LangfuseReader
 from tai42_monitoring_langfuse.settings import LangfuseSettings, langfuse_settings
-from tai42_monitoring_langfuse.writer import LangfuseSpan, LangfuseWriter
 
 __all__ = [
     "LangfuseMonitoring",
     "LangfuseReader",
     "LangfuseSettings",
-    "LangfuseSpan",
-    "LangfuseWriter",
     "build_langfuse_backend",
     "langfuse_settings",
 ]

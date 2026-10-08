@@ -21,23 +21,28 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from tai42_contract.monitoring import (
     Dimension,
     Measure,
     MetricsQuery,
     MonitoringFilter,
     MonitoringReadNotSupportedError,
+    ObservationNotFoundError,
     OrderBy,
+    PayloadRefUnresolvedError,
     TraceNotFoundError,
 )
+from tai42_kit.monitoring import payload_ref, resolve_refs
 
 from tai42_skeleton.monitoring.registry import get_monitoring
-from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, UpstreamError, operation
 from tai42_skeleton.operations.response_models_group_c import (
     MetricsResult,
     ObservabilityRunsPage,
+    ResolvedSpanValue,
     RunTraceView,
 )
 from tai42_skeleton.routers.observability_support import (
@@ -260,3 +265,50 @@ async def get_run_trace(trace_id: str) -> dict:
     except TraceNotFoundError as exc:
         raise NotFoundError("Run trace not found") from exc
     return map_trace(trace)
+
+
+class ResolvedSpanValueQuery(BaseModel):
+    """Which field of the span to resolve, and where inside it."""
+
+    field: Literal["input", "output"] = Field(description="The span field to resolve.")
+    pointer: str = Field(
+        default="",
+        description="RFC 6901 JSON pointer into the field's value; empty for the whole value.",
+    )
+
+    @field_validator("pointer")
+    @classmethod
+    def _pointer_is_rfc6901(cls, value: str) -> str:
+        if value and not value.startswith("/"):
+            raise ValueError("pointer must be empty or start with '/' (RFC 6901)")
+        return value
+
+
+@operation(
+    summary="Get a run span's resolved value",
+    tags=["observability"],
+    errors=[NotFoundError, NotSupportedError, UpstreamError],
+    request_model=ResolvedSpanValueQuery,
+    response_model=ResolvedSpanValue,
+)
+async def get_resolved_span_value(
+    trace_id: str, span_id: str, field: Literal["input", "output"], pointer: str = ""
+) -> dict:
+    """One span field's value at ``pointer``, with every record reference on the way and inside it resolved.
+
+    The pointer is applied exactly as a reference's pointer: a step that lands on a
+    reference resolves it and continues inside its value. An absent trace or span is a 404;
+    a reference the backend does not hold (not yet ingested, or lost), or a pointer the
+    record does not hold, is a 502 carrying the reason.
+    """
+    reader = get_monitoring().reader
+    try:
+        await reader.get_observation(trace_id, span_id)
+        value = await resolve_refs(payload_ref(span_id, field, pointer, trace_id=trace_id), reader, trace_id=trace_id)
+    except MonitoringReadNotSupportedError as exc:
+        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
+    except (TraceNotFoundError, ObservationNotFoundError) as exc:
+        raise NotFoundError("Run span not found") from exc
+    except PayloadRefUnresolvedError as exc:
+        raise UpstreamError(str(exc)) from exc
+    return {"traceId": trace_id, "spanId": span_id, "field": field, "pointer": pointer, "value": value}

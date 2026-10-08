@@ -215,7 +215,12 @@ REAL_SERVICES: dict[str, RealService] = {
         inbound=False,
     ),
     "langfuse": RealService(
-        required_env=("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"),
+        required_env=(
+            "LANGFUSE_HOST",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        ),
         inbound=False,
     ),
     "stripe": RealService(

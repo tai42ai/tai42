@@ -15,9 +15,11 @@ import asyncio
 from collections.abc import Iterator
 from typing import Any
 
+import orjson
 import pytest
 from tai42_contract.monitoring import SpanKind
 from tai42_contract.secrets import SecretValue, unwrap_secrets
+from tai42_kit.monitoring import encode_payload
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -108,14 +110,17 @@ def test_monitor_span_masks_a_preset_baked_reference(pg: FakeVersioningPg, monke
         assert isinstance(result["payload"]["token"], SecretValue)
         assert unwrap_secrets(result) == {"payload": {"token": _RESOLVED}, "tag": "t"}
 
-        # Exactly one standalone TOOL span, and its recorded OUTPUT masks the resolved value.
+        # Exactly one standalone TOOL span. The writer receives the raw values (callers never
+        # mask) and its encoder records the resolved value as the placeholder.
         assert len(backend.writer.spans) == 1
         span = backend.writer.spans[0]
         assert span["kind"] is SpanKind.TOOL
-        assert span["span"].outputs == [{"payload": {"token": "[secret]"}, "tag": "t"}]
-        assert _RESOLVED not in repr(span["span"].outputs)
+        (output,) = span["span"].outputs
+        assert isinstance(output["payload"]["token"], SecretValue)
+        assert orjson.loads(encode_payload(output)) == {"payload": {"token": "[secret]"}, "tag": "t"}
+        assert _RESOLVED not in encode_payload(output)
         # The recorded INPUT carries no secret either (the reference is a hidden baked
         # constant, never an exposed argument the recorder sees).
-        assert _RESOLVED not in repr(span["input"])
+        assert _RESOLVED not in encode_payload(span["input"])
 
     asyncio.run(run())

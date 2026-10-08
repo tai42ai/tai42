@@ -83,6 +83,9 @@ class LifespanMixin(LifecycleState):
             # unconditionally (a no-op each pass absent a store/provider), so both the
             # serve and backend processes reap.
             self._spawn_media_reaper()
+            # Start the monitoring health watch so a growth of the run family's monitoring
+            # delivery-failure counters raises its platform event within one poll.
+            self._spawn_monitoring_health_watch()
             yield self
         finally:
             # Shutdown start: drop the readiness sentinel FIRST so the readiness probe
@@ -94,6 +97,7 @@ class LifespanMixin(LifecycleState):
             await self._cancel_interactions_reaper()
             await self._cancel_sandbox_reaper()
             await self._cancel_media_reaper()
+            await self._cancel_monitoring_health_watch()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()
@@ -124,11 +128,12 @@ class LifespanMixin(LifecycleState):
         return True
 
     def _on_perpetual_task_done(self, task: asyncio.Task[Any]) -> None:
-        """Done-callback shared by all five run-until-cancelled lifespan tasks.
+        """Done-callback shared by all six run-until-cancelled lifespan tasks.
 
         The worker-bus subscription, the failed-MCP re-probe loop, the
-        interactions expiry reaper, the sandbox reaper and the media retention
-        reaper, in both the serve and the backend process, register this. A clean
+        interactions expiry reaper, the sandbox reaper, the media retention
+        reaper and the monitoring health watch, in both the serve and the backend
+        process, register this. A clean
         cancellation (shutdown) stays
         silent and does nothing. Otherwise the perpetual task stopped doing its
         job — a runtime exception OR a NORMAL return, both a death, since these
@@ -288,6 +293,40 @@ class LifespanMixin(LifecycleState):
         """
         task = self._media_reaper_task
         self._media_reaper_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
+            pass
+
+    def _spawn_monitoring_health_watch(self) -> None:
+        """Start the monitoring health watch loop on the serving loop.
+
+        Owned by ``app_context``; runs until cancelled at shutdown. A failed pass is logged
+        and the next one runs, so only a defect in the loop itself ends it.
+        """
+        from tai42_skeleton.monitoring.health_watch import run_monitoring_health_watch
+
+        self._monitoring_health_watch_task = asyncio.create_task(
+            run_monitoring_health_watch(),
+            name="tai-monitoring-health-watch",
+        )
+        self._monitoring_health_watch_task.add_done_callback(self._on_perpetual_task_done)
+
+    async def _cancel_monitoring_health_watch(self) -> None:
+        """Cancel the monitoring health watch and await its termination at shutdown.
+
+        The shutdown counterpart of ``_spawn_monitoring_health_watch``. A
+        non-``CancelledError`` death was already surfaced at ERROR by the done-callback, so
+        it is awaited-and-swallowed here (this runs inside ``app_context``'s shutdown
+        ``finally``, where re-raising would skip the remaining teardown).
+        """
+        task = self._monitoring_health_watch_task
+        self._monitoring_health_watch_task = None
         if task is None:
             return
         task.cancel()

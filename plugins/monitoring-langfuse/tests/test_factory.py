@@ -1,19 +1,21 @@
-"""Factory: env-or-explicit project construction, loud failure without creds."""
+"""Factory: the backend built from the ``LANGFUSE_*`` environment, loud failure without credentials."""
 
 from __future__ import annotations
 
 import pytest
 from tai42_contract.monitoring import Monitoring
+from tai42_kit.monitoring.otel import OtelWriter
 
 from tai42_monitoring_langfuse import LangfuseMonitoring, build_langfuse_backend
-from tai42_monitoring_langfuse.project import LangfuseProject
 
 
-def _cfg(public_key: str, source: str = "tai") -> LangfuseProject:
-    return LangfuseProject(public_key=public_key, secret_key=f"sk-{public_key}", host="http://lf", source=source)
+@pytest.fixture
+def otel_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces")
 
 
-def test_langfuse_without_creds_raises(monkeypatch):
+def test_langfuse_without_creds_raises(monkeypatch: pytest.MonkeyPatch, otel_env: None) -> None:
     # Selecting Langfuse but leaving credentials unset is a misconfiguration:
     # it must fail loudly, not silently degrade to no-op.
     for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"):
@@ -22,32 +24,27 @@ def test_langfuse_without_creds_raises(monkeypatch):
         build_langfuse_backend()
 
 
-def test_langfuse_with_creds_builds_backend(monkeypatch):
+def test_langfuse_with_creds_builds_an_otel_writer_stamped_with_the_source(
+    monkeypatch: pytest.MonkeyPatch, otel_env: None
+) -> None:
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
     monkeypatch.setenv("LANGFUSE_HOST", "http://localhost")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENVIRONMENT", "staging")
     backend = build_langfuse_backend()
     assert isinstance(backend, LangfuseMonitoring)
     assert isinstance(backend, Monitoring)  # runtime-checkable contract protocol
-    assert backend._manager._default_public_key == "pk"
+    assert isinstance(backend.writer, OtelWriter)
+    assert backend.writer._resource_attributes == {"deployment.environment.name": "staging"}
+    assert backend._manager.active_source() == "staging"
 
 
-def test_explicit_projects_default_to_first(monkeypatch):
-    backend = build_langfuse_backend(projects=[_cfg("pk-a"), _cfg("pk-b")])
-    assert isinstance(backend, LangfuseMonitoring)
-    assert backend._manager._default_public_key == "pk-a"
-
-
-def test_explicit_projects_with_default_key():
-    backend = build_langfuse_backend(projects=[_cfg("pk-a"), _cfg("pk-b")], default_public_key="pk-b")
-    assert isinstance(backend, LangfuseMonitoring)
-    assert backend._manager._default_public_key == "pk-b"
-
-
-def test_add_project_registers_for_scope():
-    backend = LangfuseMonitoring(projects=[_cfg("pk-a")], default_public_key="pk-a")
-    backend.add_project(_cfg("pk-b"))
-    assert "pk-b" in backend._manager._projects
-    # Idempotent.
-    backend.add_project(_cfg("pk-b"))
-    assert list(backend._manager._projects).count("pk-b") == 1
+def test_the_writer_refuses_without_an_otlp_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://localhost")
+    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    with pytest.raises(RuntimeError, match="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
+        build_langfuse_backend()

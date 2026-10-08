@@ -29,9 +29,11 @@ from tai42_contract.monitoring import (
     MonitoringReadNotSupportedError,
     MonitoringTrace,
     MonitoringTraceSummary,
+    ObservationNotFoundError,
     TraceNotFoundError,
 )
 
+from tai42_skeleton.monitoring.noop import NoOpWriter
 from tai42_skeleton.monitoring.registry import register_monitoring, reset_monitoring
 from tai42_skeleton.routers import observability as router
 from tai42_skeleton.routers.observability_support import _SORT_FIELDS, RunSortKey
@@ -70,9 +72,8 @@ def _json(resp) -> dict:
 # -- fake monitoring backend (async contract reader) -------------------------
 
 
-class _FakeWriter:
-    def shutdown(self) -> None:
-        pass
+class _FakeWriter(NoOpWriter):
+    pass
 
 
 class _FakeMonitoring:
@@ -138,6 +139,13 @@ class _FakeReader:
 
     async def list_spans_in_window(self, t0, t1, *, run=None, kind=None, filter_=None, order_by=None):
         return []
+
+    async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
+        trace = await self.get_trace(trace_id)
+        for observation in trace.observations:
+            if observation.id == observation_id:
+                return observation
+        raise ObservationNotFoundError(f"observation {observation_id!r} not found")
 
 
 @pytest.fixture(autouse=True)

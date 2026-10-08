@@ -97,3 +97,27 @@ def test_traces_get_export_downloads_raw(monkeypatch: pytest.MonkeyPatch) -> Non
     result = run_cli(monkeypatch, handler, ["traces", "get", "trace_abc", "--export"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"traceId": "trace_abc"}
+
+
+def test_traces_value_reads_one_resolved_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/observability/runs/trace_abc/spans/span_1/resolved"
+        assert dict(request.url.params) == {"field": "output", "pointer": "/outputs/n"}
+        return data_response(
+            {"traceId": "trace_abc", "spanId": "span_1", "field": "output", "pointer": "/outputs/n", "value": "v"}
+        )
+
+    result = run_cli(
+        monkeypatch, handler, ["traces", "value", "trace_abc", "span_1", "--field", "output", "--pointer", "/outputs/n"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "/outputs/n" in result.output
+
+
+def test_traces_value_defaults_to_the_whole_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert dict(request.url.params) == {"field": "input"}
+        return data_response({"traceId": "t", "spanId": "s", "field": "input", "pointer": "", "value": 1})
+
+    result = run_cli(monkeypatch, handler, ["traces", "value", "t", "s"])
+    assert result.exit_code == 0, result.output

@@ -5,11 +5,11 @@ monitoring READ contract (``tai42_contract.monitoring``): aggregate metrics, a
 filterable run list, single-run trace detail, and CSV/JSON exports. A "run" is a
 monitoring **trace** (keyed by ``trace_id``); there is no other source.
 
-All five routes are AUTHED. A trace embeds the full input/output of every tool
+All six routes are AUTHED. A trace embeds the full input/output of every tool
 and model call in a run — arguments, results, prompts, completions — so these
 reads are data-bearing and must sit behind the Studio credential, never public.
 
-The three enveloped reads (metrics, run list, single-trace detail) are thin
+The four enveloped reads (metrics, run list, single-trace detail, one span's resolved value) are thin
 adapters over operations in ``tai42_skeleton.operations.observability``: the query
 string is decoded into the neutral filter/paging types here at the HTTP edge (the
 context extractors raise ``BadRequestError`` → 400), then the operation runs
@@ -37,14 +37,17 @@ import json
 import logging
 from typing import Any
 
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import (
     MonitoringReadNotSupportedError,
     MonitoringTraceSummary,
+    PayloadRefUnresolvedError,
     TraceNotFoundError,
 )
+from tai42_kit.monitoring import resolve_refs
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
@@ -52,6 +55,7 @@ from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.observability import ExportRunsQuery
 from tai42_skeleton.operations.observability import get_metrics as _get_metrics_op
+from tai42_skeleton.operations.observability import get_resolved_span_value as _get_resolved_span_value_op
 from tai42_skeleton.operations.observability import get_run_trace as _get_run_trace_op
 from tai42_skeleton.operations.observability import list_observability_runs as _list_observability_runs_op
 from tai42_skeleton.routers.observability_support import (
@@ -160,6 +164,25 @@ get_run_trace = register_operation_route(
     action="read",
 )
 
+get_resolved_span_value = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_resolved_span_value_op),
+    path="/api/observability/runs/{trace_id}/spans/{span_id}/resolved",
+    method="GET",
+    action="read",
+)
+
+
+_RESOLVE_VALUES = ("true", "false")
+
+
+class TraceExportQuery(BaseModel):
+    """The trace export's options."""
+
+    resolve: bool = Field(
+        default=False, description="Resolve every span's input/output record references before export."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Exports (handler-native downloads — a raw attachment, not the JSON envelope)
@@ -173,24 +196,42 @@ get_run_trace = register_operation_route(
     tags=["observability"],
     response_model=None,
     no_body_reason="Trace export: raw JSON attachment download",
+    query_model=TraceExportQuery,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
-        error_statuses=(401, 404, 501),
+        error_statuses=(400, 401, 404, 501, 502),
         success_status=200,
     ),
     action="read",
 )
 async def export_run_trace(request: Request) -> Response:
-    """Single run's full trace as a downloadable JSON file."""
+    """Single run's full trace as a downloadable JSON file; ``resolve=true`` resolves every span's references first."""
     trace_id = request.path_params["trace_id"]
+    raw_resolve = request.query_params.get("resolve", "false")
+    if raw_resolve not in _RESOLVE_VALUES:
+        return _error(f"resolve must be {one_of(_RESOLVE_VALUES)}", 400)
+    resolve = raw_resolve == "true"
     reader = get_monitoring().reader
     try:
         trace = await reader.get_trace(trace_id)
+        if resolve:
+            observations = trace.observations or []
+            resolved = await resolve_refs([[o.input, o.output] for o in observations], reader, trace_id=trace_id)
+            trace = trace.model_copy(
+                update={
+                    "observations": [
+                        o.model_copy(update={"input": value[0], "output": value[1]})
+                        for o, value in zip(observations, resolved, strict=True)
+                    ]
+                }
+            )
     except MonitoringReadNotSupportedError as exc:
         return _not_supported(exc)
     except TraceNotFoundError:
         return _error("Run trace not found", 404)
+    except PayloadRefUnresolvedError as exc:
+        return _error(str(exc), 502)
 
     body = json.dumps(map_trace(trace), default=str, indent=2)
     return Response(

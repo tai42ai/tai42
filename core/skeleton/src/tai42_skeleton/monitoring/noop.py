@@ -8,7 +8,7 @@ silently degrading.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
@@ -20,14 +20,18 @@ from tai42_contract.monitoring import (
     MetricsCapability,
     MetricsQuery,
     MetricsResult,
+    MonitoringExportHealth,
     MonitoringFilter,
     MonitoringLevel,
+    MonitoringObservation,
     MonitoringTrace,
     MonitoringTraceSummary,
     OrderBy,
+    RecordId,
     Span,
     SpanKind,
     SpanWindowItem,
+    TokenUsage,
     TraceContext,
     TraceNotFoundError,
 )
@@ -46,7 +50,7 @@ class NoOpSpan:
         *,
         output: Any = None,
         model: str | None = None,
-        usage_details: dict[str, Any] | None = None,
+        usage: TokenUsage | None = None,
         metadata: dict[str, Any] | None = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
@@ -61,9 +65,32 @@ class NoOpSpan:
     ) -> None:
         """Record nothing for trace metadata."""
 
+    def end(self, *, end_time: datetime | None = None) -> None:
+        """Record nothing for the span's end."""
+
 
 class NoOpWriter:
-    """A writer that emits nothing."""
+    """A writer that emits nothing; it declares itself not recording so producers skip all recording work."""
+
+    def __init__(self) -> None:
+        """Hold no health listener."""
+        self._listener: Callable[[MonitoringExportHealth], None] | None = None
+
+    def open_span(
+        self,
+        *,
+        name: str,
+        kind: SpanKind,
+        trace_context: TraceContext | None = None,
+        input_: Any = None,
+        model: str | None = None,
+        model_parameters: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        start_time: datetime | None = None,
+        activate: bool = False,
+    ) -> Span:
+        """Return a no-op span; records nothing."""
+        return NoOpSpan()
 
     @contextmanager
     def start_span(
@@ -93,7 +120,7 @@ class NoOpWriter:
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
         model: str | None = None,
-        usage_details: dict[str, Any] | None = None,
+        usage: TokenUsage | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Discard a completed span."""
@@ -108,8 +135,9 @@ class NoOpWriter:
         output: Any = None,
         status_message: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Discard an event."""
+    ) -> RecordId | None:
+        """Discard an event; no record exists, so no id."""
+        return None
 
     def update_current_span(
         self,
@@ -117,6 +145,7 @@ class NoOpWriter:
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
         metadata: dict[str, Any] | None = None,
+        input_: Any = None,
         output: Any = None,
     ) -> None:
         """Record nothing for the current span."""
@@ -138,13 +167,21 @@ class NoOpWriter:
         """The current trace id; always ``None`` for a no-op writer."""
         return None
 
-    def inject_context(self, ctx: TraceContext) -> dict:
-        """The trace-context carrier headers; always empty for a no-op writer."""
-        return {}
+    def current_span_id(self) -> str | None:
+        """The current span id; always ``None`` for a no-op writer."""
+        return None
 
-    def get_monitoring_callbacks(self, ctx: TraceContext) -> list:
-        """The monitoring callbacks for ``ctx``; always empty for a no-op writer."""
-        return []
+    def is_recording(self) -> bool:
+        """A no-op writer records nothing."""
+        return False
+
+    def export_health(self) -> MonitoringExportHealth:
+        """Nothing is delivered, so nothing can fail."""
+        return MonitoringExportHealth()
+
+    def set_health_listener(self, listener: Callable[[MonitoringExportHealth], None] | None) -> None:
+        """Store the listener; a writer that records nothing never calls it."""
+        self._listener = listener
 
     @contextmanager
     def disable(self) -> Iterator[None]:
@@ -186,6 +223,10 @@ class NoOpReader:
         """Raise :class:`TraceNotFoundError`; a no-op reader holds no traces."""
         # No data in the double, so every trace is absent — raise rather than
         # return None (the contract's ``get_trace`` is non-optional).
+        raise TraceNotFoundError(f"trace {trace_id!r} not found (no-op reader)")
+
+    async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
+        """Raise :class:`TraceNotFoundError`; a no-op reader holds no traces."""
         raise TraceNotFoundError(f"trace {trace_id!r} not found (no-op reader)")
 
     async def list_traces(

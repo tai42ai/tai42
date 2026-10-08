@@ -91,13 +91,24 @@ class MetricsCapability(BaseModel):
     dimensions: frozenset[Dimension]
 
 
+class TokenUsage(BaseModel):
+    """Token counts and cost of one model call; each field is ``None`` when the producer did not report it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+
+
 @runtime_checkable
 class Span(Protocol):
-    """Handle to an open span, returned by ``MonitoringWriter.start_span``.
+    """Handle to an open span, returned by ``MonitoringWriter.open_span`` / ``start_span``.
 
-    Both methods are FAIL-SAFE: they catch their own errors and log — they
-    never raise into application code (a monitoring outage must not break a
-    flow).
+    Every method is FAIL-SAFE: it catches its own errors and logs them at ERROR, and the
+    writer counts them in ``export_health().records_failed`` — it never raises into
+    application code (a monitoring outage must not break a flow).
     """
 
     @property
@@ -113,16 +124,17 @@ class Span(Protocol):
         *,
         output: Any = None,
         model: str | None = None,
-        usage_details: dict[str, Any] | None = None,
+        usage: TokenUsage | None = None,
         metadata: dict[str, Any] | None = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
     ) -> None:
         """Amend this span after it was opened.
 
-        ``usage_details`` is the per-generation token/cost channel that feeds
-        the totals/analytics metrics. ``model`` may be amended here when not
-        known at open time.
+        ``usage`` is the per-generation token/cost channel that feeds the totals/analytics
+        metrics. ``model`` may be amended here when not known at open time. ``metadata`` is
+        MERGED key-wise into the metadata given so far (a later value for a key wins), never
+        a replacement of the whole object.
         """
         ...
 
@@ -135,14 +147,23 @@ class Span(Protocol):
         """Set attributes on the enclosing trace from this span."""
         ...
 
+    def end(self, *, end_time: datetime | None = None) -> None:
+        """End this span (at ``end_time``, else now) and record it.
+
+        A span opened with ``activate=True`` stops being the current span here and the
+        previous current span is restored. A span yielded by ``start_span`` is ended by its
+        context manager.
+        """
+        ...
+
 
 class TraceContext(BaseModel):
     """Propagation context for a trace/span lineage.
 
     Built by the caller from the downstream run config (trace_id /
-    parent_span_id) and carried downstream by ``inject_context`` /
-    ``get_monitoring_callbacks``. ``tags`` drive the run/tag filtering on the
-    totals screen; ``metadata`` carries attribution.
+    parent_span_id) and carried to ``open_span`` / ``start_span`` / ``record_span`` /
+    ``create_event`` and to the kit's ``bind_run_trace``. ``tags`` drive the run/tag
+    filtering on the totals screen; ``metadata`` carries attribution.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -151,6 +172,77 @@ class TraceContext(BaseModel):
     parent_span_id: str | None = None
     tags: list[str] | None = None
     metadata: dict[str, Any] | None = None
+
+
+class RecordId(BaseModel):
+    """The identity of one written record: its trace (32 lower-hex) and its span (16 lower-hex)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    trace_id: str
+    span_id: str
+
+
+# THE RESERVED MARKER NAMESPACE. A JSON object whose FIRST key starts with this prefix
+# exists in a recorded value only when the writer itself rendered a marker (a reference,
+# the unrecorded statement, an encoded byte string, an unencodable value). Producers pass
+# the kit's marker objects, never hand-built marker dicts; a user value carrying such an
+# object is refused by the writer's encoder, so a decoded one-key ``$tai42_*`` object was
+# always written by the writer and a reference is never confused with data.
+RESERVED_KEY_PREFIX = "$tai42_"
+# The one key of a reference object: ``{"$tai42_ref": {<PayloadRef fields>}}``.
+PAYLOAD_REF_KEY = "$tai42_ref"
+# The one key of ``{"$tai42_unrecorded": true}``: a value existed but was produced while
+# nothing recorded. It is not a reference; resolution leaves it in place.
+UNRECORDED_KEY = "$tai42_unrecorded"
+
+
+class PayloadRef(BaseModel):
+    """A reference from one record's value to the record that holds it.
+
+    Embedded in any input/output/metadata value as ``{"$tai42_ref": {<these fields>}}``.
+    ``trace_id`` ``None`` names the trace of the record that carries the reference.
+    ``field`` names the target record's input, output, or producer metadata object.
+    ``pointer`` is an RFC 6901 JSON pointer into that field's value; ``""`` is the whole value.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trace_id: str | None = None
+    span_id: str
+    field: Literal["input", "output", "metadata"]
+    pointer: str = ""
+
+
+class StepRole(StrEnum):
+    """What a record is in a run's step outline; a record without the marker is a step."""
+
+    GROUPING = "grouping"  # a framework grouping node: holds steps, is not one
+    SUB_STEP = "sub_step"  # a step's internal evaluation: part of a step, not one
+
+
+# Metadata key of the record's :class:`StepRole`.
+STEP_ROLE_METADATA_KEY = "tai42.step_role"
+# Metadata key of a record's timing statement; ``TIMING_ABSENT`` = the record carries no live timing.
+TIMING_METADATA_KEY = "tai42.timing"
+TIMING_ABSENT = "absent"
+# Metadata key of a generation's full generated-message record (kept in the metadata object, not promoted).
+GENERATION_MESSAGE_METADATA_KEY = "tai42.message"
+# Metadata keys a writer stores as their own record attributes rather than inside the metadata object.
+PROMOTED_METADATA_KEYS: frozenset[str] = frozenset({STEP_ROLE_METADATA_KEY, TIMING_METADATA_KEY})
+
+
+class MonitoringExportHealth(BaseModel):
+    """What a writer could not deliver, cumulative since the writer was built in this process."""
+
+    model_config = ConfigDict(frozen=True)
+
+    spans_dropped: int = 0  # evicted by a full export queue
+    spans_failed: int = 0  # in a batch the exporter could not deliver
+    export_failures: int = 0  # export calls that failed (FAILURE result or exception)
+    attributes_dropped: int = 0  # attributes evicted from exported spans
+    records_failed: int = 0  # records (or one field of a record) the writer could not build
+    last_error: str | None = None
 
 
 class SpanWindowItem(BaseModel):

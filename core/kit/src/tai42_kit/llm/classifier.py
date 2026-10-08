@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal, cast
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 from tai42_contract.app import tai42_app
-from tai42_contract.monitoring import MonitoringLevel, SpanKind
+from tai42_contract.monitoring import MonitoringLevel, SpanKind, TokenUsage
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
 from tai42_kit.llm.run_trace import resolve_trace_context
@@ -137,14 +137,11 @@ def _cached_classifier(provider: str, kwargs_key: KwargsCacheKey) -> Runnable[Cl
     return _build_classifier(provider, **unwrap_secret_kwargs(kwargs_key.kwargs))
 
 
-def _usage_details(usage: ClassifyUsage) -> dict[str, int] | None:
-    """The response's token counts as a neutral usage map, or ``None`` when none were reported."""
-    details: dict[str, int] = {}
-    if usage.input_tokens is not None:
-        details["input"] = usage.input_tokens
-    if usage.output_tokens is not None:
-        details["output"] = usage.output_tokens
-    return details or None
+def _usage(usage: ClassifyUsage) -> TokenUsage | None:
+    """The response's token counts, or ``None`` when none were reported."""
+    if usage.input_tokens is None and usage.output_tokens is None:
+        return None
+    return TokenUsage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
 
 
 def _recording_classifier(
@@ -171,7 +168,7 @@ def _recording_classifier(
     def _record(response: ClassifyResponse, span: Any) -> None:
         span.update(
             model=response.model,
-            usage_details=_usage_details(response.usage),
+            usage=_usage(response.usage),
             metadata={"request_id": response.request_id} if response.request_id is not None else None,
         )
 

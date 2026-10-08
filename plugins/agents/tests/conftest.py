@@ -12,9 +12,9 @@ through the handle:
 * ``agents`` (``AppAgents``) — the decorator instantiates the class and stores
   the instance by name; ``get_agent`` raises on an unknown name (never a silent
   ``None``).
-* ``monitoring`` (``AppMonitoring``) — ``active`` exposes a stub backend whose
-  writer records each ``TraceContext`` and returns a fixed callback list, so the
-  run-config helper can be exercised with no live backend.
+* ``monitoring`` (``AppMonitoring``) — ``active`` exposes a backend whose writer is
+  the kit's real OpenTelemetry writer over an in-memory exporter, so a test reads back
+  the records an agent run produced with no live backend.
 * ``tools`` (``AppTools``) — ``get_client_tools`` / ``run_tool`` are backed by the
   mutable ``client_tools`` / ``tool_runners`` maps. A test populates the map it
   needs; an unknown name raises a ``RuntimeError`` carrying the name — the
@@ -40,10 +40,12 @@ import mimetypes
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
+from unittest import mock
 
 import pytest
-from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.tools import StructuredTool
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors import ResolvedConnectionAuth
@@ -51,6 +53,8 @@ from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm import RunTrace
+from tai42_kit.monitoring.otel import OtelWriter
+from tai42_kit.monitoring.testing import InMemoryOtelReader
 from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
@@ -80,34 +84,29 @@ class RecordingAgents:
         return agent
 
 
-class RecordingCallbackHandler(BaseCallbackHandler):
-    """A real LangChain callback handler bound to one run's trace id.
+class RecordingMonitoringWriter(OtelWriter):
+    """The kit's real OpenTelemetry writer over an in-memory exporter.
 
-    Records into the writer the trace id each model call fires under, so a test proves a
-    feature's model call reached the monitoring seam under the run's resolved trace. Being
-    a genuine ``BaseCallbackHandler`` (not a sentinel), it rides a live graph/LLM run's
-    config unharmed — no call site has to strip it.
+    The kit's monitoring callback handler records every run of an agent through it, so a
+    test reads back the real records (``spans()``, ``reader``) a deployment would export.
     """
 
-    def __init__(self, writer: RecordingMonitoringWriter, trace_id: str | None) -> None:
-        self._writer = writer
-        self._trace_id = trace_id
-
-    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
-        self._writer.chat_model_starts.append(self._trace_id)
-
-
-class RecordingMonitoringWriter:
-    """A ``MonitoringWriter`` stub: records each ``TraceContext`` it is asked for and hands
-    back real callback handlers that record the trace id each model call fires under."""
-
     def __init__(self) -> None:
-        self.contexts: list[TraceContext] = []
-        self.chat_model_starts: list[str | None] = []
+        self.exporter = InMemorySpanExporter()
+        with mock.patch.dict(os.environ, {"OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED": "true"}):
+            super().__init__(exporter=self.exporter)
+            self._ensure_built()
+        self.reader = InMemoryOtelReader(self.exporter)
 
-    def get_monitoring_callbacks(self, ctx: TraceContext) -> list[object]:
-        self.contexts.append(ctx)
-        return [RecordingCallbackHandler(self, ctx.trace_id)]
+    def spans(self) -> list[ReadableSpan]:
+        """Every record ended so far."""
+        self.flush()
+        return list(self.exporter.get_finished_spans())
+
+    def clear(self) -> None:
+        """Forget the records ended so far."""
+        self.flush()
+        self.exporter.clear()
 
 
 def fake_run_trace(config: dict[str, Any] | None = None) -> RunTrace:

@@ -71,9 +71,8 @@ def mock_client() -> MagicMock:
 
 @pytest.fixture
 def manager(project: LangfuseProject, mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> LangfuseClientManager:
-    mgr = LangfuseClientManager([project], project.public_key)
+    mgr = LangfuseClientManager(project)
     # Never construct a real Langfuse client in unit tests.
-    monkeypatch.setattr(mgr, "_ensure_built", lambda: None)
     monkeypatch.setattr(mgr, "active_client", lambda: mock_client)
     return mgr
 

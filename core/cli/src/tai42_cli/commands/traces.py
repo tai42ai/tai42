@@ -105,3 +105,25 @@ def get_trace(
     with ctx_obj.client() as client:
         data = client.get(f"/api/observability/runs/{seg(trace_id)}/trace")
     emit_result(ctx_obj, data)
+
+
+@app.command("value")
+@covers(("GET", "/api/observability/runs/{trace_id}/spans/{span_id}/resolved"))
+def span_value(
+    ctx: typer.Context,
+    trace_id: Annotated[str, typer.Argument(help="Trace id.")],
+    span_id: Annotated[str, typer.Argument(help="Span (observation) id.")],
+    field: Annotated[str, typer.Option("--field", help="The span field: input or output.")] = "input",
+    pointer: Annotated[
+        str | None, typer.Option("--pointer", help="RFC 6901 JSON pointer into the field (e.g. /messages/0).")
+    ] = None,
+) -> None:
+    """Read one span field's value with every record reference resolved.
+
+    Example: ``tai traces value trace_abc span_1 --field output --pointer /outputs/n``
+    """
+    ctx_obj = app_context(ctx)
+    params = compact({"field": field, "pointer": pointer})
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/observability/runs/{seg(trace_id)}/spans/{seg(span_id)}/resolved", params=params)
+    emit_result(ctx_obj, data)

@@ -101,7 +101,7 @@ from tai42_e2e.manifests.marketplace import (
     build_marketplace_quarantine_stack,
     build_marketplace_stack,
 )
-from tai42_e2e.manifests.monitoring import build_monitoring_stack
+from tai42_e2e.manifests.monitoring import build_dead_collector_monitoring_stack, build_monitoring_stack
 from tai42_e2e.manifests.off import build_off_stack
 from tai42_e2e.manifests.projection import build_projection_authz_stack, build_projection_stack
 from tai42_e2e.manifests.routers import build_api_router_stack, build_default_router_stack, build_router_merge_stack
@@ -200,6 +200,7 @@ __all__ = [
     "build_claude_agent_stack",
     "build_connectors_stack",
     "build_core_stack",
+    "build_dead_collector_monitoring_stack",
     "build_deep_agent_durable_stack",
     "build_default_router_stack",
     "build_door_schedule_stack",

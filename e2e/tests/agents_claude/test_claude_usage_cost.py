@@ -3,7 +3,7 @@
 ``claude_code`` drives the Claude Agent SDK INSIDE the sandbox, so its model calls bypass the
 platform ``get_llm_async`` meter entirely. To stay billable it emits the SDK-reported
 usage/cost off the terminal ``result`` frame into the active trace as a generation span's
-cost fields (``Span.update(usage_details=...)``). The fixture monitoring backend records that
+cost fields (``Span.update(usage=...)``). The fixture monitoring backend records that
 emission on ``e2e:rec:span_cost``, and the stack names ``E2E_MONITOR_ACTIVE_TRACE`` so the
 cost-emission guard (an active trace) is satisfied on this backend-less stack.
 
@@ -64,4 +64,6 @@ async def test_sdk_reported_usage_is_emitted_as_span_cost(
     assert len(added) == 1, added
     record = json.loads(added[0])
     assert record["kind"] == "LLM", record
-    assert record["usage_details"] == {"input_tokens": 12, "output_tokens": 34, "total_cost_usd": 0.0042}, record
+    assert record["usage"] == {"input_tokens": 12, "output_tokens": 34, "total_tokens": None, "cost_usd": 0.0042}, (
+        record
+    )

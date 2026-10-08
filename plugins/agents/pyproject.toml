@@ -83,8 +83,10 @@ dev = [
     "pyyaml>=6",
     # Test-only: tests/test_config_util.py probes ``opentelemetry.context`` to prove a
     # root run leaves a caller's ambient attribution untouched (the builder attaches no
-    # fresh context). The shipped package imports no OpenTelemetry; only this test does.
+    # fresh context), and the monitoring tests record through the kit's OpenTelemetry
+    # writer over an in-memory exporter. The shipped package imports no OpenTelemetry.
     "opentelemetry-api>=1.30",
+    "tai42-kit[monitoring]>=7.7,<8",
     # Test-only: the skeleton-boot e2e integration test (tests/test_skeleton_e2e.py)
     # boots the real tai42-skeleton app in-process to prove tools_agent registers,
     # reports spec_runnable, authors, and streams end-to-end through it. Resolved

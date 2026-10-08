@@ -37,7 +37,7 @@ from tai42_contract.interactions import (
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
-from tai42_contract.monitoring.models import SpanKind
+from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm import resolve_trace_context
@@ -774,7 +774,13 @@ class ClaudeCodeAgent(Agent):
         with writer.start_span(
             name=f"{AGENT_NAME}.generation", kind=SpanKind.LLM, trace_context=trace_context, model=settings.model
         ) as span:
-            span.update(usage_details=frame.usage)
+            span.update(
+                usage=TokenUsage(
+                    input_tokens=frame.usage.get("input_tokens"),
+                    output_tokens=frame.usage.get("output_tokens"),
+                    cost_usd=frame.usage.get("total_cost_usd"),
+                )
+            )
 
 
 # --- module helpers ------------------------------------------------------------------------

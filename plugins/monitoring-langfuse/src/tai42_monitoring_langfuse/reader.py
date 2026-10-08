@@ -3,6 +3,7 @@
 - ``query_metrics`` -> the Metrics API.
 - ``list_spans_in_window`` -> the Observations API (one item per tool/node run).
 - ``get_trace`` / ``list_traces`` -> the Traces API.
+- ``get_observation`` -> the Observations API (one observation by id).
 
 ``LangfuseReader`` is a thin façade: it composes one query object per API surface
 and delegates each contract method to it. The reader methods are ``async`` but the
@@ -21,6 +22,7 @@ from tai42_contract.monitoring import (
     MetricsQuery,
     MetricsResult,
     MonitoringFilter,
+    MonitoringObservation,
     MonitoringTrace,
     MonitoringTraceSummary,
     OrderBy,
@@ -67,6 +69,10 @@ class LangfuseReader:
     async def get_trace(self, trace_id: str) -> MonitoringTrace:
         """Return the full :class:`MonitoringTrace` for ``trace_id``."""
         return await self._traces.get_trace(trace_id)
+
+    async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
+        """Return one observation of ``trace_id`` with its full input/output."""
+        return await self._traces.get_observation(trace_id, observation_id)
 
     async def list_traces(
         self,

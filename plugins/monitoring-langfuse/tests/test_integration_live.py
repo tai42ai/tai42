@@ -1,7 +1,8 @@
 """Live integration tests against a real Langfuse server.
 
 Run with ``pytest -m integration``. Credentials come from the ``LANGFUSE_*``
-environment; the suite skips cleanly when any is unset. Langfuse ingestion is
+environment and the writer exports to ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` (a collector
+in front of that Langfuse); the suite skips cleanly when any is unset. Langfuse ingestion is
 asynchronous, so the reader assertions verify the API calls parse — they do not
 require the just-emitted span to already be queryable.
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from unittest import mock
 
 import pytest
 from tai42_contract.monitoring import (
@@ -21,6 +23,7 @@ from tai42_contract.monitoring import (
     MonitoringTraceSummary,
     OrderBy,
     SpanKind,
+    TokenUsage,
 )
 
 from tai42_monitoring_langfuse import LangfuseMonitoring
@@ -30,7 +33,8 @@ pytestmark = pytest.mark.integration
 
 _SMOKE_TAG = "tai-monitoring-contract-smoke"
 
-_ENV_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST")
+# The reader's key pair plus the collector endpoint the writer exports through.
+_ENV_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
 
 
 def _creds() -> dict[str, str]:
@@ -48,7 +52,10 @@ def _backend_with_source(source: str = "tai") -> LangfuseMonitoring:
         host=creds["LANGFUSE_HOST"],
         source=source,
     )
-    return LangfuseMonitoring(projects=[cfg], default_public_key=cfg.public_key)
+    with mock.patch.dict(os.environ, {"OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED": "true"}):
+        backend = LangfuseMonitoring(project=cfg)
+        backend.writer.open_span(name="build", kind=SpanKind.CHAIN).end()
+    return backend
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +67,7 @@ def test_writer_emits_and_flushes(backend):
     writer = backend.writer
     with writer.trace_attributes(name="contract-smoke", tags=[_SMOKE_TAG]):
         with writer.start_span(name="smoke_node", kind=SpanKind.TOOL, input_={"ping": 1}) as span:
-            span.update(output={"pong": 2}, usage_details={"input": 1, "output": 1})
+            span.update(output={"pong": 2}, usage=TokenUsage(input_tokens=1, output_tokens=1))
         writer.create_event(name="smoke_event", input_={"e": 1}, output={"e": 2})
         tid = writer.current_trace_id()
     writer.flush()

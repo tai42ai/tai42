@@ -16,9 +16,19 @@ from tai42_kit.utils import worker_secret_capability as gate_state
 from tai42_skeleton.app import registry_staging
 from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.connectors.providers import registry as connector_registry
+from tai42_skeleton.monitoring import NoOpReader, NoOpWriter
 from tai42_skeleton.monitoring import registry as monitoring_registry
 from tai42_skeleton.operations.registry import operation_registry
 from tai42_skeleton.plugins import registry as studio_registry
+
+
+class _MarkedMonitoring:
+    """A monitoring backend carrying its marker; promoting it activates its (non-recording) writer."""
+
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+        self.writer = NoOpWriter()
+        self.reader = NoOpReader()
 
 
 @pytest.fixture
@@ -50,7 +60,7 @@ def _write(fresh: dict[str, Any], marker: str) -> None:
     fresh["accounts"].register("a", lambda: marker)
     fresh["operation"].write_target()["o"] = marker
     fresh["shapes"].write_target().append(marker)
-    fresh["monitoring"].set(marker)
+    fresh["monitoring"].set(_MarkedMonitoring(marker))
     fresh["studio"].set(marker)
     fresh["gate"].set(marker == "next")
 
@@ -62,7 +72,7 @@ def _committed(fresh: dict[str, Any]) -> dict[str, Any]:
         "accounts": [name for name, _ in fresh["accounts"].items()],
         "operation": dict(fresh["operation"].committed()),
         "shapes": list(fresh["shapes"].committed()),
-        "monitoring": fresh["monitoring"].current(),
+        "monitoring": fresh["monitoring"].current().marker,
         "studio": fresh["studio"].current(),
         "gate": fresh["gate"].current(),
     }

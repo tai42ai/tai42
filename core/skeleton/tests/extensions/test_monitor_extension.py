@@ -18,16 +18,20 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
+import orjson
 import pytest
 from fastmcp.utilities.types import get_cached_typeadapter
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from tai42_contract.monitoring import (
     Monitoring,
     MonitoringLevel,
     Span,
     SpanKind,
+    TokenUsage,
     TraceContext,
 )
 from tai42_contract.secrets import SecretValue
+from tai42_kit.monitoring.otel import OtelWriter
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -58,7 +62,7 @@ class _RecordingSpan(NoOpSpan):
         *,
         output: Any = None,
         model: str | None = None,
-        usage_details: dict[str, Any] | None = None,
+        usage: TokenUsage | None = None,
         metadata: dict[str, Any] | None = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,
@@ -67,7 +71,7 @@ class _RecordingSpan(NoOpSpan):
             {
                 "output": output,
                 "model": model,
-                "usage_details": usage_details,
+                "usage": usage,
                 "metadata": metadata,
                 "level": level,
                 "status_message": status_message,
@@ -312,9 +316,36 @@ def test_monitor_emits_span_with_name_kind_and_output():
     assert not any(u["level"] is MonitoringLevel.ERROR for u in updates)
 
 
-def test_monitor_masks_wrapped_secrets_in_span_input_and_output():
-    # The span is a recorder, not a live-caller door: a SecretValue in the arguments
-    # or the result is emitted as the placeholder, never the real value.
+def test_monitor_hands_the_writer_raw_secrets_and_the_writer_records_the_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The caller never masks: the raw SecretValue reaches the writer, and the writer
+    # (the kit's OpenTelemetry writer here) records the placeholder, never the value.
+    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
+    exporter = InMemorySpanExporter()
+    writer = OtelWriter(exporter=exporter)
+    backend = _RecordingMonitoring()
+    backend._recording_writer = writer  # type: ignore[assignment]
+    init_monitoring(backend)
+
+    async def run() -> Any:
+        manifest = _manifest("secret_roundtrip", "monitor", tool_module="tests.extensions._fixtures.tools_secret")
+        async with app.app_context(manifest):
+            return await app.tools.run_tool("secret_roundtrip_monitor", {"payload": SecretValue("in-secret")})
+
+    asyncio.run(run())
+    writer.flush()
+    (record,) = exporter.get_finished_spans()
+    attributes = dict(record.attributes or {})
+    assert orjson.loads(str(attributes["gen_ai.tool.call.arguments"]))["kwargs"] == {"payload": "[secret]"}
+    assert orjson.loads(str(attributes["gen_ai.tool.call.result"])) == {"echo": "[secret]", "token": "[secret]"}
+    text = repr(attributes)
+    assert "in-secret" not in text
+    assert "tok-4242-xyzzy" not in text
+    writer.shutdown()
+
+
+def test_monitor_passes_the_raw_secret_to_the_writer():
     backend = _RecordingMonitoring()
     init_monitoring(backend)
 
@@ -324,18 +355,8 @@ def test_monitor_masks_wrapped_secrets_in_span_input_and_output():
             return await app.tools.run_tool("secret_roundtrip_monitor", {"payload": SecretValue("in-secret")})
 
     asyncio.run(run())
-
-    assert len(backend.writer.spans) == 1
-    span = backend.writer.spans[0]
-    # Input: the secret argument is masked to the placeholder.
-    assert span["input"]["kwargs"] == {"payload": "[secret]"}
-    assert "in-secret" not in repr(span["input"])
-    # Output: both the echoed secret and the fresh one are masked.
-    updates = span["span"].updates
-    outputs = [u["output"] for u in updates if u["output"] is not None]
-    assert outputs == [{"echo": "[secret]", "token": "[secret]"}]
-    assert "in-secret" not in repr(outputs)
-    assert "tok-4242-xyzzy" not in repr(outputs)
+    (span,) = backend.writer.spans
+    assert isinstance(span["input"]["kwargs"]["payload"], SecretValue)
 
 
 def test_monitor_suppresses_span_when_a_trace_is_active():

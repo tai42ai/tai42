@@ -16,6 +16,7 @@ from tai42_contract.monitoring import (
     DEFAULT_LEVEL,
     MonitoringLevel,
     SpanKind,
+    TokenUsage,
     TraceContext,
 )
 
@@ -38,7 +39,7 @@ class RecordingSpan(NoOpSpan):
         *,
         output: Any = None,
         model: str | None = None,
-        usage_details: dict[str, Any] | None = None,
+        usage: TokenUsage | None = None,
         metadata: dict[str, Any] | None = None,
         level: MonitoringLevel | None = None,
         status_message: str | None = None,

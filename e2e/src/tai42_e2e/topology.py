@@ -115,6 +115,8 @@ class StackResources:
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
+    # The OTLP/HTTP traces endpoint of the collector the monitoring stack exports to.
+    otel_traces_endpoint: str | None = None
     # The in-process channel-provider stub origins the channel profile points the
     # plugins' outbound API base URLs at (``CHANNEL_<X>_API_BASE_URL``). ``None``
     # on every non-channel stack.

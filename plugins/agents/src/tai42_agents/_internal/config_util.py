@@ -5,8 +5,9 @@
   ``langgraph_config`` base.
 * :func:`init_langgraph_config` ensures a ``thread_id`` and a ``recursion_limit``,
   then delegates to the kit's :func:`~tai42_kit.llm.bind_run_trace` to resolve the
-  run's trace lineage and append the active monitoring backend's callbacks, returning
-  the :class:`~tai42_kit.llm.RunTrace` whose ``config`` the graph is invoked with.
+  run's trace lineage and append the kit's monitoring callbacks (declaring the
+  ``create_agent`` graph's grouping nodes), returning the
+  :class:`~tai42_kit.llm.RunTrace` whose ``config`` the graph is invoked with.
 * :func:`with_run_trace_lineage` threads a resolved trace context onto a base config so
   a FEATURE run that drives several sub-runs (an evaluator/critic loop, parallel voters
   plus a judge) binds ONE lineage at its entry and nests every sub-run under it.
@@ -22,10 +23,14 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from tai42_contract.monitoring import TraceContext
+from tai42_contract.monitoring import MONITORING_PARENT_SPAN_ID_KEY, MONITORING_TRACE_ID_KEY, TraceContext
 from tai42_kit.llm import RunTrace, bind_run_trace
 
 from tai42_agents.settings import agents_limits_settings
+
+# The nodes of LangChain's ``create_agent`` graph (also under deepagents) that hold the
+# agent's steps rather than being one: the model call node and the tool-calls node.
+CREATE_AGENT_GROUPING_NODES: frozenset[str] = frozenset({"model", "tools"})
 
 
 def build_run_config(
@@ -64,8 +69,10 @@ def init_langgraph_config(config: dict[str, Any] | None = None) -> RunTrace:
     top-level graph runs uncapped; a caller-supplied value, ``0`` included, wins) — onto
     a by-value copy of the caller's config, then returns
     :func:`~tai42_kit.llm.bind_run_trace`'s :class:`~tai42_kit.llm.RunTrace`. The kit
-    resolves the trace lineage and appends the active backend's monitoring callbacks; the
-    caller runs the graph with the returned ``RunTrace.config``.
+    resolves the trace lineage and appends its monitoring callbacks, which mark the
+    ``create_agent`` graph's :data:`CREATE_AGENT_GROUPING_NODES` as grouping steps and
+    record every chain value once, referenced from later records; the caller runs the
+    graph with the returned ``RunTrace.config``.
 
     The ``recursion_limit`` bounds the top-level graph only — each deep-agent task-tool
     subagent runs its own graph under deepagents' own bound.
@@ -81,13 +88,14 @@ def init_langgraph_config(config: dict[str, Any] | None = None) -> RunTrace:
     if "recursion_limit" not in new_config:
         new_config["recursion_limit"] = agents_limits_settings().default_recursion_limit
 
-    return bind_run_trace(new_config)
+    return bind_run_trace(new_config, grouping_nodes=CREATE_AGENT_GROUPING_NODES)
 
 
 def with_run_trace_lineage(config: dict[str, Any] | None, context: TraceContext) -> dict[str, Any]:
     """Thread a resolved trace ``context`` onto a by-value copy of ``config``'s ``configurable``.
 
-    Sets ``monitoring_trace_id`` (and ``monitoring_parent_span_id`` when the context
+    Sets :data:`~tai42_contract.monitoring.MONITORING_TRACE_ID_KEY` (and
+    :data:`~tai42_contract.monitoring.MONITORING_PARENT_SPAN_ID_KEY` when the context
     carries an anchor) so the sub-run this config drives JOINS ``context``'s trace rather
     than minting its own root. A FEATURE run that drives several sub-runs resolves ONE
     lineage at its entry (:func:`~tai42_kit.llm.resolve_trace_context`) and derives each
@@ -96,8 +104,8 @@ def with_run_trace_lineage(config: dict[str, Any] | None, context: TraceContext)
     """
     new_config = dict(config or {})
     configurable = dict(new_config.get("configurable", {}))
-    configurable["monitoring_trace_id"] = context.trace_id
+    configurable[MONITORING_TRACE_ID_KEY] = context.trace_id
     if context.parent_span_id is not None:
-        configurable["monitoring_parent_span_id"] = context.parent_span_id
+        configurable[MONITORING_PARENT_SPAN_ID_KEY] = context.parent_span_id
     new_config["configurable"] = configurable
     return new_config

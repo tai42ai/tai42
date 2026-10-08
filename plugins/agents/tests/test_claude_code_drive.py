@@ -25,7 +25,7 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
-from tai42_contract.monitoring.models import SpanKind
+from tai42_contract.monitoring.models import SpanKind, TokenUsage
 from tai42_contract.template import TemplatedText
 from tests._claude_app import LocalApp, RecordingWriter, build_local_app
 from tests._claude_stubs import (
@@ -190,7 +190,7 @@ def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.Monke
     span = writer.spans[0]
     assert span["kind"] == SpanKind.LLM
     assert span["model"] == "claude-x"
-    assert span["usage_details"] == {"input_tokens": 3, "output_tokens": 5}
+    assert span["usage"] == TokenUsage(input_tokens=3, output_tokens=5)
     # The cost half must NOT route through update_current_span (which carries no cost).
     assert writer.update_current_calls == []
 
@@ -206,7 +206,7 @@ def test_standalone_run_mints_a_root_trace_carrying_the_usage_span(monkeypatch: 
     assert len(writer.spans) == 1
     span = writer.spans[0]
     assert span["kind"] == SpanKind.LLM
-    assert span["usage_details"] == {"input_tokens": 3, "output_tokens": 5}
+    assert span["usage"] == TokenUsage(input_tokens=3, output_tokens=5)
     # A root trace context is minted (a 32-hex id, no parent span), so the span is its root.
     ctx = span["trace_context"]
     assert ctx is not None
