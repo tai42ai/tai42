@@ -25,8 +25,8 @@ from tai42_contract.monitoring import (
     MonitoringTraceSummary,
     ObservationNotFoundError,
     OrderBy,
+    SpanKind,
     TraceNotFoundError,
-    preview,
 )
 
 from tai42_monitoring_langfuse.filters import (
@@ -37,7 +37,7 @@ from tai42_monitoring_langfuse.filters import (
     _trace_metric_filter,
 )
 from tai42_monitoring_langfuse.measures import _measure_key, _measure_value, _nonneg_number, _pick
-from tai42_monitoring_langfuse.query_base import _PAGE_SIZE, _LangfuseQuery
+from tai42_monitoring_langfuse.query_base import PAGE_SIZE, _LangfuseQuery
 from tai42_monitoring_langfuse.sorting import _trace_sort
 
 # The trace.list field groups a row summary needs: core attributes, io (input,
@@ -112,6 +112,8 @@ class TraceQuery(_LangfuseQuery):
         the page's token totals, and one paged observations query for the page's
         error status. ``get_trace`` remains the only body door.
         """
+        if limit is not None and limit > PAGE_SIZE:
+            raise ValueError(f"limit {limit} exceeds the reader's maximum page size {PAGE_SIZE}")
         client = await self._active_client()
         source = self._m.active_source()
 
@@ -257,14 +259,14 @@ class TraceQuery(_LangfuseQuery):
                 order_by="timestamp.desc",
                 from_timestamp=from_timestamp,
                 to_timestamp=to_timestamp,
-                limit=_PAGE_SIZE,
+                limit=PAGE_SIZE,
                 page=list_page,
                 filter_=filter_,
             )
             for row in batch:
                 if row.id in wanted:
                     found[row.id] = row
-            if len(batch) < _PAGE_SIZE:
+            if len(batch) < PAGE_SIZE:
                 break
             list_page += 1
 
@@ -456,7 +458,7 @@ class TraceQuery(_LangfuseQuery):
                     to_start_time=t1,
                     level="ERROR",
                     environment=source,
-                    limit=_PAGE_SIZE,
+                    limit=PAGE_SIZE,
                     page=page,
                     request_options=self._request_options(),
                 )
@@ -468,7 +470,7 @@ class TraceQuery(_LangfuseQuery):
             meta = getattr(response, "meta", None)
             total_pages = getattr(meta, "total_pages", None) if meta else None
             if total_pages is None:
-                if len(data) >= _PAGE_SIZE:
+                if len(data) >= PAGE_SIZE:
                     raise MonitoringReadNotSupportedError(
                         "error status could not be resolved within the bounded window; narrow the time range"
                     )
@@ -493,8 +495,8 @@ class TraceQuery(_LangfuseQuery):
             timestamp=row.timestamp,
             name=getattr(row, "name", None),
             tags=list(getattr(row, "tags", None) or []),
-            input_preview=preview(getattr(row, "input", None)),
-            output_preview=preview(getattr(row, "output", None)),
+            input=getattr(row, "input", None),
+            output=getattr(row, "output", None),
             latency_ms=latency_ms,
             # trace.list with the metrics field group returns real costs; -1 marks
             # a backend that could not compute one — surface it as None, not -1.
@@ -524,27 +526,65 @@ class TraceQuery(_LangfuseQuery):
             id=raw.get("id", ""),
             trace_id=_pick(raw, "trace_id", "traceId"),
             parent_id=_pick(raw, "parent_observation_id", "parentObservationId"),
-            type=raw.get("type"),
+            kind=observation_kind(raw.get("type")),
             name=raw.get("name"),
             level=raw.get("level"),
             status_message=_pick(raw, "status_message", "statusMessage"),
             input=raw.get("input"),
             output=raw.get("output"),
-            metadata=_producer_metadata(raw),
-            usage=_pick(raw, "usage_details", "usageDetails", "usage"),
+            metadata=producer_metadata(raw.get("metadata"), raw.get("id")),
             model=_pick(raw, "provided_model_name", "model"),
+            **_token_counts(_pick(raw, "usage_details", "usageDetails", "usage")),
             start=_pick(raw, "start_time", "startTime"),
             end=_pick(raw, "end_time", "endTime"),
         )
 
 
-def _producer_metadata(raw: dict[str, Any]) -> dict[str, Any] | None:
+# Langfuse observation type -> neutral kind; any type not named here is a CHAIN.
+_TYPE_TO_KIND: dict[str, SpanKind] = {
+    "GENERATION": SpanKind.LLM,
+    "EMBEDDING": SpanKind.LLM,
+    "TOOL": SpanKind.TOOL,
+    "RETRIEVER": SpanKind.TOOL,
+    "EVENT": SpanKind.EVENT,
+}
+
+
+def observation_type(raw_type: Any) -> str | None:
+    """The Langfuse observation type as an upper-case string; ``None`` when the row carries none."""
+    if raw_type is None:
+        return None
+    return (raw_type.value if hasattr(raw_type, "value") else str(raw_type)).upper()
+
+
+def observation_kind(raw_type: Any) -> SpanKind | None:
+    """The neutral kind of a Langfuse observation type; ``None`` when the row carries no type."""
+    obs_type = observation_type(raw_type)
+    if obs_type is None:
+        return None
+    return _TYPE_TO_KIND.get(obs_type, SpanKind.CHAIN)
+
+
+def _token_counts(usage: Any) -> dict[str, int | None]:
+    """The token counts from Langfuse's usage keys ``input`` / ``output`` / ``total``; ``None`` when absent."""
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    if not isinstance(usage, Mapping):
+        usage = {}
+
+    def _count(key: str) -> int | None:
+        value = usage.get(key)
+        return None if value is None else int(value)
+
+    return {"input_tokens": _count("input"), "output_tokens": _count("output"), "total_tokens": _count("total")}
+
+
+def producer_metadata(metadata: Any, observation_id: Any) -> dict[str, Any] | None:
     """The record's producer metadata: the decoded ``tai42.metadata`` object plus the promoted keys.
 
     The backend keeps a non-SDK span's attributes under ``metadata.attributes``; ``None``
     when the record carries none.
     """
-    metadata = raw.get("metadata")
     attributes = metadata.get("attributes") if isinstance(metadata, Mapping) else None
     if not isinstance(attributes, Mapping):
         return None
@@ -554,7 +594,7 @@ def _producer_metadata(raw: dict[str, Any]) -> dict[str, Any] | None:
         encoded = orjson.loads(encoded)
     if encoded is not None:
         if not isinstance(encoded, Mapping):
-            raise MonitoringError(f"malformed tai42.metadata attribute on observation {raw.get('id')}")
+            raise MonitoringError(f"malformed tai42.metadata attribute on observation {observation_id}")
         producer.update(encoded)
     for key in PROMOTED_METADATA_KEYS:
         if key in attributes:

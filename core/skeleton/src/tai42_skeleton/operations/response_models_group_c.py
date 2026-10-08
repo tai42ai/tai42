@@ -25,6 +25,7 @@ from tai42_contract.interactions.models import LocationElement, MediaItem
 
 from tai42_skeleton.app.kind_status import KindStatus
 from tai42_skeleton.plugins.registry import StudioPluginManifest
+from tai42_skeleton.routers.observability_support import RunSortKey
 
 # --- Agents -----------------------------------------------------------------
 
@@ -383,8 +384,8 @@ class MetricsResult(BaseModel):
 class ObservabilityRunView(BaseModel):
     """One run-list row projected from a trace summary.
 
-    ``inputPreview``/``outputPreview`` are the backend's server-bounded
-    (structurally-clipped) JSON previews; the full bodies live on the trace.
+    ``inputPreview``/``outputPreview`` are server-bounded (structurally-clipped)
+    JSON previews of the run's input and output; the full bodies live on the trace.
     Nullable aggregates are ``null`` when the backend returned none.
     """
 
@@ -408,28 +409,63 @@ class ObservabilityRunsPage(BaseModel):
     nextPage: int | None = None
 
 
-class SpanView(BaseModel):
-    """One span within a run trace.
+class SpanOutlineView(BaseModel):
+    """One span within a run trace, without its input and output.
 
-    ``input``/``output``/``usage``/``metadata`` are the backend's free-form values
-    (open JSON); ``metadata`` is passed through whole, the platform reading no key
-    out of it.
+    ``kind`` is the backend's observation type mapped onto the neutral kinds; the token
+    counts are ``null`` when the producer reported none. ``metadata`` is the producer's
+    metadata (open JSON), passed through whole, the platform reading no key out of it.
     """
 
     id: str
     parentId: str | None = None
     traceId: str | None = None
     name: str | None = None
-    type: str | None = None
+    kind: Literal["LLM", "TOOL", "CHAIN", "EVENT"] | None = None
     level: str | None = None
     statusMessage: str | None = None
     start: str | None = None
     end: str | None = None
     model: str | None = None
-    usage: JsonValue = None
+    inputTokens: int | None = None
+    outputTokens: int | None = None
+    totalTokens: int | None = None
     metadata: JsonValue = None
+
+
+class SpanView(SpanOutlineView):
+    """One span within a run trace, with its free-form input and output (open JSON)."""
+
     input: JsonValue = None
     output: JsonValue = None
+
+
+class RunTraceOutlineView(BaseModel):
+    """The span tree of one run: every span without its input and output."""
+
+    traceId: str
+    spans: list[SpanOutlineView]
+
+
+class ObservabilityMetricsCapabilities(BaseModel):
+    """The neutral measures and dimensions the backend's metrics query serves."""
+
+    measures: list[str]
+    dimensions: list[str]
+
+
+class ObservabilityCapabilities(BaseModel):
+    """What the monitoring backend serves, in the run list's wire names.
+
+    ``pageSizeMax`` is the largest run-list page; ``sortKeys`` the run-list sort keys it
+    serves; ``incompatibleFilters`` maps a sort key to the run-list filter params it cannot
+    be combined with.
+    """
+
+    pageSizeMax: int
+    sortKeys: list[RunSortKey]
+    incompatibleFilters: dict[str, list[str]]
+    metrics: ObservabilityMetricsCapabilities
 
 
 class RunTraceView(BaseModel):

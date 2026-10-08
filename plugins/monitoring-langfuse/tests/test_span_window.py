@@ -13,14 +13,20 @@ from tai42_contract.monitoring import MonitoringFilter, MonitoringReadNotSupport
 from tai42_monitoring_langfuse.reader import LangfuseReader
 
 
+def _marked(role: str) -> dict:
+    # A Langfuse observation keeps the record's promoted attributes under ``metadata.attributes``.
+    return {"attributes": {"tai42.step_role": role}}
+
+
 async def test_list_spans_selects_tool_granularity(manager, mock_client, obs, obs_page):
     observations = [
         obs(id="span1", type="SPAN", name="my_node"),
         obs(id="tool1", type="TOOL", name="search"),
-        obs(id="gen1", type="GENERATION", name="llm"),  # nested LLM -> excluded
-        obs(id="evt1", type="EVENT", name="ToolCall:search"),  # event marker -> excluded
-        obs(id="grp1", type="SPAN", name="tools"),  # grouping chain -> excluded
-        obs(id="jq1", type="SPAN", name="condition:check"),  # jq sub-step -> excluded
+        obs(id="gen1", type="GENERATION", name="llm"),  # a generation is never an item
+        obs(id="emb1", type="EMBEDDING", name="embed"),  # nor an embedding call
+        obs(id="evt1", type="EVENT", name="ToolCall:search"),  # nor an event
+        obs(id="grp1", type="SPAN", name="tools", metadata=_marked("grouping")),
+        obs(id="sub1", type="SPAN", name="condition:check", metadata=_marked("sub_step")),
     ]
     mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
     mock_client.api.trace.get.return_value = SimpleNamespace(tags=["run:7"])
@@ -34,6 +40,22 @@ async def test_list_spans_selects_tool_granularity(manager, mock_client, obs, ob
     assert all(i.tags == ["run:7"] for i in items)
 
 
+async def test_a_step_is_selected_by_its_marker_never_by_its_name(manager, mock_client, obs, obs_page):
+    observations = [
+        obs(id="named_tools", type="SPAN", name="tools"),
+        obs(id="named_model", type="SPAN", name="model"),
+        obs(id="colon", type="SPAN", name="a:b"),
+        obs(id="grouping", type="SPAN", name="anything", metadata=_marked("grouping")),
+        obs(id="sub_step", type="TOOL", name="other", metadata=_marked("sub_step")),
+        obs(id="unmarked_meta", type="SPAN", name="n", metadata={"attributes": {"k": "v"}}),
+    ]
+    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
+    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    items = await LangfuseReader(manager).list_spans_in_window(now, now)
+    assert {i.id for i in items} == {"named_tools", "named_model", "colon", "unmarked_meta"}
+
+
 async def test_list_spans_run_scope_and_kind_narrowing(manager, mock_client, obs, obs_page):
     observations = [
         obs(id="tool1", type="TOOL", name="search"),
@@ -41,6 +63,7 @@ async def test_list_spans_run_scope_and_kind_narrowing(manager, mock_client, obs
         obs(id="chain1", type="CHAIN", name="step"),
         obs(id="retr1", type="RETRIEVER", name="lookup"),
         obs(id="span1", type="SPAN", name="node"),
+        obs(id="gen1", type="GENERATION", name="llm"),
     ]
     mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
     mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
@@ -55,9 +78,14 @@ async def test_list_spans_run_scope_and_kind_narrowing(manager, mock_client, obs
     items = await reader.list_spans_in_window(now, now)
     assert {i.id for i in items} == {"tool1", "agent1", "chain1", "retr1", "span1"}
 
-    # kind=TOOL narrows within the set to TOOL-typed observations only.
+    # kind narrows within the set by the mapped neutral kind.
     items = await reader.list_spans_in_window(now, now, kind=SpanKind.TOOL)
-    assert {i.id for i in items} == {"tool1"}
+    assert {i.id for i in items} == {"tool1", "retr1"}
+    items = await reader.list_spans_in_window(now, now, kind=SpanKind.CHAIN)
+    assert {i.id for i in items} == {"agent1", "chain1", "span1"}
+    # A generation or an event is never an item, so those kinds select nothing.
+    assert await reader.list_spans_in_window(now, now, kind=SpanKind.LLM) == []
+    assert await reader.list_spans_in_window(now, now, kind=SpanKind.EVENT) == []
 
 
 async def test_list_spans_failed_tag_fetch_degrades_to_empty(manager, mock_client, obs, obs_page):

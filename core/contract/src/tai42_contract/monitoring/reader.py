@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from tai42_contract.monitoring.models import (
+    ListCapability,
     MetricsCapability,
     MetricsQuery,
     MetricsResult,
@@ -41,6 +42,22 @@ class MonitoringReader(Protocol):
         """
         ...
 
+    def list_capability(self) -> ListCapability:
+        """Declare which sorts ``list_traces`` serves and which filters each sort cannot combine with.
+
+        A pure capability declaration (no I/O), so a caller offers only the sorts and
+        filter combinations the backend serves. ``list_traces`` raises
+        ``MonitoringReadNotSupportedError`` for anything outside it.
+        """
+        ...
+
+    def max_page_size(self) -> int:
+        """Declare the largest ``limit`` one ``list_traces`` call accepts.
+
+        A pure declaration (no I/O). A ``limit`` above it raises ``ValueError``.
+        """
+        ...
+
     async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
         """Totals / analytics screen — server-side aggregation.
 
@@ -65,7 +82,9 @@ class MonitoringReader(Protocol):
 
         CONTRACT GUARANTEE: exactly one item per tool execution in the
         window. Every reader performs this tool-granularity selection — it is
-        not an optional filter.
+        not an optional filter. A reader selects steps by the producers' marker:
+        an observation whose metadata ``tai42.step_role`` is ``grouping`` or
+        ``sub_step`` is never an item; generations and events are never items.
 
         ``run`` scopes to a single run (one trace); ``None`` = all runs in the
         window. ``kind`` narrows WITHIN the tool-granularity set (never widens
@@ -115,10 +134,10 @@ class MonitoringReader(Protocol):
         half-open window ``[from, to)``; either may be omitted for an open end.
         ``filter`` applies the neutral ``MonitoringFilter`` clauses (tags live
         here, not as a discrete param). ``order_by`` sorts the result; omitted ⇒
-        newest-first (``timestamp`` desc). Sortable fields: ``timestamp``,
-        ``total_cost``, ``name``, ``id``, ``latency``, ``total_tokens`` — of
-        these ``total_cost`` / ``latency`` / ``total_tokens`` rank globally (see
-        ``OrderBy``); the rest sort natively. An unsupported ``order_by.field``
-        or filter clause raises ``MonitoringReadNotSupportedError``.
+        newest-first (``timestamp`` desc). The sortable fields and the filters
+        each sort cannot combine with are declared by ``list_capability``; a sort
+        or combination outside it, or another unsupported filter clause, raises
+        ``MonitoringReadNotSupportedError``. A ``limit`` above ``max_page_size()``
+        raises ``ValueError``.
         """
         ...

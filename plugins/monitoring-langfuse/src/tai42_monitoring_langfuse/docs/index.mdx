@@ -34,11 +34,13 @@ from the project settings.
 | `LANGFUSE_TIMEOUT_SECONDS` | `30` | Read request timeout. |
 | `LANGFUSE_TRACING_ENVIRONMENT` | `tai` | Langfuse `environment` stamped on every record (as `deployment.environment.name`), and the scope every read filters by. |
 
-These five are the only `LANGFUSE_*` names the backend reads. The Langfuse SDK's
-own export settings (`LANGFUSE_FLUSH_AT`, `LANGFUSE_FLUSH_INTERVAL`,
+These five are the only `LANGFUSE_*` names the backend reads, and the plugin owns
+the `LANGFUSE_` prefix: any other `LANGFUSE_*` name — the Langfuse SDK's own export
+and debug settings (`LANGFUSE_FLUSH_AT`, `LANGFUSE_FLUSH_INTERVAL`,
 `LANGFUSE_OTEL_TRACES_EXPORT_PATH`, `LANGFUSE_MEDIA_UPLOAD_ENABLED`,
-`LANGFUSE_DEBUG`) have no effect: the export is tuned through the `OTEL_*`
-environment below and the collector.
+`LANGFUSE_DEBUG`) or a mistyped name — refuses boot and every env write with an
+error naming it. The export is tuned through the `OTEL_*` environment below and
+the collector.
 
 ### The writer: the standard OpenTelemetry environment
 

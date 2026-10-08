@@ -368,6 +368,25 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "outputPreview",
         ),
     ),
+    ("GET", "/api/observability/runs/{trace_id}/trace/outline"): RouteShape(
+        items_key="spans",
+        columns=(
+            "id",
+            "parentId",
+            "traceId",
+            "name",
+            "kind",
+            "level",
+            "statusMessage",
+            "start",
+            "end",
+            "model",
+            "inputTokens",
+            "outputTokens",
+            "totalTokens",
+            "metadata",
+        ),
+    ),
     ("GET", "/api/plugins"): RouteShape(
         items_key=None, columns=("name", "version", "api_version", "entry", "integrity", "contributions")
     ),

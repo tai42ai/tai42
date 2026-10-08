@@ -16,6 +16,7 @@ from typing import Any
 from tai42_contract.monitoring import (
     DEFAULT_LEVEL,
     Dimension,
+    ListCapability,
     Measure,
     MetricsCapability,
     MetricsQuery,
@@ -195,8 +196,22 @@ class NoOpWriter:
         """Shut down nothing."""
 
 
+# The contract's documented ``list_traces`` sort fields; the no-op reader serves every one.
+_TRACE_SORT_FIELDS = frozenset({"timestamp", "total_cost", "name", "id", "latency", "total_tokens"})
+# The declared page ceiling; the no-op reader serves an empty page of any size up to it.
+_MAX_PAGE_SIZE = 1000
+
+
 class NoOpReader:
     """A reader that returns empty results."""
+
+    def list_capability(self) -> ListCapability:
+        """Declare every sort with no incompatible filter; the disabled backend serves each as an empty page."""
+        return ListCapability(sort_fields=_TRACE_SORT_FIELDS)
+
+    def max_page_size(self) -> int:
+        """The declared page ceiling."""
+        return _MAX_PAGE_SIZE
 
     def metrics_capability(self) -> MetricsCapability:
         """Declare the full neutral vocabulary; the disabled backend serves it as empty data, not an error."""
@@ -239,7 +254,9 @@ class NoOpReader:
         filter_: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
     ) -> list[MonitoringTraceSummary]:
-        """Return no traces."""
+        """Return no traces; a ``limit`` above :meth:`max_page_size` raises ``ValueError``."""
+        if limit is not None and limit > _MAX_PAGE_SIZE:
+            raise ValueError(f"limit {limit} exceeds the reader's maximum page size {_MAX_PAGE_SIZE}")
         return []
 
 

@@ -3,7 +3,8 @@
 It maps each finished span of an ``InMemorySpanExporter`` back to a ``MonitoringObservation``
 through the writer's attribute schema (the reader is the schema's inverse), so a consumer's
 proof test walks and resolves a recording with no running backend. Flush the writer before
-reading. Every list and aggregate read raises ``MonitoringReadNotSupportedError``.
+reading. Every list and aggregate read raises ``MonitoringReadNotSupportedError``; the declarations
+serve no sort and no measure.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import StatusCode
 from tai42_contract.monitoring import (
     PROMOTED_METADATA_KEYS,
+    ListCapability,
     MetricsCapability,
     MetricsQuery,
     MetricsResult,
@@ -38,6 +40,7 @@ from tai42_kit.monitoring.otel import attributes as attr
 __all__ = ["InMemoryOtelReader", "span_to_observation"]
 
 _NOT_SUPPORTED = "in-memory test reader"
+_MAX_PAGE_SIZE = 100
 
 
 def _decode(value: Any) -> Any:
@@ -58,18 +61,9 @@ def _metadata(attributes: Mapping[str, Any]) -> dict[str, Any] | None:
     return metadata or None
 
 
-def _usage(attributes: Mapping[str, Any]) -> dict[str, Any] | None:
-    usage = {
-        name: attributes[key]
-        for name, key in (
-            ("input_tokens", attr.GEN_AI_USAGE_INPUT_TOKENS),
-            ("output_tokens", attr.GEN_AI_USAGE_OUTPUT_TOKENS),
-            ("total_tokens", attr.USAGE_TOTAL_TOKENS),
-            ("cost_usd", attr.USAGE_COST_USD),
-        )
-        if key in attributes
-    }
-    return usage or None
+def _int_attribute(attributes: Mapping[str, Any], key: str) -> int | None:
+    value = attributes.get(key)
+    return None if value is None else int(value)
 
 
 def span_to_observation(span: ReadableSpan) -> MonitoringObservation:
@@ -85,14 +79,16 @@ def span_to_observation(span: ReadableSpan) -> MonitoringObservation:
         id=format(context.span_id, "016x") if context else "",
         trace_id=format(context.trace_id, "032x") if context else None,
         parent_id=format(span.parent.span_id, "016x") if span.parent is not None else None,
-        type=kind.value,
+        kind=kind,
         name=span.name,
         level=attributes.get(attr.LEVEL),
         status_message=status_message,
         input=_decode(attributes[input_key]) if input_key in attributes else None,
         output=_decode(attributes[output_key]) if output_key in attributes else None,
         metadata=_metadata(attributes),
-        usage=_usage(attributes),
+        input_tokens=_int_attribute(attributes, attr.GEN_AI_USAGE_INPUT_TOKENS),
+        output_tokens=_int_attribute(attributes, attr.GEN_AI_USAGE_OUTPUT_TOKENS),
+        total_tokens=_int_attribute(attributes, attr.USAGE_TOTAL_TOKENS),
         model=attributes.get(attr.GEN_AI_RESPONSE_MODEL, attributes.get(attr.GEN_AI_REQUEST_MODEL)),
         start=_ts(span.start_time),
         end=_ts(span.end_time),
@@ -139,6 +135,14 @@ class InMemoryOtelReader:
     def metrics_capability(self) -> MetricsCapability:
         """No measure and no dimension is served."""
         return MetricsCapability(measures=frozenset(), dimensions=frozenset())
+
+    def list_capability(self) -> ListCapability:
+        """No sort is served: ``list_traces`` is not supported."""
+        return ListCapability(sort_fields=frozenset())
+
+    def max_page_size(self) -> int:
+        """The declared page ceiling; ``list_traces`` is not supported at any size."""
+        return _MAX_PAGE_SIZE
 
     async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
         """Not supported."""

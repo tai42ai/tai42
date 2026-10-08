@@ -135,7 +135,7 @@ async def _assert_resolved_equals_real(
     observations: list[MonitoringObservation], capture: _Capture, exporter: InMemorySpanExporter
 ) -> list[MonitoringObservation]:
     reader = InMemoryOtelReader(exporter)
-    chains = [o for o in observations if o.type == SpanKind.CHAIN.value]
+    chains = [o for o in observations if o.kind is SpanKind.CHAIN]
     assert chains
     for record in chains:
         assert record.trace_id is not None
@@ -235,15 +235,15 @@ def test_synthetic_graph_parentage_current_span_grouping_and_producer_mode(
     assert by_name["a"].metadata["tai42.step_role"] == StepRole.GROUPING.value
     for name in ("b", "p1", "p2"):
         assert "tai42.step_role" not in (by_name[name].metadata or {}), name
-    for chain in (o for o in observations if o.type == SpanKind.CHAIN.value):
+    for chain in (o for o in observations if o.kind is SpanKind.CHAIN):
         assert chain.input is None, chain.name
         assert chain.output is None, chain.name
-    (llm,) = [o for o in observations if o.type == SpanKind.LLM.value]
+    (llm,) = [o for o in observations if o.kind is SpanKind.LLM]
     assert llm.parent_id == by_name["a"].id
     assert llm.input == [{"role": "user", "parts": [{"type": "text", "content": "hello"}]}]
     assert llm.output[0]["parts"][0]["content"] == _answer(1)
     assert llm.output[0]["finish_reason"] == "stop"
-    assert llm.usage == {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}
+    assert (llm.input_tokens, llm.output_tokens, llm.total_tokens) == (10, 1, 11)
     assert llm.model == "scripted-1"
     assert llm.metadata is not None
     assert llm.metadata["tai42.message"]["additional_kwargs"] == {"reasoning_content": "thinking 1"}
@@ -386,8 +386,8 @@ async def test_create_agent_records_rebound_messages_member_wise(writer: OtelWri
     chains = await _assert_resolved_equals_real(observations, capture, exporter)
     reader = InMemoryOtelReader(exporter)
 
-    generations = [o for o in observations if o.type == SpanKind.LLM.value]
-    tools = [o for o in observations if o.type == SpanKind.TOOL.value]
+    generations = [o for o in observations if o.kind is SpanKind.LLM]
+    tools = [o for o in observations if o.kind is SpanKind.TOOL]
     model_nodes = [o for o in chains if o.name == "model"]
     root = next(o for o in chains if o.parent_id is None)
     assert len(generations) == 3

@@ -70,6 +70,18 @@ async def test_tool_run_spans_reach_langfuse_and_serve_back(
     detail = await api.get(f"/api/observability/runs/{row['traceId']}/trace")
     assert detail["traceId"] == row["traceId"]
     assert "spans" in detail
+    # Every served span carries the neutral kind the reader mapped from the backend's
+    # observation type; the monitor-wrapped tool call is a TOOL span.
+    kinds = [span["kind"] for span in detail["spans"]]
+    assert set(kinds) <= {"LLM", "TOOL", "CHAIN", "EVENT"}, kinds
+    assert "TOOL" in kinds, kinds
+
+    # The backend's declarations are served in the run list's wire names.
+    capabilities = await api.get("/api/observability/capabilities")
+    assert capabilities["pageSizeMax"] == 100
+    assert "createdAt" in capabilities["sortKeys"]
+    assert "user" not in capabilities["incompatibleFilters"]["cost"]
+    assert "status" in capabilities["incompatibleFilters"]["cost"]
 
 
 @pytest.mark.needs("setting:tools_agent", "helper:llm")

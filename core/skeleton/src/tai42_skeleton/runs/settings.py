@@ -26,8 +26,8 @@ class RunIndexSettings(TaiBaseSettings):
     # The list door caps a requested page size to this: it deliberately CLAMPS an
     # oversized page rather than refusing it, so a huge ``pageSize`` cannot pull an
     # unbounded slice — the same forgiving-list-door posture as the observability run
-    # list's ``PAGE_CHUNK`` cap (only malformed ``< 1`` paging is rejected, there and
-    # here). Must be positive.
+    # list's cap to the monitoring backend's page maximum (only malformed ``< 1`` paging
+    # is rejected, there and here). Must be positive.
     max_page_size: int = Field(default=200, gt=0)
 
 

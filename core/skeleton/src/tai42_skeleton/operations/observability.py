@@ -41,20 +41,23 @@ from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, UpstreamError, operation
 from tai42_skeleton.operations.response_models_group_c import (
     MetricsResult,
+    ObservabilityCapabilities,
     ObservabilityRunsPage,
     ResolvedSpanValue,
+    RunTraceOutlineView,
     RunTraceView,
 )
 from tai42_skeleton.routers.observability_support import (
-    PAGE_CHUNK,
     ExportFormat,
     MetricsGranularity,
     RunSortKey,
     RunStatus,
     SortDirection,
+    capabilities_view,
     derive_run,
     map_model_rows,
     map_trace,
+    map_trace_outline,
     summary_from_rows,
     time_series_from_rows,
 )
@@ -143,7 +146,10 @@ class RunsListQuery(RunFilterQuery):
 
     page: int = Field(default=1, ge=1, description="1-based page number.")
     page_size: int = Field(
-        default=50, ge=1, alias="pageSize", description=f"Items per page; capped to {PAGE_CHUNK}, never refused."
+        default=50,
+        ge=1,
+        alias="pageSize",
+        description="Items per page; capped to the monitoring backend's declared maximum, never refused.",
     )
 
 
@@ -204,6 +210,22 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
 
 
 @operation(
+    summary="Get the monitoring backend's observability capabilities",
+    tags=["observability"],
+    errors=[],
+    response_model=ObservabilityCapabilities,
+)
+async def get_observability_capabilities() -> dict:
+    """The run-list page ceiling, sorts and sort/filter incompatibilities, and the metrics measures and dimensions.
+
+    Read from the backend's pure declarations (``max_page_size``, ``list_capability``,
+    ``metrics_capability``) in the run list's wire names; no backend query is issued.
+    """
+    reader = get_monitoring().reader
+    return capabilities_view(reader.list_capability(), reader.metrics_capability(), reader.max_page_size())
+
+
+@operation(
     summary="List observability runs",
     tags=["observability"],
     errors=[BadRequestError, NotSupportedError],
@@ -221,12 +243,13 @@ async def list_observability_runs(
     """Filterable run list via the contract's ``list_traces``, paged with the reader's ``limit`` / ``page``.
 
     Time range plus the neutral advanced filters (tags / status / cost / token / latency
-    ranges) and sort.
+    ranges) and sort. ``page_size`` is capped to the backend's declared ``max_page_size``.
 
     List- or dict-typed query params are JSON-encoded in the query string
     (``tags`` may be a JSON list ``["a","b"]`` or a comma-separated string).
     """
     reader = get_monitoring().reader
+    page_size = min(page_size, reader.max_page_size())
     try:
         summaries = await reader.list_traces(
             from_timestamp=t0,
@@ -265,6 +288,27 @@ async def get_run_trace(trace_id: str) -> dict:
     except TraceNotFoundError as exc:
         raise NotFoundError("Run trace not found") from exc
     return map_trace(trace)
+
+
+@operation(
+    summary="Get a run's trace outline",
+    tags=["observability"],
+    errors=[NotFoundError, NotSupportedError],
+    response_model=RunTraceOutlineView,
+)
+async def get_run_trace_outline(trace_id: str) -> dict:
+    """The span tree of one run via the contract's ``get_trace``: every span without its input and output.
+
+    An absent trace is a 404 and a read the backend cannot serve a 501, exactly as ``get_run_trace``.
+    """
+    reader = get_monitoring().reader
+    try:
+        trace = await reader.get_trace(trace_id)
+    except MonitoringReadNotSupportedError as exc:
+        raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
+    except TraceNotFoundError as exc:
+        raise NotFoundError("Run trace not found") from exc
+    return map_trace_outline(trace)
 
 
 class ResolvedSpanValueQuery(BaseModel):

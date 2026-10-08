@@ -68,7 +68,7 @@ def test_completion_model_run_records_prompts_params_tools_and_llm_output_usage(
     assert record.output == [
         {"role": "assistant", "parts": [{"type": "text", "content": "hi"}], "finish_reason": "stop"}
     ]
-    assert record.usage == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+    assert (record.input_tokens, record.output_tokens, record.total_tokens) == (3, 4, 7)
     assert record.metadata == {"tools": [{"name": "t"}]}
     assert record.model == "m1"
 
@@ -96,7 +96,7 @@ def test_retriever_run_records_query_and_documents(
     handler.on_retriever_start({}, "query", run_id=run_id, name="search")
     handler.on_retriever_end([Document(page_content="doc")], run_id=run_id)
     record = _records(writer, exporter)["search"]
-    assert record.type == SpanKind.TOOL.value
+    assert record.kind is SpanKind.TOOL
     assert record.input == "query"
     assert record.output[0]["page_content"] == "doc"
 

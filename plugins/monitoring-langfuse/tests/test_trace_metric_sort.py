@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from tai42_contract.monitoring import MonitoringFilter, MonitoringLevel, MonitoringReadNotSupportedError, OrderBy
+from tai42_contract.monitoring import (
+    MonitoringFilter,
+    MonitoringLevel,
+    MonitoringReadNotSupportedError,
+    OrderBy,
+)
 
 from tai42_monitoring_langfuse.reader import LangfuseReader
 
@@ -155,10 +160,10 @@ async def test_metric_sort_partial_last_page(manager, mock_client, list_returns,
 async def test_metric_sort_row_limit_cap_inclusive(manager, mock_client, route_metrics, metric_query):
     route_metrics(ranking=[], tokens={})
     r = LangfuseReader(manager)
-    await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=1000, page=1)
+    await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=100, page=10)
     assert metric_query()["config"]["row_limit"] == 1000
     with pytest.raises(MonitoringReadNotSupportedError):
-        await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=600, page=2)
+        await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=100, page=11)
 
 
 @pytest.mark.parametrize(
@@ -237,11 +242,11 @@ async def test_metric_sort_ranked_id_absent_from_window_raises(
 async def test_metric_sort_walk_page_budget_raises(manager, mock_client, route_metrics, errors_for, trace_row):
     # The walk is bounded: full pages that never carry the ranked id stop at the
     # page budget with a loud error, never an unbounded scan.
-    from tai42_monitoring_langfuse.query_base import _PAGE_SIZE
+    from tai42_monitoring_langfuse.query_base import PAGE_SIZE
     from tai42_monitoring_langfuse.trace_query import _METRIC_LIST_PAGE_BUDGET
 
     route_metrics(ranking=[{"id": "ghost", "sum_totalCost": 9}], tokens={})
-    full = [trace_row(id=f"x{i}") for i in range(_PAGE_SIZE)]
+    full = [trace_row(id=f"x{i}") for i in range(PAGE_SIZE)]
     mock_client.api.trace.list.return_value = SimpleNamespace(
         data=full, meta=SimpleNamespace(total_pages=_METRIC_LIST_PAGE_BUDGET + 5)
     )
@@ -249,3 +254,63 @@ async def test_metric_sort_walk_page_budget_raises(manager, mock_client, route_m
     with pytest.raises(MonitoringReadNotSupportedError):
         await LangfuseReader(manager).list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5)
     assert mock_client.api.trace.list.call_count <= _METRIC_LIST_PAGE_BUDGET + 1
+
+
+_EVERY_FILTER_VALUE: dict[str, object] = {
+    "name": "flow-a",
+    "user_id": "u1",
+    "session_id": "s1",
+    "version": "5",
+    "level": MonitoringLevel.ERROR,
+    "model": "gpt",
+    "tags": ["run:7"],
+    "metadata": {"k": "v"},
+    "min_cost": 1.0,
+    "max_cost": 1.0,
+    "min_tokens": 1,
+    "max_tokens": 1,
+    "min_latency": 1.0,
+    "max_latency": 1.0,
+}
+
+
+def test_every_filter_field_has_a_probe_value():
+    assert set(_EVERY_FILTER_VALUE) == set(MonitoringFilter.model_fields)
+
+
+def test_list_capability_declares_the_served_sorts(manager):
+    cap = LangfuseReader(manager).list_capability()
+    assert cap.sort_fields == {"timestamp", "total_cost", "name", "id", "latency", "total_tokens"}
+    assert set(cap.incompatible_filters) == {"total_cost", "latency", "total_tokens"}
+
+
+@pytest.mark.parametrize("sort_field", ["timestamp", "total_cost", "name", "id", "latency", "total_tokens"])
+@pytest.mark.parametrize("filter_field", sorted(_EVERY_FILTER_VALUE))
+async def test_list_capability_equals_what_list_traces_refuses(
+    manager, mock_client, route_metrics, list_returns, sort_field, filter_field
+):
+    reader = LangfuseReader(manager)
+    declared = reader.list_capability().incompatible_filters.get(sort_field, frozenset())
+    route_metrics(ranking=[], tokens={})
+    list_returns([])
+    flt = MonitoringFilter.model_validate({filter_field: _EVERY_FILTER_VALUE[filter_field]})
+    call = reader.list_traces(order_by=OrderBy(field=sort_field), from_timestamp=_NOW, limit=5, filter_=flt)
+    if filter_field in declared:
+        with pytest.raises(MonitoringReadNotSupportedError, match=filter_field):
+            await call
+    elif filter_field == "model":
+        # Traces carry no model column on any sort; that refusal is not a sort combination.
+        with pytest.raises(MonitoringReadNotSupportedError, match="model"):
+            await call
+    else:
+        await call
+
+
+def test_max_page_size_is_the_backend_page_ceiling(manager):
+    assert LangfuseReader(manager).max_page_size() == 100
+
+
+async def test_a_limit_above_the_page_ceiling_raises(manager, mock_client):
+    with pytest.raises(ValueError, match="limit 101 exceeds the reader's maximum page size 100"):
+        await LangfuseReader(manager).list_traces(limit=101)
+    mock_client.api.trace.list.assert_not_called()

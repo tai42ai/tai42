@@ -127,3 +127,32 @@ def span_value(
     with ctx_obj.client() as client:
         data = client.get(f"/api/observability/runs/{seg(trace_id)}/spans/{seg(span_id)}/resolved", params=params)
     emit_result(ctx_obj, data)
+
+
+@app.command("outline")
+@covers(("GET", "/api/observability/runs/{trace_id}/trace/outline"))
+def trace_outline(
+    ctx: typer.Context,
+    trace_id: Annotated[str, typer.Argument(help="Trace id.")],
+) -> None:
+    """Get one run's span tree: every span with its parent, kind, status and metadata, without input/output.
+
+    Example: ``tai traces outline trace_abc``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/observability/runs/{seg(trace_id)}/trace/outline")
+    emit_result(ctx_obj, data)
+
+
+@app.command("capabilities")
+@covers(("GET", "/api/observability/capabilities"))
+def capabilities(ctx: typer.Context) -> None:
+    """Show what the monitoring backend serves: the page maximum, the sorts and the sort/filter combinations.
+
+    Example: ``tai traces capabilities``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get("/api/observability/capabilities")
+    emit_result(ctx_obj, data)

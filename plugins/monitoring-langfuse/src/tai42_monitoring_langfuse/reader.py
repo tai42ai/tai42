@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from tai42_contract.monitoring import (
+    ListCapability,
     MetricsCapability,
     MetricsQuery,
     MetricsResult,
@@ -31,7 +32,10 @@ from tai42_contract.monitoring import (
 )
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
+from tai42_monitoring_langfuse.filters import METRIC_SORT_UNSUPPORTED_FILTERS
 from tai42_monitoring_langfuse.metrics_query import MetricsQueryRunner
+from tai42_monitoring_langfuse.query_base import PAGE_SIZE
+from tai42_monitoring_langfuse.sorting import TRACE_METRIC_MEASURE, TRACE_SORT_FIELDS
 from tai42_monitoring_langfuse.span_window import SpanWindowQuery
 from tai42_monitoring_langfuse.trace_query import TraceQuery
 
@@ -48,6 +52,17 @@ class LangfuseReader:
     def metrics_capability(self) -> MetricsCapability:
         """Declare the neutral measures and dimensions this backend's metrics query serves."""
         return self._metrics.metrics_capability()
+
+    def list_capability(self) -> ListCapability:
+        """Declare the trace sorts; a metric-ranked sort cannot combine with the filters the metrics view lacks."""
+        return ListCapability(
+            sort_fields=TRACE_SORT_FIELDS,
+            incompatible_filters=dict.fromkeys(TRACE_METRIC_MEASURE, METRIC_SORT_UNSUPPORTED_FILTERS),
+        )
+
+    def max_page_size(self) -> int:
+        """The largest ``limit`` one ``list_traces`` call accepts."""
+        return PAGE_SIZE
 
     async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
         """Return aggregated metrics matching ``query``."""

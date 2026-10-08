@@ -126,3 +126,18 @@ def test_noop_reader_declares_the_full_capability() -> None:
     assert NoOpReader().metrics_capability() == MetricsCapability(
         measures=frozenset(Measure), dimensions=frozenset(Dimension)
     )
+
+
+def test_noop_reader_declares_every_sort_and_a_page_ceiling() -> None:
+    reader = NoOpReader()
+    capability = reader.list_capability()
+    assert capability.sort_fields == {"timestamp", "total_cost", "name", "id", "latency", "total_tokens"}
+    assert capability.incompatible_filters == {}
+    assert reader.max_page_size() == 1000
+
+
+async def test_noop_reader_refuses_a_page_above_its_ceiling() -> None:
+    reader = NoOpReader()
+    assert await reader.list_traces(limit=1000) == []
+    with pytest.raises(ValueError, match="limit 1001 exceeds the reader's maximum page size 1000"):
+        await reader.list_traces(limit=1001)
