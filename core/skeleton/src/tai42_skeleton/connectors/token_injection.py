@@ -320,7 +320,7 @@ def check_managed_transport(config: TaiMCPConfig, transport: str) -> None:
         )
 
 
-def _prepare_request(
+def prepare_managed_request(
     config: TaiMCPConfig,
     auth: ManagedAuth | None,
     transport: str,
@@ -367,7 +367,7 @@ async def call_with_auth(
     seam types it into a structured tool-error result instead of leaking a raw exception. Request
     preparation runs before the call so a preparation bug still raises loudly.
     """
-    effective_config, meta = _prepare_request(config, auth, transport)
+    effective_config, meta = prepare_managed_request(config, auth, transport)
     try:
         async with mcp_client.current(config=effective_config.model_dump()) as client:
             return await client.call_tool_mcp(
@@ -392,7 +392,7 @@ async def evict_pooled_session(
     The effective config is computed through the SAME auth resolution and request
     preparation :func:`call_with_auth` keys its pool on, so the eviction targets
     the exact pooled entry — a managed entry (auth-merged headers/env) or a plain
-    one (unmerged). Both go through :func:`_prepare_request`, so the dispatch key
+    one (unmerged). Both go through :func:`prepare_managed_request`, so the dispatch key
     and the eviction key cannot drift. A probe passes on a throwaway off-pool
     client, so a dead pooled session survives it; closing it by its exact key
     forces the next dispatch to build a fresh session. Auth resolution or the
@@ -403,7 +403,7 @@ async def evict_pooled_session(
     path's disconnect handling instead.
     """
     auth = await resolve_managed_auth_for_config(config)
-    effective_config, _meta = _prepare_request(config, auth, transport)
+    effective_config, _meta = prepare_managed_request(config, auth, transport)
     await mcp_client.close(config=effective_config.model_dump())
 
 
@@ -461,7 +461,7 @@ async def handle_token_expired(
         # The fresh client now exists and served the retry, so the superseded
         # session is evicted regardless of the retry's outcome — success, an
         # error result, or the second-token_expired raise above. Both configs
-        # come from the same pure ``_prepare_request``, so equal dumps mean the
+        # come from the same pure ``prepare_managed_request``, so equal dumps mean the
         # same pool key (the stdio _meta case): closing it would evict the live
         # session, so only a genuinely distinct key (rotated http header) is closed.
         # The whole eviction — computing the effective configs AND closing the
@@ -469,8 +469,8 @@ async def handle_token_expired(
         # is logged and swallowed so it can never replace the tool call's real
         # exception propagating through this ``finally``.
         try:
-            superseded_config = _prepare_request(config, superseded_auth, transport)[0]
-            fresh_config = _prepare_request(config, refreshed, transport)[0]
+            superseded_config = prepare_managed_request(config, superseded_auth, transport)[0]
+            fresh_config = prepare_managed_request(config, refreshed, transport)[0]
             superseded_dump = superseded_config.model_dump()
             if superseded_dump != fresh_config.model_dump():
                 await mcp_client.close(config=superseded_dump)

@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 from tai42_kit.logging import logging_settings, setup_logging
 
+from tai42_skeleton import tool_meta, versioning
 from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import settings as access_control_readiness
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.setup_gate import ensure_setup_token
 from tai42_skeleton.access_control.startup import (
@@ -22,8 +24,11 @@ from tai42_skeleton.access_control.startup import (
     seed_roles,
 )
 from tai42_skeleton.access_control.verifier import reset_registered_reserved_paths
+from tai42_skeleton.app import bus_settings
 from tai42_skeleton.app.server import TaiMCP
+from tai42_skeleton.connectors import settings as connectors_readiness
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
+from tai42_skeleton.conversations import settings as conversations_readiness
 from tai42_skeleton.conversations.lifecycle import (
     redrive_pending_conversations,
     register_conversation_completion_tools,
@@ -31,10 +36,17 @@ from tai42_skeleton.conversations.lifecycle import (
     stop_conversations_delivery_sweep,
 )
 from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
+from tai42_skeleton.hooks import settings as hooks_readiness
+from tai42_skeleton.interactions import settings as interactions_readiness
+from tai42_skeleton.marketplace import settings as marketplace_readiness
 from tai42_skeleton.marketplace.advisories import start_advisories_poll, stop_advisories_poll
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
+from tai42_skeleton.routers import tool_runs_settings
+from tai42_skeleton.settings import rate_limit
+from tai42_skeleton.states import db as states_readiness
 from tai42_skeleton.states.db import assert_states_schema_applied
 from tai42_skeleton.sub_mcp import service as sub_mcp_service
+from tai42_skeleton.sub_mcp import settings as sub_mcp_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +61,30 @@ async def _invalidate_policy_cache() -> None:
 def built_app() -> TaiMCP | None:
     """The process app singleton when it is already built, else ``None``; never builds it."""
     return _app
+
+
+def _declare_platform_readiness_and_drain(app: TaiMCP) -> None:
+    """Register each platform subsystem's own readiness contributor and the tool-runs drain budget on ``app``.
+
+    Every subsystem owns the gate that decides whether its backing store is wired; ``/ready``
+    reads them through the app's readiness registry. The tool-runs module declares the drain
+    budget a retire or recycle waits for its supervisors.
+    """
+    readiness = app.readiness
+    readiness.register("access_control", access_control_readiness.readiness_targets)
+    readiness.register("tool_runs", tool_runs_settings.readiness_targets)
+    readiness.register("interactions", interactions_readiness.readiness_targets)
+    readiness.register("rate_limit", rate_limit.readiness_targets)
+    readiness.register("hooks", hooks_readiness.readiness_targets)
+    readiness.register("sub_mcp", sub_mcp_readiness.readiness_targets)
+    readiness.register("connectors", connectors_readiness.readiness_targets)
+    readiness.register("versioning", versioning.readiness_targets)
+    readiness.register("marketplace", marketplace_readiness.readiness_targets)
+    readiness.register("tool_meta", tool_meta.readiness_targets)
+    readiness.register("states", states_readiness.readiness_targets)
+    readiness.register("conversations", conversations_readiness.readiness_targets)
+    readiness.register("bus", bus_settings.readiness_targets)
+    app.drain_budgets.register("tool_runs", lambda: tool_runs_settings.tool_runs_settings().shutdown_drain_seconds)
 
 
 def connectors_in_use() -> bool:
@@ -256,6 +292,7 @@ def build_app() -> TaiMCP:
         # adapter FRESH from settings, so a profile that flips ACCESS_CONTROL_*
         # rebuilds the adapter + verifier chain rather than pinning the boot one.
         app = TaiMCP(name="Tai", lifespan=lifespan)
+        _declare_platform_readiness_and_drain(app)
         # The gate state is handed to the kit FIRST in every epoch build, whatever the
         # gate's setting, so any later handler that enqueues a callback job finds it.
         app.lifecycle.on_startup(declare_gate_state_to_kit)

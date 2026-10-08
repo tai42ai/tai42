@@ -12,7 +12,7 @@ sub-protocols — each lives in exactly one, save the shared leaf names
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Protocol, cast, runtime_checkable
+from typing import Final, Protocol, cast, runtime_checkable
 
 from tai42_contract.tools import AppTools
 
@@ -46,6 +46,10 @@ from .facets import (
     RouteAction,
 )
 from .handle import tai42_app as _tai_app_handle
+
+# The TCP port a local server binds by default and the CLI's default server URL
+# targets, so the two cannot drift.
+DEFAULT_LOCAL_PORT: Final = 8000
 
 
 @runtime_checkable
@@ -195,6 +199,7 @@ tai42_app: _TaiAppRuntime = cast("_TaiAppRuntime", _tai_app_handle)
 
 
 __all__ = [
+    "DEFAULT_LOCAL_PORT",
     "AppAccounts",
     "AppAdmin",
     "AppAgents",

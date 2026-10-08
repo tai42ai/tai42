@@ -2,8 +2,10 @@
 
 ``/health`` returns a static ``OK`` — pure liveness.
 
-``/ready`` pings exactly the backing stores THIS deployment has wired, reusing
-each subsystem's existing gating logic instead of inventing new config. A worker
+``/ready`` pings exactly the backing stores THIS deployment has wired, as each
+subsystem declares them on the app's readiness registry
+(:mod:`tai42_skeleton.app.readiness`; the gate deciding whether a store is wired
+stays with its subsystem). A worker
 whose Redis/Postgres is unreachable 500s every real request while ``/health``
 stays green; ``/ready`` lets an orchestrator rotate it and a load balancer drain
 it. Distinct connections are deduped and pinged once, concurrently, each under a
@@ -20,21 +22,11 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from tai42_contract.app import tai42_app
-from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import ClientSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
-from tai42_kit.db import component_store_configured, component_store_settings
 
-from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.app import instance
-from tai42_skeleton.connectors.settings import connector_store_settings
-from tai42_skeleton.db import SKELETON_COMPONENT
-from tai42_skeleton.hooks.settings import HooksSettings
-from tai42_skeleton.interactions.settings import interactions_settings
-from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
-from tai42_skeleton.settings.rate_limit import rate_limit_settings
-from tai42_skeleton.sub_mcp.settings import sub_mcp_settings
 
 logger = logging.getLogger(__name__)
 
@@ -67,106 +59,6 @@ class ReadinessStatus(BaseModel):
 async def health_check(request):
     """Answer a liveness probe with ``OK`` (no auth, text/plain)."""
     return PlainTextResponse("OK")
-
-
-def _auth_connections() -> list[tuple[str, type, ClientSettings]]:
-    """The readiness targets every configured identity provider declares through the IdentityProvider ABC.
-
-    Core enumerates them generically instead of naming a concrete provider or its
-    store. A provider with no pingable backing store declares none. Resolved through the
-    module-level registry, the same deferred path the auth adapter and boot probe use;
-    identical connections across providers are deduped downstream. Empty when access
-    control is off.
-    """
-    ac = access_control_settings()
-    if not ac.enable:
-        return []
-    conns: list[tuple[str, type, ClientSettings]] = []
-    for name in ac.resolved_auth_providers():
-        provider = get_identity_provider_factory(name)(ac)
-        conns.extend((target.name, target.client, target.settings) for target in provider.readiness_targets())
-    return conns
-
-
-def _tool_runs_connections() -> list[tuple[str, type, ClientSettings]]:
-    tr = tool_runs_settings()
-    if tr.redis.redis_url:
-        return [("tool_runs", RedisClient, tr.redis)]
-    return []
-
-
-def _interactions_connections() -> list[tuple[str, type, ClientSettings]]:
-    inter = interactions_settings()
-    if inter.redis.redis_url:
-        return [("interactions", RedisClient, inter.redis)]
-    return []
-
-
-def _rate_limit_connections() -> list[tuple[str, type, ClientSettings]]:
-    # The limiter's coverage is derived from the route registry, so the readiness row
-    # rides the ENABLE posture alone: a configured counter store is a wired dependency
-    # unless every door family is switched off.
-    rl = rate_limit_settings()
-    if rl.any_family_enabled() and rl.redis.redis_url:
-        return [("rate_limit", RedisClient, rl.redis)]
-    return []
-
-
-def _hooks_connections() -> list[tuple[str, type, ClientSettings]]:
-    hooks = HooksSettings()
-    if not hooks.in_memory:
-        return [("hooks", RedisClient, hooks.redis)]
-    return []
-
-
-def _sub_mcp_connections() -> list[tuple[str, type, ClientSettings]]:
-    # The durable sub-MCP registration store: Redis-backed whenever SUB_MCP_REDIS_URL
-    # is set (its rehydrate handler runs on every boot/reload and every registration
-    # writes to it), in-memory otherwise — the same gate shape as hooks.
-    sub_mcp = sub_mcp_settings()
-    if not sub_mcp.in_memory:
-        return [("sub_mcp", RedisClient, sub_mcp.redis)]
-    return []
-
-
-def _component_store_connections() -> list[tuple[str, type, ClientSettings]]:
-    """Every durable skeleton store lives in the skeleton component's bound database.
-
-    The readiness probe pings that database once per feature label when it is
-    configured. The connector Redis cache is an additional ping, ridden only when a
-    connector-store Redis URL resolves, so a Postgres-only deploy readies on the PG row
-    alone rather than 503ing on a Redis it never wired.
-    """
-    conns: list[tuple[str, type, ClientSettings]] = []
-    if component_store_configured(SKELETON_COMPONENT):
-        conns.append(("connectors", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
-        connector_redis = connector_store_settings().redis
-        if connector_redis.redis_url:
-            conns.append(("connectors", RedisClient, connector_redis))
-    if instance.versioned_store_in_use():
-        conns.append(("versioning", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
-    if component_store_configured(SKELETON_COMPONENT):
-        conns.append(("marketplace", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
-        conns.append(("tool_meta", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
-    return conns
-
-
-def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
-    """Return ``(subsystem, client class, connection settings)`` for every backing store this deployment wired.
-
-    Concatenates each subsystem's own contributor.
-    A subsystem may contribute more than one connection (``connectors`` uses both
-    Redis and Postgres); its check is ``ok`` only when all of them ping clean.
-    """
-    return [
-        *_auth_connections(),
-        *_tool_runs_connections(),
-        *_interactions_connections(),
-        *_rate_limit_connections(),
-        *_hooks_connections(),
-        *_sub_mcp_connections(),
-        *_component_store_connections(),
-    ]
 
 
 async def _ping_redis(settings: ClientSettings) -> None:
@@ -234,12 +126,12 @@ async def readiness_check(request: Request) -> JSONResponse:
     with nothing gated in returns 200 with empty checks.
 
     Mapped public by the operator like ``/health`` (there is no code-side public
-    list — ``ResourceGuardMiddleware`` denies unknown routes). When the
-    access-control Redis itself is down the middleware fails closed with 403 before
-    this handler runs, so a probe still sees a non-200 and rotates the worker
-    either way.
+    list — ``ResourceGuardMiddleware`` denies unknown routes). Being declared public,
+    the probe passes the gate without reading the gate's own Redis, so that Redis is
+    pinged here as one of the ``access_control`` row's targets.
     """
-    conns = _wired_connections()
+    app = instance.build_app()
+    targets = app.readiness.wired_targets()
 
     # Dedupe by (client class, pool identity): the client's own pool-identity key is
     # what decides whether two settings share one pool, so subsystems that resolve to
@@ -249,8 +141,8 @@ async def readiness_check(request: Request) -> JSONResponse:
     # single ping; two distinct DSNs (or URLs) stay two pings.
     distinct: dict[tuple[type, str], tuple[type, ClientSettings]] = {}
     subsystem_keys: dict[str, list[tuple[type, str]]] = {}
-    for name, client_cls, settings in conns:
-        key = (client_cls, client_cls()._key(**settings.client_kwargs()))
+    for name, client_cls, settings in targets:
+        key = (client_cls, client_cls().pool_key(**settings.client_kwargs()))
         distinct.setdefault(key, (client_cls, settings))
         subsystem_keys.setdefault(name, []).append(key)
 
@@ -272,7 +164,7 @@ async def readiness_check(request: Request) -> JSONResponse:
     # stopped) marks the live app; surface it as a named readiness failure so this
     # worker drains. The process also requests its own graceful exit when the task
     # dies, so this window is the pre-exit truth.
-    dead = instance.build_app().dead_perpetual_task()
+    dead = app.dead_perpetual_task()
     if dead is not None:
         name, reason = dead
         checks[f"perpetual_task:{name}"] = reason

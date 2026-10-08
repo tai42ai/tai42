@@ -24,15 +24,7 @@ from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.access_control import store as _store
 from tai42_skeleton.db import SKELETON_COMPONENT
-
-# The advisory key serializing the first-principal insert AND every last-admin-guarded
-# mutation: the setup door's owner mint takes ``pg_advisory_xact_lock`` on it, counts
-# principals, and inserts only when zero, so two concurrent setups can never both create an
-# owner; :meth:`PrincipalsStoreMixin.principal_guard_txn` holds the SAME lock for a whole
-# disable/delete transaction, so two concurrent removals of the last two enabled admins
-# serialize and the second re-counts committed state. A stable arbitrary 64-bit constant
-# distinct from any other advisory lock in the deployment.
-_FIRST_PRINCIPAL_ADVISORY_LOCK = 0x4143_5052494E43  # "ACPRINC"
+from tai42_skeleton.db.lock_keys import FIRST_PRINCIPAL_LOCK_KEY
 
 # The principal row shape every principal read/insert returns, in one place.
 _PRINCIPAL_COLUMNS = "user_id, kind, display_name, created_by, disabled, created_at"
@@ -133,7 +125,7 @@ async def _apply_disabled_on_cursor(store: Any, cur: Any, user_id: str, disabled
 class _PrincipalGuard:
     """The last-admin re-read, count, and mutation, bound to one advisory-locked cursor.
 
-    Runs as a single serialized transaction under :data:`_FIRST_PRINCIPAL_ADVISORY_LOCK`.
+    Runs as a single serialized transaction under :data:`FIRST_PRINCIPAL_LOCK_KEY`.
     Every method runs on the guard's own cursor, so the last-admin count and the mutation it
     gates commit or roll back together — never a count in one transaction and the write in
     another. The identity-provider revocation a delete also needs touches Redis and cannot
@@ -214,7 +206,7 @@ class PrincipalsStoreMixin:
     async def create_first_principal(self, user_id: str, kind: str, display_name: str) -> dict[str, Any] | None:
         """Insert the FIRST principal (the setup door's owner) under an advisory lock, or ``None``.
 
-        One transaction: take ``pg_advisory_xact_lock`` on :data:`_FIRST_PRINCIPAL_ADVISORY_LOCK`,
+        One transaction: take ``pg_advisory_xact_lock`` on :data:`FIRST_PRINCIPAL_LOCK_KEY`,
         count principals, and insert only when the count is zero. Returns the inserted row,
         or ``None`` when any principal already exists — the setup door's 409 signal. The
         owner has no creator, so ``created_by`` is ``NULL``.
@@ -225,7 +217,7 @@ class PrincipalsStoreMixin:
             conn.transaction(),
             conn.cursor() as cur,
         ):
-            await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_FIRST_PRINCIPAL_ADVISORY_LOCK,))
+            await cur.execute("SELECT pg_advisory_xact_lock(%s)", (FIRST_PRINCIPAL_LOCK_KEY,))
             await cur.execute("SELECT count(*) FROM access_control_principals")
             count_row = await cur.fetchone()
             if count_row is None or count_row[0] != 0:
@@ -241,7 +233,7 @@ class PrincipalsStoreMixin:
 
     @asynccontextmanager
     async def principal_guard_txn(self) -> AsyncIterator[_PrincipalGuard]:
-        """One transaction under :data:`_FIRST_PRINCIPAL_ADVISORY_LOCK` for a last-admin-guarded mutation.
+        """One transaction under :data:`FIRST_PRINCIPAL_LOCK_KEY` for a last-admin-guarded mutation.
 
         The mutation is a disable or a delete. A concurrent guarded removal blocks at the lock
         and re-evaluates the admin count against committed state, so two removals of the last
@@ -256,7 +248,7 @@ class PrincipalsStoreMixin:
             conn.transaction(),
             conn.cursor() as cur,
         ):
-            await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_FIRST_PRINCIPAL_ADVISORY_LOCK,))
+            await cur.execute("SELECT pg_advisory_xact_lock(%s)", (FIRST_PRINCIPAL_LOCK_KEY,))
             yield _PrincipalGuard(cur, self)
 
     async def get_principal(self, user_id: str) -> dict[str, Any] | None:

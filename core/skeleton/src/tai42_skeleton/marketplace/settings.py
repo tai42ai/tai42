@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
+from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import component_store_configured, component_store_settings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
+
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 
 class MarketplaceSettings(TaiBaseSettings):
@@ -43,3 +48,10 @@ class MarketplaceSettings(TaiBaseSettings):
 def marketplace_settings() -> MarketplaceSettings:
     """Return the process-cached :class:`MarketplaceSettings`."""
     return MarketplaceSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The install-attribution store's database, when it is configured."""
+    if not component_store_configured(SKELETON_COMPONENT):
+        return []
+    return [ReadinessTarget("marketplace", PostgresClient, component_store_settings(SKELETON_COMPONENT))]

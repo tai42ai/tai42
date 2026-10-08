@@ -6,7 +6,10 @@ from typing import Any, ClassVar
 
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
+from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path, under_prefix
@@ -367,3 +370,27 @@ class SetupSettings(TaiBaseSettings):
 def setup_settings() -> SetupSettings:
     """Return the cached setup-door settings."""
     return SetupSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The gate's own Redis and the targets every configured identity provider declares.
+
+    The gate reads its Redis (the policy version) on every request that is not public, so it
+    is wired whenever access control is on, whatever store a provider declares for itself.
+    The providers are enumerated generically through the module-level provider registry (the
+    same deferred path the auth adapter and boot probe use), never naming a concrete provider
+    or its store; a provider with no pingable backing store declares none, and a provider
+    target on the gate's own connection is deduped by the probe. Empty when access control
+    is off.
+    """
+    settings = access_control_settings()
+    if not settings.enable:
+        return []
+    return [
+        ReadinessTarget("access_control", RedisClient, settings.redis),
+        *(
+            target
+            for name in settings.resolved_auth_providers()
+            for target in get_identity_provider_factory(name)(settings).readiness_targets()
+        ),
+    ]

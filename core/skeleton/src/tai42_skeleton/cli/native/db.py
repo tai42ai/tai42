@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 
 import typer
-from tai42_cli.commands._common import app_context
+from tai42_cli import app_context
 from tai42_cli.render import print_json, render_table
 from tai42_kit.db import (
     AdminIdentityIncompleteError,

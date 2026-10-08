@@ -26,10 +26,11 @@ delete is the latest durable write too: it leaves a version-fenced tombstone (a
 version-only marker, no blob) at the deleted version, so a read-populate that
 loaded the row just before the delete cannot resurrect it into the cache.
 
-If a cache write itself fails after the durable commit, a stale prior entry may
-still sit in Redis; the store then deletes the key so the next read repopulates
-from Postgres, and if that delete also fails it logs LOUDLY (the record could be
-served stale until its ``session_expires_at`` TTL elapses).
+If a ``get``/``put`` cache write itself fails after the durable commit, a stale
+prior entry may still sit in Redis; the store then deletes the key so the next
+read repopulates from Postgres, and if that delete also fails it logs LOUDLY (the
+record could be served stale until its ``session_expires_at`` TTL elapses). A
+``restore`` cache write-back that fails raises instead, after the durable commit.
 
 ``provider_id`` and ``alias`` are persisted as plaintext columns purely to back
 the ``UNIQUE (provider_id, alias)`` constraint. Every insert path — a create-only
@@ -57,9 +58,10 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 
 from psycopg.errors import UniqueViolation
 from tai42_contract.connectors.errors import ConnectorError, MalformedConnectionIdError
@@ -135,6 +137,36 @@ return 0
 """
 
 
+@dataclass(frozen=True)
+class StoredConnection:
+    """One durable connection row as stored: the ciphertext and its plaintext identity columns."""
+
+    connection_id: str
+    provider_id: str
+    alias: str
+    encrypted_blob: bytes
+    session_expires_at: datetime | None
+
+
+@dataclass(frozen=True)
+class RestoreRowResult:
+    """What :meth:`RedisPgConnectorTokenStore.restore` did with one row, keyed by its canonical id."""
+
+    connection_id: str
+    outcome: Literal["created", "updated", "skipped_existing", "alias_in_use"]
+
+
+def _stored_from_row(row: tuple) -> StoredConnection:
+    connection_id, provider_id, alias, blob, session_expires_at = row
+    return StoredConnection(
+        connection_id=str(connection_id),
+        provider_id=provider_id,
+        alias=alias,
+        encrypted_blob=bytes(blob),
+        session_expires_at=session_expires_at,
+    )
+
+
 def _expireat_arg(session_expires_at: datetime | None) -> int | None:
     """Absolute unix-seconds for Redis ``EXPIREAT``, or ``None`` for no expiry."""
     if session_expires_at is None:
@@ -165,6 +197,46 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         except (ValueError, AttributeError, TypeError) as exc:
             raise MalformedConnectionIdError(f"connection_id is not a valid UUID: {connection_id!r}") from exc
 
+    async def _cache_install(
+        self,
+        connection_id: str,
+        blob: bytes,
+        session_expires_at: datetime | None,
+        version: int,
+    ) -> None:
+        """Version-fenced set-if-newer of ``blob`` at ``version`` (atomic Lua); a Redis failure raises.
+
+        It installs ``blob`` + version only when the cached record is absent or older, so a stale
+        late write-back cannot overwrite a cache entry a peer already moved forward.
+        """
+        expire_at = _expireat_arg(session_expires_at)
+        async with client_ctx(RedisClient, self._settings.redis) as client:
+            await eval_script(
+                client,
+                _CACHE_SET_IF_NEWER_LUA,
+                1,
+                self._rec_key(connection_id),
+                _VER_FIELD,
+                _BLOB_FIELD,
+                blob,
+                version,
+                "" if expire_at is None else expire_at,
+            )
+
+    async def _cache_tombstone(self, connection_id: str, version: int) -> None:
+        """Version-fenced tombstone at ``version`` (atomic Lua) for ``_TOMBSTONE_TTL_SECONDS``; Redis failures raise."""
+        expire_at = int((datetime.now(UTC) + timedelta(seconds=_TOMBSTONE_TTL_SECONDS)).timestamp())
+        async with client_ctx(RedisClient, self._settings.redis) as client:
+            await eval_script(
+                client,
+                _CACHE_TOMBSTONE_LUA,
+                1,
+                self._rec_key(connection_id),
+                _VER_FIELD,
+                version,
+                expire_at,
+            )
+
     async def _cache_set(
         self,
         connection_id: str,
@@ -172,11 +244,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         session_expires_at: datetime | None,
         version: int,
     ) -> None:
-        """Version-fenced cache refresh after a durable commit.
-
-        The write is a set-if-newer (atomic Lua): it installs ``blob`` + version
-        only when the cached record is absent or older, so a stale late
-        write-back cannot overwrite a cache entry a peer already moved forward.
+        """Version-fenced cache refresh after a durable commit, for the serving ``get``/``put`` paths.
 
         A Redis failure here would otherwise leave a stale prior entry in the
         cache; that must never mask an already-durable Postgres write, so we log
@@ -184,21 +252,8 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         Postgres. If that delete also fails, we log LOUDLY (ERROR) — the record
         may be served stale until its ``session_expires_at`` TTL elapses.
         """
-        key = self._rec_key(connection_id)
-        expire_at = _expireat_arg(session_expires_at)
         try:
-            async with client_ctx(RedisClient, self._settings.redis) as client:
-                await eval_script(
-                    client,
-                    _CACHE_SET_IF_NEWER_LUA,
-                    1,
-                    key,
-                    _VER_FIELD,
-                    _BLOB_FIELD,
-                    blob,
-                    version,
-                    "" if expire_at is None else expire_at,
-                )
+            await self._cache_install(connection_id, blob, session_expires_at, version)
         except Exception:
             logger.warning(
                 "RedisPgConnectorTokenStore: cache write failed for %s "
@@ -455,22 +510,12 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         # instead write a version-fenced tombstone at the deleted version, which
         # blocks that stale re-install; if nothing was deleted here there is no
         # version to fence and a plain key drop suffices.
-        key = self._rec_key(connection_id)
         try:
-            async with client_ctx(RedisClient, self._settings.redis) as client:
-                if deleted_version is None:
-                    await client.delete(key)
-                else:
-                    expire_at = int((datetime.now(UTC) + timedelta(seconds=_TOMBSTONE_TTL_SECONDS)).timestamp())
-                    await eval_script(
-                        client,
-                        _CACHE_TOMBSTONE_LUA,
-                        1,
-                        key,
-                        _VER_FIELD,
-                        deleted_version,
-                        expire_at,
-                    )
+            if deleted_version is None:
+                async with client_ctx(RedisClient, self._settings.redis) as client:
+                    await client.delete(self._rec_key(connection_id))
+            else:
+                await self._cache_tombstone(connection_id, deleted_version)
         except Exception:  # cache delete must never mask a commit
             # The durable delete stands; a lingering warm entry here is a
             # now-revoked token, so escalate exactly like a failed write-back —
@@ -504,3 +549,89 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
             )
             rows = await cur.fetchall()
         return [str(r[0]) for r in rows]
+
+    async def list_all_including_expired(self) -> list[StoredConnection]:
+        """Every durable row, lapsed sessions included, ordered by ``connection_id``; never touches the cache."""
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            read_connection(pool) as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT connection_id, provider_id, alias, encrypted_blob, session_expires_at "
+                "FROM connector_connections ORDER BY connection_id"
+            )
+            rows = await cur.fetchall()
+        return [_stored_from_row(row) for row in rows]
+
+    async def reread(self, connection_id: str) -> StoredConnection | None:
+        """The durable row as it stands now (no session-expiry filter), or ``None``; never touches the cache."""
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            read_connection(pool) as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT connection_id, provider_id, alias, encrypted_blob, session_expires_at "
+                "FROM connector_connections WHERE connection_id = %s",
+                (self._as_uuid(connection_id),),
+            )
+            row = await cur.fetchone()
+        return None if row is None else _stored_from_row(row)
+
+    async def restore(self, records: Sequence[StoredConnection], *, overwrite: bool) -> list[RestoreRowResult]:
+        """Write each record durably under its canonical id, then install its cache entry at the new version.
+
+        One Postgres connection; each row runs in its own savepoint through the upsert, so an alias
+        collision (``UNIQUE (provider_id, alias)``) is that row's ``alias_in_use`` outcome while the
+        rest restore, and any other database error aborts the restore. An existing row under
+        ``overwrite=False`` is ``skipped_existing``: neither it nor its cache entry is touched.
+
+        After the commit every written row's cache entry moves to the row's new ``cache_version``:
+        an unexpired row through the set-if-newer write, an expired one through the tombstone (a
+        past ``EXPIREAT`` would drop the key and let a stale read-populate re-install the old
+        blob). Both are version-fenced, so a read-populate holding the pre-restore version is a
+        no-op before or after. A Redis failure here raises — the durable rows stand.
+        """
+        canonical = [(str(self._as_uuid(record.connection_id)), record) for record in records]
+        results: list[RestoreRowResult] = []
+        written: list[tuple[str, StoredConnection, int]] = []
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT connection_id FROM connector_connections WHERE connection_id = ANY(%s)",
+                ([uuid.UUID(cid) for cid, _ in canonical],),
+            )
+            existing = {str(row[0]) for row in await cur.fetchall()}
+            for cid, record in canonical:
+                if cid in existing and not overwrite:
+                    results.append(RestoreRowResult(connection_id=cid, outcome="skipped_existing"))
+                    continue
+                try:
+                    async with conn.transaction():
+                        version = await self._put_upsert(
+                            cur,
+                            uuid.UUID(cid),
+                            record.provider_id,
+                            record.alias,
+                            record.encrypted_blob,
+                            record.session_expires_at,
+                            cid,
+                        )
+                except AliasInUseError:
+                    results.append(RestoreRowResult(connection_id=cid, outcome="alias_in_use"))
+                    continue
+                results.append(RestoreRowResult(connection_id=cid, outcome="updated" if cid in existing else "created"))
+                written.append((cid, record, version))
+
+        now_epoch = int(datetime.now(UTC).timestamp())
+        for cid, record, version in written:
+            expire_epoch = _expireat_arg(record.session_expires_at)
+            if expire_epoch is None or expire_epoch > now_epoch:
+                await self._cache_install(cid, record.encrypted_blob, record.session_expires_at, version)
+            else:
+                await self._cache_tombstone(cid, version)
+        return results

@@ -83,6 +83,9 @@ class _FakeApp:
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
 
+    def target_validator(self, target_kind, target_name):
+        return self._target_validator_registry.get(target_kind, target_name)
+
 
 async def _owner_validator(route: Any, candidate: PresetBody | None) -> list[str]:
     """Models an owner validator: the target is broken, or it composes a preset that is broken.

@@ -172,3 +172,20 @@ async def _category_display(category_id: str) -> str | None:
         await cur.execute("SELECT display_name FROM connector_category WHERE id = %s", (category_id,))
         row = await cur.fetchone()
     return None if row is None else row[0]
+
+
+async def test_overwrite_restore_moves_a_warm_cache_to_the_restored_version(fix: _Fixture) -> None:
+    s, token = fix.store, fix.token
+    cid = fix.cid()
+    await s.put(cid, b"original", create_only=True, provider_id=token, alias="w")
+    exported = [e for e in await export_connector_connections() if e["provider_id"] == token]
+    await s.put(cid, b"rotated", provider_id=token, alias="w")
+    assert await s.get(cid) == b"rotated"  # warm at the rotated version
+
+    report = await import_connector_connections(exported, mode="overwrite")
+    assert report.updated == 1
+    async with client_ctx(RedisClient, connector_store_settings().redis) as client:
+        cached = await client.hgetall(s._rec_key(cid))  # pyright: ignore[reportGeneralTypeIssues]
+    # create (1), rotate (2), restore (3): the cache holds the restored blob at the restored version.
+    assert cached == {b"blob": b"original", b"ver": b"3"}
+    assert await s.get(cid) == b"original"

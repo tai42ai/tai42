@@ -29,6 +29,7 @@ from tai42_kit.clients.impl.postgres import pinned_connection
 from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT
+from tai42_skeleton.db.lock_keys import MARKETPLACE_LOCK_KEY
 from tai42_skeleton.marketplace.errors import OperationInProgressError
 
 logger = logging.getLogger(__name__)
@@ -37,15 +38,6 @@ logger = logging.getLogger(__name__)
 # immediately rather than queued. NOT the correctness layer — each uvicorn worker
 # is a separate process with its own instance of this.
 operation_lock = asyncio.Lock()
-
-# Fixed key for the fleet-wide session advisory lock that serializes marketplace
-# operations. Session- and transaction-scoped advisory locks share ONE key space
-# in PostgreSQL, and this feature's DSN commonly targets the same database as the
-# connector store (which takes ``0x7461695F636F6E6E`` for category creation), so
-# this MUST be a distinct value or the two would block against each other across
-# the fleet. "tai42_mktp" as ASCII bytes; the high byte 0x74 keeps it a positive
-# bigint.
-MARKETPLACE_LOCK_KEY = 0x7461695F6D6B7470  # "tai42_mktp"
 
 
 @asynccontextmanager

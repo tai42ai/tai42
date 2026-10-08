@@ -18,6 +18,8 @@ from tai42_skeleton.app.route_defaults import CORE_API_ROUTERS, STUDIO_SPA_ROUTE
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.manifest import Manifest
 
+from ._fixtures.route_table import route_table
+
 
 def _effective(default_routers: str, routers_modules: list[str]) -> list[str]:
     # A constructed (not booted) app answers the composition directly from its manifest.
@@ -63,7 +65,7 @@ def test_presence_route_mounted_in_a_none_boot_without_the_management_surface() 
 
     async def run() -> set[str | None]:
         async with instance.app_context(manifest):
-            return {getattr(route, "path", None) for route in instance._fast_mcp._additional_http_routes}
+            return {getattr(route, "path", None) for route in route_table(instance)}
 
     # Scope the bind so the process's own binding is restored afterwards.
     with tai42_app.bound(None):

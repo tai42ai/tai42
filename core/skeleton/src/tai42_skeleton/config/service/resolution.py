@@ -63,7 +63,7 @@ class _ResolutionMixin(_ConfigServiceBase):
         except FileNotFoundError:
             return {}
 
-    def _effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+    def effective_env(self, changes: Mapping[str, str]) -> dict[str, str]:
         """The effective env an :meth:`ConfigService.apply_env_change` produces, as the reloaded process sees it.
 
         The stored env is merged with ``changes`` (empties are dropped — the store

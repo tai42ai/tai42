@@ -44,7 +44,7 @@ class _ConfigServiceBase(ABC):
         """The stored env map, treating a never-written store as empty."""
 
     @abstractmethod
-    def _effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+    def effective_env(self, changes: Mapping[str, str]) -> dict[str, str]:
         """The effective env an :meth:`ConfigService.apply_env_change` produces."""
 
     @abstractmethod

@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 
 import pytest
+from tai42_contract.app import DEFAULT_LOCAL_PORT
 
 from tai42_cli import context
 
@@ -56,7 +57,7 @@ def test_server_config_beats_default(monkeypatch: pytest.MonkeyPatch, config_fil
 def test_server_default_uses_default_local_port(monkeypatch: pytest.MonkeyPatch, config_file) -> None:
     monkeypatch.delenv(context.SERVER_URL_ENV, raising=False)
     # No config file written -> falls through to the local default.
-    expected = f"http://127.0.0.1:{context.DEFAULT_LOCAL_PORT}"
+    expected = f"http://127.0.0.1:{DEFAULT_LOCAL_PORT}"
     assert context.resolve_server_url(None) == expected
     assert context.default_server_url() == expected
 

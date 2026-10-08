@@ -203,8 +203,8 @@ def _refuse_unrecyclable(diff_keys: set[str], recycle_diff_keys: list[str], repo
 def _recycle_step_timeout() -> float:
     """The per-step recycle budget — the same drain budget a retire uses.
 
-    A recycled worker's replacement gets the shutdown-drain window to boot and rejoin the census.
+    A recycled worker's replacement gets the app's declared drain window to boot and rejoin the census.
     """
-    from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
+    from tai42_skeleton.app import instance
 
-    return tool_runs_settings().shutdown_drain_seconds
+    return instance.build_app().drain_budgets.budget()

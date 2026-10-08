@@ -34,8 +34,6 @@ from tai42_skeleton.operations.projection import project_operations
 from ..connectors.conftest import (
     CID,
     CID2,
-    make_noauth_record,
-    make_noauth_stdio_descriptor,
     make_oauth_descriptor,
     make_oauth_record,
 )
@@ -410,7 +408,8 @@ async def test_get_connection_probes_reachability(monkeypatch: pytest.MonkeyPatc
         assert allow_refresh is False  # the idempotent GET resolves read-only
         return ManagedAuth(access_token="tok")
 
-    async def _probe(descriptor, sub_service, **kwargs):
+    async def _probe(descriptor, sub_service, *, auth):
+        assert auth == ManagedAuth(access_token="tok")
         return sub_service == "mail"  # cal is down
 
     monkeypatch.setattr(conn_ops, "resolve_managed_auth", _resolve)
@@ -432,24 +431,6 @@ async def test_get_connection_provider_gone_all_unreachable(monkeypatch: pytest.
     monkeypatch.setattr(conn_ops, "get_provider", _missing)
     view = await conn_ops.get_connection(connection_id=record.connection_id)
     assert view["unreachable_sub_services"] == ["mail", "cal"]
-
-
-async def test_get_connection_noauth_probes_with_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A no-auth connection probes with its decrypted client config on the transport
-    # channel and never resolves an OAuth token.
-    record = make_noauth_record(provider_id="widgets", enabled_sub_services=["search"], config_values={"api_key": "k"})
-    monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({record.connection_id: record}))
-    monkeypatch.setattr(conn_ops, "get_provider", lambda pid: make_noauth_stdio_descriptor(provider_id="widgets"))
-    captured: dict = {}
-
-    async def _probe(descriptor, sub_service, **kwargs):
-        captured["config_values"] = kwargs.get("config_values")
-        return True
-
-    monkeypatch.setattr(conn_ops, "probe", _probe)
-    view = await conn_ops.get_connection(connection_id=record.connection_id)
-    assert view["unreachable_sub_services"] == []
-    assert captured["config_values"] == {"api_key": "k"}
 
 
 async def test_get_connection_oauth_unresolvable_is_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:

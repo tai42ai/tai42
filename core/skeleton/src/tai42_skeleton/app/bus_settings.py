@@ -28,7 +28,9 @@ from typing import ClassVar
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
 
 
@@ -141,3 +143,9 @@ class BusSettings(TaiBaseSettings):
 def bus_settings() -> BusSettings:
     """Return the process-wide :class:`BusSettings`, cached after first load."""
     return BusSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The worker-bus Redis, when the bus is enabled."""
+    bus = bus_settings()
+    return [ReadinessTarget("bus", RedisClient, bus.redis)] if bus.enabled else []

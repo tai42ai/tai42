@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Any
 from tai42_contract.manifest import TaiMCPConfig
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
+from tai42_skeleton.app.lifecycle.drain import DrainBudgetRegistry
 from tai42_skeleton.app.mount_map import MountBinding
+from tai42_skeleton.app.readiness import ReadinessRegistry
 
 if TYPE_CHECKING:
     import mcp
@@ -161,6 +163,12 @@ class LifecycleState(ABC):
         # the top of ``_initialize_components`` before any manifest module imports.
         self._mount_map: dict[str, MountBinding] = {}
 
+        # The backing stores ``/ready`` pings and the drain budget a retire or recycle
+        # waits for, as each subsystem declares them on this app. Owned by the app, so a
+        # rebuilt app declares afresh and a failed build leaves nothing behind.
+        self._readiness = ReadinessRegistry()
+        self._drain_budgets = DrainBudgetRegistry()
+
     def dead_perpetual_task(self) -> tuple[str, str] | None:
         """The ``(task name, reason)`` of a perpetual task that died, or ``None``.
 
@@ -176,6 +184,16 @@ class LifecycleState(ABC):
         backend worker's private task loop) may never run again.
         """
         return self._serving_loop is not None and self._serving_loop is asyncio.get_running_loop()
+
+    @property
+    def readiness(self) -> ReadinessRegistry:
+        """The readiness contributors this app's subsystems declare; ``/ready`` reads them here."""
+        return self._readiness
+
+    @property
+    def drain_budgets(self) -> DrainBudgetRegistry:
+        """The drain budgets this app's modules declare; a retire and a recycle step read them here."""
+        return self._drain_budgets
 
     @abstractmethod
     def _mcp_tools(self, config: TaiMCPConfig, tools):

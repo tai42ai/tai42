@@ -10,6 +10,8 @@ from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.tools import ToolRegistry
 
 if TYPE_CHECKING:
+    from tai42_contract.conversations import TargetBindValidator
+
     from tai42_skeleton.agent.binding import AgentBinding
     from tai42_skeleton.app.http import HttpSurface
     from tai42_skeleton.app.server import ServingCore
@@ -200,6 +202,10 @@ class ServingCoreAccessMixin(LifecycleState):
     @property
     def _target_validator_registry(self) -> "TargetBindValidatorRegistry":
         return self._serving_core._target_validator_registry
+
+    def target_validator(self, target_kind: str, target_name: str) -> "TargetBindValidator | None":
+        """The bind validator the owner of ``(target_kind, target_name)`` registered, or ``None``."""
+        return self._serving_core._target_validator_registry.get(target_kind, target_name)
 
     @property
     def _input_schema_support_registry(self) -> "PresetInputSchemaSupportRegistry":

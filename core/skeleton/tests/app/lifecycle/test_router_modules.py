@@ -12,6 +12,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.route_defaults import CORE_API_ROUTERS, DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
 from tai42_skeleton.manifest import Manifest
 
+from .._fixtures.route_table import route_table
 from ._doubles import _Mixin
 
 
@@ -99,7 +100,7 @@ def test_default_boot_mounts_the_studio_and_cli_page_routes():
 
     async def run():
         async with app.app_context(manifest):
-            routes = app._fast_mcp._additional_http_routes
+            routes = route_table(app)
             registered = {getattr(route, "path", None) for route in routes}
             # channels backs the Interactions ChannelsCard, sub-mcp the Manifest
             # SubMcpTab, resources/get the `tai resources get` CLI.
@@ -169,7 +170,7 @@ def test_started_none_boot_serves_only_the_curated_routers(monkeypatch):
 
     async def run() -> set[str | None]:
         async with instance.app_context(manifest):
-            return {getattr(route, "path", None) for route in instance._fast_mcp._additional_http_routes}
+            return {getattr(route, "path", None) for route in route_table(instance)}
 
     try:
         # ``app_context`` binds the instance under test; scoping that bind restores

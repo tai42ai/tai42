@@ -8,7 +8,7 @@ it: it collects the chunks under a per-call ``max_bytes`` cap and returns
 ``(bytes, media type)``. Both are the vendor-media counterpart of
 :func:`tai42_kit.net.fetch_url` and honour the same single operator switch,
 :func:`tai42_kit.net.url_guard.guard_enabled`: while the guard is enabled the request
-runs over the SSRF :class:`~tai42_kit.net.fetch_url._PinningTransport` (host validated
+runs over the SSRF :class:`~tai42_kit.net.fetch_url.PinningTransport` (host validated
 and pinned per hop); when the guard is disabled it runs over a plain transport that
 pins nothing. Either way both add what a credentialed vendor fetch needs and the
 public-only ``fetch_url`` lacks:
@@ -40,7 +40,7 @@ from dataclasses import dataclass
 import httpx
 
 from tai42_kit.net import url_guard
-from tai42_kit.net.fetch_url import _PinningTransport, _unwrap_guard_error
+from tai42_kit.net.fetch_url import PinningTransport, unwrap_guard_error
 from tai42_kit.net.request_body import RequestBodyTooLargeError
 from tai42_kit.net.url_guard import UrlGuardError
 
@@ -196,7 +196,7 @@ async def _stream_media(
 ) -> AsyncIterator[MediaStream]:
     """Open the SSRF-pinned GET, follow redirects hop-by-hop, and yield the final response as a stream."""
     max_redirects = url_guard.url_guard_settings().max_redirects
-    transport = _PinningTransport() if url_guard.guard_enabled() else None
+    transport = PinningTransport() if url_guard.guard_enabled() else None
     base_headers = dict(headers) if headers is not None else {}
     current_url = httpx.URL(url)
     credentials_dropped = False
@@ -237,7 +237,7 @@ async def _stream_media(
             # letting the transport re-wrap below catch it.
             raise
         except Exception as exc:
-            guard_error = _unwrap_guard_error(exc)
+            guard_error = unwrap_guard_error(exc)
             if guard_error is not None:
                 # Re-raise the guard's own rejection (host only) rather than whatever httpx
                 # exception is carrying it.
@@ -271,7 +271,7 @@ async def open_media_stream(
     """Open a vendor media object for streaming, SSRF-pinned while the guard is enabled.
 
     While :func:`~tai42_kit.net.url_guard.guard_enabled` is set the request runs over the
-    :class:`~tai42_kit.net.fetch_url._PinningTransport`; when it is unset a plain transport
+    :class:`~tai42_kit.net.fetch_url.PinningTransport`; when it is unset a plain transport
     that pins nothing is used instead — the same one operator switch ``fetch_url`` honours.
     When ``follow_redirects`` is set, redirects are followed hop-by-hop up to the guard's
     ``max_redirects`` (``follow_redirects`` is never handed to httpx, so the pin re-runs per

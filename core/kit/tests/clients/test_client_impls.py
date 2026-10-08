@@ -253,21 +253,21 @@ def test_redis_pool_identity_is_the_full_connection_configuration():
     for client_cls in (redis_mod.RedisClient, redis_mod.SyncRedisClient):
         client = client_cls()
         # A differing max_connections is a different client.
-        assert client._key(**small) != client._key(**large)
+        assert client.pool_key(**small) != client.pool_key(**large)
         # An identical configuration shares one pooled client.
         same = StoreB(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
-        assert client._key(**small) == client._key(**same)
+        assert client.pool_key(**small) == client.pool_key(**same)
         # A differing socket timeout is a different client.
         blocking = StoreA(redis_url="redis://h:6379/0", redis_max_connections=5).client_kwargs()
         blocking["socket_timeout"] = 5.0
-        assert client._key(**small) != client._key(**blocking)
+        assert client.pool_key(**small) != client.pool_key(**blocking)
         # A different URL or decode mode still keys to a different pool.
         other = StoreA(redis_url="redis://other:6379/0", redis_max_connections=5).client_kwargs()
-        assert client._key(**small) != client._key(**other)
+        assert client.pool_key(**small) != client.pool_key(**other)
         decoded_off = StoreA(
             redis_url="redis://h:6379/0", redis_max_connections=5, decode_responses=False
         ).client_kwargs()
-        assert client._key(**small) != client._key(**decoded_off)
+        assert client.pool_key(**small) != client.pool_key(**decoded_off)
 
 
 def test_redis_env_prefix_alone_never_splits_a_pool():
@@ -288,7 +288,7 @@ def test_redis_env_prefix_alone_never_splits_a_pool():
     assert a["env_prefix"] != b["env_prefix"]  # the namespaces really differ
     for client_cls in (redis_mod.RedisClient, redis_mod.SyncRedisClient):
         client = client_cls()
-        assert client._key(**a) == client._key(**b)  # same pool despite the differing prefix
+        assert client.pool_key(**a) == client.pool_key(**b)  # same pool despite the differing prefix
         assert client._build_options(**a) == {}  # no build options -> nothing for the guard to compare
         assert client._build_options(**b) == {}
 

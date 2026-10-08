@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fakeredis import aioredis
+from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.connectors.runtime.locks as locks
 import tai42_skeleton.connectors.store.redis_pg as redis_pg
@@ -24,10 +25,12 @@ from tai42_skeleton.connectors.store.redis_pg import (
     _CACHE_TOMBSTONE_LUA,
     _VER_FIELD,
     RedisPgConnectorTokenStore,
+    StoredConnection,
 )
 from tai42_skeleton.utils.redis_typing import eval_script
 
 from .conftest import CID
+from .test_store_redis_pg import FakePg, _row
 
 
 @pytest.fixture
@@ -174,3 +177,106 @@ async def test_release_leaves_lock_held_by_another_token(lua_redis):
     await lua_redis.set(key, "later-holder")
     await _release(CID, "our-token")
     assert await lua_redis.get(key) == b"later-holder"
+
+
+# -- restore write-back against a racing read-populate ------------------------
+#
+# A read-populate is ``get``'s cache-miss path: it loads (blob, version) from
+# Postgres and installs it through the set-if-newer script. The restore writes the
+# row at V+1 and then installs (or tombstones) V+1. Whatever order the two take,
+# the cache ends at V+1.
+
+
+@pytest.fixture
+async def restore_stack(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[aioredis.FakeRedis, FakePg]]:
+    """Lua-executing Redis plus a stateful Postgres fake behind the store's client_ctx."""
+    client = aioredis.FakeRedis()
+    pg = FakePg()
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield pg if client_cls is PostgresClient else client
+
+    monkeypatch.setattr(redis_pg, "client_ctx", fake_client_ctx)
+    try:
+        yield client, pg
+    finally:
+        await client.aclose()
+
+
+def _record(blob: bytes, exp: datetime | None = None) -> StoredConnection:
+    return StoredConnection(
+        connection_id=CID, provider_id="acme", alias="work", encrypted_blob=blob, session_expires_at=exp
+    )
+
+
+async def _cached(client) -> tuple[bytes | None, bytes | None]:
+    """The record's (blob, version) fields."""
+    key = _rec_key(CID)
+    return await client.hget(key, _BLOB_FIELD), await client.hget(key, _VER_FIELD)
+
+
+async def test_refill_at_the_old_version_before_restore_is_overtaken(restore_stack):
+    client, pg = restore_stack
+    pg.rows[CID] = _row(b"old", ver=1)
+    store = RedisPgConnectorTokenStore()
+    await store._cache_set(CID, b"old", None, 1)
+    await store.restore([_record(b"restored")], overwrite=True)
+    assert await _cached(client) == (b"restored", b"2")
+
+
+async def test_refill_at_the_old_version_after_restore_is_a_no_op(restore_stack):
+    """A reader that loaded the pre-restore row installs it only after the restore's write-back."""
+    client, pg = restore_stack
+    pg.rows[CID] = _row(b"old", ver=1)
+    store = RedisPgConnectorTokenStore()
+    await store.restore([_record(b"restored")], overwrite=True)
+    await store._cache_set(CID, b"old", None, 1)
+    assert await _cached(client) == (b"restored", b"2")
+
+
+async def test_refill_after_the_commit_and_before_the_write_back_holds(restore_stack, monkeypatch):
+    """A reader that loads the restored row between the commit and the write-back installs V+1 itself."""
+    client, pg = restore_stack
+    pg.rows[CID] = _row(b"old", ver=1)
+    store = RedisPgConnectorTokenStore()
+    install = store._cache_install
+    write_backs: list[int] = []
+
+    async def refill_then_install(connection_id, blob, session_expires_at, version):
+        if not write_backs:
+            write_backs.append(version)
+            await store.get(connection_id)  # the refill's own install goes straight to Redis
+            assert await _cached(client) == (b"restored", b"2")
+        await install(connection_id, blob, session_expires_at, version)
+
+    monkeypatch.setattr(store, "_cache_install", refill_then_install)
+    await store.restore([_record(b"restored")], overwrite=True)
+    assert write_backs == [2]
+    assert await _cached(client) == (b"restored", b"2")
+
+
+async def test_warm_key_at_the_old_version_moves_to_the_restored_version(restore_stack):
+    client, pg = restore_stack
+    pg.rows[CID] = _row(b"old", ver=1)
+    store = RedisPgConnectorTokenStore()
+    await store.get(CID)
+    assert await _cached(client) == (b"old", b"1")
+    await store.restore([_record(b"restored")], overwrite=True)
+    assert await _cached(client) == (b"restored", b"2")
+    assert await store.get(CID) == b"restored"
+
+
+async def test_expired_restore_tombstones_and_fences_a_late_refill(restore_stack):
+    """An expired restored row leaves a tombstone at V+1; a refill holding V cannot re-install the old blob."""
+    client, pg = restore_stack
+    pg.rows[CID] = _row(b"old", ver=1)
+    store = RedisPgConnectorTokenStore()
+    await store.get(CID)
+    past = datetime(2000, 1, 1, tzinfo=UTC)
+    await store.restore([_record(b"lapsed", past)], overwrite=True)
+    assert await _cached(client) == (None, b"2")
+    assert await client.ttl(_rec_key(CID)) > 0
+    await store._cache_set(CID, b"old", None, 1)
+    assert await _cached(client) == (None, b"2")
+    assert await store.get(CID) is None
