@@ -1,4 +1,4 @@
-"""Redact connector secrets from MCP request logs via the log-record factory.
+"""The connector-secret log rule, registered with the kit's record redaction.
 
 Managed calls put secrets into the request struct: the OAuth access token via
 the JSON-RPC ``_meta`` field (stdio) or an ``Authorization`` header (http), and a
@@ -7,56 +7,22 @@ of the transport config. No local logger surfaces these under normal config, but
 a DEBUG bump of ``mcp.shared.session``, a future fastmcp release, or a wrapper
 layer could.
 
-Redaction rides ``logging.setLogRecordFactory``: every ``LogRecord`` the process
-creates passes through a wrapping factory that masks the ``_meta`` token value
-and every value inside a logged ``headers``/``env`` object — in the message, and
-in any attached exception/stack text. Because the record is scrubbed at creation,
-before any handler sees it, every in-scope downstream sink emits the redacted text
-no matter how logging is configured: named uvicorn loggers, late-added handlers,
-``propagate=False`` loggers with their own handler, and even
-``logging.lastResort`` (the stderr fallback used when a record reaches no
-handler). A cheap substring guard keeps a token-free record almost free — no
-``%``-formatting and no exception rendering unless a marker is actually present.
-
-The wrapper applies to a scope, so an embedded tai app does not scrub a host's
-own log records:
-
-* ``scope="tai"`` (the default, installed from ``build_app``): only records the
-  tai runtime's operation feeds are scrubbed — the tai logger family (the module
-  ``__name__`` of a tai package: ``tai42_skeleton``, ``tai42_kit``, ``tai42_contract``,
-  ``tai42_backend_*``, ``tai42_connector_*``, …, or a dotted child of one) plus the
-  ``mcp`` / ``fastmcp`` library trees the runtime drives. A host app's own
-  records pass through untouched.
-* ``scope="process"`` (installed from the CLI entrypoints, which own their
-  process): every record in the process is scrubbed.
-
-The scope only ever widens: a ``scope="process"`` install upgrades the predicate
-even over an already-installed wrapper, and a later ``scope="tai"`` install never
-narrows it back.
+:func:`register_connector_log_redaction` registers this module's rule — mask the
+``_meta`` token value and every value inside a logged ``headers``/``env`` object —
+with the kit's record factory (``tai42_kit.logging.register_record_redactor``); the
+app and the CLI entrypoints install that factory at their scope
+(``tai42_kit.logging.install_record_redaction``).
 """
 
 from __future__ import annotations
 
-import logging
 import re
-from typing import Literal
+
+from tai42_kit.logging import register_record_redactor
 
 from tai42_skeleton.connectors.settings import connector_adapter_settings
 
 _REDACTION = "**********"
-
-Scope = Literal["tai", "process"]
-
-_VALID_SCOPES = ("tai", "process")
-
-# Which records the installed factory scrubs. Starts at the embed default (the tai
-# logger family only) and only ever widens to the whole process; a live wrapper
-# reads this at record-creation time, so a scope upgrade takes effect immediately.
-_SCOPE: Scope = "tai"
-
-# The fail-closed replacement when redacting a record itself raises: the original
-# renderable text is dropped so a token it failed to scrub can never reach a handler.
-_REDACTOR_FAILED = "[meta-log-redactor error: record suppressed]"
 
 # Start of a ``"headers"``/``"env"`` object in the logged config (JSON or python
 # repr). The matching close brace is found by a quote-aware balanced scan, NOT a
@@ -206,10 +172,6 @@ def _mask_headers_env(msg: str) -> str:
         pos = open_brace + 1 + len(masked) + 1
 
 
-# Renders an ``exc_info`` tuple to the same text a default handler would emit, so
-# the token check and redaction see exactly what would otherwise reach the sink.
-_EXC_FORMATTER = logging.Formatter()
-
 # Substring markers of a logged ``headers``/``env`` object, in JSON or python repr.
 _HEADERS_ENV_MARKERS = ('"headers"', "'headers'", '"env"', "'env'")
 
@@ -226,11 +188,6 @@ def _redact_meta_match(m: re.Match[str]) -> str:
     return m.group(0).replace(value, _REDACTION)
 
 
-def _has_marker(text: str, meta_key: str) -> bool:
-    """Cheap guard: does ``text`` carry the meta token key or a headers/env object?"""
-    return meta_key in text or any(marker in text for marker in _HEADERS_ENV_MARKERS)
-
-
 def _redact_text(text: str, meta_key: str, pattern: re.Pattern[str]) -> str:
     """Mask the meta token value and every headers/env value present in ``text``."""
     if meta_key in text:
@@ -240,129 +197,18 @@ def _redact_text(text: str, meta_key: str, pattern: re.Pattern[str]) -> str:
     return text
 
 
-def _redact_record(record: logging.LogRecord, meta_key: str, pattern: re.Pattern[str]) -> None:
-    """Scrub secrets from ``record`` in place: its message, and any attached exception/stack text.
-
-    The marker check inspects the raw ``msg`` (stringified — a non-``str`` ``msg``
-    whose ``str()`` carries a token is caught too) and a string form of ``args``; the
-    full ``%``-render (:meth:`~logging.LogRecord.getMessage`) and the redaction subs
-    run only when a marker is present, and an exception is rendered only when the
-    record carries one. So a token-free record pays only the cheap marker scan, not
-    the full format + regex.
-    """
-    raw_msg = record.msg if isinstance(record.msg, str) else str(record.msg)
-    args_text = str(record.args) if record.args else ""
-    if _has_marker(raw_msg, meta_key) or _has_marker(args_text, meta_key):
-        # Render (msg % args), redact, and clear args so downstream formatters
-        # emit the redacted text and never re-interpolate the un-redacted source.
-        record.msg = _redact_text(record.getMessage(), meta_key, pattern)
-        record.args = None
-
-    # Exceptions are rare, so pay the render cost only when one is attached. Set
-    # ``exc_text`` to the redacted render; ``Formatter.format`` reuses a non-empty
-    # ``exc_text`` verbatim rather than re-rendering the raw traceback.
-    if record.exc_info or record.exc_text:
-        exc_text = record.exc_text or _EXC_FORMATTER.formatException(record.exc_info)  # type: ignore[arg-type]
-        if _has_marker(exc_text, meta_key):
-            record.exc_text = _redact_text(exc_text, meta_key, pattern)
-
-    if record.stack_info and _has_marker(record.stack_info, meta_key):
-        record.stack_info = _redact_text(record.stack_info, meta_key, pattern)
-
-
-# Logger-name roots the ``"tai"`` scope covers: the tai package family plus the
-# MCP client/server libraries the tai runtime itself drives (``mcp`` /
-# ``fastmcp``) — their session layers log request/response content carrying
-# connector ``_meta``, the primary token leak path, and those records are
-# produced by tai's own operation even though the logger names are third-party.
-_TAI_SCOPE_EXACT = ("tai", "mcp", "fastmcp")
-# `tai42_`/`tai42.` cover the package family's module loggers; `tai.` covers a
-# logger named after the product itself, which is independent of the module
-# names and is what an embedding app conventionally uses.
-_TAI_SCOPE_PREFIXES = ("tai42_", "tai42.", "tai.", "mcp.", "fastmcp.")
-
-
-def _is_tai_logger(name: str) -> bool:
-    """Whether ``name`` belongs to the loggers tai's operation feeds.
-
-    The module ``__name__`` of a tai package (``tai42_skeleton``, ``tai42_kit``, ``tai42_contract``,
-    ``tai42_backend_*``, ``tai42_connector_*``, …), a dotted child of one, or the ``mcp`` / ``fastmcp``
-    library trees the runtime drives.
-    """
-    return name in _TAI_SCOPE_EXACT or name.startswith(_TAI_SCOPE_PREFIXES)
-
-
-def install_meta_log_redactor(*, meta_key: str | None = None, scope: Scope = "tai") -> None:
-    """Install the process-global redacting log-record factory.
-
-    Chains the current ``logging.getLogRecordFactory()`` (rather than replacing
-    it), so any factory another component installed still runs. Every in-scope
-    record the process creates is then scrubbed by :func:`_redact_record` before any
-    handler sees it, which redacts leaks regardless of handler timing, logger
-    propagation, or the ``logging.lastResort`` stderr fallback — no leaf logger
-    names need enumerating.
+def register_connector_log_redaction(meta_key: str | None = None) -> None:
+    """Register the connector-secret rule with the kit's record redaction (replaces by name).
 
     Args:
         meta_key: The connector-meta token key to redact; defaults to the configured
-            key. A malformed key fails loudly at install time.
-        scope: ``"tai"`` scrubs only the loggers tai's operation feeds — the tai
-            logger family plus the ``mcp`` / ``fastmcp`` trees (the embed
-            default, so a host app's own records pass through untouched);
-            ``"process"`` scrubs
-            every record in the process (installed from the CLI entrypoints, which
-            own their process). The scope only widens: a ``"process"`` install
-            upgrades the predicate even over an already-installed wrapper, and a
-            later ``"tai"`` install never narrows it back.
-
-    Idempotent: the wrapping factory is tagged, and a second call detects the tag
-    and returns without stacking a duplicate wrapper — after applying any scope
-    widening.
+            key. A malformed key fails loudly here, at registration, never by
+            silently passing tokens at log time.
     """
-    global _SCOPE
-
-    if scope not in _VALID_SCOPES:
-        raise ValueError(f"scope must be one of {', '.join(map(repr, _VALID_SCOPES))}; got {scope!r}.")
-
-    if meta_key is None:
-        meta_key = connector_adapter_settings().meta_token_key
-
-    # Compiled here (not per record): a malformed meta key fails loudly at install
-    # time, never by silently passing tokens at log time.
-    pattern = _build_redactor_regex(meta_key)
-
-    # Widen the scope monotonically, before the idempotency check so a process-scope
-    # install upgrades an already-installed wrapper; a tai-scope install never
-    # narrows an existing process scope.
-    if scope == "process":
-        _SCOPE = "process"
-
-    previous_factory = logging.getLogRecordFactory()
-    if getattr(previous_factory, "_is_meta_log_redactor", False):
-        return
-
-    def redacting_factory(*args: object, **kwargs: object) -> logging.LogRecord:
-        record = previous_factory(*args, **kwargs)  # type: ignore[arg-type]
-        # Out-of-scope records pass through untouched: under the tai scope a host
-        # app's own records are left as they are; the live ``_SCOPE`` read makes a
-        # later process-scope upgrade take effect on this same wrapper.
-        if _SCOPE != "process" and not _is_tai_logger(record.name):
-            return record
-        try:
-            _redact_record(record, meta_key, pattern)
-        except Exception:
-            # A record-factory exception propagates to the caller's ``log`` call (it
-            # runs before ``Handler.handle``'s ``handleError`` guard), so a redactor
-            # bug — or a benign logging mistake like a bad ``%`` arg count or a raising
-            # ``__repr__`` — must never crash the request path, and must never leak a
-            # token it failed to scrub. Fail closed: blank the record's renderable
-            # fields to a marker. Re-logging here would re-enter the factory, so the
-            # failure is deliberately not re-emitted.
-            record.msg = _REDACTOR_FAILED
-            record.args = None
-            record.exc_info = None
-            record.exc_text = None
-            record.stack_info = None
-        return record
-
-    redacting_factory._is_meta_log_redactor = True  # type: ignore[attr-defined]
-    logging.setLogRecordFactory(redacting_factory)
+    key = meta_key if meta_key is not None else connector_adapter_settings().meta_token_key
+    pattern = _build_redactor_regex(key)
+    register_record_redactor(
+        "connector-secrets",
+        markers=(key, *_HEADERS_ENV_MARKERS),
+        redact=lambda text: _redact_text(text, key, pattern),
+    )

@@ -8,7 +8,9 @@ Driven through an ASYNC park, which runs the full delivery retry loop and then r
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 from tai42_contract.app import tai42_app
@@ -25,6 +27,8 @@ from tai42_skeleton.authz.execution_identity import reset_execution_identity, se
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import ask
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.ask import delivery as delivery_module
+from tai42_skeleton.interactions.ask.timing import DeadlineWindow
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 
@@ -118,3 +122,119 @@ async def test_one_span_per_delivery_attempt(monkeypatch, fake_client_ctx, drive
     assert all(u["level"] is None for u in backend.writer.spans[1]["span"].updates)
     # The recipient rides the input path on every attempt.
     assert backend.writer.spans[0]["input"] == {"recipient": "+15550001111"}
+
+
+# -- the delivery attempt span's retryable is the seam's decision ----------------------
+
+
+class _AlwaysRetryableFailure:
+    """Fails every delivery attempt with the same typed-retryable error."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def deliver(self, delivery: ChannelDelivery) -> None:
+        self.attempts += 1
+        raise ChannelDeliveryError("transient 503", retryable=True)
+
+    async def notify(self, notification: ChannelNotification) -> None:  # pragma: no cover - unused here
+        return None
+
+
+def _window(seconds: float) -> DeadlineWindow:
+    now = datetime.now(UTC)
+    return DeadlineWindow(
+        budget=seconds,
+        created_at=now,
+        timeout_at=now + timedelta(seconds=seconds),
+        deadline=asyncio.get_running_loop().time() + seconds,
+        park_ttl_margin_seconds=0,
+    )
+
+
+async def _deliver(channel_obj: Any, settings: InteractionsSettings, window: DeadlineWindow) -> None:
+    await delivery_module.deliver_with_retry(
+        channel_obj,
+        cast(ChannelDelivery, object()),
+        settings,
+        cast(Any, object()),
+        window,
+        channel="synthetic",
+        recipient="r-1",
+        interaction_id="i-1",
+        group="g-1",
+        question="proceed?",
+        sensitive=False,
+    )
+
+
+@pytest.fixture
+def terminal_failures(monkeypatch) -> list[BaseException]:
+    """Record the terminal failure instead of pruning a real store; the failure re-raises."""
+    seen: list[BaseException] = []
+
+    async def _report(settings, store, exc, **kwargs) -> bool:
+        seen.append(exc)
+        return True
+
+    monkeypatch.setattr(delivery_module, "_prune_and_report_failure", _report)
+    return seen
+
+
+def _retryable_flags(backend: RecordingMonitoring) -> list[object]:
+    return [s["span"].updates[0]["metadata"]["retryable"] for s in backend.writer.spans]
+
+
+async def test_the_last_delivery_attempt_says_not_retryable(backend, terminal_failures):
+    backend.writer.active_trace_id = "trace-1"
+    settings = InteractionsSettings(delivery_max_attempts=2, delivery_retry_backoff_seconds=0.01)
+    channel_obj = _AlwaysRetryableFailure()
+
+    with pytest.raises(ChannelDeliveryError):
+        await _deliver(channel_obj, settings, _window(30))
+
+    assert channel_obj.attempts == 2
+    assert _retryable_flags(backend) == [True, False]
+    assert len(terminal_failures) == 1
+
+
+async def test_a_window_too_short_for_the_backoff_says_not_retryable_and_stops(backend, terminal_failures):
+    backend.writer.active_trace_id = "trace-1"
+    settings = InteractionsSettings(delivery_max_attempts=3, delivery_retry_backoff_seconds=60)
+    channel_obj = _AlwaysRetryableFailure()
+
+    with pytest.raises(ChannelDeliveryError):
+        await _deliver(channel_obj, settings, _window(5))
+
+    assert channel_obj.attempts == 1
+    assert _retryable_flags(backend) == [False]
+
+
+async def test_the_retry_decision_is_made_once_per_failed_attempt_and_drives_the_backoff(
+    monkeypatch, backend, terminal_failures
+):
+    backend.writer.active_trace_id = "trace-1"
+    settings = InteractionsSettings(delivery_max_attempts=3, delivery_retry_backoff_seconds=0.01)
+    calls: list[int] = []
+    real_retry_delay = delivery_module.retry_delay
+
+    def counting_retry_delay(exc, attempt, remaining, settings):
+        calls.append(attempt)
+        return real_retry_delay(exc, attempt, remaining, settings)
+
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(delivery_module, "retry_delay", counting_retry_delay)
+    monkeypatch.setattr(delivery_module.asyncio, "sleep", recording_sleep)
+
+    with pytest.raises(ChannelDeliveryError):
+        await _deliver(_AlwaysRetryableFailure(), settings, _window(30))
+
+    assert calls == [1, 2, 3]
+    assert sleeps == [0.01, 0.02]
+    assert _retryable_flags(backend) == [True, True, False]

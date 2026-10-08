@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
-from tai42_kit.logging import logging_settings, setup_logging
+from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
 
 from tai42_skeleton import tool_meta, versioning
 from tai42_skeleton.access_control import management
@@ -27,7 +27,7 @@ from tai42_skeleton.access_control.verifier import reset_registered_reserved_pat
 from tai42_skeleton.app import bus_settings
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors import settings as connectors_readiness
-from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
+from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
 from tai42_skeleton.conversations import settings as conversations_readiness
 from tai42_skeleton.conversations.lifecycle import (
     redrive_pending_conversations,
@@ -278,15 +278,16 @@ def build_app() -> TaiMCP:
     The root-logger re-apply on config reload is NOT wired here: it is a CLI-seam
     concern registered via :func:`register_cli_logging_reload`, so an embedded app
     that builds this singleton never reconfigures the host's root logger.
-    ``install_meta_log_redactor`` is wired here regardless of caller, at its default
-    ``"tai"`` scope: its fail-closed connector-secret redaction covers tai's own log
-    records in embed mode too, while a host app's own records pass through untouched.
-    The CLI entrypoints widen it to process scope beside their logging-reload
-    registration.
+    The connector-secret log rule is registered and the kit's record redaction
+    installed here regardless of caller, at its default ``"tai"`` scope: the
+    fail-closed redaction covers tai's own log records in embed mode too, while a
+    host app's own records pass through untouched. The CLI entrypoints widen it to
+    process scope beside their logging-reload registration.
     """
     global _app
     if _app is None:
-        install_meta_log_redactor()
+        register_connector_log_redaction()
+        install_record_redaction()
         settings = access_control_settings()
         # No ``auth=`` here: each epoch's ``ServingCore`` reads the access-control
         # adapter FRESH from settings, so a profile that flips ACCESS_CONTROL_*

@@ -3,8 +3,8 @@
 Loaded when the manifest's ``channel_modules`` lists ``tai42_channel_telegram``.
 Importing this module registers :class:`TelegramChannel` under ``"telegram"``,
 imports :mod:`tai42_channel_telegram.inbound` (registering the
-``POST /api/channels/telegram/inbound`` route), installs the log-redaction filter
-that keeps the bot token out of httpx request-line logs, and hooks ``setWebhook``
+``POST /api/channels/telegram/inbound`` route), registers the bot-token mask with
+the kit's transport-log redaction, and hooks ``setWebhook``
 at startup. Importing the package ``__init__`` alone does NOT register (library use).
 """
 
@@ -16,12 +16,12 @@ from tai42_kit.settings import require, require_secret
 import tai42_channel_telegram.inbound  # noqa: F401  (import registers the inbound route)
 from tai42_channel_telegram.channel import TelegramChannel
 from tai42_channel_telegram.client import call_method
-from tai42_channel_telegram.log_hygiene import install_telegram_log_redaction
+from tai42_channel_telegram.log_hygiene import register_telegram_log_redaction
 from tai42_channel_telegram.settings import telegram_settings
 
 # The bot token rides every Bot API URL and httpx logs the request line at INFO;
 # mask it in httpx/httpcore log records before the first send (setWebhook) fires.
-install_telegram_log_redaction()
+register_telegram_log_redaction()
 
 # Captured at import — where the mount binding is live — so setWebhook points at the
 # inbound door's ACTUAL mount, following an operator remap of the route base.

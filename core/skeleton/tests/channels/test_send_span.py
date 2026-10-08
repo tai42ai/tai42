@@ -113,7 +113,7 @@ def test_input_error_is_never_retryable(backend: RecordingMonitoring) -> None:
 def test_attempt_ordinal_is_stamped(backend: RecordingMonitoring) -> None:
     backend.writer.active_trace_id = "trace-1"
 
-    with send_span("sms", recipient="x", attempt=2):
+    with send_span("sms", recipient="x", attempt=2, retry_decision=lambda exc: False):
         pass
 
     # The retry ordinal is a platform-local attribute OUTSIDE the messaging.* namespace
@@ -158,3 +158,79 @@ def test_the_writer_records_a_wrapped_recipient_as_the_placeholder(monkeypatch: 
     finally:
         reset_monitoring()
         writer.shutdown()
+
+
+# -- a retrying seam: the span's retryable is the seam's decision ------------------
+
+
+def test_a_single_send_keeps_the_error_classification(backend: RecordingMonitoring) -> None:
+    backend.writer.active_trace_id = "trace-1"
+
+    with pytest.raises(ChannelDeliveryError), send_span("sms", recipient="x"):
+        raise ChannelDeliveryError("provider 503", retryable=True)
+
+    (update,) = backend.writer.spans[0]["span"].updates
+    assert update["metadata"]["retryable"] is True
+
+
+def test_an_unstamped_exception_carries_the_unknown_kind(backend: RecordingMonitoring) -> None:
+    backend.writer.active_trace_id = "trace-1"
+
+    with pytest.raises(RuntimeError), send_span("sms", recipient="x"):
+        raise RuntimeError("socket gone")
+
+    (update,) = backend.writer.spans[0]["span"].updates
+    assert update["metadata"] == {"error.type": "RuntimeError", "error.kind": "unknown"}
+
+
+def test_a_retrying_seam_stamps_its_decision(backend: RecordingMonitoring) -> None:
+    backend.writer.active_trace_id = "trace-1"
+    decided: list[BaseException] = []
+
+    def no_more_attempts(exc: BaseException) -> bool:
+        decided.append(exc)
+        return False
+
+    error = ChannelDeliveryError("provider 503", retryable=True, retry_after=5.0)
+    with (
+        pytest.raises(ChannelDeliveryError),
+        send_span("sms", recipient="x", attempt=2, retry_decision=no_more_attempts),
+    ):
+        raise error
+
+    (update,) = backend.writer.spans[0]["span"].updates
+    assert update["metadata"] == {
+        "error.type": "ChannelDeliveryError",
+        "error.kind": "delivery_failed",
+        "retryable": False,
+    }
+    assert decided == [error]
+
+
+def test_the_decision_is_made_once_even_outside_a_trace(backend: RecordingMonitoring) -> None:
+    backend.writer.active_trace_id = None
+    decided: list[BaseException] = []
+
+    def decide(exc: BaseException) -> bool:
+        decided.append(exc)
+        return True
+
+    with pytest.raises(ChannelDeliveryError), send_span("sms", recipient="x", attempt=1, retry_decision=decide):
+        raise ChannelDeliveryError("provider 503", retryable=True)
+
+    assert len(decided) == 1
+    assert backend.writer.spans == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"attempt": 1}, {"retry_decision": lambda exc: True}],
+)
+def test_attempt_and_retry_decision_are_given_together(backend: RecordingMonitoring, kwargs: dict[str, Any]) -> None:
+    backend.writer.active_trace_id = "trace-1"
+
+    with (
+        pytest.raises(ValueError, match="send_span: attempt and retry_decision are given together"),
+        send_span("sms", recipient="x", **kwargs),
+    ):
+        pass

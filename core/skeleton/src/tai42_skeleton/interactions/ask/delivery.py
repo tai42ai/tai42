@@ -181,8 +181,19 @@ async def deliver_with_retry(
     loop = asyncio.get_running_loop()
     attempt = 0
     retry_in: float | None = None
+    # The failure the send span already decided, so the loop reuses that one decision
+    # (one clock read) and the span and the loop never disagree at the deadline edge.
+    decided: BaseException | None = None
+
+    def decide(exc: BaseException) -> bool:
+        nonlocal retry_in, decided
+        retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), settings)
+        decided = exc
+        return retry_in is not None
+
     while True:
         attempt += 1
+        decided = None
         try:
             if retry_in is not None:
                 await asyncio.sleep(retry_in)
@@ -192,7 +203,7 @@ async def deliver_with_retry(
             # distinct sends). ``deliver`` returns None on success — no correlatable
             # provider id at this seam — so no tier-2 receipt index is written here.
             attempt_timeout = window.deadline - loop.time()
-            with send_span(channel, recipient=recipient, attempt=attempt):
+            with send_span(channel, recipient=recipient, attempt=attempt, retry_decision=decide):
                 try:
                     await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
                 except TimeoutError as exc:
@@ -202,7 +213,9 @@ async def deliver_with_retry(
                         retryable=True,
                     ) from exc
         except BaseException as exc:
-            retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), settings)
+            if decided is not exc:
+                # Raised outside the send span (the backoff sleep): decided here.
+                retry_in = retry_delay(exc, attempt, window.deadline - loop.time(), settings)
             if retry_in is not None:
                 # Intermediate failure: the question stays open for the next attempt —
                 # never pruned here, never silent.

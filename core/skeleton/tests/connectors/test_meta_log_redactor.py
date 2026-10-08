@@ -1,4 +1,9 @@
-"""Tests for the record-factory redactor that scrubs connector secrets from logs."""
+"""The connector-secret log rule, applied through the kit's record redaction.
+
+Each test registers the rule (:func:`register_connector_log_redaction`) and installs
+the kit's record factory at process scope, so every record below is scrubbed exactly
+as the app and the CLI entrypoints scrub it.
+"""
 
 from __future__ import annotations
 
@@ -6,19 +11,17 @@ import logging
 import sys
 
 import pytest
+from tai42_kit.logging import REDACTOR_FAILED, install_record_redaction
+from tai42_kit.logging import redaction as kit_redaction
 
-from tai42_skeleton.connectors import meta_log_redactor
 from tai42_skeleton.connectors.meta_log_redactor import (
-    _REDACTOR_FAILED,
     _build_redactor_regex,
     _find_object_end,
-    _is_tai_logger,
     _mask_headers_env,
     _mask_object_body,
     _read_string,
-    _redact_record,
     _skip_value,
-    install_meta_log_redactor,
+    register_connector_log_redaction,
 )
 
 _META = "tai_hub.access_token"
@@ -28,26 +31,25 @@ _PATTERN = _build_redactor_regex(_META)
 
 
 @pytest.fixture(autouse=True)
-def _restore_log_record_factory():
-    """Reset the process-global record factory to the stock ``logging.LogRecord``
-    for the duration of every test, then restore whatever was there before.
-
-    Resetting to the stock factory (rather than merely saving/restoring) gives each
-    test a clean baseline that is immune to a redactor another test module already
-    installed on the global factory (building the app installs it process-wide); the
-    restore afterward keeps this module from leaking its own installs onward. The
-    monotonic redaction scope is reset to the embed default the same way, so a
-    process-scope install in one test cannot widen another's baseline.
-    """
+def _isolated_record_redaction(monkeypatch: pytest.MonkeyPatch):
+    """Give every test the stock record factory, an empty kit registry and the embed
+    scope, then restore whatever was there before — immune to a redaction another
+    test module installed (building the app installs it process-wide), and leaking
+    none of this module's installs onward."""
     saved = logging.getLogRecordFactory()
-    saved_scope = meta_log_redactor._SCOPE
     logging.setLogRecordFactory(logging.LogRecord)
-    meta_log_redactor._SCOPE = "tai"
+    monkeypatch.setattr(kit_redaction, "_SCOPE", "tai")
+    monkeypatch.setattr(kit_redaction, "_RECORD_REDACTORS", kit_redaction._Registry())
     try:
         yield
     finally:
         logging.setLogRecordFactory(saved)
-        meta_log_redactor._SCOPE = saved_scope
+
+
+def _install(meta_key: str | None = _META) -> None:
+    """Register the connector rule and install the kit's record factory at process scope."""
+    register_connector_log_redaction(meta_key)
+    install_record_redaction(scope="process")
 
 
 @pytest.fixture
@@ -72,9 +74,11 @@ def _record(msg: str) -> logging.LogRecord:
 
 
 def _apply(rec: logging.LogRecord) -> logging.LogRecord:
-    """Run the in-place record redaction the factory applies to every record."""
-    _redact_record(rec, _META, _PATTERN)
-    return rec
+    """Re-create ``rec`` through the installed redacting factory, as ``Logger.makeRecord`` does."""
+    _install()
+    return logging.getLogRecordFactory()(
+        rec.name, rec.levelno, rec.pathname, rec.lineno, rec.msg, rec.args, rec.exc_info, sinfo=rec.stack_info
+    )
 
 
 def _capture_handler() -> tuple[logging.Handler, list[str]]:
@@ -223,7 +227,7 @@ def test_passes_through_clean_message():
 
 def test_clears_args_after_redaction():
     rec = logging.LogRecord("t", logging.INFO, __file__, 1, f'{{"{_META}": "%s"}}', ("tok",), None)
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.args is None
     assert "tok" not in rec.getMessage()
 
@@ -232,14 +236,14 @@ def test_lazy_args_untouched_on_clean_message():
     # No marker in msg/args -> the record's lazy formatting is preserved (args kept,
     # no %-render forced by the redactor).
     rec = logging.LogRecord("t", logging.INFO, __file__, 1, "value=%s", ("plain",), None)
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.args == ("plain",)
 
 
 def test_redacts_token_carried_only_in_args():
     # The token lives in args, not the format string; the guard checks str(args).
     rec = logging.LogRecord("t", logging.INFO, __file__, 1, "sending %s", (f'{{"{_META}": "{_SECRET}"}}',), None)
-    _apply(rec)
+    rec = _apply(rec)
     assert _SECRET not in rec.getMessage()
     assert _REDACT in rec.getMessage()
 
@@ -258,7 +262,7 @@ def test_redacts_python_repr_shape():
 def test_noop_when_key_absent():
     rec = _record("normal log line about tool x")
     original = rec.getMessage()
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.getMessage() == original
 
 
@@ -293,7 +297,7 @@ def test_redacts_no_auth_stdio_env_values():
 def test_noop_when_no_headers_env_or_meta():
     rec = _record("plain message with url=https://x.test/mcp and title=foo")
     original = rec.getMessage()
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.getMessage() == original
 
 
@@ -360,7 +364,7 @@ def test_redacts_token_inside_exception_text():
     # A token echoed by an exception's str() (e.g. a pydantic ValidationError over
     # the request _meta) must be redacted in the rendered exception text.
     rec = _record_with_exception(f'bad input {{"{_META}": "{_SECRET}"}}')
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.exc_text is not None
     assert _SECRET not in rec.exc_text
     assert _REDACT in rec.exc_text
@@ -368,7 +372,7 @@ def test_redacts_token_inside_exception_text():
 
 def test_redacts_headers_inside_exception_text():
     rec = _record_with_exception('cfg={"headers": {"Authorization": "Bearer EXC-LEAK"}}')
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.exc_text is not None
     assert "EXC-LEAK" not in rec.exc_text
 
@@ -377,19 +381,19 @@ def test_exception_without_token_leaves_exc_text_unrendered():
     # No marker in the exception -> the redactor does not pre-render/cache exc_text,
     # leaving normal handler rendering intact.
     rec = _record_with_exception("ordinary failure, nothing secret")
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.exc_text is None
 
 
 def test_redacts_token_inside_stack_info():
     rec = _record(f'op {{"{_META}": "{_SECRET}"}}')
     rec.stack_info = f'Stack (most recent call last):\n  cfg = {{"{_META}": "{_SECRET}"}}'
-    _apply(rec)
+    rec = _apply(rec)
     assert rec.stack_info is not None
     assert _SECRET not in rec.stack_info
 
 
-# -- install (record-factory redaction) --------------------------------------
+# -- the rule through the kit's record factory --------------------------------
 
 
 def test_install_redacts_when_root_had_no_handler_at_install(bare_root):
@@ -399,7 +403,7 @@ def test_install_redacts_when_root_had_no_handler_at_install(bare_root):
     redacted text. Process scope (the CLI-owned path) covers the arbitrary leaf
     logger below.
     """
-    install_meta_log_redactor(meta_key=_META, scope="process")
+    _install()
     handler, captured = _capture_handler()
     bare_root.addHandler(handler)  # added AFTER install, as uvicorn/late config does
 
@@ -414,7 +418,7 @@ def test_install_redacts_propagated_child_logger(bare_root):
     """The most likely leak path — a propagated WARNING from ``mcp.shared.session``
     with no own handler — is redacted under process scope without enumerating the
     leaf logger's name."""
-    install_meta_log_redactor(meta_key=_META, scope="process")
+    _install()
     handler, captured = _capture_handler()
     bare_root.addHandler(handler)
 
@@ -428,7 +432,7 @@ def test_install_redacts_propagated_child_logger(bare_root):
 def test_install_redacts_logged_exception_end_to_end(bare_root):
     """A token inside an exception logged via ``logger.exception`` is redacted in the
     fully formatted sink output (exc_text) under process scope."""
-    install_meta_log_redactor(meta_key=_META, scope="process")
+    _install()
     handler, formatted = _format_capture_handler()
     bare_root.addHandler(handler)
 
@@ -443,14 +447,11 @@ def test_install_redacts_logged_exception_end_to_end(bare_root):
     assert _REDACT in joined
 
 
-def test_install_is_idempotent():
-    original = logging.getLogRecordFactory()
-    install_meta_log_redactor(meta_key=_META)
-    first = logging.getLogRecordFactory()
-    install_meta_log_redactor(meta_key=_META)
-    second = logging.getLogRecordFactory()
-    assert first is not original  # installed
-    assert first is second  # not double-wrapped
+def test_registering_again_replaces_the_rule():
+    # A repeat registration (another build or CLI entrypoint) keeps one rule, not two.
+    _install()
+    _install()
+    assert len(kit_redaction._RECORD_REDACTORS.active) == 1
 
 
 def test_install_chains_prior_factory():
@@ -462,7 +463,7 @@ def test_install_chains_prior_factory():
         return record
 
     logging.setLogRecordFactory(custom_factory)
-    install_meta_log_redactor(meta_key=_META, scope="process")
+    _install()
 
     factory = logging.getLogRecordFactory()
     rec = factory("t", logging.INFO, __file__, 1, f'{{"{_META}": "{_SECRET}"}}', None, None)
@@ -470,10 +471,10 @@ def test_install_chains_prior_factory():
     assert _SECRET not in rec.getMessage()  # and redaction runs on top
 
 
-def test_install_defaults_meta_key_from_settings():
+def test_registration_defaults_meta_key_from_settings():
     # No meta_key -> settings default (tai_hub.access_token). Process scope so the
     # bare-named record below is in scope regardless of the logger family.
-    install_meta_log_redactor(scope="process")
+    _install(None)
     factory = logging.getLogRecordFactory()
     rec = factory("t", logging.INFO, __file__, 1, '{"tai_hub.access_token": "SECRETVAL"}', None, None)
     assert "SECRETVAL" not in rec.getMessage()
@@ -485,10 +486,10 @@ def test_factory_fails_closed_when_redaction_raises():
     # raise ``TypeError`` inside the redactor. A record-factory exception would
     # otherwise propagate to the caller's log call (a DoS); the factory must instead
     # fail closed — blanking the record — never crash and never leak the token.
-    install_meta_log_redactor(meta_key=_META, scope="process")
+    _install()
     factory = logging.getLogRecordFactory()
     rec = factory("t", logging.INFO, __file__, 1, f"{_META}={_SECRET} %s %s", ("only-one",), None)
-    assert rec.msg == _REDACTOR_FAILED
+    assert rec.msg == REDACTOR_FAILED
     assert rec.args is None
     assert _SECRET not in rec.getMessage()
 
@@ -500,13 +501,12 @@ def test_redacts_token_in_non_str_msg():
         def __str__(self) -> str:
             return f'{{"{_META}": "{_SECRET}"}}'
 
-    rec = logging.LogRecord("t", logging.INFO, __file__, 1, _Obj(), None, None)
-    _redact_record(rec, _META, _PATTERN)
+    rec = _apply(logging.LogRecord("t", logging.INFO, __file__, 1, _Obj(), None, None))
     assert _SECRET not in rec.getMessage()
     assert _REDACT in rec.getMessage()
 
 
-# -- redaction scope (tai family vs whole process) ---------------------------
+# -- the embed scope ------------------------------------------------------------
 
 
 def _make_record(logger_name: str) -> logging.LogRecord:
@@ -515,69 +515,19 @@ def _make_record(logger_name: str) -> logging.LogRecord:
     return factory(logger_name, logging.INFO, __file__, 1, f'{{"{_META}": "{_SECRET}"}}', None, None)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "tai",
-        "tai42_skeleton",
-        "tai42_kit.logging",
-        "tai.child.logger",
-        "tai42_connector_hub",
-        # The MCP libraries the runtime drives: their session layers log
-        # request/response content carrying connector ``_meta`` — the primary
-        # token leak path — so the tai scope covers them.
-        "mcp",
-        "mcp.shared.session",
-        "fastmcp",
-        "fastmcp.server.http",
-    ],
-)
-def test_is_tai_logger_accepts_family(name: str) -> None:
-    assert _is_tai_logger(name) is True
-
-
-@pytest.mark.parametrize("name", ["myhost.app", "taint", "uvicorn.error", "tailscale", "mcpx", "fastmcpx.app"])
-def test_is_tai_logger_rejects_non_family(name: str) -> None:
-    assert _is_tai_logger(name) is False
-
-
-def test_default_scope_redacts_tai_logger_record():
-    # Embed default (tai scope): a record from the tai logger family is scrubbed.
-    install_meta_log_redactor(meta_key=_META)
-    rec = _make_record("tai42_skeleton.connectors")
+@pytest.mark.parametrize("name", ["tai42_skeleton.connectors", "mcp.shared.session", "fastmcp.server.http"])
+def test_tai_scope_redacts_the_connector_leak_paths(name: str):
+    # Embed default (tai scope): the tai family and the MCP library trees whose
+    # session layers log request content carrying connector ``_meta``.
+    register_connector_log_redaction(_META)
+    install_record_redaction()
+    rec = _make_record(name)
     assert _SECRET not in rec.getMessage()
     assert _REDACT in rec.getMessage()
 
 
-def test_default_scope_passes_host_logger_record_untouched():
-    # Embed default (tai scope): a host app's own logger record passes through
-    # unredacted — the wrapper never touches records outside the tai family.
-    install_meta_log_redactor(meta_key=_META)
+def test_tai_scope_passes_host_logger_record_untouched():
+    register_connector_log_redaction(_META)
+    install_record_redaction()
     rec = _make_record("myhost.app")
     assert _SECRET in rec.getMessage()
-    assert _REDACT not in rec.getMessage()
-
-
-def test_process_scope_redacts_host_logger_record():
-    # Widening to process scope (the CLI path) upgrades the already-installed
-    # wrapper, so the same host logger record is now scrubbed.
-    install_meta_log_redactor(meta_key=_META)  # embed default first
-    install_meta_log_redactor(meta_key=_META, scope="process")  # widen
-    rec = _make_record("myhost.app")
-    assert _SECRET not in rec.getMessage()
-    assert _REDACT in rec.getMessage()
-
-
-def test_scope_upgrade_is_one_way():
-    # A process-scope install cannot be narrowed back by a later tai-scope install:
-    # the host logger record stays scrubbed.
-    install_meta_log_redactor(meta_key=_META, scope="process")
-    install_meta_log_redactor(meta_key=_META)  # default tai scope — must not downgrade
-    rec = _make_record("myhost.app")
-    assert _SECRET not in rec.getMessage()
-    assert _REDACT in rec.getMessage()
-
-
-def test_invalid_scope_raises():
-    with pytest.raises(ValueError, match="scope must be one of"):
-        install_meta_log_redactor(meta_key=_META, scope="bogus")  # type: ignore[arg-type]

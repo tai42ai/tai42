@@ -8,7 +8,7 @@ import signal
 import click
 from dotenv import load_dotenv
 from tai42_contract.backend import CONSUMING_RUNTIME
-from tai42_kit.logging import logging_settings, setup_logging
+from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
 from tai42_kit.signals import signal_chain
 
 from tai42_skeleton.app import instance
@@ -16,7 +16,7 @@ from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_f
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.backend.settings import base_backend_settings
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
-from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
+from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,8 @@ async def run_backend(extra_args):
     instance.register_cli_logging_reload()
     # This CLI-owned process owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
-    install_meta_log_redactor(scope="process")
+    register_connector_log_redaction()
+    install_record_redaction(scope="process")
     # Only the key NAME is needed below, and this coroutine frame is suspended for the
     # process lifetime: holding the settings MODEL here would keep a boot-epoch instance
     # reachable past every reload's cache reset, which the stale-settings sweep reports

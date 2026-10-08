@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
 from tai42_contract.errors import ErrorKind
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
 from tai42_contract.tools import ToolRetryBackoff, ToolRetryPolicy
@@ -347,3 +347,62 @@ async def test_attempt_spans_noop_outside_a_trace(sleeps, backend):
     assert await dispatch_with_retry("fetch", _policy(), attempt) == "ok"
     assert calls["n"] == 2
     assert backend.writer.spans == []
+
+
+# -- monitoring: the attempt span's retryable is this seam's decision ------------------
+
+
+def _attempt_metadata(backend: RecordingMonitoring) -> list[dict | None]:
+    """Each attempt span's ERROR metadata, or ``None`` for an attempt that succeeded."""
+    out: list[dict | None] = []
+    for recorded in backend.writer.spans:
+        updates = recorded["span"].updates
+        out.append(updates[0]["metadata"] if updates else None)
+    return out
+
+
+async def test_a_declared_bad_input_retry_says_true_then_false_on_the_last_attempt(sleeps, backend):
+    backend.writer.active_trace_id = "trace-1"
+    policy = _policy(max_attempts=2, retryable=(ErrorKind.BAD_INPUT,))
+    attempt, calls = _failing(5, lambda: ChannelInputError("unrenderable"))
+
+    with pytest.raises(ChannelInputError):
+        await dispatch_with_retry("render", policy, attempt)
+
+    # The decision is unchanged: the declared kind is retried until the budget is spent.
+    assert calls["n"] == 2
+    assert not hasattr(ChannelInputError("x"), "retryable")
+    assert _attempt_metadata(backend) == [
+        {"error.type": "ChannelInputError", "error.kind": "bad_input", "retryable": True},
+        {"error.type": "ChannelInputError", "error.kind": "bad_input", "retryable": False},
+    ]
+
+
+async def test_a_retryable_delivery_error_says_false_on_the_last_attempt(sleeps, backend):
+    backend.writer.active_trace_id = "trace-1"
+    attempt, _calls = _failing(5, lambda: ChannelDeliveryError("503", retryable=True, retry_after=2))
+
+    with pytest.raises(ChannelDeliveryError):
+        await dispatch_with_retry("fetch", _policy(max_attempts=2), attempt)
+
+    assert _attempt_metadata(backend) == [
+        {"error.type": "ChannelDeliveryError", "error.kind": "delivery_failed", "retryable": True, "retry_after": 2.0},
+        {"error.type": "ChannelDeliveryError", "error.kind": "delivery_failed", "retryable": False},
+    ]
+    assert sleeps == [2.0]
+
+
+async def test_a_non_idempotent_attempt_says_false(sleeps, backend):
+    backend.writer.active_trace_id = "trace-1"
+    # The model rejects this shape at declaration; the runtime belt still answers it.
+    policy = ToolRetryPolicy.model_construct(
+        max_attempts=3, backoff=ToolRetryBackoff(), retryable=True, idempotent=False
+    )
+    attempt, _calls = _failing(1, lambda: ChannelDeliveryError("503", retryable=True))
+
+    with pytest.raises(ChannelDeliveryError):
+        await dispatch_with_retry("send_once", policy, attempt)
+
+    assert _attempt_metadata(backend) == [
+        {"error.type": "ChannelDeliveryError", "error.kind": "delivery_failed", "retryable": False},
+    ]

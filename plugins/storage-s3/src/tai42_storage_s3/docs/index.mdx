@@ -37,10 +37,9 @@ The bucket policy needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and
 fall under `s3:GetObject` and its multi-object delete under `s3:DeleteObject`; it
 makes no other calls.
 
-## Quirks
+## Content types
 
-Text templates are stored with content type `application/jinja2`, so a `stat` on
-one reports that rather than a `text/*` type.
+`upload` (text) stores `ContentType: text/plain; charset=utf-8`; `stat` on a text object reports it.
 
 ## See also
 

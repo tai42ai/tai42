@@ -77,7 +77,7 @@ def test_failure_message_redacts_url_embedded_credentials():
     message = mcp_health.snapshot("Utilities")["last_error"]["message"]
     assert "secret" not in message
     assert "abc" not in message
-    assert "https://<redacted>@host/path?token=<redacted>&x=<redacted>" in message
+    assert "https://***@host/path?token=***&x=***" in message
     # Surrounding non-URL text is untouched.
     assert "Client error '401 Unauthorized' for url" in message
     assert "- see docs" in message
@@ -89,7 +89,7 @@ def test_failure_message_redacts_raw_at_userinfo():
 
     message = mcp_health.snapshot("Utilities")["last_error"]["message"]
     assert "p@ss" not in message
-    assert "https://<redacted>@host/x?a=<redacted>" in message
+    assert "https://***@host/x?a=***" in message
 
 
 @pytest.mark.parametrize("hostile", ["a" * 200_000, "a." * 100_000])

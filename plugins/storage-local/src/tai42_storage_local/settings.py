@@ -13,7 +13,8 @@ class LocalStorageSettings(TaiBaseSettings):
         env_prefix="STORAGE_LOCAL_",
     )
 
-    root_path: str = "./templates"
+    # The storage root; unset (or empty) leaves the backend unconfigured and every call refuses.
+    root_path: str | None = None
     create_dirs: bool = True
 
 

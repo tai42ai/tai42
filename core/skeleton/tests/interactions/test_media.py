@@ -62,6 +62,30 @@ async def test_store_refuses_bad_input_loudly(fake_redis, bad):
         await store_data_image(store, fake_redis, bad, ttl_seconds=100)
 
 
+@pytest.fixture
+def image_allowlist(monkeypatch: pytest.MonkeyPatch):
+    """Override ``MEDIA_INGEST_IMAGE_MIME_ALLOWLIST`` for one test, re-read through the settings cache."""
+    from tai42_skeleton.settings.media_ingest import media_ingest_settings
+
+    def _set(raw: str) -> None:
+        monkeypatch.setenv("MEDIA_INGEST_IMAGE_MIME_ALLOWLIST", raw)
+        media_ingest_settings.cache_clear()  # type: ignore[attr-defined]
+
+    yield _set
+    monkeypatch.delenv("MEDIA_INGEST_IMAGE_MIME_ALLOWLIST", raising=False)
+    media_ingest_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+async def test_the_configured_image_allowlist_bounds_a_data_image(fake_redis, image_allowlist):
+    image_allowlist('["image/png", "image/jpeg"]')
+    store = InteractionStore("t:")
+    gif = "data:image/gif;base64," + base64.b64encode(b"GIF89a").decode()
+    with pytest.raises(ValueError, match="media data url mime 'image/gif' is not an accepted image type"):
+        await store_data_image(store, fake_redis, gif, ttl_seconds=100)
+    # A type the allowlist keeps is still accepted.
+    assert len(await store_data_image(store, fake_redis, _DATA_PNG, ttl_seconds=100)) == 43
+
+
 async def test_substitute_swaps_data_image_for_relative_reference(fake_redis):
     store = InteractionStore("t:")
     items: list[MediaItem | dict] = [

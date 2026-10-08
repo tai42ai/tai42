@@ -490,15 +490,19 @@ def test_factory_boot_leaves_host_logger_record_unredacted(patch_factory_seam, r
     never widens that to process scope (only the CLI seams do). The real
     ``build_app`` → default-scope install wire is pinned separately in the
     instance suite — this suite fakes ``build_app``."""
-    from tai42_skeleton.connectors import meta_log_redactor
+    from tai42_kit.logging import install_record_redaction
+    from tai42_kit.logging import redaction as kit_redaction
+
+    from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
 
     saved_factory = logging.getLogRecordFactory()
-    saved_scope = meta_log_redactor._SCOPE
+    saved_scope = kit_redaction._SCOPE
     logging.setLogRecordFactory(logging.LogRecord)
-    meta_log_redactor._SCOPE = "tai"
+    kit_redaction._SCOPE = "tai"
     try:
         # Mirror the embed install (``build_app`` is faked out in this suite).
-        meta_log_redactor.install_meta_log_redactor(scope="tai")
+        register_connector_log_redaction()
+        install_record_redaction(scope="tai")
         patch_factory_seam(_FakeApp())
         with TestClient(asgi.create_app()):
             pass
@@ -508,4 +512,4 @@ def test_factory_boot_leaves_host_logger_record_unredacted(patch_factory_seam, r
         assert "HOST-SECRET" in rec.getMessage()
     finally:
         logging.setLogRecordFactory(saved_factory)
-        meta_log_redactor._SCOPE = saved_scope
+        kit_redaction._SCOPE = saved_scope

@@ -14,39 +14,17 @@ concurrent record from a different worker thread or event loop atomic.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
-# The scheme quantifier is bounded so an adversarial non-URL run of scheme-valid
-# chars not followed by ``://`` scans linearly instead of backtracking quadratically.
-_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]{0,62}://[^\s\"'<>]+")
+from tai42_kit.logging import redact_urls_in_text
 
 
 def redact_probe_error(text: str) -> str:
-    """Redact URL-embedded credentials in arbitrary text.
-
-    For each URL, userinfo and every query-string VALUE become ``<redacted>``;
-    non-URL text is left untouched.
-    """
-
-    def _one(match: re.Match[str]) -> str:
-        # Userinfo runs to the LAST ``@`` in the authority so an inner ``@`` in a
-        # password cannot leak.
-        url = re.sub(r"(://)[^/?#\s]+@", r"\1<redacted>@", match.group(0))
-        base, sep, tail = url.partition("?")
-        if not sep:
-            return url
-        query, hsep, frag = tail.partition("#")
-        pairs = []
-        for pair in query.split("&"):
-            key, eq, _value = pair.partition("=")
-            pairs.append(f"{key}{eq}<redacted>" if eq else pair)
-        return f"{base}{sep}{'&'.join(pairs)}{hsep}{frag}"
-
-    return _URL_RE.sub(_one, text)
+    """Redact URL-embedded credentials in a probe error: each URL's userinfo and query values become ``***``."""
+    return redact_urls_in_text(text)
 
 
 def _now_iso() -> str:

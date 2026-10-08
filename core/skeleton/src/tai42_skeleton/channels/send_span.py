@@ -10,9 +10,9 @@ fabricates a rootless span. The conditional-emit idiom (span only under an activ
 trace) is expressed through the tai42 contract writer the skeleton already uses.
 
 The SUCCESS output (the provider message ids) is set by the caller, which alone knows
-them; a FAILURE is marked here from the raised ``ChannelDeliveryError`` /
-``ChannelInputError`` (level ERROR + the typed retry/kind detail), so no seam repeats
-that mapping.
+them; a FAILURE is marked here from the raised exception (level ERROR + the
+:func:`~tai42_skeleton.monitoring.span_metadata.error_span_metadata` detail), so no
+seam repeats that mapping.
 
 PII: the recipient rides the span INPUT, never the metadata. The writer masks every
 ``SecretValue``, so a wrapped value is masked; a plain-string recipient still reaches the
@@ -23,13 +23,13 @@ recipient redaction is a monitoring-backend-side concern, not something this sea
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
 from tai42_contract.monitoring import MonitoringLevel, Span, SpanKind
 
 from tai42_skeleton.monitoring import get_monitoring
+from tai42_skeleton.monitoring.span_metadata import error_span_metadata
 
 # ``messaging.*`` follow the OpenTelemetry messaging semantic-convention names, so the
 # spans read uniformly across channels on the backend.
@@ -45,43 +45,44 @@ def active_trace_id() -> str | None:
     return get_monitoring().writer.current_trace_id()
 
 
-def _error_metadata(exc: BaseException) -> dict[str, Any]:
-    """Lift the structured failure detail off a typed channel error.
-
-    Carries the exception type, its platform ``error.kind`` (``ChannelDeliveryError`` / ``ChannelInputError``
-    both carry ``__tai_error_kind__``), and — for a delivery failure — whether it is ``retryable`` and any
-    medium-requested ``retry_after``. An input error is never retryable (a permanent shape refusal).
-    """
-    metadata: dict[str, Any] = {"error.type": type(exc).__name__}
-    kind = getattr(exc, "__tai_error_kind__", None)
-    if kind is not None:
-        metadata["error.kind"] = getattr(kind, "value", str(kind))
-    if isinstance(exc, ChannelDeliveryError):
-        metadata["retryable"] = exc.retryable
-        if exc.retry_after is not None:
-            metadata["retry_after"] = exc.retry_after
-    elif isinstance(exc, ChannelInputError):
-        metadata["retryable"] = False
-    return metadata
-
-
 @contextlib.contextmanager
-def send_span(channel: str, *, recipient: str | None, attempt: int | None = None) -> Iterator[Span | None]:
+def send_span(
+    channel: str,
+    *,
+    recipient: str | None,
+    attempt: int | None = None,
+    retry_decision: Callable[[BaseException], bool] | None = None,
+) -> Iterator[Span | None]:
     """Wrap ONE send attempt to ``channel`` in a ``send:<channel>`` span, or run it unwrapped when no trace is ambient.
 
     Yields the open :class:`Span` handle (so the caller can set the success ``output`` —
     the provider message ids it alone knows) inside a trace, or ``None`` outside one. A
-    raised ``ChannelDeliveryError`` / ``ChannelInputError`` (or any other send exception)
-    is marked on the span as ``MonitoringLevel.ERROR`` with the typed failure detail and
-    re-raised unchanged — the caller's own success/retry/failure control flow is never
-    altered. ``attempt`` stamps the retry ordinal when the seam retries (one span per
-    attempt), so a "attempt 1 failed retryable, attempt 2 accepted" sequence is visible
-    rather than collapsed.
+    raised exception is marked on the span as ``MonitoringLevel.ERROR`` with the failure
+    detail and re-raised unchanged — the caller's own success/retry/failure control flow
+    is never altered.
+
+    A retrying seam passes ``attempt`` (the retry ordinal, one span per attempt) together
+    with ``retry_decision``, which it calls with the raised exception ONCE per failed
+    attempt — whether or not a trace is ambient — and which returns whether another
+    attempt follows; that decision is the span's ``retryable``. A single send passes
+    neither, and its span carries the error's own classification.
     """
+    if (attempt is None) != (retry_decision is None):
+        raise ValueError("send_span: attempt and retry_decision are given together")
+
+    def _failure_metadata(exc: BaseException) -> dict[str, Any]:
+        retryable = retry_decision(exc) if retry_decision is not None else None
+        return error_span_metadata(exc, retryable=retryable)
+
     if active_trace_id() is None:
         # No ambient trace: emit nothing (a rootless send span would attach to no run),
-        # just run the wrapped call.
-        yield None
+        # just run the wrapped call — the retrying seam's decision is still made here.
+        try:
+            yield None
+        except Exception as exc:
+            if retry_decision is not None:
+                retry_decision(exc)
+            raise
         return
     metadata: dict[str, Any] = {"messaging.system": channel, "messaging.operation": _MESSAGING_OPERATION_SEND}
     if attempt is not None:
@@ -102,7 +103,7 @@ def send_span(channel: str, *, recipient: str | None, attempt: int | None = None
         try:
             yield span
         except Exception as exc:
-            span.update(level=MonitoringLevel.ERROR, status_message=str(exc), metadata=_error_metadata(exc))
+            span.update(level=MonitoringLevel.ERROR, status_message=str(exc), metadata=_failure_metadata(exc))
             raise
 
 

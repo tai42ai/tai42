@@ -10,6 +10,9 @@ A ``@model_validator`` proves at boot that every allowlisted image/audio/video t
 identifiable by one of the seam's two matchers (``filetype`` 1.2.0 or the in-seam ISOBMFF brand
 matcher), so a misconfigured allowlist fails the process LOUDLY rather than silently rejecting
 every upload of that type at runtime.
+
+The image allowlist also bounds a ``data:image/*`` URI a caller attaches to a question or
+notification, stored by reference.
 """
 
 from __future__ import annotations

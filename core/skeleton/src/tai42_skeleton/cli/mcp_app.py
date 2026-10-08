@@ -12,14 +12,14 @@ from typing import Any, cast
 import click
 import uvicorn
 from dotenv import load_dotenv
-from tai42_kit.logging import logging_settings, setup_logging
+from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
 from tai42_kit.utils.runtime.uvicorn_util import parse_and_validate_uvicorn_args
 
 from tai42_skeleton import asgi
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import require_bus_for_shared_config, require_bus_for_workers
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
-from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
+from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.settings.cache import app_args_settings
 from tai42_skeleton.settings.cache import manifest_path as default_manifest_path
@@ -59,7 +59,8 @@ def create_app():
 
     # This CLI-owned worker owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
-    install_meta_log_redactor(scope="process")
+    register_connector_log_redaction()
+    install_record_redaction(scope="process")
 
     # ``run_mcp_app`` stamps ``TAI_TRANSPORT``/``TAI_STATELESS_HTTP`` beside the
     # manifest path so the flags travel to this uvicorn factory worker (a factory
@@ -103,7 +104,8 @@ async def run_stdio():
     app.lifecycle.on_reload(_refuse_stdio_profile_apply)
     # This CLI-owned process owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
-    install_meta_log_redactor(scope="process")
+    register_connector_log_redaction()
+    install_record_redaction(scope="process")
     # Bridge the persisted env store into ``os.environ`` and resolve the manifest
     # under it in one seam, so a store-only ``!ENV ${VAR}`` marker resolves to its
     # real value before ``start()`` probes any mount.

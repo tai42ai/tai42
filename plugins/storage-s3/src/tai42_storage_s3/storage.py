@@ -7,7 +7,7 @@ S3 stores bytes and content-types natively; ``stat`` reports the stored
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Final
 
 from botocore.exceptions import ClientError
 from tai42_contract.app import tai42_app
@@ -24,8 +24,8 @@ _NOT_FOUND_CODES = frozenset({"NoSuchKey", "404", "NotFound"})
 # S3 rejects a single ``delete_objects`` request carrying more than 1000 keys.
 _DELETE_BATCH_SIZE = 1000
 
-# Content-type stored for every text template upload.
-_TEMPLATE_CONTENT_TYPE = "application/jinja2"
+# The type of a UTF-8 text body; a caller wanting another type passes it to ``upload_bytes``.
+_TEXT_CONTENT_TYPE: Final = "text/plain; charset=utf-8"
 
 
 def _is_not_found(error: ClientError) -> bool:
@@ -99,7 +99,7 @@ class S3Storage(Storage):
 
     async def upload(self, path: str, content: str) -> None:
         """Upload ``content`` as UTF-8 text at ``path``."""
-        await self.upload_bytes(path, content.encode("utf-8"), content_type=_TEMPLATE_CONTENT_TYPE)
+        await self.upload_bytes(path, content.encode("utf-8"), content_type=_TEXT_CONTENT_TYPE)
 
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
         """Upload ``data`` at ``path`` with an optional ``content_type``, refusing a flat-key-space collision."""

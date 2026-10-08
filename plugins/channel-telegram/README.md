@@ -229,6 +229,14 @@ ask, a plain notify option) carries no params.
    `{public_base_url}/api/channels/telegram/inbound` and aborts startup loudly
    if `setWebhook` fails.
 
+## The bot token stays out of logs
+
+The Bot API carries the token in every request path (`/bot<id>:<secret>/…`), and
+`httpx` logs each request line at INFO. Loading the channel registers a token mask
+with the kit's transport-log redaction (`tai42_kit.logging.register_transport_redaction`),
+so every `httpx`/`httpcore` record shows `/bot<redacted>/…` before any handler
+formats it.
+
 ## Development
 
 ```bash

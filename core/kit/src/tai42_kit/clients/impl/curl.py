@@ -6,21 +6,21 @@ from curl_cffi.requests.exceptions import SessionClosed
 
 from tai42_kit.clients.base import PooledClient, is_loop_bound_runtime_error, reject_unknown_connection_kwargs
 
-_ALLOWED_KWARGS = frozenset({"session_params"})
+_ALLOWED_KWARGS = frozenset({"session_params", "share_key"})
 
 
 class CurlClient(PooledClient[requests.AsyncSession]):
     """Manages reusable curl_cffi sessions.
 
     Every primitive in ``session_params`` maps onto the ``AsyncSession``, giving
-    full control over the network layer.
+    full control over the network layer. ``share_key: str | None`` is part of the
+    pool identity only: callers passing the same ``share_key`` and equal
+    ``session_params`` share one pooled session.
     """
 
     async def _create(self, **kwargs) -> requests.AsyncSession:
         reject_unknown_connection_kwargs("Curl client", kwargs, _ALLOWED_KWARGS)
-        # Copy before mutating — never alter the caller's dict.
-        session_params = {k: v for k, v in kwargs.get("session_params", {}).items() if k != "session_key"}
-        return requests.AsyncSession(**session_params)
+        return requests.AsyncSession(**kwargs.get("session_params", {}))
 
     async def _close(self, client: requests.AsyncSession):
         if client:

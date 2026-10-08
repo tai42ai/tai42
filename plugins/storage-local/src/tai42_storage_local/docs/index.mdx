@@ -17,8 +17,12 @@ storage_module: tai42_storage_local
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `STORAGE_LOCAL_ROOT_PATH` | `./templates` | Base directory every stored path resolves under, relative to the process working directory. |
+| `STORAGE_LOCAL_ROOT_PATH` | required | The base directory every stored path resolves under; every call refuses until it is set. A relative path resolves against the process working directory. |
 | `STORAGE_LOCAL_CREATE_DIRS` | `true` | Create parent directories on write. |
+
+The root has no default: until `STORAGE_LOCAL_ROOT_PATH` is set, every storage call, `list` included,
+raises `RuntimeError`, so an unmounted or mistyped location never reads as an empty store. Set
+`STORAGE_LOCAL_ROOT_PATH=./templates` to keep files under the working directory's `templates/`.
 
 ## Quirks
 

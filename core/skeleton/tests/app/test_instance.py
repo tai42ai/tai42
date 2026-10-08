@@ -176,12 +176,12 @@ def test_build_app_installs_redactor_at_tai_scope(monkeypatch):
     # restored so this test neither depends on nor leaks redactor state; the
     # singleton is reset so the first-build branch (where the install lives)
     # actually runs.
-    from tai42_skeleton.connectors import meta_log_redactor
+    from tai42_kit.logging import redaction as kit_redaction
 
     saved_factory = logging.getLogRecordFactory()
-    saved_scope = meta_log_redactor._SCOPE
+    saved_scope = kit_redaction._SCOPE
     logging.setLogRecordFactory(logging.LogRecord)
-    meta_log_redactor._SCOPE = "tai"
+    kit_redaction._SCOPE = "tai"
     monkeypatch.setattr(instance, "_app", None)
     try:
         instance.build_app()
@@ -194,7 +194,7 @@ def test_build_app_installs_redactor_at_tai_scope(monkeypatch):
         assert "WIRE-SECRET" in host_rec.getMessage()
     finally:
         logging.setLogRecordFactory(saved_factory)
-        meta_log_redactor._SCOPE = saved_scope
+        kit_redaction._SCOPE = saved_scope
 
 
 def test_apply_logging_settings_applies_configured_level(monkeypatch, root_logger_restored):
@@ -286,7 +286,7 @@ def test_a_failed_build_raises_its_own_error_again_on_the_next_build(monkeypatch
     def _failing_install() -> None:
         raise RuntimeError("the redactor could not be installed")
 
-    monkeypatch.setattr(instance, "install_meta_log_redactor", _failing_install)
+    monkeypatch.setattr(instance, "register_connector_log_redaction", _failing_install)
     for _ in range(2):
         with pytest.raises(RuntimeError, match="the redactor could not be installed"):
             instance.build_app()
