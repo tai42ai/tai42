@@ -147,9 +147,9 @@ async def test_the_checkpoint_pool_keeps_the_library_loader(real_pg_settings: Po
     pytest.importorskip("langgraph.checkpoint.postgres.aio")
     from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource
 
-    pool, closer = await create_checkpoint_resource("postgres", real_pg_settings.pg_dsn)
+    resource, closer = await create_checkpoint_resource("postgres", real_pg_settings.pg_dsn)
     try:
-        async with pool.connection() as conn:
+        async with resource.handle.connection() as conn:
             assert _jsonb_loads(conn) is json.loads
     finally:
         await closer()

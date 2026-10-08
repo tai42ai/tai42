@@ -52,9 +52,10 @@ def _park(
     candidates: SubjectCandidates | None = None,
     asked_by: list[str] | None = None,
     continuation_tool: str = "resume_tool",
+    expiry_at: datetime | None = None,
 ) -> InteractionRequest:
     now = datetime.now(UTC)
-    expiry = now + timedelta(minutes=60)
+    expiry = expiry_at or now + timedelta(minutes=60)
     return InteractionRequest(
         interaction_id=iid,
         group_id=gid,
@@ -203,6 +204,61 @@ async def test_asks_outcome_sentinel_splits_a_mixed_step(store, fake_redis):
     assert outcome.suspended.interaction_ids == ["c1", "u2"]
     assert outcome.suspended.caller_interaction_ids == ["c1"]
     assert outcome.suspended.resume_owner == "resume_tool"
+
+
+async def test_asks_outcome_sentinel_carries_the_deadline_of_the_step(store, fake_redis):
+    # A run face surfaces its step with the earliest deadline; the re-park sentinel a send-up caller
+    # hands back as its own park must carry that deadline, or the caller cannot bound its park.
+    deadline = datetime.now(UTC) + timedelta(minutes=45)
+    await _seed_caller(store, fake_redis, "c1", expiry_at=deadline)
+
+    async def _start(extras):
+        return SuspendedInteraction(
+            interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"], expiry_at=deadline
+        )
+
+    with state_context(_context(_candidates())):
+        outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
+    assert outcome.kind == "asks"
+    assert outcome.suspended is not None
+    assert outcome.suspended.expiry_at == deadline
+
+
+async def test_asks_outcome_sentinel_takes_the_earliest_stored_deadline_of_the_open_ids(store, fake_redis):
+    # A sentinel that names its ids without a deadline: the re-park sentinel reads each open ask's
+    # stored deadline and carries the earliest, the moment the first of them expires.
+    now = datetime.now(UTC)
+    await _seed_caller(store, fake_redis, "c1", expiry_at=now + timedelta(hours=2))
+    await _seed_user(store, fake_redis, "u2", expiry_at=now + timedelta(minutes=30))
+
+    async def _start(extras):
+        return SuspendedInteraction(interaction_id="c1", interaction_ids=["c1", "u2"], caller_interaction_ids=["c1"])
+
+    with state_context(_context(_candidates())):
+        outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
+    assert outcome.kind == "asks"
+    assert outcome.suspended is not None
+    assert outcome.suspended.expiry_at == now + timedelta(minutes=30)
+
+
+async def test_asks_outcome_sentinel_keeps_an_earlier_deadline_the_run_reported(store, fake_redis):
+    # An open id the interactions store does not hold (a chained key waiting on a nested call) has
+    # its deadline only on the incoming sentinel; an earlier reported deadline is kept.
+    now = datetime.now(UTC)
+    await _seed_caller(store, fake_redis, "c1", expiry_at=now + timedelta(hours=2))
+
+    async def _start(extras):
+        return SuspendedInteraction(
+            interaction_id="c1",
+            interaction_ids=["c1", "chained-k"],
+            caller_interaction_ids=["c1"],
+            expiry_at=now + timedelta(minutes=10),
+        )
+
+    with state_context(_context(_candidates())):
+        outcome = await visit_module.visit(target_name="t", cancel=[], resume=[], start=_start, extras={})
+    assert outcome.suspended is not None
+    assert outcome.suspended.expiry_at == now + timedelta(minutes=10)
 
 
 async def test_asks_outcome_sentinel_raises_on_differing_resume_owners(store, fake_redis):

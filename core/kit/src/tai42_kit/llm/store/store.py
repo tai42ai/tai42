@@ -57,37 +57,16 @@ async def _create_sqlite_store(conn_string: str | None, store_kwargs: dict[str, 
 
 
 async def _create_postgres_store(conn_string: str | None, store_kwargs: dict[str, Any]) -> tuple[Resource, CleanupFn]:
-    if conn_string is None:
-        # An unset conn string means the base Postgres namespace; the DSN
-        # builder raises a named error if that identity is also unset, and its
-        # deployment sizes size this pool.
-        settings = PostgresConnectionSettings()
-        conn_string = settings.pg_dsn
-        min_size = settings.pg_min_connections
-        max_size = settings.pg_max_connections
-    else:
-        # An explicit conn string targets a database other than the base
-        # namespace, so its sizes are the langgraph pool's own defaults, not the
-        # base settings'.
-        min_size = 1
-        max_size = 20
-
     from langgraph.store.postgres import AsyncPostgresStore  # pyright: ignore[reportMissingImports]
-    from psycopg.rows import dict_row
 
-    from tai42_kit.clients.impl.postgres import _open_named_pool, _pool_owner, postgres_pool_name
+    from tai42_kit.clients.impl.postgres import open_dedicated_pool
+    from tai42_kit.llm._langgraph_postgres import LANGGRAPH_CONNECTION_KWARGS
 
-    # The shared build path: probe the first connection, then a named pool whose fill
-    # is awaited here (bounded by the DSN's connect_timeout) with a checkout-time
-    # liveness check. AsyncPostgresStore needs connections that autocommit, skip
-    # prepared statements, and yield dict rows, so those ride as the pool's per-
-    # connection kwargs.
-    pool = await _open_named_pool(
-        conn_string,
-        min_size=min_size,
-        max_size=max_size,
-        name=postgres_pool_name(conn_string, _pool_owner(None), "langgraph-store"),
-        connection_kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+    # An unset conn string means the base Postgres namespace: its DSN builder raises a named
+    # error if that identity is also unset, and its deployment sizes size this pool.
+    target: PostgresConnectionSettings | str = PostgresConnectionSettings() if conn_string is None else conn_string
+    pool = await open_dedicated_pool(
+        target, role="langgraph-store", connection_kwargs=dict(LANGGRAPH_CONNECTION_KWARGS)
     )
     try:
         # Temp connection for setup. The pool's per-connection kwargs set

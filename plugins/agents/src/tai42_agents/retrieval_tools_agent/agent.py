@@ -42,7 +42,12 @@ from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.llm.structured import plan_structured_output
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
-from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.config_util import (
+    build_run_config,
+    init_langgraph_config,
+    mark_minted_thread_finished,
+    start_run_thread,
+)
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
@@ -207,12 +212,14 @@ class RetrievalToolsAgent(Agent):
         llm_kwargs: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
-        """Resolve providers, embed the tools, compile the graph, and return ``(agent, messages, config, llm)``.
+    ) -> tuple[Any, dict[str, Any], dict[str, Any], Any, str | None]:
+        """Resolve providers, embed the tools, compile the graph, and return ``(agent, messages, config, llm, minted)``.
 
         The ``llm`` is handed back so ``astream`` can run a structured finalization pass over the
         terminal result when a ``response_format`` was requested. ``user_content_kwargs`` (e.g.
-        ``cache_control``) carries content-block keys onto the user message.
+        ``cache_control``) carries content-block keys onto the user message. A caller-supplied
+        thread leaves the checkpoint finished-thread ledger before the run; ``minted`` is the
+        thread id this run minted (``None`` for a caller-supplied one).
         """
         rendered_system = await render_message(system_message)
         rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
@@ -255,12 +262,13 @@ class RetrievalToolsAgent(Agent):
             system_prompt=system_prompt,
         ).abuild()
 
-        config = init_langgraph_config(config).config
+        run_config = init_langgraph_config(config).config
+        minted = await start_run_thread(config, run_config, provider=checkpoint_provider)
         messages = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
         # The single spot both faces (run drains astream) build through, so a thread
         # poisoned by an aborted turn is repaired here before the run.
-        await _repair_dangling_tool_calls(agent, config)
-        return agent, messages, config, llm
+        await _repair_dangling_tool_calls(agent, run_config)
+        return agent, messages, run_config, llm, minted
 
     async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         """Build the retrieval graph and yield its run as normalized events.
@@ -306,7 +314,22 @@ class RetrievalToolsAgent(Agent):
             kwargs.get("recursion_limit"),
         )
 
-        agent, messages, config, llm = await self._build(**build_kwargs)
+        agent, messages, config, llm, minted = await self._build(**build_kwargs)
+        async for event in self._run_events(agent, messages, config, llm, kwargs, resolved_response_format):
+            yield event
+        # The run reached its terminal: a thread it minted is finished.
+        await mark_minted_thread_finished(minted, provider=kwargs.get("checkpoint_provider"))
+
+    async def _run_events(
+        self,
+        agent: Any,
+        messages: dict[str, Any],
+        config: dict[str, Any],
+        llm: Any,
+        kwargs: dict[str, Any],
+        resolved_response_format: Any,
+    ) -> AsyncIterator[StreamEvent]:
+        """Drive the built retrieval graph and yield its events up to and including the terminal."""
         terminal: MessageFinal | None = None
         async for event in aproject_agent_events(agent, messages, config):
             if isinstance(event, MessageDelta):

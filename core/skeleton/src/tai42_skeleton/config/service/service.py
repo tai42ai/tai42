@@ -52,6 +52,7 @@ import copy
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from tai42_kit.fork_gate import fork_gate
+from tai42_kit.llm import release_loop_bound_resources
 
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
@@ -65,7 +66,7 @@ from tai42_skeleton.config.recycle_policy import (
     capability_report,
 )
 from tai42_skeleton.config.secret_seal import _leaving_connector_secrets
-from tai42_skeleton.config.service.broadcast import _BroadcastMixin, _release_llm_pools
+from tai42_skeleton.config.service.broadcast import _BroadcastMixin
 from tai42_skeleton.config.service.resolution import _ResolutionMixin
 from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError, ProfileApplyOutcome
 from tai42_skeleton.config.service.validation import _ValidationMixin
@@ -389,7 +390,7 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         save_previous: Callable[[dict[str, str]], Awaitable[None]],
         build_and_swap: Callable[..., Awaitable[Epoch]] = build_and_swap_epoch,
         orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
-        release_llm_pools: Callable[[], Awaitable[None]] = _release_llm_pools,
+        release_llm_pools: Callable[[], Awaitable[None]] = release_loop_bound_resources,
     ) -> ProfileApplyOutcome:
         """Apply a settings profile: the env-write-LAST reload pipeline.
 
@@ -467,13 +468,12 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         # dedicated thread so ownership stays single-threaded and this loop is never
         # blocked while job spans drain.
         async with reload_gate.lock, fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
-            # Release the loop-bound langgraph checkpoint/store pools BEFORE the build's
-            # settings reset drops their per-loop registries: build_and_swap_epoch opens
-            # with ``reset_all_settings()``, whose resource-registry reset REFUSES to drop
-            # a registry still holding live resources on a running loop (a prior agent run
-            # leaves a cached checkpoint saver behind). This is the same release
-            # AppLifecycle._reload_config performs before ITS build_and_swap_epoch; the
-            # profile-apply path missed it, so an apply following any LLM run 500'd.
+            # Release the loop-bound kit resources BEFORE the build's settings reset drops
+            # their per-loop registries: build_and_swap_epoch opens with
+            # ``reset_all_settings()``, whose resource-registry reset REFUSES to drop a
+            # registry still holding live resources on a running loop (a prior agent run
+            # leaves a cached checkpoint saver behind). AppLifecycle._reload_config makes
+            # the same release before its own build_and_swap_epoch.
             await release_llm_pools()
             await build_and_swap(profile_env, drain_tolerate_driver=driven)
 

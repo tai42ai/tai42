@@ -33,6 +33,7 @@ from tai42_contract.agent.events import (
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm import resolve_trace_context
+from tai42_kit.llm.checkpoint import mark_threads_finished
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
@@ -43,7 +44,7 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import init_langgraph_config, with_run_trace_lineage
+from tai42_agents._internal.config_util import init_langgraph_config, start_run_thread, with_run_trace_lineage
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.outcomes import outcome_for_drive_error
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
@@ -174,12 +175,15 @@ async def _run_refine_loop(
     critic_config: dict[str, Any] | None,
     response_format: Any = None,
     user_content_kwargs: dict[str, Any] | None = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
+) -> tuple[Any, dict[str, Any], dict[str, Any], Any, list[str]]:
     """Run the Evaluator↔Critic loop to approval.
 
-    Returns ``(final_agent, final_input, final_config, strategy)`` for the final
-    approved evaluator pass the caller streams; ``strategy`` is the minted
-    structured-output strategy the stream projection reads (``None`` when text-shaped).
+    Returns ``(final_agent, final_input, final_config, strategy, minted_threads)`` for the
+    final approved evaluator pass the caller streams; ``strategy`` is the minted
+    structured-output strategy the stream projection reads (``None`` when text-shaped), and
+    ``minted_threads`` the role threads this run minted, which the caller marks finished at
+    the run's end. A caller-supplied role thread leaves the checkpoint finished-thread
+    ledger before the loop runs on it.
 
     ``user_content_kwargs`` (e.g. ``cache_control``) carries content-block keys onto
     the evaluator's first user turn — the run's primary caller-supplied message —
@@ -236,8 +240,18 @@ async def _run_refine_loop(
     # critic, and the final structured pass all nest under the ONE run trace rather than
     # each minting a fresh root. Each role still gets its own thread_id and callbacks.
     run_context = resolve_trace_context(evaluator_config)
-    evaluator_config = init_langgraph_config(with_run_trace_lineage(evaluator_config, run_context)).config
-    critic_config = init_langgraph_config(with_run_trace_lineage(critic_config, run_context)).config
+    evaluator_source = with_run_trace_lineage(evaluator_config, run_context)
+    critic_source = with_run_trace_lineage(critic_config, run_context)
+    evaluator_config = init_langgraph_config(evaluator_source).config
+    critic_config = init_langgraph_config(critic_source).config
+    minted_threads = [
+        minted
+        for minted in (
+            await start_run_thread(evaluator_source, evaluator_config, provider=checkpoint_provider),
+            await start_run_thread(critic_source, critic_config, provider=checkpoint_provider),
+        )
+        if minted is not None
+    ]
     # The two role graphs run on their own checkpointed threads; repair either if an
     # aborted prior turn left it with dangling tool_calls before the loop resumes it.
     await _repair_dangling_tool_calls(evaluator, evaluator_config)
@@ -272,7 +286,7 @@ async def _run_refine_loop(
         raise RuntimeError(f"Max iterations ({max_iterations}) reached without critic approval")
 
     if response_format is None:
-        return evaluator, _final_evaluator_input(), evaluator_config, None
+        return evaluator, _final_evaluator_input(), evaluator_config, None, minted_threads
 
     # Force the final answer into the schema without re-shaping the loop thread:
     # feed its negotiation history as input to a second, structured evaluator on a
@@ -294,7 +308,8 @@ async def _run_refine_loop(
     )
     final_input = {"messages": [*history, {"role": "user", "content": "Critic Approved."}]}
     final_config = init_langgraph_config(with_run_trace_lineage(None, run_context)).config
-    return structured_evaluator, final_input, final_config, strategy
+    minted_threads.append(final_config["configurable"]["thread_id"])
+    return structured_evaluator, final_input, final_config, strategy, minted_threads
 
 
 class RefineAgentInput(BaseModel):
@@ -425,7 +440,7 @@ class RefineAgent(Agent):
             # The loop mints the structured-output strategy at the final evaluator pass
             # (keyed on its model) and returns it; the same object is bound into both the
             # final pass and the projection, so the synthetic tool names match by identity.
-            final_agent, final_input, final_config, strategy = await _run_refine_loop(
+            final_agent, final_input, final_config, strategy, minted_threads = await _run_refine_loop(
                 tools=resolved_tools,
                 evaluator_message=evaluator_message,
                 critic_message=critic_message,
@@ -463,3 +478,5 @@ class RefineAgent(Agent):
         # (re-prompt cap or recursion limit), which IS its result.
         if response_format is not None and not saw_structured and not saw_outcome:
             raise RuntimeError("agent run requested a response_format but produced no structured output")
+        # The run reached its terminal: every role thread it minted is finished.
+        await mark_threads_finished(minted_threads, provider=checkpoint_provider)

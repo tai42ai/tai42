@@ -297,6 +297,54 @@ async def test_apply_releases_llm_pools_before_the_build(monkeypatch: pytest.Mon
     assert order == ["release", "build"]
 
 
+def test_apply_releases_through_the_kit_call_by_default() -> None:
+    import inspect
+
+    from tai42_kit.llm import release_loop_bound_resources
+
+    default = inspect.signature(ConfigService.apply_replace_env).parameters["release_llm_pools"].default
+    assert default is release_loop_bound_resources
+
+
+async def test_apply_closes_the_store_when_the_checkpoint_close_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing checkpoint close never skips the store close; the apply fails loudly before the build."""
+    from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+    from tai42_kit.llm.store.store_registry import store_registry
+
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    closed: list[str] = []
+
+    async def _failing_close() -> None:
+        closed.append("checkpoint")
+        raise RuntimeError("checkpoint close failed")
+
+    async def _store_close() -> None:
+        closed.append("store")
+
+    async def _checkpoint_resource():
+        return object(), _failing_close
+
+    async def _store_resource():
+        return object(), _store_close
+
+    await checkpoint_registry()._get_or_init_resource("k", _checkpoint_resource)
+    await store_registry()._get_or_init_resource("k", _store_resource)
+    built: list[bool] = []
+
+    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        built.append(True)
+        return Epoch(number=0)
+
+    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+    with pytest.raises(ExceptionGroup, match="errors releasing loop-bound kit resources"):
+        await _service(store).apply_replace_env(
+            {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
+        )
+    assert sorted(closed) == ["checkpoint", "store"]
+    assert built == []
+    assert store.env == {"MY_APP_FLAG": "old"}
+
+
 async def test_apply_holds_the_fork_gate_across_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
     """This door drives ``build_and_swap`` directly instead of through
     ``reload_gate.run``, so it must take the fork gate itself: its rebuild re-imports the

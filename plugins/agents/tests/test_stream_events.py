@@ -345,7 +345,7 @@ def test_astream_tools_agent_events_threads_build_into_projection(monkeypatch):
     ]
 
     async def fake_build(*_args, **_kwargs):
-        return _StubAgent(items), {"messages": []}, {}, None
+        return _StubAgent(items), {"messages": []}, {}, None, None
 
     monkeypatch.setattr(stream_events, "_build_agent_and_input", fake_build)
 

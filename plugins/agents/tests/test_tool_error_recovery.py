@@ -127,7 +127,7 @@ def _config(thread_id: str) -> dict[str, Any]:
 async def _state_messages(saver: InMemorySaver, model: BaseChatModel, thread_id: str) -> list[BaseMessage]:
     """Read a thread's checkpointed messages back through a freshly built agent over
     the same checkpointer."""
-    agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+    agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
     snapshot = await agent.aget_state(config)
     return snapshot.values.get("messages", []) if snapshot.values else []
 
@@ -300,7 +300,7 @@ class TestDanglingToolCallRepair:
     async def _seed_dangling(self, saver: InMemorySaver, model: BaseChatModel, thread_id: str) -> None:
         """Checkpoint a thread whose last message is an ``AIMessage`` with an
         unanswered tool_call — the poisoned shape an aborted turn leaves behind."""
-        agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
+        agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config(thread_id))
         await agent.aupdate_state(
             config,
             {"messages": [HumanMessage(content="first question"), _tool_call("failing", "call_x")]},
@@ -362,7 +362,7 @@ class TestDanglingToolCallRepair:
         _seams(monkeypatch, model, saver)
 
         async def seed() -> None:
-            agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-healthy"))
+            agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-healthy"))
             await agent.aupdate_state(
                 config,
                 {"messages": [HumanMessage(content="first"), AIMessage(content="first answer")]},
@@ -392,7 +392,7 @@ class TestRepairHelper:
         _seams(monkeypatch, model, saver)
 
         async def seed() -> None:
-            agent, _, config, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-events"))
+            agent, _, config, _, _ = await bta._build_agent_and_input("sys", ["x"], [], config=_config("t-events"))
             await agent.aupdate_state(
                 config,
                 {"messages": [HumanMessage(content="first"), _tool_call("failing", "call_e")]},

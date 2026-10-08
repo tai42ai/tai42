@@ -1,10 +1,9 @@
-"""The checkpoint-provider fixture (postgres / sqlite).
+"""The checkpoint-provider fixtures (postgres / sqlite, and redis).
 
-Every other stack pins the ``memory`` or ``redis`` checkpoint provider, so the
-DELETING branch of ``sweep_checkpoints`` — reached only for ``{postgres, sqlite}``
-with a TTL set (``operations/checkpoints.py``) — never runs. This fixture
-boots the provider stack for each DB-backed provider in turn (the builder + conn-string
-helper live in ``_checkpoint_support``)."""
+Every other stack pins the ``memory`` or ``redis`` checkpoint provider and marks no thread
+finished, so neither DELETING horizon of ``sweep_checkpoints`` runs there. These fixtures
+boot the provider stack for each DB-backed provider in turn, and one on the module-capable
+checkpoint Redis (the builder + conn-string helper live in ``_checkpoint_support``)."""
 
 from __future__ import annotations
 
@@ -36,3 +35,16 @@ def checkpoint_stack(
     # at fixture finalization, so the isolated DB clone / sqlite file are reaped.
     for stack in boot_stack(infra, tmp_path_factory.mktemp(f"checkpoint-{provider}"), builder):
         yield stack, provider
+
+
+@pytest.fixture(scope="module")
+def redis_checkpoint_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The checkpoint-provider stack on the ``redis`` provider, this stack's logical DB on the
+    module-capable checkpoint Redis. Skips when ``TAI_E2E_CHECKPOINT_REDIS_URL`` is unset."""
+    if infra.checkpoint_redis is None:
+        pytest.skip(
+            "checkpoint Redis not configured; set TAI_E2E_CHECKPOINT_REDIS_URL and start "
+            "`docker compose --profile agents-redis up -d`"
+        )
+    builder = functools.partial(build_checkpoint_stack, provider="redis")
+    yield from boot_stack(infra, tmp_path_factory.mktemp("checkpoint-redis"), builder, allocate_checkpoint_db=True)

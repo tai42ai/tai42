@@ -477,9 +477,6 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/auth/roles/{name}/rollback"): RouteShape(
         items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
-    ("POST", "/api/checkpoints/sweep"): RouteShape(
-        items_key=None, columns=("provider", "ttl_minutes", "swept_count", "swept_threads", "skipped")
-    ),
     ("POST", "/api/config/reload"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),

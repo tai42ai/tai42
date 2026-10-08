@@ -39,7 +39,7 @@ from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.config_util import build_run_config, mark_minted_thread_finished
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.park import (
     ParkIdentity,
@@ -72,6 +72,7 @@ from tai42_agents.langchain_deep_agent.run_input import (
     _UNHONORED_REASONS,
     DeepAgentInput,
 )
+from tai42_agents.langchain_deep_agent.run_thread import end_streamed_run, start_run_config
 from tai42_agents.langchain_deep_agent.session import DeepAgentSession
 from tai42_agents.langchain_deep_agent.settings import langchain_deep_agent_crash_resume
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
@@ -216,7 +217,9 @@ class DeepAgent(Agent):
                     llm_kwargs=llm_kwargs,
                     session=drive.session,
                 )
-                config = self._run_config(langgraph_config, thread_id, None, recursion_limit)
+                config, minted_thread = await start_run_config(
+                    langgraph_config, thread_id, None, recursion_limit, checkpoint_provider
+                )
                 if resume is not None:
                     agent_input: Any = Command(resume=resume)
                 else:
@@ -272,6 +275,8 @@ class DeepAgent(Agent):
                 # A park-suspend is still a LIVE run: skip the credential scrub so the bearer file
                 # stays for the door-less expiry resume (its own terminal exit scrubs it).
                 suspended = is_suspended_receipt(result)
+                if not suspended:
+                    await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
                 return result
             finally:
                 if not suspended:
@@ -328,30 +333,6 @@ class DeepAgent(Agent):
         )
         await awrite_thread_messages(agent, config, converted)
 
-    @staticmethod
-    def _run_config(
-        langgraph_config: dict[str, Any] | None,
-        thread_id: str | None,
-        resume_checkpoint_id: str | None,
-        recursion_limit: int | None,
-    ) -> dict[str, Any]:
-        """Build the run config both faces run the graph with.
-
-        The caller's ``langgraph_config`` is the read-only base; ``thread_id`` /
-        ``resume_checkpoint_id`` overlay its ``configurable`` and ``recursion_limit``
-        overlays the top level, through
-        :func:`~tai42_agents._internal.config_util.build_run_config`. With no thread
-        pinned, :func:`init_langgraph_config` mints a fresh isolated one.
-
-        ``recursion_limit`` bounds the TOP-LEVEL graph ONLY: each task-tool subagent
-        runs its own graph bound by deepagents at 9999, so the effective step budget
-        is MULTIPLICATIVE across nesting depth, not a total-spend ceiling. The
-        settings default bounds only the top level.
-        """
-        return init_langgraph_config(
-            config=build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
-        ).config
-
     async def astream(
         self,
         *,
@@ -387,7 +368,7 @@ class DeepAgent(Agent):
         ``id`` plus render ``kwargs``) rendered here through the kit's resource-manager
         seam. Live ``tools`` combine with the client tools from ``tool_names``.
 
-        ``langgraph_config`` is the base run config (built through :meth:`_run_config`
+        ``langgraph_config`` is the base run config (built through :func:`start_run_config`
         as :meth:`run`): a ``configurable.thread_id`` / ``checkpoint_id`` it carries
         pins checkpointed memory, and ``thread_id`` / ``resume_checkpoint_id`` /
         ``recursion_limit`` overlay it.
@@ -438,7 +419,7 @@ class DeepAgent(Agent):
             saw_interrupt = False
             saw_suspended = False
             try:
-                agent, config, strategy = await self._build_agent(
+                agent, config, strategy, minted_thread = await self._build_agent(
                     tools=scoped_tools,
                     subagents=internal_subagents,
                     skills=skills,
@@ -515,11 +496,13 @@ class DeepAgent(Agent):
                         yield event
                 finally:
                     await detach_dead_chains(claims)
-                # A requested response_format that produced no terminal answer fails loudly; a
-                # pending interrupt or an async park paused the run, so (as in _drain) the raise
-                # is skipped.
-                if response_format is not None and not saw_structured and not saw_interrupt and not saw_suspended:
-                    raise RuntimeError("agent run requested a response_format but produced no structured output")
+                await end_streamed_run(
+                    response_format=response_format,
+                    saw_structured=saw_structured,
+                    paused=saw_interrupt or saw_suspended,
+                    minted_thread=minted_thread,
+                    checkpoint_provider=checkpoint_provider,
+                )
             finally:
                 # A park-suspend is still LIVE: keep the bearer file for the door-less expiry
                 # resume (its own terminal exit scrubs it); every other exit is terminal.
@@ -640,15 +623,16 @@ class DeepAgent(Agent):
         recursion_limit: int | None,
         langgraph_config: dict[str, Any] | None = None,
         session: SandboxSession | None = None,
-    ) -> tuple[Any, dict[str, Any], Any]:
+    ) -> tuple[Any, dict[str, Any], Any, str | None]:
         """Assemble the compiled deep agent and its run config for the streaming face.
 
-        Wraps :meth:`_resolve_and_build` with the run config from :meth:`_run_config`,
+        Wraps :meth:`_resolve_and_build` with the run config from :func:`start_run_config`,
         the same one the invoke face uses. The recursion cap bounds the TOP-LEVEL
         graph ONLY: each task-tool subagent runs its own graph bound by deepagents at
         9999, so the effective step budget is MULTIPLICATIVE across nesting depth.
-        Returns ``(agent, config, strategy)`` — the minted structured-output strategy
-        the projection reads.
+        Returns ``(agent, config, strategy, minted_thread)`` — the minted structured-output
+        strategy the projection reads, and the thread id minted for a keyless run (``None``
+        for a caller-supplied thread, which leaves the finished-thread ledger here).
 
         ``session`` is the acquired durable sandbox session the caller threads through to
         the backend (``None`` leaves the non-sandbox ``StateBackend`` default).
@@ -667,8 +651,10 @@ class DeepAgent(Agent):
             llm_kwargs=llm_kwargs,
             session=session,
         )
-        config = self._run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
-        return agent, config, strategy
+        config, minted_thread = await start_run_config(
+            langgraph_config, thread_id, resume_checkpoint_id, recursion_limit, checkpoint_provider
+        )
+        return agent, config, strategy, minted_thread
 
     async def aresume_park(
         self,
@@ -734,7 +720,9 @@ class DeepAgent(Agent):
                     llm_kwargs=validated.llm_kwargs,
                     session=drive.session,
                 )
-                config = self._run_config(validated.langgraph_config, thread_id, None, recursion_limit)
+                config, _minted = await start_run_config(
+                    validated.langgraph_config, thread_id, None, recursion_limit, validated.checkpoint_provider
+                )
 
                 snapshot = await agent.aget_state(config, subgraphs=True)
                 pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}

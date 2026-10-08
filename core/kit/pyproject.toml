@@ -59,20 +59,25 @@ Changelog = "https://github.com/tai42ai/tai42/blob/main/core/kit/CHANGELOG.md"
 # The LLM stack (tai42_kit.llm + tai42_kit.utils.lc) — everything LangChain-shaped
 # is opt-in so the bare install stays a light leaf kit. openai + redis ship
 # inside this extra because they are the default llm/embedding and
-# checkpoint/store providers (llm/settings.py). langgraph-checkpoint-redis
-# floors at 0.5: 0.4.x calls a serializer method langgraph-checkpoint 4.1+
-# removed. postgres/sqlite backends stay separate extras below.
+# checkpoint/store providers (llm/settings.py). langgraph-checkpoint-redis is
+# held to the 0.5.x line from 0.5.2: the kit's Redis checkpoint codec, its
+# metadata write and its thread delete rely on that saver's internals,
+# proven on 0.5.2 (tests/llm/test_checkpoint_saver_pin.py). postgres/sqlite
+# backends stay separate extras below.
 llm = [
     "langchain>=1.2,<2",
     "langchain-core>=1.2,<2",
     "langchain-openai>=1.6.7",
     "langgraph>=1.2.12,<2",
     "langgraph-checkpoint>=4.2.0",
-    "langgraph-checkpoint-redis>=0.5",
+    "langgraph-checkpoint-redis>=0.5.2,<0.6",
     # Imported directly by llm/checkpoint/checkpoint.py and llm/store/store.py:
     # the redis client for the checkpoint saver / store is built here and injected,
     # never left for the saver to build from a URL.
     "redis>=5",
+    # Imported directly by llm/checkpoint/codec.py: the thread delete counts what a
+    # thread still holds through the Redis saver's own search indexes.
+    "redisvl>=0.15.0,<1",
 ]
 
 # jq expression compilation (utils/data/jq_util.py) — a C extension, opt-in.
@@ -144,6 +149,8 @@ dev = [
     "pyright>=1.1.389",
     # net/jwt.py's joserfc driver, so the suite always exercises the [jwt] module.
     "joserfc>=1.7",
+    # The Redis finished-thread ledger's unit tests run on an in-process Redis.
+    "fakeredis>=2.21",
 ]
 
 [tool.setuptools]

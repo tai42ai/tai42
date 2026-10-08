@@ -66,14 +66,20 @@ def test_configured_temperature_passes_through_unchanged():
     assert dumped["temperature"] == 0.7
 
 
-def test_checkpoint_ttl_minutes_defaults_to_none():
-    # The default keeps every checkpoint forever; a deployment sets a positive
-    # number of minutes to bound retention.
-    assert llm_settings_mod.llm_provider_settings().checkpoint_ttl_minutes is None
+def test_checkpoint_retention_defaults():
+    # Seven days for a thread its owner may still continue, one day after its owner marks it finished;
+    # large checkpoint values are compressed above 64 KiB.
+    provider = llm_settings_mod.LLMProviderSettings()
+    assert provider.checkpoint_retention_waiting_minutes == 10080
+    assert provider.checkpoint_retention_finished_minutes == 1440
+    assert provider.checkpoint_inline_compress_bytes == 65536
 
 
-def test_checkpoint_ttl_minutes_accepts_none_to_keep_forever():
-    assert llm_settings_mod.LLMProviderSettings(checkpoint_ttl_minutes=None).checkpoint_ttl_minutes is None
+def test_checkpoint_inline_compress_bytes_none_turns_compression_off():
+    assert (
+        llm_settings_mod.LLMProviderSettings(checkpoint_inline_compress_bytes=None).checkpoint_inline_compress_bytes
+        is None
+    )
 
 
 def test_conn_strings_default_to_none():
@@ -84,13 +90,34 @@ def test_conn_strings_default_to_none():
     assert provider.store_conn_string is None
 
 
-def test_checkpoint_ttl_minutes_accepts_a_positive_value():
-    s = llm_settings_mod.LLMProviderSettings(checkpoint_ttl_minutes=120)
-    assert s.checkpoint_ttl_minutes == 120
-
-
+@pytest.mark.parametrize(
+    "field",
+    [
+        "checkpoint_retention_waiting_minutes",
+        "checkpoint_retention_finished_minutes",
+        "checkpoint_inline_compress_bytes",
+    ],
+)
 @pytest.mark.parametrize("bad", [0, -1, -60])
-def test_checkpoint_ttl_minutes_rejects_non_positive(bad):
-    # A non-positive TTL is a misconfiguration, rejected loudly rather than read as "off".
-    with pytest.raises(ValidationError, match="positive"):
-        llm_settings_mod.LLMProviderSettings(checkpoint_ttl_minutes=bad)
+def test_checkpoint_retention_values_reject_non_positive(field, bad):
+    with pytest.raises(ValidationError, match="greater than 0"):
+        llm_settings_mod.LLMProviderSettings(**{field: bad})
+
+
+def test_finished_retention_may_equal_waiting():
+    s = llm_settings_mod.LLMProviderSettings(
+        checkpoint_retention_waiting_minutes=60, checkpoint_retention_finished_minutes=60
+    )
+    assert s.checkpoint_retention_finished_minutes == 60
+
+
+def test_finished_retention_longer_than_waiting_is_refused():
+    with pytest.raises(ValidationError) as excinfo:
+        llm_settings_mod.LLMProviderSettings(
+            checkpoint_retention_waiting_minutes=60, checkpoint_retention_finished_minutes=61
+        )
+    assert (
+        "LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES (61) must not exceed "
+        "LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES (60): a finished thread is never kept longer than a "
+        "waiting one"
+    ) in str(excinfo.value)

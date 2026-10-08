@@ -12,9 +12,9 @@ left unset.
 """
 
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.template import TemplatedText
 
@@ -165,7 +165,9 @@ class LLMSettings(TaiBaseSettings):
 class LLMProviderSettings(TaiBaseSettings):
     """Selects the LLM, embedding, checkpoint, and store provider implementations and their connection strings."""
 
-    model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_")
+    # ``null`` sets an optional value to ``None`` (an empty value means "unset" and keeps the default),
+    # so a deployment can turn the inline checkpoint compression off.
+    model_config = SettingsConfigDict(env_prefix="LLM_PROVIDER_", env_parse_none_str="null")
 
     llm: str = "openai"
     embedding: str = "openai"
@@ -175,23 +177,29 @@ class LLMProviderSettings(TaiBaseSettings):
     # to the shared connection namespace (redis -> the base Redis URL, postgres ->
     # the base Postgres DSN); a double-None raises a named error there.
     checkpoint_conn_string: str | None = None
-    # Idle-TTL (minutes) for a conversation checkpoint: the redis saver measures it
-    # from the last read and ``sweep_checkpoints`` evicts past it. ``None`` (the
-    # default) keeps checkpoints forever; a deployment that wants bounded retention
-    # sets a positive number of minutes explicitly.
-    checkpoint_ttl_minutes: int | None = None
+    # Retention of a checkpoint thread, in minutes. "Waiting": a thread its owner may still continue
+    # (a parked run, an open conversation, any thread not marked finished); it is kept this long after
+    # its last write. "Finished": a thread its owner marked finished; the checkpoint sweep deletes it
+    # this long after the mark.
+    checkpoint_retention_waiting_minutes: int = Field(default=10080, gt=0)
+    checkpoint_retention_finished_minutes: int = Field(default=1440, gt=0)
+    # A checkpoint value whose encoding exceeds this many bytes is stored compressed; ``None``
+    # (``LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES=null``) turns the compression off.
+    checkpoint_inline_compress_bytes: int | None = Field(default=65536, gt=0)
     store: str = "redis"
     store_conn_string: str | None = None
 
-    @field_validator("checkpoint_ttl_minutes")
-    @classmethod
-    def _validate_checkpoint_ttl_minutes(cls, value: int | None) -> int | None:
-        if value is not None and value <= 0:
+    @model_validator(mode="after")
+    def _finished_within_waiting(self) -> Self:
+        waiting = self.checkpoint_retention_waiting_minutes
+        finished = self.checkpoint_retention_finished_minutes
+        if finished > waiting:
             raise ValueError(
-                "checkpoint_ttl_minutes must be a positive number of minutes; "
-                "leave it unset to keep checkpoints forever"
+                f"LLM_PROVIDER_CHECKPOINT_RETENTION_FINISHED_MINUTES ({finished}) must not exceed "
+                f"LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES ({waiting}): a finished thread is never kept "
+                "longer than a waiting one"
             )
-        return value
+        return self
 
 
 @settings_cache

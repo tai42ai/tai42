@@ -291,8 +291,8 @@ def test_refine_final_pass_outcome_passes_through_without_the_missing_structured
 
     agent = tai42_app.agents.get_agent("refine_agent")
 
-    async def _fake_loop(**_kwargs: Any) -> tuple[Any, Any, Any, Any]:
-        return object(), {}, {}, None
+    async def _fake_loop(**_kwargs: Any) -> tuple[Any, Any, Any, Any, list[str]]:
+        return object(), {}, {}, None, []
 
     monkeypatch.setattr(refine_mod, "_run_refine_loop", _fake_loop)
 

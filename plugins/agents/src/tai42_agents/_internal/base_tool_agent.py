@@ -31,7 +31,7 @@ from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.append import awrite_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
-from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.config_util import init_langgraph_config, mark_minted_thread_finished, start_run_thread
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
@@ -161,7 +161,7 @@ async def _build_agent_and_input(
     system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
+) -> tuple[Any, dict[str, Any], dict[str, Any], Any, str | None]:
     """Compile the tools agent, build its input messages and run config, and ready the thread.
 
     Wraps :func:`_compile_tools_agent` with the input build and the turn-start
@@ -171,9 +171,12 @@ async def _build_agent_and_input(
     ``system_prompt`` — the input carries only the user messages, so thread state
     stays system-free. ``system_content_kwargs`` / ``user_content_kwargs`` (e.g.
     ``cache_control``) carry content-block keys onto the system message and the last
-    user message respectively. Returns ``(agent, messages, config, strategy)`` — the
-    minted structured-output strategy the projection suppresses the synthetic tool
-    frames by.
+    user message respectively. A caller-supplied thread leaves the checkpoint
+    finished-thread ledger here, before any face runs the graph. Returns ``(agent,
+    messages, config, strategy, minted_thread)`` — the minted structured-output strategy
+    the projection suppresses the synthetic tool frames by, and the thread id this run
+    minted (``None`` for a caller-supplied thread), which the face marks finished when
+    the run ends without a park.
     """
     agent, strategy = await _compile_tools_agent(
         tools,
@@ -185,10 +188,11 @@ async def _build_agent_and_input(
         system_content_kwargs=system_content_kwargs,
     )
 
-    config = init_langgraph_config(config).config
+    run_config = init_langgraph_config(config).config
+    minted_thread = await start_run_thread(config, run_config, provider=checkpoint_provider)
     messages = build_agent_input(*user_message, user_content_kwargs=user_content_kwargs)
-    await _repair_dangling_tool_calls(agent, config)
-    return agent, messages, config, strategy
+    await _repair_dangling_tool_calls(agent, run_config)
+    return agent, messages, run_config, strategy, minted_thread
 
 
 async def aappend_tools_agent_messages(
@@ -243,7 +247,7 @@ async def ainvoke_tools_agent(
     instead of an answer. ``resume`` drives ``Command(resume=...)`` — answering a
     prior park — in place of a fresh user turn.
     """
-    agent, messages, config, _strategy = await _build_agent_and_input(
+    agent, messages, config, _strategy, minted_thread = await _build_agent_and_input(
         system_message,
         user_message,
         tools,
@@ -272,6 +276,7 @@ async def ainvoke_tools_agent(
             outcome = outcome_for_drive_error(exc, config)
             if outcome is None:
                 raise
+            await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
             return AgentInvokeResult(output="", usage=CallUsage(0, 0, None), structured=None, outcome=outcome)
         park_events = await finalize_drive(agent, config, None, park)
     for event in park_events:
@@ -283,6 +288,7 @@ async def ainvoke_tools_agent(
                 suspended=_suspended_receipt(event),
             )
     structured = extract_structured_output(state, response_format) if response_format is not None else None
+    await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
     return AgentInvokeResult(
         output=build_user_output(state),
         usage=aggregate_usage(state),
@@ -308,7 +314,7 @@ async def astream_tools_agent(
     The caller decodes the channel shapes. A ``response_format`` forces structured output onto
     the ``structured_response`` state channel.
     """
-    agent, messages, config, _strategy = await _build_agent_and_input(
+    agent, messages, config, _strategy, minted_thread = await _build_agent_and_input(
         system_message,
         user_message,
         tools,
@@ -322,3 +328,4 @@ async def astream_tools_agent(
     )
     async for chunk in agent.astream(messages, config, stream_mode=stream_mode):
         yield chunk
+    await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)

@@ -1,4 +1,4 @@
-"""The conversation-checkpoint sweep is natively schedulable.
+"""The checkpoint sweep is natively schedulable.
 
 Scheduling any tool means branching it with the backend's ``schedule_task`` extension; a
 projected operation-tool (``sweep_checkpoints``) has no manifest extension hook of its own, so

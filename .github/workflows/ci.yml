@@ -202,7 +202,7 @@ jobs:
           # the services-backed e2e job. Any other value -> full pytest with cov.
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
-          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra typesafe --extra monitoring|arq,celery,rq|cov
+          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra langgraph-checkpoint-sqlite --extra typesafe --extra monitoring|arq,celery,rq|cov
           cli|core/cli|tai42-cli||--extra dev --extra api-gate|arq,celery,rq|cov
           skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
           accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
@@ -375,6 +375,14 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s
           --health-timeout 3s --health-retries 20
+      # The Redis checkpoint saver needs the JSON and search modules, which Redis 8 ships;
+      # the kit and skeleton integration passes run their real-Redis checkpoint suites on it.
+      redis-modules:
+        image: redis:8
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -487,10 +495,12 @@ jobs:
           TAI_DATABASE_DEFAULT_PG_HOST=localhost \
           TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
           CONNECTOR_STORE_REDIS_URL=redis://localhost:6379 \
+          TAI42_SKELETON_REAL_REDIS_URL=redis://localhost:6380 \
             uv run --no-sync pytest -m integration --cov --cov-append --cov-report=term-missing
       - name: Pytest (kit — offline suite + real-Postgres integration suite)
         # The Postgres client pool, the LangGraph postgres checkpoint saver, and the
-        # LangGraph postgres store are exercised against a real Postgres by the opt-in
+        # LangGraph postgres store are exercised against a real Postgres, and the
+        # LangGraph Redis checkpoint saver against a real Redis 8, by the opt-in
         # ``integration`` suite (their SQL and driver behavior cannot be faked); that
         # coverage carries part of the kit floor. The rest of the suite runs OFFLINE and
         # must NOT see a configured database. So the two halves run as two passes with
@@ -508,6 +518,7 @@ jobs:
           TAI42_KIT_REAL_PG=1 \
           TAI_DATABASE_DEFAULT_PG_HOST=localhost \
           TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
+          TAI42_KIT_REAL_REDIS_URL=redis://localhost:6380 \
             uv run --no-sync pytest -m integration --cov --cov-append --cov-report=term-missing
       - name: Pytest (accounts-postgres — offline suite + real-Postgres integration suite)
         # The stores' named-constraint split, advisory-locked bootstrap/last-admin guard,

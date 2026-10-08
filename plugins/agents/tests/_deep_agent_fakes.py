@@ -96,8 +96,8 @@ def _install_fake_resolve(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, gra
 
 
 def _install_fake_graph(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, graph: _CompiledGraphLike) -> None:
-    async def fake_build_agent(**kwargs: Any) -> tuple[_CompiledGraphLike, dict[str, Any], Any]:
-        return graph, {"configurable": {"thread_id": "t"}}, None
+    async def fake_build_agent(**kwargs: Any) -> tuple[_CompiledGraphLike, dict[str, Any], Any, str | None]:
+        return graph, {"configurable": {"thread_id": "t"}}, None, None
 
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
 

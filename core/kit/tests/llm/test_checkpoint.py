@@ -21,6 +21,34 @@ from tai42_kit.llm.checkpoint import checkpoint as cp
 from .conftest import client_target, install_fake_named_pool, install_spy_client
 
 
+@pytest.fixture(autouse=True)
+def _no_store_side_effects(monkeypatch):
+    """Keep the resource builders off the store-format gate and the SQL ledgers (tested on their own)."""
+
+    async def _no_gate(resource):
+        return None
+
+    class _FakeSqlLedger:
+        def __init__(self, handle):
+            self.handle = handle
+
+        async def setup(self):
+            pass
+
+    monkeypatch.setattr(cp, "ensure_store_format", _no_gate)
+    monkeypatch.setattr(cp, "SqliteFinishedThreadLedger", _FakeSqlLedger)
+    monkeypatch.setattr(cp, "PostgresFinishedThreadLedger", _FakeSqlLedger)
+
+
+def _use_fake_redis_saver(monkeypatch, saver_cls):
+    """Build the redis checkpoint on ``saver_cls`` in place of the kit's guarded Redis saver."""
+    from tai42_kit.llm.checkpoint import codec
+
+    if not hasattr(saver_cls, "serde"):
+        saver_cls.serde = None
+    monkeypatch.setattr(codec, "GuardedAsyncRedisSaver", saver_cls)
+
+
 # --------------------------------------------------------------------------- #
 # create_checkpoint_resource — provider branches
 # --------------------------------------------------------------------------- #
@@ -28,12 +56,16 @@ async def test_memory_resource_returns_saver_and_noop_close():
     from langgraph.checkpoint.memory import InMemorySaver
 
     resource, closer = await cp.create_checkpoint_resource("memory")
-    assert isinstance(resource, InMemorySaver)
+    assert resource.provider == "memory"
+    assert isinstance(resource.handle, InMemorySaver)
+    assert resource.redis_client is None
     await closer()  # no-op, must not raise
 
 
 async def test_unsupported_provider_raises():
-    with pytest.raises(ValueError, match="Unsupported checkpoint provider"):
+    from tai42_kit.llm.checkpoint.providers import UnknownCheckpointProviderError
+
+    with pytest.raises(UnknownCheckpointProviderError, match="Unsupported checkpoint provider: 'bogus'"):
         await cp.create_checkpoint_resource("bogus")
 
 
@@ -90,12 +122,11 @@ async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
         async def __aexit__(self, *exc):
             pass
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     resource, closer = await cp.create_checkpoint_resource("redis", None)
-    assert client_target(resource.redis_client) == "shared:6379/0"
+    assert client_target(resource.handle.redis_client) == "shared:6379/0"
+    assert resource.redis_client is resource.handle.redis_client
     assert setups == ["shared:6379/0"]
     await closer()
 
@@ -116,10 +147,7 @@ async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypa
 
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
     saver_mod.AsyncPostgresSaver = _FakeSaver
-    rows_mod: Any = types.ModuleType("psycopg.rows")
-    rows_mod.dict_row = object()
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
-    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
     _resource, closer = await cp.create_checkpoint_resource("postgres", None)
     assert captured["conninfo"].startswith("postgresql://")
@@ -148,16 +176,14 @@ async def test_redis_resource_setup_called(monkeypatch):
         async def __aexit__(self, *exc):
             self.closed = True
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     resource, closer = await cp.create_checkpoint_resource("redis", "redis://h:6379/0")
-    assert isinstance(resource, _FakeSaver)
+    assert isinstance(resource.handle, _FakeSaver)
     assert setups == ["h:6379/0"]
     await closer()
     # The closer tears the saver down (releasing its indexes), not a no-op.
-    assert resource.closed is True
+    assert resource.handle.closed is True
 
 
 async def test_redis_setup_ignores_already_exists(monkeypatch):
@@ -168,12 +194,10 @@ async def test_redis_setup_ignores_already_exists(monkeypatch):
         async def asetup(self):
             raise RuntimeError("Index already exists")
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     resource, _ = await cp.create_checkpoint_resource("redis", "redis://h/0")
-    assert isinstance(resource, _FakeSaver)
+    assert isinstance(resource.handle, _FakeSaver)
 
 
 async def test_redis_setup_reraises_other_errors(monkeypatch):
@@ -189,9 +213,7 @@ async def test_redis_setup_reraises_other_errors(monkeypatch):
         async def __aexit__(self, *exc):
             closed.append(True)
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     with pytest.raises(RuntimeError, match="connection refused"):
         await cp.create_checkpoint_resource("redis", "redis://h/0")
@@ -218,9 +240,7 @@ async def test_redis_saver_is_handed_a_client_built_from_the_resolved_url(monkey
         async def __aexit__(self, *exc):
             pass
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     assert "REDIS_URL" not in os.environ
     await cp.create_checkpoint_resource("redis", "rediss://user:pw@vault:6380/3")
@@ -278,9 +298,7 @@ async def test_redis_closer_closes_the_injected_client_exactly_once(monkeypatch)
         async def __aexit__(self, *exc):
             exits.append(True)
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     _resource, closer = await cp.create_checkpoint_resource("redis", "redis://h/0")
     assert len(built) == 1
@@ -306,9 +324,7 @@ async def test_redis_setup_failure_closes_the_injected_client(monkeypatch):
         async def __aexit__(self, *exc):
             pass
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     with pytest.raises(RuntimeError, match="connection refused"):
         await cp.create_checkpoint_resource("redis", "redis://h/0")
@@ -330,9 +346,7 @@ async def test_redis_client_closes_even_when_saver_teardown_raises(monkeypatch):
         async def __aexit__(self, *exc):
             raise RuntimeError("teardown blew up")
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
 
     _resource, closer = await cp.create_checkpoint_resource("redis", "redis://h/0")
     with pytest.raises(RuntimeError, match="teardown blew up"):
@@ -354,52 +368,34 @@ def _install_fake_redis_saver(monkeypatch) -> dict[str, Any]:
         async def __aexit__(self, *exc):
             pass
 
-    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
-    fake_mod.AsyncRedisSaver = _FakeSaver
-    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+    _use_fake_redis_saver(monkeypatch, _FakeSaver)
     return captured
 
 
-async def test_redis_ttl_none_passes_no_ttl(monkeypatch):
-    # ``None`` gives the saver no TTL, so redis keeps checkpoints forever.
-    from types import SimpleNamespace
-
-    captured = _install_fake_redis_saver(monkeypatch)
-    monkeypatch.setattr(
-        "tai42_kit.llm.settings.llm_provider_settings",
-        lambda: SimpleNamespace(checkpoint_ttl_minutes=None),
-    )
-    await cp.create_checkpoint_resource("redis", "redis://h/0")
-    assert captured["ttl"] is None
-
-
-async def test_redis_ttl_default_keeps_forever(monkeypatch):
-    # The shipped default is unset, so the redis saver gets no TTL and keeps
-    # checkpoints forever with no operator configuration.
+async def test_redis_ttl_is_the_waiting_retention_set_at_write(monkeypatch):
+    # Every key a write stamps carries the waiting retention; a read never re-arms it.
     from tai42_kit.settings import reset_all_settings
 
     captured = _install_fake_redis_saver(monkeypatch)
-    monkeypatch.delenv("LLM_PROVIDER_CHECKPOINT_TTL_MINUTES", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_RETENTION_WAITING_MINUTES", "2880")
     reset_all_settings()
     try:
         await cp.create_checkpoint_resource("redis", "redis://h/0")
     finally:
         reset_all_settings()
-    assert captured["ttl"] is None
+    assert captured["ttl"] == {"default_ttl": 2880, "refresh_on_read": False}
 
 
-async def test_redis_ttl_set_passes_idle_ttl_config(monkeypatch):
-    # A set TTL becomes the redis key TTL with ``refresh_on_read`` enabled, so the
-    # lifetime measures IDLE time (reads and writes both restart the countdown).
-    from types import SimpleNamespace
+async def test_redis_ttl_default_is_seven_days(monkeypatch):
+    from tai42_kit.settings import reset_all_settings
 
     captured = _install_fake_redis_saver(monkeypatch)
-    monkeypatch.setattr(
-        "tai42_kit.llm.settings.llm_provider_settings",
-        lambda: SimpleNamespace(checkpoint_ttl_minutes=120),
-    )
-    await cp.create_checkpoint_resource("redis", "redis://h/0")
-    assert captured["ttl"] == {"default_ttl": 120, "refresh_on_read": True}
+    reset_all_settings()
+    try:
+        await cp.create_checkpoint_resource("redis", "redis://h/0")
+    finally:
+        reset_all_settings()
+    assert captured["ttl"] == {"default_ttl": 10080, "refresh_on_read": False}
 
 
 async def test_sqlite_resource_builds_and_closes(monkeypatch):
@@ -428,7 +424,8 @@ async def test_sqlite_resource_builds_and_closes(monkeypatch):
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.sqlite.aio", saver_mod)
 
     resource, closer = await cp.create_checkpoint_resource("sqlite", "/tmp/x.db")
-    assert isinstance(resource, _FakeConn)
+    assert isinstance(resource.handle, _FakeConn)
+    assert resource.ledger.handle is resource.handle  # pyright: ignore[reportAttributeAccessIssue]
     await closer()
     assert closed == [True]
 
@@ -445,18 +442,17 @@ async def test_postgres_resource_builds_and_closes(monkeypatch):
 
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
     saver_mod.AsyncPostgresSaver = _FakeSaver
-    rows_mod: Any = types.ModuleType("psycopg.rows")
-    rows_mod.dict_row = object()
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
-    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
-    _resource, closer = await cp.create_checkpoint_resource("postgres", "postgresql://u@h/db")
+    resource, closer = await cp.create_checkpoint_resource("postgres", "postgresql://u@h/db")
     # The saver's required connection kwargs are handed to the pool.
-    assert captured_pool_kwargs["kwargs"] == {
-        "autocommit": True,
-        "prepare_threshold": 0,
-        "row_factory": rows_mod.dict_row,
-    }
+    from psycopg.rows import dict_row
+
+    assert captured_pool_kwargs["kwargs"] == {"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row}
+    # An explicit DSN gets the kit's explicit-DSN pool sizes.
+    assert captured_pool_kwargs["min_size"] == 1
+    assert captured_pool_kwargs["max_size"] == 20
+    assert resource.ledger.handle is resource.handle  # pyright: ignore[reportAttributeAccessIssue]
     # Named for the checkpoint role, and its fill is awaited here rather than in
     # background workers.
     assert captured_pool_kwargs["name"] == "postgres@h/db:checkpoint"
@@ -511,10 +507,7 @@ async def test_postgres_resource_closes_pool_on_setup_failure(monkeypatch):
 
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
     saver_mod.AsyncPostgresSaver = _FakeSaver
-    rows_mod: Any = types.ModuleType("psycopg.rows")
-    rows_mod.dict_row = object()
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
-    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
 
     with pytest.raises(RuntimeError, match="setup boom"):
         await cp.create_checkpoint_resource("postgres", "postgresql://u@h/db")
@@ -532,13 +525,17 @@ class _FakeSaver:
         self.serde = object()
 
 
-def test_get_saver_memory_and_redis_return_resource():
-    # The same resource object is returned (its serde is guarded in place), so the
+def _resource(provider, handle):
+    return cp.CheckpointResource(provider, handle, ledger=object())  # type: ignore[arg-type]
+
+
+def test_get_saver_memory_and_redis_return_the_resource_handle():
+    # The same handle object is returned (its serde is guarded in place), so the
     # registry's cached resource identity is preserved.
     memory_saver = _FakeSaver()
     redis_saver = _FakeSaver()
-    assert cp.get_saver_from_resource("memory", memory_saver) is memory_saver
-    assert cp.get_saver_from_resource("redis", redis_saver) is redis_saver
+    assert cp.get_saver_from_resource("memory", _resource("memory", memory_saver)) is memory_saver
+    assert cp.get_saver_from_resource("redis", _resource("redis", redis_saver)) is redis_saver
     assert isinstance(memory_saver.serde, cp._GuardedSerializer)
     assert isinstance(redis_saver.serde, cp._GuardedSerializer)
 
@@ -547,26 +544,47 @@ def test_get_saver_sqlite_wraps_resource(monkeypatch):
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.sqlite.aio")
     saver_mod.AsyncSqliteSaver = _FakeSaver
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.sqlite.aio", saver_mod)
-    out = cp.get_saver_from_resource("sqlite", "conn")
+    out = cp.get_saver_from_resource("sqlite", _resource("sqlite", "conn"))
     assert isinstance(out, _FakeSaver)
     assert out.resource == "conn"
-    # The saver the graph checkpoints through has its serializer guarded.
+    # The saver the graph checkpoints through has its serializer guarded, with no codec.
     assert isinstance(out.serde, cp._GuardedSerializer)
+    assert out.serde._codec is None
 
 
-def test_get_saver_postgres_wraps_resource(monkeypatch):
+def test_get_saver_postgres_wraps_resource_with_the_blob_codec(monkeypatch):
+    from tai42_kit.llm.checkpoint.codec import BlobCompressCodec
+
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
     saver_mod.AsyncPostgresSaver = _FakeSaver
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
-    out = cp.get_saver_from_resource("postgres", "pool")
+    out = cp.get_saver_from_resource("postgres", _resource("postgres", "pool"))
     assert isinstance(out, _FakeSaver)
     assert out.resource == "pool"
     assert isinstance(out.serde, cp._GuardedSerializer)
+    assert isinstance(out.serde._codec, BlobCompressCodec)
+
+
+def test_get_saver_redis_installs_the_faithful_codec():
+    from tai42_kit.llm.checkpoint.codec import FaithfulRedisSerializer, RedisFaithfulCodec
+
+    saver = _FakeSaver()
+    cp.get_saver_from_resource("redis", _resource("redis", saver))
+    serde: Any = saver.serde
+    assert isinstance(serde._inner, FaithfulRedisSerializer)
+    assert isinstance(serde._codec, RedisFaithfulCodec)
 
 
 def test_get_saver_unknown_provider_raises():
-    with pytest.raises(ValueError, match="Unknown provider"):
-        cp.get_saver_from_resource("bogus", object())
+    from tai42_kit.llm.checkpoint.providers import UnknownCheckpointProviderError
+
+    with pytest.raises(UnknownCheckpointProviderError, match="Unsupported checkpoint provider: 'bogus'"):
+        cp.get_saver_from_resource("bogus", _resource("bogus", object()))
+
+
+def test_get_saver_refuses_a_resource_of_another_provider():
+    with pytest.raises(ValueError, match="of provider 'memory' cannot serve provider 'redis'"):
+        cp.get_saver_from_resource("redis", _resource("memory", _FakeSaver()))
 
 
 # --------------------------------------------------------------------------- #
@@ -582,7 +600,7 @@ _OVERSIZED_INT = 2**64
 def _guarded_memory_serde():
     from langgraph.checkpoint.memory import InMemorySaver
 
-    return cp.get_saver_from_resource("memory", InMemorySaver()).serde
+    return cp.get_saver_from_resource("memory", _resource("memory", InMemorySaver())).serde
 
 
 def test_guard_tool_call_args_overflow_raises_typed_error_naming_path():
@@ -628,10 +646,9 @@ def test_guard_names_the_true_msgpack_culprit_not_the_uint64():
     assert "['uint']" not in message
 
 
-def test_guard_keeps_valid_uint64_from_doors_5_and_6():
-    # Doors 5-6 carry arbitrary tool payloads that may hold a valid uint64; a
-    # payload with only an in-[2**63, 2**64-1] value encodes fine and does NOT
-    # raise at checkpoint.
+def test_guard_keeps_valid_uint64_values():
+    # A tool payload may hold a valid uint64; a payload with only an
+    # in-[2**63, 2**64-1] value encodes fine and does NOT raise at checkpoint.
     serde = _guarded_memory_serde()
     type_, _ = serde.dumps_typed({"result": {"total": 2**63}, "max": 2**64 - 1})
     assert type_ == "msgpack"
@@ -645,7 +662,7 @@ def test_guarded_saver_write_raises_typed_error_naming_path():
     from langgraph.checkpoint.base import empty_checkpoint
     from langgraph.checkpoint.memory import InMemorySaver
 
-    saver = cp.get_saver_from_resource("memory", InMemorySaver())
+    saver = cp.get_saver_from_resource("memory", _resource("memory", InMemorySaver()))
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = {"payload": {"count": 2**64}}
     config: Any = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
@@ -667,8 +684,8 @@ def test_guard_non_integer_encode_failure_still_raises_typed_error():
 def test_guard_is_idempotent():
     from langgraph.checkpoint.memory import InMemorySaver
 
-    saver = cp.get_saver_from_resource("memory", InMemorySaver())
+    saver = cp.get_saver_from_resource("memory", _resource("memory", InMemorySaver()))
     once = saver.serde
-    twice = cp.get_saver_from_resource("memory", saver).serde
+    twice = cp.get_saver_from_resource("memory", _resource("memory", saver)).serde
     assert once is twice
     assert isinstance(twice, cp._GuardedSerializer)

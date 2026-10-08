@@ -398,3 +398,31 @@ async def test_agent_route_parked_bound_as_jq_has_no_null_keys(monkeypatch):
 
     await _run_agent(route)
     assert agent.seen[0]["parked_nulls"] == []
+
+
+async def test_agent_turn_on_the_shipped_checkpoint_default_with_no_store_returns_the_reply(monkeypatch):
+    # A conversation turn needs no checkpoint store: on the shipped ``redis`` default with no
+    # connection configured, the turn drives the agent and returns its reply; whether a store is
+    # needed is the agent's own concern.
+    from tai42_kit.llm.settings import llm_provider_settings
+    from tai42_kit.settings import reset_all_settings
+
+    for name in (
+        "LLM_PROVIDER_CHECKPOINT",
+        "LLM_PROVIDER_CHECKPOINT_CONN_STRING",
+        "REDIS_URL",
+        "TAI_DEFAULT_REDIS_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    reset_all_settings()
+    assert llm_provider_settings().checkpoint == "redis"
+
+    agent = _RecordingAgent(MessageFinal(text="the agent reply"))
+    route = _agent_route()
+    _wire_agent(monkeypatch, route, agent)
+    outcome = await _run_agent(route)
+    assert isinstance(outcome, outcome_module._ResolvedOutcome)
+    assert outcome.error is None
+    assert outcome.answer_status == "answered"
+    assert outcome.parts[0].message == "the agent reply"
+    assert [seen["thread_id"] for seen in agent.seen] == ["bridge:chat:+15550002222"]

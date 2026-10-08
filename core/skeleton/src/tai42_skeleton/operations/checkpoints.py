@@ -1,10 +1,23 @@
-"""Checkpoint retention — the sweep that expires idle conversation threads.
+"""Checkpoint retention — the one sweep that deletes expired checkpoint threads of the deployment's store.
 
-``sweep_checkpoints`` deletes every thread whose newest checkpoint is older than
-``checkpoint_ttl_minutes`` (the kit ``LLMProviderSettings``). It is the retention
-mechanism for the DB-backed providers (``postgres``/``sqlite``); ``redis`` carries
-its own native key TTL and ``memory`` is process-lifetime, so both are a no-op
-here, as is an unset TTL. Deletion uses the saver's own ``adelete_thread`` surface.
+Two horizons, both from the kit ``LLMProviderSettings``:
+
+- finished (``checkpoint_retention_finished_minutes``): a thread its owner marked finished in the
+  store's finished-thread ledger is deleted that long after the mark, on every provider;
+- waiting (``checkpoint_retention_waiting_minutes``): any other thread is deleted that long after its
+  newest checkpoint. ``postgres``/``sqlite`` are swept here; ``redis`` expires the thread by its key
+  TTL and ``memory`` keeps it for the process lifetime, so the waiting horizon is skipped for both.
+
+Before any delete, every registered live-thread filter (``tai42_kit.llm.checkpoint.liveness``) is asked:
+a thread a consumer reports live is spared — logged at WARNING, counted on
+``tai42_checkpoint_sweep_spared_total`` and listed in the result — and a finished one stays in the
+ledger so the next sweep checks it again.
+
+The sweep covers the deployment's configured provider and connection string only: the one store
+every process shares. One interleaving is accepted: a sweep that read a thread past its horizon
+before a run restarted on the same id, and deletes after the restart began, can delete the thread
+the restart has just begun to re-checkpoint — a compound event on a thread already past its
+horizon, whose next drive re-checkpoints.
 
 As an operation it projects as a tool, so it is runnable by name through
 ``/api/schedules``. Native recurrence additionally needs a ``schedule_task``-branched
@@ -14,109 +27,172 @@ external cron of ``tai checkpoints sweep`` is the busless alternative.
 
 from __future__ import annotations
 
+import logging
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Final, cast
 
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.llm.checkpoint import checkpoint_provider_facts, live_threads
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.settings import llm_provider_settings
 
-from tai42_skeleton.interactions.settings import interactions_settings
-from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.interactions import checkpoint_liveness  # noqa: F401 -- registers the interactions filter
 from tai42_skeleton.operations import operation
+from tai42_skeleton.operations.checkpoint_metrics import sweep_spared_counter
 from tai42_skeleton.operations.response_models_group_c import CheckpointSweepResult
 
-# Providers with a persisted store the sweep walks; redis uses a native key TTL, memory is process-lifetime.
-_SWEEPABLE_PROVIDERS = frozenset({"postgres", "sqlite"})
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+    from tai42_kit.llm.checkpoint import FinishedThreadLedger
+    from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
+
+logger = logging.getLogger(__name__)
+
+# Candidate threads handled per page (one ledger read and one live-thread filter pass each).
+_PAGE: Final = 1000
+
+# ``adelete_thread`` removes every document the thread holds when it is called; a checkpoint
+# written meanwhile survives it, so the sweep deletes again until none remains, at most this
+# many rounds.
+_MAX_DELETE_ROUNDS: Final = 100
 
 
-async def _threads_with_live_parks(thread_ids: list[str]) -> set[str]:
-    """The subset of ``thread_ids`` that still back at least one live async park.
+class CheckpointSweepError(RuntimeError):
+    """A thread could not be removed from the checkpoint store."""
 
-    Reads the interactions store's thread reverse index UNION the thread subject index — the
-    platform's authoritative reach of a thread's live parks, the SAME reach a thread delete kills
-    through (:func:`~tai42_skeleton.interactions.helper.cancel_parks_for_thread`). A terminal exit
-    removes a park's member, so a member present here is a park still waiting for an answer or its
-    expiry. Empty when the interactions store is unconfigured — no park could ever have been
-    persisted.
-    """
-    settings = interactions_settings()
-    if not settings.redis.redis_url:
-        return set()
-    store = InteractionStore(settings.key_prefix)
-    parked: set[str] = set()
-    async with client_ctx(RedisClient, settings.redis) as conn:
+
+async def _delete_thread(saver: BaseCheckpointSaver, thread_id: str) -> None:
+    for _ in range(_MAX_DELETE_ROUNDS):
+        await saver.adelete_thread(thread_id)
+        remaining = False
+        tuples_of_thread = cast("AsyncGenerator[Any]", saver.alist({"configurable": {"thread_id": thread_id}}, limit=1))
+        async with aclosing(tuples_of_thread) as tuples:
+            async for _tup in tuples:
+                remaining = True
+                break
+        if not remaining:
+            return
+    raise CheckpointSweepError(f"thread {thread_id} still holds checkpoints after {_MAX_DELETE_ROUNDS} delete rounds")
+
+
+class _Sweep:
+    """One sweep over the deployment's checkpoint store."""
+
+    def __init__(self, provider: str, conn_string: str | None, saver: BaseCheckpointSaver) -> None:
+        self.provider = provider
+        self.conn_string = conn_string
+        self.saver = saver
+        self.spared: list[str] = []
+
+    async def page(self, thread_ids: list[str], horizon: str) -> list[str]:
+        """Delete every thread of the page no filter claims; return the deleted ids."""
+        claimed = await live_threads(self.provider, self.conn_string, thread_ids)
+        deleted: list[str] = []
         for thread_id in thread_ids:
-            if await store.thread_park_members(conn, thread_id) or await store.subject_members(
-                conn, "thread", thread_id
-            ):
-                parked.add(thread_id)
-    return parked
+            owner = claimed.get(thread_id)
+            if owner is not None:
+                logger.warning(
+                    "checkpoint sweep: thread %s is past the %s horizon but %s reports it live; kept",
+                    thread_id,
+                    horizon,
+                    owner,
+                )
+                sweep_spared_counter().labels(horizon=horizon, owner=owner).inc()
+                self.spared.append(thread_id)
+                continue
+            await _delete_thread(self.saver, thread_id)
+            deleted.append(thread_id)
+        return deleted
+
+    async def finished(self, ledger: FinishedThreadLedger, cutoff: datetime) -> list[str]:
+        swept: list[str] = []
+        seen: set[str] = set()
+        while True:
+            # Spared threads stay in the ledger, so each read asks past the ones already handled.
+            due = await ledger.finished_before(cutoff, limit=len(seen) + _PAGE)
+            fresh = [thread_id for thread_id in due if thread_id not in seen]
+            if not fresh:
+                return swept
+            seen.update(fresh)
+            deleted = await self.page(fresh, "finished")
+            await ledger.forget(deleted)
+            swept.extend(deleted)
+
+    async def waiting(self, ledger: FinishedThreadLedger, stale: list[str]) -> list[str]:
+        already_spared = set(self.spared)
+        candidates = [thread_id for thread_id in stale if thread_id not in already_spared]
+        swept: list[str] = []
+        for start in range(0, len(candidates), _PAGE):
+            deleted = await self.page(candidates[start : start + _PAGE], "waiting")
+            await ledger.forget(deleted)
+            swept.extend(deleted)
+        return swept
+
+
+async def _stale_threads(provider: str, resource: CheckpointResource, saver: Any, cutoff: datetime) -> list[str]:
+    if provider == "postgres":
+        from tai42_kit.llm.checkpoint import postgres_store
+
+        return await postgres_store.stale_threads(resource.handle, cutoff=cutoff)
+    # sqlite: the newest checkpoint of every thread, walked through the saver (development scale).
+    newest_by_thread: dict[str, datetime] = {}
+    async for tup in saver.alist(None):
+        thread_id = tup.config["configurable"]["thread_id"]
+        ts = datetime.fromisoformat(tup.checkpoint["ts"])
+        current = newest_by_thread.get(thread_id)
+        if current is None or ts > current:
+            newest_by_thread[thread_id] = ts
+    return sorted(thread_id for thread_id, ts in newest_by_thread.items() if ts < cutoff)
 
 
 @operation(
-    summary="Sweep expired conversation checkpoints",
+    summary="Sweep expired checkpoint threads",
     tags=["checkpoints"],
     destructive=True,
     reload_gated=True,
     response_model=CheckpointSweepResult,
 )
 async def sweep_checkpoints() -> dict[str, Any]:
-    """Delete conversation threads whose newest checkpoint is older than the configured idle lifetime.
+    """Delete the checkpoint threads of the deployment's store that are past their retention horizon.
 
-    Returns the provider, the TTL, and the swept threads.
-    A no-op (nothing deleted) when the TTL is unset, or the provider is ``redis``
-    (native key TTL) or ``memory`` (process-lifetime) — each reported in ``skipped``.
+    A finished thread (marked by its owner) goes ``checkpoint_retention_finished_minutes`` after the
+    mark; on ``postgres``/``sqlite`` any thread goes ``checkpoint_retention_waiting_minutes`` after its
+    newest checkpoint (``redis`` expires it by key TTL and ``memory`` keeps it for the process — both
+    reported in ``skipped``). A thread a registered live-thread filter claims is spared and listed.
     """
     settings = llm_provider_settings()
     provider = settings.checkpoint
-    ttl_minutes = settings.checkpoint_ttl_minutes
+    conn_string = settings.checkpoint_conn_string
+    waiting = settings.checkpoint_retention_waiting_minutes
+    finished = settings.checkpoint_retention_finished_minutes
+    facts = checkpoint_provider_facts(provider)
+    registry = checkpoint_registry()
+    resource = await registry.resource(provider, conn_string)
+    saver = await registry.get_checkpointer(provider, conn_string)
+    now = datetime.now(UTC)
 
-    if provider not in _SWEEPABLE_PROVIDERS:
-        return {
-            "provider": provider,
-            "ttl_minutes": ttl_minutes,
-            "swept_count": 0,
-            "swept_threads": [],
-            "skipped": f"provider {provider!r} has no swept store (redis uses a key TTL; memory is process-lifetime)",
-        }
+    sweep = _Sweep(provider, conn_string, saver)
+    finished_swept = await sweep.finished(resource.ledger, now - timedelta(minutes=finished))
 
-    if ttl_minutes is None:
-        return {
-            "provider": provider,
-            "ttl_minutes": None,
-            "swept_count": 0,
-            "swept_threads": [],
-            "skipped": "retention disabled (checkpoint_ttl_minutes unset); checkpoints are kept forever",
-        }
-
-    saver = await checkpoint_registry().get_checkpointer(provider=provider, conn_string=settings.checkpoint_conn_string)
-    cutoff = datetime.now(UTC) - timedelta(minutes=ttl_minutes)
-
-    # Staleness = each thread's newest checkpoint timestamp vs the cutoff.
-    newest_by_thread: dict[str, datetime] = {}
-    async for tup in saver.alist(None):
-        configurable = tup.config.get("configurable") or {}
-        thread_id = configurable["thread_id"]
-        ts = datetime.fromisoformat(tup.checkpoint["ts"])
-        current = newest_by_thread.get(thread_id)
-        if current is None or ts > current:
-            newest_by_thread[thread_id] = ts
-
-    stale = sorted(thread_id for thread_id, ts in newest_by_thread.items() if ts < cutoff)
-    # A thread backing a still-live async park is NOT idle: deleting its checkpoints would destroy
-    # a run that is parked and waiting for an answer or its expiry. Keep every such thread — the
-    # idle-staleness heuristic cannot see that a parked run is alive, so the live-park index is
-    # consulted before any delete.
-    parked = await _threads_with_live_parks(stale)
-    swept = [thread_id for thread_id in stale if thread_id not in parked]
-    for thread_id in swept:
-        await saver.adelete_thread(thread_id)
+    skipped: str | None = None
+    waiting_swept: list[str] = []
+    if facts.retention == "sweep":
+        stale = await _stale_threads(provider, resource, saver, now - timedelta(minutes=waiting))
+        waiting_swept = await sweep.waiting(resource.ledger, stale)
+    elif facts.retention == "native_ttl":
+        skipped = f"waiting horizon: provider {provider!r} expires threads by their key TTL"
+    else:
+        skipped = f"waiting horizon: provider {provider!r} keeps threads for the process lifetime"
 
     return {
         "provider": provider,
-        "ttl_minutes": ttl_minutes,
-        "swept_count": len(swept),
-        "swept_threads": swept,
+        "waiting_minutes": waiting,
+        "finished_minutes": finished,
+        "finished_swept": finished_swept,
+        "waiting_swept": waiting_swept,
+        "swept_count": len(finished_swept) + len(waiting_swept),
+        "spared": sweep.spared,
+        "skipped": skipped,
     }

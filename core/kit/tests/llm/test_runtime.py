@@ -263,10 +263,9 @@ def test_validate_value_invalid_schema_raises():
         validate_structured_output(_VALID, {"type": "object", "required": "name"})
 
 
-# --- unconditional int64 walk closes the native BaseModel door -----------------
-# A plain-int BaseModel field accepts any Python int, so a value in
-# [2**63, 2**64-1] validates by pydantic yet has no signed-int64 encoding — it
-# would silently store (neither retryable nor loud) without the unconditional walk.
+# --- the storage integer range belongs to the checkpoint guard -----------------
+# A plain-int BaseModel field accepts any Python int; a value in [2**63, 2**64-1]
+# validates by pydantic and stores fine (the checkpoint guard owns the msgpack range).
 
 
 class _Big(BaseModel):
@@ -281,20 +280,26 @@ class _BigOuter(BaseModel):
     inner: _BigInner
 
 
-def test_validate_basemodel_rejects_oversized_top_level_int_naming_path():
-    over = INT64_MAX + 1  # 2**63: encodes in msgpack as uint64 but overflows int64
-    with pytest.raises(JsonSchemaValidationError) as exc:
-        validate_structured_output(_Big(n=over), _Big)
-    assert exc.value.offending_value == over
-    assert exc.value.json_path == "['n']"
-    assert "['n']" in str(exc.value)
-
-
-def test_validate_basemodel_rejects_oversized_nested_int():
+def test_validate_basemodel_accepts_an_int_past_int64_within_the_storage_range():
+    # A pydantic-class schema carries no integer bound: a value in (int64, uint64] is a valid
+    # Python int, and the checkpoint guard owns the storage range.
     over = INT64_MAX + 1
-    with pytest.raises(JsonSchemaValidationError) as exc:
-        validate_structured_output(_BigOuter(inner=_BigInner(k=over)), _BigOuter)
-    assert exc.value.json_path == "['inner']['k']"
+    out = validate_structured_output(_Big(n=over), _Big)
+    assert isinstance(out, _Big)
+    assert out.n == over
+
+
+def test_validate_basemodel_accepts_a_nested_int_past_int64():
+    over = INT64_MAX + 1
+    out = validate_structured_output(_BigOuter(inner=_BigInner(k=over)), _BigOuter)
+    assert out.inner.k == over
+
+
+def test_dict_schema_untyped_site_accepts_an_int_past_int64():
+    # Only integer-typed sites of a dict schema carry the injected int64 bound.
+    over = INT64_MAX + 1
+    schema = {"title": "Any", "type": "object", "properties": {"n": {}, "x": {"type": "number"}}}
+    assert validate_structured_output({"n": over, "x": over}, schema) == {"n": over, "x": over}
 
 
 def test_validate_basemodel_conforming_value_reinflates_to_class():
@@ -307,8 +312,8 @@ def test_validate_basemodel_conforming_value_reinflates_to_class():
 
 def test_dict_schema_rejects_oversized_int_in_a_pydantic_instance():
     # The tool tier parses its bound model to a pydantic instance; validated against a
-    # dict-authored schema it is still walked for an integer outside the platform int64
-    # range, so an oversized integer raises rather than being emitted as a dict.
+    # dict-authored schema, the int64 bound injected onto the integer-typed site rejects
+    # an oversized integer rather than emitting it as a dict.
     over = INT64_MAX + 1
     schema = {"title": "Big", "type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
     with pytest.raises(JsonSchemaValidationError) as exc:

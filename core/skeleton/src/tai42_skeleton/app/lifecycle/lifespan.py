@@ -186,8 +186,7 @@ class LifespanMixin(LifecycleState):
                 errors.append(e)
 
         await _guard("pooled clients", self.clients.shutdown_clients)
-        await _guard("checkpoint registry", lambda: _lifecycle.checkpoint_registry().close_all())
-        await _guard("store registry", lambda: _lifecycle.store_registry().close_all())
+        await _guard("loop-bound kit resources", lambda: _lifecycle.release_loop_bound_resources(all_epochs=True))
 
         # Flush buffered monitoring spans last, so spans emitted during the
         # teardown above are captured before the process exits rather than lost

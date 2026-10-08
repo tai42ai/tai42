@@ -81,8 +81,8 @@ def structured_output_stack(
     if not isinstance(schema, dict) and not (isinstance(schema, type) and issubclass(schema, BaseModel)):
         # A langchain schema shape the capability plan does not model (a Python union of
         # models, a TypedDict, a dataclass): bind it to the tool tier as-is. The rail
-        # validates the produced value against it (the int64 walk applies to every value),
-        # and re-prompts a non-conforming payload under the per-run cap.
+        # validates the produced value against it and re-prompts a non-conforming payload
+        # under the per-run cap.
         return ToolStrategy(schema, handle_errors=False), StructuredOutputRailMiddleware(schema, cap)
     plan = plan_structured_output(llm, provider, schema)
     if plan.mode == "native":

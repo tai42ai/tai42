@@ -113,12 +113,14 @@ class TestBuildAgentAndInput:
         captured = _patch_seams(monkeypatch)
         tool = _tool("search")
 
-        agent, messages, config, _strategy = asyncio.run(
+        agent, messages, config, _strategy, minted = asyncio.run(
             bta._build_agent_and_input("sys-prompt", ["hi"], [tool], llm_kwargs={"temperature": 0})
         )
 
         assert agent is not None
         assert config == {"configurable": {"thread_id": "t"}}
+        # A keyless call: the thread the builder minted is returned for the end-of-run mark.
+        assert minted == "t"
         # Default providers fell back to the settings values.
         assert captured["llm_provider"] == "def_llm"
         assert captured["checkpoint"] == ("def_checkpoint", "cp-conn")
@@ -162,7 +164,7 @@ class TestBuildAgentAndInput:
 
     def test_user_content_kwargs_mark_the_last_input_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_seams(monkeypatch)
-        _, messages, _, _ = asyncio.run(
+        _, messages, _, _, _ = asyncio.run(
             bta._build_agent_and_input(
                 "sys", ["first", "last"], [], user_content_kwargs={"cache_control": {"type": "ephemeral"}}
             )
@@ -180,7 +182,7 @@ class TestBuildAgentAndInput:
 
     def test_system_and_user_content_kwargs_apply_together(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)
-        _, messages, _, _ = asyncio.run(
+        _, messages, _, _, _ = asyncio.run(
             bta._build_agent_and_input(
                 "sys-prompt",
                 ["hi"],

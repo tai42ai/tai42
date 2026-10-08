@@ -61,7 +61,7 @@ from tai42_agents._internal.base_tool_agent import (
     aappend_tools_agent_messages,
     ainvoke_tools_agent,
 )
-from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.config_util import build_run_config, init_langgraph_config, unmark_caller_thread
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
 from tai42_agents._internal.park import (
     ParkIdentity,
@@ -717,6 +717,7 @@ class ToolsAgent(Agent):
         config = init_langgraph_config(
             build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)
         ).config
+        await unmark_caller_thread(thread_id, provider=validated.checkpoint_provider)
         await _repair_dangling_tool_calls(agent, config)
         snapshot = await agent.aget_state(config, subgraphs=True)
         pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}

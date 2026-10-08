@@ -20,7 +20,6 @@ suspension marker + ``SuspendedFinal`` vocabulary.
 from __future__ import annotations
 
 from tai42_agents._internal.park.capability import (
-    DURABLE_CHECKPOINT_PROVIDERS,
     ParkIdentity,
     assert_park_capable,
     build_park_identity,
@@ -59,7 +58,6 @@ from tai42_agents._internal.park.resume_tool import register_agent_resume_tool
 __all__ = [
     "AGENT_RESUME_TOOL_NAME",
     "CHAINED_PARK_DELIVERY_TOOL_NAME",
-    "DURABLE_CHECKPOINT_PROVIDERS",
     "LEASE_HEADROOM_SECONDS",
     "WSLOCK_KEY_PREFIX",
     "AsyncParkMiddleware",

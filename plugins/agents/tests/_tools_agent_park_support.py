@@ -6,7 +6,7 @@ park-payload helpers the park behaviour tests drive on.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -61,6 +61,11 @@ class ScriptedChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+def _within_retention() -> datetime:
+    """An ask deadline one hour out — inside the checkpoint's waiting retention."""
+    return datetime.now(UTC) + timedelta(hours=1)
+
+
 class _AskStandIn:
     """A faithful ``ask(mode="async")`` stand-in: it parks (returns the reserved
     marker) ONLY when a resume continuation is bound, and otherwise RAISES exactly as the
@@ -70,7 +75,9 @@ class _AskStandIn:
     def __init__(self, interaction_id: str, expiry_at: Any = None, *, caller: bool = False) -> None:
         self.calls = 0
         self._interaction_id = interaction_id
-        self._expiry_at = expiry_at
+        # A durable checkpoint keeps a parked thread the waiting retention, so an ask parks with a
+        # deadline inside it.
+        self._expiry_at = expiry_at if expiry_at is not None else _within_retention()
         # A ``to="caller"`` ask stamps its own id into the marker's caller subset (the platform's
         # ``ask`` does this off ``to``); a user ask leaves it empty.
         self._caller = caller
@@ -110,7 +117,7 @@ class _NestedDriverStandIn:
         self.chained_keys: list[str] = []
         self._interaction_id = interaction_id
         self._resume_owner = resume_owner
-        self._expiry_at = expiry_at
+        self._expiry_at = expiry_at if expiry_at is not None else _within_retention()
 
     def run(self, **_kwargs: Any) -> SuspendedInteraction:
         self.calls += 1
@@ -141,9 +148,6 @@ class _ProviderSettings:
     llm = "fake"
     checkpoint = "redis"
     checkpoint_conn_string = None
-    # Keep-forever retention, so the park-persist expiry-vs-retention gate bounds nothing
-    # and these resume-mechanics tests' synthetic None-expiry parks pass it.
-    checkpoint_ttl_minutes = None
     store = "memory"
     store_conn_string = None
 
