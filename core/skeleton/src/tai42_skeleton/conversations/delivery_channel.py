@@ -508,6 +508,7 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
     Never re-sends an accepted chunk. Orchestrates: preconditions → ledger read + resume plan →
     fresh-send admission → send plan → send loop → mark provisional + fallback confirmation.
     """
+    from tai42_skeleton.conversations import cache
     from tai42_skeleton.conversations import delivery as _pkg
     from tai42_skeleton.conversations.turn import working_signal
 
@@ -524,7 +525,7 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
     # single-part path stays byte-exact with a plain per-answer send.
     parts = record.answer_parts or [AnswerPart(message=answer)]
     part_texts = [part.message for part in parts]
-    ledger = ChannelSendLedger(settings)
+    ledger = cache.get_conversations_manager().send_ledger
     # Account the attempt BEFORE the first fallible step, so every fault below is bounded by
     # ``delivery_max_attempts`` instead of leaving the record pending_delivery forever.
     attempts = await store.bump_attempt(record.message_id)

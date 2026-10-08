@@ -42,7 +42,7 @@ from tai42_skeleton.conversations.turn import record as turn_record_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 
-from .conftest import _connected, rendered_user_message
+from .conftest import FakeManager, _connected, rendered_user_message
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _CODE_RE = re.compile(r"LINK-[A-Z0-9]{8}")
@@ -63,17 +63,6 @@ class EchoAgent(Agent):
         text = rendered_user_message(user_message)
         self.calls.append((text, thread_id))
         return f"echo: {text}"
-
-
-class FakeManager:
-    def __init__(self, *routes: ConversationRoute) -> None:
-        self._routes = {r.route_name: r for r in routes}
-
-    async def list_routes(self):
-        return dict(self._routes), 0
-
-    async def get_route(self, name: str):
-        return self._routes.get(name)
 
 
 class FakeChannel:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.cache import get_conversations_manager
 
 
 @tai42_app.lifecycle.on_startup
@@ -52,7 +52,7 @@ async def _redrive_pending_conversations() -> None:
     periodic sweep is established separately (post-swap), so it survives a reload rather
     than being spawned on the throwaway build-thread loop this handler runs on at reload.
     """
-    if ConversationsSettings().in_memory:
+    if not get_conversations_manager().durable:
         return
     from tai42_skeleton.conversations import redrive_accepted, redrive_pending
 
@@ -69,7 +69,7 @@ def _start_conversations_delivery_sweep() -> None:
     is what recovers a record whose worker died holding a still-live lease. No-op with no
     backend.
     """
-    if ConversationsSettings().in_memory:
+    if not get_conversations_manager().durable:
         return
     from tai42_skeleton.conversations import start_delivery_sweep
 
@@ -82,7 +82,7 @@ async def _stop_conversations_delivery_sweep() -> None:
 
     A backend-less deployment never started one.
     """
-    if ConversationsSettings().in_memory:
+    if not get_conversations_manager().durable:
         return
     from tai42_skeleton.conversations import stop_delivery_sweep
 

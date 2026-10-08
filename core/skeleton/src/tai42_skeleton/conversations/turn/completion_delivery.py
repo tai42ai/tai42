@@ -17,7 +17,6 @@ from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import DeliveryStatus
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.errors import CompletionDeliveryError
 from tai42_skeleton.conversations.turn.outcome import _error_answer_text, _serialize_structured, _text_part
@@ -59,7 +58,7 @@ async def _rebuilt_turn(message_id: str | None, route: ConversationRoute) -> dic
     """
     if not message_id:
         return None
-    record = await accessors._store().get_record(message_id)
+    record = await cache.get_conversations_manager().records.get_record(message_id)
     if record is None:
         return None
     return _turn_block(record, route, person=None, thread_id=record.thread_id)
@@ -76,11 +75,11 @@ async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute,
     """
     if thread_id.startswith(PERSON_THREAD_PREFIX):
         person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
-        person = await accessors._person_store().get_by_id(person_id)
+        person = await cache.get_conversations_manager().persons.get_by_id(person_id)
         if person is None:
             raise CompletionDeliveryError(f"no person for parked thread {thread_id!r}")
         person_routes = sorted({route for address in person.addresses for route in address.routes})
-        newest, _ = await accessors._store().list_person_thread_records(
+        newest, _ = await cache.get_conversations_manager().records.list_person_thread_records(
             person_routes, thread_id, offset=0, limit=1, newest_first=True
         )
         if not newest.records:
@@ -196,7 +195,7 @@ async def deliver_agent_completion(
     assert_delivery_authorized(completion_id)
     if not completion_id:
         raise ValueError("deliver_agent_completion requires a completion_id — it is the exactly-once delivery key")
-    existing = await accessors._store().get_record(completion_id)
+    existing = await cache.get_conversations_manager().records.get_record(completion_id)
     if existing is not None:
         # A redelivered completion for a super-step whose durable record already committed (a
         # lease-lapse re-drive): the exactly-once point is passed, so this is a benign no-op.
@@ -273,8 +272,8 @@ async def deliver_agent_completion(
         answer_parts=answer_parts,
         origin="operator",
     )
-    await accessors._store().create_record(record)
-    await accessors._refresh_thread_mode_ttl(thread_id)
+    await cache.get_conversations_manager().records.create_record(record)
+    await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
     spawn_delivery(completion_id)
     return {"message_id": completion_id}
 
@@ -352,7 +351,7 @@ async def deliver_tool_completion(
     assert_delivery_authorized(completion_id)
     if not completion_id:
         raise ValueError("deliver_tool_completion requires a completion_id — it is the exactly-once delivery key")
-    existing = await accessors._store().get_record(completion_id)
+    existing = await cache.get_conversations_manager().records.get_record(completion_id)
     if existing is not None:
         # A redelivered completion for a terminal whose durable record already committed: the
         # exactly-once point is passed, so this is a benign no-op. Read BEFORE the address guard,
@@ -424,7 +423,7 @@ async def deliver_tool_completion(
         answer_parts=answer_parts,
         origin="operator",
     )
-    await accessors._store().create_record(record)
-    await accessors._refresh_thread_mode_ttl(delivery_thread_id)
+    await cache.get_conversations_manager().records.create_record(record)
+    await cache.get_conversations_manager().modes.refresh_ttl(delivery_thread_id)
     spawn_delivery(completion_id)
     return {"message_id": completion_id}

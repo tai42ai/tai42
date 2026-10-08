@@ -5,14 +5,19 @@ concurrency semaphore."""
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
+from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
+from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 
+from tai42_skeleton.app import epoch as epoch_module
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.caps import AddressAdmission, ThreadBusyError, ThreadQueueOverflowError, TurnCaps
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import fixed_settings
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -35,7 +40,7 @@ class _Clock:
 def test_token_bucket_admits_then_sheds_with_reply_then_silent(monkeypatch, small_settings):
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
 
     # Capacity is one hour's worth of turns (2 here): the first two are admitted.
     assert caps.admit_address("+1") is AddressAdmission.ADMIT
@@ -62,7 +67,7 @@ def test_a_spent_bucket_survives_and_a_quiet_one_is_dropped(monkeypatch, small_s
     # for a full refill window is dropped.
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
     assert caps.admit_address("+1") is AddressAdmission.ADMIT
     assert caps.admit_address("+1") is AddressAdmission.ADMIT
     assert caps.admit_address("+1") is AddressAdmission.SHED_WITH_REPLY
@@ -87,14 +92,14 @@ def test_the_bucket_map_is_bounded_under_address_churn(monkeypatch):
     # sent in that hour.
     monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "2")
     monkeypatch.setenv("CONVERSATIONS_ADDRESS_BUCKET_MAX_ENTRIES", "16")
-    caps = TurnCaps(ConversationsSettings())
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
     for index in range(500):
         assert caps.admit_address(f"+{index}") is AddressAdmission.ADMIT
     assert len(caps._buckets) == 16
 
 
 def test_thread_queue_overflow_is_loud(small_settings):
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
     caps.reserve_thread_slot("t")  # 1
     caps.reserve_thread_slot("t")  # 2 (depth == 2)
     with pytest.raises(ThreadQueueOverflowError):
@@ -106,7 +111,7 @@ def test_thread_queue_overflow_is_loud(small_settings):
 def test_release_thread_slot_is_the_abort_mirror(small_settings):
     # An aborted accept must give its reservation back: no ``run_reserved`` will consume
     # it, so the FIFO would otherwise leak a slot per abort.
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
     caps.reserve_thread_slot("t")
     caps.reserve_thread_slot("t")  # depth == 2, the thread is full
     caps.release_thread_slot("t")
@@ -116,7 +121,7 @@ def test_release_thread_slot_is_the_abort_mirror(small_settings):
 
 
 async def test_run_reserved_releases_the_slot(small_settings):
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
     caps.reserve_thread_slot("t")
     async with caps.run_reserved("t"):
         pass
@@ -126,7 +131,7 @@ async def test_run_reserved_releases_the_slot(small_settings):
 
 
 async def test_global_semaphore_bounds_concurrency(small_settings):
-    caps = TurnCaps(small_settings)  # max_concurrent_turns == 1
+    caps = TurnCaps(lambda: small_settings)  # max_concurrent_turns == 1
     entered = asyncio.Event()
     release = asyncio.Event()
     second_entered = asyncio.Event()
@@ -158,7 +163,7 @@ async def test_same_thread_runs_serialize_in_arrival_order(monkeypatch):
     # Two turns for the SAME thread never overlap; the global ceiling is raised so the
     # serialization under test is the per-thread lock, not the semaphore.
     monkeypatch.setenv("CONVERSATIONS_MAX_CONCURRENT_TURNS", "8")
-    caps = TurnCaps(ConversationsSettings())
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
     order: list[str] = []
     first_in = asyncio.Event()
     let_first_finish = asyncio.Event()
@@ -192,7 +197,7 @@ async def test_distinct_threads_run_concurrently(monkeypatch):
     # Serialization is PER THREAD only: two different threads run at once under a global
     # ceiling that admits both, so one slow thread never blocks another conversation.
     monkeypatch.setenv("CONVERSATIONS_MAX_CONCURRENT_TURNS", "8")
-    caps = TurnCaps(ConversationsSettings())
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
     both_in = asyncio.Event()
     count = 0
 
@@ -246,7 +251,7 @@ async def test_a_settings_reload_keeps_a_live_thread_serialized(monkeypatch, fre
     t1 = asyncio.create_task(first())
     await first_in.wait()
     monkeypatch.setenv("CONVERSATIONS_MAX_CONCURRENT_TURNS", "8")
-    caps_module._reset_turn_caps()
+    reset_all_settings()
 
     t2 = asyncio.create_task(second())
     await asyncio.sleep(0.02)
@@ -260,9 +265,31 @@ async def test_a_settings_reload_keeps_a_live_thread_serialized(monkeypatch, fre
     assert inside == ["B"]
 
 
+def test_a_retired_settings_generation_is_not_held_by_the_caps(monkeypatch, fresh_caps_singleton, caplog):
+    # The caps singleton outlives every reload; it must not keep the retired generation's
+    # settings instance alive, or every retire sweep reports a stale-config leak.
+    monkeypatch.setattr(epoch_module, "_retiring_epoch", None)
+    reset_all_settings()
+    caps = caps_module.get_turn_caps()
+    retired = current_client_epoch()
+    advance_client_epoch()
+
+    monkeypatch.setattr(epoch_module, "_retiring_epoch", retired)
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+        reset_all_settings()
+    monkeypatch.setattr(epoch_module, "_retiring_epoch", None)
+
+    held = [h for h in sweep_stale_settings(retired) if h.settings_type.endswith(".ConversationsSettings")]
+    assert held == []
+    assert "ConversationsSettings" not in caplog.text
+    # The same live instance keeps serving under the new generation.
+    assert caps_module.get_turn_caps() is caps
+
+
 async def test_a_reload_that_lowers_the_ceiling_counts_the_turns_already_running(monkeypatch):
     monkeypatch.setenv("CONVERSATIONS_MAX_CONCURRENT_TURNS", "2")
-    caps = TurnCaps(ConversationsSettings())
+    current = ConversationsSettings()
+    caps = TurnCaps(lambda: current)
     running = 0
     peak = 0
     let_finish = asyncio.Event()
@@ -281,7 +308,8 @@ async def test_a_reload_that_lowers_the_ceiling_counts_the_turns_already_running
     assert running == 2
 
     monkeypatch.setenv("CONVERSATIONS_MAX_CONCURRENT_TURNS", "1")
-    caps.reconfigure(ConversationsSettings())
+    current = ConversationsSettings()
+    caps.reconfigure()
     third = asyncio.create_task(run("c"))
     await asyncio.sleep(0.02)
     # The two already running count against the lowered ceiling, so the third waits.
@@ -302,7 +330,7 @@ async def test_sync_door_bound_refuses_a_held_local_lock_promptly():
     # In-memory (the lease is a no-op), so the ONLY thing holding a second caller is this
     # worker's FIFO lock. Red half: an UNBOUNDED waiter hangs behind the held lock. Green half:
     # a bounded waiter refuses PROMPTLY with ThreadBusyError, its FIFO reservation given back.
-    caps = TurnCaps(ConversationsSettings())
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
     held = asyncio.Event()
     release = asyncio.Event()
 
@@ -363,7 +391,7 @@ async def test_sync_door_bound_refuses_a_foreign_cross_worker_lease(fake_lease):
     key = settings.thread_lease_key("T")
     await fake.set(key, "foreign-token", px=120_000, nx=True)
 
-    caps = TurnCaps(settings)
+    caps = TurnCaps(lambda: settings)
     caps.reserve_thread_slot("T")
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -379,7 +407,7 @@ async def test_sync_door_bound_refuses_a_foreign_cross_worker_lease(fake_lease):
 async def test_sync_door_bound_never_arms_the_turn_body():
     # The bound covers ACQUISITION only: on a free thread a tiny bound must not fire even when
     # the body runs far longer than it — a HITL pause inside the turn is never cut short.
-    caps = TurnCaps(ConversationsSettings())
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
     caps.reserve_thread_slot("T")
     async with caps.run_reserved("T", acquire_timeout_seconds=0.05):
         await asyncio.sleep(0.2)
@@ -388,7 +416,7 @@ async def test_sync_door_bound_never_arms_the_turn_body():
 async def test_background_turn_waits_unbounded_behind_a_held_lock():
     # The background turn caller passes no bound: it waits behind an in-flight turn and completes
     # when the holder releases — never a ThreadBusyError.
-    caps = TurnCaps(ConversationsSettings())
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
     held = asyncio.Event()
     release = asyncio.Event()
     done = asyncio.Event()
@@ -420,12 +448,14 @@ def test_reconfigure_re_rates_a_live_bucket(monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
     monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1000")
-    caps = TurnCaps(ConversationsSettings())
+    current = ConversationsSettings()
+    caps = TurnCaps(lambda: current)
     for _ in range(40):
         assert caps.admit_address("abuser") is AddressAdmission.ADMIT
 
     monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "5")
-    caps.reconfigure(ConversationsSettings())
+    current = ConversationsSettings()
+    caps.reconfigure()
 
     bucket = caps._buckets["abuser"]
     assert bucket.capacity == 5.0
@@ -442,7 +472,7 @@ def test_a_per_hour_override_runs_a_bucket_at_its_own_rate(monkeypatch, small_se
     # the global cap (2 here), so the two never share one budget.
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
 
     # The overridden key gets 4 turns; its bucket is created at the override rate.
     for _ in range(4):
@@ -459,7 +489,7 @@ def test_none_per_hour_runs_at_the_global_rate(monkeypatch, small_settings):
     # An explicit ``per_hour=None`` is byte-identical to omitting it: the global cap applies.
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
 
     assert caps.admit_address("+1", per_hour=None) is AddressAdmission.ADMIT
     assert caps.admit_address("+1", per_hour=None) is AddressAdmission.ADMIT
@@ -474,12 +504,14 @@ def test_a_reload_does_not_clobber_an_override(monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
     monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "2")
-    caps = TurnCaps(ConversationsSettings())
+    current = ConversationsSettings()
+    caps = TurnCaps(lambda: current)
     assert caps.admit_address("vip", per_hour=10) is AddressAdmission.ADMIT
 
     # Reload the GLOBAL cap; reconfigure transiently re-rates every live bucket to it.
     monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "3")
-    caps.reconfigure(ConversationsSettings())
+    current = ConversationsSettings()
+    caps.reconfigure()
     assert caps._buckets["vip"].capacity == 3.0
 
     # The overridden key's next message restores its own rate in place: capacity and refill
@@ -501,7 +533,7 @@ def test_a_changed_override_re_rates_the_bucket_in_place(monkeypatch, small_sett
     # the new rate in place, clamping tokens down (never handing any back), just as a reload.
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
 
     assert caps.admit_address("vip", per_hour=100) is AddressAdmission.ADMIT
     assert caps._buckets["vip"].capacity == 100.0
@@ -520,7 +552,7 @@ def test_a_re_rate_never_refunds_a_drained_bucket(monkeypatch, small_settings):
     # budget — the clamp a mutation that refunds on re-rate would break.
     clock = _Clock()
     monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
-    caps = TurnCaps(small_settings)
+    caps = TurnCaps(lambda: small_settings)
 
     # Drain the key to zero at a rate of 2: two admits, then the third hit sheds (empty).
     assert caps.admit_address("vip", per_hour=2) is AddressAdmission.ADMIT

@@ -18,10 +18,11 @@ from tai42_contract.conversations import ConversationRoute, TurnSupersededError
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.app.root_task import spawn_root_task
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import OVERLAP_DELIVERY_STATUSES, ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.turn import accessors, overlap, redrive, target, working_signal
+from tai42_skeleton.conversations.turn import overlap, redrive, target, working_signal
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
@@ -128,7 +129,7 @@ async def _settled_record(intake: ConversationRecord) -> ConversationRecord:
     API-door ``pending_delivery`` marker) is returned so the completion callback delivers or
     skips it by its own delivery status. A record gone entirely is logged loudly.
     """
-    settled = await accessors._store().get_record(intake.message_id)
+    settled = await cache.get_conversations_manager().records.get_record(intake.message_id)
     if settled is None:
         logger.warning(
             "conversations: overlap lead %s left intake and its record is gone; no turn ran and nothing is delivered",
@@ -160,7 +161,7 @@ async def _refresh_intake_lease(message_id: str, token: str) -> None:
     Runs until the record leaves intake or the lease is lost. A refresh that fails is logged and
     retried — a heartbeat that died quietly would let a live turn be reaped as stranded.
     """
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     settings = store.settings
     while True:
         await asyncio.sleep(settings.intake_claim_refresh_seconds)

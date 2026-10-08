@@ -10,7 +10,8 @@
 
 The caps are a per-worker singleton. A settings reload is applied to that ONE instance, so
 a turn in flight and one accepted after the reload always meet in the same FIFO and under
-the same ceiling.
+the same ceiling. The caps hold only that live state: every bound is read through a settings
+source at its use, so the singleton never keeps a retired settings generation alive.
 
 ``run_reserved`` additionally holds the cross-worker per-thread mutex
 (:class:`~tai42_skeleton.conversations.thread_lease.ThreadTurnLease`) for the turn's span, so
@@ -32,7 +33,7 @@ import contextlib
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from enum import Enum, auto
 from threading import RLock
@@ -40,7 +41,7 @@ from threading import RLock
 from cachetools import LRUCache, TTLCache, cached
 from tai42_kit.settings import register_settings_reset
 
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.settings import ConversationsSettings, conversations_settings
 from tai42_skeleton.conversations.thread_lease import ThreadTurnLease
 from tai42_skeleton.operations.errors import UnavailableError
 
@@ -177,44 +178,58 @@ class _ConcurrencyGate:
 
 
 class TurnCaps:
-    """The per-worker turn caps. One instance backs every turn on the worker."""
+    """The per-worker turn caps. One instance backs every turn on the worker.
 
-    def __init__(self, settings: ConversationsSettings) -> None:
-        """Build the caps from ``settings`` (concurrency ceiling, per-address rate, FIFO depth)."""
-        self.settings = settings
-        self._gate = _ConcurrencyGate(settings.max_concurrent_turns)
+    The instance holds only live state (the FIFO, its locks, the buckets, the in-flight
+    ceiling). Every bound is read through ``settings`` — a zero-argument source of the current
+    :class:`ConversationsSettings` — at its use, never kept, so no settings instance outlives
+    the generation it belongs to.
+    """
+
+    def __init__(self, settings: Callable[[], ConversationsSettings]) -> None:
+        """Build the caps' live state from the bounds ``settings`` currently returns."""
+        self._settings = settings
+        current = settings()
+        self._gate = _ConcurrencyGate(current.max_concurrent_turns)
         self._lease = ThreadTurnLease(settings)
         self._thread_locks: dict[str, asyncio.Lock] = {}
         self._thread_waiters: dict[str, int] = {}
+        # The global per-hour rate the live buckets were last re-rated to.
+        self._applied_rate = current.per_address_turns_per_hour
         # Bounded on both axes: idle expiry drops a bucket indistinguishable from a fresh
         # one, and the size bound caps a flood of never-seen keys.
         self._buckets: TTLCache[str, _TokenBucket] = TTLCache(
-            maxsize=settings.address_bucket_max_entries, ttl=_BUCKET_IDLE_SECONDS, timer=_now
+            maxsize=current.address_bucket_max_entries, ttl=_BUCKET_IDLE_SECONDS, timer=_now
         )
 
-    def reconfigure(self, settings: ConversationsSettings) -> None:
-        """Adopt a reloaded settings snapshot IN PLACE.
+    @property
+    def settings(self) -> ConversationsSettings:
+        """The current settings, read through the caps' settings source."""
+        return self._settings()
+
+    def reconfigure(self) -> None:
+        """Apply the bounds the settings source now returns to the live state IN PLACE.
 
         The FIFO, its locks, the spent buckets and the in-flight ceiling are live state a
         running turn is held by, so they carry over; rebuilding them would run a second cohort
         of turns outside them.
         """
-        if settings.address_bucket_max_entries != self.settings.address_bucket_max_entries:
+        current = self._settings()
+        if current.address_bucket_max_entries != self._buckets.maxsize:
             resized: TTLCache[str, _TokenBucket] = TTLCache(
-                maxsize=settings.address_bucket_max_entries, ttl=_BUCKET_IDLE_SECONDS, timer=_now
+                maxsize=current.address_bucket_max_entries, ttl=_BUCKET_IDLE_SECONDS, timer=_now
             )
             resized.update(self._buckets)
             self._buckets = resized
-        if settings.per_address_turns_per_hour != self.settings.per_address_turns_per_hour:
+        if current.per_address_turns_per_hour != self._applied_rate:
             # Re-rate the live buckets in place so a reload changes the limit an actively
             # sending key already sees; never hand back tokens (tokens are only ever clamped
             # down), and keep the refill clock so no in-flight refill is corrupted.
-            new_rate = settings.per_address_turns_per_hour
+            new_rate = current.per_address_turns_per_hour
             for bucket in self._buckets.values():
                 bucket._rerate(new_rate)
-        self.settings = settings
-        self._gate.set_limit(settings.max_concurrent_turns)
-        self._lease.reconfigure(settings)
+            self._applied_rate = new_rate
+        self._gate.set_limit(current.max_concurrent_turns)
 
     # -- the per-key token bucket --------------------------------------------
 
@@ -261,10 +276,11 @@ class TurnCaps:
         :meth:`release_thread_slot`.
         """
         waiting = self._thread_waiters.get(thread_id, 0)
-        if waiting >= self.settings.thread_queue_depth:
+        depth = self.settings.thread_queue_depth
+        if waiting >= depth:
             raise ThreadQueueOverflowError(
                 f"conversation thread {thread_id!r} already has {waiting} turns queued "
-                f"(limit {self.settings.thread_queue_depth}); retry once it drains"
+                f"(limit {depth}); retry once it drains"
             )
         self._thread_waiters[thread_id] = waiting + 1
 
@@ -326,7 +342,7 @@ _CAPS_STALE = False
 
 @cached(_CAPS_CACHE, key=lambda *args, **kwargs: _CAPS_KEY, lock=_CAPS_LOCK)
 def _build_turn_caps() -> TurnCaps:
-    return TurnCaps(ConversationsSettings())
+    return TurnCaps(conversations_settings)
 
 
 def get_turn_caps() -> TurnCaps:
@@ -338,14 +354,14 @@ def get_turn_caps() -> TurnCaps:
     with _CAPS_LOCK:
         caps = _build_turn_caps()
         if _CAPS_STALE:
-            caps.reconfigure(ConversationsSettings())
+            caps.reconfigure()
             _CAPS_STALE = False
         return caps
 
 
 @register_settings_reset
 def _reset_turn_caps() -> None:
-    """Mark the caps for reconfiguration on the next read.
+    """Mark the caps' live state for reconfiguration on the next read.
 
     The instance is NOT dropped: a replacement would carry an empty FIFO and a second
     ceiling, so every turn in flight would lose its serialization the moment config reloads.

@@ -39,7 +39,7 @@ from .backend import _require_backend
 # generation's submodules bind to their OWN package object here — a stale-but-orphaned handler
 # then still reads (and a test still patches) the same generation it was built with. This is the
 # package-alias test-double seam for ``get_conversations_manager``/``resolve_caller``/
-# ``assert_execution_key_bindable``/``_person_store``.
+# ``assert_execution_key_bindable``.
 _pkg = sys.modules["tai42_skeleton.operations.conversations"]
 
 
@@ -351,11 +351,7 @@ async def get_conversation_message(route_name: str, message_id: str) -> dict[str
     route key's run.
     """
     _validate_route_name(route_name)
-    _require_backend()
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    record = await ConversationRecordStore(ConversationsSettings()).get_record(message_id)
+    record = await _require_backend().records.get_record(message_id)
     if record is None or record.route_name != route_name:
         raise NotFoundError(f"conversation record not found: {message_id!r}")
     caller = await _pkg.resolve_caller()
@@ -387,10 +383,7 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     """
     _validate_route_name(route_name)
     manager = _require_backend()
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-
-    store = ConversationRecordStore(ConversationsSettings())
+    store = manager.records
     # Cancel every async ``ask`` parked on each of the route's threads FIRST, while the routing row
     # still stands. Each cancel whole-chain-kills the park and delivers the run's single door FAILED,
     # and that delivery resolves the park's thread back to its route+address — which only exists while

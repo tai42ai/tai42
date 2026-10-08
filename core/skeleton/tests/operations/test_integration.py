@@ -128,7 +128,9 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
     strand every async turn that parked while api_tools was off."""
     from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
     from tai42_skeleton.authz.identity import INTERNAL_PRINCIPAL
-    from tai42_skeleton.conversations.turn import accessors as accessors_module
+    from tai42_skeleton.conversations import cache as cache_module
+    from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
+    from tai42_skeleton.conversations.settings import ConversationsSettings
     from tai42_skeleton.runs.chokepoint import delivery_fire
 
     class _AlreadyCommittedStore:
@@ -137,7 +139,9 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
 
     async def run():
         async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": False}})):
-            monkeypatch.setattr(accessors_module, "_store", lambda: _AlreadyCommittedStore())
+            manager = RedisConversationsManager(ConversationsSettings())
+            manager.records = _AlreadyCommittedStore()  # type: ignore[assignment]  # the accessor serves the double
+            monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
             token = set_execution_identity(INTERNAL_PRINCIPAL)
             # The resume driver fires the address tool inside the platform's delivery-fire context;
             # without it the tool's delivery-authorisation guard refuses the fire.

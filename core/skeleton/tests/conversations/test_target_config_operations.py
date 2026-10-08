@@ -47,7 +47,6 @@ def wired(monkeypatch) -> FakeConfigRedis:
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeConfigRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_config_client_ctx(fake))
-    monkeypatch.setattr(ops, "get_conversations_manager", lambda: object())
     from tai42_skeleton.app import instance
 
     monkeypatch.setattr(instance, "app", _FakeApp({"assistant"}, {"lookup"}), raising=False)

@@ -11,12 +11,12 @@ from tai42_contract.conversations import BlankInboundTextError, ConversationRout
 from tai42_contract.interactions import LocationElement, MediaItem
 from tai42_contract.locale import normalize_optional_locale
 
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, get_turn_caps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_attachments,
     _checked_form,
@@ -121,7 +121,7 @@ async def accept(
         accountable=cap_bucket,
     )
     thread_id = await _resolve_thread_id(route, multichannel, address)
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
 
     owner = await store.get_inbound_owner(channel, provider_message_id)
     if owner is not None:
@@ -227,7 +227,7 @@ async def _accept_for_turn(
     )
     try:
         await store.create_record(intake, intake_token=intake_token)
-        await accessors._refresh_thread_mode_ttl(thread_id)
+        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
         owner = await store.claim_inbound(channel, provider_message_id, message_id)
     except asyncio.CancelledError:
         # A cancelled task cannot await the round-trips the resolution needs, so it is

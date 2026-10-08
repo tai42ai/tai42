@@ -14,7 +14,6 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, get_turn_caps
 from tai42_skeleton.conversations.models import DeliveryStatus
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.api_wait import ApiSubmitResult, _api_wait_or_callback
 from tai42_skeleton.conversations.turn.errors import ConversationRouteResolutionError, UnauthenticatedApiCallerError
 from tai42_skeleton.conversations.turn.inbound_checks import (
@@ -130,8 +129,8 @@ async def submit_api_message(
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
-        await accessors._store().create_record(intake, intake_token=intake_token)
-        await accessors._refresh_thread_mode_ttl(thread_id)
+        await cache.get_conversations_manager().records.create_record(intake, intake_token=intake_token)
+        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
     except BaseException:
         caps.release_thread_slot(thread_id)
         raise

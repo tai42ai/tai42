@@ -9,6 +9,7 @@ from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import AnswerPart, ConversationRoute
 from tai42_contract.interactions import LocationElement, MediaItem
 
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.caps import get_turn_caps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.mode import supports_thread_append
@@ -144,7 +145,7 @@ async def operator_send(
             origin="operator",
             operator_send=True,
         )
-        await accessors._store().create_record(record)
-        await accessors._refresh_thread_mode_ttl(thread_id)
+        await cache.get_conversations_manager().records.create_record(record)
+        await cache.get_conversations_manager().modes.refresh_ttl(thread_id)
         spawn_delivery(message_id)
     return message_id

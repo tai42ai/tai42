@@ -14,8 +14,10 @@ from fastmcp.utilities.types import get_cached_typeadapter
 from pydantic import ValidationError
 from tai42_contract.conversations import MultichannelDisabledError, TargetConversationConfig
 
-from tai42_skeleton.conversations import pairing, turn
+from tai42_skeleton.conversations import cache, pairing, turn
+from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
 from tai42_skeleton.conversations.pair_codes import MintingConversation
+from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.tools.builtin import get_pairing_code as builtin_get_pairing_code
 
 _EXPIRES_AT = datetime(2026, 8, 8, 12, 15, 0, tzinfo=UTC)
@@ -36,15 +38,11 @@ def _route(**overrides: object) -> SimpleNamespace:
 
 
 class _StubConfigStore:
-    """Callable stub standing in for ``ConversationTargetConfigStore``: constructing it with
-    ``settings`` returns the stub itself, whose ``get`` yields the configured row."""
+    """Stub the manager's ``target_configs`` accessor serves: its ``get`` yields the configured row."""
 
     def __init__(self, config: TargetConversationConfig | None) -> None:
         self.config = config
         self.calls: list[tuple[str, str]] = []
-
-    def __call__(self, settings: object) -> _StubConfigStore:
-        return self
 
     async def get(self, target_kind: str, target_name: str) -> TargetConversationConfig | None:
         self.calls.append((target_kind, target_name))
@@ -52,16 +50,13 @@ class _StubConfigStore:
 
 
 class _StubCodeStore:
-    """Callable stub standing in for ``ConversationPairCodeStore``: records every minting
-    conversation and returns a fixed ``(code, expires_at)``."""
+    """Stub the manager's ``pair_codes`` accessor serves: records every minting conversation and
+    returns a fixed ``(code, expires_at)``."""
 
     def __init__(self, code: str = "LINK-ABCD1234", expires_at: datetime = _EXPIRES_AT) -> None:
         self.code = code
         self.expires_at = expires_at
         self.minted: list[MintingConversation] = []
-
-    def __call__(self, settings: object) -> _StubCodeStore:
-        return self
 
     async def mint(self, conversation: MintingConversation) -> tuple[str, datetime]:
         self.minted.append(conversation)
@@ -84,8 +79,10 @@ def wired(monkeypatch: pytest.MonkeyPatch):
         # ``mint_pairing_code`` looks the route-resolver up on ``turn`` (a lazy import that
         # breaks the turn<->pairing module cycle), so the fake is installed there.
         monkeypatch.setattr(turn, "_resolve_channel_route", fake_resolve)
-        monkeypatch.setattr(pairing, "ConversationTargetConfigStore", config_store)
-        monkeypatch.setattr(pairing, "ConversationPairCodeStore", code_store)
+        manager = RedisConversationsManager(ConversationsSettings())
+        manager.target_configs = config_store  # type: ignore[assignment]  # the accessor serves the stub
+        manager.pair_codes = code_store  # type: ignore[assignment]  # the accessor serves the stub
+        monkeypatch.setattr(cache, "get_conversations_manager", lambda: manager)
         return resolve_calls, config_store, code_store
 
     return _install

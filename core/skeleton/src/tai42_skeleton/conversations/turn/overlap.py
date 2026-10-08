@@ -28,9 +28,9 @@ from tai42_contract.conversations import ConversationRoute, TurnSupersededError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn import record as record_module
 from tai42_skeleton.utils.redis_typing import awaited
 
@@ -83,7 +83,7 @@ async def resolve_batch(route: ConversationRoute, intake: ConversationRecord) ->
     lead is always still ``accepted`` and the batch is the lead alone.
     """
     policy = route.overlap
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     if not is_message_turn(intake):
         # An event turn (and any non-message turn) runs as its own turn: never merged, never
         # superseded, never a canceller. The single-member batch keeps the payload byte-identical.
@@ -169,7 +169,7 @@ async def supersede_lead(lead: ConversationRecord, successor_id: str) -> Convers
     successor is the message that took this turn's place. Raises if the record already left
     intake — an outcome was written elsewhere and this supersede would overwrite it.
     """
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     superseded = record_module._superseded_record(lead, successor_id)
     outcome = await _persist_overlap(store, superseded)
     if outcome != 1:
@@ -214,7 +214,7 @@ async def set_cancel_marker(record: ConversationRecord) -> None:
     turn learns of every newer message. The record store refuses to construct without the
     conversations Redis, so a worker with no backend never reaches here — it fails loudly at accept.
     """
-    settings = accessors._store().settings
+    settings = cache.get_conversations_manager().records.settings
     key = settings.overlap_cancel_key(record.thread_id)
     value = json.dumps({"message_id": record.message_id, "created_at": record.created_at})
     async with client_ctx(RedisClient, settings.redis) as r:
@@ -256,7 +256,7 @@ async def cancel_watch(route: ConversationRoute, batch: Batch) -> AsyncIterator[
     store refuses to construct without the conversations Redis, so a watched turn always has a
     backing store — a worker with no backend fails loudly at accept, never reaches here.
     """
-    settings = accessors._store().settings
+    settings = cache.get_conversations_manager().records.settings
     owner = asyncio.current_task()
     if owner is None:
         raise RuntimeError("cancel_watch must run inside a task to be able to cancel it")

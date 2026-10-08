@@ -1,11 +1,11 @@
 """Per-target conversation-config doors keyed ``(target_kind, target_name)``.
 
-The multichannel opt-in + first-contact greeting, with their key validator and config-store accessor.
+The multichannel opt-in + first-contact greeting, with their key validator.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, get_args
+from typing import Any, get_args
 
 from tai42_contract.conversations import ConversationTargetKind, TargetConversationConfig
 from tai42_contract.states.binding import StateBinding
@@ -20,9 +20,6 @@ from tai42_skeleton.operations.response_models_group_a import (
 
 from .backend import _require_backend
 from .routes import _assert_target_exists
-
-if TYPE_CHECKING:
-    from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
 _TARGET_KINDS = get_args(ConversationTargetKind)
 
@@ -39,17 +36,6 @@ def _validate_target_key(target_kind: str, target_name: str) -> None:
         raise BadRequestError("target_name must be a non-blank target identifier")
 
 
-def _config_store() -> ConversationTargetConfigStore:
-    """The config store over the live conversations settings.
-
-    Called only after :func:`_require_backend`, so its own backend guard never fires here.
-    """
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-    from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
-
-    return ConversationTargetConfigStore(ConversationsSettings())
-
-
 @operation(
     summary="List conversation target configs",
     tags=["conversations"],
@@ -62,8 +48,7 @@ async def list_conversation_configs() -> dict[str, Any]:
     Returns ``{"items", "total", "unreadable"}``, where ``unreadable`` counts the indexed configs
     whose row was gone or unparseable.
     """
-    _require_backend()
-    configs, unreadable = await _config_store().list()
+    configs, unreadable = await _require_backend().target_configs.list()
     items = [config.model_dump(mode="json") for config in configs.values()]
     return {"items": items, "total": len(items), "unreadable": unreadable}
 
@@ -81,8 +66,7 @@ async def get_conversation_config(target_kind: str, target_name: str) -> dict[st
     is blank, is a 400.
     """
     _validate_target_key(target_kind, target_name)
-    _require_backend()
-    config = await _config_store().get(target_kind, target_name)
+    config = await _require_backend().target_configs.get(target_kind, target_name)
     if config is None:
         raise NotFoundError(f"conversation config not found: {target_kind}/{target_name}")
     return config.model_dump(mode="json")
@@ -126,7 +110,7 @@ async def set_conversation_config(
         )
     except ValueError as exc:
         raise BadRequestError(f"invalid conversation config: {exc}") from exc
-    _require_backend()
+    manager = _require_backend()
     await _assert_target_exists(config.target_kind, config.target_name)
     if state_binding is not None:
         from tai42_skeleton.app import instance
@@ -135,7 +119,7 @@ async def set_conversation_config(
         # Attach-on-use + validate the binding at SAVE (the config upsert) — a bad binding is
         # a 400 that persists no config.
         await validate_and_attach_binding(instance.app, state_binding)
-    created = await _config_store().upsert(config)
+    created = await manager.target_configs.upsert(config)
     return {
         "created": created,
         "target_kind": config.target_kind,
@@ -156,8 +140,7 @@ async def delete_conversation_config(target_kind: str, target_name: str) -> dict
     An unknown key is a loud 404; a malformed key is a 400. Returns ``{"removed", "target_kind", "target_name"}``.
     """
     _validate_target_key(target_kind, target_name)
-    _require_backend()
-    removed = await _config_store().delete(target_kind, target_name)
+    removed = await _require_backend().target_configs.delete(target_kind, target_name)
     if not removed:
         raise NotFoundError(f"conversation config not found: {target_kind}/{target_name}")
     return {"removed": True, "target_kind": target_kind, "target_name": target_name}

@@ -60,10 +60,9 @@ class _AttachmentMixin(_StatesServiceBase):
             )
         if subject.kind != PERSON_KIND:
             return
-        from tai42_skeleton.conversations.persons import ConversationPersonStore
-        from tai42_skeleton.conversations.settings import ConversationsSettings
+        from tai42_skeleton.conversations.cache import get_conversations_manager
 
-        person = await ConversationPersonStore(ConversationsSettings()).get_by_id(subject.key)
+        person = await get_conversations_manager().persons.get_by_id(subject.key)
         if person is None:
             raise SubjectRefusedError(
                 f"subject key {subject.key!r} of kind 'person' names no person in the identity store"

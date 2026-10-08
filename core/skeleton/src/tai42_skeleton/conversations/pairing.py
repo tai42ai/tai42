@@ -30,10 +30,9 @@ from datetime import datetime
 
 from tai42_contract.conversations import MultichannelDisabledError
 
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
-from tai42_skeleton.conversations.pair_codes import ConversationPairCodeStore, MintingConversation
-from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
+from tai42_skeleton.conversations.pair_codes import MintingConversation
 
 # The pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token so a longer
 # alphanumeric run adjacent to a valid-looking prefix is not mistaken for a code.
@@ -112,8 +111,8 @@ async def mint_pairing_code(channel: str, our_identity: str, sender: str) -> tup
             raise ValueError(f"get_pairing_code requires a non-blank {name}")
     identity_canonical = canonical_address(our_identity)
     route = await _resolve_channel_route(channel, identity_canonical)
-    settings = ConversationsSettings()
-    config = await ConversationTargetConfigStore(settings).get(route.target_kind, route.target_name)
+    manager = cache.get_conversations_manager()
+    config = await manager.target_configs.get(route.target_kind, route.target_name)
     if config is None or not config.multichannel:
         raise MultichannelDisabledError(
             f"target {route.target_kind}:{route.target_name} has multichannel turned off; no pair code minted"
@@ -129,7 +128,7 @@ async def mint_pairing_code(channel: str, our_identity: str, sender: str) -> tup
         # conversation by, so the code redeems onto exactly this sender's thread.
         address=canonical_address(sender),
     )
-    return await ConversationPairCodeStore(settings).mint(conversation)
+    return await manager.pair_codes.mint(conversation)
 
 
 __all__ = ["Link", "PairingAction", "Passthrough", "Redeem", "Unlink", "classify", "mint_pairing_code"]

@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, cast
 
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore, inbound_media_blob_path
-from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.settings.media_ingest import media_ingest_settings
 
 if TYPE_CHECKING:
@@ -93,13 +93,13 @@ async def reap_expired_media_once() -> int:
     guard, so a scan-level fault propagates; a per-member delete fault is logged + evented and its member
     kept for the next pass.
     """
-    conv_settings = ConversationsSettings()
-    if conv_settings.in_memory:
+    manager = get_conversations_manager()
+    if not manager.durable:
         return 0
     provider = _storage_provider()
     if provider is None:
         return 0
-    store = InboundMediaMetaStore(conv_settings)
+    store = manager.media_meta
     reaped = 0
     now = time.time()
     for media_id in await store.due_expiry_ids(now):

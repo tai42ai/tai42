@@ -9,7 +9,7 @@ from tai42_kit.settings import register_settings_reset
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.settings import conversations_settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def get_conversations_manager() -> BaseConversationsManager:
     The null in-memory backend without ``CONVERSATIONS_REDIS_URL``, else the Redis one. Cached over
     a settings snapshot and rebuilt on a settings reload.
     """
-    settings = ConversationsSettings()
+    settings = conversations_settings()
     if settings.in_memory:
         # Cached, so this fires once per worker process.
         logger.warning(

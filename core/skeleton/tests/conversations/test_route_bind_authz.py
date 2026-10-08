@@ -34,6 +34,10 @@ class _DictManager(BaseConversationsManager):
     """A non-in-memory routing-row store that records every write, so a refused bind can
     be shown to have stored nothing."""
 
+    @property
+    def durable(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__(ConversationsSettings())
         self.rows: dict[str, object] = {}

@@ -29,6 +29,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import outcome as outcome_module
 
+from .conftest import FakeManager
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: Every answer in this module is chunked at this width, so a handful of characters makes
@@ -222,11 +223,12 @@ def _channel_route(error_reply_text: str | None = None) -> ConversationRoute:
     )
 
 
-class _FakeRouteManager:
+class _FakeRouteManager(FakeManager):
     """Resolves the one route the refusal notice looks up; ``route`` is swapped by a test that
     exercises a route-carried ``error_reply_text``."""
 
     def __init__(self, route: ConversationRoute | None) -> None:
+        super().__init__()
         self.route = route
 
     async def get_route(self, name: str) -> ConversationRoute | None:
@@ -234,7 +236,7 @@ class _FakeRouteManager:
 
 
 @pytest.fixture(autouse=True)
-def route_manager(monkeypatch) -> _FakeRouteManager:
+def route_manager(monkeypatch, _conversations_env) -> _FakeRouteManager:
     """Wire the could-not-deliver notice's route lookup to a hermetic in-memory route (no
     ``error_reply_text``, so the notice is the built-in uniform text by default)."""
     manager = _FakeRouteManager(_channel_route())
@@ -499,7 +501,7 @@ async def test_a_refusal_notice_falls_back_and_logs_when_the_route_lookup_faults
     """A route-lookup fault must not block the participant notice: it falls back to the built-in
     uniform text AND is logged at ERROR (never silent)."""
 
-    class _BrokenManager:
+    class _BrokenManager(FakeManager):
         async def get_route(self, name: str):
             raise RuntimeError("route store unavailable")
 

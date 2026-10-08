@@ -18,6 +18,7 @@ from tai42_contract.conversations import (
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.mode import effective_mode, supports_thread_append
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.pairing import Passthrough, classify
@@ -160,10 +161,10 @@ async def _resolve_event_person(
     such person carries no person fields — exactly like a plain, non-multichannel thread.
     """
     if intake.thread_id.startswith(PERSON_THREAD_PREFIX):
-        return await accessors._person_store().get_by_id(intake.thread_id[len(PERSON_THREAD_PREFIX) :])
+        return await cache.get_conversations_manager().persons.get_by_id(intake.thread_id[len(PERSON_THREAD_PREFIX) :])
     if multichannel is None:
         return None
-    return await accessors._person_store().get_person(
+    return await cache.get_conversations_manager().persons.get_person(
         multichannel.target,
         door=multichannel.door,
         channel=multichannel.channel,
@@ -236,7 +237,7 @@ async def _resolve_turn_record(
             None,
         )
 
-    person, created = await accessors._person_store().ensure_provisional(
+    person, created = await cache.get_conversations_manager().persons.ensure_provisional(
         multichannel.target, multichannel.address_row(), locale=intake.inbound_locale
     )
     greeting_code = await pairing._mint_and_owe_greeting(multichannel, intake.thread_id) if created else None
@@ -310,7 +311,7 @@ async def _persist_completed(
     leaves it owed too, so the next delivering turn re-delivers it once (the crash-window trade for
     never dropping it).
     """
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     if completed.delivery_status is DeliveryStatus.SILENT:
         outcome = await store.complete_silent(completed)
         verb = "complete_silent"

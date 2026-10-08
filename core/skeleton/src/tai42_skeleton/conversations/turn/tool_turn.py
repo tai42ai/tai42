@@ -27,6 +27,7 @@ from tai42_kit.interactions.door_contract import DOOR_START_DEFAULT, evaluate_do
 from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.authz.execution import bind_execution_identity
+from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.models import ConversationRecord
 from tai42_skeleton.conversations.target_validators import caller_ask_landing_for_tool_route
 from tai42_skeleton.conversations.turn import accessors
@@ -332,7 +333,7 @@ async def _run_tool_turn(
     kwargs, start_requested = _start_kwargs(payload, contract.start)
     # The route's optional door binding, read from the target config; handed to ``visit``, which
     # deposits it around ``start`` alone. A route with no binding deposits nothing.
-    target_config = await accessors._config_store().get(route.target_kind, route.target_name)
+    target_config = await cache.get_conversations_manager().target_configs.get(route.target_kind, route.target_name)
     route_state_binding = target_config.state_binding if target_config is not None else None
     try:
         outcome = await _drive_visit(

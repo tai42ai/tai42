@@ -12,6 +12,7 @@ from tai42_contract.conversations import (
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils import render as door_contract_module
 
+from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
@@ -36,6 +37,7 @@ from .conftest import (
     _tool_channel_route,
     _wire,
     _wire_tool,
+    durable_manager,
 )
 
 
@@ -610,7 +612,8 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
         async def get(self, target_kind, target_name):
             return TargetConversationConfig(target_kind=target_kind, target_name=target_name, state_binding=binding)
 
-    monkeypatch.setattr(accessors_module, "_config_store", lambda: _Cfg())
+    manager = durable_manager(target_configs=_Cfg())
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
     monkeypatch.setattr(tool_turn_module, "tai42_app", _FakeTemplateApp())
     monkeypatch.setattr(door_contract_module, "tai42_app", _FakeTemplateApp())
 

@@ -15,7 +15,6 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.outcome import _error_answer_text, _text_part
 from tai42_skeleton.conversations.turn.record import _with_outcome
 
@@ -28,7 +27,7 @@ async def _resolve_stranded_intake(message_id: str) -> None:
     A record that has already left intake keeps the outcome it carries; one still at intake is arbitrated
     against its inbound pair.
     """
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     record = await store.get_record(message_id)
     if record is None:
         logger.warning(
@@ -84,7 +83,7 @@ async def redrive_accepted() -> None:
     else for is discarded. An adopted record takes the ``error`` outcome and its turn is
     never re-run — a turn dispatches authorized tools, so it is not idempotent.
     """
-    store = accessors._store()
+    store = cache.get_conversations_manager().records
     token = uuid4().hex
     for record in (await store.list_by_status(frozenset({DeliveryStatus.ACCEPTED}))).items:
         try:

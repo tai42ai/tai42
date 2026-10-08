@@ -34,19 +34,18 @@ def _patch_person_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only ``known`` resolves, to target ``agent/a`` — every other id is unknown."""
 
     class _FakePersonStore:
-        def __init__(self, settings: object) -> None:
-            self._settings = settings
-
         async def get_by_id(self, person_id: str) -> object:
             if person_id == "known":
                 return SimpleNamespace(person_id="known", target_kind="agent", target_name="a")
             return None
 
-    import tai42_skeleton.conversations.persons as persons_mod
-    import tai42_skeleton.conversations.settings as settings_mod
+    from tai42_skeleton.conversations import cache as cache_module
+    from tai42_skeleton.conversations.managers.redis_conversations_manager import RedisConversationsManager
+    from tai42_skeleton.conversations.settings import ConversationsSettings
 
-    monkeypatch.setattr(persons_mod, "ConversationPersonStore", _FakePersonStore)
-    monkeypatch.setattr(settings_mod, "ConversationsSettings", lambda: object())
+    manager = RedisConversationsManager(ConversationsSettings())
+    manager.persons = _FakePersonStore()  # type: ignore[assignment]  # the accessor serves the double
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
 
 
 def _person_row(key: str, n: int) -> dict[str, Any]:

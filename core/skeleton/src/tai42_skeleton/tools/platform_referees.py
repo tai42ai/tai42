@@ -231,13 +231,11 @@ async def _conversation_config_detach_referee(state: str, template: str) -> list
     # A tool-target conversation config carries the door binding the route applies around the
     # tool turn. Feature-off (the redis conversations backend unset) holds none.
     from tai42_skeleton.conversations.cache import get_conversations_manager
-    from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
-    from tai42_skeleton.conversations.settings import ConversationsSettings
-    from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
-    if isinstance(get_conversations_manager(), InMemoryConversationsManager):
+    manager = get_conversations_manager()
+    if not manager.durable:
         return []
-    configs, _ = await ConversationTargetConfigStore(ConversationsSettings()).list()
+    configs, _ = await manager.target_configs.list()
     return [
         f"conversation config {config.target_kind}/{config.target_name}"
         for config in configs.values()

@@ -16,7 +16,6 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.pair_codes import MintingConversation
 from tai42_skeleton.conversations.persons import PairingTarget
-from tai42_skeleton.conversations.turn import accessors
 from tai42_skeleton.conversations.turn.errors import ConversationRouteResolutionError
 from tai42_skeleton.conversations.turn.keys import _person_thread_id, _thread_id, _throttle_source_key
 
@@ -100,7 +99,7 @@ async def _multichannel_context(
     party the redeem throttle scopes to (the caller of the door, the same key its rate
     cap uses).
     """
-    config = await accessors._config_store().get(route.target_kind, route.target_name)
+    config = await cache.get_conversations_manager().target_configs.get(route.target_kind, route.target_name)
     if config is None or not config.multichannel:
         return None
     return _Multichannel(
@@ -129,7 +128,7 @@ async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichann
     moment).
     """
     if multichannel is not None:
-        person = await accessors._person_store().get_person(
+        person = await cache.get_conversations_manager().persons.get_person(
             multichannel.target,
             door=multichannel.door,
             channel=multichannel.channel,

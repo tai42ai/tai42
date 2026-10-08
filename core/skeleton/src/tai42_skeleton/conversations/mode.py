@@ -110,7 +110,9 @@ async def effective_mode(route: ConversationRoute, thread_id: str) -> Conversati
     The per-thread override if set, else the no-override default from
     :func:`default_mode`.
     """
-    override = await ConversationModeStore(ConversationsSettings()).get_mode(thread_id)
+    from tai42_skeleton.conversations.cache import get_conversations_manager
+
+    override = await get_conversations_manager().modes.get_mode(thread_id)
     return override if override is not None else await default_mode(route, thread_id)
 
 
@@ -127,13 +129,13 @@ async def default_mode(route: ConversationRoute, thread_id: str) -> Conversation
     if not thread_id.startswith(PERSON_THREAD_PREFIX):
         return route.initial_mode
     from tai42_skeleton.conversations.cache import get_conversations_manager
-    from tai42_skeleton.conversations.persons import ConversationPersonStore
 
-    person = await ConversationPersonStore(ConversationsSettings()).get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
+    manager = get_conversations_manager()
+    person = await manager.persons.get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
     if person is None:
         return route.initial_mode
     route_names = {name for address in person.addresses for name in address.routes}
-    return await default_mode_for_routes(get_conversations_manager(), route_names)
+    return await default_mode_for_routes(manager, route_names)
 
 
 async def default_mode_for_routes(manager: BaseConversationsManager, route_names: Iterable[str]) -> ConversationMode:
@@ -180,6 +182,7 @@ async def set_current_thread_mode(mode: str) -> ConversationMode:
     the vocabulary is a loud ``ValueError``.
     """
     checked = _validate_mode(mode)
+    from tai42_skeleton.conversations.cache import get_conversations_manager
     from tai42_skeleton.conversations.turn_context import current_bridge_turn
 
     context = current_bridge_turn()
@@ -188,7 +191,7 @@ async def set_current_thread_mode(mode: str) -> ConversationMode:
             "set_conversation_mode was called outside a bridge turn; there is no current conversation whose "
             "mode to set. Set a thread's mode through the PUT /thread/mode door instead."
         )
-    return await ConversationModeStore(ConversationsSettings()).set_mode(context.thread_id, checked)
+    return await get_conversations_manager().modes.set_mode(context.thread_id, checked)
 
 
 __all__ = [

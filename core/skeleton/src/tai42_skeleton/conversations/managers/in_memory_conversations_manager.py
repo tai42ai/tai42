@@ -15,6 +15,11 @@ class InMemoryConversationsManager(BaseConversationsManager):
     A durable routing table cannot live per-process.
     """
 
+    @property
+    def durable(self) -> bool:
+        """``False``: nothing outlives the process, so no store is served."""
+        return False
+
     async def put_route(self, route: ConversationRoute) -> bool:
         """Refuse to store ``route``; the in-memory backend has no durable routing table (501)."""
         raise NotSupportedError(_IN_MEMORY_REFUSAL)

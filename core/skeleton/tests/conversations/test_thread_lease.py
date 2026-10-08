@@ -27,6 +27,7 @@ from tai42_skeleton.conversations.thread_lease import ThreadLeaseLostError, Thre
 from tai42_skeleton.conversations.turn import operator_send
 from tai42_skeleton.operations import conversations as ops
 
+from .conftest import durable_manager, fixed_settings
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 _THREAD = "bridge:line:+15550002222"
@@ -34,9 +35,6 @@ _THREAD = "bridge:line:+15550002222"
 
 class _NoLease:
     """A lease disabled to no-op, used to show the lost update the mutex prevents."""
-
-    def reconfigure(self, settings: ConversationsSettings) -> None:
-        pass
 
     @asynccontextmanager
     async def held(self, thread_id: str) -> AsyncIterator[None]:
@@ -133,7 +131,8 @@ async def _worker(
 async def test_headline_two_workers_serialize_and_keep_both_turns(fake):
     # Two workers, one thread: the lease serializes their turns, so the second reads the
     # first's write and the thread memory keeps BOTH turns' messages.
-    worker_a, worker_b = TurnCaps(ConversationsSettings()), TurnCaps(ConversationsSettings())
+    source = fixed_settings(ConversationsSettings())
+    worker_a, worker_b = TurnCaps(source), TurnCaps(source)
     memory: dict[str, list[str]] = {"messages": []}
     spans: list[tuple[str, int, int]] = []
     order = count()
@@ -161,7 +160,8 @@ async def test_headline_two_workers_serialize_and_keep_both_turns(fake):
 async def test_headline_without_the_lease_loses_an_update(fake):
     # The red half: with the lease disabled, both workers fork the SAME empty parent and the
     # last write wins, dropping one turn's message.
-    worker_a, worker_b = TurnCaps(ConversationsSettings()), TurnCaps(ConversationsSettings())
+    source = fixed_settings(ConversationsSettings())
+    worker_a, worker_b = TurnCaps(source), TurnCaps(source)
     worker_a._lease, worker_b._lease = _NoLease(), _NoLease()  # pyright: ignore[reportAttributeAccessIssue]
     memory: dict[str, list[str]] = {"messages": []}
     spans: list[tuple[str, int, int]] = []
@@ -190,7 +190,8 @@ async def test_interrupt_spanning_turn_holds_the_lease_across_its_heartbeats(fak
     clock = _Clock(refresh_seconds=1, poll_seconds=ConversationsSettings().thread_lease_poll_seconds)
     monkeypatch.setattr(thread_lease_module, "asyncio", _ShimAsyncio(clock.sleep))
 
-    worker_a, worker_b = TurnCaps(ConversationsSettings()), TurnCaps(ConversationsSettings())
+    source = fixed_settings(ConversationsSettings())
+    worker_a, worker_b = TurnCaps(source), TurnCaps(source)
     memory: dict[str, list[str]] = {"messages": []}
     spans: list[tuple[str, int, int]] = []
     order = count()
@@ -223,7 +224,8 @@ async def test_crash_steal_lost_lease_cancels_the_turn(fake, monkeypatch):
     clock = _Clock(refresh_seconds=1, poll_seconds=ConversationsSettings().thread_lease_poll_seconds)
     monkeypatch.setattr(thread_lease_module, "asyncio", _ShimAsyncio(clock.sleep))
 
-    worker_a, worker_b = TurnCaps(ConversationsSettings()), TurnCaps(ConversationsSettings())
+    source = fixed_settings(ConversationsSettings())
+    worker_a, worker_b = TurnCaps(source), TurnCaps(source)
     memory: dict[str, list[str]] = {"messages": []}
     stuck = _aio.Event()
     a_in = _aio.Event()
@@ -281,7 +283,8 @@ async def test_partition_holder_self_cancels_once_the_lease_can_no_longer_be_pro
 
     monkeypatch.setattr(fake, "eval", _partitioned_eval)
 
-    worker_a, worker_b = TurnCaps(ConversationsSettings()), TurnCaps(ConversationsSettings())
+    source = fixed_settings(ConversationsSettings())
+    worker_a, worker_b = TurnCaps(source), TurnCaps(source)
     memory: dict[str, list[str]] = {"messages": []}
     a_in = _aio.Event()
     stuck = _aio.Event()
@@ -324,7 +327,7 @@ async def test_external_cancel_during_cleanup_is_not_swallowed(fake, monkeypatch
     # A genuine shutdown cancel that lands while ``held`` is tearing down its heartbeat must
     # propagate, not be absorbed by the heartbeat-cleanup suppression — otherwise the turn
     # would finish normally in the face of a real cancellation.
-    lease = ThreadTurnLease(ConversationsSettings())
+    lease = ThreadTurnLease(fixed_settings(ConversationsSettings()))
     heartbeat_started = _aio.Event()
     heartbeat_cancelling = _aio.Event()
     release_heartbeat = _aio.Event()
@@ -371,7 +374,7 @@ async def test_release_is_token_guarded(fake):
     # A stale holder's release never deletes the lease a later holder adopted; only the token
     # that owns the lease can delete it.
     settings = ConversationsSettings()
-    lease = ThreadTurnLease(settings)
+    lease = ThreadTurnLease(lambda: settings)
     key = settings.thread_lease_key(_THREAD)
     await fake.set(key, "adopter", px=2000, nx=True)
 
@@ -428,7 +431,7 @@ def _stub_checkpoint(monkeypatch) -> _RecordingSaver:
 @asynccontextmanager
 async def _lease_held_by_a(thread_id: str):
     """A separate worker holds ``thread_id``'s lease for the block's duration."""
-    worker_a = TurnCaps(ConversationsSettings())
+    worker_a = TurnCaps(fixed_settings(ConversationsSettings()))
     holding, release = _aio.Event(), _aio.Event()
 
     async def _hold() -> None:
@@ -477,7 +480,8 @@ async def test_door_operator_send_blocks_behind_a_turn(fake, monkeypatch):
 
 async def test_door_delete_thread_blocks_behind_a_turn(fake, monkeypatch):
     saver = _stub_checkpoint(monkeypatch)
-    monkeypatch.setattr(ops, "get_conversations_manager", lambda: object())
+    manager = durable_manager()
+    monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
     thread_id = "bridge:chat:+15550001111"
 
     async with _lease_held_by_a(thread_id):
@@ -493,8 +497,8 @@ async def test_door_delete_thread_blocks_behind_a_turn(fake, monkeypatch):
 
 async def test_door_person_gone_branch_serializes_behind_a_turn(fake, monkeypatch):
     saver = _stub_checkpoint(monkeypatch)
-    monkeypatch.setattr(ops, "get_conversations_manager", lambda: object())
-    monkeypatch.setattr(ops, "_person_store", lambda: _PersonStoreGone())
+    manager = durable_manager(persons=_PersonStoreGone())
+    monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
     thread_id = f"{PERSON_THREAD_PREFIX}PID1"
 
     async with _lease_held_by_a(thread_id):

@@ -23,6 +23,10 @@ from tai42_skeleton.conversations.target_validators import TargetBindValidatorRe
 
 
 class _DictManager(BaseConversationsManager):
+    @property
+    def durable(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__(ConversationsSettings())
         self.rows: dict[str, ConversationRoute] = {}

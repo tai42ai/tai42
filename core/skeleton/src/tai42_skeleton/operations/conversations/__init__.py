@@ -21,7 +21,6 @@ from tai42_skeleton.conversations.cache import get_conversations_manager as get_
 from tai42_skeleton.operations._authority import assert_execution_key_bindable as assert_execution_key_bindable
 from tai42_skeleton.operations._authority import resolve_caller as resolve_caller
 
-from .backend import _person_store as _person_store
 from .mode import get_conversation_thread_mode, set_conversation_thread_mode
 from .models import MAX_THREAD_PAGE, MAX_THREAD_PAGE_SIZE
 from .operator_send import send_conversation_thread_message

@@ -22,6 +22,7 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
+from .conftest import FakeManager
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: Every answer in this module is chunked at this width, so a handful of characters makes
@@ -272,7 +273,7 @@ async def test_the_periodic_loop_runs_every_recovery_pass(monkeypatch):
         ran.append("prune")
         return cursor
 
-    class _Routes:
+    class _Routes(FakeManager):
         async def list_routes(self):
             return {"alpha": object()}, 0
 
@@ -308,7 +309,7 @@ async def test_the_prune_pass_is_handed_every_live_route_and_the_last_cursor(mon
         handed.append((list(route_names), cursor))
         return stops[len(handed) - 1]
 
-    class _Routes:
+    class _Routes(FakeManager):
         async def list_routes(self):
             return {"alpha": object(), "beta": object()}, 0
 

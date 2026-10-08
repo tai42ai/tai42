@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from time import monotonic
 from uuid import uuid4
@@ -72,17 +72,14 @@ class _LeaseSignal:
 class ThreadTurnLease:
     """The cross-worker per-thread turn mutex over the conversations Redis.
 
-    Holds no live state of its own — every :meth:`held` span reads the current timings, so a settings
-    reload is adopted in place by :meth:`reconfigure`.
+    Holds no live state of its own and keeps no settings instance: every read goes through
+    ``settings`` — a zero-argument source of the current :class:`ConversationsSettings` — so a
+    settings reload is adopted at the next read, mid-span included.
     """
 
-    def __init__(self, settings: ConversationsSettings) -> None:
-        """Bind to ``settings``; timings are read fresh each span."""
-        self.settings = settings
-
-    def reconfigure(self, settings: ConversationsSettings) -> None:
-        """Adopt a reloaded settings snapshot in place; the next span uses the new timings."""
-        self.settings = settings
+    def __init__(self, settings: Callable[[], ConversationsSettings]) -> None:
+        """Bind to the settings source ``settings``; every timing is read through it at its use."""
+        self._settings = settings
 
     @asynccontextmanager
     async def held(self, thread_id: str) -> AsyncIterator[None]:
@@ -90,12 +87,12 @@ class ThreadTurnLease:
 
         A lease lost mid-body cancels the body and surfaces as :class:`ThreadLeaseLostError`.
         """
-        if self.settings.in_memory:
+        if self._settings().in_memory:
             # No conversations Redis is no cross-process store, and a worker without one can
             # never run a turn — the mutex is an explicit local no-op, not a hidden skip.
             yield
             return
-        key = self.settings.thread_lease_key(thread_id)
+        key = self._settings().thread_lease_key(thread_id)
         token = uuid4().hex
         owner = asyncio.current_task()
         if owner is None:
@@ -145,13 +142,13 @@ class ThreadTurnLease:
         The wait is unbounded — the same shape as a local waiter behind a HITL-paused turn; the
         upstream FIFO depth bounds how many ever queue here.
         """
-        lease_ms = self.settings.thread_lease_seconds * 1000
+        lease_ms = self._settings().thread_lease_seconds * 1000
         while True:
-            async with client_ctx(RedisClient, self.settings.redis) as r:
+            async with client_ctx(RedisClient, self._settings().redis) as r:
                 won = await awaited(r.set(key, token, nx=True, px=lease_ms))
             if won is not None:
                 return
-            await asyncio.sleep(self.settings.thread_lease_poll_seconds)
+            await asyncio.sleep(self._settings().thread_lease_poll_seconds)
 
     async def _heartbeat(
         self, key: str, token: str, owner: asyncio.Task[object], signal: _LeaseSignal, last_success: float
@@ -165,16 +162,17 @@ class ThreadTurnLease:
         context turns the self-cancel into :class:`ThreadLeaseLostError`.
         """
         while True:
-            await asyncio.sleep(self.settings.thread_lease_refresh_seconds)
+            await asyncio.sleep(self._settings().thread_lease_refresh_seconds)
             try:
                 held = await self._refresh(key, token)
             except Exception:
-                if monotonic() - last_success >= self.settings.thread_lease_seconds:
+                lease_seconds = self._settings().thread_lease_seconds
+                if monotonic() - last_success >= lease_seconds:
                     logger.warning(
                         "conversations: thread lease %s unreachable for its full TTL (%ss since the last proven "
                         "refresh); it may be adopted — cancelling the turn, its outcome is another worker's to write",
                         key,
-                        self.settings.thread_lease_seconds,
+                        lease_seconds,
                     )
                     signal.lost = True
                     owner.cancel()
@@ -182,7 +180,7 @@ class ThreadTurnLease:
                 logger.error(
                     "conversations: refreshing thread lease %s failed; retrying in %ss",
                     key,
-                    self.settings.thread_lease_refresh_seconds,
+                    self._settings().thread_lease_refresh_seconds,
                     exc_info=True,
                 )
                 continue
@@ -199,13 +197,13 @@ class ThreadTurnLease:
             last_success = monotonic()
 
     async def _refresh(self, key: str, token: str) -> int:
-        lease_ms = self.settings.thread_lease_seconds * 1000
-        async with client_ctx(RedisClient, self.settings.redis) as r:
+        lease_ms = self._settings().thread_lease_seconds * 1000
+        async with client_ctx(RedisClient, self._settings().redis) as r:
             return int(await eval_script(r, _REFRESH_LUA, 1, key, token, lease_ms))
 
     async def _release(self, key: str, token: str) -> None:
         try:
-            async with client_ctx(RedisClient, self.settings.redis) as r:
+            async with client_ctx(RedisClient, self._settings().redis) as r:
                 await eval_script(r, _RELEASE_LUA, 1, key, token)
         except Exception:
             logger.error(

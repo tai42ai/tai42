@@ -15,7 +15,6 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations import mode as mode_module
-from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations.mode import (
     ConversationModeStore,
@@ -31,6 +30,7 @@ from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError
 
+from .conftest import FakeManager, serve_stores
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -100,17 +100,6 @@ class _MemoryAgent(Agent):
         return None
 
 
-class FakeManager:
-    def __init__(self, *routes: ConversationRoute) -> None:
-        self._routes = {r.route_name: r for r in routes}
-
-    async def get_route(self, name: str):
-        return self._routes.get(name)
-
-    async def list_routes(self):
-        return dict(self._routes), 0
-
-
 def _two_route_person() -> Person:
     return Person(
         person_id="p9",
@@ -138,22 +127,20 @@ def _two_route_person() -> Person:
     )
 
 
-def _wire_person(monkeypatch, person: Person) -> None:
-    class _FakePersonStore:
-        def __init__(self, settings) -> None:
-            pass
+class _FakePersonStore:
+    def __init__(self, person: Person) -> None:
+        self._person = person
 
-        async def get_by_id(self, person_id: str) -> Person | None:
-            return person if person_id == person.person_id else None
-
-    monkeypatch.setattr(persons_module, "ConversationPersonStore", _FakePersonStore)
+    async def get_by_id(self, person_id: str) -> Person | None:
+        return self._person if person_id == self._person.person_id else None
 
 
-def _wire_two_route_manager(monkeypatch, *, chat_mode: str, chat_b_mode: str) -> None:
+def _wire_two_route_manager(monkeypatch, person: Person, *, chat_mode: str, chat_b_mode: str) -> None:
     manager = FakeManager(
         _route_named("chat", chat_mode, "+15550001111"),
         _route_named("chat-b", chat_b_mode, "+15550003333"),
     )
+    serve_stores(manager, persons=_FakePersonStore(person))
     monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
 
 
@@ -274,23 +261,20 @@ _PERSON_THREAD = "bridge:@person:p9"
 
 
 async def test_default_mode_person_thread_is_manual_if_any_route_is_manual(fake, monkeypatch) -> None:
-    _wire_person(monkeypatch, _two_route_person())
-    _wire_two_route_manager(monkeypatch, chat_mode="agent", chat_b_mode="manual")
+    _wire_two_route_manager(monkeypatch, _two_route_person(), chat_mode="agent", chat_b_mode="manual")
     assert await default_mode(_route(), _PERSON_THREAD) == "manual"
     # With no override the effective mode folds to the same default.
     assert await effective_mode(_route(), _PERSON_THREAD) == "manual"
 
 
 async def test_default_mode_person_thread_is_agent_if_every_route_is_agent(fake, monkeypatch) -> None:
-    _wire_person(monkeypatch, _two_route_person())
-    _wire_two_route_manager(monkeypatch, chat_mode="agent", chat_b_mode="agent")
+    _wire_two_route_manager(monkeypatch, _two_route_person(), chat_mode="agent", chat_b_mode="agent")
     assert await default_mode(_route(), _PERSON_THREAD) == "agent"
     assert await effective_mode(_route(), _PERSON_THREAD) == "agent"
 
 
 async def test_person_thread_override_still_wins_over_the_folded_default(fake, monkeypatch) -> None:
-    _wire_person(monkeypatch, _two_route_person())
-    _wire_two_route_manager(monkeypatch, chat_mode="manual", chat_b_mode="manual")
+    _wire_two_route_manager(monkeypatch, _two_route_person(), chat_mode="manual", chat_b_mode="manual")
     await _store().set_mode(_PERSON_THREAD, "agent")
     assert await effective_mode(_route(), _PERSON_THREAD) == "agent"
 

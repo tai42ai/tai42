@@ -14,7 +14,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotFoundError
 
-from .conftest import _assert_park_cancelled, _seed_park
+from .conftest import _assert_park_cancelled, _seed_park, serve_stores
 
 _THREAD = "bridge:chat:+15550001111"
 _PERSON_THREAD = "bridge:@person:p1"
@@ -375,7 +375,7 @@ async def test_delete_person_thread_clears_every_route_index(wired, record_redis
         async def get_by_id(self, person_id: str) -> Person | None:
             return person if person_id == person.person_id else None
 
-    monkeypatch.setattr(ops, "_person_store", lambda: _FakePersonStore())
+    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
 
     settings = ConversationsSettings()
     record_redis.seed_route("chat-a")
@@ -423,7 +423,7 @@ async def test_delete_person_thread_404s_when_the_route_is_not_the_persons(
         async def get_by_id(self, person_id: str) -> Person | None:
             return person
 
-    monkeypatch.setattr(ops, "_person_store", lambda: _FakePersonStore())
+    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
 
     with pytest.raises(NotFoundError):
         await ops.delete_conversation_thread("chat-b", _PERSON_THREAD)
@@ -467,7 +467,7 @@ async def test_delete_person_thread_with_a_turn_in_flight_is_a_409(wired, record
         async def get_by_id(self, person_id: str) -> Person | None:
             return person if person_id == person.person_id else None
 
-    monkeypatch.setattr(ops, "_person_store", lambda: _FakePersonStore())
+    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
 
     settings = ConversationsSettings()
     record_redis.seed_route("chat-a")
@@ -616,7 +616,7 @@ async def test_delete_person_cascade_cancels_a_parked_ask(
         async def erase(self, p: Person):
             return True, 1
 
-    monkeypatch.setattr(ops, "_person_store", lambda: _FakePersonStore())
+    serve_stores(ops.get_conversations_manager(), persons=_FakePersonStore())
     record_redis.seed_route("chat-a")
     await _seed_record(message_id="pa", route_name="chat-a", thread_id=_PERSON_THREAD)
     await _seed_park(store, fake, interaction_id="i1", group_id="g1", thread_id=_PERSON_THREAD)

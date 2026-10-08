@@ -12,10 +12,12 @@ import pytest
 from tai42_contract.channels import ChannelDeliveryError
 
 from tai42_skeleton.app import instance as instance_module
+from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations.models import ANSWERLESS_STATUSES, ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.conversations.turn import accessors as accessors_module
 from tai42_skeleton.conversations.turn import working_signal
+
+from .conftest import durable_manager
 
 _LOGGER = "tai42_skeleton.conversations.turn.working_signal"
 _REAL_SLEEP = asyncio.sleep
@@ -123,7 +125,8 @@ def _install_store(monkeypatch, reader) -> None:
         async def get_record(self, message_id: str):
             return await reader(message_id)
 
-    monkeypatch.setattr(accessors_module, "_store", lambda: _Store())
+    manager = durable_manager(records=_Store())
+    monkeypatch.setattr(cache_module, "get_conversations_manager", lambda: manager)
 
 
 class _CallRecorder(Protocol):

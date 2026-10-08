@@ -26,7 +26,6 @@ from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
-from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ async def export_conversation_routes() -> dict[str, Any]:
     An in-memory deployment provably holds no rows, so it exports empty rather than refusing.
     """
     manager = get_conversations_manager()
-    if isinstance(manager, InMemoryConversationsManager):
+    if not manager.durable:
         return {"routes": []}
     routes, _ = await manager.list_routes()
     exported: list[dict[str, Any]] = []
@@ -197,10 +196,10 @@ async def import_conversation_routes(
         return report
 
     manager = get_conversations_manager()
-    if isinstance(manager, InMemoryConversationsManager):
+    if not manager.durable:
         # The store cannot hold a row on a backend-less deployment; refuse the whole
         # section loudly rather than silently drop every route.
-        raise RuntimeError("conversation routes require the redis conversations backend to restore")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+        raise RuntimeError("conversation routes require the redis conversations backend to restore")
 
     existing, _ = await manager.list_routes()
     # Live ``(channel, identity)`` claims, tracked across the restore: two channel rows on

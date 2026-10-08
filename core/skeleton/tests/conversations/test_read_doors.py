@@ -53,6 +53,10 @@ _API_ROUTE = ConversationRoute(
 class _DictManager(BaseConversationsManager):
     """A non-in-memory routing-row store so ``_require_backend`` admits the read door."""
 
+    @property
+    def durable(self) -> bool:
+        return True
+
     def __init__(self, route: ConversationRoute = _ROUTE) -> None:
         super().__init__(ConversationsSettings())
         self._route = route

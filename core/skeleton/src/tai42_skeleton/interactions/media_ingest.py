@@ -41,8 +41,8 @@ from tai42_contract.interactions.models.media_errors import (
 from tai42_kit.interactions import MediaIngestCapSettings, media_ingest_cap_settings
 
 from tai42_skeleton.channels.inbound import emit_inbound_media_ingested, emit_inbound_media_rejected
-from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore, inbound_media_blob_path
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.cache import get_conversations_manager
+from tai42_skeleton.conversations.media_meta import inbound_media_blob_path
 from tai42_skeleton.settings.media_ingest import MediaIngestSettings, media_ingest_settings
 
 if TYPE_CHECKING:
@@ -307,11 +307,11 @@ async def ingest_media(
 
         media_id = secrets.token_urlsafe(32)
         storage_path = inbound_media_blob_path(media_id)
-        conv_settings = ConversationsSettings()
-        meta_store = InboundMediaMetaStore(conv_settings)
+        manager = get_conversations_manager()
+        meta_store = manager.media_meta
         pending = origin.message_id is None
         now = time.time()
-        expiry_at = now + (settings.pending_ttl_seconds if pending else conv_settings.answer_retention_ttl_seconds)
+        expiry_at = now + (settings.pending_ttl_seconds if pending else manager.settings.answer_retention_ttl_seconds)
 
         await meta_store.put(
             media_id,
@@ -374,8 +374,8 @@ async def bind_media(media_id: str, *, origin: MediaOrigin) -> IngestedMedia:
     """
     if origin.message_id is None:
         raise ValueError("bind_media requires origin.message_id")
-    conv_settings = ConversationsSettings()
-    meta_store = InboundMediaMetaStore(conv_settings)
+    manager = get_conversations_manager()
+    meta_store = manager.media_meta
     now = time.time()
     code = await meta_store.bind(
         media_id,
@@ -383,7 +383,7 @@ async def bind_media(media_id: str, *, origin: MediaOrigin) -> IngestedMedia:
         channel_id=origin.channel_id,
         participant_identity=origin.participant_identity,
         now=now,
-        expiry_at=now + conv_settings.answer_retention_ttl_seconds,
+        expiry_at=now + manager.settings.answer_retention_ttl_seconds,
     )
     if code == -1:
         raise MediaNotFoundError(f"no pending media {media_id!r} to bind")

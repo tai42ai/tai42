@@ -10,8 +10,7 @@ from __future__ import annotations
 
 from tai42_contract.app import PendingMessage
 
-from tai42_skeleton.conversations.records import ConversationRecordStore
-from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations import cache
 
 
 async def pending_messages(thread_id: str, *, after: str) -> list[PendingMessage]:
@@ -23,7 +22,7 @@ async def pending_messages(thread_id: str, *, after: str) -> list[PendingMessage
     thread-index score (the epoch seconds it was accepted at). An ``after`` that names no record — an
     unknown thread, or a lead that already left ``accepted`` — reads as an empty list.
     """
-    store = ConversationRecordStore(ConversationsSettings())
+    store = cache.get_conversations_manager().records
     after_record = await store.get_record(after)
     if after_record is None:
         return []
