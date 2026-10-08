@@ -24,13 +24,13 @@ inline under whatever CSP the host applies), never substituted to a served refer
 the shared feed carries no TTL to bound a served key's lifetime.
 
 The feed is a bounded newest-first ring buffer: every write caps it (LTRIM) at
-``interactions_settings().notifications_feed_max`` entries, keeping the newest N
+``channels_settings().notifications_feed_max`` entries, keeping the newest N
 and evicting older ones by design, so the feed key cannot grow without limit.
 This is a deliberate, documented retention policy — an explicit product bound,
 not a silent truncation of an error. The SHARED feed key carries NO TTL by
 design — an unbounded lifetime, so a quiet period never drops the operator
 inbox. Only the per-``audience`` feed keys carry a rolling TTL
-(``interactions_settings().notifications_feed_ttl_seconds``), refreshed on
+(``channels_settings().notifications_feed_ttl_seconds``), refreshed on
 every push, so a key minted one-per-distinct-identity cannot accumulate forever
 (see the per-key detail below).
 
@@ -40,7 +40,7 @@ ALSO pushed onto a PER-IDENTITY feed ``{key_prefix}notifications:audience:{audie
 (its own bounded LTRIM, mirroring the shared feed) so a restricted caller reads a
 COMPLETE window of its own records that other identities' volume can never trim
 out — the notifications analog of the tool-runs per-identity index. That
-per-identity key also carries a rolling EXPIRE (``notifications_feed_ttl_seconds``)
+per-identity key also carries a rolling EXPIRE (``CHANNELS_NOTIFICATIONS_FEED_TTL_SECONDS``)
 refreshed on every push, so a key minted one-per-distinct-identity and read
 non-destructively cannot accumulate forever — exactly as the tool-runs per-identity
 index expires. The shared feed key is deliberately NOT expired: a TTL there could
@@ -68,6 +68,7 @@ from tai42_contract.interactions.models import FormData, FormPage, LocationEleme
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.channels.settings import channels_settings
 from tai42_skeleton.interactions.settings import (
     INTERACTIONS_NOT_CONFIGURED_CODE,
     INTERACTIONS_NOT_CONFIGURED_MESSAGE,
@@ -97,10 +98,10 @@ class NotificationSink:
 
     ``max_feed_length`` is the ring-buffer bound: each :meth:`record` write LTRIMs
     the feed to this many newest entries. It is supplied at construction from
-    ``interactions_settings().notifications_feed_max``.
+    ``channels_settings().notifications_feed_max``.
 
     ``audience_feed_ttl_seconds`` is the idle TTL refreshed on the PER-AUDIENCE feed
-    key on every push (from ``interactions_settings().notifications_feed_ttl_seconds``),
+    key on every push (from ``channels_settings().notifications_feed_ttl_seconds``),
     so a per-identity key minted one-per-distinct-audience cannot accumulate forever.
     The shared feed key is deliberately NOT expired — a TTL there could drop the
     operator inbox after a quiet period.
@@ -265,9 +266,8 @@ async def record_notification(
     if not interactions_store_configured():
         raise NotSupportedError(INTERACTIONS_NOT_CONFIGURED_MESSAGE, extra={"code": INTERACTIONS_NOT_CONFIGURED_CODE})
     settings = interactions_settings()
-    sink = NotificationSink(
-        settings.key_prefix, settings.notifications_feed_max, settings.notifications_feed_ttl_seconds
-    )
+    bounds = channels_settings()
+    sink = NotificationSink(settings.key_prefix, bounds.notifications_feed_max, bounds.notifications_feed_ttl_seconds)
     async with client_ctx(RedisClient, settings.redis) as r:
         return await sink.record(
             r,
@@ -296,9 +296,8 @@ async def read_notifications(audience: str | None = None) -> list[dict]:
     Redis or serialization failure propagates loudly.
     """
     settings = interactions_settings()
-    sink = NotificationSink(
-        settings.key_prefix, settings.notifications_feed_max, settings.notifications_feed_ttl_seconds
-    )
+    bounds = channels_settings()
+    sink = NotificationSink(settings.key_prefix, bounds.notifications_feed_max, bounds.notifications_feed_ttl_seconds)
     async with client_ctx(RedisClient, settings.redis) as r:
         if audience is not None:
             return await sink.read_for(r, audience)

@@ -53,6 +53,7 @@ from tai42_kit.settings import registered_settings
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
+from tai42_skeleton.connectors.manifest_env import connector_client_env_refs
 
 # Boot-identity + manifest-path bare reads that NO settings class in the
 # registered-settings inventory (``registered_settings()``) marks as an ``excluded``
@@ -249,17 +250,11 @@ def refuse_unset_connector_env(preserved_manifest: Mapping[str, Any], effective_
     ``(VAR, json-pointer)`` pair (names only, never a value) — the operations layer maps
     it to a 400.
     """
-    connectors = preserved_manifest.get("connectors")
-    if not isinstance(connectors, list):
-        return
-    unset: list[str] = []
-    for index, connector in enumerate(connectors):
-        if not isinstance(connector, dict) or connector.get("kind") != "oauth":
-            continue
-        for field_name in ("client_id_env", "client_secret_env"):
-            var = connector.get(field_name)
-            if isinstance(var, str) and var and var not in effective_env:
-                unset.append(f"{var} (at /connectors/{index}/{field_name})")
+    unset = [
+        f"{ref.var} (at /connectors/{ref.index}/{ref.field})"
+        for ref in connector_client_env_refs(preserved_manifest)
+        if ref.var not in effective_env
+    ]
     if unset:
         raise ValueError(
             "Refusing a change that leaves an oauth connector's client-credential env unset — "

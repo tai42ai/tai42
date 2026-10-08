@@ -4,6 +4,7 @@ but only the booted stack can resolve to concrete ports."""
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -147,12 +148,15 @@ def child_env(stack: TaiStack, tmpdir: str, cwd_override: str | None) -> dict[st
     }
     env.update(stack.config.env)
     env.update(dynamic_env(stack))
-    # The supervision marker is a PROCESS-env-only shape signal (never written to
-    # ``.env``): it is X-band, so a profile may not carry it, and keeping it out of the
-    # store means a profile built from the stored env never trips the X-band refusal —
-    # yet ``detect_shape`` reads it off ``os.environ`` on every (re)spawned child.
+    # The supervision marker and its pinned set are PROCESS-env-only shape signals (never
+    # written to ``.env``): they are X-band, so a profile may not carry them, and keeping
+    # them out of the store means a profile built from the stored env never trips the
+    # X-band refusal — yet ``detect_shape`` reads them off ``os.environ`` on every
+    # (re)spawned child.
     if stack.config.supervised:
-        env["TAI_SUPERVISED"] = "harness"
+        env["TAI_SUPERVISED"] = stack.config.supervision_marker
+        if stack.config.supervised_pinned_keys is not None:
+            env["TAI_SUPERVISED_PINNED_KEYS"] = json.dumps(stack.config.supervised_pinned_keys)
     if "PROMETHEUS_MULTIPROC_DIR" in env:
         raise RuntimeError(
             "the harness must never set PROMETHEUS_MULTIPROC_DIR in a child env; "

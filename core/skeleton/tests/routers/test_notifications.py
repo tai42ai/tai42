@@ -213,12 +213,10 @@ async def test_restricted_feed_stays_complete_when_shared_feed_flooded(sink_redi
     # past its cap by OTHER records. keyA's per-identity feed still contains its
     # record — proving a per-identity feed, not a post-filtered shared window (which
     # would have LTRIM'd its record out before any filter ran).
-    from tai42_skeleton.interactions.settings import InteractionsSettings
+    from tai42_skeleton.channels.settings import ChannelsSettings
 
     cap = 5
-    monkeypatch.setattr(
-        notifications_sink, "interactions_settings", lambda: InteractionsSettings(notifications_feed_max=cap)
-    )
+    monkeypatch.setattr(notifications_sink, "channels_settings", lambda: ChannelsSettings(notifications_feed_max=cap))
 
     await notifications_sink.record_notification("for-keyA", audience="keyA")
     for i in range(cap + 3):

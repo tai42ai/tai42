@@ -14,6 +14,7 @@ from tai42_kit.accounts.registry import reset_registry as reset_accounts_registr
 
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.boot_rules import require_bus_for_backend
+from tai42_skeleton.app.epoch import applied_env_keys
 from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
@@ -22,6 +23,7 @@ from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
 from tai42_skeleton.operations.registry import operation_registry
+from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_applied_env
 from tai42_skeleton.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -181,6 +183,11 @@ class BootMixin(LifecycleState):
         from tai42_skeleton.access_control.role_gate import reset_route_index
 
         reset_route_index()
+
+        # Every plugin is imported now, so every settings group is registered: the env this
+        # boot or reload applied refuses when it names an unknown setting under an owned prefix
+        # (a reload's build is then discarded and the live epoch keeps serving).
+        refuse_unknown_owned_applied_env(applied_env_keys())
 
         logger.info("[tools]")
         for t in sorted(self._registry_names_sync()["tool"]):

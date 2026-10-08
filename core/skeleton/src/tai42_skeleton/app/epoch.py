@@ -416,6 +416,15 @@ def apply_env_and_reset_settings(proposed: Mapping[str, str]) -> None:
     reset_all_settings()
 
 
+def applied_env_keys() -> frozenset[str]:
+    """The names the last env apply set in ``os.environ``.
+
+    The stored env the boot bridge applied, or the proposed env an epoch build applied (a
+    failed build restores the previous set).
+    """
+    return frozenset(_loaded_env_keys)
+
+
 def _restore_env(snapshot: Mapping[str, str], loaded: set[str]) -> None:
     """Restore ``os.environ`` exactly to ``snapshot`` on the failure branch.
 

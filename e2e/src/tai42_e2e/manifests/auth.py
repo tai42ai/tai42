@@ -69,7 +69,7 @@ def _auth_env(res: StackResources, variants: Variants) -> dict[str, str]:
     # overflow the shared window with a handful of records within the suite timeout (the
     # per-identity index/feed must still return the addressed identity's own record).
     env["TAI_TOOL_RUNS_RECENT_RUNS_LIMIT"] = "3"
-    env["INTERACTIONS_NOTIFICATIONS_FEED_MAX"] = "5"
+    env["CHANNELS_NOTIFICATIONS_FEED_MAX"] = "5"
     # A channel-delivered ask mints a callback ticket + URL from the public base URL,
     # so this setting is required; the host is never dialed, but it must be an https value.
     env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"

@@ -295,8 +295,10 @@ async def test_secret_env_requires_exactly_one_of_key_or_hint(fake):
 async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
     # shadow-avoidance: even with the stored env FREE of the candidate, a generated key that
     # would match a REGISTERED settings env_var is skipped — the generator mints a fresh,
-    # non-shadowing key (suffix). Uses a REAL registered, non-X-band var as the target so the op
-    # must consult registered_env_var_names() (the X band alone would not carry it).
+    # non-shadowing key the env write accepts. Uses a REAL registered, non-X-band var as the
+    # target so the op must consult registered_env_var_names() (the X band alone would not carry it).
+    from tai42_kit.settings import unknown_owned_env_keys
+
     from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 
     target = sorted(registered_env_var_names() - x_band_env_keys())[0]
@@ -313,8 +315,76 @@ async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
     )
     assert resp.status_code == 200
     assert target not in fake.cm._env  # the registered var is NOT shadowed
-    assert fake.cm._env[f"{target}_2"] == "fresh-secret"  # a fresh, non-shadowing key was minted
-    assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == f"!ENV ${{{target}_2}}"
+    minted = next(key for key, value in fake.cm._env.items() if value == "fresh-secret")
+    assert minted not in registered_env_var_names()  # a fresh, non-shadowing key was minted
+    assert unknown_owned_env_keys([minted]) == []  # and the owned-prefix audit accepts it
+    assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == f"!ENV ${{{minted}}}"
+
+
+async def test_secret_env_generated_key_suffixes_a_registered_name_outside_owned_prefixes(fake):
+    from tai42_kit.settings import owned_env_prefixes
+
+    from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
+
+    owned = tuple(owned_env_prefixes())
+    target = sorted(v for v in registered_env_var_names() - x_band_env_keys() if not v.startswith(owned))[0]
+    fake.cm._env = {}
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req({"value": "fresh-secret", "key_hint": target, "manifest_pointer": "mcp/0/config/headers/Authorization"})
+    )
+    assert resp.status_code == 200
+    assert fake.cm._env[f"{target}_2"] == "fresh-secret"
+
+
+@pytest.mark.parametrize(
+    ("stored", "hint", "minted"),
+    [
+        ({}, "CHANNELS_TOKEN", "SECRET_CHANNELS_TOKEN"),
+        ({}, "interactions api key", "SECRET_INTERACTIONS_API_KEY"),
+        ({}, "ACCESS_CONTROL_ENABLE", "SECRET_ACCESS_CONTROL_ENABLE"),
+        ({"SECRET_CHANNELS_TOKEN": "other"}, "CHANNELS_TOKEN", "SECRET_CHANNELS_TOKEN_2"),
+    ],
+    ids=["owned-prefix-hint", "owned-prefix-words", "registered-owned-name", "rooted-name-taken"],
+)
+async def test_secret_env_generated_key_never_lands_under_an_owned_prefix(fake, stored, hint, minted):
+    # A name under an owned prefix that no settings group accepts is refused by every env
+    # write, so the generator roots such a hint under ``SECRET_`` and the write succeeds.
+    fake.cm._env = dict(stored)
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req({"value": "fresh-secret", "key_hint": hint, "manifest_pointer": "mcp/0/config/headers/Authorization"})
+    )
+    assert resp.status_code == 200, resp.body
+    assert fake.cm._env[minted] == "fresh-secret"
+    assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == f"!ENV ${{{minted}}}"
+
+
+async def test_secret_env_generated_key_refuses_when_its_root_is_owned(fake, monkeypatch):
+    # With ``SECRET_`` itself owned no generated name can be written: a loud 400 asks for an
+    # explicit key instead of minting a name the env write refuses.
+    from typing import ClassVar
+
+    from pydantic_settings import SettingsConfigDict
+    from tai42_kit.settings import TaiBaseSettings
+    from tai42_kit.settings import registry as settings_registry
+
+    monkeypatch.setattr(settings_registry, "_REGISTRY", dict(settings_registry._REGISTRY))
+
+    class _SecretRootSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="SECRET_")
+        env_prefix_owned: ClassVar[bool] = True
+
+        knob: int = 1
+
+    fake.cm._env = {}
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req({"value": "s", "key_hint": "CHANNELS_TOKEN", "manifest_pointer": "mcp/0/config/headers/Authorization"})
+    )
+    assert resp.status_code == 400
+    assert "explicit 'key'" in _data(resp)["error"]
+    assert fake.cm._env == {}
 
 
 async def test_secret_env_marks_appended_not_clobbered_reads_stored_env(fake):

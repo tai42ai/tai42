@@ -13,7 +13,7 @@ from .remote_harness import Handler, data_response, run_cli, visible
 def test_config_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/config/env"
-        assert json.loads(request.content) == {"LOG_LEVEL": "debug"}
+        assert json.loads(request.content) == {"env": {"LOG_LEVEL": "debug"}}
         return data_response({"reloaded": True})
 
     result = run_cli(monkeypatch, handler, ["config", "env", "set", "LOG_LEVEL=debug"])
@@ -320,7 +320,10 @@ def _capture_env_handler(seen: dict) -> Handler:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/config/env"
-        seen.update(json.loads(request.content))
+        body = json.loads(request.content)
+        # The env write body carries the overrides under ``env`` and never touches the secret marks.
+        assert set(body) == {"env"}
+        seen.update(body["env"])
         return data_response({"reloaded": True})
 
     return handler

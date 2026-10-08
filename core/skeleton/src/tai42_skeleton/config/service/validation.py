@@ -1,7 +1,8 @@
 """Validation on the resolved projection of a manifest / env / profile-replace change.
 
-Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, key material, dangling
-``!ENV``, incomplete admin pair), and the backend-needs-bus invariant in both directions.
+Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, unknown owned-prefix
+settings, key material, dangling ``!ENV``, incomplete admin pair), and the backend-needs-bus
+invariant in both directions.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from tai42_skeleton.config.boundary import (
 from tai42_skeleton.config.service.base import _ConfigServiceBase
 from tai42_skeleton.config.service.resolution import _environ
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_env_write
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -53,6 +55,7 @@ class _ValidationMixin(_ConfigServiceBase):
         remains is rejected too).
         """
         refuse_x_band(changes.keys())
+        refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
         # Change-aware: refuse a key-material key only when the payload SETS it to a value
         # different from the current stored value (rotation-via-editor), never an unchanged
         # carry — the stored env is the real values a read-modify-write round-trip re-sends.
@@ -81,6 +84,7 @@ class _ValidationMixin(_ConfigServiceBase):
         evaluates backend-needs-bus against the post-change bus configuration.
         """
         refuse_x_band(changes.keys())
+        refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
         # Change-aware key-material refusal (see :meth:`_validate_env`): a CHANGE to a KEK /
         # signing key is refused, an unchanged carry is allowed.
         refuse_key_material(changes, self._read_stored_env())
@@ -104,6 +108,7 @@ class _ValidationMixin(_ConfigServiceBase):
         invariant against that same env.
         """
         refuse_x_band(profile_env.keys())
+        refuse_unknown_owned_env_write([key for key, value in profile_env.items() if value != ""])
         # Change-aware key-material refusal: a profile snapshotted from the stored env carries
         # the KEK unchanged (allowed); only a profile that would SET key material to a new
         # value is refused (see :meth:`_validate_env`).

@@ -10,12 +10,32 @@ them. Masking driven by these marks is display-side (Studio); the marks
 themselves are plain data.
 """
 
-from collections.abc import Mapping
-from typing import Annotated, Any
+from collections.abc import Iterable, Mapping
+from typing import Annotated, Any, Final
 
 from pydantic import Field, field_validator
 from pydantic_settings import NoDecode
 from tai42_kit.settings import TaiBaseSettings, settings_cache
+
+from tai42_skeleton.connectors.manifest_env import connector_client_env_refs
+
+# The env var holding the operator's marks: a comma-separated list of env key names.
+SECRET_MARKS_ENV_VAR: Final = "TAI_ENV_SECRET_KEYS"  # noqa: S105 constant identifier, not a secret value
+
+
+def parse_secret_marks(value: str | None) -> list[str]:
+    """The marks variable's value as an ordered, de-duplicated list of trimmed names; empty segments dropped."""
+    return list(dict.fromkeys(mark.strip() for mark in (value or "").split(",") if mark.strip()))
+
+
+def format_secret_marks(marks: Iterable[str]) -> str:
+    """The marks variable's value for ``marks``."""
+    return ",".join(marks)
+
+
+def merge_secret_marks(stored: str | None, added: Iterable[str]) -> str:
+    """The marks variable's value for the ordered union of the ``stored`` value and ``added``."""
+    return format_secret_marks(dict.fromkeys([*parse_secret_marks(stored), *added]))
 
 
 class EnvSecretMarksSettings(TaiBaseSettings):
@@ -25,17 +45,17 @@ class EnvSecretMarksSettings(TaiBaseSettings):
     # pydantic-settings' JSON decode for this complex field so the raw
     # comma-separated env string reaches the ``mode="before"`` validator, which
     # splits it into a list.
-    secret_keys: Annotated[list[str], NoDecode] = Field(default_factory=list, validation_alias="TAI_ENV_SECRET_KEYS")
+    secret_keys: Annotated[list[str], NoDecode] = Field(default_factory=list, validation_alias=SECRET_MARKS_ENV_VAR)
 
     @field_validator("secret_keys", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
-        """Accept a comma-separated string, trimming whitespace and dropping empty segments.
+        """Accept the comma-separated env string through :func:`parse_secret_marks`.
 
         Env values are strings; a non-string value is passed through unchanged.
         """
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            return parse_secret_marks(value)
         return value
 
 
@@ -49,7 +69,7 @@ def effective_secret_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     """The env key names masked as secret, deduped and sorted.
 
     The stored operator marks (``EnvSecretMarksSettings.secret_keys``) UNIONED with
-    every live ``connectors[*].client_secret_env``.
+    every live oauth connector's ``client_secret_env``.
     Secret-ness of a connector's client secret is an invariant the manifest already
     STATES, so it is DERIVED here at read time rather than duplicated into the env
     store — an oauth connector's secret value stays masked even with no operator mark.
@@ -57,11 +77,5 @@ def effective_secret_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     a missing or malformed ``connectors`` key contributes nothing.
     """
     keys = set(env_secret_marks_settings().secret_keys)
-    connectors = manifest.get("connectors")
-    if isinstance(connectors, list):
-        for connector in connectors:
-            if isinstance(connector, dict):
-                var = connector.get("client_secret_env")
-                if isinstance(var, str) and var:
-                    keys.add(var)
+    keys.update(ref.var for ref in connector_client_env_refs(manifest) if ref.secret)
     return tuple(sorted(keys))

@@ -23,7 +23,7 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     marker = uniq("E2E_MARKER").upper()
     api_a = replicas_stack.api(port=replicas_stack.port_a)
     # Seed a config change (polling past the boot-time reload gate), then fan the reload.
-    await api_a.post("/api/config/env", json={marker: "1"}, retry_on_reloading=True)
+    await api_a.post("/api/config/env", json={"env": {marker: "1"}}, retry_on_reloading=True)
 
     async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
         # Prime the SDK's per-session tool-output-schema cache so the post-call result

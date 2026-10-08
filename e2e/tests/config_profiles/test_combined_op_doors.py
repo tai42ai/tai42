@@ -87,7 +87,7 @@ async def test_combined_op_atomic_success(agents_stack: TaiStack, uniq: Callable
 async def test_combined_op_explicit_key_collision_refused(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     key = uniq("COLLIDE").upper()
-    await api.post("/api/config/env", json={key: "live-value"}, retry_on_reloading=True)
+    await api.post("/api/config/env", json={"env": {key: "live-value"}}, retry_on_reloading=True)
     await _seed_mcp_entry(agents_stack, uniq("cop"))
 
     resp = await api.request_raw(
@@ -111,7 +111,7 @@ async def test_combined_op_generated_key_collision_mints_fresh(
     api = agents_stack.api()
     # A stored key EQUAL to the generator's first candidate (the hint uppercases to itself).
     hint = uniq("COP_SEED").upper()
-    await api.post("/api/config/env", json={hint: "seeded-value"}, retry_on_reloading=True)
+    await api.post("/api/config/env", json={"env": {hint: "seeded-value"}}, retry_on_reloading=True)
     await _seed_mcp_entry(agents_stack, uniq("cop"))
 
     resp = await api.request_raw(

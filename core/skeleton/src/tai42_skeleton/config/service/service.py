@@ -64,23 +64,19 @@ from tai42_skeleton.config.recycle_policy import (
     _replace_diff_keys,
     capability_report,
 )
-from tai42_skeleton.config.secret_seal import _leaving_connector_secrets, _parse_marks
+from tai42_skeleton.config.secret_seal import _leaving_connector_secrets
 from tai42_skeleton.config.service.broadcast import _BroadcastMixin, _release_llm_pools
 from tai42_skeleton.config.service.resolution import _ResolutionMixin
 from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError, ProfileApplyOutcome
 from tai42_skeleton.config.service.validation import _ValidationMixin
 from tai42_skeleton.operations._broadcast import snapshot_membership
+from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, format_secret_marks, parse_secret_marks
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
     from tai42_skeleton.app.bus import WorkerBus
     from tai42_skeleton.config.service.results import _FleetPublisher, _ManifestStore, _ReloadAdmin
-
-
-# The operator's "treat these env keys as secret" marks var — the same
-# comma-separated key-name list ``set_mcp_secret_env`` and the installer append to.
-_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"  # noqa: S105 constant identifier, not a secret value
 
 
 class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
@@ -225,14 +221,19 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
 
         return await self.apply_env_and_change(prepare)
 
-    async def apply_env_change(self, changes: dict[str, str]) -> ApplyResult:
+    async def apply_env_change(self, changes: dict[str, str], secret_keys: list[str] | None = None) -> ApplyResult:
         """Apply env overrides, validating the effective config before anything is written.
+
+        ``secret_keys`` (when not ``None``) replaces the stored secret marks in the same
+        validated write.
 
         VALIDATE the effective/resolved config (the manifest's ``!ENV`` markers
         materialized against the post-change env) through the SAME backend-needs-bus gate,
         then merge the overrides, locally reload, and broadcast to the whole fleet. An
         invalid effective config raises before anything is written.
         """
+        if secret_keys is not None:
+            changes = {**changes, SECRET_MARKS_ENV_VAR: format_secret_marks(dict.fromkeys(secret_keys))}
         self._validate_env(changes)
         self._config_manager.write_env(changes)
         return await self._reload_and_broadcast(document=None)
@@ -370,11 +371,13 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
         leaving = _leaving_connector_secrets(preserved, candidate)
         if not leaving:
             return
-        stored_marks = _parse_marks(stored.get(_SECRET_MARKS_VAR))
-        base = _parse_marks(changes[_SECRET_MARKS_VAR]) if _SECRET_MARKS_VAR in changes else list(stored_marks)
+        stored_marks = parse_secret_marks(stored.get(SECRET_MARKS_ENV_VAR))
+        base = (
+            parse_secret_marks(changes[SECRET_MARKS_ENV_VAR]) if SECRET_MARKS_ENV_VAR in changes else list(stored_marks)
+        )
         final = list(dict.fromkeys([*base, *sorted(leaving)]))
         if set(final) != set(stored_marks):
-            changes[_SECRET_MARKS_VAR] = ",".join(final)
+            changes[SECRET_MARKS_ENV_VAR] = format_secret_marks(final)
 
     # -- Profile apply ----------------------------------------------------
 

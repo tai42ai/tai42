@@ -29,7 +29,6 @@ from tai42_skeleton.config.recycle_policy import CapabilityReport, Shape
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse
 from tai42_skeleton.operations import config as config_ops
-from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView
 
 
@@ -270,6 +269,28 @@ async def test_diff_reports_added_removed_changed_recycle_and_refused(
     assert diff["refused_keys"] == ["GONE"]
 
 
+async def test_diff_previews_the_marks_the_apply_writes(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    # The diff previews the env the apply writes: the profile's secret_keys become the marks
+    # variable, so unchanged marks are no diff and changed marks show their new value.
+    await view.create_profile("same", SettingsProfileBody(description="d", env={"FOO": "x"}, secret_keys=["FOO"]))
+    await view.create_profile(
+        "more", SettingsProfileBody(description="d", env={"FOO": "x"}, secret_keys=["FOO", "BAR"])
+    )
+    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"FOO": "x", "TAI_ENV_SECRET_KEYS": "FOO"})
+    monkeypatch.setattr(config_ops, "_reload_class_by_env_var", dict)
+    monkeypatch.setattr(
+        config_ops,
+        "capability_report",
+        lambda: CapabilityReport(shape=Shape.bare, recycle_supported=False, refused_keys=[], census_kinds=[]),
+    )
+    same = await config_ops.diff_profile("same")
+    assert (same["added"], same["removed"], same["changed"]) == ([], [], [])
+    more = await config_ops.diff_profile("more")
+    assert more["changed"] == [{"key": "TAI_ENV_SECRET_KEYS", "old": "FOO", "new": "FOO,BAR"}]
+
+
 async def test_diff_absent_is_404() -> None:
     with pytest.raises(NotFoundError):
         await config_ops.diff_profile("nope")
@@ -398,26 +419,32 @@ async def test_apply_absent_is_404() -> None:
         await config_ops.apply_profile("nope")
 
 
-async def test_save_previous_version_derives_connector_secret_key(
-    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+@pytest.mark.parametrize(
+    ("stored", "expected_env", "expected_marks"),
+    [
+        ({"API_KEY": "v", "TAI_ENV_SECRET_KEYS": "API_KEY"}, {"API_KEY": "v"}, ["API_KEY"]),
+        ({"API_KEY": "v"}, {"API_KEY": "v"}, []),
+    ],
+    ids=["with-marks-row", "without-marks-row"],
+)
+async def test_save_previous_version_snapshots_the_stored_band_as_a_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    view: SettingsProfileStoreView,
+    stored: dict[str, str],
+    expected_env: dict[str, str],
+    expected_marks: list[str],
 ) -> None:
-    # The @previous snapshot the apply pipeline saves carries a secret_keys set DERIVED from
-    # effective_secret_keys(live_manifest): the operator's stored marks UNIONED with every
-    # live oauth connector's client_secret_env, so a rollback re-applies with the connector
-    # secret still masked even without an operator mark for it.
-    monkeypatch.setenv("TAI_ENV_SECRET_KEYS", "API_KEY")
-    env_secret_marks_settings.cache_clear()
+    # The @previous snapshot is the pre-apply stored env in the profile shape: the rows without
+    # the marks variable, the band's own marks in ``secret_keys``. Applying it writes the
+    # pre-apply band back exactly, whatever the live manifest's connectors declare.
     live_manifest = {"connectors": [{"id": "acme", "kind": "oauth", "client_secret_env": "ACME_CLIENT_SECRET"}]}
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(live_manifest=live_manifest)))
-    try:
-        await config_ops._save_previous_version({"API_KEY": "v"})
-    finally:
-        env_secret_marks_settings.cache_clear()
+    await config_ops._save_previous_version(dict(stored))
 
     body = await view.get_active_body("@previous")
-    assert body.env == {"API_KEY": "v"}
-    # The connector-derived key sits alongside the operator's own mark in the snapshot.
-    assert set(body.secret_keys) == {"API_KEY", "ACME_CLIENT_SECRET"}
+    assert body.env == expected_env
+    assert body.secret_keys == expected_marks
+    assert config_ops._profile_env(body) == stored
 
 
 async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> None:
@@ -430,3 +457,33 @@ async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: 
     monkeypatch.setattr(config_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))
     with pytest.raises(BadRequestError, match="SUB_MCP_REDIS_URL"):
         await config_ops.apply_profile("p")
+
+
+async def test_apply_carries_the_profile_secret_marks_into_the_replaced_env(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    # A profile saved with its marks in ``secret_keys`` (the env rows never carry the marks
+    # variable) keeps those keys masked once applied: the replace writes the marks with the env.
+    await view.create_profile("p", SettingsProfileBody(**_body(env={"FOO": "x"}, secret_keys=["FOO"])))
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
+    await config_ops.apply_profile("p")
+    assert seen["env"] == {"FOO": "x", "TAI_ENV_SECRET_KEYS": "FOO"}
+
+
+async def test_apply_unions_marks_already_in_the_profile_env(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    body = _body(env={"FOO": "x", "BAR": "y", "TAI_ENV_SECRET_KEYS": "BAR"}, secret_keys=["FOO"])
+    await view.create_profile("p", SettingsProfileBody(**body))
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
+    await config_ops.apply_profile("p")
+    assert seen["env"]["TAI_ENV_SECRET_KEYS"] == "BAR,FOO"
+
+
+async def test_apply_without_marks_writes_no_marks_variable(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
+    await config_ops.apply_profile("p")
+    assert seen["env"] == {"A": "1"}

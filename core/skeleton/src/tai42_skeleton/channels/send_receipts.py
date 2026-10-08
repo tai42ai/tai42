@@ -40,6 +40,7 @@ from tai42_contract.monitoring import MonitoringLevel, TraceContext
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.channels.settings import channels_settings
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.utils.redis_typing import awaited
@@ -67,13 +68,13 @@ async def index_send(channel: str, provider_message_ids: list[str], *, trace_id:
 
     A no-op when the id list is empty (a channel that exposes no correlatable id) or the
     interactions store is unconfigured. The TTL is the receipt-relevance window
-    (``INTERACTIONS_SEND_RECEIPT_INDEX_TTL_SECONDS``): long enough for a delayed carrier
+    (``CHANNELS_SEND_RECEIPT_INDEX_TTL_SECONDS``): long enough for a delayed carrier
     receipt, bounded so the index cannot accumulate.
     """
     if not provider_message_ids or not interactions_store_configured():
         return
     settings = interactions_settings()
-    ttl = settings.send_receipt_index_ttl_seconds
+    ttl = channels_settings().send_receipt_index_ttl_seconds
     payload = json.dumps({"trace_id": trace_id, "span_id": span_id})
     async with client_ctx(RedisClient, settings.redis) as r:
         for provider_message_id in provider_message_ids:

@@ -17,6 +17,7 @@ from tai42_contract.conversations import DeliveryReceipt
 from tai42_contract.monitoring import MonitoringLevel
 
 from tai42_skeleton.channels import send_receipts
+from tai42_skeleton.channels.settings import ChannelsSettings
 from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 
 from .._fakes.recording_monitoring import RecordingMonitoring
@@ -60,9 +61,12 @@ def kv(monkeypatch: pytest.MonkeyPatch) -> _FakeKV:
     async def _ctx(client_cls, settings=None, **kwargs):
         yield fake
 
-    settings = SimpleNamespace(redis=None, key_prefix="interactions:", send_receipt_index_ttl_seconds=100)
+    settings = SimpleNamespace(redis=None, key_prefix="interactions:")
     monkeypatch.setattr(send_receipts, "client_ctx", _ctx)
     monkeypatch.setattr(send_receipts, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(
+        send_receipts, "channels_settings", lambda: ChannelsSettings(send_receipt_index_ttl_seconds=100)
+    )
     monkeypatch.setattr(send_receipts, "interactions_store_configured", lambda: True)
     return fake
 

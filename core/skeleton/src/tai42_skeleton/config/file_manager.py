@@ -25,6 +25,8 @@ from tai42_kit.utils.data import (
     merge_and_dump_manifest,
 )
 
+from tai42_skeleton.settings.settings import CoreSettings
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +57,7 @@ def _acquire_exclusive_lock(fd: int) -> None:
 # An env key is a shell-identifier: a letter/underscore then letters/digits/
 # underscores. Anything else (a newline, ``=``, a space) could inject a second
 # assignment or corrupt the parse, so it is rejected loudly.
-_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _dotenv_serialize_value(value: str) -> str:
@@ -91,7 +93,8 @@ class FileConfigManager(ConfigManager):
 
     @property
     def _manifest_path(self) -> str:
-        return os.getenv("TAI_MANIFEST_PATH") or os.path.join(self._config_dir_path, "manifest.yml")
+        # A fresh settings read per call: launchers set the variable after import.
+        return CoreSettings().manifest_path or os.path.join(self._config_dir_path, "manifest.yml")
 
     @property
     def _defaults_manifest_path(self) -> str:
@@ -177,7 +180,7 @@ class FileConfigManager(ConfigManager):
         offending key, and no write happens.
         """
         for key in config:
-            if not _ENV_KEY_RE.fullmatch(key):
+            if not ENV_KEY_RE.fullmatch(key):
                 raise ValueError(f"invalid env key {key!r}: must match [A-Za-z_][A-Za-z0-9_]*")
         path = self._env_path
         # The whole read-modify-write (re-read existing → merge → atomic write) runs
@@ -229,7 +232,7 @@ class FileConfigManager(ConfigManager):
         dropped.
         """
         for key in config:
-            if not _ENV_KEY_RE.fullmatch(key):
+            if not ENV_KEY_RE.fullmatch(key):
                 raise ValueError(f"invalid env key {key!r}: must match [A-Za-z_][A-Za-z0-9_]*")
         path = self._env_path
         # The whole write runs under the env sidecar lock so a concurrent worker's

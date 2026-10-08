@@ -14,6 +14,7 @@ from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.settings.owned_settings import require_known_owned_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,12 @@ class LifespanMixin(LifecycleState):
         # serve stale config after a reload. Refuse loudly before the app starts.
         require_bus_for_shared_config()
         require_bus_for_backend(manifest)
+        # A supervised marker must arrive with the deployment's pinned set, so the recycle
+        # refusal never runs on a guessed list. Imported here: the recycle policy imports the
+        # app package this module belongs to.
+        from tai42_skeleton.config.recycle_policy import require_supervision_declared
+
+        require_supervision_declared()
         from tai42_skeleton.app.epoch import clear_epoch, current_epoch_or_none, install_boot_core
 
         try:
@@ -45,6 +52,10 @@ class LifespanMixin(LifecycleState):
             install_boot_core(self._building)
             self._building = None
             self.start(manifest)
+            # Every plugin is imported now, so every settings group is registered: an env
+            # name the process environment or the ``.env`` file sets under an owned prefix
+            # that no group accepts refuses the boot (``start()`` audited the applied env).
+            require_known_owned_settings()
             # raise_on_error: a failed startup handler must abort the boot
             # loudly, never leave a healthy-looking half-initialized app.
             await self._run_handlers(list(self._startup_handlers.values()), raise_on_error=True)

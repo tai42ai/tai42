@@ -5,8 +5,9 @@ AUTHED thin adapters over operations in ``tai42_skeleton.operations.config``:
 * ``GET /api/config/env`` — the stored env config plus the operator's secret-key
   marks; admin-only (``action=secret``), the whole store being one admin-owned
   bulk read.
-* ``POST /api/config/env`` — merge a ``{key: value}`` env map (all values strings),
-  then hot-reload the process config; returns the reload result.
+* ``POST /api/config/env`` — merge ``{"env": {key: value}}`` (all values strings) and,
+  when ``secret_keys`` is a list, replace the operator's secret marks; then hot-reload the
+  process config; returns the reload result.
 * ``GET /api/config/mode`` — the active config backend mode (``file`` or an external provider's mode).
 * ``GET /api/config/settings-schema`` — every registered settings group with its
   field metadata and each field's current resolved value; admin-only
@@ -41,21 +42,30 @@ from tai42_skeleton.operations.config import reload_config as _reload_config_op
 from tai42_skeleton.operations.config import rollback_profile as _rollback_profile_op
 from tai42_skeleton.operations.config import write_env as _write_env_op
 
+_ENV_BODY_SHAPE = 'the env write body is {"env": {name: value}, "secret_keys": [name] | null}'
+
 
 async def _extract_env_update(request: Request) -> dict[str, Any]:
-    """Parse and validate the env-merge body at the HTTP edge, preserving the door's hand-authored 400 messages.
+    """Parse and validate the env-write body at the HTTP edge, preserving the door's hand-authored 400 messages.
 
-    A plain request-model parse would answer 422. Yields the operation's flat ``env`` kwarg.
+    A plain request-model parse would answer 422. Yields the operation's flat ``env`` and
+    ``secret_keys`` kwargs.
     """
     try:
         body = await request.json()
     except ValueError as exc:
         raise BadRequestError("invalid JSON body") from exc
-    if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of env values")
-    if not all(isinstance(v, str) for v in body.values()):
+    if not isinstance(body, dict) or not isinstance(body.get("env"), dict) or set(body) - {"env", "secret_keys"}:
+        raise BadRequestError(_ENV_BODY_SHAPE)
+    env = body["env"]
+    if not all(isinstance(v, str) for v in env.values()):
         raise BadRequestError("all env values must be strings")
-    return {"env": body}
+    secret_keys = body.get("secret_keys")
+    if secret_keys is not None and (
+        not isinstance(secret_keys, list) or not all(isinstance(k, str) for k in secret_keys)
+    ):
+        raise BadRequestError("'secret_keys' must be a list of strings or null")
+    return {"env": env, "secret_keys": secret_keys}
 
 
 async def _extract_profile_body(request: Request) -> dict[str, Any]:

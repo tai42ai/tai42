@@ -45,12 +45,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
-from tai42_kit.utils.data.env_markers import ENV_REF
-
-# The prefix of an ``!ENV`` marker string, mirroring the kit marker convention
-# (``tai42_kit.utils.data.yaml_util``). A ``fixed_kwargs`` scalar leaf that begins
-# with it is a secret reference resolved here.
-_ENV_MARKER_PREFIX = "!ENV "
+from tai42_kit.utils.data.env_markers import escape_json_pointer_token, is_env_marker, parse_env_marker
 
 
 def resolve_secret_refs(fixed_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -65,13 +60,13 @@ def resolve_secret_refs(fixed_kwargs: dict[str, Any]) -> dict[str, Any]:
     loud :class:`ValueError` naming the variable and the leaf's json-pointer. The
     input is never mutated — a fresh structure is returned.
     """
-    return {key: _resolve(value, f"/{_escape(str(key))}") for key, value in fixed_kwargs.items()}
+    return {key: _resolve(value, f"/{escape_json_pointer_token(str(key))}") for key, value in fixed_kwargs.items()}
 
 
 def _resolve(node: Any, pointer: str) -> Any:
     """Rebuild ``node`` resolving every ``!ENV`` scalar leaf; non-string leaves pass through."""
     if isinstance(node, Mapping):
-        return {key: _resolve(value, f"{pointer}/{_escape(str(key))}") for key, value in node.items()}
+        return {key: _resolve(value, f"{pointer}/{escape_json_pointer_token(str(key))}") for key, value in node.items()}
     if isinstance(node, (list, tuple)):
         return [_resolve(value, f"{pointer}/{index}") for index, value in enumerate(node)]
     if isinstance(node, str):
@@ -81,31 +76,24 @@ def _resolve(node: Any, pointer: str) -> Any:
 
 def _resolve_leaf(leaf: str, pointer: str) -> Any:
     """Resolve a single scalar leaf: an ``!ENV`` marker → its value, else the leaf unchanged."""
-    if not leaf.startswith(_ENV_MARKER_PREFIX):
+    if not is_env_marker(leaf):
         return leaf
-    expression = leaf[len(_ENV_MARKER_PREFIX) :]
-    match = ENV_REF.fullmatch(expression)
-    if match is None:
+    ref = parse_env_marker(leaf)
+    if ref is None:
         raise ValueError(
             f"preset secret reference at {pointer} is malformed: a fixed_kwargs !ENV value "
             "must be exactly '!ENV ${VAR}' or '!ENV ${VAR:default}' — a single environment "
             "reference with no surrounding text or extra references"
         )
-    var = match.group(1)
-    default = match.group(2)
+    var = ref.var
     if var in os.environ:
         return SecretValue(os.environ[var])
-    if default is not None:
-        return default[1:]
+    if ref.default is not None:
+        return ref.default
     raise ValueError(
         f"preset secret reference at {pointer} resolves to no environment variable: "
         f"set {var}, or give the reference a default ('!ENV ${{{var}:...}}')"
     )
-
-
-def _escape(token: str) -> str:
-    """RFC 6901 json-pointer token escaping (matching the kit scalar-leaf walk)."""
-    return token.replace("~", "~0").replace("/", "~1")
 
 
 # The JSON-schema keywords that pin a concrete string-leaf type once unions and
@@ -414,7 +402,7 @@ def _redact_value(value: Any, schema: Any, root: Mapping[str, Any], seen: frozen
     """
     candidates = _candidates(schema, root, seen)
     if _leaf_is_secret(candidates):
-        if isinstance(value, str) and value.startswith(_ENV_MARKER_PREFIX):
+        if is_env_marker(value):
             return value
         return SECRET_PLACEHOLDER
     if isinstance(value, Mapping):
@@ -462,7 +450,7 @@ def _mask_all(value: Any) -> Any:
         return {key: _mask_all(child) for key, child in value.items()}
     if isinstance(value, (list, tuple)):
         return [_mask_all(child) for child in value]
-    if isinstance(value, str) and value.startswith(_ENV_MARKER_PREFIX):
+    if is_env_marker(value):
         return value
     return SECRET_PLACEHOLDER
 

@@ -15,10 +15,9 @@ class CoreSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TAI_MCP_",
     )
-    # TAI_MANIFEST_PATH is the single manifest-location env var: it feeds the
-    # CLI's --manifest-path default here and is what the config file manager
-    # reads directly. Deployment-spec identity (a launcher-set bootstrap path) —
-    # a profile can never carry it, so it is excluded from the reload boundary.
+    # The single manifest-location env var; read per call through this field.
+    # Deployment-spec identity (a launcher-set bootstrap path) — a profile can
+    # never carry it, so it is excluded from the reload boundary.
     manifest_path: str | None = Field(
         default=None, validation_alias="TAI_MANIFEST_PATH", json_schema_extra={"reload": "excluded"}
     )

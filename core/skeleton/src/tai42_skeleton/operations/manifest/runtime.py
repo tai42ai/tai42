@@ -8,7 +8,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import ApplyResponse
 from tai42_kit.utils.data import load_manifest
 
-from tai42_skeleton.app.boot_rules import BackendNeedsBusError
+from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService
@@ -73,14 +73,9 @@ async def update_manifest(manifest_text: str) -> Any:
         document = cast("dict[str, Any]", load_manifest(manifest_text))
     except Exception as exc:
         raise BadRequestError(f"invalid manifest: {exc}") from exc
-    with translate_orphan_env_write():
+    with translate_orphan_env_write(), translate_backend_needs_bus(BadRequestError):
         try:
             result = await ConfigService.from_app().apply_replace(document)
-        except BackendNeedsBusError as exc:
-            # The invariant is a RuntimeError (a boot-time refusal must still crash loudly),
-            # so the mutate-time path maps it explicitly to a loud, actionable 400 naming
-            # TAI_BUS_REDIS_URL rather than letting it escape as a 500.
-            raise BadRequestError(str(exc)) from exc
         except ValueError as exc:
             raise BadRequestError(f"invalid manifest: {exc}") from exc
         return apply_response(result)

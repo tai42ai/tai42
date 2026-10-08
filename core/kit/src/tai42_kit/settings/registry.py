@@ -19,6 +19,7 @@ from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings
 
 from tai42_kit.settings.base import ReloadClass
+from tai42_kit.settings.default_namespace import TAI_DEFAULT_ENV_PREFIX
 
 
 class SettingsFieldInfo(BaseModel):
@@ -41,6 +42,10 @@ class SettingsFieldInfo(BaseModel):
     reload_class: ReloadClass = "hot"
     # True when the field carries key material (the ``KeyMaterial`` type).
     key_material: bool = False
+    # Every env name the settings layer reads for this field: the primary env var
+    # plus every other string choice of an ``AliasChoices`` (a nested-group
+    # reference reads ``env_prefix + name`` as JSON).
+    accepted_env_vars: list[str]
 
 
 class SettingsClassInfo(BaseModel):
@@ -52,6 +57,9 @@ class SettingsClassInfo(BaseModel):
     fields: list[SettingsFieldInfo]
     # The group's declared reload disposition (default ``hot``).
     reload_class: ReloadClass = "hot"
+    env_prefix: str
+    # Whether the group declares its ``env_prefix`` owned (``TaiBaseSettings.env_prefix_owned``).
+    env_prefix_owned: bool
 
 
 # Keyed by qualified name (``module.__qualname__``) so a module re-import
@@ -253,6 +261,24 @@ def _env_var(name: str, field_info: FieldInfo, env_prefix: str, case_sensitive: 
     return env_var if case_sensitive else env_var.upper()
 
 
+def _accepted_env_vars(name: str, field_info: FieldInfo, env_prefix: str, case_sensitive: bool) -> list[str]:
+    """Every env name the settings layer reads for a scalar field.
+
+    The primary env var (``_env_var``) first, then every other string choice of an
+    ``AliasChoices``, each upper-cased unless ``case_sensitive``.
+    """
+    primary = _env_var(name, field_info, env_prefix, case_sensitive)
+    names = [primary if case_sensitive else primary.upper()]
+    alias = field_info.validation_alias or field_info.alias
+    if isinstance(alias, AliasChoices):
+        for choice in alias.choices:
+            if isinstance(choice, str):
+                candidate = choice if case_sensitive else choice.upper()
+                if candidate not in names:
+                    names.append(candidate)
+    return names
+
+
 def _factory_needs_validated_data(factory: Any) -> bool:
     """Whether a ``default_factory`` is the pydantic 2.10+ validated-data form.
 
@@ -310,6 +336,9 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
     # Inheriting read (a subclass inherits its base's declaration); the field-level
     # value falls back to this when a field declares no ``reload`` override.
     class_reload = _as_reload_class(getattr(cls, "reload_class", "hot"), f"class {cls.__name__!r}")
+    prefix_owned = getattr(cls, "env_prefix_owned", False) is True
+    if prefix_owned and not env_prefix:
+        raise ValueError(f"settings group {cls.__name__!r}: env_prefix_owned requires a non-empty env_prefix")
     fields: list[SettingsFieldInfo] = []
     for name, field_info in cls.model_fields.items():
         nested = _settings_member(field_info.annotation)
@@ -327,6 +356,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                     description=field_info.description,
                     nested_group=nested.__name__,
                     reload_class=class_reload,
+                    accepted_env_vars=[env_prefix + name if case_sensitive else (env_prefix + name).upper()],
                 )
             )
             continue
@@ -357,9 +387,12 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                 secret=secret,
                 description=field_info.description,
                 nested_group=None,
-                default_namespace_var=f"TAI_DEFAULT_{default_key.upper()}" if default_key is not None else None,
+                default_namespace_var=f"{TAI_DEFAULT_ENV_PREFIX}{default_key.upper()}"
+                if default_key is not None
+                else None,
                 reload_class=field_reload,
                 key_material=_is_key_material(field_info),
+                accepted_env_vars=_accepted_env_vars(name, field_info, env_prefix, case_sensitive),
             )
         )
     return SettingsClassInfo(
@@ -368,6 +401,8 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
         qualname=_qualname(cls),
         fields=fields,
         reload_class=class_reload,
+        env_prefix=env_prefix,
+        env_prefix_owned=prefix_owned,
     )
 
 
@@ -379,6 +414,11 @@ def _register(cls: type[BaseSettings]) -> None:
 def _clear_registry() -> None:
     """Drop every registration — for tests only."""
     _REGISTRY.clear()
+
+
+def _registered_infos() -> list[SettingsClassInfo]:
+    """The live registrations, uncopied — for kit-internal read-only scans."""
+    return list(_REGISTRY.values())
 
 
 def registered_settings() -> list[SettingsClassInfo]:

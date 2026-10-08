@@ -14,18 +14,19 @@ from ruamel.yaml.constructor import RoundTripConstructor
 from ruamel.yaml.nodes import ScalarNode
 from ruamel.yaml.representer import RoundTripRepresenter
 
+from tai42_kit.utils.data.env_markers import ENV_MARKER_PREFIX
+
 # ---------------------------------------------------------------------------
 # !ENV marker convention
 # ---------------------------------------------------------------------------
 
 _ENV_TAG = "!ENV"
-_ENV_MARKER_PREFIX = "!ENV "
 
 
 def _construct_env_marker(constructor: RoundTripConstructor, node: ScalarNode) -> str:
     """Turn an ``!ENV`` tagged scalar into a ``"!ENV <value>"`` marker string."""
     value = constructor.construct_scalar(node)
-    return f"!ENV {value}"
+    return f"{ENV_MARKER_PREFIX}{value}"
 
 
 def _represent_env_marker(representer: RoundTripRepresenter, data: str) -> ScalarNode:
@@ -35,8 +36,8 @@ def _represent_env_marker(representer: RoundTripRepresenter, data: str) -> Scala
     (``key: !ENV <value>``) so it reloads through :func:`load_manifest` as the
     same marker. Every other string uses the default round-trip representation.
     """
-    if data.startswith(_ENV_MARKER_PREFIX):
-        return representer.represent_scalar(_ENV_TAG, data[len(_ENV_MARKER_PREFIX) :])
+    if data.startswith(ENV_MARKER_PREFIX):
+        return representer.represent_scalar(_ENV_TAG, data[len(ENV_MARKER_PREFIX) :])
     return RoundTripRepresenter.represent_str(representer, data)
 
 

@@ -26,7 +26,7 @@ async def _write_env(api: ApiClient, body: dict[str, str]) -> None:
     frees the key is persisted without loss (exactly what this test asserts)."""
 
     async def _attempt() -> bool:
-        resp = await api.request_raw("POST", "/api/config/env", json=body)
+        resp = await api.request_raw("POST", "/api/config/env", json={"env": body})
         if resp.status_code == 503:  # retriable "reloading" — re-send
             return False
         if resp.status_code != 200:

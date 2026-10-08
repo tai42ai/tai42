@@ -93,7 +93,7 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
     # (a) The config-reload door published on the worker bus — the mode-wrapped fleet
     # fan-out shape (siblings apply asynchronously), never a bare local-only note.
     # Poll past the embed worker's boot-time reload gate.
-    data = await api.post("/api/config/env", json={marker: "1"}, retry_on_reloading=True)
+    data = await api.post("/api/config/env", json={"env": {marker: "1"}}, retry_on_reloading=True)
     fanout = data.get("fanout")
     assert isinstance(fanout, dict), f"POST /api/config/env carried no fanout field: {data!r}"
     assert fanout["mode"] == "fleet", f"embedded worker did not broadcast the reload over the fleet: {fanout!r}"

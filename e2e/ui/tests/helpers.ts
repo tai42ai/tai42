@@ -590,7 +590,7 @@ async function redisGet(redisUrl: string, key: string): Promise<string | null> {
       socket.write(respCommand(['GET', key]));
     });
     socket.on('data', (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
+      buf = Buffer.concat([buf, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
       try {
         for (;;) {
           const reply = parseRedisReply(buf);

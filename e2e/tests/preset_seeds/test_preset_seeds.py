@@ -34,7 +34,7 @@ async def _versions(stack: TaiStack) -> list[dict]:
 async def _reload_env(stack: TaiStack, env: dict[str, str]) -> None:
     """Drive a reload through the env-write door — an empty ``env`` re-applies the seed,
     a variant flip ships a drifted body — then wait past the reload gate on a probe."""
-    await stack.api().post("/api/config/env", json=env, retry_on_reloading=True)
+    await stack.api().post("/api/config/env", json={"env": env}, retry_on_reloading=True)
     async with stack.mcp() as mcp:
         await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
 

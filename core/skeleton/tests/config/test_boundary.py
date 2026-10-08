@@ -86,8 +86,15 @@ def _service(store: FakeConfigStore) -> tuple[ConfigService, FakeReloadAdmin, Re
 # TAI_CONFIG_MODE  = half (a), a registry ``excluded`` field.
 # TAI_MANIFEST_PATH = redundant: registry-excluded AND listed in X_BAND_EXTRA.
 # TAI_RUN_MODE     = half (b), a boot-identity bare read no settings class declares.
-# TAI_SUPERVISED / TAI_READY_SENTINEL_PATH = the two deployment keys.
-_X_KEYS = ["TAI_CONFIG_MODE", "TAI_MANIFEST_PATH", "TAI_RUN_MODE", "TAI_SUPERVISED", "TAI_READY_SENTINEL_PATH"]
+# TAI_SUPERVISED / TAI_SUPERVISED_PINNED_KEYS / TAI_READY_SENTINEL_PATH = the three deployment keys.
+_X_KEYS = [
+    "TAI_CONFIG_MODE",
+    "TAI_MANIFEST_PATH",
+    "TAI_RUN_MODE",
+    "TAI_SUPERVISED",
+    "TAI_SUPERVISED_PINNED_KEYS",
+    "TAI_READY_SENTINEL_PATH",
+]
 
 
 @pytest.mark.parametrize("x_key", _X_KEYS)

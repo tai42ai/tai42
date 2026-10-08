@@ -13,6 +13,7 @@ import pytest
 
 from tai42_skeleton.channels import notifications_sink
 from tai42_skeleton.channels.notifications_sink import NotificationSink
+from tai42_skeleton.channels.settings import ChannelsSettings
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
 # The default interactions key prefix, the namespace the sink shares with the
@@ -258,7 +259,7 @@ async def test_audience_feed_ttl_rolls_forward_on_each_push(fake_redis) -> None:
 async def test_module_writer_sets_the_audience_ttl(monkeypatch, fake_redis) -> None:
     # The module writer builds the sink with the configured TTL, so a real
     # ``record_notification`` push sets the per-identity key's expiry.
-    settings = InteractionsSettings(notifications_feed_ttl_seconds=123)
+    settings = InteractionsSettings()
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -266,6 +267,9 @@ async def test_module_writer_sets_the_audience_ttl(monkeypatch, fake_redis) -> N
 
     monkeypatch.setattr(notifications_sink, "client_ctx", _ctx)
     monkeypatch.setattr(notifications_sink, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(
+        notifications_sink, "channels_settings", lambda: ChannelsSettings(notifications_feed_ttl_seconds=123)
+    )
 
     await notifications_sink.record_notification("for-alice", audience="alice")
 

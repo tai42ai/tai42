@@ -118,6 +118,20 @@ def test_tai_manifest_path_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     assert mgr._manifest_path == override
 
 
+def test_an_empty_tai_manifest_path_is_absent(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("TAI_MANIFEST_PATH", "")
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    assert mgr._manifest_path == os.path.join(str(tmp_path), "manifest.yml")
+
+
+def test_tai_manifest_path_is_read_per_call(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "first.yml"))
+    assert mgr._manifest_path == str(tmp_path / "first.yml")
+    monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "second.yml"))
+    assert mgr._manifest_path == str(tmp_path / "second.yml")
+
+
 # --- env read/write ---------------------------------------------------------
 
 

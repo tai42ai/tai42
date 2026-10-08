@@ -117,7 +117,7 @@ def set_env(
     if not overrides:
         raise typer.BadParameter("provide at least one KEY=VALUE assignment (argument, --env-file, or --stdin).")
     with ctx_obj.client() as client:
-        data = client.post("/api/config/env", json=overrides)
+        data = client.post("/api/config/env", json={"env": overrides})
     emit_result(ctx_obj, data)
 
 

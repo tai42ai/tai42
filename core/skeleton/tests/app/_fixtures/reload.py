@@ -11,6 +11,7 @@ assert the registry surface, not the ASGI dispatch).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from tai42_skeleton.app import epoch as epoch_mod
@@ -22,9 +23,9 @@ class _SentinelServingApp:
         raise AssertionError("the unit reload helper's sentinel serving app is never dispatched")
 
 
-async def reload_with(app: Any, manifest: Any) -> Epoch:
-    """Rebuild a fresh epoch under ``manifest`` and swap it in, or discard it and
-    re-raise on a failed build (the live epoch keeps serving untouched)."""
+async def reload_with(app: Any, manifest: Any, env: Mapping[str, str] | None = None) -> Epoch:
+    """Rebuild a fresh epoch under ``manifest`` and the proposed ``env`` and swap it in, or
+    discard it and re-raise on a failed build (the live epoch keeps serving untouched)."""
 
     def _rebuild() -> None:
         app._building = app._build_serving_core()
@@ -42,4 +43,4 @@ async def reload_with(app: Any, manifest: Any) -> Epoch:
             app._building = None
         return _SentinelServingApp()
 
-    return await epoch_mod.build_and_swap_epoch({}, rebuild=_rebuild, build_serving_app=_build_serving_app)
+    return await epoch_mod.build_and_swap_epoch(env or {}, rebuild=_rebuild, build_serving_app=_build_serving_app)

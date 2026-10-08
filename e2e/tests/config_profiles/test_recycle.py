@@ -21,12 +21,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tai42_e2e import wait_for_async
+from tai42_e2e.manifests import build_recycle_stack
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.topology import StackConfig, StackResources
 from tai42_e2e.waiting import wait_for
+
+if TYPE_CHECKING:
+    from tai42_e2e.variants import Variants
 
 pytestmark = pytest.mark.needs("kind:backend")
 
@@ -189,6 +196,38 @@ async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uni
     )
     done_pids = {json.loads(rec)["pid"] for rec in recycle_stack.records(key) if json.loads(rec)["value"] == "done"}
     assert started_pid in done_pids, f"'done' came from a different pid than started ({started_pid} vs {done_pids})"
+
+
+# The synthetic key a compose-marked stack declares pinned.
+_PINNED_SAMPLE = "E2E_PINNED_SAMPLE"
+
+
+def _build_compose_marked_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The recycle stack under the ``compose`` marker with a declared synthetic pinned set."""
+    return replace(
+        build_recycle_stack(res, variants),
+        name="recycle-compose",
+        supervision_marker="compose",
+        supervised_pinned_keys=[_PINNED_SAMPLE],
+    )
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.needs("mutable", "store:redis", "process", "topology:supervised")
+async def test_declared_pinned_key_refuses_a_profile_changing_it(
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """On a ``compose``-marked deployment the keys it declares in ``TAI_SUPERVISED_PINNED_KEYS``
+    are refused upfront at the API, naming the key: a container respawn would re-inject them."""
+    stack = fresh_stack(_build_compose_marked_recycle_stack)
+    api = stack.api()
+    name = uniq("pinned")
+    await _profile_from_stored(stack, {_PINNED_SAMPLE: uniq("value")}, name)
+    resp = await api.request_raw("POST", f"/api/config/profiles/{name}/apply")
+    assert resp.status_code == 400, resp.text
+    error = resp.json()["error"]
+    assert "'compose' deployment" in error, error
+    assert _PINNED_SAMPLE in error, error
 
 
 @pytest.mark.needs("setting:TAI_SUPERVISED=unset")

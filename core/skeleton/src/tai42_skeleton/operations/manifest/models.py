@@ -8,17 +8,9 @@ from pydantic import BaseModel, Field
 
 from tai42_skeleton.manifest import AgentsConfig, TaiMCPConfig, ToolsConfig
 
-# The env var the operator's "treat these env keys as secret" marks live under — a
-# comma-separated key-name list backing ``EnvSecretMarksSettings.secret_keys``. The
-# secret-env door adds its generated key to this mark so the editor masks it.
-_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"  # noqa: S105 constant identifier, not a secret value
-
 # A generated secret-env key is a shell identifier; a hint is sanitized to this charset.
 _ENV_KEY_START = re.compile(r"[A-Za-z_]")
 _NON_ENV_KEY_CHAR = re.compile(r"[^A-Za-z0-9_]+")
-# An EXPLICIT key must be a full shell identifier (mirrors file_manager._ENV_KEY_RE, the
-# strictest provider) — an odd value is a loud 400 before any write.
-_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class McpConfigUpdate(BaseModel):

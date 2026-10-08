@@ -6,6 +6,7 @@ extends), so the feature settings declare only feature fields. Connection values
 read from the ``INTERACTIONS_REDIS_*`` env; feature values from ``INTERACTIONS_*``.
 """
 
+from typing import ClassVar
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
@@ -24,6 +25,7 @@ class InteractionsRedisSettings(RedisConnectionSettings):
     """
 
     model_config = SettingsConfigDict(env_prefix="INTERACTIONS_")
+    env_prefix_owned: ClassVar[bool] = True
 
     redis_url: str | None = None
     redis_max_connections: int | None = 10
@@ -42,6 +44,7 @@ class InteractionsSettings(TaiBaseSettings):
     """Interactions feature settings: the Redis connection plus the ask/answer budgets and limits."""
 
     model_config = SettingsConfigDict(env_prefix="INTERACTIONS_")
+    env_prefix_owned: ClassVar[bool] = True
 
     # Infra: the redis connection is composed from the kit (a field, not a base),
     # so the feature config declares no connection fields of its own.
@@ -49,21 +52,6 @@ class InteractionsSettings(TaiBaseSettings):
 
     # Namespace prefix for every interactions key.
     key_prefix: str = "interactions:"
-
-    # Bound on the internal notifications sink feed (the list ``notify_user`` with
-    # no channel writes). The feed is a newest-first ring buffer: each write LTRIMs
-    # it to this many entries, keeping the newest N and evicting older ones by
-    # design, so the feed key cannot grow without limit. A deliberate, documented
-    # retention cap — not a silent truncation. Must be positive.
-    notifications_feed_max: int = Field(default=1000, gt=0)
-
-    # Idle TTL (seconds) on a PER-AUDIENCE notifications feed key, refreshed on each
-    # push (30d, mirroring the answer-record retention neighbor). A per-identity feed
-    # is minted one-per-distinct-audience and read non-destructively, so without an
-    # expiry its key would accumulate forever; this bounds an idle identity's key.
-    # The shared feed key is deliberately NOT expired here — a TTL there could drop
-    # the operator inbox after a quiet period. Must be positive.
-    notifications_feed_ttl_seconds: int = Field(default=30 * 86400, gt=0)
 
     # Default wait budget for a blocked ask before it raises (1h); a caller
     # may override per call. Must be positive.
@@ -73,15 +61,6 @@ class InteractionsSettings(TaiBaseSettings):
     # question; a group with no open questions expires after this (24h). Must be
     # positive — a non-positive TTL would delete keys on write.
     idle_ttl_seconds: int = Field(default=86400, gt=0)
-
-    # TTL (seconds) on a send-receipt index entry: the
-    # ``provider_message_id -> {trace_id, span_id}`` map a ``notify_user`` channel send
-    # writes so a later out-of-band delivery receipt can be posted back onto the
-    # originating trace (the send-outcome monitoring layer's tier 2). Sized to the
-    # receipt-relevance window — long enough for a delayed carrier receipt to still
-    # correlate to its run, bounded (24h) so the index cannot accumulate. Must be
-    # positive — a non-positive TTL would delete the entry on write.
-    send_receipt_index_ttl_seconds: int = Field(default=86400, gt=0)
 
     # Public base URL of the host serving the interactions routes; required for
     # external-format questions (the callback URL is built from it). Must be
@@ -98,9 +77,8 @@ class InteractionsSettings(TaiBaseSettings):
     # Open-questions guard: refuse new ask calls once this many questions are
     # open platform-wide (the atomic reserve-and-check in ``reserve_open_slot``).
     # A finite ceiling by default so pending human questions cannot grow without
-    # bound; well above any realistic live count and on the same scale as this
-    # file's other retention ceiling (``notifications_feed_max``). Set ``None`` for
-    # unlimited; a set value must be positive.
+    # bound; well above any realistic live count. Set ``None`` for unlimited; a set
+    # value must be positive.
     max_concurrent: int | None = Field(default=1000, gt=0)
 
     # Open-callers guard: the independent ceiling on ``to="caller"`` asks and the
