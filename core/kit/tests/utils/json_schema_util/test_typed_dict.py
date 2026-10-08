@@ -208,3 +208,128 @@ def test_typed_dict_refuses_an_empty_union_and_excess_depth():
         deep = {"type": "object", "properties": {"n": deep}}
     with pytest.raises(ValueError, match="max_depth=2"):
         json_schema_to_typed_dict(deep, name="Deep", max_depth=2)
+
+
+def test_typed_dict_type_list_builds_a_union_of_each_member():
+    schema = {
+        "type": ["object", "array", "integer", "null"],
+        "title": "Mixed",
+        "properties": {"k": {"type": "integer"}},
+        "required": ["k"],
+        "items": {"type": "string"},
+    }
+    adapter = TypeAdapter(json_schema_to_typed_dict(schema, name="Mixed"))
+    assert adapter.validate_python({"k": 1}) == {"k": 1}
+    assert adapter.validate_python(["a", "b"]) == ["a", "b"]
+    assert adapter.validate_python(5) == 5
+    assert adapter.validate_python(None) is None
+    with pytest.raises(ValidationError):
+        adapter.validate_python("text")
+
+
+def test_typed_dict_const_and_enum_admit_only_their_values():
+    schema = {
+        "title": "Choice",
+        "type": "object",
+        "properties": {"kind": {"const": "fixed"}, "level": {"enum": ["low", "high"]}},
+        "required": ["kind", "level"],
+    }
+    adapter = TypeAdapter(json_schema_to_typed_dict(schema, name="Choice"))
+    assert adapter.validate_python({"kind": "fixed", "level": "high"}) == {"kind": "fixed", "level": "high"}
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"kind": "other", "level": "high"})
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"kind": "fixed", "level": "mid"})
+
+
+def test_typed_dict_not_and_typeless_nodes_accept_any_value():
+    schema = {
+        "title": "Loose",
+        "type": "object",
+        "properties": {"neg": {"not": {"type": "string"}}, "free": {}},
+        "required": ["neg", "free"],
+    }
+    adapter = TypeAdapter(json_schema_to_typed_dict(schema, name="Loose"))
+    value = {"neg": [1, {"x": None}], "free": "anything"}
+    assert adapter.validate_python(value) == value
+
+
+def test_typed_dict_allof_of_objects_merges_properties_and_required():
+    schema = {
+        "title": "Merged",
+        "allOf": [
+            {"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]},
+            {"properties": {"b": {"type": "string"}}, "required": ["b"]},
+        ],
+    }
+    annotation = json_schema_to_typed_dict(schema, name="Merged")
+    assert annotation.__name__ == "Merged"
+    adapter = TypeAdapter(annotation)
+    assert adapter.validate_python({"a": 1, "b": "x"}) == {"a": 1, "b": "x"}
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"a": 1})
+
+
+def test_typed_dict_allof_with_a_non_object_member_accepts_any_value():
+    from typing import Any
+
+    schema = {"allOf": [{"type": "object", "properties": {"a": {"type": "integer"}}}, {"$ref": "#/$defs/X"}]}
+    assert json_schema_to_typed_dict(schema, name="Mixed") is Any
+
+
+def test_typed_dict_shared_ref_is_built_once_and_enforced_at_each_use():
+    schema = {
+        "$defs": {
+            "Point": {
+                "type": "object",
+                "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                "required": ["x", "y"],
+            }
+        },
+        "title": "Segment",
+        "type": "object",
+        "properties": {"start": {"$ref": "#/$defs/Point"}, "end": {"$ref": "#/$defs/Point"}},
+        "required": ["start", "end"],
+    }
+    annotation = json_schema_to_typed_dict(schema, name="Segment")
+    hints = annotation.__annotations__
+    assert hints["start"] is hints["end"]
+    adapter = TypeAdapter(annotation)
+    value = {"start": {"x": 0, "y": 0}, "end": {"x": 3, "y": 4}}
+    assert adapter.validate_python(value) == value
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"start": {"x": 0, "y": 0}, "end": {"x": 3}})
+
+
+def test_typed_dict_max_depth_bounds_nesting_loudly():
+    schema = {"type": "array", "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}}}
+    assert TypeAdapter(json_schema_to_typed_dict(schema, max_depth=3)).validate_python([[[1]]]) == [[[1]]]
+    with pytest.raises(ValueError, match="max_depth=2"):
+        json_schema_to_typed_dict(schema, max_depth=2)
+
+
+def test_typed_dict_empty_union_raises_loudly():
+    with pytest.raises(ValueError, match="at least one subschema"):
+        json_schema_to_typed_dict({"anyOf": []}, name="Empty")
+
+
+def test_typed_dict_open_map_without_value_schema_accepts_any_values():
+    schema = {"type": "object", "additionalProperties": True}
+    adapter = TypeAdapter(json_schema_to_typed_dict(schema, name="Bag"))
+    value = {"a": 1, "b": [None], "c": {"d": "e"}}
+    assert adapter.validate_python(value) == value
+
+
+def test_typed_dict_prefix_items_admit_each_position_type_and_enforce_bounds():
+    schema = inject_int64_bounds({"type": "array", "prefixItems": [{"type": "integer"}, {"type": "string"}]})
+    adapter = TypeAdapter(json_schema_to_typed_dict(schema, name="Pair"))
+    assert adapter.validate_python([1, "a"]) == [1, "a"]
+    with pytest.raises(ValidationError):
+        adapter.validate_python([1.5])
+    with pytest.raises(ValidationError):
+        adapter.validate_python([INT64_MAX + 1])
+
+
+def test_typed_dict_array_without_item_schema_accepts_any_items():
+    adapter = TypeAdapter(json_schema_to_typed_dict({"type": "array"}, name="Items"))
+    assert adapter.validate_python([1, "a", None]) == [1, "a", None]
