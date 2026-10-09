@@ -99,10 +99,10 @@ async def evaluate_door_contract(
 def parked_entries_for_jq(entries: Iterable[ParkedEntry]) -> list[dict[str, Any]]:
     """Dump parked/ask entries to the plain jq documents a door binds as ``$parked`` / ``$asks``.
 
-    Each entry is dumped compact (``exclude_none=True``) so an unset optional field is absent rather
-    than a null key — the single shape every door presents, matching the documented sample entry.
+    An entry dumps with only its set fields (:class:`~tai42_contract.interactions.ParkedEntry` leaves
+    every unset field out), the one shape every door presents.
     """
-    return [entry.model_dump(mode="json", exclude_none=True) for entry in entries]
+    return [entry.model_dump(mode="json") for entry in entries]
 
 
 async def _eval(field: str, text: TemplatedText | None, jq_input: Any, variables: dict[str, Any]) -> Any:

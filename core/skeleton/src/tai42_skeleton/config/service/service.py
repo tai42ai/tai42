@@ -29,7 +29,7 @@ refuses (a :class:`~tai42_skeleton.config.secret_seal.ResolvedSecretError`, a
 no marker origin — so a resolved round-trip preserves the operator's markers and a
 plaintext secret never reaches the store.
 
-The broadcast tail is the whole fleet, always: ``publish({"op": "reload_config"},
+The broadcast tail is the whole fleet, always: ``publish(ReloadConfig(op="reload_config"),
 targets=None, local=<local reload result>)`` — a persisted change reaches every
 worker, and each subscriber re-reads the persisted store itself. An unconfirmed
 worker is a loud ERROR log and an explicit entry in the report, but the call still

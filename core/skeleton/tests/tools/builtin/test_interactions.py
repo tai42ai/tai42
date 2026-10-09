@@ -383,3 +383,60 @@ async def test_unrestricted_ask_may_address_any_identity(monkeypatch, fake_redis
     store = InteractionStore(helper_module.interactions_settings().key_prefix)
     persisted = await _persisted_audience(fake_redis, store, audience="alice")
     assert persisted == "alice"
+
+
+# -- the parked-entry tools answer compact entries ---------------------------
+
+
+_ENTRY_KEYS = {"id": "c1", "status": "asking", "to": "caller", "question": "proceed?", "answer_format": "confirm"}
+
+
+class _ParkedInteractions:
+    """An interactions facet double whose run has one caller ask parked."""
+
+    def _entry(self):
+        from tai42_contract.interactions import ParkedEntry
+
+        return ParkedEntry.model_validate(_ENTRY_KEYS)
+
+    def _asks_outcome(self, **kwargs):
+        from tai42_contract.interactions import SuspendedInteraction, VisitOutcome
+
+        sentinel = SuspendedInteraction(interaction_id="c1", interaction_ids=["c1"], caller_interaction_ids=["c1"])
+        return VisitOutcome(kind="asks", asks=[self._entry()], suspended=sentinel, **kwargs)
+
+    async def list_parked(self):
+        return [self._entry()]
+
+    async def resume_parked(self, interaction_id, payload=None):
+        return self._asks_outcome(action="resumed")
+
+    async def cancel_parked(self, ids):
+        return self._asks_outcome(action="started", cancelled=list(ids))
+
+
+@pytest.fixture
+def parked_facet(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from tai42_contract.app import tai42_app
+
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(interactions=_ParkedInteractions()))
+
+
+async def test_list_parked_answers_each_entry_without_its_unset_fields(parked_facet: None) -> None:
+    # An entry's unset optional fields are absent from the tool's answer, never null keys.
+    assert await builtin_interactions.list_parked() == [_ENTRY_KEYS]
+
+
+async def test_resume_parked_answers_its_new_asks_without_their_unset_fields(parked_facet: None) -> None:
+    answer = await builtin_interactions.resume_parked("c1", "yes")
+
+    assert answer["asks"] == [_ENTRY_KEYS]
+
+
+async def test_cancel_parked_answers_its_remaining_asks_without_their_unset_fields(parked_facet: None) -> None:
+    answer = await builtin_interactions.cancel_parked(["c0"])
+
+    assert answer["cancelled"] == ["c0"]
+    assert answer["asks"] == [_ENTRY_KEYS]
