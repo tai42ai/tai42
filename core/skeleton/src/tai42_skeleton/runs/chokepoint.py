@@ -37,7 +37,11 @@ terminal write, and the resume row records it at START from the ambient
 ``run_tool`` re-entry. First-set wins on the column (the store COALESCEs), so a
 resume that parks AGAIN keeps its origin id and the new park's id is not separately
 recorded — a single-park lifecycle joins fully; a multi-park chain is not end-to-end
-walkable by this column alone. No correlation available → NULL, never an error.
+walkable by this column alone. A dispatch that ends on a ``ResumeBuffered`` (a resume that
+answered one ask and left its siblings open) also terminates ``parked``, but its open ids
+are not a park this dispatch raised, so it writes no id: the row keeps its START value (the
+resume origin of a continuation fire, else NULL). No correlation available → NULL, never an
+error.
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.monitoring import (
     RUN_ATTRIBUTION_TRACE_NAME,
     SpanKind,
@@ -254,11 +258,12 @@ async def _run_trace_root(ambient_trace_id: str | None) -> AsyncIterator[str | N
 class RunRecord:
     """A live run row's handle.
 
-    The binding calls :meth:`observe` with the dispatch result so a park (a
-    ``SuspendedInteraction`` return) is recorded as ``parked`` rather than ``success`` — capturing
-    the sentinel's ``interaction_id`` as the row's lifecycle-correlation key. A dispatch that
-    raises never reaches ``observe`` — the chokepoint records ``aborted`` (a cancellation) or
-    ``error`` (any other escape) from the exception path.
+    The binding calls :meth:`observe` with the dispatch result so a park signal (either of the
+    contract's two) is recorded as ``parked``, never ``success``. A ``SuspendedInteraction``
+    carries its ``interaction_id`` as the row's lifecycle-correlation key; a ``ResumeBuffered``
+    (a resume that left sibling asks open) carries none, so the row keeps the START's resume
+    origin. A dispatch that raises never reaches ``observe`` — the chokepoint records
+    ``aborted`` (a cancellation) or ``error`` (any other escape) from the exception path.
     """
 
     def __init__(self) -> None:
@@ -268,10 +273,13 @@ class RunRecord:
         self.interaction_id: str | None = None
 
     def observe(self, result: object) -> None:
-        """Record the outcome from a dispatch ``result``: ``parked`` on a park sentinel, else ``success``."""
+        """Record the outcome from a dispatch ``result``: ``parked`` on a park signal, else ``success``."""
         if isinstance(result, SuspendedInteraction):
             self.outcome = "parked"
             self.interaction_id = result.interaction_id
+        elif isinstance(result, ResumeBuffered):
+            self.outcome = "parked"
+            self.interaction_id = None
         else:
             self.outcome = "success"
             self.interaction_id = None
@@ -294,7 +302,7 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
     dispatch is a continuation fire, else NULL), sample the trace id, and INSERT the
     ``running`` START row. On exit: UPDATE the terminal outcome — ``aborted`` if a
     cancellation escaped the block, ``error`` if anything else raised, else the
-    observed outcome (``success`` / ``parked``, a park carrying its interaction id) —
+    observed outcome (``success`` / ``parked``, a suspended park carrying its interaction id) —
     with ``ended_at``, a backfilled trace id, and the interaction ids this run resumed or
     took. A no-op (still yields a handle) when the store is OFF or the START write fails.
 

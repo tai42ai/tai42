@@ -21,8 +21,9 @@ _RUNNING = "running"
 _SUCCEEDED = "succeeded"
 _FAILED = "failed"
 _LOST = "lost"
-# A run whose tool async-parked (returned a ``SuspendedInteraction``): a terminal record that
-# did NOT succeed — the deferred answer is delivered out of band by the tool's own resumer, so
+# A run whose tool ended on a park signal (a ``SuspendedInteraction``, or a ``ResumeBuffered``
+# that left sibling asks open): a terminal record that did NOT succeed — the deferred answers
+# are delivered out of band by the tool's own resumer, so
 # recording ``succeeded`` over the unfinished run would be a lie. GENERIC: any parking tool.
 _PARKED = "parked"
 

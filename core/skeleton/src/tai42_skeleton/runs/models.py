@@ -15,10 +15,12 @@ from typing import Literal, get_args
 
 # The closed outcome vocabulary the ``run_index_outcome_check`` constraint enforces:
 # ``running`` is the dispatch-start state (``ended_at`` still NULL); ``success`` /
-# ``error`` are the normal terminal states; ``parked`` is a run whose tool async-parked
-# (returned a ``SuspendedInteraction``) — a terminal record for THIS dispatch even
-# though the deferred answer is delivered out of band, so recording ``success`` over the
-# unfinished work would be a lie (mirrors the tool-run surface's ``parked``);
+# ``error`` are the normal terminal states; ``parked`` is a dispatch that ended on a park
+# signal — a ``SuspendedInteraction`` (its tool async-parked), or a ``ResumeBuffered`` (a
+# resume that answered one ask and left its siblings open; the run stays parked) — a
+# terminal record for THIS dispatch even though the deferred answers are delivered out of
+# band, so recording ``success`` over the unfinished work would be a lie (mirrors the
+# tool-run surface's ``parked``);
 # ``aborted`` is a run whose dispatch was CANCELLED (``asyncio.CancelledError`` — a
 # user abort, a shutdown drain, an epoch retire) — cancelled is not failed, so it is
 # never conflated with ``error``.
@@ -36,11 +38,13 @@ class RunRow:
 
     ``trace_id`` is the monitoring trace for deep-linking — NULLABLE and best-effort
     (a run whose body opens no trace, or a deployment with monitoring disabled, has
-    none). ``interaction_id`` is the lifecycle-correlation key — NULLABLE: a parked
-    row carries the interaction id its ``SuspendedInteraction`` sentinel parked on,
-    and the later out-of-band resume dispatch's row carries the SAME id (the ambient
+    none). ``interaction_id`` is the lifecycle-correlation key — NULLABLE: a row
+    parked on a ``SuspendedInteraction`` carries the interaction id that sentinel parked
+    on, and the later out-of-band resume dispatch's row carries the SAME id (the ambient
     resume origin the continuation drive deposits), so one equality query joins a
-    logical run's parked and resume rows; a plain run has none. ``ended_at`` is
+    logical run's parked and resume rows; a row parked on a ``ResumeBuffered`` carries
+    the START's resume origin when the dispatch was a continuation fire, else none; a
+    plain run has none. ``ended_at`` is
     ``None`` while the run is still ``running`` (in-flight or crash-interrupted).
     ``resumed_interactions`` is the list of parked interaction ids this run resumed or
     took across its whole dispatch span (nested inline resumes included, since a nested

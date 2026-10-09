@@ -32,7 +32,8 @@ class PresetBody(BaseModel):
     schema): on an AGENT base it is baked into the run tool's ``response_format``
     so the agent FORCES a structured output matching it; on a plain tool it is
     advertised as the bound tool's output schema and every result is validated
-    against it at run time. ``input_schema`` is an optional author-set INPUT JSON
+    against it at run time — a park is a suspend signal, not a result, and passes.
+    ``input_schema`` is an optional author-set INPUT JSON
     Schema: it becomes the exposed named tool's input contract, and the caller's
     validated object is routed into the base tool's declared payload argument (see
     :class:`PresetInputSchemaSupport`). Only a base tool that DECLARES input-schema
