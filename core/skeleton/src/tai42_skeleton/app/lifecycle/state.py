@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.manifest import TaiMCPConfig
+from tai42_contract.template import TemplateEviction
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.lifecycle.drain import DrainBudgetRegistry
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools import (
         ToolExtrasRegistry,
+        ToolPauseRegistry,
         ToolRefsRegistry,
         ToolRegistry,
         ToolRetryRegistry,
@@ -132,6 +134,10 @@ class LifecycleState(ABC):
         # prefork pool turnover is the known consumer).
         self._fleet_op_applied_handlers: dict[str, Callable] = {}
 
+        # Handlers fired, synchronously, with every ``TemplateEviction`` the resource
+        # manager applies. Keyed by qualified name, like the fleet-op registry.
+        self._template_evicted_handlers: dict[str, Callable[[TemplateEviction], Any]] = {}
+
         # Lifespan-owned exponential-backoff task that re-probes failed-at-boot
         # MCP servers so a deploy-order race (the MCP pod comes up after the
         # skeleton) self-heals without a manual reload. Distinct from the
@@ -206,6 +212,7 @@ class LifecycleState(ABC):
         async def _run_handlers(self, handlers: list[Callable], raise_on_error: bool = False): ...
         async def _run_post_swap_handlers(self, *, raise_on_error: bool) -> None: ...
         async def _run_fleet_op_applied_handlers(self, op_name: str, budget: float) -> None: ...
+        def _fire_template_evicted(self, eviction: TemplateEviction) -> None: ...
         def _epoch_handlers(self) -> list[Callable]: ...
         def _refresh_manifest_mcp(self) -> None: ...
         def _require_live_manifest(self) -> "Manifest": ...
@@ -266,6 +273,7 @@ class LifecycleState(ABC):
     _tool_refs_registry: "ToolRefsRegistry"
     _tool_retry_registry: "ToolRetryRegistry"
     _tool_extras_registry: "ToolExtrasRegistry"
+    _tool_pause_registry: "ToolPauseRegistry"
     _rename_referee_registry: "ToolRenameRefereeRegistry"
     _delete_referee_registry: "ToolDeleteRefereeRegistry"
     _detach_referee_registry: "StateTemplateDetachRefereeRegistry"

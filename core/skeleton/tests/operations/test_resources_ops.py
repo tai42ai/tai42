@@ -111,7 +111,7 @@ async def test_rejects_traversal_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    real_manager = ResourceManager(registry.provider)
+    real_manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
     monkeypatch.setattr(
         resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=real_manager))
     )

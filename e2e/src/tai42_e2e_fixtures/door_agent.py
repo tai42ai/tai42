@@ -21,6 +21,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.events import StreamEvent
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import TOOL_META_PAUSES
 
 AGENT_NAME = "e2e_door_agent"
 
@@ -39,7 +40,7 @@ class _DoorAgentInput(BaseModel):
     thread_id: str | None = Field(default=None, description="The conversation thread the run uses.")
 
 
-@tai42_app.agents.agent(AGENT_NAME, tags={"e2e"})
+@tai42_app.agents.agent(AGENT_NAME, tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 class E2eDoorAgent(Agent):
     """A ``tools_agent`` carrying :data:`BAKED_TOOL_NAMES`, registered under its own name so a
     conversation route can target it and reach the caller-ask tool."""

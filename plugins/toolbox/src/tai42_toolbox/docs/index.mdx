@@ -40,7 +40,9 @@ Each extension branches a tool into a variant; attach one through a manifest's
 
 ### batch
 
-Branches a tool into a variant that runs many instances at once.
+Branches a tool into a variant that runs many instances at once. The extension declares
+that its branches can pause (`pauses=True`): an instance that parks surfaces its park
+through the batch variant.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -57,7 +59,9 @@ Branches a tool into a variant that memoizes results by call arguments.
 
 ### chain
 
-Branches a tool into a variant that transforms its output and calls a next tool.
+Branches a tool into a variant that transforms its output and calls a next tool. The
+extension declares that its branches can pause (`pauses=True`): a stage that parks surfaces
+its park through the chain variant.
 
 ### output_schema
 

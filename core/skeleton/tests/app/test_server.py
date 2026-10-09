@@ -513,7 +513,7 @@ def test_resource_manager_caches_instance():
     b._storage_registry = MagicMock()
     with patch.object(server_module, "ResourceManager", return_value="built") as rm:
         assert b.storage.resource_manager == "built"
-    rm.assert_called_once_with(b._storage_registry.provider)
+    rm.assert_called_once_with(b._storage_registry.provider, on_evicted=b._fire_template_evicted)
 
 
 def test_extension_decorator_noops_registration_into_registry():

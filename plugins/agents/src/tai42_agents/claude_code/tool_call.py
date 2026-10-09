@@ -14,6 +14,7 @@ from tai42_contract.interactions import (
     SuspendedInteraction,
     assert_park_adoptable,
 )
+from tai42_contract.tools import UndeclaredPauseError
 
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
 from tai42_agents.claude_code.protocol import ProtocolError, ToolCallFrame, ToolResultFrame, dump_frame
@@ -59,6 +60,9 @@ async def run_proxied_tool_call(
     try:
         with nested_tool_dispatch():
             result = await tai42_app.tools.run_tool(frame.tool_name, frame.arguments)
+    except UndeclaredPauseError:
+        # A registration fault, never a tool result the session may retry around: the drive ends.
+        raise
     except Exception as exc:
         await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True)))
         return None

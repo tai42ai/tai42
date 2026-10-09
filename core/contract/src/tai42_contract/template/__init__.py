@@ -27,6 +27,8 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+from tai42_contract.template.eviction import TemplateEviction
+
 # The vendor-extension key a jq-typed property carries in generated JSON schemas.
 EXPRESSION_ANNOTATION_KEY = "x-tai42-expression"
 
@@ -183,6 +185,7 @@ __all__ = [
     "TEMPLATED_TEXT_ANNOTATION_KEY",
     "ConditionMixin",
     "ExprMixin",
+    "TemplateEviction",
     "TemplatedText",
     "expression_annotation",
 ]

@@ -61,7 +61,7 @@ def _manager(items: dict[str, str] | None = None) -> tuple[ResourceManager, _InM
     registry = StorageRegistry()
     store = _InMemoryStorage(items)
     registry.register_storage(lambda: store)  # type: ignore[arg-type]
-    return ResourceManager(registry.provider), store
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None), store
 
 
 # --- construction: cache enabled vs disabled --------------------------------

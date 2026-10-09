@@ -34,6 +34,7 @@ from tai42_contract.states import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import (
+    TOOL_META_PAUSES,
     ToolInvocation,
     current_tool_invocation,
     reset_current_tool_invocation,
@@ -306,7 +307,7 @@ def test_in_process_park_result_applies_no_updates_but_injects_and_records_parke
         async with app.app_context(Manifest.model_validate({})):
             fake.patch_onto(app._states_facet, monkeypatch)
 
-            @app.tools.tool(force=True)
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker(x: int, injected: dict | None = None) -> SuspendedInteraction:
                 """Probe tool that async-parks: returns the suspended sentinel in place of an output."""
                 seen["injected"] = injected

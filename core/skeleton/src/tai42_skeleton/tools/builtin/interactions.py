@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import AnswerMismatchPolicy
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.interactions import ask as _ask
 
@@ -31,7 +32,7 @@ _ANSWER_SCHEMA: dict[str, Any] = {
 }
 
 
-@tai42_app.tools.tool(output_schema=_ANSWER_SCHEMA, tags={"interactions"})
+@tai42_app.tools.tool(output_schema=_ANSWER_SCHEMA, tags={"interactions"}, meta={TOOL_META_PAUSES: True})
 async def ask(
     question: str,
     answer_format: str = "text",

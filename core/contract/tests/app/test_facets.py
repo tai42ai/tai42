@@ -28,14 +28,14 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 149 (sub-protocol, member) pairs over 145
+# The frozen facade surface: the 152 (sub-protocol, member) pairs over 148
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
 # (webhook_verifiers + channels), so the distinct-name union is four
 # fewer than the pair count.
 EXPECTED_FACADE = {
-    # tools (20)
+    # tools (21)
     "tool",
     "surface_generation",
     "toolkit",
@@ -56,6 +56,7 @@ EXPECTED_FACADE = {
     "tier",
     "extras",
     "declared_extras",
+    "pauses",
     # agents (3)
     "agent",
     "get_agent",
@@ -68,9 +69,11 @@ EXPECTED_FACADE = {
     "sandbox",
     "require_sandbox",
     "sandbox_policy",
-    # storage (2)
+    # storage (4)
     "register_storage",
     "resource_manager",
+    "on_template_evicted",
+    "template_reads",
     # connectors (3)
     "register_connector",
     "token_store",
@@ -158,7 +161,7 @@ EXPECTED_FACADE = {
     "mcp_sub_app_router",
     # versioning (1)
     "store",
-    # presets (10) — `store` shared with versioning above
+    # presets (12) — `store` shared with versioning above
     "bind",
     "create",
     "save_version",
@@ -172,7 +175,7 @@ EXPECTED_FACADE = {
     "used_by",
     # tool_meta (2) — `store` shared with versioning and presets above
     "patch",
-    # states (31)
+    # states (38)
     "list_declarations",
     "get_declaration",
     "put_declaration",
@@ -312,11 +315,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 149 (sub-protocol, member) pairs over 145 distinct names — ``store`` is exposed
+    # 152 (sub-protocol, member) pairs over 148 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 145, f"union={len(union)}"
-    assert total == 149 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 148, f"union={len(union)}"
+    assert total == 152 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():

@@ -415,7 +415,7 @@ def test_import_without_creds_succeeds_and_full_validation_still_raises_at_run(
         # Executing the module body runs the decorator with NO operator env present; it must NOT
         # raise, and the crash_resume meta defaults to False when unset.
         spec.loader.exec_module(fresh)
-        assert APP.agents.meta["langchain_deep_agent"] == {"tai42/crash_resume": False}
+        assert APP.agents.meta["langchain_deep_agent"]["tai42/crash_resume"] is False
         # Full config validation is unchanged — with no digest ``session_image`` it raises loudly, so
         # the loud error lands at run start (the first ``astream``/``run`` reads it), not at import.
         with pytest.raises(ValidationError):

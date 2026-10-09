@@ -38,7 +38,12 @@ from tai42_contract.states import (
     UnitCommitResult,
 )
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
+from tai42_contract.tools import (
+    TOOL_META_PAUSES,
+    ToolInvocation,
+    reset_current_tool_invocation,
+    set_current_tool_invocation,
+)
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
@@ -221,7 +226,7 @@ async def test_in_process_park_defers_door_updates_to_the_real_terminal(monkeypa
 
             deadline = datetime.now(UTC) + timedelta(hours=1)
 
-            @app.tools.tool(force=True)
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker(x: int, injected: dict | None = None) -> SuspendedInteraction:
                 """A bound tool that async-parks instead of returning a clean output."""
                 return await helper_module.ask("proceed?", mode="async", expiry_at=deadline)
@@ -281,7 +286,7 @@ async def test_mcp_edge_park_defers_door_updates_to_the_real_terminal(monkeypatc
 
             deadline = datetime.now(UTC) + timedelta(hours=1)
 
-            @app.tools.tool(force=True)
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parker(x: int, injected: dict | None = None) -> SuspendedInteraction:
                 """A bound tool that async-parks at the MCP edge."""
                 return await helper_module.ask("proceed?", mode="async", expiry_at=deadline)

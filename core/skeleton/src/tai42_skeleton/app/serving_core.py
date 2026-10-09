@@ -34,6 +34,7 @@ from tai42_skeleton.states.service import (
 )
 from tai42_skeleton.tools import (
     ToolExtrasRegistry,
+    ToolPauseRegistry,
     ToolRefsRegistry,
     ToolRegistry,
     ToolRetryRegistry,
@@ -197,6 +198,57 @@ class ServingCore:
         # unregistered path; budgets are tunable per family via TAI_RATE_LIMIT_*.
         self._http_surface.middleware(RateLimitMiddleware)
 
+        # The registries the manifest's modules register into, reset each start().
+        self._build_start_reset_registries()
+
+        # The backup registry is the host's first consumer of its own AppBackup facet:
+        # the core host sections are registered here (never on reload, which keeps this
+        # object), so the duplicate-name guard is never tripped.
+        self._backup_registry = BackupRegistry()
+        register_core_sections(self._backup_registry)
+
+        # The ``tool`` deferred-call kind registers itself at import; a unit's ``defer_call`` uses it.
+        import tai42_skeleton.tools.deferred  # noqa: F401
+
+        # The preset register/reload engine, rehydrated per epoch from the store by the
+        # startup/reload handler.
+        self._preset_manager = PresetManager(app)
+
+        # Per-epoch generation state, reached through the app's forwarding properties so
+        # a build populates THIS core and a failed build is discarded with it untouched.
+        # ``None`` manifest is the pre-boot no-op contract the registration
+        # decorators truthiness-check; the registries/maps are empty-but-valid until
+        # ``start()`` rebuilds them from the manifest.
+        self._manifest: Manifest | None = None
+        self._tool_registry: ToolRegistry = ToolRegistry(set[str](), {})
+        self._extension_registry: ExtensionRegistry = ExtensionRegistry(frozenset[str]())
+        # Manifest MCP servers that failed their viability check (title -> the failure
+        # record: status, credential-free category, redacted message, http_status),
+        # the tools each live MCP bound (per title, so a targeted reload replaces cleanly),
+        # the per-title names a scoped MCP (re)bind refused because a preset owns them,
+        # and the per-title tools a (re)bind skipped because they advertised an unusable schema.
+        self._failed_mcps: dict[str, dict[str, Any]] = {}
+        self._mcp_bound_tools: dict[str, set[str]] = {}
+        self._mcp_preset_conflicts: dict[str, set[str]] = {}
+        self._mcp_unusable_tools: dict[str, set[str]] = {}
+        # Cached resource manager: dropped each start() so a reload rebuilds it against
+        # the freshly-imported storage provider rather than pinning the previous pool.
+        self._resource_manager_cache: ResourceManager | None = None
+
+        # The identity/accounts providers this epoch instantiated ONCE at build time
+        # (``probe_identity_provider``), keyed by configured name. The live verifier and
+        # the accounts-provider routes resolve THIS epoch's instances here rather than
+        # re-instantiating per request or reading a plugin module holder — so a failed
+        # build's providers are GC'd with the discarded core and never leak.
+        self.active_auth_providers: dict[str, IdentityProvider] = {}
+
+    def _build_start_reset_registries(self) -> None:
+        """Construct the per-epoch registries ``start()`` resets and the manifest's modules register into.
+
+        Every registry here is reset on each start, so a reload re-imports the manifest's
+        modules and re-registers cleanly. The states service is built here too: it holds
+        the states registries by reference.
+        """
         # Webhook-verifier + channel registries, reset each start() so a reload
         # re-imports the manifest's modules and re-registers cleanly.
         self._webhook_verifier_registry = WebhookVerifierRegistry()
@@ -233,6 +285,10 @@ class ServingCore:
         # reset each start() for the same reload reason.
         self._tool_extras_registry = ToolExtrasRegistry()
 
+        # The bound tool names that can pause (a ``TOOL_META_PAUSES`` declaration or a
+        # ``pauses=True`` extension in a branch's stack), reset each start() likewise.
+        self._tool_pause_registry = ToolPauseRegistry()
+
         # Tool-rename referee registry + declared-preset-seed registry, reset each
         # start() alongside the registries above so a reload re-imports the plugin
         # modules (and re-arms the platform-internal referees) cleanly. The referee
@@ -241,12 +297,6 @@ class ServingCore:
         self._delete_referee_registry = ToolDeleteRefereeRegistry()
         self._detach_referee_registry = StateTemplateDetachRefereeRegistry()
         self._seed_registry = PresetSeedRegistry()
-
-        # The backup registry is the host's first consumer of its own AppBackup facet:
-        # the core host sections are registered here (never on reload, which keeps this
-        # object), so the duplicate-name guard is never tripped.
-        self._backup_registry = BackupRegistry()
-        register_core_sections(self._backup_registry)
 
         # The subject-keyed state store: one shared service over the record substrate,
         # plus the consumer-owned registries (attach validators, consumer listers, template
@@ -263,37 +313,3 @@ class ServingCore:
             consumer_listers=self._states_consumer_listers,
             seeds=self._states_template_seeds,
         )
-        # The ``tool`` deferred-call kind registers itself at import; a unit's ``defer_call`` uses it.
-        import tai42_skeleton.tools.deferred  # noqa: F401
-
-        # The preset register/reload engine, rehydrated per epoch from the store by the
-        # startup/reload handler.
-        self._preset_manager = PresetManager(app)
-
-        # Per-epoch generation state, reached through the app's forwarding properties so
-        # a build populates THIS core and a failed build is discarded with it untouched.
-        # ``None`` manifest is the pre-boot no-op contract the registration
-        # decorators truthiness-check; the registries/maps are empty-but-valid until
-        # ``start()`` rebuilds them from the manifest.
-        self._manifest: Manifest | None = None
-        self._tool_registry: ToolRegistry = ToolRegistry(set[str](), {})
-        self._extension_registry: ExtensionRegistry = ExtensionRegistry(frozenset[str]())
-        # Manifest MCP servers that failed their viability check (title -> the failure
-        # record: status, credential-free category, redacted message, http_status),
-        # the tools each live MCP bound (per title, so a targeted reload replaces cleanly),
-        # the per-title names a scoped MCP (re)bind refused because a preset owns them,
-        # and the per-title tools a (re)bind skipped because they advertised an unusable schema.
-        self._failed_mcps: dict[str, dict[str, Any]] = {}
-        self._mcp_bound_tools: dict[str, set[str]] = {}
-        self._mcp_preset_conflicts: dict[str, set[str]] = {}
-        self._mcp_unusable_tools: dict[str, set[str]] = {}
-        # Cached resource manager: dropped each start() so a reload rebuilds it against
-        # the freshly-imported storage provider rather than pinning the previous pool.
-        self._resource_manager_cache: ResourceManager | None = None
-
-        # The identity/accounts providers this epoch instantiated ONCE at build time
-        # (``probe_identity_provider``), keyed by configured name. The live verifier and
-        # the accounts-provider routes resolve THIS epoch's instances here rather than
-        # re-instantiating per request or reading a plugin module holder — so a failed
-        # build's providers are GC'd with the discarded core and never leak.
-        self.active_auth_providers: dict[str, IdentityProvider] = {}

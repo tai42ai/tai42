@@ -52,9 +52,16 @@ class ExtensionRegistry(BaseRegistry):
         self._extensions: dict[str, Callable] = {}
         self._available_extensions: set[str] = set()
         self._requires_body_locality: dict[str, bool] = {}
+        self._pauses: dict[str, bool] = {}
 
     def register_extension(
-        self, func: Callable, kind: ExtensionKind, name: str, *, requires_body_locality: bool = False
+        self,
+        func: Callable,
+        kind: ExtensionKind,
+        name: str,
+        *,
+        requires_body_locality: bool = False,
+        pauses: bool = False,
     ):
         """Register extension ``func`` under ``name`` with its ``kind``; a duplicate name raises."""
         # The registry is rebuilt fresh on every start/reload, so a name already
@@ -66,6 +73,7 @@ class ExtensionRegistry(BaseRegistry):
         self._extensions[name] = func
         self._kinds[name] = kind
         self._requires_body_locality[name] = requires_body_locality
+        self._pauses[name] = pauses
         self._available_extensions.add(name)
 
     def extension(
@@ -75,6 +83,7 @@ class ExtensionRegistry(BaseRegistry):
         kind: ExtensionKind,
         name: str | None = None,
         requires_body_locality: bool = False,
+        pauses: bool = False,
     ):
         """Decorator form of :meth:`register_extension` (the ``app.extensions`` facet body); bare or with arguments.
 
@@ -82,12 +91,15 @@ class ExtensionRegistry(BaseRegistry):
         the process running the tool body it wraps; the bind engine reads it to
         require the extension to sit INSIDE any execution-relocating
         (``ExtensionKind.relocates_execution``) extension in a stacked combo.
+        ``pauses`` marks an extension every branch of which can pause, whatever its base declares.
         """
         if f and callable(f):
-            return self.extension(kind=kind, name=name, requires_body_locality=requires_body_locality)(f)
+            return self.extension(kind=kind, name=name, requires_body_locality=requires_body_locality, pauses=pauses)(f)
 
         def decorator(func):
-            self.register_extension(func, kind, name or func.__name__, requires_body_locality=requires_body_locality)
+            self.register_extension(
+                func, kind, name or func.__name__, requires_body_locality=requires_body_locality, pauses=pauses
+            )
             return func
 
         return decorator
@@ -117,6 +129,14 @@ class ExtensionRegistry(BaseRegistry):
         name = extension_name(element)
         try:
             return self._requires_body_locality[name]
+        except KeyError:
+            raise TaiValidationError(f"Extension '{name}' is not registered.") from None
+
+    def pauses(self, element: ExtensionElement) -> bool:
+        """Whether the extension registered with ``pauses=True`` (every branch it mints can pause)."""
+        name = extension_name(element)
+        try:
+            return self._pauses[name]
         except KeyError:
             raise TaiValidationError(f"Extension '{name}' is not registered.") from None
 

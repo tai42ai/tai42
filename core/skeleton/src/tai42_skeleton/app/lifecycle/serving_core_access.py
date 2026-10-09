@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools import (
         ToolExtrasRegistry,
+        ToolPauseRegistry,
         ToolRefsRegistry,
         ToolRetryRegistry,
         ToolTierRegistry,
@@ -247,6 +248,10 @@ class ServingCoreAccessMixin(LifecycleState):
     @property
     def _tool_extras_registry(self) -> "ToolExtrasRegistry":
         return self._serving_core._tool_extras_registry
+
+    @property
+    def _tool_pause_registry(self) -> "ToolPauseRegistry":
+        return self._serving_core._tool_pause_registry
 
     @property
     def _rename_referee_registry(self) -> "ToolRenameRefereeRegistry":

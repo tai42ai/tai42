@@ -170,6 +170,26 @@ class _ResolutionMixin(_ToolBindingBase):
                 return declared
         return frozenset()
 
+    async def pauses(self, key: str) -> bool:
+        """Whether a dispatch of ``key`` can return a park signal.
+
+        ``key`` was recorded as able to pause at bind (a declared tool, a branch of one, a branch
+        minted by a ``pauses=True`` extension), or it resolves to a preset whose ``parent_tool``
+        chain reaches such a tool. An unknown name answers ``False``: its own dispatch surfaces
+        the not-found.
+        """
+        if key in self._tool_pause_registry:
+            return True
+        try:
+            tool_obj: Tool = await self._resolve_run_target(key)
+        except UnknownToolError:
+            return False
+        while isinstance(tool_obj, TransformedTool):
+            tool_obj = tool_obj.parent_tool
+            if tool_obj.name in self._tool_pause_registry:
+                return True
+        return False
+
     def _retry_policy_for(self, key: str, mcp_tool: Tool) -> ToolRetryPolicy | None:
         """The declared retry policy governing a dispatch of ``key``, or ``None``.
 

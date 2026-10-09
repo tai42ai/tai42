@@ -50,7 +50,7 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tai42_contract.tools import get_run_delivery_id
+from tai42_contract.tools import TOOL_META_PAUSES, get_run_delivery_id
 from tai42_kit.llm.runtime import build_user_output, extract_structured_output
 
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
@@ -208,7 +208,7 @@ register_agent_resume_tool()
 register_chained_park_tool()
 
 
-@tai42_app.agents.agent("tools_agent", tags={"agents"})
+@tai42_app.agents.agent("tools_agent", tags={"agents"}, meta={TOOL_META_PAUSES: True})
 class ToolsAgent(Agent):
     """A LangGraph tools agent: loads tools by name (and optional presets) and runs system/user messages."""
 

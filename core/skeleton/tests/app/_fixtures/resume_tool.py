@@ -17,10 +17,10 @@ from tai42_contract.interactions import (
     SuspendedInteraction,
     get_resume_continuation_tool,
 )
-from tai42_contract.tools import current_tool_invocation
+from tai42_contract.tools import TOOL_META_PAUSES, current_tool_invocation
 
 
-@tai42_app.tools.tool
+@tai42_app.tools.tool(meta={TOOL_META_PAUSES: True})
 async def resume_tool(interaction_id: str, answer: Any) -> Any:
     """A continuation face: branch on ``answer`` to return each outcome shape a driver produces.
 

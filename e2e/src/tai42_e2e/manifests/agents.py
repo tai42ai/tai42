@@ -206,7 +206,9 @@ def build_agent_async_park_stack(res: StackResources, variants: Variants) -> Sta
     feature Redis (``TAI_AGENTS_REDIS_URL``). Loading ``tools_agent`` alone registers the hidden
     ``agent_resume`` continuation the park fires (any park-capable agent module does through the
     shared park machinery), and its simpler loop drives the run. Auth off, so the probe tool
-    binds the synthetic identity ``ask`` needs."""
+    binds the synthetic identity ``ask`` needs. The ``chain`` branch of the undeclared parking
+    probe (``e2e_undeclared_park_chain``) lets a spec drive the undeclared-park refusal from a
+    branch the model calls, beside the run-tool door and the MCP edge."""
     if res.checkpoint_redis_url is None:
         raise RuntimeError(
             "build_agent_async_park_stack requires resources.checkpoint_redis_url; allocate_resources must run "
@@ -215,9 +217,13 @@ def build_agent_async_park_stack(res: StackResources, variants: Variants) -> Sta
     manifest = {
         "default_routers": "none",
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.agents"],
-        "extensions_modules": ["tai42_toolbox.extensions.prometheus", "tai42_toolbox.extensions.proxy"],
+        "extensions_modules": [
+            "tai42_toolbox.extensions.prometheus",
+            "tai42_toolbox.extensions.proxy",
+            "tai42_toolbox.extensions.chain",
+        ],
         "tools": [
-            _probe_tools_entry(with_backend_branches=False),
+            _probe_tools_entry(with_backend_branches=False, with_undeclared_park_chain=True),
             *_builtin_entries(),
         ],
         "agents": [

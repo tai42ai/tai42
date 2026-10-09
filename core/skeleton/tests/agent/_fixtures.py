@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.tools import TOOL_META_PAUSES
 
 
 class EchoInput(BaseModel):
@@ -148,7 +149,7 @@ class ParkInput(BaseModel):
     text: str = ""
 
 
-@tai42_app.agents.agent("parking")
+@tai42_app.agents.agent("parking", meta={TOOL_META_PAUSES: True})
 class ParkingAgent(Agent):
     """A run that parks on an async ask: its ``run`` returns a ``SuspendedInteraction`` typed
     value (the shape ``Agent._drain`` yields), so a test can observe the agent tool-face pass the

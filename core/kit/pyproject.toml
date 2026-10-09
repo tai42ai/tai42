@@ -80,8 +80,9 @@ llm = [
     "redisvl>=0.15.0,<1",
 ]
 
-# jq expression compilation (utils/data/jq_util.py) — a C extension, opt-in.
-jq = ["jq>=1.10"]
+# jq expression compilation (utils/data/jq_util.py) — a C extension, opt-in;
+# orjson encodes the evaluation envelope into the JSON text jq reads.
+jq = ["jq>=1.10", "orjson>=3.11"]
 
 # uvicorn CLI-arg parsing (utils/runtime/uvicorn_util.py) — opt-in for
 # consumers that run their own server.
@@ -153,6 +154,8 @@ dev = [
     # in-process Redis; the park index's scripts need its Lua support.
     "fakeredis[lua]>=2.21",
     "redis>=5",
+    # The jq envelope-encoding parity tests compare numpy scalars with json.dumps.
+    "numpy>=2",
 ]
 
 [tool.setuptools]

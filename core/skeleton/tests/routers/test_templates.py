@@ -393,7 +393,7 @@ def real_manager(monkeypatch):
     """
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    tm = ResourceManager(registry.provider)
+    tm = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
     monkeypatch.setattr(templates_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=tm)))
     monkeypatch.setattr(instance.app, "_bus", FakeBus())
     return tm
