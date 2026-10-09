@@ -25,6 +25,7 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
+from tai42_contract.states.pending import HeldPendingSave, PruneResult, StateDeclarationSaved
 from tai42_contract.states.rendered import RenderedAttachment, RenderedStateTemplate, ResolvedTemplateJq
 
 
@@ -51,14 +52,18 @@ class AppStates(Protocol):
         """The declaration named ``name``, or ``None`` when none is declared."""
         ...
 
-    async def put_declaration(self, decl: StateDeclaration) -> StateDeclaration:
-        """Declare or re-declare a state and return the stored declaration.
+    async def put_declaration(self, decl: StateDeclaration) -> StateDeclarationSaved:
+        """Declare or re-declare a state and return the stored declaration with the held saves it was accepted beside.
 
         An additive re-declare (new optional fields, new subject kinds) is applied in
         place; a change that would remove or narrow a field while records exist raises
         :class:`~tai42_contract.states.NonAdditiveRedeclareError` (erase the records
         first), and removing a subject kind still present in records raises
         :class:`~tai42_contract.states.DeclarationInUseError`. Never a silent overwrite.
+        The state's pending saves are applied first; a save held by a failed save counts as
+        records present, so a re-declare that would refuse its document or remove a kind it
+        writes raises :class:`~tai42_contract.states.DeclarationInUseError`, and an accepted one
+        names it in ``held``.
         """
         ...
 
@@ -70,7 +75,11 @@ class AppStates(Protocol):
         ...
 
     async def stats(self, name: str) -> dict[str, Any]:
-        """Counts for a state — records, subjects by kind, consumers — for the listing."""
+        """Counts for a state — records, subjects by kind, consumers — for the listing.
+
+        Counted over committed records; ``held`` lists the saves held by a failed save that the
+        counts do not include (each a :class:`~tai42_contract.states.HeldPendingSave` dump).
+        """
         ...
 
     # --- Templates ---
@@ -170,23 +179,25 @@ class AppStates(Protocol):
         """
         ...
 
-    async def attach(self, state: str, template: str, body: AttachBody) -> None:
+    async def attach(self, state: str, template: str, body: AttachBody) -> list[HeldPendingSave]:
         """Attach ``template`` on ``state`` at ``body.path``, recomposing the effective schema in one transaction.
 
         Stores the resolved parameters and declarations. Runs every registered attach validator before the write; a
         raise refuses the door with the validator's message. Overlapping fragments raise
-        :class:`~tai42_contract.states.AttachConflictError`.
+        :class:`~tai42_contract.states.AttachConflictError`. Returns the saves held by a failed save
+        whose subjects the validators and reconcilers read over their committed records.
         """
         ...
 
     async def update_attachment_declarations(
         self, state: str, template: str, declarations: dict[str, Any], *, options: dict[str, Any] | None = None
-    ) -> None:
+    ) -> list[HeldPendingSave]:
         """Replace an attachment's declaration values, recomposing the effective schema before the write.
 
         Re-runs every registered attach validator and reconciler before the write.
         ``options`` is a per-operation directive bag passed to the reconcilers for THIS
-        operation only, never stored or served back (``None`` is an empty bag).
+        operation only, never stored or served back (``None`` is an empty bag). Returns the saves
+        held by a failed save whose subjects were read over their committed records.
         """
         ...
 
@@ -318,7 +329,9 @@ class AppStates(Protocol):
     ) -> dict[str, Any]:
         """A keyset page of subjects for ``state`` (optionally one ``kind``).
 
-        ``{"subjects": [...], "next_cursor": <cursor|None>}``.
+        ``{"subjects": [...], "next_cursor": <cursor|None>, "held": [...]}`` — served over committed
+        records; ``held`` lists the saves held by a failed save whose subjects show their last
+        applied data (each a :class:`~tai42_contract.states.HeldPendingSave` dump).
         """
         ...
 
@@ -327,7 +340,8 @@ class AppStates(Protocol):
     ) -> dict[str, Any]:
         """A keyset page of records whose document contains ``filters``.
 
-        ``{"matches": [...], "next_cursor": <cursor|None>}``.
+        ``{"matches": [...], "next_cursor": <cursor|None>, "held": [...]}`` — ``held`` as for
+        :meth:`list_subjects`.
         """
         ...
 
@@ -342,8 +356,12 @@ class AppStates(Protocol):
         """
         ...
 
-    async def prune_expired(self) -> dict[str, int]:
-        """Delete records past their state's ``retention_days`` and return the per-state deletion counts."""
+    async def prune_expired(self) -> PruneResult:
+        """Delete records past their state's ``retention_days`` and return the per-state deletion counts.
+
+        A subject held by a failed pending save keeps its record; the held saves are named in
+        ``held``.
+        """
         ...
 
     # --- Ambient context (read-only; the doors deposit it, not consumers) ---

@@ -55,8 +55,17 @@ class _StoreBase(ABC):
         """The cursor a read runs on — a plain pooled connection, or the caller's transaction when threaded in."""
 
     @abstractmethod
-    async def _resolve_subject(self, cur: Any, state: str, subject: StateSubject) -> tuple[str, str]:
-        """The canonical ``(kind, key)`` for ``subject``, resolved through the alias table on the cursor."""
+    def begin(self) -> AbstractAsyncContextManager[AsyncConnection[Any]]:
+        """A pooled connection with an open transaction — the atomic boundary for multi-statement callers."""
+
+    @abstractmethod
+    async def _resolve_subject(
+        self, cur: Any, state: str, subject: StateSubject, *, check_outbox: bool
+    ) -> tuple[str, str]:
+        """The canonical ``(kind, key)`` for ``subject``, resolved through the alias table on the cursor.
+
+        ``check_outbox`` raises when the subject's record has an unapplied pending save.
+        """
 
     @staticmethod
     @abstractmethod

@@ -891,3 +891,19 @@ async def test_submit_unauthenticated_binds_nothing(wired):
     await _drain()
 
     assert tools.seen_identities == [None]
+
+
+async def test_a_background_submit_drains_its_subject_once_in_its_supervised_run(wired):
+    from .._drain_spy import spy_on_drains, subject_key
+
+    spy = spy_on_drains(wired.monkeypatch)
+    tools = wired.install()
+    tools.result = {"ok": 1}
+    subject = StateSubject(target_kind="tool", target_name="alpha", kind="thread", key="t-1")
+    out = await ops.submit_run("alpha", {"x": 2}, subject=subject)
+    await _drain()
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "succeeded"
+    # One drain, at the supervised run's visit — in the detached supervisor task, not the submitter's.
+    assert spy.keys == [[subject_key("tool", "alpha", "thread", "t-1")]]
+    assert spy.tasks[0] is not asyncio.current_task()

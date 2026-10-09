@@ -429,6 +429,22 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "resumedInteractions",
         ),
     ),
+    ("GET", "/api/state-pending-saves"): RouteShape(
+        items_key="items",
+        columns=(
+            "id",
+            "status",
+            "run_id",
+            "states",
+            "subjects",
+            "calls",
+            "attempts",
+            "last_error",
+            "failed_phase",
+            "created_at",
+            "failed_at",
+        ),
+    ),
     ("GET", "/api/state-templates"): RouteShape(
         items_key=None,
         columns=(
@@ -552,6 +568,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "effective_schema",
             "regimes",
             "updated_at",
+            "held",
         ),
     ),
     ("PUT", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"): RouteShape(

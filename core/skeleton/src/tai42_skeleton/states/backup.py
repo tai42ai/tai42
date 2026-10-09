@@ -44,6 +44,13 @@ _ENTITY_ERRORS = (StatesError, KeyError, TypeError, ValueError)
 _RESTORE_ORIGIN = WriteOrigin(consumer="backup-restore")
 
 
+def _concrete_states() -> Any:
+    """The skeleton states facet, whose backup-only doors sit off the ``AppStates`` protocol."""
+    from tai42_skeleton.app import instance
+
+    return instance.app.states
+
+
 async def export_states() -> dict[str, Any]:
     """The section exporter: every template, declaration, attachment, record and alias.
 
@@ -58,8 +65,12 @@ async def export_states() -> dict[str, Any]:
     attachments: list[dict[str, Any]] = []
     aliases: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
+    from tai42_skeleton.app import instance
+
     for decl in await store.list_declarations():
         state = decl["name"]
+        # A backup must not capture records that silently lack a held save.
+        await instance.app.states.drain_pending_saves(state, held="raise", scan="backup export")
         declarations.append(
             {
                 "name": state,
@@ -120,6 +131,9 @@ async def _import_declarations(payload: dict[str, Any], report: dict[str, Any]) 
     for entry in payload.get("declarations") or []:
         try:
             existed = await tai42_app.states.get_declaration(entry["name"]) is not None
+            if existed:
+                # A restore must not interleave with a held save it would overwrite.
+                await _concrete_states().drain_pending_saves(entry["name"], held="raise", scan="restore")
             await tai42_app.states.put_declaration(StateDeclaration.model_validate(entry))
         except _ENTITY_ERRORS as exc:
             report["declarations"]["failed"] += 1

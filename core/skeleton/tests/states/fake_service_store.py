@@ -36,7 +36,8 @@ _CHECK_RESOURCES = {
 class FakeStatesStore:
     """An in-memory stand-in for :class:`PostgresStatesStore` covering the methods the
     service drives — enough to pin the service's validate+apply logic. Every read returns a
-    deep copy, as a database read is a snapshot a later write never changes in place."""
+    deep copy, as a database read is a snapshot a later write never changes in place. Its
+    pending-save outbox is always empty: every drain finds nothing outstanding."""
 
     def __init__(self) -> None:
         self.declarations: dict[str, dict[str, Any]] = {}
@@ -146,13 +147,14 @@ class FakeStatesStore:
         *,
         effective_schema,
         decide,
+        held_saves=(),
     ):
         existing = self.declarations.get(name)
         per_kind: dict[str, int] = {}
         for state, _tk, _tn, sk, _key in self.records:
             if state == name:
                 per_kind[sk] = per_kind.get(sk, 0) + 1
-        outcome = decide(existing, per_kind)
+        outcome = decide(existing, per_kind, [])
         if inspect.isawaitable(outcome):
             await outcome
         version = self._next_version()
@@ -167,6 +169,7 @@ class FakeStatesStore:
             "updated_at": 1,
             "version": version,
         }
+        return list(held_saves)
 
     async def delete_declaration(self, name):
         return self.declarations.pop(name, None) is not None
@@ -258,14 +261,25 @@ class FakeStatesStore:
         return True
 
     # records
-    async def read_record_view(self, state, subject, *, conn=None):
+    async def read_record_view(self, state, subject, *, conn=None, check_outbox=True):
         row = self.records.get((state, subject.target_kind, subject.target_name, subject.kind, subject.key))
         if row is None:
             return None
         return {"data": copy.deepcopy(row), "seq": 1.0, "canonical_subject": subject, "folded_from": []}
 
     async def apply_ops(
-        self, state, subject, ops, *, op_id, origin, catalog, validate_subject_in_txn, validate=True, conn=None
+        self,
+        state,
+        subject,
+        ops,
+        *,
+        op_id,
+        origin,
+        catalog,
+        validate_subject_in_txn,
+        validate=True,
+        conn=None,
+        check_outbox=True,
     ):
         decl, _entry = await self._entry(catalog, state)
         # The real store validates the subject inside the write txn from the locked declaration's
@@ -303,7 +317,17 @@ class FakeStatesStore:
         self.restored_aliases = list(rows)
 
     async def replace(
-        self, state, subject, data, *, origin, catalog, validate_subject_in_txn, validate=True, conn=None
+        self,
+        state,
+        subject,
+        data,
+        *,
+        origin,
+        catalog,
+        validate_subject_in_txn,
+        validate=True,
+        conn=None,
+        check_outbox=True,
     ):
         decl, entry = await self._entry(catalog, state)
         await validate_subject_in_txn(list(decl["subject_kinds"]))
@@ -343,9 +367,26 @@ class FakeStatesStore:
         ]
         return rows[:limit]
 
-    async def prune_expired(self, default):
+    async def prune_expired(self, default, *, held_record_keys=()):
         self.prune_default = default
+        self.prune_held_record_keys = list(held_record_keys)
         return {"alerts": 2} if self.records else {}
+
+    # the pending-save outbox: always empty
+    async def outbox_unapplied_on_records(self, keys):
+        return []
+
+    async def outbox_unapplied_on_state(self, state):
+        return []
+
+    async def outbox_unapplied_states(self):
+        return []
+
+    async def outbox_outstanding_on_subjects(self, keys):
+        return []
+
+    async def outbox_check_records(self, conn, keys):
+        return False
 
     async def prune_ops(self, retention_days):
         self.prune_ops_days = retention_days

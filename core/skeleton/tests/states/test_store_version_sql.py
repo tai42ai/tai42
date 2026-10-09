@@ -29,7 +29,7 @@ def _version(pg: FakeStatesPg, state: str = "alerts") -> int:
     return pg.declarations[state]["version"]
 
 
-async def _never(existing, per_kind) -> None:
+async def _never(existing, per_kind, held) -> None:
     return None
 
 

@@ -15,6 +15,7 @@ import importlib.resources
 import logging
 from importlib.resources.abc import Traversable
 
+from pydantic import Field, model_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.db import (
     MigrationEntry,
@@ -54,6 +55,31 @@ class StatesSettings(TaiBaseSettings):
     # declaration overrides it. Nothing is ever deleted until a retention is configured
     # here or on the state, so bounding user memory is always a deliberate choice.
     default_retention_days: int | None = None
+
+    # The pending-save outbox: a run's writes and deferred calls are saved before the reply and
+    # applied after it. The recovery sweep passes every ``outbox_sweep_seconds``; a deferred
+    # call's claim is leased for ``outbox_claim_lease_seconds`` (heartbeat at a third); a
+    # transient failure is retried up to ``outbox_max_attempts`` times with an exponential
+    # backoff from ``outbox_retry_base_seconds`` capped at ``outbox_retry_cap_seconds``; a
+    # reader waits at most ``outbox_drain_timeout_seconds`` for a subject's pending save,
+    # polling a running deferred call every ``outbox_drain_poll_seconds``; shutdown awaits
+    # in-flight applies for ``outbox_shutdown_grace_seconds``.
+    outbox_sweep_seconds: float = Field(default=5.0, gt=0)
+    outbox_claim_lease_seconds: float = Field(default=60.0, gt=0)
+    outbox_max_attempts: int = Field(default=5, gt=0)
+    outbox_retry_base_seconds: float = Field(default=1.0, gt=0)
+    outbox_retry_cap_seconds: float = Field(default=60.0, gt=0)
+    outbox_drain_poll_seconds: float = Field(default=0.05, gt=0)
+    outbox_drain_timeout_seconds: float = Field(default=30.0, gt=0)
+    outbox_shutdown_grace_seconds: float = Field(default=20.0, ge=0)
+
+    @model_validator(mode="after")
+    def _outbox_pairs(self) -> StatesSettings:
+        if self.outbox_drain_poll_seconds >= self.outbox_drain_timeout_seconds:
+            raise ValueError("STATES_OUTBOX_DRAIN_POLL_SECONDS must be below STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS")
+        if self.outbox_retry_base_seconds > self.outbox_retry_cap_seconds:
+            raise ValueError("STATES_OUTBOX_RETRY_BASE_SECONDS must not exceed STATES_OUTBOX_RETRY_CAP_SECONDS")
+        return self
 
 
 def states_settings() -> StatesSettings:

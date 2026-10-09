@@ -46,6 +46,11 @@ async def _invalidate_policy_cache() -> None:
     await management.bump_policy_version()
 
 
+def built_app() -> TaiMCP | None:
+    """The process app singleton when it is already built, else ``None``; never builds it."""
+    return _app
+
+
 def connectors_in_use() -> bool:
     """Whether this deployment uses connectors at all.
 
@@ -193,6 +198,33 @@ def _register_feature_lifecycles(app: TaiMCP) -> None:
     app.lifecycle.on_shutdown(stop_advisories_poll)
 
 
+def _register_states_lifecycles(app: TaiMCP) -> None:
+    """Register the states component's schema gate, its outbox sweep and its seed reconcile.
+
+    Registered right after the skeleton's schema gate, so neither the sweep nor the reconcile
+    ever runs against a pending-migration database.
+    """
+    # The states component's chain is a second skeleton-owned schema-gate: it
+    # defaults to the same database as the skeleton (component_store_configured),
+    # so it is verified whenever a database is bound, before any state read/write.
+    app.lifecycle.on_startup(assert_states_schema_applied)
+    # Every process that runs the app lifespan sweeps the states outbox (pending saves applied
+    # after the reply), so any serve process or backend worker recovers any pending save.
+    from tai42_skeleton.states.outbox.sweep import start_state_outbox_sweep, stop_state_outbox_sweep
+
+    app.lifecycle.on_post_swap(start_state_outbox_sweep)
+    app.lifecycle.on_shutdown(stop_state_outbox_sweep)
+
+    # Reconcile the shipped state-template seeds once the store is live (a no-op while
+    # the feature is off). A closure over the persistent app reads the LIVE per-epoch
+    # service at call time, so a reload reconciles the freshly-registered seeds rather
+    # than a boot-epoch snapshot.
+    async def _reconcile_state_template_seeds() -> None:
+        await app._states_service.apply_template_seeds()
+
+    app.lifecycle.on_startup(_reconcile_state_template_seeds)
+
+
 def build_app() -> TaiMCP:
     """Build (once) the process app singleton.
 
@@ -233,20 +265,7 @@ def build_app() -> TaiMCP:
         # fires only for a CONFIGURED schema-owning feature, so an all-off
         # deployment is a no-op.
         app.lifecycle.on_startup(assert_skeleton_schema_applied)
-        # The states component's chain is a second skeleton-owned schema-gate: it
-        # defaults to the same database as the skeleton (component_store_configured),
-        # so it is verified whenever a database is bound, before any state read/write.
-        app.lifecycle.on_startup(assert_states_schema_applied)
-
-        # Reconcile the shipped state-template seeds once the store is live (a no-op while
-        # the feature is off). Registered after the schema gate so it never runs against
-        # a pending-migration database. A closure over the persistent app reads the LIVE
-        # per-epoch service at call time, so a reload reconciles the freshly-registered
-        # seeds rather than a boot-epoch snapshot.
-        async def _reconcile_state_template_seeds() -> None:
-            await app._states_service.apply_template_seeds()
-
-        app.lifecycle.on_startup(_reconcile_state_template_seeds)
+        _register_states_lifecycles(app)
         if settings.enable:
             # The configured identity providers probe their OWN record stores once at
             # startup, so a deployment against a backend a provider cannot use fails

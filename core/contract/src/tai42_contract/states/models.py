@@ -552,37 +552,21 @@ class TemplateJqApplyResult(BaseModel):
     skipped: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
 
 
-class UnitDivergence(BaseModel):
-    """One staged-vs-committed mismatch surfaced on a unit-of-work commit.
-
-    ``index`` is the staged write's position (in staged order), ``field`` names the answer
-    that differed (``"applied"`` or ``"skipped"``), and ``staged``/``committed`` carry the two
-    values. Reported on :class:`UnitCommitResult` and logged at warning — never swallowed.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    field: str
-    staged: Any = None
-    committed: Any = None
-
-
 class UnitCommitResult(BaseModel):
     """The outcome of committing a unit of work.
 
-    ``results`` is the per-staged-write :class:`ApplyResult` the one commit transaction
-    produced, in staged order; ``diverged`` is true when a staged projection answer differed
-    from the committed answer (guards and ``op_id`` idempotency are authoritative at commit),
-    and ``divergences`` names each. A caller reads ``diverged`` to learn the projection its
-    scope was served differed from what landed.
+    ``results`` is the provisional per-staged-write :class:`ApplyResult` in staged order, the
+    answers the scope was served; ``outbox_id`` names the pending save the commit wrote (``None``
+    when nothing was staged and no call was deferred) and ``deferred_calls`` counts the calls it
+    carries. The save is applied after the caller returns, in per-subject order, and every later
+    reader of its subjects waits for it.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     results: list[ApplyResult] = Field(default_factory=list[ApplyResult])
-    diverged: bool = False
-    divergences: list[UnitDivergence] = Field(default_factory=list[UnitDivergence])
+    outbox_id: str | None = None
+    deferred_calls: int = 0
 
 
 class WriteEntry(BaseModel):
@@ -701,11 +685,11 @@ class StateUnit(Protocol):
     every facet read of a subject the unit has staged is served from the projection (the
     committed document overlaid with the unit's staged deltas in order, on a monotonic
     provisional sequence), so the scope reads its own staged writes while every other scope
-    still sees the store's committed document. ``commit`` applies every staged batch onto the
-    latest committed documents in ONE store transaction — the whole-batch rollback holds, so
-    nothing lands on any failure and the failure is loud — and returns the per-write ledger
-    answers. ``discard`` drops the staging. A unit neither committed nor discarded by the end
-    of its scope is discarded by the scope teardown, an error the caller logs.
+    still sees the store's committed document. ``defer_call`` stages a tool call to run after the
+    unit's writes apply. ``commit`` writes the staged batches and calls durably as one pending
+    save, applied after the caller returns in per-subject order. ``discard`` drops the staging.
+    A unit neither committed nor discarded by the end of its scope is discarded by the scope
+    teardown, an error the caller logs.
     """
 
     async def stage(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
@@ -725,13 +709,22 @@ class StateUnit(Protocol):
         ...
 
     async def commit(self) -> UnitCommitResult:
-        """Apply every staged batch onto the latest committed documents in ONE store transaction.
+        """Write every staged batch and deferred call durably as ONE pending save in one store transaction.
 
-        The whole-batch rollback holds: any write that fails rolls the whole commit back and
-        raises loudly, nothing lands. Returns the committed per-write :class:`ApplyResult` in
-        staged order plus any divergence between the staged projection and the committed answer
-        (a visible field, also logged at warning). A committed or discarded unit raises
-        :class:`StateUnitClosedError`.
+        Returns the provisional results; the save is applied after the caller returns, in
+        per-subject order, and every later reader of its subjects waits for it. Validation already
+        ran at stage. A committed or discarded unit raises :class:`StateUnitClosedError`.
+        """
+        ...
+
+    async def defer_call(self, tool: str, arguments: dict[str, Any], *, run_id: str | None = None) -> None:
+        """Stage a call of ``tool`` with ``arguments`` to run after the unit's pending save applies.
+
+        Captured with the caller's execution identity, state context and run attribution; dropped
+        with the unit on discard and with a savepoint on its rollback. ``run_id`` names the
+        caller's run, as ``WriteOrigin.run_id`` does. Raises
+        :class:`~tai42_contract.states.errors.DeferredCallRefusedError` when the tool is not
+        registered or the arguments are not plain JSON.
         """
         ...
 

@@ -42,7 +42,8 @@ if TYPE_CHECKING:
         StatesConsumerListerRegistry,
     )
     from .rendered import RenderedEntry, RenderedTemplates
-    from .unit import StagedItemRecord, _StagedReplace, _StateUnit
+    from .staging import StagedItemRecord, StagedReplace
+    from .unit import _StateUnit
 
 
 class _StatesServiceBase:
@@ -160,7 +161,7 @@ class _StatesServiceBase:
 
     async def _commit_writes(
         self,
-        writes: Sequence[StateBatchWrite | _StagedReplace],
+        writes: Sequence[StateBatchWrite | StagedReplace],
         *,
         staged: Sequence[StagedItemRecord] | None = None,
         conn: AsyncConnection[Any] | None = None,
@@ -215,7 +216,12 @@ class _StatesServiceBase:
     def open_unit(self) -> AbstractAsyncContextManager[_StateUnit]: ...
 
     async def _projected_record_view(
-        self, state: str, subject: StateSubject, *, conn: AsyncConnection[Any] | None = None
+        self,
+        state: str,
+        subject: StateSubject,
+        *,
+        conn: AsyncConnection[Any] | None = None,
+        check_outbox: bool = True,
     ) -> dict[str, Any] | None: ...
 
     async def list_subjects(

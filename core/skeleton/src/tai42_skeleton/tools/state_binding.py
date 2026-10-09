@@ -322,10 +322,9 @@ async def apply_binding_updates(
     the whole op batch over the tool output (its ``.``) with the run input bound as ``$input`` and
     the record as ``$record``, queued as an ``ops`` write. The node-entry record is read ONCE per
     engaged attach, and every custom update of that attach authors ``$record`` against that one
-    snapshot; the ops then land sequentially and atomically inside the single transaction the
-    batch applies. Every queued item across every engaged attach is applied through
-    :meth:`app.states.apply_batch` ONCE, so a node's whole update set commits or rolls back
-    together — a failed update rolls the node's writes back.
+    snapshot; the ops then land sequentially and atomically as one pending save. Every queued
+    item across every engaged attach is staged and enqueued ONCE, so a node's whole update set
+    lands or fails together.
 
     Single-writer identity: a TEMPLATE update writes as one door-independent writer keyed on
     its resolved program name (the SAME update from any door on one state is one writer); a
@@ -335,7 +334,9 @@ async def apply_binding_updates(
     While a states unit of work is bound to the caller's scope the write set STAGES into it rather
     than landing in the store — so these binding writes read back within the scope and roll back
     with a discard, exactly as the facet's own read seam serves a bound unit; with no unit open the
-    set applies directly, as one transaction, through :meth:`app.states.apply_batch`.
+    set is staged into a fresh unit bound for the staging and enqueued as one pending save
+    (:meth:`StatesService.enqueue_batch`), applied after the caller returns, before any later
+    reader of its subjects reads.
 
     ``idempotency_scope`` makes a DEFERRED apply (a parked run's updates applied at its real
     terminal) land exactly once under at-least-once delivery: every item that carries no author
@@ -364,7 +365,7 @@ async def apply_binding_updates(
     if unit is not None:
         await unit.stage(items)
     else:
-        await app.states.apply_batch(items)
+        await app.states.enqueue_batch(items)
 
 
 async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> None:

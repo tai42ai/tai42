@@ -33,6 +33,7 @@ from tai42_contract.tools import (
 )
 
 from tai42_skeleton.runs.chokepoint import RunRecord, record_outermost_preset_run
+from tai42_skeleton.states.outbox.drain import run_entry_drain
 from tai42_skeleton.tools.attribution import (
     preset_attribution_armed,
     run_attribution,
@@ -239,33 +240,37 @@ async def dispatch_scope(
     invocation_token = set_current_tool_invocation(ToolInvocation(tool_name=key, state_binding=door_binding))
     binding_token = _binding_scope_armed.set(True)
     try:
-        # The call frame owns the ambient call chain, extras, and — at an outermost run
-        # start — the run-delivery identity and address (read off the completion the door
-        # bound before this dispatch). ``continues_chain`` SETS the chain (a continuation
-        # dispatch); otherwise the frame PUSHES ``key``.
-        with tool_call_frame(name=key, extras=extras, continues_chain=continues_chain), stamp_run_attribution():
-            async with turn_budget():
-                manager = app.preset_manager
-                is_preset = manager.is_registered(key)
-                version = manager.active_version(key) if is_preset else None
-                # The preset's own binding merges only when THIS dispatch is the door target
-                # (outermost) AND a registered preset; the door binding is carried in ``prior``.
-                preset_binding = manager.get_spec(key).state_binding if (is_preset and outermost_binding) else None
-                merged = merge_bindings(door_binding, preset_binding) if outermost_binding else None
-                async with _binding_application(app, merged, arguments, scope, key):
-                    if version is None:
-                        yield scope
-                        return
-                    # Read the outermost state BEFORE the stamp arms it: True here means an
-                    # ancestor preset dispatch already owns this run's row.
-                    outermost_preset = not preset_attribution_armed()
-                    with stamp_preset_attribution(key, version):
-                        if not outermost_preset:
+        # The run entry waits for the outstanding pending saves of the door's subjects first,
+        # outside the turn budget (the wait is an earlier save's, not this turn's work); a held
+        # subject refuses before the call frame, the budget and the binding are entered.
+        async with run_entry_drain():
+            # The call frame owns the ambient call chain, extras, and — at an outermost run
+            # start — the run-delivery identity and address (read off the completion the door
+            # bound before this dispatch). ``continues_chain`` SETS the chain (a continuation
+            # dispatch); otherwise the frame PUSHES ``key``.
+            with tool_call_frame(name=key, extras=extras, continues_chain=continues_chain), stamp_run_attribution():
+                async with turn_budget():
+                    manager = app.preset_manager
+                    is_preset = manager.is_registered(key)
+                    version = manager.active_version(key) if is_preset else None
+                    # The preset's own binding merges only when THIS dispatch is the door target
+                    # (outermost) AND a registered preset; the door binding is carried in ``prior``.
+                    preset_binding = manager.get_spec(key).state_binding if (is_preset and outermost_binding) else None
+                    merged = merge_bindings(door_binding, preset_binding) if outermost_binding else None
+                    async with _binding_application(app, merged, arguments, scope, key):
+                        if version is None:
                             yield scope
                             return
-                        async with record_outermost_preset_run(key, version) as run:
-                            scope._run = run
-                            yield scope
+                        # Read the outermost state BEFORE the stamp arms it: True here means an
+                        # ancestor preset dispatch already owns this run's row.
+                        outermost_preset = not preset_attribution_armed()
+                        with stamp_preset_attribution(key, version):
+                            if not outermost_preset:
+                                yield scope
+                                return
+                            async with record_outermost_preset_run(key, version) as run:
+                                scope._run = run
+                                yield scope
     finally:
         _binding_scope_armed.reset(binding_token)
         reset_current_tool_invocation(invocation_token)
@@ -307,6 +312,7 @@ class DispatchScopeMiddleware(Middleware):
         from fastmcp.tools.base import ToolResult
         from mcp.types import TextContent
         from tai42_contract.interactions import RunTerminalFailed
+        from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
 
         from tai42_skeleton.access_control.user import request_identity
         from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
@@ -397,3 +403,7 @@ class DispatchScopeMiddleware(Middleware):
                         structured_content={"error": "tool run failed", "outcome": outcome},
                         is_error=True,
                     )
+                except (StatePendingSaveFailedError, StatePendingSaveTimeoutError) as exc:
+                    # The run entry's drain refused before the tool ran (a held subject, or a save
+                    # that did not finish in time): the client reads the message as a named refusal.
+                    raise ToolError(str(exc)) from exc

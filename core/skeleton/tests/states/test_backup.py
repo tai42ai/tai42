@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from tai42_contract.states.errors import StatesError
+from tai42_contract.states.errors import StatePendingSaveFailedError, StatesError
 
 import tai42_skeleton.app.instance as instance_mod
 from tai42_skeleton.states import backup as backup_mod
@@ -73,7 +73,11 @@ class _FakeExportStore:
 async def test_export_states_reads_the_whole_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(backup_mod, "states_store_configured", lambda: True)
     monkeypatch.setattr(backup_mod, "PostgresStatesStore", _FakeExportStore)
+    facet = _FakeStatesFacet()
+    monkeypatch.setattr(instance_mod, "app", SimpleNamespace(states=facet))
     payload = await export_states()
+    # Each state's pending saves land before its records are read; a held save raises.
+    assert facet.drained == [("alerts", "raise", "backup export")]
     assert payload["version"] == 1
     assert payload["templates"] == [{"kind": "state-template", "name": "m"}]
     assert payload["declarations"][0]["name"] == "alerts"
@@ -114,6 +118,17 @@ class _FakeStatesFacet:
         self.skip_reconcilers_seen: list[bool] = []
         self.restored_aliases: list[tuple[str, int]] = []
         self.restored_records: list[tuple[str, int]] = []
+        self.drained: list[tuple[str, str, str]] = []
+        self.held: set[str] = set()
+
+    async def drain_pending_saves(self, state, *, held, scan):
+        self.drained.append((state, held, scan))
+        if state in self.held:
+            raise StatePendingSaveFailedError(
+                f"subject x of state {state!r} has a failed pending save 7; an operator must retry or discard it",
+                save_id="7",
+            )
+        return []
 
     async def get_template(self, name):
         return object() if name in self.existing else None
@@ -301,3 +316,15 @@ async def test_import_tolerates_absent_sections(monkeypatch: pytest.MonkeyPatch)
     report = await import_states({"version": 1})
     assert report.details["templates"] == {"created": 0, "updated": 0, "failed": 0}
     assert report.errors == []
+
+
+async def test_restoring_a_declaration_over_a_held_state_fails_that_entry_naming_the_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facet = _FakeStatesFacet(existing={"alerts"})
+    facet.held = {"alerts"}
+    _wire(monkeypatch, facet)
+    report = await import_states(_payload())
+    assert ("alerts", "raise", "restore") in facet.drained
+    assert facet.put_declarations == []
+    assert any("has a failed pending save 7" in error for error in report.errors)

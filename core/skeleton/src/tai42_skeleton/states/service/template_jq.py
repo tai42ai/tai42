@@ -22,6 +22,7 @@ from tai42_contract.states.models import (
 )
 from tai42_kit.utils.data.jq_util import run_jq_first
 
+from tai42_skeleton.states.outbox.drain import drained
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.reconcile_support import _rebase_op, _record_subtree
 from tai42_skeleton.states.service.unit import current_state_unit
@@ -285,8 +286,15 @@ class _TemplateJqMixin(_StatesServiceBase):
             return TemplateJqApplyResult(
                 name=name, applied=applied.applied, data=applied.data, seq=applied.seq, skipped=applied.skipped
             )
-        return await self._apply_template_jq_completed(
-            state, subject, name, input_, op_id=op_id, origin=self._complete_origin(origin), conn=conn
+        completed = self._complete_origin(origin)
+        if conn is not None:
+            return await self._apply_template_jq_completed(
+                state, subject, name, input_, op_id=op_id, origin=completed, conn=conn
+            )
+        # A pending save met by the write lands first, and the program runs again over it.
+        return await drained(
+            self,
+            lambda: self._apply_template_jq_completed(state, subject, name, input_, op_id=op_id, origin=completed),
         )
 
     async def _apply_template_jq_completed(

@@ -56,14 +56,14 @@ async def test_upsert_declaration_guarded_insert_calls_decide_with_no_existing(
 ) -> None:
     seen: list[tuple] = []
 
-    def decide(existing, per_kind):
-        seen.append((existing, per_kind))
+    def decide(existing, per_kind, held):
+        seen.append((existing, per_kind, held))
 
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     await store.upsert_declaration_guarded(
         "alerts", "", schema, ["thread"], "thread", None, effective_schema=schema, decide=decide
     )
-    assert seen == [(None, {})]
+    assert seen == [(None, {}, [])]
     assert "alerts" in pg.declarations
 
 
@@ -77,7 +77,7 @@ async def test_upsert_declaration_guarded_reads_per_kind_counts_under_lock(
     pg.seed_record("alerts", "agent", "a", "person", "p1", {"n": 3})
     seen: dict = {}
 
-    def decide(existing, per_kind):
+    def decide(existing, per_kind, held):
         seen.update(per_kind)
 
     await store.upsert_declaration_guarded(
@@ -90,7 +90,7 @@ async def test_upsert_declaration_guarded_decide_raise_rolls_back(pg: FakeStates
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
     pg.seed_declaration("alerts", schema=schema, description="original")
 
-    def decide(existing, per_kind):
+    def decide(existing, per_kind, held):
         raise ValueError("refused")
 
     with pytest.raises(ValueError, match="refused"):

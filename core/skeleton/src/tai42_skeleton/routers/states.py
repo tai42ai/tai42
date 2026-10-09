@@ -1,7 +1,7 @@
 """HTTP routes for the subject-keyed state store (all AUTHED).
 
-Covers ``/api/states*``, the sibling ``/api/state-templates*`` and
-``/api/state-retention/prune``.
+Covers ``/api/states*``, the siblings ``/api/state-templates*`` and ``/api/state-pending-saves*``,
+and ``/api/state-retention/prune``.
 Thin adapters over the operations in :mod:`tai42_skeleton.operations.states`; each door's
 body/query is parsed at the HTTP edge into the operation's flat kwargs. The sibling
 ``/api/state-templates`` collection keeps the templates OFF the ``/api/states/{name}``
@@ -103,6 +103,15 @@ from tai42_skeleton.operations.states import (
 )
 from tai42_skeleton.operations.states import (
     update_state_attachment as _update_state_attachment_op,
+)
+from tai42_skeleton.operations.states_outbox import (
+    discard_state_pending_save as _discard_state_pending_save_op,
+)
+from tai42_skeleton.operations.states_outbox import (
+    list_state_pending_saves as _list_state_pending_saves_op,
+)
+from tai42_skeleton.operations.states_outbox import (
+    retry_state_pending_save as _retry_state_pending_save_op,
 )
 
 # -- request-edge readers -----------------------------------------------------
@@ -255,6 +264,14 @@ async def _extract_template_document(request: Request) -> dict[str, Any]:
     return {"document": await _json_object(request), "replace": _query_bool(request, "replace")}
 
 
+async def _extract_pending_saves_query(request: Request) -> dict[str, Any]:
+    ctx: dict[str, Any] = {"status": request.query_params.get("status"), "cursor": request.query_params.get("cursor")}
+    limit = _optional_int(request, "limit")
+    if limit is not None:
+        ctx["limit"] = limit
+    return ctx
+
+
 # -- route registrations (literal siblings + retention FIRST) -----------------
 
 # The single-record doors. ``{key}`` is one path segment addressed by its
@@ -288,6 +305,28 @@ delete_state_template = register_operation_route(
     tai42_app,
     operation_metadata_of(_delete_state_template_op),
     path="/api/state-templates/{name}",
+    method="DELETE",
+    action="write",
+)
+list_state_pending_saves = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_state_pending_saves_op),
+    path="/api/state-pending-saves",
+    method="GET",
+    context_extractor=_extract_pending_saves_query,
+    action="read",
+)
+retry_state_pending_save = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_retry_state_pending_save_op),
+    path="/api/state-pending-saves/{id}/retry",
+    method="POST",
+    action="write",
+)
+discard_state_pending_save = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_discard_state_pending_save_op),
+    path="/api/state-pending-saves/{id}",
     method="DELETE",
     action="write",
 )

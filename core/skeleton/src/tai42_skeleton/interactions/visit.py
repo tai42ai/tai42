@@ -71,6 +71,7 @@ from tai42_skeleton.interactions.settings import interactions_settings, interact
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.runs.chokepoint import note_resumed_interaction
 from tai42_skeleton.states.context import current_state_context
+from tai42_skeleton.states.outbox.drain import run_entry_drain
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -147,28 +148,31 @@ async def visit(
     # authenticated and callback answer doors enforce it.
     await _enforce_resume_submitted(resumes, parked, effective_answers)
 
-    # --- 2. Cancel (each id → the one whole-chain kill seam). ---
-    cancelled = await _cancel_all(store, settings, cancel, parked)
+    # --- Run entry: the subject's outstanding pending saves (records and deferred calls) finish
+    #     before anything is cancelled, resumed, taken or started; a held subject refuses here. ---
+    async with run_entry_drain():
+        # --- 2. Cancel (each id → the one whole-chain kill seam). ---
+        cancelled = await _cancel_all(store, settings, cancel, parked)
 
-    # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
-    if resumes:
-        result = await _drive_resumes(
-            store, settings, ctx, candidates, resumes, parked, receives_outcome, effective_answers
-        )
-        kind, value, asks, suspended = await _normalise(store, settings, candidates, result)
-        return VisitOutcome(
-            action="resumed", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
-        )
-    if takes:
-        value = await _take_all(store, settings, takes)
-        return VisitOutcome(action="taken", cancelled=cancelled, kind="result", result=value)
-    if start is not None:
-        started = await _run_start(target_name, start, extras, state_binding)
-        kind, value, asks, suspended = await _normalise(store, settings, candidates, started)
-        return VisitOutcome(
-            action="started", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
-        )
-    return VisitOutcome(action="none", cancelled=cancelled, kind="none")
+        # --- 3/4/5. At most one action besides cancel, then normalise what came back. ---
+        if resumes:
+            result = await _drive_resumes(
+                store, settings, ctx, candidates, resumes, parked, receives_outcome, effective_answers
+            )
+            kind, value, asks, suspended = await _normalise(store, settings, candidates, result)
+            return VisitOutcome(
+                action="resumed", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
+            )
+        if takes:
+            value = await _take_all(store, settings, takes)
+            return VisitOutcome(action="taken", cancelled=cancelled, kind="result", result=value)
+        if start is not None:
+            started = await _run_start(target_name, start, extras, state_binding)
+            kind, value, asks, suspended = await _normalise(store, settings, candidates, started)
+            return VisitOutcome(
+                action="started", cancelled=cancelled, kind=kind, result=value, asks=asks, suspended=suspended
+            )
+        return VisitOutcome(action="none", cancelled=cancelled, kind="none")
 
 
 # --- the pre-check ---------------------------------------------------------------------

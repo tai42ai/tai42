@@ -35,6 +35,7 @@ from tai42_contract.states import (
     StateSubject,
     StateUpdate,
     TemplateJqApplyResult,
+    UnitCommitResult,
 )
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
@@ -70,7 +71,7 @@ class _FakeStates:
         monkeypatch.setattr(facet, "read", self.read)
         monkeypatch.setattr(facet, "apply_template_jq", self.apply_template_jq)
         monkeypatch.setattr(facet, "apply", self.apply)
-        monkeypatch.setattr(facet, "apply_batch", self.apply_batch)
+        monkeypatch.setattr(facet, "enqueue_batch", self.enqueue_batch)
 
     def context(self):
         return None
@@ -90,7 +91,7 @@ class _FakeStates:
         self.applies.append(("__custom__", ops))
         return ApplyResult(applied=True, data={}, seq=1.0, skipped=[])
 
-    async def apply_batch(self, writes) -> list[ApplyResult]:
+    async def enqueue_batch(self, writes) -> UnitCommitResult:
         results: list[ApplyResult] = []
         for item in writes:
             if item.ops is not None:
@@ -104,7 +105,7 @@ class _FakeStates:
             results.append(
                 ApplyResult(applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped)
             )
-        return results
+        return UnitCommitResult(results=results)
 
 
 _SUBJECT_EXPR = TemplatedText(content='{target_kind: "agent", target_name: "a", kind: "thread", key: (.x | tostring)}')

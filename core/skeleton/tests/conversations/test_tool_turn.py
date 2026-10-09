@@ -646,3 +646,19 @@ async def test_tool_turn_deposits_the_route_state_binding_on_the_ambient_invocat
         batch=overlap_module.Batch(lead=record, members=[record]),
     )
     assert seen["binding"] == binding
+
+
+async def test_a_tool_target_turn_drains_its_subjects_once_at_its_visit(env, monkeypatch):
+    from .._drain_spy import spy_on_drains, subject_key
+
+    spy = spy_on_drains(monkeypatch)
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "done")
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-DRAIN")
+    await _settle()
+
+    # One drain at the turn's visit, over the turn's candidate subject, before the tool ran.
+    assert spy.keys == [[subject_key("tool", "echo-tool", "thread", "bridge:tool-line:+15550002222")]]
+    assert [n.message for n in channel.sends] == ["done"]

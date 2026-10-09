@@ -14,6 +14,7 @@ from tai42_contract.states.errors import StatesNotConfiguredError
 from tai42_skeleton.states.service.attachments import _AttachmentMixin
 from tai42_skeleton.states.service.catalog import CatalogSnapshot
 from tai42_skeleton.states.service.declarations import _DeclarationMixin
+from tai42_skeleton.states.service.pending_saves import _PendingSavesMixin
 from tai42_skeleton.states.service.provenance import _ProvenanceMixin
 from tai42_skeleton.states.service.reconcile import _ReconcileMixin
 from tai42_skeleton.states.service.records import _RecordMixin
@@ -45,6 +46,7 @@ class StatesService(
     _RegistrationMixin,
     _ReconcileMixin,
     _UnitMixin,
+    _PendingSavesMixin,
 ):
     """The one validate + apply layer.
 

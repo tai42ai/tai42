@@ -96,7 +96,6 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/presets/{name}/rename"),
     ("POST", "/api/presets/{name}/rollback"),
     ("POST", "/api/presets/{name}/versions"),
-    ("POST", "/api/run-tool"),
     # The runs-index prune is reload-gated (a deployment-wide destructive purge, exactly
     # like the checkpoint sweep) and declares NO 503 of its own: with the store OFF it
     # reports a skip, never a 503. So the reload gate is its only 503 source.
@@ -129,6 +128,25 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     # retryable, carrying the medium's retry_after); it is not reload-gated, so it
     # carries that 503 alone.
     ("POST", "/api/notifications"),
+    # The states doors that read or scan records wait for the subject's or the state's pending
+    # saves first: a save that does not finish within the drain timeout is a retriable 503.
+    ("POST", "/api/state-retention/prune"),
+    ("DELETE", "/api/states/{name}"),
+    ("PUT", "/api/states/{name}"),
+    ("PATCH", "/api/states/{name}/attachments/{template}"),
+    ("PUT", "/api/states/{name}/attachments/{template}"),
+    ("POST", "/api/states/{name}/records/search"),
+    ("DELETE", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
+    ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
+    ("PATCH", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
+    ("PUT", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}"),
+    ("POST", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/deltas"),
+    ("POST", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/fold"),
+    ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/template-jq/{program}"),
+    ("POST", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/template-jq/{program}"),
+    ("GET", "/api/states/{name}/records/{target_kind}/{target_name}/{kind}/{key}/writes"),
+    ("GET", "/api/states/{name}/stats"),
+    ("GET", "/api/states/{name}/subjects"),
 }
 
 _EXPECTED_503_BOTH: set[tuple[str, str]] = {
@@ -146,6 +164,9 @@ _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     # tool-runs keeps its declared 503: it is the per-worker CAPACITY UnavailableError
     # (retry later), independent of the store gate, which is a 501.
     ("POST", "/api/tool-runs"),
+    # The synchronous run-tool door declares the pending-save UnavailableError: a subject of the
+    # run still has a pending state save after the drain timeout (retry later).
+    ("POST", "/api/run-tool"),
 }
 
 
@@ -524,10 +545,12 @@ def test_scope_url_delete_doors_document_the_400(
 # below holds none. That status belongs to the inner tool, not to the door's contract —
 # the equality is over what each door DECLARES, which is what a client reads off the spec.
 _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
-    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, UpstreamError (502 — a
-    # tool result no JSON encoder can render is a bad-tool-output fault), OperationFailedError. Its
-    # only 503 is the reload gate's, so none is declared here.
-    ("POST", "/api/run-tool"): {400, 401, 403, 404, 500, 502},
+    # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, ConflictError (409 — a
+    # subject of the run is held by a failed pending state save), UpstreamError (502 — a tool
+    # result no JSON encoder can render is a bad-tool-output fault), UnavailableError (503 — a
+    # subject's pending state save did not finish in time), OperationFailedError — and the reload
+    # gate's own 503 beside it.
+    ("POST", "/api/run-tool"): {400, 401, 403, 404, 409, 500, 502, 503},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — this door is not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},

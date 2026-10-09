@@ -8,6 +8,7 @@ effective schema; subject validation refuses a subject a state's declaration doe
 from __future__ import annotations
 
 import copy
+from time import monotonic
 from typing import Any
 
 import jsonschema
@@ -26,13 +27,20 @@ from tai42_contract.states.models import (
     StateSubject,
     StateTemplateDocument,
 )
+from tai42_contract.states.pending import HeldPendingSave
 from tai42_kit.utils.data.jq_util import run_jq_first
 
+from tai42_skeleton.states.db import states_settings
+from tai42_skeleton.states.outbox.drain import drain_state
 from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
 from tai42_skeleton.states.templates import StateTemplate, compose_effective_schema, regime_for
+
+
+def _deadline() -> float:
+    return monotonic() + states_settings().outbox_drain_timeout_seconds
 
 
 class _AttachmentMixin(_StatesServiceBase):
@@ -114,7 +122,9 @@ class _AttachmentMixin(_StatesServiceBase):
             for r in rows
         ]
 
-    async def attach(self, state: str, template_name: str, body: AttachBody, *, skip_reconcilers: bool = False) -> None:
+    async def attach(
+        self, state: str, template_name: str, body: AttachBody, *, skip_reconcilers: bool = False
+    ) -> list[HeldPendingSave]:
         """Attach a template on a state.
 
         Validate path/parameters/declarations (+ check), run every registered attach validator
@@ -124,7 +134,9 @@ class _AttachmentMixin(_StatesServiceBase):
         a reconciler's record writes commit with the attach or roll back together with a refusal.
         ``body.options`` is a per-operation directive passed to the reconcilers, never stored.
         ``skip_reconcilers`` (backup restore only) runs the validators but not the
-        reconcilers — a restored attachment is a snapshot, not a re-attach.
+        reconcilers — a restored attachment is a snapshot, not a re-attach. The state's pending
+        saves are applied first; the validators and reconcilers read the committed records of the
+        subjects held by a failed save, and the held saves are returned.
         """
         self._ensure_available()
         path = list(body.path)
@@ -132,6 +144,7 @@ class _AttachmentMixin(_StatesServiceBase):
         declarations = dict(body.declarations or {})
         options = dict(body.options or {})
         decl = await self._require_declaration(state)
+        held = await drain_state(self, state, _deadline(), held="skip", scan="attach")
         template = await self._get_template_or_raise(template_name)
         self._validate_attach_path(path)
         if await self._store.get_attachment(state, template_name) is not None:
@@ -169,6 +182,7 @@ class _AttachmentMixin(_StatesServiceBase):
             await self._store.upsert_attachment(
                 state, template_name, path, resolved, declarations, effective_schema=effective
             )
+        return held
 
     async def update_attachment_declarations(
         self,
@@ -178,13 +192,14 @@ class _AttachmentMixin(_StatesServiceBase):
         *,
         options: dict[str, Any] | None = None,
         skip_reconcilers: bool = False,
-    ) -> None:
+    ) -> list[HeldPendingSave]:
         """Rewrite an attachment's declarations, recomposing the effective schema before the write.
 
         Re-runs every registered attach validator and reconciler before the write. The reconcilers
         and the write share ONE transaction. ``options`` is a per-operation directive
         passed to the reconcilers, never stored. ``skip_reconcilers`` (backup restore only)
-        runs the validators but not the reconcilers.
+        runs the validators but not the reconcilers. The state's pending saves are applied first;
+        the saves held by a failed save are returned.
         """
         self._ensure_available()
         declarations = dict(declarations or {})
@@ -192,6 +207,7 @@ class _AttachmentMixin(_StatesServiceBase):
         row = await self._store.get_attachment(state, template_name)
         if row is None:
             raise StateNotFoundError(f"template {template_name!r} is not attached on state {state!r}")
+        held = await drain_state(self, state, _deadline(), held="skip", scan="update_attachment_declarations")
         template = await self._get_template_or_raise(template_name)
         await self._validate_attach_values(template, dict(row["parameters"] or {}), declarations)
         effective = await self._compose_effective(state, (await self._require_declaration(state))["schema"])
@@ -217,6 +233,7 @@ class _AttachmentMixin(_StatesServiceBase):
             await self._store.update_attachment_declarations(
                 state, template_name, declarations, effective_schema=effective
             )
+        return held
 
     async def detach(self, state: str, template_name: str) -> None:
         """Remove an attachment and recompose the state's effective schema (nothing else)."""

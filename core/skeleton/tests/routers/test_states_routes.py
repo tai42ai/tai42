@@ -361,15 +361,18 @@ def test_get_attachment_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
 class _RecordingAttachStates:
     """Records the attach options the door threads through."""
 
-    def __init__(self) -> None:
+    def __init__(self, held: list | None = None) -> None:
         self.attach_options: dict | None = None
         self.update_options: dict | None = None
+        self.held = held or []
 
     async def attach(self, state, template, body):
         self.attach_options = dict(body.options)
+        return self.held
 
     async def update_attachment_declarations(self, state, template, declarations, *, options=None):
         self.update_options = options
+        return self.held
 
 
 def test_attach_operation_threads_options_into_the_attach_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,6 +387,57 @@ def test_update_attachment_operation_threads_options(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(ops, "_states", lambda: facet)
     asyncio.run(ops.update_state_attachment("alerts", "m", {"n": 2}, {"on_orphan": "refuse"}))
     assert facet.update_options == {"on_orphan": "refuse"}
+
+
+def _held() -> Any:
+    from tai42_contract.states import HeldPendingSave, StateSubject
+
+    return HeldPendingSave(
+        save_id="18",
+        held_by="17",
+        subjects=[StateSubject(target_kind="agent", target_name="a", kind="thread", key="t1")],
+    )
+
+
+_HELD_WIRE = {
+    "save_id": "18",
+    "held_by": "17",
+    "subjects": [{"target_kind": "agent", "target_name": "a", "kind": "thread", "key": "t1"}],
+}
+
+
+def test_the_attach_and_declarations_doors_answer_the_held_saves(monkeypatch: pytest.MonkeyPatch) -> None:
+    facet = _RecordingAttachStates(held=[_held()])
+    monkeypatch.setattr(ops, "_states", lambda: facet)
+    attached = asyncio.run(ops.attach_state_template("alerts", "m", {"path": ["sub"]}))
+    updated = asyncio.run(ops.update_state_attachment("alerts", "m", {"n": 2}))
+    assert attached["held"] == [_HELD_WIRE]
+    assert updated["held"] == [_HELD_WIRE]
+
+
+def test_the_prune_door_answers_the_counts_and_the_held_saves(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_contract.states import PruneResult
+
+    class _Prune:
+        async def prune_expired(self) -> PruneResult:
+            return PruneResult(pruned={"alerts": 2}, held=[_held()])
+
+    monkeypatch.setattr(ops, "_states", lambda: _Prune())
+    assert asyncio.run(ops.prune_state_retention()) == {"pruned": {"alerts": 2}, "held": [_HELD_WIRE]}
+
+
+def test_the_declare_door_answers_the_declaration_and_the_held_saves(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_contract.states import StateDeclarationSaved
+
+    class _Declare:
+        async def put_declaration(self, decl: StateDeclaration) -> StateDeclarationSaved:
+            return StateDeclarationSaved(declaration=decl, held=[_held()])
+
+    monkeypatch.setattr(ops, "_states", lambda: _Declare())
+    body = {"schema": {"type": "object", "properties": {"n": {"type": "integer"}}}, "subject_kinds": ["thread"]}
+    answered = asyncio.run(ops.put_state("alerts", {**body, "default_subject_kind": "thread"}))
+    assert answered["name"] == "alerts"
+    assert answered["held"] == [_HELD_WIRE]
 
 
 def _request_with_body(method: str, path: str, body: dict[str, Any], **path_params: str) -> Request:
