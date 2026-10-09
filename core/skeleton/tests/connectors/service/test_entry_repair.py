@@ -61,6 +61,30 @@ async def _reconnect(harness, monkeypatch, *, enabled: list[str]) -> None:
     await complete_connect(flow_id=flow.flow_id, code="auth")
 
 
+def _refusal(title: str, provider: str, sub: str, repair: str) -> str:
+    """The text the own-server check gives for entry ``title`` whose url is not ``provider``'s for ``sub``."""
+    return (
+        f"MCP entry {title!r} carries the reference of connection {CID} but its url is not the one provider "
+        f"{provider!r} defines for sub-service {sub!r}, so no credential is sent to it; {repair}"
+    )
+
+
+_RECONNECT = (
+    "reconnect the account to rewrite the entry the connector wrote for that connection, "
+    "or remove the reference from this entry if it is not that one"
+)
+_SAVE_SERVICES = (
+    "save the connection's services again to rewrite the entry the connector wrote for that connection, "
+    "or remove the reference from this entry if it is not that one"
+)
+
+
+def _refused_with(config: TaiMCPConfig) -> str:
+    with pytest.raises(ConnectorConnectionError) as caught:
+        require_own_server(config)
+    return str(caught.value)
+
+
 def _pipeline(harness):
     cs, *_ = harness
     return cs.ConfigService.from_app()
@@ -73,8 +97,9 @@ async def test_a_reconnect_rewrites_the_connectors_own_entry_that_fell_behind(ha
     pipeline.seed(descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID)
 
     _use(providers, _moved(providers["acme"], "mail", "https://new.acme.test/mcp/mail"))
-    with pytest.raises(ConnectorConnectionError, match="reconnect the account"):
-        require_own_server(_entry(pipeline.doc, "acme_mail_work"))
+    assert _refused_with(_entry(pipeline.doc, "acme_mail_work")) == _refusal(
+        "acme_mail_work", "acme", "mail", _RECONNECT
+    )
 
     await _reconnect(harness, monkeypatch, enabled=["mail"])
 
@@ -129,14 +154,36 @@ async def test_a_reconnect_leaves_another_entry_carrying_the_reference_untouched
         managed=ConnectorRef(connection_id=CID, provider_id="acme", sub_service="mail"),
     )
     pipeline.doc["mcp"].append(forged.model_dump(mode="json", exclude_none=True))
-    with pytest.raises(ConnectorConnectionError, match="remove the reference"):
-        require_own_server(forged)
+    told = _refusal("borrowed", "acme", "mail", _RECONNECT)
+    assert _refused_with(forged) == told
 
     await _reconnect(harness, monkeypatch, enabled=["mail"])
 
     assert _entry(pipeline.doc, "borrowed") == forged
-    with pytest.raises(ConnectorConnectionError, match="remove the reference"):
-        require_own_server(_entry(pipeline.doc, "borrowed"))
+    assert _refused_with(_entry(pipeline.doc, "borrowed")) == told
+
+
+async def test_an_entry_titled_like_another_aliass_entry_is_refused_with_both_repairs_and_left_alone_by_a_reconnect(
+    harness, monkeypatch
+):
+    _cs, records, _store, _flows, _events, providers = harness
+    _use(providers, providers["acme"])
+    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail"])
+    pipeline = _pipeline(harness)
+    pipeline.seed(descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID)
+    lookalike = TaiMCPConfig(
+        title="acme_mail_home",
+        config=MCPConfig(type="http", url="https://elsewhere.test/mcp"),
+        managed=ConnectorRef(connection_id=CID, provider_id="acme", sub_service="mail"),
+    )
+    pipeline.doc["mcp"].append(lookalike.model_dump(mode="json", exclude_none=True))
+    told = _refusal("acme_mail_home", "acme", "mail", _RECONNECT)
+    assert _refused_with(lookalike) == told
+
+    await _reconnect(harness, monkeypatch, enabled=["mail"])
+
+    assert _entry(pipeline.doc, "acme_mail_home") == lookalike
+    assert _refused_with(_entry(pipeline.doc, "acme_mail_home")) == told
 
 
 async def test_an_entry_equal_to_the_builders_output_causes_no_manifest_write(harness, monkeypatch):
@@ -159,8 +206,9 @@ async def test_saving_an_unchanged_set_rewrites_a_no_auth_connections_entry(harn
     pipeline = _pipeline(harness)
     pipeline.seed(descriptor=providers["httpsvc"], enabled_sub_services=["main"], alias="main", connection_id=CID)
     _use(providers, _moved(providers["httpsvc"], "main", "https://new.httpsvc.test/mcp"))
-    with pytest.raises(ConnectorConnectionError, match="save the connection's services again"):
-        require_own_server(_entry(pipeline.doc, "httpsvc_main_main"))
+    assert _refused_with(_entry(pipeline.doc, "httpsvc_main_main")) == _refusal(
+        "httpsvc_main_main", "httpsvc", "main", _SAVE_SERVICES
+    )
 
     result = await patch_sub_services(
         connection_id=CID, desired=["main"], return_url="/x", redirect_uri=REDIRECT, origin=ORIGIN

@@ -23,6 +23,7 @@ import tai42_skeleton.connectors.token_injection as ti
 from tai42_skeleton.connectors.providers import registry
 from tai42_skeleton.connectors.runtime.own_server import own_server_refusal
 from tai42_skeleton.connectors.runtime.resolver import (
+    ConnectorConnectionError,
     ConnectorReconnectRequiredError,
     ConnectorRefreshFailingError,
     ManagedAuth,
@@ -182,6 +183,90 @@ async def test_an_entry_of_an_unregistered_provider_is_refused_after_the_401(mon
 
 
 # -- the shared server check -----------------------------------------------------------------------
+
+
+_LOOKALIKE_REFUSAL = (
+    f"MCP entry 'acme_mail_home' carries the reference of connection {CID} but its url is not the one provider "
+    "'acme' defines for sub-service 'mail', so no credential is sent to it; reconnect the account to rewrite the "
+    "entry the connector wrote for that connection, or remove the reference from this entry if it is not that one"
+)
+
+
+class _ClosingPool:
+    """A pool that records what it is asked to close and refuses to open anything."""
+
+    def __init__(self) -> None:
+        self.closed: list[dict[str, Any]] = []
+
+    async def close(self, *, config: dict[str, Any]) -> None:
+        self.closed.append(config)
+
+    @asynccontextmanager
+    async def current(self, *, config: dict[str, Any]):
+        raise AssertionError("a refused entry opens no session")
+        yield
+
+
+async def _door_call(config: TaiMCPConfig) -> None:
+    async def run(client, meta):
+        return await client.call_tool_mcp("send", {}, meta=meta)
+
+    await ti.with_managed_auth(config, "http", _ClosingPool(), run, tool_name="send")  # type: ignore[arg-type]
+
+
+async def _door_forced_refresh(config: TaiMCPConfig) -> None:
+    await ti._force_refresh(config, "secret")
+
+
+async def _door_resolve_for_config(config: TaiMCPConfig) -> None:
+    await ti.resolve_managed_auth_for_config(config)
+
+
+async def _door_eviction(config: TaiMCPConfig) -> None:
+    pool = _ClosingPool()
+    await ti.evict_pooled_session(config, "http", pool)  # type: ignore[arg-type]
+    assert pool.closed == [config.model_dump()]
+
+
+async def _door_listing(config: TaiMCPConfig) -> None:
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await _list(config, _Server({}))
+    assert caught.value.response.status_code == 401
+
+
+async def _door_credentials_step(config: TaiMCPConfig) -> None:
+    assert await step_mod.bring_credentials_up_to_date([config], timeout=1.0) == {}
+
+
+@pytest.mark.usefixtures("acme")
+@pytest.mark.parametrize(
+    ("door", "raises"),
+    [
+        (_door_call, True),
+        (_door_forced_refresh, True),
+        (_door_resolve_for_config, True),
+        (_door_eviction, False),
+        (_door_listing, False),
+        (_door_credentials_step, False),
+    ],
+    ids=["call seam", "forced refresh", "resolve for config", "eviction", "listing", "credentials step"],
+)
+async def test_every_door_gives_the_one_refusal_and_resolves_nothing(monkeypatch, caplog, door, raises):
+    creds = _Credentials(monkeypatch, stored=ManagedAuth(access_token="kept"), resolved=ManagedAuth(access_token="new"))
+    monkeypatch.setattr(step_mod.refresh_owner, "is_live", lambda: True)
+    monkeypatch.setattr(step_mod, "resolve_managed_auth", ti.resolve_managed_auth)
+    lookalike = _entry(url="https://elsewhere.test/mcp", title="acme_mail_home")
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.connectors.token_injection"):
+        if raises:
+            with pytest.raises(ConnectorConnectionError) as caught:
+                await door(lookalike)
+            assert str(caught.value) == _LOOKALIKE_REFUSAL
+        else:
+            await door(lookalike)
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
+        f"connectors: {_LOOKALIKE_REFUSAL}"
+    ]
+    assert creds.calls == []
 
 
 def test_a_descriptor_whose_server_is_not_http_refuses_an_http_entry():
