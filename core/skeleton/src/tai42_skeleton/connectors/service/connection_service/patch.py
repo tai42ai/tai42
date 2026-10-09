@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.connectors.models import ConnectionRecord
+from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.service import PatchResult
 
 from tai42_skeleton.connectors.oauth import redirect, state
@@ -17,6 +19,25 @@ from tai42_skeleton.connectors.service import manifest_writer
 from .flow import _start_flow
 from .persist import _persist
 from .validation import _validate_return_url, _validate_sub_services
+
+
+def _split_toggled_on(
+    record: ConnectionRecord, descriptor: ProviderDescriptor, to_add: set[str]
+) -> tuple[list[str], list[str]]:
+    """Split the sub-services toggled ON into those recreated inline and those that need consent.
+
+    A no-auth connection has no OAuth endpoints, so there is no consent flow to fork — every toggle
+    is inline regardless of any scopes the descriptor declares.
+    """
+    granted = set(record.granted_scopes)
+    can_inline: list[str] = []
+    needs_consent: list[str] = []
+    for sub_id in to_add:
+        if record.kind == "none" or set(descriptor.sub_services[sub_id].scopes).issubset(granted):
+            can_inline.append(sub_id)
+        else:
+            needs_consent.append(sub_id)
+    return can_inline, needs_consent
 
 
 async def patch_sub_services(
@@ -33,7 +54,8 @@ async def patch_sub_services(
     ON whose scopes are already granted are recreated inline; otherwise a
     ``TOGGLE_SUBSERVICE_ON`` flow is started and the authorize URL returned for a
     consent popup that :func:`~tai42_skeleton.connectors.service.connection_service.complete.complete_connect`
-    finalises.
+    finalises. The connection's whole enabled set is reconciled, so an owned entry the run-time check
+    refuses (it fell behind its descriptor) is rewritten; an unchanged set is accepted only to do that.
     """
     _validate_return_url(return_url)
 
@@ -52,23 +74,25 @@ async def patch_sub_services(
 
         current = set(record.enabled_sub_services)
         desired_set = set(desired)
+        config_service = _svc.ConfigService.from_app()
         if current == desired_set:
-            raise ValueError("enabled_sub_services unchanged")
+            # Saving the services again is how a connection that cannot reconnect (no-auth) has its
+            # entries brought back to what the descriptor defines: an unchanged set is refused only
+            # when no owned entry would be rewritten.
+            pending = manifest_writer.managed_entries_to_write(
+                config_service.read_manifest_document(),
+                descriptor=descriptor,
+                enabled_sub_services=sorted(current),
+                alias=record.alias,
+                connection_id=connection_id,
+            )
+            if not pending.rewritten:
+                raise ValueError("enabled_sub_services unchanged")
 
         to_remove = current - desired_set
         to_add = desired_set - current
 
-        granted = set(record.granted_scopes)
-        needs_consent_subs: list[str] = []
-        can_inline_subs: list[str] = []
-        for sub_id in to_add:
-            # A no-auth connection has no OAuth endpoints, so there is no
-            # consent flow to fork — every toggle is inline regardless of any
-            # scopes the descriptor declares.
-            if record.kind == "none" or set(descriptor.sub_services[sub_id].scopes).issubset(granted):
-                can_inline_subs.append(sub_id)
-            else:
-                needs_consent_subs.append(sub_id)
+        can_inline_subs, needs_consent_subs = _split_toggled_on(record, descriptor, to_add)
 
         # A consent-requiring toggle forks an OAuth flow whose signed state
         # carries this origin, so fail closed on an off-list Origin here — after
@@ -79,18 +103,20 @@ async def patch_sub_services(
             redirect.validate_origin_allowed(origin)
 
         new_enabled = sorted((current - to_remove) | set(can_inline_subs))
-        record.enabled_sub_services = new_enabled
-        # Compare-and-set against the ciphertext this operation loaded: the
-        # lock is best-effort, so a peer (e.g. a token refresh that rotated the
-        # refresh token) may have written meanwhile — losing the CAS raises
-        # rather than clobbering the peer's record.
-        await _persist(record, expected_blob=started_blob)
+        if new_enabled != sorted(current):
+            record.enabled_sub_services = new_enabled
+            # Compare-and-set against the ciphertext this operation loaded: the
+            # lock is best-effort, so a peer (e.g. a token refresh that rotated the
+            # refresh token) may have written meanwhile — losing the CAS raises
+            # rather than clobbering the peer's record.
+            await _persist(record, expected_blob=started_blob)
 
-        # Reconcile the inline manifest changes in ONE pipeline transaction
-        # (remove + append in a single mutator ⇒ one persist, one reload, one
-        # broadcast) INSIDE the lock so a concurrent disconnect (which also takes
-        # the lock) cannot delete the connection between this persist and the
-        # reconcile and strand the added entries against a deleted connection.
+        # Reconcile the manifest in ONE pipeline transaction (remove + append/rewrite in a
+        # single mutator ⇒ one persist, one reload, one broadcast) INSIDE the lock so a
+        # concurrent disconnect (which also takes the lock) cannot delete the connection
+        # between this persist and the reconcile and strand the written entries. The whole
+        # enabled set is reconciled, so an owned entry that fell behind the descriptor is
+        # rewritten too.
         removed: list[str] = []
         added: list[str] = []
 
@@ -100,24 +126,27 @@ async def patch_sub_services(
                 if to_remove
                 else []
             )
-            added[:] = (
-                manifest_writer.add_managed_entries(
-                    document,
-                    descriptor=descriptor,
-                    enabled_sub_services=can_inline_subs,
-                    alias=record.alias,
-                    connection_id=connection_id,
-                )
-                if can_inline_subs
-                else []
+            added[:] = manifest_writer.add_managed_entries(
+                document,
+                descriptor=descriptor,
+                enabled_sub_services=new_enabled,
+                alias=record.alias,
+                connection_id=connection_id,
             )
 
-        # A consent-only toggle (nothing to remove, nothing inline-addable) makes no
-        # manifest change here, so no apply_change runs and the fanout is honestly
-        # ``None``; the forked consent flow's own completion reports its broadcast.
+        # The pipeline runs only when the manifest changes; a consent-only toggle changes
+        # nothing here, so the fanout is honestly ``None`` and the forked consent flow's own
+        # completion reports its broadcast.
         fanout: dict[str, Any] | None = None
-        if to_remove or can_inline_subs:
-            fanout = (await _svc.ConfigService.from_app().apply_change(reconcile)).fanout
+        pending_write = manifest_writer.managed_entries_to_write(
+            config_service.read_manifest_document(),
+            descriptor=descriptor,
+            enabled_sub_services=new_enabled,
+            alias=record.alias,
+            connection_id=connection_id,
+        )
+        if to_remove or pending_write:
+            fanout = (await config_service.apply_change(reconcile)).fanout
 
     if not needs_consent_subs:
         return PatchResult(

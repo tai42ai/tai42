@@ -10,14 +10,21 @@ from unittest.mock import AsyncMock
 
 import pytest
 from tai42_contract.connectors.models import ConnectorRef
+from tai42_contract.connectors.providers import (
+    McpServerDescriptor,
+    OAuthEndpoints,
+    ProviderDescriptor,
+    SubServiceDescriptor,
+)
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as lifecycle_module
+from tai42_skeleton.connectors.providers import registry
 from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
 from tai42_skeleton.connectors.token_injection import prepare_managed_request
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.manifest.transport import detect_transport
 from tai42_skeleton.tools import mcp_health
-from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
 
 from ._doubles import _cfg, _failed_row, _FakeMcpTool, _Mixin
 
@@ -122,7 +129,35 @@ def test_reload_evicts_pooled_session_under_plain_key(monkeypatch):
     assert [kwargs for _loop, kwargs in sink] == [{"config": _cfg("svc").model_dump()}]
 
 
-def test_reload_eviction_uses_managed_effective_key(monkeypatch):
+@pytest.fixture
+def acme_events():
+    """The OAuth provider ``acme`` registered, its ``events`` server at ``http://x/mcp`` (``_managed_cfg``'s url)."""
+    registry.reset_registry()
+    registry.register_connector(
+        ProviderDescriptor(
+            id="acme",
+            display_name="Acme",
+            kind="oauth",
+            origin="system",
+            category="productivity",
+            oauth=OAuthEndpoints(authorize="https://acme.test/authorize", token="https://acme.test/token"),
+            client_id_env="ACME_CLIENT_ID",
+            client_secret_env="ACME_CLIENT_SECRET",
+            sub_services={
+                "events": SubServiceDescriptor(
+                    id="events",
+                    display_name="Events",
+                    scopes=["events.read"],
+                    mcp_server=McpServerDescriptor(type="http", url="http://x/mcp"),
+                ),
+            },
+        )
+    )
+    yield
+    registry.reset_registry()
+
+
+def test_reload_eviction_uses_managed_effective_key(monkeypatch, acme_events):
     """For a managed entry the eviction key is the auth-MERGED effective config —
     the exact key a dispatch pools under — computed through the same
     ``prepare_managed_request`` path, so the two can never drift."""
@@ -142,7 +177,7 @@ def test_reload_eviction_uses_managed_effective_key(monkeypatch):
     out = m._reload_mcp("svc")
 
     assert out["status"] == "ok"
-    transport = _detect_transport(config.config)
+    transport = detect_transport(config.config)
     expected = prepare_managed_request(config, auth, transport)[0].model_dump()
     assert [kwargs for _loop, kwargs in sink] == [{"config": expected}]
     # The merged Bearer header proves the key is NOT the raw config dump.

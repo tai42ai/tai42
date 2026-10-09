@@ -1,7 +1,6 @@
 """Unit tests for the connector managed-auth wrappers.
 
-The injection seam (``set_resolver`` / ``set_force_refresher`` / sentinels)
-is gone; ``resolve_managed_auth`` / ``force_refresh`` are store-backed runtime
+``resolve_managed_auth`` / ``force_refresh`` are store-backed runtime
 functions taking ``(connection_id, provider_id, sub_service)`` directly. The
 token-injection module wraps them in ``resolve_managed_auth_for_config(config)``
 / ``_force_refresh(config)`` which unwrap ``config.managed``, gate on
@@ -36,6 +35,9 @@ from tai42_skeleton.connectors.token_injection import (
 )
 
 CONN_ID = "11111111-1111-1111-1111-111111111111"
+
+# Every managed entry here sits on its provider's own server.
+pytestmark = pytest.mark.usefixtures("managed_providers")
 
 _RESOLVER = "tai42_skeleton.connectors.token_injection.resolve_managed_auth"
 _REFRESHER = "tai42_skeleton.connectors.token_injection.force_refresh"
@@ -75,7 +77,7 @@ def test_managed_config_resolves_via_runtime_resolver():
         auth = asyncio.run(resolve_managed_auth_for_config(_managed_config()))
 
     assert auth == ManagedAuth(access_token="raw-token")
-    resolver.assert_awaited_once_with(CONN_ID, "google", "gmail")
+    resolver.assert_awaited_once_with(CONN_ID, "google", "gmail", allow_refresh=True)
 
 
 def test_hand_authored_config_returns_none_without_resolving():

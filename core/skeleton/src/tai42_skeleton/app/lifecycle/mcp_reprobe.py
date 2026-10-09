@@ -110,6 +110,31 @@ class McpReprobeMixin(LifecycleState):
             still_failed = set(self._failed_mcps)
         return out, still_failed
 
+    async def _bring_boot_credentials_up_to_date(self) -> None:
+        """After boot's listing, refresh the credentials it could not, then re-probe the entries that now have one.
+
+        Boot lists before the refresh owner is live, so a server that demands a credential whose stored
+        token had expired is left failed. Once the owner is bound this brings those credentials up to date
+        (one reload probe budget) and re-probes, ONCE, exactly the entries of that selection the boot
+        listing left failed and that now have a credential in hand; an entry down for another reason is
+        left to the ordinary re-probe loop.
+        """
+        in_hand = await self._bring_listed_credentials_up_to_date()
+        manifest = self._manifest
+        mcp_map = (manifest.mcp_map if manifest else {}) or {}
+        snapshot = {
+            title: mcp_map[title]
+            for title, ready in in_hand.items()
+            if ready and title in mcp_map and title in self._failed_mcps
+        }
+        if snapshot:
+            results, _still_failed = await self._probe_and_apply_failed(snapshot)
+            logger.info(
+                "boot credential re-probe: probed=%s recovered=%s",
+                sorted(snapshot),
+                sorted(r["title"] for r in results if r.get("status") == "ok"),
+            )
+
     async def _reprobe_failed_mcps_loop(self) -> None:
         """Re-probe failed-at-boot MCP servers on an exponential backoff.
 

@@ -205,12 +205,15 @@ async def test_patch_provider_removed_raises_value_error(harness, monkeypatch):
 
 
 async def test_patch_consent_fork_when_scopes_missing(harness):
-    cs_mod, records, _, _flows, _events, _ = harness
+    cs_mod, records, _, _flows, _events, providers = harness
     # cal scope NOT granted → consent flow.
     records[CID] = make_oauth_record(
         connection_id=CID,
         enabled_sub_services=["mail"],
         granted_scopes=["mail.read", "mail.send"],
+    )
+    cs_mod.ConfigService.from_app().seed(
+        descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID
     )
     result = await patch_sub_services(
         connection_id=CID,

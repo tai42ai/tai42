@@ -728,9 +728,17 @@ async def build_and_discard_epoch(
     logger.info("epoch built under the proposed env and discarded: this process is not a bus member and swaps nothing")
 
 
+async def _default_bring_credentials_up_to_date() -> None:
+    """The live app's credentials step: one reload probe budget, raising nothing, idle with no live refresh owner."""
+    from tai42_skeleton.app import instance
+
+    await instance.app._bring_listed_credentials_up_to_date()
+
+
 async def build_and_swap_epoch(
     proposed_env: Mapping[str, str],
     *,
+    bring_credentials_up_to_date: Callable[[], Awaitable[Any]] | None = None,
     rebuild: Callable[[], Any] | None = None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
     establish_background_loops: Callable[[], Awaitable[None]] | None = None,
@@ -744,6 +752,8 @@ async def build_and_swap_epoch(
 
     Protocol:
 
+    - first, on the still-free serving loop and under the live settings, bring up to date the credentials
+      the build's listing needs (``bring_credentials_up_to_date``): the build blocks the loop it refreshes on;
     - snapshot ``os.environ``, apply ``proposed_env`` (removed-key reconciled), and
       clear the accessor cache with ``reset_all_settings`` so the build reads it;
     - build the new serving surface OFF TO THE SIDE — ``rebuild`` re-initialises the
@@ -763,11 +773,12 @@ async def build_and_swap_epoch(
       ``os.environ`` is restored EXACTLY from the snapshot (restore-on-failure only),
       the old epoch keeps serving untouched, and the build failure is re-raised loudly.
 
-    The ``rebuild`` / ``build_serving_app`` / ``establish_background_loops`` seams
-    default to the running app; they are injectable so the build/swap/discard contract
-    is exercised in isolation.
+    The ``bring_credentials_up_to_date`` / ``rebuild`` / ``build_serving_app`` / ``establish_background_loops``
+    seams default to the running app; injectable so the build/swap/discard contract is exercised in isolation.
     """
     from tai42_skeleton.app.registry_staging import commit_staging_all
+
+    await (bring_credentials_up_to_date or _default_bring_credentials_up_to_date)()
 
     establish_background_loops = establish_background_loops or _default_establish_background_loops
     build = await _build_epoch(proposed_env, rebuild, build_serving_app)

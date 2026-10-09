@@ -290,7 +290,6 @@ async def _complete_reconnect_or_toggle(
         # applied removals before forking to the consent flow.
         new_enabled = sorted(set(flow_state.enabled_sub_services))
         prior_enabled = set(record.enabled_sub_services)
-        to_add = set(new_enabled) - prior_enabled
         to_remove = prior_enabled - set(new_enabled)
         record.enabled_sub_services = new_enabled
 
@@ -317,23 +316,29 @@ async def _complete_reconnect_or_toggle(
                 if to_remove
                 else []
             )
-            added[:] = (
-                manifest_writer.add_managed_entries(
-                    document,
-                    descriptor=descriptor,
-                    enabled_sub_services=to_add,
-                    alias=record.alias,
-                    connection_id=cid,
-                )
-                if to_add
-                else []
+            added[:] = manifest_writer.add_managed_entries(
+                document,
+                descriptor=descriptor,
+                enabled_sub_services=new_enabled,
+                alias=record.alias,
+                connection_id=cid,
             )
 
-        # No delta ⇒ no apply_change ran, so there is no broadcast to report; the
-        # fanout is honestly ``None`` (this path mutated no manifest).
+        # The pipeline runs only when the manifest changes (it writes and reloads whatever it is
+        # given); with no change there is no broadcast to report and the fanout is honestly ``None``.
+        # The whole enabled set is reconciled, so an owned entry the run-time check refuses (it fell
+        # behind its descriptor) is rewritten by the reconnect.
+        config_service = _svc.ConfigService.from_app()
+        pending = manifest_writer.managed_entries_to_write(
+            config_service.read_manifest_document(),
+            descriptor=descriptor,
+            enabled_sub_services=new_enabled,
+            alias=record.alias,
+            connection_id=cid,
+        )
         fanout: dict[str, Any] | None = None
-        if to_remove or to_add:
-            fanout = (await _svc.ConfigService.from_app().apply_change(reconcile)).fanout
+        if to_remove or pending:
+            fanout = (await config_service.apply_change(reconcile)).fanout
 
     return CompleteConnectResult(
         connection_id=cid,

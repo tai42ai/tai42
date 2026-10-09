@@ -21,12 +21,12 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
+from tai42_skeleton.manifest.transport import detect_transport
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
 from tai42_skeleton.tools.adapters.mcp_tool_to_func import (
     _build_input_model,
     _build_input_value,
     _build_output_schema,
-    _detect_transport,
     mcp_tool_call_wrapper,
     mcp_tool_to_func,
 )
@@ -277,20 +277,20 @@ def test_explicit_null_arguments_reach_the_wire():
 
 
 def test_detect_transport_each_kind():
-    assert _detect_transport(MCPConfig(type="http", url="http://x")) == "http"
-    assert _detect_transport(MCPConfig(type="stdio", command="uvx")) == "stdio"
-    assert _detect_transport(MCPConfig(type="uds", uds="/tmp/s.sock")) == "uds"
+    assert detect_transport(MCPConfig(type="http", url="http://x")) == "http"
+    assert detect_transport(MCPConfig(type="stdio", command="uvx")) == "stdio"
+    assert detect_transport(MCPConfig(type="uds", uds="/tmp/s.sock")) == "uds"
 
 
 def test_detect_transport_none_raises():
     with pytest.raises(RuntimeError, match="no transport"):
-        _detect_transport(MCPConfig(type=None))
+        detect_transport(MCPConfig(type=None))
 
 
 def test_detect_transport_ambiguous_raises():
     cfg = MCPConfig.model_construct(type="http", url="http://x", command="uvx")
     with pytest.raises(RuntimeError, match="ambiguous"):
-        _detect_transport(cfg)
+        detect_transport(cfg)
 
 
 # -- mcp_tool_to_func + wrapper (non-managed) ---------------------------------
@@ -344,10 +344,46 @@ def test_mcp_tool_to_func_call_drives_wrapper():
     assert client.captured_args[0][0] == "lookup"
 
 
-def test_wrapper_managed_token_expired_force_refreshes_and_retries():
+@pytest.fixture
+def provider_g():
+    """The OAuth provider ``g`` registered, its ``m`` server at ``http://x/mcp`` (the managed entries' url)."""
+    from tai42_contract.connectors.providers import (
+        McpServerDescriptor,
+        OAuthEndpoints,
+        ProviderDescriptor,
+        SubServiceDescriptor,
+    )
+
+    from tai42_skeleton.connectors.providers import registry
+
+    registry.reset_registry()
+    registry.register_connector(
+        ProviderDescriptor(
+            id="g",
+            display_name="G",
+            kind="oauth",
+            origin="system",
+            category="productivity",
+            oauth=OAuthEndpoints(authorize="https://g.test/authorize", token="https://g.test/token"),
+            client_id_env="G_CLIENT_ID",
+            client_secret_env="G_CLIENT_SECRET",
+            sub_services={
+                "m": SubServiceDescriptor(
+                    id="m",
+                    display_name="M",
+                    scopes=["m.read"],
+                    mcp_server=McpServerDescriptor(type="http", url="http://x/mcp"),
+                ),
+            },
+        )
+    )
+    yield
+    registry.reset_registry()
+
+
+def test_wrapper_managed_token_expired_force_refreshes_and_retries(provider_g):
     # Managed OAuth entry: a first ``token_expired`` sentinel drives the
-    # force-refresh + retry-once branch (the ``is_managed and access_token``
-    # gate plus ``handle_token_expired``).
+    # force-refresh + retry-once branch of the managed-credential seam.
     from unittest.mock import AsyncMock
 
     from tai42_contract.connectors.models import ConnectorRef
@@ -408,10 +444,9 @@ def test_wrapper_managed_token_expired_force_refreshes_and_retries():
     refresher.assert_awaited_once()
 
 
-def test_wrapper_managed_no_expiry_skips_retry():
-    # Managed OAuth entry whose first call succeeds: the ``is_managed and
-    # access_token`` gate is true but ``is_token_expired`` is false, so the
-    # retry branch is skipped (the 144->152 false edge).
+def test_wrapper_managed_no_expiry_skips_retry(provider_g):
+    # Managed OAuth entry whose first call succeeds: no "token expired" outcome,
+    # so the seam's refresh-and-retry branch is skipped.
     from unittest.mock import AsyncMock
 
     from tai42_contract.connectors.models import ConnectorRef
@@ -588,3 +623,78 @@ def test_lc_tool_preserves_explicit_none():
     assert func(n=None) == {"n": None}
     # A value equal to the default drops from the forwarded dict; the tool fills it.
     assert func(n=5) == {"n": 5}
+
+
+def test_the_auth_retry_runs_inside_one_dispatch_and_the_reconnect_retry_outside_it(provider_g):
+    # A 401 on the first request is the seam's: one forced refresh and one retry, inside the same
+    # dispatch. That retry losing its session is the reconnect's: the whole dispatch runs once more,
+    # resolving the credential again. Neither retry is taken twice.
+    import httpx
+    from tai42_contract.connectors.models import ConnectorRef
+    from tai42_contract.errors import ClientDisconnectedError
+
+    from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
+
+    events: list[str] = []
+    request = httpx.Request("POST", "http://x/mcp")
+    refused = httpx.HTTPStatusError("401", request=request, response=httpx.Response(401, request=request))
+    outcomes: list = [refused, ClientDisconnectedError("lost"), _ok_result()]
+    managed = TaiMCPConfig(
+        title="srv",
+        config=MCPConfig(type="http", url="http://x/mcp", headers={}),
+        managed=ConnectorRef(connection_id="11111111-1111-1111-1111-111111111111", provider_id="g", sub_service="m"),
+    )
+
+    class _Client:
+        def current(self, *, config):
+            token = (config["config"].get("headers") or {}).get("authorization")
+
+            class _S:
+                async def __aenter__(self):
+                    return self
+
+                @staticmethod
+                async def __aexit__(*exc):
+                    return False
+
+                @staticmethod
+                async def call_tool_mcp(name, arguments, meta=None, timeout=None):
+                    events.append(f"call {token}")
+                    nxt = outcomes.pop(0)
+                    if isinstance(nxt, BaseException):
+                        raise nxt
+                    return nxt
+
+            return _S()
+
+        async def close(self, *, config):
+            events.append("close")
+
+    tokens = iter(["stale", "fresh"])
+
+    async def resolve(*args, **kwargs):
+        events.append("resolve")
+        return ManagedAuth(access_token=next(tokens))
+
+    async def refresh(connection_id, *, failed_access_token=None):
+        events.append(f"refresh fenced on {failed_access_token}")
+        return ManagedAuth(access_token="fresh")
+
+    async def go():
+        with (
+            patch(_CLIENT, return_value=_Client()),
+            patch("tai42_skeleton.connectors.token_injection.resolve_managed_auth", new=resolve),
+            patch("tai42_skeleton.connectors.token_injection.force_refresh", new=refresh),
+        ):
+            return await mcp_tool_call_wrapper(managed, "lookup", _build_input_model(_FakeTool(), 50), {"q": "x"})
+
+    assert asyncio.run(go()) == {"result": "done"}
+    assert events == [
+        "resolve",
+        "call Bearer stale",
+        "refresh fenced on stale",
+        "call Bearer fresh",
+        "close",  # the superseded session, evicted whatever the retry answered
+        "resolve",
+        "call Bearer fresh",
+    ]

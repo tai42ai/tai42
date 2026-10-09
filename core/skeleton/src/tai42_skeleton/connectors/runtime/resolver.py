@@ -23,6 +23,7 @@ translates into tool errors:
 - :class:`ConnectorRefreshFailingError` — the bounded retry budget on transient
   errors was exhausted; the connection flips to ``REFRESH_FAILING``.
 - :class:`ConnectorConnectionError` — the connection is missing (base class).
+- :class:`ConnectorInsufficientScopeError` — the server's scope challenge; the user must reconnect.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from pydantic import SecretStr
 from tai42_contract.connectors.errors import ConnectorClientRequiredError, ConnectorError
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord
 from tai42_contract.connectors.providers import ProviderDescriptor
+from tai42_contract.errors import ErrorKind
 
 from tai42_skeleton.connectors.oauth import authorization, crypto, discovery
 from tai42_skeleton.connectors.oauth import client as oauth_client
@@ -119,6 +121,36 @@ class ConnectorAuthExpiredError(ConnectorError):
         self.connection_id = connection_id
         self.provider_id = provider_id
         self.sub_service = sub_service
+
+
+class ConnectorInsufficientScopeError(ConnectorError):
+    """The server answered a managed call with a scope challenge: the token lacks ``scopes``.
+
+    A refresh cannot widen a grant, so only the user's reconnect can give the token the scopes;
+    ``scopes`` are the challenge's, in its order (possibly none).
+    """
+
+    # Only the user's reconnect resolves it, so it is never a retryable kind.
+    __tai_error_kind__ = ErrorKind.UNAUTHORIZED
+
+    def __init__(
+        self,
+        *,
+        connection_id: str,
+        provider_id: str,
+        sub_service: str,
+        scopes: list[str],
+    ) -> None:
+        """Store the connection identity and the scopes the server named, and format the message."""
+        named = " ".join(scopes) if scopes else "none named"
+        super().__init__(
+            f"the server of connection_id={connection_id} provider_id={provider_id} sub_service={sub_service} "
+            f"refused the token for lacking scopes ({named}); reconnect the account to grant them"
+        )
+        self.connection_id = connection_id
+        self.provider_id = provider_id
+        self.sub_service = sub_service
+        self.scopes = list(scopes)
 
 
 class ConnectorConnectionError(ConnectorError):
@@ -713,3 +745,43 @@ async def _force_refresh_slow(connection_id: str, failed_access_token: str | Non
                 connection_id=connection_id,
             )
         return await _refresh(record, started_blob)
+
+
+SCOPES_WANTED_MAX = 50
+
+
+async def note_scopes_wanted(connection_id: str, scopes: list[str]) -> bool:
+    """Add ``scopes`` to the record's ``scopes_wanted`` (the union, in order, without duplicates).
+
+    The next reconnect asks for them. Returns whether a write committed: nothing new, a union past
+    :data:`SCOPES_WANTED_MAX` (logged at WARNING) and a compare-and-set lost twice (logged at WARNING;
+    the next scope challenge notes them again) write nothing. The health state is not touched. A store
+    error propagates.
+    """
+    async with connection_lock(connection_id):
+        for attempt in (1, 2):
+            record, blob = await _load(connection_id)
+            union = list(dict.fromkeys([*record.scopes_wanted, *scopes]))
+            if union == record.scopes_wanted:
+                return False
+            if len(union) > SCOPES_WANTED_MAX:
+                logger.warning(
+                    "connectors: connection %s would want %d scopes (more than %d); "
+                    "the challenge's scopes are not noted",
+                    connection_id,
+                    len(union),
+                    SCOPES_WANTED_MAX,
+                )
+                return False
+            record.scopes_wanted = union
+            if await _persist(record, expected_blob=blob):
+                _stamp_written(connection_id)
+                return True
+            if attempt == 1:
+                logger.info(
+                    "connectors: noting wanted scopes of %s lost the compare-and-set; retrying once", connection_id
+                )
+    logger.warning(
+        "connectors: noting wanted scopes of %s lost the compare-and-set twice; not noted this time", connection_id
+    )
+    return False

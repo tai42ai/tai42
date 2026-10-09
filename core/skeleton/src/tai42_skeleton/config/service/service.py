@@ -149,6 +149,14 @@ class ConfigService(_ValidationMixin, _ResolutionMixin, _BroadcastMixin):
 
         return cls(config_manager=tai42_app.config.config_manager, admin=tai42_app.admin, bus=instance.app.bus)
 
+    def read_manifest_document(self) -> dict[str, Any]:
+        """The persisted manifest in its PRESERVED view (empty when none exists yet), a copy the caller owns.
+
+        A caller asks a mutator what it would change before driving :meth:`apply_change`, which
+        persists, reloads and broadcasts whatever it is given.
+        """
+        return copy.deepcopy(self._read_preserved_manifest())
+
     async def apply_change(self, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
         """Read-modify-write the manifest, then persist, reload, and broadcast to the fleet.
 

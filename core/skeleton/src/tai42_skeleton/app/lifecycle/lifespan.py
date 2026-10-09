@@ -67,6 +67,10 @@ class LifespanMixin(LifecycleState):
             # The connectors' credential refreshes run as tasks owned by this loop, so a
             # caller that stops waiting (a budget, a cancelled request) never cuts one.
             refresh_owner.bind_to_running_loop()
+            # Boot listed before the owner was live, so a server that demands a credential whose
+            # token expired meanwhile is still failed: refresh such credentials now and re-probe
+            # those entries once, before the post-swap handlers and the background tasks start.
+            await self._bring_boot_credentials_up_to_date()
             # Establish the boot generation's loop-affine background loops ON this
             # serving loop, registered with the boot epoch so they retire with it. Boot
             # raises loudly on a failed establisher (never a healthy-looking half-start).
