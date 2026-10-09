@@ -4,7 +4,7 @@
 -- the (target_kind, target_name) pair is the only tenancy this platform has, kind
 -- names the subject family a state declares, key addresses one subject in it.
 --
--- Seven tables under the `states` component, bound through the kit DB registry
+-- Eight tables under the `states` component, bound through the kit DB registry
 -- (env TAI_DB_BINDING_STATES, defaulting to the `default` database like `skeleton`).
 -- The column comments state the invariants the tables cannot express; the store
 -- (states/store.py) enforces the rest.
@@ -134,3 +134,37 @@ CREATE TABLE IF NOT EXISTS state_writes (
 );
 CREATE INDEX IF NOT EXISTS state_writes_subject_idx
     ON state_writes (state, target_kind, target_name, subject_kind, subject_key, id DESC);
+
+-- Durable pending saves: a run's validated record writes and its deferred calls, written before the reply and
+-- applied after it. A row is deleted in the transaction that finishes it, so the table holds only outstanding rows.
+-- Keys are compact JSON arrays: record_keys [state,tk,tn,kind,key] of every staged subject, its canonical and its
+-- aliases; subject_keys [tk,tn,kind,key] of the same subjects plus the enqueuing door's candidates; targets [tk,tn]
+-- of every entry of both. The id is the per-key FIFO order.
+CREATE TABLE IF NOT EXISTS state_outbox (
+    id                 BIGSERIAL   PRIMARY KEY,
+    status             TEXT        NOT NULL,             -- 'pending' | 'calls' | 'running' | 'failed'
+    record_keys        TEXT[]      NOT NULL,
+    subject_keys       TEXT[]      NOT NULL,
+    targets            TEXT[]      NOT NULL,
+    states             TEXT[]      NOT NULL,             -- every state the row writes
+    run_id             TEXT,
+    trace_id           TEXT,                             -- the run's monitoring trace, when one was active
+    records            JSONB       NOT NULL,             -- the staged writes in authored order
+    subjects           JSONB       NOT NULL,             -- per subject: base seq, declaration version, projection
+    calls              JSONB       NOT NULL,             -- the deferred calls in authored order
+    calls_done         INTEGER     NOT NULL DEFAULT 0,
+    attempts           INTEGER     NOT NULL DEFAULT 0,
+    next_attempt_at    TIMESTAMPTZ,
+    claimed_by         TEXT,
+    lease_until        TIMESTAMPTZ,
+    last_error         TEXT,
+    failed_phase       TEXT,                             -- 'records' | 'calls' when status = 'failed'
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    records_applied_at TIMESTAMPTZ,
+    failed_at          TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS state_outbox_record_keys_gin ON state_outbox USING gin (record_keys);
+CREATE INDEX IF NOT EXISTS state_outbox_subject_keys_gin ON state_outbox USING gin (subject_keys);
+CREATE INDEX IF NOT EXISTS state_outbox_targets_gin ON state_outbox USING gin (targets);
+CREATE INDEX IF NOT EXISTS state_outbox_states_gin ON state_outbox USING gin (states);
+CREATE INDEX IF NOT EXISTS state_outbox_status_idx ON state_outbox (status, id);

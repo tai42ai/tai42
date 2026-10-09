@@ -160,18 +160,21 @@ async def _parked_interaction_referee(old_name: str) -> list[str]:
 
 async def _states_referee(old_name: str) -> list[str]:
     # A ``tool`` target renamed would strand every state record keyed under it — the
-    # subject scope ``(tool, <old_name>)`` no longer names a live target. Count them across
-    # every state; feature-off (the states component's database unbound) holds none.
+    # subject scope ``(tool, <old_name>)`` no longer names a live target. The target's pending
+    # saves are applied (or named, when held or still running their calls) first, so the count
+    # includes their records. Feature-off (the states component's database unbound) holds none.
+    from tai42_skeleton.app import instance
     from tai42_skeleton.states.db import states_store_configured
     from tai42_skeleton.states.store import PostgresStatesStore
 
     if not states_store_configured():
         return []
+    holders = await instance.app.states.drain_target_saves("tool", old_name)
     count = await PostgresStatesStore().count_records_for_target("tool", old_name)
     if count == 0:
-        return []
+        return holders
     records = "record" if count == 1 else "records"
-    return [f"{count} state {records} under target tool/{old_name}"]
+    return [*holders, f"{count} state {records} under target tool/{old_name}"]
 
 
 def register_platform_rename_referees() -> None:

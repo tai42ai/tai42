@@ -689,12 +689,9 @@ def _current_execution_identity_for_park() -> tuple[str | None, str]:
     function-locally to keep an ``authz`` module-load edge (its ``access_control.backend`` chain)
     out of this module's import.
     """
-    from tai42_skeleton.authz.execution_identity import get_execution_identity
+    from tai42_skeleton.authz.execution_identity import capture_fire_identity
 
-    identity = get_execution_identity()
-    if identity is None or identity.user_id is None:
-        return None, ""
-    return identity.user_id, identity.execution_key_fingerprint or ""
+    return capture_fire_identity()
 
 
 def _bind_execution_identity_for_park_fire(execution_key: str, fingerprint: str) -> Any:

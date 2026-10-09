@@ -36,12 +36,15 @@ from tai42_contract.states import (
 from tai42_contract.states.errors import (
     AttachConflictError,
     DeclarationInUseError,
+    DeferredCallRefusedError,
     InvalidPathError,
     NonAdditiveRedeclareError,
     RegimeViolationError,
     SchemaValidationError,
     StateExistsError,
     StateNotFoundError,
+    StatePendingSaveFailedError,
+    StatePendingSaveTimeoutError,
     StatesError,
     StatesNotConfiguredError,
     SubjectFoldError,
@@ -57,6 +60,7 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
+    UnavailableError,
     ValidationRejectedError,
     operation,
 )
@@ -72,6 +76,7 @@ from tai42_skeleton.operations.response_models_group_states import (
     StateAttachmentRow,
     StateConsumerList,
     StateDeclarationList,
+    StateDeclarationPutResponse,
     StateDeleteResult,
     StateRecordOrNull,
     StateSearchPage,
@@ -102,6 +107,9 @@ _ERROR_MAP: dict[type[StatesError], type] = {
     ValueValidationError: ValidationRejectedError,
     RegimeViolationError: ValidationRejectedError,
     TemplateValidationError: ValidationRejectedError,
+    StatePendingSaveFailedError: ConflictError,
+    StatePendingSaveTimeoutError: UnavailableError,
+    DeferredCallRefusedError: ValidationRejectedError,
 }
 
 
@@ -182,14 +190,15 @@ async def get_state(name: str) -> dict[str, Any]:
     summary="Create or re-declare a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, ValidationRejectedError, ConflictError, NotFoundError],
-    response_model=StateDeclaration,
+    errors=[NotSupportedError, ValidationRejectedError, ConflictError, NotFoundError, UnavailableError],
+    response_model=StateDeclarationPutResponse,
 )
 async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
     """Upsert a state declaration; the ``name`` is taken from the path.
 
     With records present only additive schema changes are accepted — a narrowing is refused
-    while records exist.
+    while records exist. The state's pending saves are applied first; a save held by a failed
+    save counts as records present and an accepted re-declare names it in ``held``.
     """
     body = {**declaration, "name": name}
     try:
@@ -203,14 +212,14 @@ async def put_state(name: str, declaration: dict[str, Any]) -> dict[str, Any]:
             # ``effective_schema`` supplied by a client (computed by the platform) is a
             # rejected input, not a store fault.
             raise ValidationRejectedError(str(exc)) from exc
-    return saved.model_dump(mode="json")
+    return {**saved.declaration.model_dump(mode="json"), "held": [h.model_dump(mode="json") for h in saved.held]}
 
 
 @operation(
     summary="Delete a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ConflictError, UnavailableError],
     response_model=StateDeleteResult,
 )
 async def delete_state(name: str) -> dict[str, Any]:
@@ -223,7 +232,7 @@ async def delete_state(name: str) -> dict[str, Any]:
 @operation(
     summary="A state's record statistics",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError],
+    errors=[NotSupportedError, NotFoundError, UnavailableError],
     response_model=StateStats,
 )
 async def state_stats(name: str) -> dict[str, Any]:
@@ -269,7 +278,7 @@ async def get_state_attachment(name: str, template: str) -> dict[str, Any]:
     summary="Attach a template on a state",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=AttachAck,
 )
 async def attach_state_template(name: str, template: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -282,15 +291,15 @@ async def attach_state_template(name: str, template: str, body: dict[str, Any]) 
     except ValidationError as exc:
         raise ValidationRejectedError(f"invalid attach body: {exc.errors(include_url=False)}") from exc
     with _states_door():
-        await _states().attach(name, template, attach_body)
-    return {"attached": True, "state": name, "template": template}
+        held = await _states().attach(name, template, attach_body)
+    return {"attached": True, "state": name, "template": template, "held": [h.model_dump(mode="json") for h in held]}
 
 
 @operation(
     summary="Update an attachment's declarations",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=AttachUpdateAck,
 )
 async def update_state_attachment(
@@ -301,8 +310,8 @@ async def update_state_attachment(
     Re-runs the attach validators and reconcilers and recomposes the effective schema.
     """
     with _states_door():
-        await _states().update_attachment_declarations(name, template, declarations, options=options)
-    return {"updated": True, "state": name, "template": template}
+        held = await _states().update_attachment_declarations(name, template, declarations, options=options)
+    return {"updated": True, "state": name, "template": template, "held": [h.model_dump(mode="json") for h in held]}
 
 
 async def _detach_referees(state: str, template: str) -> list[str]:
@@ -350,7 +359,7 @@ async def detach_state_template(name: str, template: str) -> dict[str, Any]:
 @operation(
     summary="List a state's subjects",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError],
+    errors=[NotSupportedError, NotFoundError, UnavailableError],
     response_model=StateSubjectsPage,
 )
 async def list_state_subjects(
@@ -364,7 +373,7 @@ async def list_state_subjects(
 @operation(
     summary="Search a state's records",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError],
+    errors=[NotSupportedError, NotFoundError, UnavailableError],
     response_model=StateSearchPage,
 )
 async def search_state_records(
@@ -378,7 +387,7 @@ async def search_state_records(
 @operation(
     summary="Read a subject's record",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=StateRecordOrNull,
 )
 async def read_state_record(
@@ -399,7 +408,7 @@ async def read_state_record(
 @operation(
     summary="Evaluate an input-purpose template_jq program for a subject",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=TemplateJqResult,
 )
 async def eval_state_template_jq(
@@ -428,7 +437,7 @@ async def eval_state_template_jq(
     summary="Apply an update-purpose template_jq program to a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=TemplateJqApplyResult,
 )
 async def apply_state_template_jq(
@@ -461,7 +470,7 @@ async def apply_state_template_jq(
     summary="Replace a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=StateRecord,
 )
 async def replace_state_record(
@@ -478,7 +487,7 @@ async def replace_state_record(
     summary="Merge into a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=StateRecord,
 )
 async def merge_state_record(
@@ -495,7 +504,7 @@ async def merge_state_record(
     summary="Apply ops to a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=ApplyResult,
 )
 async def apply_state_record(
@@ -522,7 +531,7 @@ async def apply_state_record(
     summary="Erase a subject's record",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=EraseAck,
 )
 async def erase_state_record(name: str, target_kind: str, target_name: str, kind: str, key: str) -> dict[str, Any]:
@@ -537,7 +546,7 @@ async def erase_state_record(name: str, target_kind: str, target_name: str, kind
     summary="Fold one subject into another",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=FoldReport,
 )
 async def fold_state_record(
@@ -565,7 +574,7 @@ async def fold_state_record(
 @operation(
     summary="A subject's write audit trail",
     tags=["states"],
-    errors=[NotSupportedError, NotFoundError, ValidationRejectedError],
+    errors=[NotSupportedError, NotFoundError, ValidationRejectedError, ConflictError, UnavailableError],
     response_model=WritesPage,
 )
 async def list_state_writes(
@@ -681,13 +690,13 @@ async def delete_state_template(name: str) -> dict[str, Any]:
     summary="Prune expired state records",
     tags=["states"],
     destructive=True,
-    errors=[NotSupportedError],
+    errors=[NotSupportedError, UnavailableError],
     response_model=PruneResult,
 )
 async def prune_state_retention() -> dict[str, Any]:
     """Delete every record past its state's ``retention_days`` horizon.
 
-    Returns the per-state deleted counts.
+    Returns the per-state deleted counts and the saves held by a failed save whose records it kept.
     """
     with _states_door():
-        return {"pruned": await _states().prune_expired()}
+        return (await _states().prune_expired()).model_dump(mode="json")

@@ -169,6 +169,14 @@ class LifecycleState(ABC):
         """
         return self._dead_perpetual_task
 
+    def on_serving_loop(self) -> bool:
+        """Whether the caller runs on this process's serving loop.
+
+        A task spawned there runs for the process lifetime; a task left on any other loop (a
+        backend worker's private task loop) may never run again.
+        """
+        return self._serving_loop is not None and self._serving_loop is asyncio.get_running_loop()
+
     @abstractmethod
     def _mcp_tools(self, config: TaiMCPConfig, tools):
         raise NotImplementedError

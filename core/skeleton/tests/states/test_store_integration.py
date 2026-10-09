@@ -75,6 +75,7 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     await _exec("DELETE FROM state_attachments WHERE state = %s", (state,))
     await _exec("DELETE FROM state_applied_ops WHERE op_id LIKE %s", (f"%:{state}",))
     await _exec("DELETE FROM state_templates WHERE name = %s", (state + "_m",))
+    await _exec("DELETE FROM state_outbox WHERE states @> ARRAY[%s]::text[]", (state,))
     await _exec("DELETE FROM state_declarations WHERE name = %s", (state,))
 
 

@@ -733,3 +733,63 @@ def test_get_surfaces_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     result = run_cli(monkeypatch, handler, ["states", "get", "status"])
     assert result.exit_code != 0
     assert "not found" in visible(result.output)
+
+
+# -- pending saves ------------------------------------------------------------
+
+
+def test_pending_saves_list_passes_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/state-pending-saves"
+        assert dict(request.url.params) == {"status": "failed", "limit": "10", "cursor": "42"}
+        return data_response({"items": [], "next_cursor": None, "outstanding": 1, "failed": 1})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["states", "pending-saves", "list", "--status", "failed", "--limit", "10", "--cursor", "42"],
+        json_output=True,
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["failed"] == 1
+
+
+def test_pending_saves_retry_posts_to_the_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/state-pending-saves/17/retry"
+        return data_response({"id": "17", "status": "applied", "last_error": None})
+
+    result = run_cli(monkeypatch, handler, ["states", "pending-saves", "retry", "17"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "applied"
+
+
+def test_pending_saves_discard_needs_yes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request without --yes")
+
+    result = run_cli(monkeypatch, handler, ["states", "pending-saves", "discard", "17"])
+    assert result.exit_code != 0
+    assert "pass --yes to discard a pending save" in visible(result.output)
+
+
+def test_pending_saves_discard_deletes_the_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/state-pending-saves/17"
+        return data_response({"discarded": "17"})
+
+    result = run_cli(monkeypatch, handler, ["states", "pending-saves", "discard", "17", "--yes"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"discarded": "17"}
+
+
+def test_pending_saves_retry_surfaces_the_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response("pending save 17 is not failed", 409)
+
+    result = run_cli(monkeypatch, handler, ["states", "pending-saves", "retry", "17"])
+    assert result.exit_code != 0
+    assert "pending save 17 is not failed" in visible(result.output)

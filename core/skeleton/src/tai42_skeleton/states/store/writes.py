@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from tai42_contract.states.errors import StateNotFoundError, SubjectFoldError
 from tai42_contract.states.models import CompletedOrigin, StateSubject
 
+from tai42_skeleton.states.outbox.keys import record_key
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
 from tai42_skeleton.states.paths import partition_guarded
 from tai42_skeleton.states.schema import _validate_document
@@ -98,6 +99,7 @@ class _RecordWriteStore(_StoreBase):
         validate_subject_in_txn: Any,
         validate: bool = True,
         conn: AsyncConnection[Any] | None = None,
+        check_outbox: bool = True,
     ) -> tuple[dict[str, Any], float]:
         """Replace ``subject``'s whole document with ``data`` and record the write.
 
@@ -108,13 +110,14 @@ class _RecordWriteStore(_StoreBase):
         validates the batch it belongs to); the write records paths ``[[]]`` (the whole document).
         The subject resolves through the alias table first. With ``conn`` the write joins the
         caller's transaction (the unit of work's commit replaying a staged replace alongside the
-        batch's other writes).
+        batch's other writes). Without ``conn`` the write raises :class:`OutboxPending`, before
+        writing, when the subject has an unapplied pending save (unless ``check_outbox`` is off).
         """
         async with self._write_cursor(conn) as cur:
             version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
             await validate_subject_in_txn(subject_kinds)
             entry = await catalog.write_entry(cur, state, version)
-            kind, key = await self._resolve_subject(cur, state, subject)
+            kind, key = await self._resolve_subject(cur, state, subject, check_outbox=check_outbox and conn is None)
             if validate:
                 _validate_document(entry.validator, data)
             await cur.execute(
@@ -189,6 +192,7 @@ class _RecordWriteStore(_StoreBase):
         validate_subject_in_txn: Any,
         validate: bool = True,
         conn: AsyncConnection[Any] | None = None,
+        check_outbox: bool = True,
     ) -> tuple[bool, dict[str, Any] | None, float | None, list[dict[str, Any]]]:
         """Apply a batch of path-addressed ops to one record, in ONE txn.
 
@@ -206,7 +210,9 @@ class _RecordWriteStore(_StoreBase):
         ops apply; the whole-document validation (skipped with ``validate=False``, for a caller
         that validates the batch the write belongs to); the UPDATE + ``state_writes`` row as ONE
         writable CTE. With ``conn`` the write joins the caller's transaction (a reconciler's
-        record write commits or rolls back with the attach).
+        record write commits or rolls back with the attach); without it the subject resolve raises
+        :class:`OutboxPending`, before any write, when the subject has an unapplied pending save
+        (unless ``check_outbox`` is off).
         """
         async with self._write_cursor(conn) as cur:
             version, subject_kinds = await self._lock_declaration(cur, state, "SHARE")
@@ -222,7 +228,7 @@ class _RecordWriteStore(_StoreBase):
             # (i) refuse a composing shape violation BEFORE the ledger insert.
             _refuse_composing_shape(ops, regime_paths)
 
-            kind, key = await self._resolve_subject(cur, state, subject)
+            kind, key = await self._resolve_subject(cur, state, subject, check_outbox=check_outbox and conn is None)
 
             if op_id is not None:
                 await cur.execute(
@@ -352,7 +358,7 @@ class _RecordWriteStore(_StoreBase):
     ) -> float | None:
         """The compare-and-set write on the savepoint's cursor; raises :class:`_ProjectionMovedError` on a mismatch."""
         current_version, _kinds = await self._lock_declaration(cur, state, "SHARE")
-        kind, key = await self._resolve_subject(cur, state, subject)
+        kind, key = await self._resolve_subject(cur, state, subject, check_outbox=False)
         where = (state, subject.target_kind, subject.target_name, kind, key)
         await cur.execute(
             "INSERT INTO state_records (state, target_kind, target_name, subject_kind, subject_key, data, "
@@ -443,7 +449,7 @@ class _RecordWriteStore(_StoreBase):
                     (state, *_subject_cols(subject)),
                 )
                 return
-            kind, key = await self._resolve_subject(cur, state, subject)
+            kind, key = await self._resolve_subject(cur, state, subject, check_outbox=True)
             await cur.execute(
                 "DELETE FROM state_records WHERE state = %s AND target_kind = %s AND target_name = %s "
                 "AND subject_kind = %s AND subject_key = %s",
@@ -499,7 +505,18 @@ class _RecordWriteStore(_StoreBase):
                 (state, tk, tn, subject.kind, subject.key),
             )
             existing = await cur.fetchone()
-            target_kind, target_key = await self._resolve_subject(cur, state, into)
+            target_kind, target_key = await self._resolve_subject(cur, state, into, check_outbox=False)
+            # The declaration ``FOR UPDATE`` blocks every apply; a pending save enqueued since the
+            # caller drained both subjects would apply under keys this fold rewrites.
+            canonical_into = StateSubject(target_kind=tk, target_name=tn, kind=target_kind, key=target_key)
+            await cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM state_outbox WHERE record_keys && %s::text[] "
+                "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL))) AS pending",
+                ([record_key(state, s) for s in (subject, into, canonical_into)],),
+            )
+            pending_row = await cur.fetchone()
+            if pending_row is not None and pending_row["pending"]:
+                raise SubjectFoldError(f"subject {subject.kind}/{subject.key} has a pending save; retry the fold")
 
             from_view = {"kind": subject.kind, "key": subject.key}
             into_view = {"kind": target_kind, "key": target_key}

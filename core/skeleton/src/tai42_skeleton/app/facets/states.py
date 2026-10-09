@@ -20,20 +20,27 @@ if TYPE_CHECKING:
         AttachValidator,
         ConsumerLister,
         ConsumerRow,
+        HeldPendingSave,
+        PruneResult,
         RenderedAttachment,
         RenderedStateTemplate,
         StateBatchWrite,
         StateContext,
         StateDeclaration,
+        StateDeclarationSaved,
         StateRecord,
         StateSubject,
         StateTemplateDocument,
         StateUnit,
         TemplateJqApplyResult,
         TemplateJqResult,
+        UnitCommitResult,
         WriteOrigin,
         WritesPage,
     )
+
+    from tai42_skeleton.states.outbox.models import OutboxRow
+    from tai42_skeleton.states.service.pending_saves import RetryOutcome
 
 
 class StatesFacet(_Facet):
@@ -66,8 +73,8 @@ class StatesFacet(_Facet):
         """
         return await self._app._states_service.served_declaration(name)
 
-    async def put_declaration(self, decl: StateDeclaration) -> StateDeclaration:
-        """Register or replace ``decl`` and return the stored declaration."""
+    async def put_declaration(self, decl: StateDeclaration) -> StateDeclarationSaved:
+        """Register or replace ``decl``; the stored declaration and the held saves it was accepted beside."""
         return await self._app._states_service.put_declaration(decl)
 
     async def delete_declaration(self, name: str) -> None:
@@ -155,8 +162,13 @@ class StatesFacet(_Facet):
         """List template attachments, optionally filtered by ``state`` and/or ``template``."""
         return await self._app._states_service.list_attachments(state, template=template)
 
-    async def attach(self, state: str, template: str, body: AttachBody, *, skip_reconcilers: bool = False) -> None:
-        """Attach ``template`` to ``state`` with ``body``; ``skip_reconcilers`` bypasses reconcilers."""
+    async def attach(
+        self, state: str, template: str, body: AttachBody, *, skip_reconcilers: bool = False
+    ) -> list[HeldPendingSave]:
+        """Attach ``template`` to ``state`` with ``body``; ``skip_reconcilers`` bypasses reconcilers.
+
+        Returns the saves held by a failed save the validators and reconcilers read past.
+        """
         return await self._app._states_service.attach(state, template, body, skip_reconcilers=skip_reconcilers)
 
     async def update_attachment_declarations(
@@ -167,8 +179,11 @@ class StatesFacet(_Facet):
         *,
         options: dict[str, Any] | None = None,
         skip_reconcilers: bool = False,
-    ) -> None:
-        """Update the per-template ``declarations`` of ``template``'s attachment on ``state``."""
+    ) -> list[HeldPendingSave]:
+        """Update the per-template ``declarations`` of ``template``'s attachment on ``state``.
+
+        Returns the saves held by a failed save the validators and reconcilers read past.
+        """
         return await self._app._states_service.update_attachment_declarations(
             state, template, declarations, options=options, skip_reconcilers=skip_reconcilers
         )
@@ -178,6 +193,42 @@ class StatesFacet(_Facet):
         return await self._app._states_service.detach(state, template)
 
     # -- backup restore --
+    async def drain_pending_saves(
+        self, state: str, *, held: Literal["raise", "skip", "count"], scan: str
+    ) -> list[HeldPendingSave]:
+        """Apply ``state``'s pending saves first; a save held by a failed one is raised on, skipped or counted.
+
+        Skeleton-only (the backup section's export/restore and other whole-state scans), off the
+        ``AppStates`` protocol.
+        """
+        return await self._app._states_service.drain_pending_saves(state, held=held, scan=scan)
+
+    async def drain_target_saves(self, target_kind: str, target_name: str) -> list[str]:
+        """Finish the pending saves under one conversation target; the lines naming the saves that cannot finish.
+
+        Skeleton-only (the tool-rename referee), off the ``AppStates`` protocol.
+        """
+        return await self._app._states_service.drain_target_saves(target_kind, target_name)
+
+    # -- pending saves (skeleton-only operator doors, off the ``AppStates`` protocol) --
+    async def list_pending_saves(
+        self, *, status: Literal["outstanding", "failed"] | None, limit: int, before: int | None
+    ) -> tuple[list[OutboxRow], dict[str, int]]:
+        """One page of outstanding pending saves newest first, and the per-status row counts."""
+        return await self._app._states_service.list_pending_saves(status=status, limit=limit, before=before)
+
+    async def get_pending_save(self, row_id: int) -> OutboxRow | None:
+        """The outstanding pending save ``row_id``, or ``None``."""
+        return await self._app._states_service.get_pending_save(row_id)
+
+    async def retry_pending_save(self, row_id: int) -> RetryOutcome:
+        """Requeue the failed save ``row_id`` and apply its records; the save as it stands after."""
+        return await self._app._states_service.retry_pending_save(row_id)
+
+    async def discard_pending_save(self, row_id: int, *, principal: str | None) -> OutboxRow | None:
+        """Drop the failed save ``row_id`` for good; ``None`` when it is not failed."""
+        return await self._app._states_service.discard_pending_save(row_id, principal=principal)
+
     async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
         """The backup section's alias-restore path; off the ``AppStates`` protocol.
 
@@ -251,12 +302,20 @@ class StatesFacet(_Facet):
             state, subject, name, input_, op_id=op_id, origin=origin
         )
 
+    async def enqueue_batch(self, items: Sequence[StateBatchWrite]) -> UnitCommitResult:
+        """Stage ``items`` into a fresh bound unit and enqueue them as one pending save.
+
+        The door binding's write set outside any unit. Skeleton-only, off the ``AppStates`` protocol.
+        """
+        return await self._app._states_service.enqueue_batch(items)
+
     def open_unit(self) -> AbstractAsyncContextManager[StateUnit]:
         """Open a unit of work over the states facet, bound to the caller's scope for the ``async with`` block.
 
-        The caller stages writes against the yielded unit and reads its own staged writes back;
-        ``commit`` lands them in one transaction, ``discard`` drops them, and a unit left
-        unresolved when the block exits is discarded at teardown.
+        The caller stages writes (and deferred calls) against the yielded unit and reads its own
+        staged writes back; ``commit`` writes them as one pending save that is applied after the
+        caller returns, ``discard`` drops them, and a unit left unresolved when the block exits is
+        discarded at teardown.
         """
         return self._app._states_service.open_unit()
 
@@ -288,8 +347,8 @@ class StatesFacet(_Facet):
         """Page the write history for ``subject`` under ``state``."""
         return await self._app._states_service.writes(state, subject, limit=limit, cursor=cursor)
 
-    async def prune_expired(self) -> dict[str, int]:
-        """Delete every expired record and return per-state removal counts."""
+    async def prune_expired(self) -> PruneResult:
+        """Delete every expired record; the per-state removal counts and the held saves skipped."""
         return await self._app._states_service.prune_expired()
 
     # -- context --

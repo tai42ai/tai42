@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from time import monotonic
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -32,7 +33,18 @@ from tai42_contract.states.models import (
     WriteOrigin,
     WritesPage,
 )
+from tai42_contract.states.pending import HeldPendingSave, PruneResult
 
+from tai42_skeleton.states.db import states_settings
+from tai42_skeleton.states.outbox.drain import (
+    HeldMode,
+    drain_records,
+    drain_state,
+    drain_state_rows,
+    drain_target,
+    drained,
+)
+from tai42_skeleton.states.outbox.keys import record_key
 from tai42_skeleton.states.paths import validate_op
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.rows import _page_limit, _subject_from_row
@@ -41,6 +53,11 @@ from tai42_skeleton.states.store import make_cursor, store_settings_retention
 from tai42_skeleton.states.store.trace import guard_skip_rows
 
 logger = logging.getLogger(__name__)
+
+
+def _deadline() -> float:
+    """The deadline a door's drain runs to: now plus ``STATES_OUTBOX_DRAIN_TIMEOUT_SECONDS``."""
+    return monotonic() + states_settings().outbox_drain_timeout_seconds
 
 
 class _RecordMixin(_StatesServiceBase):
@@ -96,7 +113,10 @@ class _RecordMixin(_StatesServiceBase):
                 if view is None:
                     raise AssertionError
                 return view
-        return await self._replace_completed(state, subject, data, origin=self._complete_origin(origin), conn=conn)
+        completed = self._complete_origin(origin)
+        if conn is not None:
+            return await self._replace_completed(state, subject, data, origin=completed, conn=conn)
+        return await drained(self, lambda: self._replace_completed(state, subject, data, origin=completed))
 
     async def _replace_completed(
         self,
@@ -127,7 +147,8 @@ class _RecordMixin(_StatesServiceBase):
             validate=validate,
             conn=conn,
         )
-        view = await self._projected_record_view(state, subject, conn=conn)
+        # The write just landed: read it back as it stands.
+        view = await self._projected_record_view(state, subject, conn=conn, check_outbox=False)
         if view is None:
             raise AssertionError
         return StateRecord(
@@ -191,9 +212,10 @@ class _RecordMixin(_StatesServiceBase):
                     [StateBatchWrite(state=state, subject=subject, ops=ops, op_id=op_id, origin=origin)]
                 )
                 return staged[0]
-        return await self._apply_completed(
-            state, subject, ops, op_id=op_id, origin=self._complete_origin(origin), conn=conn
-        )
+        completed = self._complete_origin(origin)
+        if conn is not None:
+            return await self._apply_completed(state, subject, ops, op_id=op_id, origin=completed, conn=conn)
+        return await drained(self, lambda: self._apply_completed(state, subject, ops, op_id=op_id, origin=completed))
 
     async def _apply_completed(
         self,
@@ -261,7 +283,7 @@ class _RecordMixin(_StatesServiceBase):
         self._ensure_available()
         await self._admit_subject(state, subject)
         completed = self._complete_origin(origin)
-        await self._store.erase_subject(state, subject, origin=completed)
+        await drained(self, lambda: self._store.erase_subject(state, subject, origin=completed))
 
     async def fold(
         self, state: str, subject: StateSubject, into: StateSubject, mode: str, *, origin: WriteOrigin
@@ -273,6 +295,9 @@ class _RecordMixin(_StatesServiceBase):
         _version, subject_kinds, _default = await self._admit_subject(state, subject)
         await self._validate_subject_admitted(subject_kinds, state, into)
         completed = self._complete_origin(origin)
+        # A fold rewrites the subjects' identity: both subjects' pending saves land first, and a
+        # held one refuses the fold. The fold re-checks under its declaration lock.
+        await drain_records(self, [record_key(state, subject), record_key(state, into)], _deadline())
         return await self._store.fold_subject(state, subject, into, mode, origin=completed, catalog=self._catalog)
 
     async def list_subjects(
@@ -293,6 +318,10 @@ class _RecordMixin(_StatesServiceBase):
         page = _page_limit(limit)
         if await self._store.declaration_version(state) is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
+        # A transaction-threaded page (a reconciler's own in-flight merges) is read as the transaction sees it.
+        held = (
+            [] if conn is not None else await drain_state(self, state, _deadline(), held="skip", scan="list_subjects")
+        )
         rows = await self._store.list_subjects(state, kind=kind, limit=page, cursor=cursor, conn=conn)
         next_cursor = (
             make_cursor(
@@ -301,7 +330,11 @@ class _RecordMixin(_StatesServiceBase):
             if len(rows) == page
             else None
         )
-        return {"subjects": [_subject_from_row(state, r) for r in rows], "next_cursor": next_cursor}
+        return {
+            "subjects": [_subject_from_row(state, r) for r in rows],
+            "next_cursor": next_cursor,
+            "held": [h.model_dump(mode="json") for h in held],
+        }
 
     async def search(
         self, state: str, filters: dict[str, Any], *, limit: int | None = None, cursor: str | None = None
@@ -317,6 +350,7 @@ class _RecordMixin(_StatesServiceBase):
             raise ValueValidationError("search needs a non-empty filters object (a JSONB containment document)")
         if await self._store.declaration_version(state) is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
+        held = await drain_state(self, state, _deadline(), held="skip", scan="search")
         rows = await self._store.search_records(state, filters, limit=page, cursor=cursor)
         next_cursor = (
             make_cursor(
@@ -325,7 +359,11 @@ class _RecordMixin(_StatesServiceBase):
             if len(rows) == page
             else None
         )
-        return {"matches": [_subject_from_row(state, r) for r in rows], "next_cursor": next_cursor}
+        return {
+            "matches": [_subject_from_row(state, r) for r in rows],
+            "next_cursor": next_cursor,
+            "held": [h.model_dump(mode="json") for h in held],
+        }
 
     async def writes(
         self, state: str, subject: StateSubject, *, limit: int | None = None, cursor: str | None = None
@@ -343,7 +381,7 @@ class _RecordMixin(_StatesServiceBase):
                 int(cursor)
             except (TypeError, ValueError):
                 raise ValueValidationError(f"writes cursor must be a row id (an integer), got {cursor!r}") from None
-        rows = await self._store.writes(state, subject, limit=page, cursor=cursor)
+        rows = await drained(self, lambda: self._store.writes(state, subject, limit=page, cursor=cursor))
         items = [
             WriteEntry(
                 seq=row["seq"] if row["seq"] is not None else 0.0,
@@ -364,15 +402,16 @@ class _RecordMixin(_StatesServiceBase):
         next_cursor = str(rows[-1]["id"]) if len(rows) == page else None
         return WritesPage(items=items, next_cursor=next_cursor)
 
-    async def prune_expired(self) -> dict[str, int]:
+    async def prune_expired(self) -> PruneResult:
         """The explicit retention sweep — delete every record past its state's effective retention.
 
         Also prunes the op-idempotency ledger past its own retention window: this externally
         scheduled sweep is the ledger's only prune, so a deployment that never runs it keeps a
         growing ``state_applied_ops`` exactly as it keeps un-pruned records. A misconfigured
-        global default is refused loudly before any delete; a failing prune raises.
+        global default is refused loudly before any delete; a failing prune raises. Every state's
+        pending saves are applied first; a subject held by a failed save keeps its record.
 
-        Returns the per-state record removal counts.
+        Returns the per-state record removal counts and the held saves it skipped.
         """
         self._ensure_available()
         from tai42_skeleton.states import service as _pkg
@@ -383,7 +422,11 @@ class _RecordMixin(_StatesServiceBase):
                 f"STATES_DEFAULT_RETENTION_DAYS must be a positive integer ≤ {MAX_RETENTION_DAYS} or unset, "
                 f"got {default!r}"
             )
-        counts = await self._store.prune_expired(default)
+        held_rows = []
+        for state in await self._store.outbox_unapplied_states():
+            held_rows.extend(await drain_state_rows(self, state, _deadline(), held="skip", scan="retention prune"))
+        held_records = sorted({k for _held, row in held_rows for k in row.record_keys})
+        counts = await self._store.prune_expired(default, held_record_keys=held_records)
         op_pruned = await self._store.prune_ops(store_settings_retention())
         if counts or op_pruned:
             logger.info(
@@ -392,7 +435,7 @@ class _RecordMixin(_StatesServiceBase):
                 len(counts),
                 op_pruned,
             )
-        return counts
+        return PruneResult(pruned=counts, held=[held for held, _row in held_rows])
 
     async def restore_records(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
         """Restore record rows for ``state`` under the completed origin, validating each document against the schema.
@@ -432,7 +475,19 @@ class _RecordMixin(_StatesServiceBase):
             except SubjectRefusedError as exc:
                 raise SubjectRefusedError(f"restore row {index}: {exc}") from exc
         completed = self._complete_origin(origin)
+        # A restore must not interleave with a held save it would overwrite.
+        await drain_state(self, state, _deadline(), held="raise", scan="restore")
         await self._store.restore_records(state, row_list, origin=completed, catalog=self._catalog)
+
+    async def drain_pending_saves(self, state: str, *, held: HeldMode, scan: str) -> list[HeldPendingSave]:
+        """Apply ``state``'s pending saves; meet each save held by a failed one per ``held`` (raise/skip/count)."""
+        self._ensure_available()
+        return await drain_state(self, state, _deadline(), held=held, scan=scan)
+
+    async def drain_target_saves(self, target_kind: str, target_name: str) -> list[str]:
+        """Finish the pending saves under one conversation target; the lines naming those that cannot finish."""
+        self._ensure_available()
+        return await drain_target(self, target_kind, target_name, _deadline())
 
     async def restore_aliases(self, state: str, rows: Sequence[dict[str, Any]], *, origin: WriteOrigin) -> None:
         """Restore subject-alias rows for ``state`` verbatim (identity, not a write).

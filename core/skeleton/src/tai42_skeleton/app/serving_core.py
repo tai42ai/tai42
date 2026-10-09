@@ -263,6 +263,8 @@ class ServingCore:
             consumer_listers=self._states_consumer_listers,
             seeds=self._states_template_seeds,
         )
+        # The ``tool`` deferred-call kind registers itself at import; a unit's ``defer_call`` uses it.
+        import tai42_skeleton.tools.deferred  # noqa: F401
 
         # The preset register/reload engine, rehydrated per epoch from the store by the
         # startup/reload handler.

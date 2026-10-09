@@ -24,6 +24,7 @@ from contextvars import ContextVar, Token
 from tai42_skeleton.authz.identity import CallerIdentity
 
 __all__ = [
+    "capture_fire_identity",
     "get_execution_identity",
     "reset_execution_identity",
     "set_execution_identity",
@@ -56,3 +57,14 @@ def reset_execution_identity(token: Token[CallerIdentity | None]) -> None:
     ``token`` is the one returned by the matching :func:`set_execution_identity` call.
     """
     _current_execution_identity.reset(token)
+
+
+def capture_fire_identity() -> tuple[str | None, str]:
+    """The bound execution identity as ``(user id, fingerprint)`` for a later fire to rebind.
+
+    ``(None, "")`` when none is bound (or it carries no user id): the later fire runs with none.
+    """
+    identity = get_execution_identity()
+    if identity is None or identity.user_id is None:
+        return None, ""
+    return identity.user_id, identity.execution_key_fingerprint or ""

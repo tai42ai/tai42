@@ -1,8 +1,11 @@
-"""``tai states`` — manage the subject-keyed state store (``/api/states*`` and ``/api/state-retention/prune``).
+"""``tai states`` — manage the subject-keyed state store.
+
+Covers ``/api/states*``, ``/api/state-pending-saves*`` and ``/api/state-retention/prune``.
 
 Thin wrappers over the platform state routes: declare and inspect states, attach templates,
 read/write/erase/fold a subject's record, page a subject's write audit trail, list a
-state's consumers, and prune expired records. A record is addressed by its subject —
+state's consumers, prune expired records, and list, retry or discard the pending saves
+written before a reply and applied after it. A record is addressed by its subject —
 ``--target-kind``/``--target-name``/``--kind``/``--key`` — and a document/patch/op batch is
 read from a JSON ``--data`` string, a ``--file`` path, or stdin.
 """
@@ -450,3 +453,56 @@ def prune_state_retention(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         emit_result(ctx_obj, client.post("/api/state-retention/prune"))
+
+
+# -- pending saves ------------------------------------------------------------
+# ``tai states pending-saves`` — the saves a run wrote durably before its reply and that
+# apply after it. A failed one holds its subjects until it is retried (after its cause is
+# repaired) or discarded.
+pending_saves_app = typer.Typer(
+    name="pending-saves", help="List, retry or discard pending state saves.", no_args_is_help=True
+)
+app.add_typer(pending_saves_app)
+
+
+@pending_saves_app.command("list")
+@covers(("GET", "/api/state-pending-saves"))
+def list_state_pending_saves(
+    ctx: typer.Context,
+    status: Annotated[
+        str | None, typer.Option("--status", help="'outstanding' (every save) or 'failed' (the failed ones).")
+    ] = None,
+    limit: Annotated[int | None, typer.Option("--limit", help="Page size.")] = None,
+    cursor: Annotated[str | None, typer.Option("--cursor", help="A keyset cursor from a prior page.")] = None,
+) -> None:
+    """List the outstanding pending state saves, newest first."""
+    ctx_obj = app_context(ctx)
+    params = {k: v for k, v in {"status": status, "limit": limit, "cursor": cursor}.items() if v is not None}
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.get("/api/state-pending-saves", params=params or None))
+
+
+@pending_saves_app.command("retry")
+@covers(("POST", "/api/state-pending-saves/{id}/retry"))
+def retry_state_pending_save(
+    ctx: typer.Context, save_id: Annotated[str, typer.Argument(metavar="ID", help="The failed pending save's id.")]
+) -> None:
+    """Retry a failed pending save: requeue it and apply its records now."""
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.post(f"/api/state-pending-saves/{seg(save_id)}/retry"))
+
+
+@pending_saves_app.command("discard")
+@covers(("DELETE", "/api/state-pending-saves/{id}"))
+def discard_state_pending_save(
+    ctx: typer.Context,
+    save_id: Annotated[str, typer.Argument(metavar="ID", help="The failed pending save's id.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm: its writes and calls are never applied.")] = False,
+) -> None:
+    """Discard a failed pending save for good, releasing its subjects."""
+    if not yes:
+        raise typer.BadParameter("pass --yes to discard a pending save")
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        emit_result(ctx_obj, client.delete(f"/api/state-pending-saves/{seg(save_id)}"))

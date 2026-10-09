@@ -417,11 +417,26 @@ async def test_parked_referee_feature_off_is_empty(monkeypatch) -> None:
 # -- states referee ----------------------------------------------------------
 
 
+def _drained_targets(monkeypatch, lines: list[str]) -> list[tuple[str, str]]:
+    """Patch the live app's states facet: the target drain answers ``lines`` and is recorded."""
+    import tai42_skeleton.app.instance as instance_mod
+
+    seen: list[tuple[str, str]] = []
+
+    async def _drain(target_kind: str, target_name: str) -> list[str]:
+        seen.append((target_kind, target_name))
+        return list(lines)
+
+    monkeypatch.setattr(instance_mod, "app", SimpleNamespace(states=SimpleNamespace(drain_target_saves=_drain)))
+    return seen
+
+
 async def test_states_referee_blocks_on_records_under_the_tool_target(monkeypatch) -> None:
     import tai42_skeleton.states.db as states_db
     import tai42_skeleton.states.store as states_store
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
+    drained = _drained_targets(monkeypatch, [])
 
     async def _count(self, target_kind: str, target_name: str) -> int:
         assert target_kind == "tool"
@@ -431,6 +446,23 @@ async def test_states_referee_blocks_on_records_under_the_tool_target(monkeypatc
     holders = await platform_referees._states_referee("echo")
     assert holders == ["3 state records under target tool/echo"]
     assert await platform_referees._states_referee("other") == []
+    # The target's pending saves land (or are named) before the records are counted.
+    assert drained == [("tool", "echo"), ("tool", "other")]
+
+
+async def test_states_referee_names_the_pending_saves_it_could_not_finish(monkeypatch) -> None:
+    import tai42_skeleton.states.db as states_db
+    import tai42_skeleton.states.store as states_store
+
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
+    line = "failed pending state save 4 holds writes under target tool/echo; an operator must retry or discard it"
+    _drained_targets(monkeypatch, [line])
+
+    async def _count(self, target_kind: str, target_name: str) -> int:
+        return 0
+
+    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_target", _count)
+    assert await platform_referees._states_referee("echo") == [line]
 
 
 async def test_states_referee_singular_record_wording(monkeypatch) -> None:
@@ -438,6 +470,7 @@ async def test_states_referee_singular_record_wording(monkeypatch) -> None:
     import tai42_skeleton.states.store as states_store
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
+    _drained_targets(monkeypatch, [])
 
     async def _count(self, target_kind: str, target_name: str) -> int:
         return 1

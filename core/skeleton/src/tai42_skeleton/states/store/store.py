@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tai42_skeleton.states.outbox.store import _OutboxStore
+
 from .attachments import _AttachmentStore
 from .connection import _StoreConnection
 from .declarations import _DeclarationStore
@@ -23,6 +25,7 @@ class PostgresStatesStore(
     _RecordQueryStore,
     _RestoreStore,
     _RetentionStore,
+    _OutboxStore,
 ):
     """One class over the record substrate's tables, composed from the per-table concern mixins.
 

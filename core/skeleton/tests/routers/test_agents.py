@@ -685,3 +685,39 @@ async def test_run_subject_query_partial_is_a_400(one_agent):
     request.scope["query_string"] = b"subject_kind=thread"
     resp = await router.run_agent(request)
     assert resp.status_code == 400
+
+
+async def test_run_drains_the_named_subject_once_at_its_visit(one_agent, monkeypatch):
+    from .._drain_spy import spy_on_drains, subject_key
+
+    spy = spy_on_drains(monkeypatch)
+    one_agent(_FakeAgent([MessageFinal(text="ok")]))
+    request = _make_run_request("faker", b'{"prompt":"hi"}')
+    request.scope["query_string"] = b"subject_kind=thread&subject_key=t-1&subject_target=faker"
+    resp = await router.run_agent(request)
+    frames = _data_frames(await _collect(resp))
+    assert frames[-1]["type"] == "stream.end"
+    assert spy.keys == [[subject_key("agent", "faker", "thread", "t-1")]]
+
+
+async def test_run_on_a_held_subject_ends_with_one_stream_error_naming_the_save(one_agent, monkeypatch):
+    from tai42_contract.states.errors import StatePendingSaveFailedError
+
+    from tai42_skeleton.states.outbox import drain as drain_mod
+
+    message = "subject agent/faker/thread/t-1 has a failed pending save 17; an operator must retry or discard it"
+
+    async def _refuse(service: Any, keys: Any, deadline: float, *, applying: Any = None) -> None:
+        raise StatePendingSaveFailedError(message, save_id="17")
+
+    monkeypatch.setattr(drain_mod, "_states_on", lambda: True)
+    monkeypatch.setattr(drain_mod, "drain_subjects", _refuse)
+    monkeypatch.setattr(drain_mod, "live_states_service", lambda: None)
+    agent = one_agent(_FakeAgent([MessageFinal(text="ok")]))
+    request = _make_run_request("faker", b'{"prompt":"hi"}')
+    request.scope["query_string"] = b"subject_kind=thread&subject_key=t-1&subject_target=faker"
+    resp = await router.run_agent(request)
+    assert resp.status_code == 200  # the stream had started
+    frames = _data_frames(await _collect(resp))
+    assert frames == [{"type": "stream.error", "message": message}]
+    assert agent.received_kwargs is None  # no run started

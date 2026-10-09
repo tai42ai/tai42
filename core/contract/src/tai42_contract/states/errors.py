@@ -2,9 +2,10 @@
 
 Each stamps its transport-neutral :class:`~tai42_contract.errors.ErrorKind`; the
 door status the operations layer surfaces is noted per class (501 not configured,
-404 not found, 409 exists / in use / conflict, 422 schema / subject / regime /
-path / value, 412 narrowing needs confirmation). Every path raises loudly — the
-store has no silent no-op.
+404 not found, 409 exists / in use / conflict / a failed pending save, 422 schema /
+subject / regime / path / value / a refused deferred call, 412 narrowing needs
+confirmation, 503 a pending save that did not finish in time). Every path raises
+loudly — the store has no silent no-op.
 """
 
 from __future__ import annotations
@@ -159,3 +160,41 @@ class AttachConflictError(StatesError):
     """
 
     __tai_error_kind__ = ErrorKind.CONFLICT
+
+
+class StatePendingSaveFailedError(StatesError):
+    """A subject's pending save failed; the subject is held until an operator retries or discards it (409).
+
+    ``save_id`` names the FAILED save (for a save held behind it, the failed one it waits on) and
+    rides on ``extra``.
+    """
+
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+    def __init__(self, *args: object, save_id: str) -> None:
+        """Build the error naming the failed ``save_id``."""
+        super().__init__(*args, extra={"save_id": save_id})
+        self.save_id = save_id
+
+
+class StatePendingSaveTimeoutError(StatesError):
+    """A subject's pending save did not finish within the drain timeout (503).
+
+    ``save_id`` names the save still working and rides on ``extra``.
+    """
+
+    __tai_error_kind__ = ErrorKind.UNAVAILABLE
+
+    def __init__(self, *args: object, save_id: str) -> None:
+        """Build the error naming the still-working ``save_id``."""
+        super().__init__(*args, extra={"save_id": save_id})
+        self.save_id = save_id
+
+
+class DeferredCallRefusedError(StatesError):
+    """A call deferred after the reply was refused (422).
+
+    The tool is unknown, its arguments are not plain JSON, or the call parked for an answer.
+    """
+
+    __tai_error_kind__ = ErrorKind.BAD_INPUT

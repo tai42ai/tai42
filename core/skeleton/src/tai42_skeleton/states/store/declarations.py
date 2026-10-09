@@ -8,12 +8,17 @@ reader keyed on the version it read never serves a derived artifact across a cha
 from __future__ import annotations
 
 import inspect
+from collections.abc import Sequence
 from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from tai42_contract.states.errors import DeclarationInUseError
+from tai42_contract.states.pending import HeldPendingSave
 from tai42_kit.clients.impl.postgres import read_connection
+
+from tai42_skeleton.states.outbox.models import HeldRecord, OutboxSubject
 
 from .base import _StoreBase
 from .connection import _pool, _settings
@@ -174,14 +179,19 @@ class _DeclarationStore(_StoreBase):
         *,
         effective_schema: dict[str, Any],
         decide: Any,
-    ) -> None:
+        held_saves: Sequence[HeldPendingSave] = (),
+    ) -> list[HeldPendingSave]:
         """Guarded upsert, closing the narrowing check-then-act race in ONE txn.
 
         Locks the declaration row ``FOR UPDATE`` (blocking every ``apply_ops``'s
-        ``FOR SHARE``, so no record can land mid-guard), reads the existing row and the
-        per-kind record counts under that lock, then calls ``decide(existing_row |
-        None, per_kind_counts)`` — awaited so the decision may resolve a by-id base schema under
-        the lock — which raises to refuse (aborting the txn) — and finally performs the upsert.
+        ``FOR SHARE``, so no record can land mid-guard), reads the existing row, the
+        per-kind record counts and the records the state's held saves write (``held_saves``,
+        counted by the caller's drain) under that lock, then calls ``decide(existing_row |
+        None, per_kind_counts, held_records)`` — awaited so the decision may resolve a by-id base
+        schema under the lock — which raises to refuse (aborting the txn) — and finally performs
+        the upsert. A save with unapplied records on the state that is not among ``held_saves``
+        was written since the drain: the re-declare is refused. Returns the held saves still
+        outstanding under the lock.
         """
         async with (
             _pool(_settings()) as pool,
@@ -201,7 +211,8 @@ class _DeclarationStore(_StoreBase):
                     (name,),
                 )
                 per_kind = {row["subject_kind"]: int(row["n"]) for row in await cur.fetchall()}
-            outcome = decide(existing, per_kind)  # raises to refuse — the txn aborts
+            held, held_records = await self._held_under_lock(cur, name, held_saves)
+            outcome = decide(existing, per_kind, held_records)  # raises to refuse — the txn aborts
             # ``decide`` may be sync or async (the declaration door's decision resolves a by-id
             # base schema under this lock); await it only when it returns an awaitable.
             if inspect.isawaitable(outcome):
@@ -225,6 +236,43 @@ class _DeclarationStore(_StoreBase):
                     retention_days,
                 ),
             )
+            return held
+
+    @staticmethod
+    async def _held_under_lock(
+        cur: Any, name: str, held_saves: Sequence[HeldPendingSave]
+    ) -> tuple[list[HeldPendingSave], list[HeldRecord]]:
+        """The state's held saves still outstanding, and the records they write — read under the guard's lock."""
+        await cur.execute(
+            "SELECT id, subjects FROM state_outbox WHERE states @> ARRAY[%s]::text[] "
+            "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) ORDER BY id",
+            (name,),
+        )
+        rows = list(await cur.fetchall())
+        known = {int(h.save_id): h for h in held_saves}
+        written_since = [int(row["id"]) for row in rows if int(row["id"]) not in known]
+        if written_since:
+            raise DeclarationInUseError(
+                f"state {name!r} has pending save(s) {written_since} written while it was re-declared; "
+                f"retry the re-declare"
+            )
+        held: list[HeldPendingSave] = []
+        records: list[HeldRecord] = []
+        for row in rows:
+            save = known[int(row["id"])]
+            held.append(save)
+            for entry in row["subjects"]:
+                staged = OutboxSubject.model_validate(entry)
+                if staged.state == name and staged.projected is not None:
+                    records.append(
+                        HeldRecord(
+                            save_id=save.save_id,
+                            held_by=save.held_by,
+                            subject=staged.canonical,
+                            document=staged.projected,
+                        )
+                    )
+        return held, records
 
     async def delete_declaration(self, name: str) -> bool:
         """Delete a state with its records, attachments, aliases and write ledger in ONE txn under the lock.

@@ -85,7 +85,7 @@ class _RecordQueryStore(_StoreBase):
             read_connection(pool) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
-            kind, key = await self._resolve_subject(cur, state, subject)
+            kind, key = await self._resolve_subject(cur, state, subject, check_outbox=True)
             base = (
                 "SELECT id, seq, at, door, actor, consumer, meta, run_id, turn_id, paths, op_id FROM state_writes "
                 "WHERE state = %s AND target_kind = %s AND target_name = %s AND subject_kind = %s AND subject_key = %s"

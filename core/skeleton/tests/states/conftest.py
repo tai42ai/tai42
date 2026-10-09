@@ -1,9 +1,11 @@
 """A stateful in-memory fake Postgres for the subject-keyed state store tests.
 
-``FakeStatesPg`` models the seven tables :class:`~tai42_skeleton.states.store.
+``FakeStatesPg`` models the eight tables :class:`~tai42_skeleton.states.store.
 PostgresStatesStore` touches — ``state_declarations``, ``state_templates``, ``state_attachments``,
 ``state_records``, ``state_subject_aliases``, ``state_applied_ops`` (the idempotency
-ledger) and ``state_writes`` (the write-provenance ledger) — and interprets the store's
+ledger), ``state_writes`` (the write-provenance ledger) and ``state_outbox`` (the pending saves:
+the enqueue, the record apply, the drains and the guard's held-save read; the calls claim and the
+operator doors run on real Postgres only) — and interprets the store's
 EXACT SQL by normalized text, monkeypatched in over the pooled ``client_ctx`` so the REAL
 store runs against it with no live database. It is faithful to the Postgres semantics the
 store leans on:
@@ -199,8 +201,12 @@ class FakeStatesPg:
         self.aliases: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.applied_ops: dict[str, datetime] = {}  # op_id -> applied_at
         self.writes: list[dict[str, Any]] = []
+        self.outbox: dict[int, dict[str, Any]] = {}  # id -> row
+        self._outbox_id = 0  # BIGSERIAL: never rewound by a rollback
         self.executed: list[tuple[str, Any]] = []
         self.locked: list[list[str]] = []
+        self.lock_timeouts: list[str] = []
+        self.advisory_locks: list[str] = []
         self.attachment_joins = 0
         self.savepoints = 0
         self.transactions = 0
@@ -222,6 +228,11 @@ class FakeStatesPg:
         self._write_id += 1
         return self._write_id
 
+    def next_outbox_id(self) -> int:
+        """``nextval`` of ``state_outbox.id``: never rewound by a rollback."""
+        self._outbox_id += 1
+        return self._outbox_id
+
     def next_catalog_version(self) -> int:
         """``nextval('state_catalog_versions')``: the version every catalog row write takes."""
         self._catalog_version += 1
@@ -237,6 +248,7 @@ class FakeStatesPg:
             "aliases": copy.deepcopy(self.aliases),
             "applied_ops": dict(self.applied_ops),
             "writes": copy.deepcopy(self.writes),
+            "outbox": copy.deepcopy(self.outbox),
         }
 
     def restore(self, snap: dict[str, Any]) -> None:
@@ -247,6 +259,7 @@ class FakeStatesPg:
         self.aliases = snap["aliases"]
         self.applied_ops = snap["applied_ops"]
         self.writes = snap["writes"]
+        self.outbox = snap["outbox"]
 
     # -- convenience seeding for tests --------------------------------------
     def seed_declaration(
@@ -1146,15 +1159,19 @@ def _writes_cursor(cur, pg, norm, params):
     r"DELETE FROM state_records r USING state_declarations d WHERE r.state = d.name "
     r"AND COALESCE\(d.retention_days, %\(default\)s\) IS NOT NULL "
     r"AND r.updated_at < now\(\) - make_interval\(days => COALESCE\(d.retention_days, %\(default\)s\)\) "
+    r"AND NOT EXISTS \(SELECT 1 FROM unnest\(%\(s\)s::text\[\], %\(tk\)s::text\[\], %\(tn\)s::text\[\], "
+    r"%\(k\)s::text\[\], %\(key\)s::text\[\]\) AS h\(s, tk, tn, k, key\) WHERE h.s = r.state "
+    r"AND h.tk = r.target_kind AND h.tn = r.target_name AND h.k = r.subject_kind AND h.key = r.subject_key\) "
     r"RETURNING r.state$"
 )
 def _prune_expired(cur, pg, norm, params):
     default = params["default"]
+    held = set(zip(params["s"], params["tk"], params["tn"], params["k"], params["key"], strict=True))
     now = pg.now()
     victims = []
     for rkey, rec in pg.records.items():
         decl = pg.declarations.get(rec["state"])
-        if decl is None:
+        if decl is None or rkey in held:
             continue
         eff = decl["retention_days"] if decl["retention_days"] is not None else default
         if eff is None:
@@ -1165,6 +1182,266 @@ def _prune_expired(cur, pg, norm, params):
         state = pg.records[rkey]["state"]
         del pg.records[rkey]
         cur._all.append({"state": state})
+
+
+# -- the pending-save outbox -------------------------------------------------
+def _exact(sql: str):
+    """Register a handler for one statement, matched exactly after whitespace normalisation."""
+    return _on("^" + re.escape(" ".join(sql.split())) + "$")
+
+
+def _unapplied(row: dict[str, Any]) -> bool:
+    return row["status"] == "pending" or (row["status"] == "failed" and row["records_applied_at"] is None)
+
+
+def _outstanding(row: dict[str, Any]) -> bool:
+    return row["status"] in ("pending", "calls", "running", "failed")
+
+
+def _overlaps(row_keys: list[str], keys: list[str]) -> bool:
+    return not set(row_keys).isdisjoint(keys)
+
+
+@_exact(
+    "SELECT a.canonical_kind, a.canonical_key, EXISTS (SELECT 1 FROM state_outbox o "
+    "WHERE o.record_keys && %(keys)s::text[] "
+    "AND (o.status = 'pending' OR (o.status = 'failed' AND o.records_applied_at IS NULL))) AS outbox_pending "
+    "FROM (SELECT 1) AS one LEFT JOIN state_subject_aliases a "
+    "ON a.state = %(state)s AND a.target_kind = %(tk)s AND a.target_name = %(tn)s "
+    "AND a.alias_kind = %(kind)s AND a.alias_key = %(key)s"
+)
+def _resolve_alias_checked(cur, pg, norm, params):
+    row = pg.aliases.get((params["state"], params["tk"], params["tn"], params["kind"], params["key"]))
+    pending = any(_unapplied(o) and _overlaps(o["record_keys"], params["keys"]) for o in pg.outbox.values())
+    cur._one = {
+        "canonical_kind": None if row is None else row["canonical_kind"],
+        "canonical_key": None if row is None else row["canonical_key"],
+        "outbox_pending": pending,
+    }
+
+
+def _insert_outbox(pg, params, *, status: str):
+    record_keys, subject_keys, targets, states, run_id, trace_id, records, subjects, calls = params
+    row_id = pg.next_outbox_id()
+    pg.outbox[row_id] = {
+        "id": row_id,
+        "status": status,
+        "record_keys": list(record_keys),
+        "subject_keys": list(subject_keys),
+        "targets": list(targets),
+        "states": list(states),
+        "run_id": run_id,
+        "trace_id": trace_id,
+        "records": _unwrap(records),
+        "subjects": _unwrap(subjects),
+        "calls": _unwrap(calls),
+        "calls_done": 0,
+        "attempts": 0,
+        "next_attempt_at": None,
+        "claimed_by": None,
+        "lease_until": None,
+        "last_error": None,
+        "failed_phase": None,
+        "created_at": pg.now(),
+        "records_applied_at": None if status == "pending" else pg.now(),
+        "failed_at": None,
+    }
+    return row_id
+
+
+@_exact(
+    "INSERT INTO state_outbox (status, records_applied_at, record_keys, subject_keys, targets, states, "
+    "run_id, trace_id, records, subjects, calls) VALUES ('pending', NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+    "RETURNING id"
+)
+def _insert_outbox_pending(cur, pg, norm, params):
+    cur._one = {"id": _insert_outbox(pg, params, status="pending")}
+
+
+@_exact(
+    "INSERT INTO state_outbox (status, records_applied_at, record_keys, subject_keys, targets, states, "
+    "run_id, trace_id, records, subjects, calls) VALUES ('calls', clock_timestamp(), "
+    "%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+    "RETURNING id"
+)
+def _insert_outbox_calls(cur, pg, norm, params):
+    cur._one = {"id": _insert_outbox(pg, params, status="calls")}
+
+
+@_exact("SELECT record_keys FROM state_outbox WHERE id = %s")
+def _outbox_record_keys(cur, pg, norm, params):
+    row = pg.outbox.get(params[0])
+    cur._one = None if row is None else {"record_keys": list(row["record_keys"])}
+
+
+@_exact("SELECT status, claimed_by FROM state_outbox WHERE id = %s")
+def _outbox_status(cur, pg, norm, params):
+    row = pg.outbox.get(params[0])
+    cur._one = None if row is None else {"status": row["status"], "claimed_by": row["claimed_by"]}
+
+
+@_exact("SELECT set_config('lock_timeout', %s, true)")
+def _set_lock_timeout(cur, pg, norm, params):
+    pg.lock_timeouts.append(params[0])
+
+
+@_exact("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))")
+def _advisory_lock(cur, pg, norm, params):
+    pg.advisory_locks.append(params[0])
+
+
+@_exact(
+    "SELECT id, status FROM state_outbox WHERE id < %s AND record_keys && %s::text[] "
+    "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) "
+    "ORDER BY id LIMIT 1"
+)
+def _outbox_older_unapplied(cur, pg, norm, params):
+    row_id, keys = params
+    older = [
+        o for i, o in sorted(pg.outbox.items()) if i < row_id and _unapplied(o) and _overlaps(o["record_keys"], keys)
+    ]
+    cur._one = None if not older else {"id": older[0]["id"], "status": older[0]["status"]}
+
+
+@_on(r"^SELECT id, status, record_keys, .* FROM state_outbox WHERE id = %s( FOR UPDATE)?$")
+def _outbox_row_by_id(cur, pg, norm, params):
+    row = pg.outbox.get(params[0])
+    cur._one = None if row is None else dict(row)
+
+
+@_exact(
+    "UPDATE state_outbox SET status = 'calls', records_applied_at = clock_timestamp(), attempts = 0, "
+    "next_attempt_at = NULL WHERE id = %s"
+)
+def _outbox_to_calls(cur, pg, norm, params):
+    row = pg.outbox[params[0]]
+    row.update(status="calls", records_applied_at=pg.now(), attempts=0, next_attempt_at=None)
+    cur.rowcount = 1
+
+
+@_exact("DELETE FROM state_outbox WHERE id = %s")
+def _outbox_delete(cur, pg, norm, params):
+    cur.rowcount = int(pg.outbox.pop(params[0], None) is not None)
+
+
+@_on(
+    r"^UPDATE state_outbox SET attempts = attempts \+ %\(inc\)s, last_error = %\(error\)s, "
+    r".* RETURNING status, attempts$"
+)
+def _outbox_record_failure(cur, pg, norm, params):
+    row = pg.outbox.get(params["id"])
+    if row is None:
+        return
+    if params["phase"] == "records":
+        if row["status"] != "pending":
+            return
+    elif row["status"] != "running" or row["claimed_by"] != params["claim"]:
+        return
+    attempts = row["attempts"] + params["inc"]
+    retry = params["transient"] and attempts < params["max"]
+    row.update(
+        attempts=attempts,
+        last_error=params["error"],
+        status=params["retry"] if retry else "failed",
+        next_attempt_at=pg.now() if retry else None,
+        failed_phase=None if retry else params["phase"],
+        failed_at=None if retry else pg.now(),
+        claimed_by=None,
+        lease_until=None,
+    )
+    cur._one = {"status": row["status"], "attempts": attempts}
+
+
+@_exact(
+    "SELECT EXISTS (SELECT 1 FROM state_outbox WHERE record_keys && %s::text[] "
+    "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL))) AS pending"
+)
+def _outbox_check_records(cur, pg, norm, params):
+    (keys,) = params
+    cur._one = {"pending": any(_unapplied(o) and _overlaps(o["record_keys"], keys) for o in pg.outbox.values())}
+
+
+@_exact(
+    "SELECT EXISTS (SELECT 1 FROM state_outbox WHERE record_keys && %s::text[] "
+    "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL))) AS pending"
+)
+def _outbox_fold_recheck(cur, pg, norm, params):
+    _outbox_check_records(cur, pg, norm, params)
+
+
+@_exact(
+    "SELECT id, status FROM state_outbox WHERE record_keys && %s::text[] "
+    "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) ORDER BY id"
+)
+def _outbox_unapplied_on_records(cur, pg, norm, params):
+    (keys,) = params
+    cur._all = [
+        {"id": o["id"], "status": o["status"]}
+        for _i, o in sorted(pg.outbox.items())
+        if _unapplied(o) and _overlaps(o["record_keys"], keys)
+    ]
+
+
+@_exact(
+    "SELECT id, status, record_keys, subject_keys, targets, states, run_id, trace_id, records, subjects, calls, "
+    "calls_done, attempts, next_attempt_at, claimed_by, lease_until, last_error, failed_phase, created_at, "
+    "records_applied_at, failed_at FROM state_outbox WHERE states @> ARRAY[%s]::text[] "
+    "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) ORDER BY id"
+)
+def _outbox_unapplied_on_state(cur, pg, norm, params):
+    (state,) = params
+    cur._all = [dict(o) for _i, o in sorted(pg.outbox.items()) if _unapplied(o) and state in o["states"]]
+
+
+@_exact(
+    "SELECT id, subjects FROM state_outbox WHERE states @> ARRAY[%s]::text[] "
+    "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) ORDER BY id"
+)
+def _outbox_held_on_state(cur, pg, norm, params):
+    (state,) = params
+    cur._all = [
+        {"id": o["id"], "subjects": o["subjects"]}
+        for _i, o in sorted(pg.outbox.items())
+        if _unapplied(o) and state in o["states"]
+    ]
+
+
+@_exact(
+    "SELECT id, status, subject_keys FROM state_outbox WHERE subject_keys && %s::text[] "
+    "AND status IN ('pending', 'calls', 'running', 'failed') "
+    "ORDER BY id"
+)
+def _outbox_outstanding_on_subjects(cur, pg, norm, params):
+    (keys,) = params
+    cur._all = [
+        {"id": o["id"], "status": o["status"], "subject_keys": list(o["subject_keys"])}
+        for _i, o in sorted(pg.outbox.items())
+        if _outstanding(o) and _overlaps(o["subject_keys"], keys)
+    ]
+
+
+@_exact(
+    "SELECT id, status, subject_keys FROM state_outbox WHERE id < %s AND subject_keys && %s::text[] "
+    "AND status IN ('pending', 'calls', 'running', 'failed') ORDER BY id LIMIT 1"
+)
+def _outbox_blocker(cur, pg, norm, params):
+    row_id, keys = params
+    older = [
+        o for i, o in sorted(pg.outbox.items()) if i < row_id and _outstanding(o) and _overlaps(o["subject_keys"], keys)
+    ]
+    cur._one = (
+        None
+        if not older
+        else {"id": older[0]["id"], "status": older[0]["status"], "subject_keys": older[0]["subject_keys"]}
+    )
+
+
+@_exact(
+    "SELECT DISTINCT unnest(states) AS state FROM state_outbox "
+    "WHERE (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) ORDER BY state"
+)
+def _outbox_unapplied_states(cur, pg, norm, params):
+    cur._all = [{"state": s} for s in sorted({st for o in pg.outbox.values() if _unapplied(o) for st in o["states"]})]
 
 
 @pytest.fixture

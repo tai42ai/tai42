@@ -132,8 +132,9 @@ async def test_prune_expired_reports_counts(svc: StatesService) -> None:
     await svc.put_declaration(_STATE)
     store: FakeStatesStore = svc._store  # type: ignore[assignment]
     store.records[("alerts", "agent", "a", "thread", "t1")] = {"n": 1}
-    counts = await svc.prune_expired()
-    assert counts == {"alerts": 2}
+    result = await svc.prune_expired()
+    assert result.pruned == {"alerts": 2}
+    assert result.held == []
 
 
 async def test_prune_expired_also_sweeps_the_op_ledger(svc: StatesService, monkeypatch: pytest.MonkeyPatch) -> None:

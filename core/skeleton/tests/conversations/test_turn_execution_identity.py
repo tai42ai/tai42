@@ -357,3 +357,22 @@ async def test_descoping_the_key_denies_the_next_turn(ac, store, monkeypatch):
     assert answer_status2 == "error"
     assert error2 is not None
     assert "denied" in error2
+
+
+# -- the turn waits for its subject's pending saves once, at its visit -----------
+
+
+async def test_an_agent_turn_drains_its_subjects_once_and_the_agents_own_tool_call_adds_none(ac, store, monkeypatch):
+    from .._drain_spy import spy_on_drains
+
+    spy = spy_on_drains(monkeypatch)
+    _wire_turn(monkeypatch, "k-run", "shout", {"text": "hi there"})
+    async with app.app_context(_manifest()):
+        answer_status, answer, _error = await _run_turn_answer(store)
+    assert (answer_status, answer) == ("answered", "hi there")
+    # One drain at the turn's visit, over the turn's candidate subjects; the agent's own tool call
+    # reaches the tool body inside that visit and makes no run entry of its own.
+    assert len(spy.queries) == 1
+    (keys,) = spy.keys
+    assert keys
+    assert all(key.startswith(f'["agent","{_AGENT}",') for key in keys)

@@ -19,7 +19,10 @@ from typing import Any, LiteralString
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.states.errors import RegimeViolationError, SubjectRefusedError, ValueValidationError
+from tai42_contract.states.errors import (
+    RegimeViolationError,
+    ValueValidationError,
+)
 from tai42_contract.states.models import (
     AttachBody,
     StateBatchWrite,
@@ -138,6 +141,7 @@ async def _cleanup_state(state: str, template: str) -> None:
     await _exec("DELETE FROM state_attachments WHERE state = %s", (state,))
     await _exec("DELETE FROM state_applied_ops WHERE op_id LIKE %s", (f"%:{state}",))
     await _exec("DELETE FROM state_templates WHERE name = %s", (template,))
+    await _exec("DELETE FROM state_outbox WHERE states @> ARRAY[%s]::text[]", (state,))
     await _exec("DELETE FROM state_declarations WHERE name = %s", (state,))
 
 
@@ -276,7 +280,7 @@ async def test_unit_of_work_stages_projects_and_commits_once(real_service: tuple
         # Nothing has landed in the store yet — no committed write ledger row.
         assert len((await svc.writes(state, subject, limit=10, cursor=None)).items) == 0
         commit = await unit.commit()
-    assert commit.diverged is False
+    assert commit.outbox_id is not None
     assert commit.results[0].applied is True
     # After commit the item is in the store, trace and all, in one write.
     view = await svc.read(state, subject)
@@ -323,7 +327,6 @@ async def test_unit_of_work_restage_same_op_id_in_a_later_unit_is_not_applied(
         )
         assert staged[0].applied is False  # the ledger already holds the op_id
         commit = await second.commit()
-    assert commit.diverged is False
     assert commit.results[0].applied is False
     view = await svc.read(state, subject)
     assert view is not None
@@ -364,6 +367,7 @@ async def _cleanup_plain(state: str) -> None:
     await _exec("DELETE FROM state_writes WHERE state = %s", (state,))
     await _exec("DELETE FROM state_records WHERE state = %s", (state,))
     await _exec("DELETE FROM state_applied_ops WHERE op_id LIKE %s", (f"%:{state}",))
+    await _exec("DELETE FROM state_outbox WHERE states @> ARRAY[%s]::text[]", (state,))
     await _exec("DELETE FROM state_declarations WHERE name = %s", (state,))
 
 
@@ -583,7 +587,7 @@ async def test_a_unit_write_replayed_onto_a_recreated_state_is_refused_by_its_ne
     real_plain: tuple[StatesService, str, str], staged_kind: str
 ) -> None:
     """Another process deletes and re-declares the state with other subject kinds between stage and
-    commit: the replay is refused by the re-declared kinds and nothing of the commit lands."""
+    commit: the replay is refused by the re-declared kinds, the save fails and nothing of it lands."""
     svc, state, _b = real_plain
     other = StatesService()
     async with svc.open_unit() as unit:
@@ -604,13 +608,20 @@ async def test_a_unit_write_replayed_onto_a_recreated_state_is_refused_by_its_ne
         await other.put_declaration(
             _plain_decl(state).model_copy(update={"subject_kinds": ["case"], "default_subject_kind": "case"})
         )
-        with pytest.raises(SubjectRefusedError, match=f"subject kind 'thread' is not declared by state '{state}'"):
-            await unit.commit()
+        commit = await unit.commit()
+    assert commit.outbox_id is not None
     async with (
         client_ctx(PostgresClient, component_store_settings(STATES_COMPONENT)) as pool,
         pool.connection() as conn,
     ):
         cur = await conn.execute("SELECT count(*) AS n FROM state_records WHERE state = %s", (state,))
         row = await cur.fetchone()
+        saved = await conn.execute(
+            "SELECT status, last_error FROM state_outbox WHERE id = %s", (int(commit.outbox_id),)
+        )
+        save = await saved.fetchone()
     assert row is not None
     assert row[0] == 0
+    assert save is not None
+    assert save[0] == "failed"
+    assert f"subject kind 'thread' is not declared by state '{state}'" in save[1]

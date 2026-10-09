@@ -1,26 +1,33 @@
-"""The states facet's unit of work — staging, projection-served reads, one-transaction commit.
+"""The states facet's unit of work — staging, projection-served reads, the commit as one pending save.
 
 Driven against the faithful in-memory Postgres (:class:`FakeStatesPg`) so the REAL
 ``StatesService`` + ``PostgresStatesStore`` run: the projection is computed with the same
-applier the persisted write path runs, and ``commit`` replays through the true store
-transaction (whole-batch rollback, the op-idempotency ledger, the guard filter). Covers the
-design cases: A-then-B-fails commits nothing; a staged batch commits once; a re-staged ``op_id``
-in a later unit answers ``applied=False``; discard vs commit; a read after a staged update sees
-the staged value (the ``read`` door and a template program); a nested savepoint failure rolls
-back only its own writes; a staged/commit divergence is reported; an unresolved unit is
-discarded at teardown.
+applier the persisted write path runs, and ``commit`` writes one ``state_outbox`` row that the
+applier then lands through the true store transaction (whole-subject rollback, the
+op-idempotency ledger, the guard filter). Off the serving loop — as here — the commit applies the
+save's records inline before it returns. Covers: a refused apply lands nothing and holds its
+subjects; a staged batch commits once; a re-staged ``op_id`` in a later unit answers
+``applied=False``; discard vs commit; a read after a staged update sees the staged value (the
+``read`` door and a template program); a nested savepoint failure rolls back only its own
+writes; a staged/applied divergence is reported by the applier; an unresolved unit is discarded at
+teardown.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.states import StateAttach, StateBinding, StateUpdate
-from tai42_contract.states.errors import RegimeViolationError, SubjectRefusedError, ValueValidationError
+from tai42_contract.states.errors import (
+    RegimeViolationError,
+    StatePendingSaveFailedError,
+    ValueValidationError,
+)
 from tai42_contract.states.models import (
     AttachBody,
     StateBatchWrite,
@@ -123,14 +130,16 @@ async def test_read_your_own_writes_through_the_unit(svc: StatesService, pg: Fak
         await unit.discard()
 
 
-async def test_commit_lands_all_staged_writes_in_one_transaction(svc: StatesService) -> None:
+async def test_commit_lands_all_staged_writes_in_one_transaction(svc: StatesService, pg: FakeStatesPg) -> None:
     await svc.put_declaration(_decl())
     async with svc.open_unit() as unit:
         await unit.stage([_write(_subject(), [_set("n", 1)])])
         await unit.stage([_write(_subject(), [_set("note", "hi")])])
         result = await unit.commit()
-    assert result.diverged is False
+    assert result.outbox_id == "1"
+    assert result.deferred_calls == 0
     assert [r.applied for r in result.results] == [True, True]
+    assert not pg.outbox  # applied and removed in the apply's transaction
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"n": 1, "note": "hi"}
@@ -187,8 +196,7 @@ async def test_commit_applies_the_final_state_without_stale_replay_over_a_later_
     async with svc.open_unit() as unit:
         await svc.apply("notes", _subject(), [_set("n", 1)], op_id=None, origin=_ORIGIN)
         await svc.replace("notes", _subject(), {"note": "final"}, origin=_ORIGIN)
-        result = await unit.commit()
-    assert result.diverged is False
+        await unit.commit()
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"note": "final"}  # n=1 did not replay over the later replace
@@ -210,18 +218,30 @@ async def test_unresolved_unit_is_discarded_at_teardown(svc: StatesService, pg: 
     assert not pg.records
 
 
-async def test_whole_batch_commit_rolls_back_wholly_and_loudly(svc: StatesService, pg: FakeStatesPg) -> None:
-    # A lands (projected) then B fails at commit → nothing committed, loud.
+async def test_a_save_refused_at_apply_lands_nothing_and_holds_its_subjects(
+    svc: StatesService, pg: FakeStatesPg, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The schema narrows between stage and the apply: the save fails as a whole, nothing lands,
+    # and every subject it writes is held until an operator retries or discards it.
     await svc.put_declaration(_decl())
     async with svc.open_unit() as unit:
         await unit.stage([_write(_subject("t1"), [_set("n", 1)])])
         await unit.stage([_write(_subject("t2"), [_set("n", 2)])])
-        # The schema narrows out of band (no records yet, so the redeclare is allowed); the
-        # commit re-reads it authoritatively and every staged write now fails validation.
+        # No record yet, so the narrowing re-declare is accepted.
         await svc.put_declaration(_decl({"type": "object", "properties": {"n": {"type": "string"}}}))
-        with pytest.raises(ValueValidationError):
-            await unit.commit()
+        with caplog.at_level(logging.ERROR, logger="tai42_skeleton.states.outbox.loud"):
+            result = await unit.commit()
+    assert result.outbox_id == "1"
     assert not pg.records
+    row = pg.outbox[1]
+    assert row["status"] == "failed"
+    assert row["failed_phase"] == "records"
+    assert "ValueValidationError" in row["last_error"]
+    assert "pending save 1 failed in its records phase" in caplog.text
+    for key in ("t1", "t2"):
+        with pytest.raises(StatePendingSaveFailedError, match="has a failed pending save 1") as raised:
+            await svc.read("notes", _subject(key))
+        assert raised.value.extra == {"save_id": "1"}
 
 
 async def test_restage_same_op_id_in_a_later_unit_answers_not_applied(svc: StatesService, pg: FakeStatesPg) -> None:
@@ -234,7 +254,6 @@ async def test_restage_same_op_id_in_a_later_unit_answers_not_applied(svc: State
         staged = await second.stage([_write(_subject(), [_set("n", 99)], op_id="op-1")])
         assert staged[0].applied is False  # the ledger already holds op-1 — provisional agrees
         result = await second.commit()
-    assert result.diverged is False
     assert result.results[0].applied is False
     view = await svc.read("notes", _subject())
     assert view is not None
@@ -259,24 +278,27 @@ async def test_guard_skip_is_reported_and_matches_at_commit(svc: StatesService) 
         staged = await unit.stage([_write(_subject(), [_set("n", 1, guard={"path": ["n"], "expected": 5})])])
         assert staged[0].skipped == [{"op": "set", "path": ["n"], "reason": "guard"}]
         result = await unit.commit()
-    assert result.diverged is False
     assert result.results[0].skipped == staged[0].skipped
 
 
-async def test_commit_reports_divergence_when_the_ledger_moves(svc: StatesService) -> None:
+async def test_an_apply_whose_ledger_moved_reports_the_divergence(
+    svc: StatesService, caplog: pytest.LogCaptureFixture
+) -> None:
     await svc.put_declaration(_decl())
     async with svc.open_unit() as unit:
         staged = await unit.stage([_write(_subject(), [_set("n", 1)], op_id="k1")])
         assert staged[0].applied is True  # k1 not yet in the ledger at stage time
-        # Another writer commits op_id k1 before this unit commits — a root of execution so its
-        # write goes to the store rather than staging into this scope's unit.
+        # Another writer commits op_id k1 before this unit's save applies — a root of execution so
+        # its write goes to the store rather than staging into this scope's unit.
         await spawn_root_task(svc.apply("notes", _subject(), [_set("n", 9)], op_id="k1", origin=_ORIGIN))
-        result = await unit.commit()
-    assert result.diverged is True
-    assert result.results[0].applied is False
-    assert result.divergences[0].field == "applied"
-    assert result.divergences[0].staged is True
-    assert result.divergences[0].committed is False
+        with caplog.at_level(logging.WARNING, logger="tai42_skeleton.states.outbox.apply"):
+            result = await unit.commit()
+    assert result.results[0].applied is True  # the provisional answer the run was served
+    assert "pending save 1 diverged from its projection" in caplog.text
+    assert "'field': 'applied', 'staged': True, 'applied': False" in caplog.text
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 9}  # the replay found k1 in the ledger and wrote nothing
 
 
 async def test_savepoint_failure_rolls_back_only_its_own_writes(svc: StatesService) -> None:
@@ -357,20 +379,25 @@ async def test_teardown_discards_when_the_scope_raises(svc: StatesService, pg: F
     assert not pg.records
 
 
-async def test_commit_reports_a_skipped_divergence(svc: StatesService) -> None:
+async def test_an_apply_whose_guard_now_skips_reports_the_divergence(
+    svc: StatesService, caplog: pytest.LogCaptureFixture
+) -> None:
     await svc.put_declaration(_decl())
     async with svc.open_unit() as unit:
         # The guard expects n absent; the empty base satisfies it, so the op applies at stage.
         staged = await unit.stage([_write(_subject(), [_set("n", 1, guard={"path": ["n"], "expected": None})])])
         assert staged[0].applied is True
         assert staged[0].skipped == []
-        # Another writer sets n before this unit commits (a root of execution, so the write lands in
-        # the store, not this scope's unit); now the guard fails and the op skips.
+        # Another writer sets n before this unit's save applies (a root of execution, so the write
+        # lands in the store, not this scope's unit); now the guard fails and the op skips.
         await spawn_root_task(svc.apply("notes", _subject(), [_set("n", 5)], op_id=None, origin=_ORIGIN))
-        result = await unit.commit()
-    assert result.diverged is True
-    assert [d.field for d in result.divergences] == ["skipped"]
-    assert result.results[0].skipped == [{"op": "set", "path": ["n"], "reason": "guard"}]
+        with caplog.at_level(logging.WARNING, logger="tai42_skeleton.states.outbox.apply"):
+            result = await unit.commit()
+    assert result.results[0].skipped == []
+    assert "'field': 'skipped'" in caplog.text
+    view = await svc.read("notes", _subject())
+    assert view is not None
+    assert view.data == {"n": 5}
 
 
 _COMPOSING_TEMPLATE = StateTemplateDocument.model_validate(
@@ -505,7 +532,7 @@ async def test_binding_updates_commit_lands_through_the_unit(svc: StatesService)
     async with svc.open_unit() as unit:
         await apply_binding_updates(_binding_app(svc), _n7_binding(), {}, {}, door_id="d1")
         result = await unit.commit()
-    assert result.diverged is False
+    assert result.outbox_id is not None
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"n": 7}
@@ -640,7 +667,7 @@ async def test_an_unmoved_commit_writes_the_projection_with_no_validation(
         result = await _commit(unit, validations)
     assert validations.commit == 0
     assert cas == [True, True]
-    assert result.diverged is False
+    assert [r.applied for r in result.results] == [True, True, True]
     view = await svc.read("notes", _subject("t1"))
     assert view is not None
     assert view.data == {"n": 1, "note": "x"}
@@ -648,7 +675,6 @@ async def test_an_unmoved_commit_writes_the_projection_with_no_validation(
     t1_rows = [w for w in pg.writes if w["subject_key"] == "t1"]
     assert [w["paths"] for w in t1_rows] == [[["n"]], [["note"]]]
     assert len({w["seq"] for w in t1_rows}) == 1
-    assert result.results[0].seq == result.results[1].seq == t1_rows[0]["seq"]
 
 
 async def test_a_moved_base_replays_and_validates_once_per_batch(
@@ -663,7 +689,7 @@ async def test_a_moved_base_replays_and_validates_once_per_batch(
         result = await _commit(unit, validations)
     assert cas == [False]
     assert validations.commit == 2  # once per (batch, subject)
-    assert result.diverged is False
+    assert [r.applied for r in result.results] == [True, True, True]
     view = await svc.read("notes", _subject())
     assert view is not None
     assert view.data == {"n": 2, "note": "b"}
@@ -683,7 +709,7 @@ async def test_a_version_bump_between_stage_and_commit_replays(
     assert view.data == {"n": 1}
 
 
-async def test_an_invalid_final_document_on_replay_is_loud_and_rolls_back(
+async def test_an_invalid_final_document_on_replay_fails_the_save_and_lands_nothing(
     svc: StatesService, pg: FakeStatesPg, cas: list[bool]
 ) -> None:
     await svc.put_declaration(_decl())
@@ -691,10 +717,11 @@ async def test_an_invalid_final_document_on_replay_is_loud_and_rolls_back(
         await unit.stage([_write(_subject("t1"), [_set("n", 1)])])
         await unit.stage([_write(_subject("t2"), [_set("n", 2)])])
         await svc.put_declaration(_decl({"type": "object", "properties": {"n": {"type": "string"}}}))
-        with pytest.raises(ValueValidationError, match="state 'notes' subject agent/a/thread/t1"):
-            await unit.commit()
+        await unit.commit()
     assert not pg.records
     assert not pg.writes
+    assert pg.outbox[1]["status"] == "failed"
+    assert "state 'notes' subject agent/a/thread/t1" in pg.outbox[1]["last_error"]
 
 
 async def test_replayed_rows_carry_each_items_stage_time_origin(
@@ -779,7 +806,7 @@ async def test_a_concurrent_ledger_insert_of_a_staged_op_id_falls_back_to_replay
         await spawn_root_task(svc.apply("notes", _subject("t9"), [_set("n", 9)], op_id="shared", origin=_ORIGIN))
         result = await unit.commit()
     assert cas == [False]
-    assert result.results[0].applied is False
+    assert result.results[0].applied is True  # the provisional answer; the applier reports the divergence
     assert await svc.read("notes", _subject()) is None
 
 
@@ -788,7 +815,7 @@ async def test_a_write_replayed_onto_a_recreated_state_is_admitted_by_the_new_de
     svc: StatesService, pg: FakeStatesPg, cas: list[bool], staged_kind: str
 ) -> None:
     """Every staged write kind replayed after its state was deleted and re-declared with other
-    subject kinds is refused by the re-declared kinds, loudly, and nothing of the commit lands."""
+    subject kinds is refused by the re-declared kinds: the save fails loudly and nothing of it lands."""
     await _with_template(svc)
     async with svc.open_unit() as unit:
         if staged_kind == "replace":
@@ -807,8 +834,9 @@ async def test_a_write_replayed_onto_a_recreated_state_is_admitted_by_the_new_de
         await svc.put_declaration(
             StateDeclaration(name="notes", schema=_SCHEMA, subject_kinds=["case"], default_subject_kind="case")
         )
-        with pytest.raises(SubjectRefusedError, match="subject kind 'thread' is not declared by state 'notes'"):
-            await unit.commit()
+        await unit.commit()
     assert cas == [False]
     assert not pg.records
     assert not pg.writes
+    assert pg.outbox[1]["status"] == "failed"
+    assert "SubjectRefusedError: subject kind 'thread' is not declared by state 'notes'" in pg.outbox[1]["last_error"]

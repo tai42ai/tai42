@@ -55,15 +55,18 @@ from tai42_contract.app.responses import OpaqueJson
 from tai42_contract.interactions import RunTerminalFailed
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
+from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
 from tai42_skeleton.operations import (
     BadRequestError,
+    ConflictError,
     NotFoundError,
     OperationError,
     OperationFailedError,
     PermissionDeniedError,
+    UnavailableError,
     UpstreamError,
     operation,
 )
@@ -205,7 +208,15 @@ def _run_tool_return(outcome: VisitOutcome) -> Any:
     destructive=True,
     reload_gated=True,
     meta_executor=True,
-    errors=[BadRequestError, NotFoundError, PermissionDeniedError, UpstreamError, OperationFailedError],
+    errors=[
+        BadRequestError,
+        NotFoundError,
+        PermissionDeniedError,
+        ConflictError,
+        UpstreamError,
+        UnavailableError,
+        OperationFailedError,
+    ],
     request_model=RunToolRequest,
     response_model=OpaqueJson,
 )
@@ -338,11 +349,25 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.
             raise
+        except (StatePendingSaveFailedError, StatePendingSaveTimeoutError) as exc:
+            # A subject of the run has a pending save (at the run entry, or a read inside the run).
+            raise _pending_save_refusal(exc) from exc
         except Exception as exc:
             logger.exception("run-tool %r raised during execution", tool_name)
             # A bare raise stringifies to ""; the class-name fallback keeps the envelope
             # from emitting {"error": ""}.
             raise OperationFailedError(str(exc) or type(exc).__name__) from exc
+
+
+def _pending_save_refusal(exc: StatePendingSaveFailedError | StatePendingSaveTimeoutError) -> OperationError:
+    """The run-tool door's answer for a subject's pending save, naming it.
+
+    A save held by a failed one is a conflict the operator resolves (retry or discard); a save
+    that did not finish within the drain timeout is unavailable (retry later).
+    """
+    if isinstance(exc, StatePendingSaveFailedError):
+        return ConflictError(str(exc), extra=exc.extra)
+    return UnavailableError(str(exc), extra=exc.extra)
 
 
 @operation(

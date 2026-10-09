@@ -1,4 +1,4 @@
-"""The unit of work over the states facet — staging, projection-served reads, one-transaction commit.
+"""The unit of work over the states facet — staging, projection-served reads, one pending save.
 
 A caller opens a unit for a scope it owns and stages write sets against it. Each staged batch is
 projected with the SAME applier the persisted write path runs (the composing-shape refusal, the
@@ -13,18 +13,19 @@ writes while every other scope still sees the store's committed document.
 A write door (``replace``/``apply``, and ``merge`` through ``apply``) that runs while the unit is the
 ambient unit STAGES into it rather than touching the store, exactly as the read seam serves staged
 subjects — so a step's writes read back within the scope and roll back with a discard. A
-``conn``-threaded write (the commit itself) always goes to the store.
+``conn``-threaded write always goes to the store. ``defer_call`` stages a call to run after the
+unit's writes apply.
 
-``commit`` lands every staged subject in ONE store transaction
-(:meth:`~tai42_skeleton.states.service.StatesService._commit_writes`): per subject, the already
+``commit`` writes every staged write and deferred call durably as ONE pending save
+(:mod:`tai42_skeleton.states.outbox`) and returns the provisional results; the save is applied
+after the caller returns through :meth:`StatesService._commit_writes`: per subject, the already
 validated projected document is written under a compare-and-set on the base ``seq`` and the
 declaration ``version`` it was staged under; a moved base, a moved version or a ledger conflict
 replays that subject's writes through the store's apply path instead, validated once per staged
-batch. Any failure rolls the whole commit back, loud; divergence between the staged projection and
-the committed answer is reported. ``discard`` drops the staging. A unit neither committed nor
-discarded when its scope ends is discarded at teardown and the discard is logged. A savepoint
-nests: writes staged inside it are kept on a clean exit and dropped on an exception, only the
-child's deltas rolling back.
+batch. ``discard`` drops the staging. A unit neither committed nor discarded when its scope ends
+is discarded at teardown and the discard is logged. A savepoint nests: writes and calls staged
+inside it are kept on a clean exit and dropped on an exception, only the child's staging rolling
+back.
 """
 
 from __future__ import annotations
@@ -34,23 +35,25 @@ import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.states.errors import InvalidPathError
 from tai42_contract.states.models import (
     ApplyResult,
-    CompletedOrigin,
     StateSubject,
     StateUnitClosedError,
     UnitCommitResult,
-    UnitDivergence,
 )
 
+from tai42_skeleton.states.outbox.calls import deferred_call_kind
+from tai42_skeleton.states.outbox.drain import drained
+from tai42_skeleton.states.outbox.keys import record_key
+from tai42_skeleton.states.outbox.models import OutboxCall, OutboxItem, OutboxPending, OutboxSubject
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
 from tai42_skeleton.states.paths import partition_guarded, validate_op
 from tai42_skeleton.states.schema import _validate_document
 from tai42_skeleton.states.service.base import _StatesServiceBase
+from tai42_skeleton.states.service.staging import StagedItemRecord, StagedReplace, outbox_item
 from tai42_skeleton.states.store.trace import _refuse_composing_shape, guard_skip_rows, stamp_trace, trace_stamp
 from tai42_skeleton.states.store.writes import ProjectedWrite
 
@@ -70,46 +73,6 @@ _SEQ_EPSILON = 1e-6
 
 _SubjectKey = tuple[str, str, str, str, str]
 _ApplyContext = tuple[int, list[str], "ApplyEntry"]
-
-
-@dataclass(frozen=True)
-class _StagedReplace:
-    """A whole-document replace staged in a unit, replayed through the facet's replace door at commit.
-
-    Carried in the unit's ordered staging alongside the ``StateBatchWrite`` ops/template_jq items so a
-    replace interleaves with them in authored order; the store is touched only when the unit commits.
-    """
-
-    state: str
-    subject: StateSubject
-    data: dict[str, Any]
-    origin: WriteOrigin
-
-
-@dataclass(frozen=True)
-class StagedItemRecord:
-    """What one staged write recorded at stage, for the commit.
-
-    ``applied_ops`` (post-guard, ``_trace``-stamped) and ``paths`` are what the write changes;
-    ``op_id`` enters the idempotency ledger when ``ledger``; ``row`` records a ``state_writes`` row.
-    ``batch`` is the index of the ``stage`` / ``stage_replace`` call that staged it (per unit), and
-    ``completed_origin`` the origin completed once at stage. ``version`` and ``base_seq`` are the
-    declaration version and the subject's committed ``seq`` (``None`` = no record) it was staged
-    against; ``document`` is the subject's projected document after it (``None`` = no projection);
-    ``provisional`` its staged answer.
-    """
-
-    applied_ops: list[dict[str, Any]]
-    paths: list[list[Any]]
-    op_id: str | None
-    batch: int
-    completed_origin: CompletedOrigin
-    ledger: bool
-    row: bool
-    version: int
-    base_seq: float | None
-    document: dict[str, Any] | None
-    provisional: ApplyResult
 
 
 # The ambient unit of work bound to the caller's scope. Homed here (not the kit) because only the
@@ -138,7 +101,7 @@ class _StateUnit:
 
     def __init__(self, service: _StatesServiceBase) -> None:
         self._service = service
-        self._staged: list[StateBatchWrite | _StagedReplace] = []
+        self._staged: list[StateBatchWrite | StagedReplace] = []
         self._records: list[StagedItemRecord] = []
         self._staged_op_ids: set[str] = set()
         self._base: dict[_SubjectKey, dict[str, Any] | None] = {}
@@ -147,6 +110,7 @@ class _StateUnit:
         self._proj_seq: dict[_SubjectKey, float] = {}
         self._last_seq = 0.0
         self._batches = 0
+        self._calls: list[OutboxCall] = []
         self._closed = False
 
     # -- lifecycle guards ----------------------------------------------------
@@ -207,7 +171,7 @@ class _StateUnit:
         self._ensure_open()
         snapshot = self._snapshot()
         batch = self._next_batch()
-        item = _StagedReplace(state=state, subject=subject, data=data, origin=origin)
+        item = StagedReplace(state=state, subject=subject, data=data, origin=origin)
         try:
             record = await self._project_replace(item, batch)
         except BaseException:
@@ -233,8 +197,11 @@ class _StateUnit:
         key = self._key(state, subject)
         if key not in self._base:
             # Direct store read — the unit's own base is the store's committed document, never its
-            # own projection (which is what the reader chokepoint would serve).
-            self._base[key] = await self._service._store.read_record_view(state, subject)
+            # own projection (which is what the reader chokepoint would serve). An outstanding
+            # pending save on the subject is applied first, so the base is the latest committed one.
+            self._base[key] = await drained(
+                self._service, lambda: self._service._store.read_record_view(state, subject)
+            )
         return self._base[key]
 
     async def _stage_one(self, item: StateBatchWrite, batch: int) -> StagedItemRecord:
@@ -312,7 +279,7 @@ class _StateUnit:
             ApplyResult(applied=True, data=merged, seq=seq, skipped=skipped), applied_ops=applied_ops, ledger=ledger
         )
 
-    async def _project_replace(self, item: _StagedReplace, batch: int) -> StagedItemRecord:
+    async def _project_replace(self, item: StagedReplace, batch: int) -> StagedItemRecord:
         """Project a staged replace onto the subject's document on a fresh provisional sequence.
 
         Validates ``data`` whole against the effective schema and mirrors the persisted replace door (no
@@ -347,33 +314,50 @@ class _StateUnit:
         self._last_seq = candidate
         return candidate
 
+    # -- deferred calls -------------------------------------------------------
+    async def defer_call(self, tool: str, arguments: dict[str, Any], *, run_id: str | None = None) -> None:
+        """Stage a call of ``tool`` with ``arguments`` to run after the unit's pending save applies.
+
+        The registered ``tool`` call kind captures it with the caller's identity, state context,
+        run attribution and trace; it is dropped with the unit on discard and with a savepoint on
+        its rollback.
+        """
+        self._ensure_open()
+        payload = await deferred_call_kind("tool").capture(tool, arguments)
+        self._calls.append(OutboxCall(kind="tool", target=tool, payload=payload, run_id=run_id))
+
     # -- commit / discard ----------------------------------------------------
+    def pending_save(self) -> tuple[list[OutboxItem], list[OutboxSubject], list[OutboxCall], list[ApplyResult]]:
+        """The unit's staging as one pending save: its items, subjects and calls, and the provisional results."""
+        items = [outbox_item(write, record) for write, record in zip(self._staged, self._records, strict=True)]
+        subjects: dict[_SubjectKey, OutboxSubject] = {}
+        for write, record in zip(self._staged, self._records, strict=True):
+            key = self._key(write.state, write.subject)
+            base = self._base.get(key)
+            subjects[key] = OutboxSubject(
+                state=write.state,
+                subject=write.subject,
+                canonical=base["canonical_subject"] if base is not None else write.subject,
+                aliases=list(base["folded_from"]) if base is not None else [],
+                base_seq=record.base_seq,
+                declaration_version=record.version,
+                projected=record.document,
+            )
+        return items, list(subjects.values()), list(self._calls), [r.provisional for r in self._records]
+
     async def commit(self) -> UnitCommitResult:
         self._ensure_open()
-        staged = list(self._staged)
-        records = list(self._records)
-        provisional = [r.provisional for r in records]
-        results = await self._service._commit_writes(staged, staged=records)
-        divergences = self._divergences(provisional, results)
+        # The outbox imports the unit's staging shapes; the unit reaches it at commit.
+        from tai42_skeleton.states.outbox.enqueue import dispatch_pending_save, insert_pending_save
+
+        items, subjects, calls, provisional = self.pending_save()
+        row_id = await insert_pending_save(self._service, items, subjects, calls)
         self._closed = True
         self._clear()
-        if divergences:
-            logger.warning(
-                "states unit of work: %d staged write(s) diverged from the projection at commit: %s",
-                len(divergences),
-                [d.model_dump() for d in divergences],
-            )
-        return UnitCommitResult(results=results, diverged=bool(divergences), divergences=divergences)
-
-    @staticmethod
-    def _divergences(provisional: list[ApplyResult], committed: list[ApplyResult]) -> list[UnitDivergence]:
-        out: list[UnitDivergence] = []
-        for i, (staged, landed) in enumerate(zip(provisional, committed, strict=True)):
-            if staged.applied != landed.applied:
-                out.append(UnitDivergence(index=i, field="applied", staged=staged.applied, committed=landed.applied))
-            if staged.skipped != landed.skipped:
-                out.append(UnitDivergence(index=i, field="skipped", staged=staged.skipped, committed=landed.skipped))
-        return out
+        if row_id is None:
+            return UnitCommitResult(results=provisional)
+        await dispatch_pending_save(self._service, row_id, has_records=bool(items), has_calls=bool(calls))
+        return UnitCommitResult(results=provisional, outbox_id=str(row_id), deferred_calls=len(calls))
 
     async def discard(self) -> None:
         self._ensure_open()
@@ -390,9 +374,12 @@ class _StateUnit:
             "an exception was in flight" if exception else "clean exit",
             len(self._staged),
         )
+        if self._calls:
+            logger.warning("states unit of work: %d deferred call(s) dropped with it", len(self._calls))
         self._clear()
 
     def _clear(self) -> None:
+        self._calls.clear()
         self._staged.clear()
         self._records.clear()
         self._staged_op_ids.clear()
@@ -414,6 +401,7 @@ class _StateUnit:
         return {
             "staged": len(self._staged),
             "records": len(self._records),
+            "calls": len(self._calls),
             "projected": dict(self._projected),
             "proj_seq": dict(self._proj_seq),
             "op_ids": set(self._staged_op_ids),
@@ -425,6 +413,7 @@ class _StateUnit:
     def _restore(self, snapshot: dict[str, Any]) -> None:
         del self._staged[snapshot["staged"] :]
         del self._records[snapshot["records"] :]
+        del self._calls[snapshot["calls"] :]
         self._projected = snapshot["projected"]
         self._proj_seq = snapshot["proj_seq"]
         self._staged_op_ids = snapshot["op_ids"]
@@ -462,9 +451,21 @@ class _UnitMixin(_StatesServiceBase):
         self._ensure_available()
         return _open_unit(self)
 
+    async def enqueue_batch(self, items: Sequence[StateBatchWrite]) -> UnitCommitResult:
+        """Stage ``items`` into a fresh unit and enqueue it as one pending save; nothing for no items.
+
+        The unit is BOUND as the ambient unit while it stages, so an item's update program reads
+        the projection the earlier items of the batch leave, exactly as a bound caller's unit does.
+        """
+        if not items:
+            return UnitCommitResult(results=[])
+        async with self.open_unit() as unit:
+            await unit.stage(list(items))
+            return await unit.commit()
+
     async def _commit_writes(
         self,
-        writes: Sequence[StateBatchWrite | _StagedReplace],
+        writes: Sequence[StateBatchWrite | StagedReplace],
         *,
         staged: Sequence[StagedItemRecord] | None = None,
         conn: AsyncConnection[Any] | None = None,
@@ -490,17 +491,27 @@ class _UnitMixin(_StatesServiceBase):
         order = sorted(range(len(writes)), key=lambda i: self._subject_sort_key(writes[i]))
         if conn is not None:
             return await self._commit_on(conn, writes, order, staged)
-        async with self._store.begin() as own:
-            return await self._commit_on(own, writes, order, staged)
+
+        async def own_transaction() -> list[ApplyResult]:
+            async with self._store.begin() as own:
+                if staged is None:
+                    # The batch's items run on this transaction's connection, so the pending-save
+                    # check their own reads would make runs here, before any write.
+                    keys = sorted({record_key(w.state, w.subject) for w in writes})
+                    if await self._store.outbox_check_records(own, keys):
+                        raise OutboxPending(keys)
+                return await self._commit_on(own, writes, order, staged)
+
+        return await drained(self, own_transaction)
 
     @staticmethod
-    def _subject_sort_key(item: StateBatchWrite | _StagedReplace) -> tuple[str, str, str, str, str]:
+    def _subject_sort_key(item: StateBatchWrite | StagedReplace) -> tuple[str, str, str, str, str]:
         return (item.state, item.subject.target_kind, item.subject.target_name, item.subject.kind, item.subject.key)
 
     async def _commit_on(
         self,
         conn: AsyncConnection[Any],
-        writes: Sequence[StateBatchWrite | _StagedReplace],
+        writes: Sequence[StateBatchWrite | StagedReplace],
         order: list[int],
         staged: Sequence[StagedItemRecord] | None,
     ) -> list[ApplyResult]:
@@ -536,9 +547,9 @@ class _UnitMixin(_StatesServiceBase):
             results.update(zip(indices, replayed, strict=True))
         return [results[i] for i in range(len(writes))]
 
-    async def _dispatch(self, item: StateBatchWrite | _StagedReplace, conn: AsyncConnection[Any]) -> ApplyResult:
+    async def _dispatch(self, item: StateBatchWrite | StagedReplace, conn: AsyncConnection[Any]) -> ApplyResult:
         """Apply one item on ``conn`` through its facet door (validated per item)."""
-        if isinstance(item, _StagedReplace):
+        if isinstance(item, StagedReplace):
             record = await self.replace(item.state, item.subject, item.data, origin=item.origin, conn=conn)
             return ApplyResult(applied=True, data=record.data, seq=record.seq, skipped=[])
         if item.ops is not None:
@@ -553,7 +564,7 @@ class _UnitMixin(_StatesServiceBase):
     async def _replay_subject(
         self,
         conn: AsyncConnection[Any],
-        writes: Sequence[StateBatchWrite | _StagedReplace],
+        writes: Sequence[StateBatchWrite | StagedReplace],
         staged: Sequence[StagedItemRecord],
         indices: list[int],
     ) -> list[ApplyResult]:
@@ -568,7 +579,7 @@ class _UnitMixin(_StatesServiceBase):
         for i in indices:
             item = writes[i]
             origin = staged[i].completed_origin
-            if isinstance(item, _StagedReplace):
+            if isinstance(item, StagedReplace):
                 record = await self._replace_completed(
                     item.state, item.subject, item.data, origin=origin, conn=conn, validate=False
                 )
@@ -611,7 +622,12 @@ class _UnitMixin(_StatesServiceBase):
         _validate_document(entry.validator, document, where=_subject_where(state, subject))
 
     async def _projected_record_view(
-        self, state: str, subject: StateSubject, *, conn: Any | None = None
+        self,
+        state: str,
+        subject: StateSubject,
+        *,
+        conn: Any | None = None,
+        check_outbox: bool = True,
     ) -> dict[str, Any] | None:
         """The record view a facet reader gets: the bound unit's projection, else the store's committed read.
 
@@ -619,7 +635,9 @@ class _UnitMixin(_StatesServiceBase):
         record read flow through, so every facet reader honours a unit at one place. A read that
         threads a ``conn`` (an attach reconciler in its own transaction, or the commit replaying
         through the write transaction) reads the store directly — a unit is an out-of-transaction
-        projection, never consulted on a transaction-bound read.
+        projection, never consulted on a transaction-bound read. A committed read waits for the
+        subject's outstanding pending saves first; ``check_outbox=False`` reads back a write that
+        just landed as it stands.
         """
         if conn is None:
             unit = current_state_unit()
@@ -627,4 +645,7 @@ class _UnitMixin(_StatesServiceBase):
                 view = unit.projected_view(state, subject)
                 if view is not None:
                     return view
+            if check_outbox:
+                return await drained(self, lambda: self._store.read_record_view(state, subject))
+            return await self._store.read_record_view(state, subject, check_outbox=False)
         return await self._store.read_record_view(state, subject, conn=conn)

@@ -5,7 +5,9 @@ Plus the fresh reads of the op-ledger and default record retention windows.
 
 from __future__ import annotations
 
+import json
 import sys
+from collections.abc import Sequence
 
 from psycopg.rows import dict_row
 from tai42_contract.states.errors import StatesError
@@ -30,13 +32,16 @@ class _RetentionStore:
             )
             return cur.rowcount
 
-    async def prune_expired(self, default_retention_days: int | None) -> dict[str, int]:
+    async def prune_expired(
+        self, default_retention_days: int | None, *, held_record_keys: Sequence[str] = ()
+    ) -> dict[str, int]:
         """Delete every record past its state's EFFECTIVE retention, in ONE atomic statement.
 
         Effective retention is the state's own ``retention_days`` when set, else
-        the global default; ``NULL`` keeps records forever. Returns
-        ``{state: rows_deleted}``.
+        the global default; ``NULL`` keeps records forever. A record named by ``held_record_keys``
+        (the record keys of saves held by a failed save) is kept. Returns ``{state: rows_deleted}``.
         """
+        held = [json.loads(key) for key in held_record_keys]
         async with (
             _pool(_settings()) as pool,
             pool.connection() as conn,
@@ -46,8 +51,18 @@ class _RetentionStore:
                 "DELETE FROM state_records r USING state_declarations d WHERE r.state = d.name "
                 "AND COALESCE(d.retention_days, %(default)s) IS NOT NULL "
                 "AND r.updated_at < now() - make_interval(days => COALESCE(d.retention_days, %(default)s)) "
+                "AND NOT EXISTS (SELECT 1 FROM unnest(%(s)s::text[], %(tk)s::text[], %(tn)s::text[], "
+                "%(k)s::text[], %(key)s::text[]) AS h(s, tk, tn, k, key) WHERE h.s = r.state "
+                "AND h.tk = r.target_kind AND h.tn = r.target_name AND h.k = r.subject_kind AND h.key = r.subject_key) "
                 "RETURNING r.state",
-                {"default": default_retention_days},
+                {
+                    "default": default_retention_days,
+                    "s": [h[0] for h in held],
+                    "tk": [h[1] for h in held],
+                    "tn": [h[2] for h in held],
+                    "k": [h[3] for h in held],
+                    "key": [h[4] for h in held],
+                },
             )
             counts: dict[str, int] = {}
             for row in await cur.fetchall():

@@ -25,6 +25,7 @@ from tai42_contract.states import (
     SubjectCandidates,
     TemplateJqApplyResult,
     TemplateJqResult,
+    UnitCommitResult,
     WriteOrigin,
 )
 from tai42_contract.states.errors import (
@@ -83,7 +84,7 @@ class FakeStates(_SubjectMixin):
         self.eval_calls: list[tuple[str, StateSubject, str, dict[str, Any]]] = []
         self.apply_tjq_calls: list[tuple[str, StateSubject, str, Any, str | None, WriteOrigin]] = []
         self.apply_calls: list[tuple[str, StateSubject, list[dict[str, Any]], str | None, WriteOrigin]] = []
-        self.apply_batch_calls: list[list[StateBatchWrite]] = []
+        self.enqueue_batch_calls: list[list[StateBatchWrite]] = []
         self.read_calls: list[tuple[str, StateSubject]] = []
         self.attached_now: list[tuple[str, str, list[str]]] = []
         self.resolve_tjq_calls: list[tuple[str, str, str, list[str]]] = []
@@ -146,11 +147,11 @@ class FakeStates(_SubjectMixin):
         self.apply_calls.append((state, subject, ops, op_id, origin))
         return ApplyResult(applied=True, data={}, seq=1.0, skipped=[])
 
-    async def apply_batch(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
-        # Mirror the real service: record the batch, then dispatch each item (STABLY sorted by
+    async def enqueue_batch(self, writes: list[StateBatchWrite]) -> UnitCommitResult:
+        # Stand in for the pending save: record the batch, then dispatch each item (STABLY sorted by
         # ``(state, subject)``) to ``apply`` / ``apply_template_jq``, returning results in input
         # order — so the per-call assertions and the batch-shape assertions both hold.
-        self.apply_batch_calls.append(list(writes))
+        self.enqueue_batch_calls.append(list(writes))
         order = sorted(
             range(len(writes)),
             key=lambda i: (
@@ -173,7 +174,7 @@ class FakeStates(_SubjectMixin):
             results[i] = ApplyResult(
                 applied=outcome.applied, data=outcome.data, seq=outcome.seq, skipped=outcome.skipped
             )
-        return [results[i] for i in range(len(writes))]
+        return UnitCommitResult(results=[results[i] for i in range(len(writes))])
 
     async def list_attachments(self, state: str, *, template: str | None = None):
         names = self._attached.get(state, [])
@@ -523,8 +524,8 @@ async def test_named_update_adapts_input_and_custom_update_authors_ops() -> None
     assert ops == [{"op": "set", "path": ["last"], "value": {"status": "done"}}]
     assert origin2.consumer == "door:preset-x"
     # both updates rode ONE batch — a single transaction for the node's whole write set
-    assert len(states.apply_batch_calls) == 1
-    assert len(states.apply_batch_calls[0]) == 2
+    assert len(states.enqueue_batch_calls) == 1
+    assert len(states.enqueue_batch_calls[0]) == 2
 
 
 async def test_two_updates_on_one_state_ride_one_batch() -> None:
@@ -543,8 +544,8 @@ async def test_two_updates_on_one_state_ride_one_batch() -> None:
         ]
     )
     await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {}, door_id="d")
-    assert len(states.apply_batch_calls) == 1
-    batch = states.apply_batch_calls[0]
+    assert len(states.enqueue_batch_calls) == 1
+    batch = states.enqueue_batch_calls[0]
     assert [item.state for item in batch] == ["status", "status"]
     assert [item.ops for item in batch] == [
         [{"op": "set", "path": ["a"], "value": 1}],
@@ -571,8 +572,8 @@ async def test_binding_spanning_two_states_lands_one_atomic_batch() -> None:
     )
     await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {}, door_id="d")
     # ONE batch carries both attaches' writes — a single transaction across the node's states.
-    assert len(states.apply_batch_calls) == 1
-    assert len(states.apply_batch_calls[0]) == 2
+    assert len(states.enqueue_batch_calls) == 1
+    assert len(states.enqueue_batch_calls[0]) == 2
 
 
 async def test_two_custom_updates_read_the_node_entry_record_once() -> None:
@@ -593,8 +594,8 @@ async def test_two_custom_updates_read_the_node_entry_record_once() -> None:
     await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {"status": "done"}, door_id="d")
     # The node-entry record is read ONCE for the whole attach, and the second custom update's
     # jq sees THAT snapshot (``$record`` is the node-entry record, not a re-read).
-    assert states.read_calls == [("status", states.apply_batch_calls[0][0].subject)]
-    second_ops = states.apply_batch_calls[0][1].ops
+    assert states.read_calls == [("status", states.enqueue_batch_calls[0][0].subject)]
+    second_ops = states.enqueue_batch_calls[0][1].ops
     assert second_ops == [{"op": "set", "path": ["echo"], "value": "original"}]
 
 
@@ -616,7 +617,7 @@ async def test_a_build_time_update_failure_applies_no_batch() -> None:
     with pytest.raises(ValueValidationError, match="must return an op batch"):
         await apply_binding_updates(_app(states), b, {"tid": "k-1"}, {}, door_id="d")
     # The build raised before the batch was applied — nothing partial reached the store.
-    assert states.apply_batch_calls == []
+    assert states.enqueue_batch_calls == []
 
 
 # -- attach-on-use / validate at save -----------------------------------------
