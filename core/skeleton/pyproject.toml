@@ -53,7 +53,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pydantic>=2.12",
     "pydantic-core>=2",
-    "cachetools>=7.0",
+    "cachetools>=7.2.1",
     "async-lru>=2.3",
     # The tool-result surrogate check encodes the result once in C before any Python walk.
     "orjson>=3.11.8,<4",
