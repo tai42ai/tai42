@@ -17,8 +17,11 @@ from tai42_e2e.child_env import origin_allowlist_env
 from tai42_e2e.manifests import (
     _STRIPE_TEST_SECRET_KEY,
     ATLASSIAN_CLIENT_ID,
+    DISCOVERED_ENV_PROVIDER_ID,
+    DOCUMENT_ORIGIN,
     GOOGLE_CLIENT_ID,
     _llm_env,
+    build_discovered_connectors_stack,
     build_shipped_connectors_stack,
     build_stripe_stack,
 )
@@ -312,6 +315,33 @@ def test_origin_allowlist_engine_hook_public_vs_loopback() -> None:
     }
     assert origin_allowlist_env(_allowlist_cfg(public=False), "127.0.0.1", [8001, 8002]) == {
         "CONNECTORS_REDIRECT_URI_ALLOWLIST": "http://127.0.0.1:8001,http://127.0.0.1:8002"
+    }
+
+
+def test_the_discovered_servers_profile_pins_its_env_client_to_the_fixture() -> None:
+    cfg = build_discovered_connectors_stack(_res(oauth_mcp_base_url="http://127.0.0.1:9"), _VARIANTS)
+    (descriptor,) = cfg.manifest["connectors"]
+    assert descriptor["id"] == DISCOVERED_ENV_PROVIDER_ID
+    assert descriptor["issuer"] == "http://127.0.0.1:9"
+    assert descriptor["sub_services"]["default"]["mcp_server"]["url"] == "http://127.0.0.1:9/mcp"
+    assert cfg.env["ACCESS_CONTROL_ENABLE"] == "true"
+    assert cfg.topology is Topology.REPLICAS
+    assert cfg.extra_allowlist_origins == [DOCUMENT_ORIGIN]
+    with pytest.raises(RuntimeError, match="OAuth MCP fixture"):
+        build_discovered_connectors_stack(_res(), _VARIANTS)
+
+
+def test_origin_allowlist_loopback_fill_carries_the_extra_origins_last() -> None:
+    cfg = StackConfig(
+        name="c",
+        topology=Topology.REPLICAS,
+        manifest={},
+        env={},
+        origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+        extra_allowlist_origins=["https://app.e2e.test"],
+    )
+    assert origin_allowlist_env(cfg, "127.0.0.1", [8001, 8002]) == {
+        "CONNECTORS_REDIRECT_URI_ALLOWLIST": "http://127.0.0.1:8001,http://127.0.0.1:8002,https://app.e2e.test"
     }
 
 

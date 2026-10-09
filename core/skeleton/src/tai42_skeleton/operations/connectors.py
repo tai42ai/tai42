@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -54,7 +55,8 @@ from tai42_skeleton.connectors.oauth.crypto import ConnectorEncryptionConfigErro
 from tai42_skeleton.connectors.providers.registry import get_provider, list_providers
 from tai42_skeleton.connectors.runtime.probe import probe
 from tai42_skeleton.connectors.runtime.resolver import resolve_managed_auth
-from tai42_skeleton.connectors.service import connection_service
+from tai42_skeleton.connectors.service import connection_service, provider_service
+from tai42_skeleton.connectors.service.provider_service import ClientSource
 from tai42_skeleton.connectors.store import token_store
 from tai42_skeleton.connectors.store.catalog_store import fetch_categories
 from tai42_skeleton.connectors.store.client_store import ConnectorStoreNotConfiguredError
@@ -127,7 +129,9 @@ def _not_supported_from_store_off(exc: ConnectorStoreNotConfiguredError) -> NotS
 # -- Serialization (through the contract wire models; never leaks secrets) ----
 
 
-def _provider_view(provider: ProviderDescriptor) -> ProviderCatalogEntry:
+def _provider_view(
+    provider: ProviderDescriptor, *, removable: bool, client_source: ClientSource | None
+) -> ProviderCatalogEntry:
     return ProviderCatalogEntry(
         id=provider.id,
         display_name=provider.display_name,
@@ -144,7 +148,20 @@ def _provider_view(provider: ProviderDescriptor) -> ProviderCatalogEntry:
             ConfigFieldSpec(key=f.key, label=f.label, target=f.target, required=f.required, secret=f.secret)
             for f in provider.config_fields
         ],
+        removable=removable,
+        client_source=client_source,
     )
+
+
+async def catalog_entries(providers: Sequence[ProviderDescriptor]) -> list[ProviderCatalogEntry]:
+    """The catalog entries of ``providers``: whether the provider door may remove each, and where its client comes from.
+
+    One installed-plugin index query and one grouped client-store query for the whole list,
+    whatever its length.
+    """
+    removable = await provider_service.removable_ids(providers)
+    sources = await provider_service.client_sources(providers)
+    return [_provider_view(p, removable=p.id in removable, client_source=sources.get(p.id)) for p in providers]
 
 
 def _connection_account(
@@ -255,12 +272,14 @@ async def list_connector_providers() -> dict[str, Any]:
     The category groupings are those the UI arranges the providers under.
     Providers come from the in-memory registry (populated from the manifest's
     ``connectors`` list at boot/reload), so they list regardless of store
-    configuration. The category
+    configuration; each says whether the provider door may remove it and where its
+    sign-in client comes from (``unset`` for a stored-client provider and never
+    removable while the store is not configured). The category
     groupings live in the connector store's Postgres, so they are served only when
     that store is configured (otherwise an empty grouping list, mirroring the
     OFF-state connections read).
     """
-    providers = [_provider_view(p) for p in list_providers()]
+    providers = await catalog_entries(list_providers())
     if component_store_configured(SKELETON_COMPONENT):
         categories = [
             ConnectorCategoryView(id=category.id, display_name=category.display_name, sort_order=category.sort_order)

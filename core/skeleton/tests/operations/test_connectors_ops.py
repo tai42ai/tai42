@@ -771,6 +771,6 @@ def test_the_catalog_view_of_a_discovered_provider_passes_no_icon_through() -> N
             )
         },
     )
-    view = conn_ops._provider_view(provider)
+    view = conn_ops._provider_view(provider, removable=False, client_source="unset")
     assert view.icon_url is None
     assert view.sub_services[0].scopes == []

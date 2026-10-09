@@ -494,6 +494,27 @@ class TaiStack:
         spawning.spawn(self, spec)
         self._wait_after_restart(name, before_backends)
 
+    def restart_with_env(self, changes: Mapping[str, str | None]) -> None:
+        """Apply env ``changes`` (``None`` removes a key) to every serve replica and the backend, then restart them.
+
+        Models an operator changing a deployment setting: the rendered ``.env`` file carries the
+        change too, so a restarted process boots with it.
+        """
+        for key, value in changes.items():
+            if value is None:
+                self.config.env.pop(key, None)
+            else:
+                self.config.env[key] = value
+        child_env.render_env_file(self)
+        for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
+            env = self._specs[name].env
+            for key, value in changes.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
+            self.restart(name)
+
     def rotate_connectors_kek(self, *, new_kek: str, previous: list[str]) -> None:
         """Rotate ``CONNECTORS_KEK`` across every serve replica and the backend worker.
 

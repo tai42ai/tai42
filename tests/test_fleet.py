@@ -396,6 +396,7 @@ HARNESS_API = {
         "build_fixture_source_tarball",
     ],
     "tai42_e2e.pytest_plugin": [],
+    "tai42_e2e_fixtures.oauth_mcp_server": ["OAuthMcpServer", "Controls", "Counters"],
 }
 
 

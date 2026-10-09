@@ -112,6 +112,9 @@ class StackResources:
     connectors_kek: str | None = None
     connectors_state_hmac_key: str | None = None
     idp_base_url: str | None = None
+    # The in-process OAuth-protected MCP fixture server a hand-written discovered descriptor
+    # with an env client points at; ``None`` on every other stack.
+    oauth_mcp_base_url: str | None = None
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
@@ -191,6 +194,9 @@ class StackConfig:
     # ``CONNECTORS_REDIRECT_URI_ALLOWLIST`` to the origins the OAuth connect flow
     # signs from ``request.base_url``.
     origin_allowlist_env_keys: list[str] = field(default_factory=list)
+    # Origins appended to every loopback ``origin_allowlist_env_keys`` fill: an ``https`` origin
+    # a test presents in a request's ``Origin`` header while the stack itself serves plain http.
+    extra_allowlist_origins: list[str] = field(default_factory=list)
     # Env keys that must carry the SINGLE replica-B loopback origin
     # (``http://host:port_b``), only known after boot allocates the ports — the
     # channel profile pins ``INTERACTIONS_PUBLIC_BASE_URL`` (so an ask minted on

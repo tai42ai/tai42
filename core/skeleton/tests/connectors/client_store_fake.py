@@ -19,6 +19,7 @@ from tai42_skeleton.connectors.store.client_store import (
     RestoreClientRowResult,
     StoredClient,
     StoredClientRow,
+    StoredClientSource,
     open_row,
     seal_credentials,
     select_for_flow,
@@ -138,6 +139,23 @@ class FakeClientStore:
     async def has_rows(self, provider_id: str) -> bool:
         self.calls.append("has_rows")
         return any(row.provider_id == provider_id for row in self.rows)
+
+    async def sources(self, provider_ids: Sequence[str]) -> dict[str, StoredClientSource]:
+        self.calls.append("sources")
+        now = datetime.now(UTC)
+        out: dict[str, StoredClientSource] = {}
+        for provider_id in provider_ids:
+            rows = [row for row in self.rows if row.provider_id == provider_id]
+            if any(row.source == "manual" for row in rows):
+                out[provider_id] = "manual"
+            elif any(
+                row.source == "dynamic"
+                and not row.dead
+                and (row.secret_expires_at is None or row.secret_expires_at > now)
+                for row in rows
+            ):
+                out[provider_id] = "dynamic"
+        return out
 
     async def enumerate_rows(self) -> list[StoredClientRow]:
         self.calls.append("enumerate_rows")

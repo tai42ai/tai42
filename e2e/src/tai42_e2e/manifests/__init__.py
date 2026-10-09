@@ -62,11 +62,16 @@ from tai42_e2e.manifests.channels import (
 )
 from tai42_e2e.manifests.connectors import (
     ATLASSIAN_CLIENT_ID,
+    DISCOVERED_ENV_CLIENT_ID,
+    DISCOVERED_ENV_CLIENT_SECRET,
+    DISCOVERED_ENV_PROVIDER_ID,
+    DOCUMENT_ORIGIN,
     GITHUB_CLIENT_ID,
     GOOGLE_CLIENT_ID,
     MANAGED_SERVER_RELOAD_PROBE_ENV,
     SLACK_CLIENT_ID,
     build_connectors_stack,
+    build_discovered_connectors_stack,
     build_shipped_connectors_stack,
 )
 from tai42_e2e.manifests.core import (
@@ -148,6 +153,10 @@ __all__ = [
     "BRIDGE_WHATSAPP_PHONE_ID_B",
     "BRIDGE_WHATSAPP_PHONE_ID_C",
     "BRIDGE_WHATSAPP_WABA_ID",
+    "DISCOVERED_ENV_CLIENT_ID",
+    "DISCOVERED_ENV_CLIENT_SECRET",
+    "DISCOVERED_ENV_PROVIDER_ID",
+    "DOCUMENT_ORIGIN",
     "GITHUB_CLIENT_ID",
     "GOOGLE_CLIENT_ID",
     "MANAGED_SERVER_RELOAD_PROBE_ENV",
@@ -208,6 +217,7 @@ __all__ = [
     "build_dead_collector_monitoring_stack",
     "build_deep_agent_durable_stack",
     "build_default_router_stack",
+    "build_discovered_connectors_stack",
     "build_door_schedule_stack",
     "build_embed_prefix_stack",
     "build_embed_stack",

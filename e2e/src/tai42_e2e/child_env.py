@@ -44,7 +44,8 @@ def origin_allowlist_env(config: StackConfig, host: str, app_ports: list[int]) -
     """Fill each ``origin_allowlist_env_keys`` entry, only known after boot.
 
     Mock legs (the default) fill every entry with this stack's own loopback app
-    origins (``http://host:port`` for every allocated app port, comma-joined).
+    origins (``http://host:port`` for every allocated app port) followed by the
+    profile's ``extra_allowlist_origins``, comma-joined.
 
     A REAL connector leg additionally lists keys in ``public_allowlist_env_keys``:
     those fill from ``E2E_PUBLIC_BASE_URL`` (the origin the vendor redirects the OAuth
@@ -65,7 +66,7 @@ def origin_allowlist_env(config: StackConfig, host: str, app_ports: list[int]) -
         env.update(dict.fromkeys(public_keys, config.public_base_url.rstrip("/")))
     loopback_keys = [key for key in config.origin_allowlist_env_keys if key not in public_keys]
     if loopback_keys:
-        origins = ",".join(f"http://{host}:{port}" for port in app_ports)
+        origins = ",".join([*(f"http://{host}:{port}" for port in app_ports), *config.extra_allowlist_origins])
         env.update(dict.fromkeys(loopback_keys, origins))
     return env
 

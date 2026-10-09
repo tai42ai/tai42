@@ -22,3 +22,31 @@ async def e2e_resolve_connector(connection_id: str, provider_id: str = "e2e_idp"
 
     auth = await resolve_managed_auth(connection_id, provider_id, sub_service)
     return {"resolved": auth is not None, "pid": os.getpid()}
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_age_connection_token(connection_id: str, seconds_ago: int = 60) -> dict:
+    """Move the STORED access-token expiry of ``connection_id`` ``seconds_ago`` into the past.
+
+    The token itself, and the sign-in service's own record of it, are untouched: the platform
+    believes its token expired, so its next use (or a reload's credential step) refreshes it.
+    Written with the store's compare-and-set on the blob it read; a lost race raises."""
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_skeleton.connectors.oauth import crypto
+    from tai42_skeleton.connectors.store import token_store
+    from tai42_skeleton.connectors.store.persistence import load_record_with_blob, session_expires_at_for
+
+    record, blob = await load_record_with_blob(connection_id)
+    aged = record.model_copy(update={"access_token_expires_at": datetime.now(UTC) - timedelta(seconds=seconds_ago)})
+    committed = await token_store().put(
+        connection_id,
+        crypto.encrypt(aged.to_storage_json().encode("utf-8"), aad=connection_id),
+        expected_blob=blob,
+        session_expires_at=session_expires_at_for(aged),
+        provider_id=aged.provider_id,
+        alias=aged.alias,
+    )
+    if not committed:
+        raise RuntimeError(f"connection {connection_id} changed while its expiry was being moved")
+    return {"aged": True}
