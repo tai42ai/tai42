@@ -1,6 +1,7 @@
 """Per-event-loop, epoch-aware pooling for shared driver clients."""
 
 import asyncio
+import contextvars
 import json
 import logging
 import threading
@@ -283,7 +284,12 @@ class PooledClient[T]:
                 if entry is not None:
                     self._ensure_build_options_match(entry, kwargs)
                     return entry, epoch
-                created = await self._create(**kwargs)
+                # The client is shared by every later caller of this epoch on this loop,
+                # so it is created from an empty context: a task its creation starts (a
+                # driver pool's workers) copies the context it is created in, and would
+                # otherwise keep the first caller's state (its request) for the
+                # client's whole life.
+                created = await asyncio.create_task(self._create(**kwargs), context=contextvars.Context())
                 # ``_create`` awaited, so the epoch may have advanced and a
                 # shutdown/drain may have detached the pool. ``_register`` re-reads
                 # both atomically: it lands the client in the LIVE current-epoch

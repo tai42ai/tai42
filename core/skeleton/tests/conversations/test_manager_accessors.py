@@ -8,7 +8,7 @@ import pytest
 from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 
-from tai42_skeleton.app import epoch as epoch_module
+from tai42_skeleton.app.retired_generations import certify_retired_generation
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations.ledger import ChannelSendLedger
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
@@ -174,7 +174,8 @@ def test_a_retired_settings_generation_is_not_held_by_the_manager(request, caplo
     advance_client_epoch()
 
     with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
-        epoch_module._reset_settings_and_sweep(retired)
+        reset_all_settings()
+        certify_retired_generation(retired)
 
     held = [h for h in sweep_stale_settings(retired) if h.settings_type.endswith(".ConversationsSettings")]
     assert held == []

@@ -7,6 +7,7 @@ module-global, class-keyed pool from leaking state across tests.
 """
 
 import asyncio
+import contextvars
 
 import pytest
 from tai42_contract.errors import ClientDisconnectedError
@@ -336,3 +337,32 @@ async def test_shutdown_all_clients_collects_errors_into_group():
     assert cls.closed == 2
     assert len(ei.value.exceptions) == 2
     assert all(isinstance(e, RuntimeError) for e in ei.value.exceptions)
+
+
+_caller_state: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("test_caller_state", default=None)
+
+
+async def test_a_pooled_client_is_created_outside_the_first_callers_context():
+    # A pooled client is shared by every later caller of its epoch on this loop, so the
+    # tasks its creation starts (a driver pool's workers) carry no first caller's state.
+    spawned: list[asyncio.Task] = []
+
+    class _TaskOwningClient(_make_client_cls()):
+        async def _create(self, **kwargs):
+            spawned.append(asyncio.get_running_loop().create_task(asyncio.Event().wait()))
+            return _Conn(**kwargs)
+
+    async def first_caller():
+        _caller_state.set("request-1")
+        async with _TaskOwningClient().current(url="a"):
+            pass
+
+    try:
+        await asyncio.create_task(first_caller(), context=contextvars.Context())
+        assert len(spawned) == 1
+        assert _caller_state not in spawned[0].get_context()
+    finally:
+        for task in spawned:
+            task.cancel()
+        await asyncio.gather(*spawned, return_exceptions=True)
+        await shutdown_all_clients()
