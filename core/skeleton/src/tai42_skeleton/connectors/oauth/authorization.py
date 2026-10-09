@@ -19,10 +19,11 @@ from tai42_contract.connectors.models import ConnectionGrant, ConnectionRecord
 from tai42_contract.connectors.providers import OAuthEndpoints, ProviderDescriptor
 from tai42_contract.errors import ErrorKind
 
-from tai42_skeleton.connectors.oauth.client import OAuthError
+from tai42_skeleton.connectors.oauth import client_document, registration
+from tai42_skeleton.connectors.oauth.client import ClientAuthMethod, OAuthError
 from tai42_skeleton.connectors.oauth.discovery import OAuthDiscoveryError, discover, same_issuer
+from tai42_skeleton.connectors.store import client_store
 
-ClientAuthMethod = Literal["client_secret_post", "client_secret_basic", "none"]
 ClientSource = Literal["env", "manual", "document", "dynamic"]
 
 OFFLINE_ACCESS = "offline_access"
@@ -63,6 +64,8 @@ class ResolvedClient:
     client_secret: str | None = field(repr=False)
     auth_method: ClientAuthMethod
     source: ClientSource
+    # The client-store row of a manual or dynamic client; ``None`` for an env or document client.
+    client_row_id: str | None = None
 
 
 class OAuthIssuerMismatchError(OAuthError):
@@ -183,14 +186,21 @@ async def resolve_client(
     *,
     redirect_uri: str | None = None,
     client_id: str | None = None,
+    origin: str | None = None,
 ) -> ResolvedClient:
     """Resolve the client a door authenticates as.
 
     A descriptor that names env client variables resolves the env client (``client_secret_post``;
-    an unset variable raises :class:`OperatorMisconfiguredError`). ``client_id`` selects the stored
-    client a grant was issued to (refresh, revoke) and ``redirect_uri`` the one for a new flow; a
-    provider with no env client, or a grant issued to a stored client, needs a stored client, and
-    with none available this raises :class:`ConnectorClientRequiredError`.
+    an unset variable raises :class:`OperatorMisconfiguredError`). Otherwise:
+
+    * ``client_id`` given (a grant's client, or the client a login started with): this
+      deployment's client-identity document when ``client_id`` is its URL, else the stored client
+      of that id at ``resolved.issuer``; a missing or dead row raises.
+    * ``redirect_uri`` given (a new flow from deployment ``origin``), the first that applies: the
+      provider's manual client for the issuer; the client-identity document, when the server
+      supports it and ``origin`` is a document origin; a usable dynamic client registered for
+      ``redirect_uri``; a client registered now at the server's registration endpoint.
+    * neither, or none of these: :class:`ConnectorClientRequiredError`.
     """
     if descriptor.client_id_env or descriptor.client_secret_env:
         if client_id is not None:
@@ -198,7 +208,65 @@ async def resolve_client(
                 descriptor.id, "the grant was issued to a stored client; the descriptor names an env client"
             )
         return _env_client(descriptor)
-    raise ConnectorClientRequiredError(descriptor.id, f"no stored client for {resolved.issuer!r}")
+    issuer = resolved.issuer
+    if issuer is None:
+        raise ConnectorClientRequiredError(descriptor.id, "a provider with no issuer needs an env client")
+    if client_id is not None:
+        return await _client_of_grant(descriptor, issuer, client_id)
+    if redirect_uri is not None:
+        return await _client_for_flow(descriptor, resolved, issuer, redirect_uri, origin)
+    raise ConnectorClientRequiredError(descriptor.id, "the record holds no grant to resolve a stored client from")
+
+
+def _document_client(client_id: str) -> ResolvedClient:
+    return ResolvedClient(client_id=client_id, client_secret=None, auth_method="none", source="document")
+
+
+def _stored(found: client_store.StoredClient) -> ResolvedClient:
+    return ResolvedClient(
+        client_id=found.client_id,
+        client_secret=found.client_secret,
+        auth_method=found.auth_method,
+        source=found.source,
+        client_row_id=found.client_row_id,
+    )
+
+
+async def _client_of_grant(descriptor: ProviderDescriptor, issuer: str, client_id: str) -> ResolvedClient:
+    if client_document.is_own_client_document(client_id):
+        return _document_client(client_id)
+    found = await client_store.active_client_store().get(descriptor.id, issuer, client_id)
+    if found is None:
+        raise ConnectorClientRequiredError(descriptor.id, f"the client {client_id!r} of {issuer!r} is no longer stored")
+    if found.dead:
+        raise ConnectorClientRequiredError(
+            descriptor.id, f"the authorization server {issuer!r} refused the client {client_id!r}"
+        )
+    return _stored(found)
+
+
+async def _client_for_flow(
+    descriptor: ProviderDescriptor,
+    resolved: ResolvedAuthorization,
+    issuer: str,
+    redirect_uri: str,
+    origin: str | None,
+) -> ResolvedClient:
+    store = client_store.active_client_store()
+    found = await store.find_for_flow(descriptor.id, issuer, redirect_uri)
+    if found is not None and found.source == "manual":
+        return _stored(found)
+    if resolved.client_id_document_supported and origin is not None and client_document.eligible(origin):
+        return _document_client(client_document.client_document_url(origin))
+    if found is not None:
+        return _stored(found)
+    if resolved.registration_endpoint is None:
+        raise ConnectorClientRequiredError(
+            descriptor.id, f"the authorization server {issuer!r} offers no registration and no client is set"
+        )
+    scopes = requested_scopes(descriptor, descriptor.sub_services, resolved)
+    registered = await registration.register_client(descriptor, resolved, redirect_uri, scopes=scopes)
+    return _stored(await store.add_dynamic(descriptor.id, issuer, registered))
 
 
 # -- grants --------------------------------------------------------------------------------------

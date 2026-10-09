@@ -34,7 +34,7 @@ class _Store:
     """A compare-and-set store; with ``hang`` its write sets ``entered`` and waits until ``release`` is set."""
 
     def __init__(self, record: ConnectionRecord, *, hang: bool = False) -> None:
-        self.blob = crypto.encrypt(record.to_storage_json().encode(), connection_id=record.connection_id)
+        self.blob = crypto.encrypt(record.to_storage_json().encode(), aad=record.connection_id)
         self.cid = record.connection_id
         self.hang = hang
         self.entered = threading.Event()
@@ -42,7 +42,7 @@ class _Store:
         self.writes = 0
 
     def record(self) -> ConnectionRecord:
-        return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, connection_id=self.cid))
+        return ConnectionRecord.model_validate_json(crypto.decrypt(self.blob, aad=self.cid))
 
     async def put(self, connection_id, blob, *, create_only=False, expected_blob=None, session_expires_at=None):
         if self.hang:

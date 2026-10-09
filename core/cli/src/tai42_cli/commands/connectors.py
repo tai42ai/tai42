@@ -164,10 +164,11 @@ def patch_sub_services(
 @app.command("reencrypt-tokens")
 @covers(("POST", "/api/connectors/tokens/reencrypt"))
 def reencrypt_tokens(ctx: typer.Context) -> None:
-    """Re-encrypt every stored token blob under the current CONNECTORS_KEK.
+    """Re-encrypt every stored token and client credential under the current CONNECTORS_KEK.
 
     Run after rotating CONNECTORS_KEK (old key moved to CONNECTORS_KEK_PREVIOUS) to
-    converge every blob onto the new key so the previous key can be retired.
+    converge every connection token blob and every stored OAuth client blob onto the
+    new key so the previous key can be retired.
 
     Example: ``tai connectors reencrypt-tokens``
     """

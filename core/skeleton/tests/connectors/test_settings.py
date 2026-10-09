@@ -234,9 +234,23 @@ def test_oauth_bridge_url_defaults_none():
 
 
 def test_oauth_bridge_url_from_env(monkeypatch):
-    monkeypatch.setenv("CONNECTORS_OAUTH_BRIDGE_URL", "https://bridge.tai42.ai")
+    monkeypatch.setenv("CONNECTORS_OAUTH_BRIDGE_URL", "https://bridge.example.com")
     reset_all_settings()
-    assert ConnectorEngineConfig().oauth_bridge_url == "https://bridge.tai42.ai"
+    assert ConnectorEngineConfig().oauth_bridge_url == "https://bridge.example.com"
+
+
+def test_client_name_defaults_and_reads_the_env(monkeypatch):
+    assert ConnectorEngineConfig().client_name == "Tai"
+    monkeypatch.setenv("CONNECTORS_CLIENT_NAME", "Acme Assistant")
+    reset_all_settings()
+    assert ConnectorEngineConfig().client_name == "Acme Assistant"
+
+
+def test_client_id_document_defaults_on_and_turns_off(monkeypatch):
+    assert ConnectorEngineConfig().client_id_document is True
+    monkeypatch.setenv("CONNECTORS_CLIENT_ID_DOCUMENT", "false")
+    reset_all_settings()
+    assert ConnectorEngineConfig().client_id_document is False
 
 
 def test_connector_engine_config_is_cached():

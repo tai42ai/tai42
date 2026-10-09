@@ -27,6 +27,9 @@ from tai42_contract.connectors.providers import (
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.connectors.oauth import authorization
+from tai42_skeleton.connectors.store import client_store
+
+from .client_store_fake import FakeClientStore
 
 # Deterministic test secrets: a 32-byte KEK and a 32-byte state-HMAC key.
 TEST_KEK_B64 = base64.b64encode(bytes(range(32))).decode("ascii")
@@ -72,6 +75,15 @@ def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
     if os.environ.get("TAI42_SKELETON_REAL_PG") in ("1", "true", "True"):
         return
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
+
+
+@pytest.fixture(autouse=True)
+def client_store_fake(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> FakeClientStore:
+    """Every offline test reaches an in-memory client store; a real-Postgres test keeps the real one."""
+    fake = FakeClientStore()
+    if request.node.get_closest_marker("integration") is None:
+        monkeypatch.setattr(client_store, "active_client_store", lambda: fake)
+    return fake
 
 
 # -- Descriptor / record builders -------------------------------------------

@@ -525,9 +525,6 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/config/reload"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),
-    ("POST", "/api/connectors/tokens/reencrypt"): RouteShape(
-        items_key=None, columns=("scanned", "reencrypted", "skipped", "failed", "failed_connection_ids", "cas_retries")
-    ),
     ("POST", "/api/fleet/reload-config"): RouteShape(
         items_key="results", columns=("name", "outcome", "payload", "error", "detail")
     ),

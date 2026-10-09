@@ -41,7 +41,7 @@ from tai42_contract.connectors.errors import ConnectorClientRequiredError, Conne
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord
 from tai42_contract.connectors.providers import ProviderDescriptor
 
-from tai42_skeleton.connectors.oauth import authorization, crypto
+from tai42_skeleton.connectors.oauth import authorization, crypto, discovery
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth.discovery import OAuthDiscoveryError
 from tai42_skeleton.connectors.providers.registry import get_provider
@@ -55,7 +55,7 @@ from tai42_skeleton.connectors.runtime.locks import (
     refresh_cooldown_active,
 )
 from tai42_skeleton.connectors.settings import connector_engine_config
-from tai42_skeleton.connectors.store import token_store
+from tai42_skeleton.connectors.store import client_store, token_store
 from tai42_skeleton.connectors.store.persistence import (
     ConnectionNotFoundError,
     load_record_with_blob,
@@ -188,7 +188,7 @@ async def _persist(record: ConnectionRecord, *, expected_blob: bytes) -> bool:
     """
     blob = crypto.encrypt(
         record.to_storage_json().encode("utf-8"),
-        connection_id=record.connection_id,
+        aad=record.connection_id,
     )
     return await token_store().put(
         record.connection_id,
@@ -388,6 +388,20 @@ async def _transient_failure(
     ) from cause
 
 
+async def _retire_refused_client(descriptor: ProviderDescriptor, client: authorization.ResolvedClient) -> None:
+    """A dynamic client its authorization server refused: mark its row dead and drop the cached documents.
+
+    The next login then registers a new client at the endpoint discovery finds afresh. Only a
+    dynamic client's refusal is terminal (an env or manual client's ``invalid_client`` is a failing
+    refresh), so only a dynamic client reaches here.
+    """
+    if client.source != "dynamic" or client.client_row_id is None:
+        raise RuntimeError(f"a {client.source} client's invalid_client is not terminal")
+    await client_store.active_client_store().mark_dead(client.client_row_id)
+    discovery.forget(descriptor.discovery_url)
+    logger.warning("connectors: the authorization server refused the dynamic client of provider %s", descriptor.id)
+
+
 async def _attempt(
     *,
     record: ConnectionRecord,
@@ -409,6 +423,8 @@ async def _attempt(
             resource=target.resource,
         )
     except oauth_client.TokenRefreshFailedError as exc:
+        if exc.reason == "invalid_client":
+            await _retire_refused_client(descriptor, client)
         if exc.reason in ("invalid_grant", "invalid_client"):
             # The invalid_grant may be spurious: a peer rotated our refresh_token
             # out from under us. Compare-and-set the terminal state so a lost race

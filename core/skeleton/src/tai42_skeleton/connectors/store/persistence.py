@@ -70,7 +70,7 @@ async def load_record_with_blob(
     if blob is None:
         raise ConnectionNotFoundError(connection_id)
     try:
-        plain = crypto.decrypt(blob, connection_id=connection_id)
+        plain = crypto.decrypt(blob, aad=connection_id)
     except crypto.ConnectorEncryptionConfigError:
         raise
     except Exception:
@@ -109,7 +109,7 @@ async def load_record_or_none(connection_id: str) -> ConnectionRecord | None:
     if blob is None:
         return None
     try:
-        plain = crypto.decrypt(blob, connection_id=connection_id)
+        plain = crypto.decrypt(blob, aad=connection_id)
         return ConnectionRecord.model_validate_json(plain)
     except crypto.ConnectorEncryptionConfigError:
         raise

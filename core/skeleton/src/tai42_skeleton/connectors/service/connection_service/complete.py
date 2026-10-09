@@ -23,6 +23,7 @@ from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth.discovery import same_issuer
 from tai42_skeleton.connectors.service import connection_service as _svc
 from tai42_skeleton.connectors.service import manifest_writer
+from tai42_skeleton.connectors.store import client_store
 
 from .persist import _persist
 
@@ -92,14 +93,12 @@ async def complete_connect(
     # discovered provider's server may issue none; on RECONNECT / TOGGLE an
     # existing one may be inherited in _complete_reconnect_or_toggle.
     require_refresh_token = flow_state.operation == state.FlowOperation.CONNECT and not descriptor.is_discovered
-    token_resp = await oauth_client.exchange_code(
+    token_resp = await _exchange(
         descriptor=descriptor,
         resolved=resolved,
         client=client,
         code=code,
-        code_verifier=flow_state.pkce_verifier,
-        redirect_uri=flow_state.redirect_uri,
-        resource=flow_state.resource,
+        flow_state=flow_state,
         require_refresh_token=require_refresh_token,
     )
     grant = authorization.grant_for(descriptor, resolved, client)
@@ -175,6 +174,41 @@ async def complete_connect(
         removed_manifest_entries=[],
         fanout=applied.fanout,
     )
+
+
+async def _exchange(
+    *,
+    descriptor: ProviderDescriptor,
+    resolved: authorization.ResolvedAuthorization,
+    client: authorization.ResolvedClient,
+    code: str,
+    flow_state: state.OAuthFlowState,
+    require_refresh_token: bool,
+) -> oauth_client.TokenResponse:
+    """Exchange the login's code; a dynamic client the server answers ``invalid_client`` is marked dead first.
+
+    The registration is gone, so the user's next attempt registers a new client. A manual client
+    is never marked: an administrator corrects it.
+    """
+    try:
+        return await oauth_client.exchange_code(
+            descriptor=descriptor,
+            resolved=resolved,
+            client=client,
+            code=code,
+            code_verifier=flow_state.pkce_verifier,
+            redirect_uri=flow_state.redirect_uri,
+            resource=flow_state.resource,
+            require_refresh_token=require_refresh_token,
+        )
+    except oauth_client.CodeExchangeFailedError as exc:
+        if exc.error_code == "invalid_client" and client.source == "dynamic" and client.client_row_id is not None:
+            await client_store.active_client_store().mark_dead(client.client_row_id)
+            logger.warning(
+                "connectors: the authorization server refused the dynamic client of provider %s; marked it dead",
+                descriptor.id,
+            )
+        raise
 
 
 async def _revoke_fresh_grant(

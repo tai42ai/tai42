@@ -161,7 +161,11 @@ def connector_crypto_secrets() -> ConnectorCryptoSecrets:
 
 
 class ConnectorEngineConfig(TaiBaseSettings):
-    """Non-secret engine knobs: session-TTL cap, redirect-URI allow-list, and the optional OAuth-bridge origin."""
+    """Non-secret engine knobs.
+
+    The session-TTL cap, the redirect-URI allow-list, the optional OAuth-bridge origin, the client
+    name an authorization server shows, and whether the client-identity document is offered.
+    """
 
     model_config = SettingsConfigDict(env_prefix="CONNECTORS_")
 
@@ -184,6 +188,18 @@ class ConnectorEngineConfig(TaiBaseSettings):
     # ``validate_redirect_uri``. Unset = the provider redirects to this deployment
     # directly (the single-deployment default).
     oauth_bridge_url: str | None = None
+
+    # The name an authorization server shows on its consent screen for this
+    # platform: sent in a dynamic client registration and in the client-identity
+    # document.
+    client_name: str = "Tai"
+
+    # Whether the platform offers its client-identity document
+    # (``/oauth/client-metadata.json`` on each allow-listed ``https`` origin other
+    # than the bridge's) to authorization servers that support it. Turn it off on a
+    # deployment those servers cannot reach: the engine then registers a client
+    # dynamically, or an administrator sets client credentials.
+    client_id_document: bool = True
 
     @field_validator("max_session_ttl", mode="before")
     @classmethod

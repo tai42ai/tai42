@@ -180,7 +180,8 @@ class AccessControlSettings(TaiBaseSettings):
     # route is acknowledged by its template STRING (an ordinary key). The app's intentional
     # public-by-declaration routes are so acknowledged by default: the operational probes
     # (``/health``, ``/ready``), the webhook ingress door (``/universal_webhook/{topic}``),
-    # the trigger-link door (``/trigger/{token}``), and the SPA history-fallback catch-all
+    # the trigger-link door (``/trigger/{token}``), the OAuth client-identity document
+    # (``/oauth/client-metadata.json``), and the SPA history-fallback catch-all
     # (``/{spa_path:path}``) that IS the public shell. A NEW such route halts boot until a
     # reviewer acknowledges it. Entries must be absolute and canonical; the boot audit refuses
     # one under a control-plane prefix (an acknowledged PUBLIC control-plane route is a
@@ -190,6 +191,7 @@ class AccessControlSettings(TaiBaseSettings):
         "/ready",
         "/universal_webhook/{topic}",
         "/trigger/{token}",
+        "/oauth/client-metadata.json",
         "/{spa_path:path}",
     )
 

@@ -31,7 +31,7 @@ def _share_the_store_with_the_resolver(harness, monkeypatch) -> None:
     """Point the resolver at the harness's records and compare-and-set store, with a sealed blob."""
     cs_mod, records, store, _, _, providers = harness
     record = records[CID]
-    store.blobs[CID] = crypto.encrypt(record.to_storage_json().encode(), connection_id=CID)
+    store.blobs[CID] = crypto.encrypt(record.to_storage_json().encode(), aad=CID)
 
     async def _load(connection_id):
         return records[connection_id], store.blobs[connection_id]
