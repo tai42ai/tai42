@@ -50,12 +50,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.models import RoleDefinition
+from tai42_contract.access_control.models import AccessPolicy, RoleDefinition
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning import VersionedStore, VersionedStoreTransaction
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError
@@ -64,6 +64,7 @@ from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy_store import ac_policy_store
 from tai42_skeleton.access_control.store import access_control_store
+from tai42_skeleton.access_control.user import is_admin_policy
 
 _KIND = "role"
 
@@ -360,7 +361,7 @@ async def seed_default_roles() -> None:
 
 
 async def apply_role(user_id: str, role_name: str) -> None:
-    """Assign role ``role_name`` to ``user_id``'s ENFORCED policy (LIVE semantics).
+    """Assign role ``role_name`` to ``user_id``'s ENFORCED policy (LIVE semantics), last-admin guarded.
 
     Writes the ``scopes`` + the role's ``condition`` (overwritten whole, so a
     re-assignment never strands a prior role's condition) AND the role-name POINTER
@@ -372,11 +373,12 @@ async def apply_role(user_id: str, role_name: str) -> None:
     absent pointer keeps the ``is_admin_policy`` discriminator intact) — a stale pointer
     from a prior non-admin role is dropped on the admin assignment.
 
-    CREATE-OR-UPDATE: ``update_policy_fields`` is UPDATE-only and returns ``None`` when
-    the user has no policy row (the bootstrap owner and every admin-created/invited user
-    reach here with no row). On that sentinel this falls through to ``create_policy``, so
-    the user is never left on the empty ``AccessPolicy()`` default. Raises ``KeyError``
-    on an unknown role (loud).
+    Runs in one advisory-locked guard transaction: the policy row is read ``FOR UPDATE``,
+    a non-``allow_all`` role on the last enabled admin principal raises
+    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written, and the
+    row is written (created when absent, so the bootstrap owner and every admin-created or
+    invited user never stay on the empty ``AccessPolicy()`` default). Enforcement is
+    refreshed after the commit. Raises ``KeyError`` on an unknown role (loud).
     """
     try:
         body = await role_store().get_active_body(role_name)
@@ -384,8 +386,6 @@ async def apply_role(user_id: str, role_name: str) -> None:
         raise KeyError(f"unknown role: {role_name!r}") from exc
 
     role = RoleDefinition(**body)
-    scopes = list(role.scopes)
-    condition = role.condition
 
     # Fail-closed guard on the admin discriminator: a non-allow_all role MUST carry a
     # base-tier condition. A role carrying ``condition=None`` would assign a
@@ -399,30 +399,40 @@ async def apply_role(user_id: str, role_name: str) -> None:
             "produce a condition-free ['*'] policy the admin discriminator misreads as full admin — refusing"
         )
 
-    store = access_control_store()
-    existing = await store.get_policy_body(user_id)
-    policy_data = dict((existing or {}).get("policy_data") or {})
-    if role.allow_all:
-        policy_data.pop(ROLE_POINTER_KEY, None)
-    else:
-        policy_data[ROLE_POINTER_KEY] = role_name
-
-    condition_doc = condition.model_dump() if condition is not None else None
-    committed = await store.update_policy_fields(
-        user_id,
-        {
-            "scopes": scopes,
-            "condition": condition_doc,
+    async with access_control_store().principal_guard_txn() as guard:
+        existing = await guard.policy_body(user_id)
+        policy_data = dict((existing or {}).get("policy_data") or {})
+        if role.allow_all:
+            policy_data.pop(ROLE_POINTER_KEY, None)
+        else:
+            policy_data[ROLE_POINTER_KEY] = role_name
+        committed = {
+            "scopes": list(role.scopes),
             "policy_data": policy_data,
-        },
-    )
-    if committed is None:
-        # No policy row yet — upsert a real policy so the user (including the first
-        # admin owner) is never left on the empty AccessPolicy() default.
-        committed = await store.create_policy(user_id, scopes, policy_data, condition_doc)
+            "condition": role.condition.model_dump() if role.condition is not None else None,
+        }
+        await guard.refuse_if_last_admin(user_id, committed)
+        await guard.write_policy(user_id, committed)
 
-    await management.bump_policy_version()
-    await ac_policy_store().write(user_id, committed)
+    await refresh_enforcement(user_id, committed)
+
+
+async def principal_roles(user_ids: Sequence[str]) -> dict[str, str | None]:
+    """The role each principal holds, read in one query.
+
+    :data:`RESERVED_ADMIN_ROLE` when its own policy is admin-shaped, else its role pointer,
+    else ``None`` (a policy not written from a role template). A user id with no principal
+    is absent from the result.
+    """
+    policies = await access_control_store().principal_policies(user_ids)
+    result: dict[str, str | None] = {}
+    for user_id, body in policies.items():
+        if is_admin_policy(AccessPolicy(**body), None):
+            result[user_id] = RESERVED_ADMIN_ROLE
+            continue
+        pointer = body["policy_data"].get(ROLE_POINTER_KEY)
+        result[user_id] = pointer if isinstance(pointer, str) and pointer else None
+    return result
 
 
 async def create_principal(
@@ -452,12 +462,12 @@ async def create_principal(
     return principal
 
 
-async def refresh_enforcement_after_disabled(user_id: str, committed: dict[str, Any]) -> None:
+async def refresh_enforcement(user_id: str, committed: dict[str, Any]) -> None:
     """Bump the policy version and write the committed body into the enforcement cache.
 
-    The post-commit half of a disabled flip, shared by the guarded principals door and the
-    accounts-services wrapper: once the advisory-locked transaction has committed both homes,
-    enforcement is refreshed so the new disabled state takes effect on the next request.
+    The post-commit half of a guarded principal change (a role assignment or a disabled
+    flip): once the advisory-locked transaction has committed, enforcement is refreshed so
+    the change takes effect on the next request.
     """
     await management.bump_policy_version()
     await ac_policy_store().write(user_id, committed)
@@ -485,31 +495,32 @@ async def revoke_owned_keys_and_bump(user_id: str) -> None:
 async def set_principal_disabled(user_id: str, disabled: bool) -> None:
     """Flip a principal's disabled state under the advisory-locked guard, then refresh enforcement.
 
-    A thin wrapper over :meth:`~tai42_skeleton.access_control.principals_mixin.PrincipalsStoreMixin.principal_guard_txn`
-    with NO last-admin check: the accounts users door that reaches this (through the accounts
-    admin services, for a login-owning human) runs its own last-admin guard on its
-    ``accounts_users`` table. The guard writes both the authoritative
+    A disable of the last enabled admin principal raises
+    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written; a
+    re-enable needs no count. The guard writes both the authoritative
     ``access_control_principals.disabled`` column and its ``policy_data['disabled']``
     projection in one transaction; enforcement is refreshed after it commits. Raises
     ``KeyError`` when the principal (or its policy row) is absent.
     """
     async with access_control_store().principal_guard_txn() as guard:
+        if disabled:
+            await guard.refuse_if_last_admin(user_id)
         committed = await guard.set_disabled(user_id, disabled)
-    await refresh_enforcement_after_disabled(user_id, committed)
+    await refresh_enforcement(user_id, committed)
 
 
 async def delete_principal(user_id: str) -> None:
     """Delete a principal's policy row and principal row under the advisory-locked guard, then revoke owned keys.
 
-    A thin wrapper over :meth:`~tai42_skeleton.access_control.principals_mixin.PrincipalsStoreMixin.principal_guard_txn`
-    with NO last-admin check: the accounts users door that reaches this (through the accounts
-    admin services, for a login-owning human) runs its own last-admin guard on its
-    ``accounts_users`` table. The guard deletes both rows in one transaction; owned keys are
-    revoked AFTER it commits (see :func:`revoke_owned_keys_and_bump`). The principal is
-    expected to EXIST: a missing policy row or principal row is an invariant breach and raises
-    ``KeyError`` (loud) rather than proceeding silently.
+    Deleting the last enabled admin principal raises
+    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written. The guard
+    deletes both rows in one transaction; owned keys are revoked AFTER it commits (see
+    :func:`revoke_owned_keys_and_bump`). The principal is expected to EXIST: a missing
+    policy row or principal row is an invariant breach and raises ``KeyError`` (loud)
+    rather than proceeding silently.
     """
     async with access_control_store().principal_guard_txn() as guard:
+        await guard.refuse_if_last_admin(user_id)
         policy_existed, principal_existed = await guard.delete(user_id)
         if not policy_existed:
             raise KeyError(f"cannot remove policy for unknown principal: {user_id!r}")
@@ -524,7 +535,8 @@ class SkeletonAccountsAdminServices:
     Injected onto ``settings.admin`` at ``AuthAdapter`` construction so every
     accounts-provider factory reaches it as ``settings.admin`` (never by importing this
     module). Every method mutates application-owned policy state and bumps the policy
-    version so enforcement follows immediately.
+    version so enforcement follows immediately; the role, disable and remove methods hold
+    the last-admin guard.
     """
 
     async def create_principal(
@@ -550,3 +562,7 @@ class SkeletonAccountsAdminServices:
     async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
         """Set/clear the disabled marker on ``user_id``'s principal; see :func:`set_principal_disabled`."""
         await set_principal_disabled(user_id, disabled)
+
+    async def principal_roles(self, user_ids: Sequence[str]) -> Mapping[str, str | None]:
+        """The role each principal holds; see :func:`principal_roles`."""
+        return await principal_roles(user_ids)

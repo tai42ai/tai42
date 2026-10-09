@@ -11,11 +11,10 @@ Who may disable or delete a principal is decided by OWNERSHIP OF ITS LOGIN, not 
 A ``disabled`` change or a DELETE first asks every registered login-attaching accounts
 provider whether it holds a login for the principal; if one does (a password human), the
 change is refused with a 409 and routed to that provider's users door, which cleans the
-login row and runs its own last-admin guard. Every principal no attaching provider claims
-— a ``service`` principal, an OIDC-provisioned human whose login lives at the issuer, the
-keys-only owner — is disabled or deleted here, behind a skeleton last-admin guard that
-refuses to strand the deployment with no enabled admin. A display-name edit is accepted
-for any kind.
+login row. Every principal no attaching provider claims — a ``service`` principal, an
+OIDC-provisioned human whose login lives at the issuer, the keys-only owner — is disabled
+or deleted here. Both doors hold the one last-admin guard, which refuses to strand the
+deployment with no enabled admin principal. A display-name edit is accepted for any kind.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, RootModel
 from tai42_contract.access_control.models import Principal
 from tai42_contract.accounts import LoginAttachingProvider
+from tai42_contract.accounts.errors import LastAdminError
 
 from tai42_skeleton.access_control import management, roles
 from tai42_skeleton.access_control.store import access_control_store
@@ -68,13 +68,13 @@ def _login_attaching_providers() -> list[tuple[str, LoginAttachingProvider]]:
     """The CURRENT epoch's live login-attaching accounts providers, name-sorted.
 
     The same registry :mod:`~tai42_skeleton.operations.setup` and
-    :mod:`~tai42_skeleton.operations.login` read: the serving core's recorded auth
+    :mod:`~tai42_skeleton.operations.login` read: the app's recorded auth
     providers, filtered to the ones that can attach — and therefore hold — an
     interactive login. Name-sorted so the owning-provider choice is deterministic.
     """
     from tai42_skeleton.app.instance import app
 
-    recorded = app._serving_core.active_auth_providers
+    recorded = app.recorded_auth_providers()
     return [(name, p) for name, p in sorted(recorded.items()) if isinstance(p, LoginAttachingProvider)]
 
 
@@ -82,8 +82,8 @@ async def _refuse_if_login_owned(user_id: str) -> None:
     """Refuse (409) when a login-attaching provider holds this principal's login.
 
     A principal whose interactive login lives in an accounts provider is disabled and
-    deleted through THAT provider's users door — which cleans the login row and runs its
-    own last-admin guard — never this door. A provider store error propagates (fail
+    deleted through THAT provider's users door — which cleans the login row — never this
+    door. A provider store error propagates (fail
     closed), never a silent pass.
     """
     for name, provider in _login_attaching_providers():
@@ -94,23 +94,8 @@ async def _refuse_if_login_owned(user_id: str) -> None:
             )
 
 
-async def _refuse_if_last_admin(guard: Any, user_id: str, target_disabled: bool) -> None:
-    """Refuse (409), rolling the guard's transaction back, when removing ``user_id`` strands the admins.
-
-    Runs INSIDE the advisory-locked guard transaction so the last-admin count and the
-    mutation it gates are atomic — a concurrent guarded removal blocks at the lock and
-    re-counts committed state, so two removals of the last two enabled admins cannot both
-    pass. Guards ONLY a currently-enabled admin target: a target already disabled
-    (``target_disabled``) or non-admin never contributes to the enabled-admin count, so
-    removing it strands nothing. When the target is an enabled admin, the guard counts the
-    OTHER enabled admin principals on its locked cursor; a count of zero makes the target the
-    last one and the door refuses (the ``ConflictError`` propagates out of the guard block,
-    rolling the transaction back with nothing written).
-    """
-    if target_disabled:
-        return
-    if await guard.target_is_enabled_admin(user_id) and await guard.count_other_enabled_admins(user_id) == 0:
-        raise ConflictError("the last enabled admin principal cannot be disabled or deleted")
+# The door's refusal text when a disable or delete would strand the admins.
+_LAST_ADMIN_CONFLICT = "the last enabled admin principal cannot be disabled or deleted"
 
 
 @operation(summary="List principals", tags=["access-control"], errors=[ForbiddenError], response_model=PrincipalListing)
@@ -162,9 +147,9 @@ async def update_principal(user_id: str, display_name: str | None = None, disabl
 
     Both fields are omit-means-keep. A ``disabled`` change is refused (409) when a
     login-attaching accounts provider owns the principal's login — its disabled state lives
-    at that provider's users door — and otherwise flips both homes through the single
-    disabled writer. Disabling the last enabled admin principal is refused (409) behind the
-    store's advisory-locked guard. A display-name edit is accepted for any kind. Returns the
+    at that provider's users door — and otherwise flips both homes through the guarded
+    disabled writer. Disabling the last enabled admin principal is refused (409) by the
+    last-admin guard. A display-name edit is accepted for any kind. Returns the
     updated principal; a missing principal is a 404.
     """
     caller = await resolve_caller()
@@ -177,14 +162,12 @@ async def update_principal(user_id: str, display_name: str | None = None, disabl
         raise NotFoundError(f"principal not found: {user_id!r}")
     if disabled is not None:
         await _refuse_if_login_owned(user_id)
-        async with store.principal_guard_txn() as guard:
-            locked = await guard.read(user_id)
-            if locked is None:
-                raise NotFoundError(f"principal not found: {user_id!r}")
-            if disabled:
-                await _refuse_if_last_admin(guard, user_id, locked["disabled"])
-            committed = await guard.set_disabled(user_id, disabled)
-        await roles.refresh_enforcement_after_disabled(user_id, committed)
+        try:
+            await roles.set_principal_disabled(user_id, disabled)
+        except LastAdminError as exc:
+            raise ConflictError(_LAST_ADMIN_CONFLICT) from exc
+        except KeyError as exc:
+            raise NotFoundError(f"principal not found: {user_id!r}") from exc
     if display_name is not None:
         await store.update_principal_display_name(user_id, display_name)
     updated = await store.get_principal(user_id)
@@ -207,8 +190,8 @@ async def delete_principal(user_id: str) -> dict[str, Any]:
     Refused (409) when a login-attaching accounts provider owns the principal's login — that
     provider's users door deletes it and cleans the login row. A principal no attaching
     provider claims (service, OIDC-provisioned human, keys-only owner) is deleted here;
-    deleting the last enabled admin principal is refused (409) behind the store's
-    advisory-locked guard. A missing principal is a 404.
+    deleting the last enabled admin principal is refused (409) by the last-admin guard. A
+    missing principal is a 404.
     """
     caller = await resolve_caller()
     require_admin(caller)
@@ -217,13 +200,10 @@ async def delete_principal(user_id: str) -> dict[str, Any]:
     if principal is None:
         raise NotFoundError(f"principal not found: {user_id!r}")
     await _refuse_if_login_owned(user_id)
-    async with store.principal_guard_txn() as guard:
-        locked = await guard.read(user_id)
-        if locked is None:
-            raise NotFoundError(f"principal not found: {user_id!r}")
-        await _refuse_if_last_admin(guard, user_id, locked["disabled"])
-        policy_existed, principal_existed = await guard.delete(user_id)
-        if not policy_existed or not principal_existed:
-            raise NotFoundError(f"principal not found: {user_id!r}")
-    await roles.revoke_owned_keys_and_bump(user_id)
+    try:
+        await roles.delete_principal(user_id)
+    except LastAdminError as exc:
+        raise ConflictError(_LAST_ADMIN_CONFLICT) from exc
+    except KeyError as exc:
+        raise NotFoundError(f"principal not found: {user_id!r}") from exc
     return {"user_id": user_id, "deleted": True}

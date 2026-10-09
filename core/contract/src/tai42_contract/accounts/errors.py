@@ -1,15 +1,17 @@
 """Errors an accounts provider raises through the contract.
 
-Two families, each so a generic application door catches ONE base type and reaches every
-failure a caller can correct, without importing any provider-private exception type — an
-accounts plugin never imports the application package. Each carries the stable
+Each family lets a generic application door catch ONE base type and reach every failure a
+caller can correct, without importing any provider-private exception type — an accounts
+plugin never imports the application package. Each carries the stable
 :class:`~tai42_contract.errors.ErrorKind` the caller maps to a transport status.
 
 :class:`LoginAttachError` is raised by ``attach_login`` (the setup/invite flow); the
 :class:`MemberActionError` family is raised by ``invoke_member_action`` so the generic
 invoke operation surfaces a provider's typed failure at the right status instead of a
-generic server error. The platform reads only the typed kind and surfaces the message; it
-reads no provider-specific content.
+generic server error. :class:`LastAdminError` is raised by the application's guarded
+:class:`~tai42_contract.accounts.provider.AccountsAdminServices` methods, so a provider
+reaches the last-admin refusal without importing the application package. The platform
+reads only the typed kind and surfaces the message; it reads no provider-specific content.
 """
 
 from __future__ import annotations
@@ -81,7 +83,15 @@ class MemberActionBadRequestError(MemberActionError):
     __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
+class LastAdminError(Exception):
+    """The change would leave no enabled admin principal; refused, nothing written."""
+
+    # The deployment's admin standing forbids the change — a state conflict.
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+
 __all__ = [
+    "LastAdminError",
     "LoginAttachError",
     "LoginConflictError",
     "MemberActionBadRequestError",

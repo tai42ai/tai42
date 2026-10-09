@@ -139,6 +139,15 @@ async def test_remove_url_keeps_scope_with_remaining_urls(pg: FakeAccessControlP
     assert pg.policy("u1")["scopes"] == ["scope-a"]
 
 
+async def test_add_url_to_scope_rejects_the_universal_scope_and_writes_nothing(pg: FakeAccessControlPg) -> None:
+    # A route mapped to "*" would let removing its last url cascade "*" out of every admin's grant.
+    pg.add_policy("admin", scopes=["*"])
+    with pytest.raises(ValueError, match="universal grant"):
+        await STORE().add_url_to_scope("*", "/x")
+    assert pg.routes == []
+    assert pg.policy("admin")["scopes"] == ["*"]
+
+
 async def test_remove_public_url_skips_cascade(pg: FakeAccessControlPg) -> None:
     await STORE().add_url_to_scope(PUBLIC, "/open")
     pg.add_policy("u1", scopes=[PUBLIC])
@@ -257,6 +266,15 @@ async def test_remove_url_from_scope_on_marker_deletes_route_only(pg: FakeAccess
 async def test_remove_scope_rejects_public_marker(pg: FakeAccessControlPg) -> None:
     with pytest.raises(ValueError, match="public marker"):
         await STORE().remove_scope(PUBLIC)
+
+
+async def test_remove_scope_rejects_the_universal_scope_and_writes_nothing(pg: FakeAccessControlPg) -> None:
+    pg.add_policy("admin", scopes=["*"])
+    pg.add_policy("holder", scopes=["*"], condition={"content": "true", "id": None, "kwargs": {}})
+    with pytest.raises(ValueError, match="universal grant"):
+        await STORE().remove_scope("*")
+    assert pg.policy("admin")["scopes"] == ["*"]
+    assert pg.policy("holder")["scopes"] == ["*"]
 
 
 async def test_remove_scope_strips_policies_and_returns_count(pg: FakeAccessControlPg) -> None:

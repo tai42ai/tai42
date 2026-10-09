@@ -32,7 +32,6 @@ def _seed_user(users, sessions, *, disabled=False, last_seen=None, absolute=None
         "user_id": "usr-1",
         "email": "a@b.c",
         "password_hash": "hash",
-        "role": "admin",
         "disabled": disabled,
         "created_at": future(0),
     }
@@ -79,7 +78,7 @@ async def test_validate_token_happy_returns_identity_and_touches(monkeypatch, us
     identity = await _provider().validate_token(raw)
     assert isinstance(identity, AuthIdentity)
     assert identity.user_id == "usr-1"
-    assert identity.claims == {"email": "a@b.c", "role": "admin", "kind": "session"}
+    assert identity.claims == {"email": "a@b.c", "kind": "session"}
     # last_seen was >60s stale, so it was touched forward.
     assert sessions_store.rows[th]["last_seen_at"] > before
 
@@ -142,7 +141,6 @@ async def test_attach_login_password_sets_login(wire):
     row = wire.users.rows["usr-owner"]
     assert row["email"] == "owner@x.y"  # normalized before storage
     assert row["password_hash"] is not None
-    assert row["role"] == "admin"  # the owner's admin role, mirrored on the login row
 
 
 async def test_attach_login_invite_mints_link(wire):
@@ -154,7 +152,6 @@ async def test_attach_login_invite_mints_link(wire):
     assert result.login_path == f"/login?invite={token}"
     row = wire.users.rows["usr-owner"]
     assert row["password_hash"] is None  # password set later, on invite accept
-    assert row["role"] == "admin"
     assert service.token_hash(token) in wire.invites.rows
 
 
@@ -163,7 +160,6 @@ async def test_attach_login_existing_login_raises(wire):
         "user_id": "usr-owner",
         "email": "other@x.y",
         "password_hash": "h",
-        "role": "admin",
         "disabled": False,
         "created_at": future(0),
     }
@@ -178,7 +174,6 @@ async def test_attach_login_email_taken_raises(wire):
         "user_id": "usr-other",
         "email": "taken@x.y",
         "password_hash": "h",
-        "role": "viewer",
         "disabled": False,
         "created_at": future(0),
     }
@@ -223,19 +218,24 @@ async def test_has_login_false_when_no_row(wire):
 # -- list_members ---------------------------------------------------------------
 
 
-def _seed_login(wire, user_id: str, *, email: str, password_hash: str | None, role: str = "editor") -> None:
+def _seed_login(wire, user_id: str, *, email: str, password_hash: str | None, role: str | None = "editor") -> None:
+    """A login row plus its platform principal's role in the services fake."""
     wire.users.rows[user_id] = {
         "user_id": user_id,
         "email": email,
         "password_hash": password_hash,
-        "role": role,
         "disabled": False,
         "created_at": future(0),
     }
+    wire.admin.roles[user_id] = role
+
+
+def _listing_provider(wire) -> PostgresAccountsProvider:
+    return PostgresAccountsProvider(wire.settings)
 
 
 async def test_list_members_empty_lists_nothing(wire):
-    listing = await _provider().list_members()
+    listing = await _listing_provider(wire).list_members()
     assert listing.members == []
     assert listing.invites == []
 
@@ -246,11 +246,28 @@ async def test_list_members_partitions_active_members_and_open_invites(wire):
     exp = future(3600)
     wire.invites.rows["th-1"] = {"user_id": "usr-pending", "expires_at": exp, "consumed_at": None}
 
-    listing = await _provider().list_members()
+    listing = await _listing_provider(wire).list_members()
 
     assert [(m.id, m.email, m.role) for m in listing.members] == [("usr-active", "a@x.test", "admin")]
     assert [(i.id, i.email, i.role) for i in listing.invites] == [("usr-pending", "p@x.test", "viewer")]
     assert listing.invites[0].expires_at == exp
+    # One batch read of every user's role.
+    assert [call for call in wire.admin.calls if call[0] == "principal_roles"] == [
+        ("principal_roles", ("usr-active", "usr-pending"))
+    ]
+
+
+async def test_list_members_role_not_from_a_template_is_none(wire):
+    _seed_login(wire, "usr-direct", email="d@x.test", password_hash="hash", role=None)
+    listing = await _listing_provider(wire).list_members()
+    assert [(m.id, m.role) for m in listing.members] == [("usr-direct", None)]
+
+
+async def test_list_members_user_without_a_principal_fails_loudly(wire):
+    _seed_login(wire, "usr-orphan", email="o@x.test", password_hash="hash")
+    del wire.admin.roles["usr-orphan"]
+    with pytest.raises(RuntimeError, match="'usr-orphan' has no access-control principal"):
+        await _listing_provider(wire).list_members()
 
 
 async def test_list_members_consumed_invite_user_is_a_member_not_dropped(wire):
@@ -259,7 +276,7 @@ async def test_list_members_consumed_invite_user_is_a_member_not_dropped(wire):
     _seed_login(wire, "usr-edge", email="e@x.test", password_hash=None)
     wire.invites.rows["th-1"] = {"user_id": "usr-edge", "expires_at": future(3600), "consumed_at": future(0)}
 
-    listing = await _provider().list_members()
+    listing = await _listing_provider(wire).list_members()
 
     assert [m.id for m in listing.members] == ["usr-edge"]
     assert listing.invites == []
@@ -269,7 +286,7 @@ async def test_list_members_expired_open_invite_is_still_listed(wire):
     _seed_login(wire, "usr-pending", email="p@x.test", password_hash=None)
     wire.invites.rows["th-1"] = {"user_id": "usr-pending", "expires_at": past(10), "consumed_at": None}
 
-    listing = await _provider().list_members()
+    listing = await _listing_provider(wire).list_members()
 
     assert listing.members == []
     assert [i.id for i in listing.invites] == ["usr-pending"]

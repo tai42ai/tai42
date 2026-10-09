@@ -1,8 +1,7 @@
 """The Postgres seam's control flow against a scripted psycopg cursor.
 
 Exercises the SQL-issuing paths in ``stores.py`` (the login-row insert and its
-constraint-name split, the last-admin count, atomic invite consume) without a live
-database. Real SQL correctness is proven by the e2e leg.
+constraint-name split, atomic invite consume) without a live database. Real SQL correctness is proven by the e2e leg.
 """
 
 from __future__ import annotations
@@ -40,32 +39,32 @@ def test_new_user_id_is_prefixed():
 async def test_create_login_inserts(monkeypatch):
     pg = ScriptedPg()
     _pg(monkeypatch, pg)
-    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
+    await UsersStore(_settings()).create_login("usr-1", "a@b.c")
     assert any("INSERT INTO accounts_users" in sql for sql, _ in pg.executed)
 
 
-async def test_create_login_writes_email_role_and_hash(monkeypatch):
+async def test_create_login_writes_email_and_hash(monkeypatch):
     pg = ScriptedPg()
     _pg(monkeypatch, pg)
-    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin", "argon2$x")
-    _sql, params = next((s, p) for s, p in pg.executed if "INSERT INTO accounts_users" in s)
-    # Column order is (user_id, email, password_hash, role).
-    assert params == ("usr-1", "a@b.c", "argon2$x", "admin")
+    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "argon2$x")
+    sql, params = next((s, p) for s, p in pg.executed if "INSERT INTO accounts_users" in s)
+    assert sql == "INSERT INTO accounts_users (user_id, email, password_hash) VALUES (%s, %s, %s)"
+    assert params == ("usr-1", "a@b.c", "argon2$x")
 
 
 async def test_create_login_null_password_when_unset(monkeypatch):
     pg = ScriptedPg()
     _pg(monkeypatch, pg)
-    await UsersStore(_settings()).create_login("usr-1", "a@b.c", "viewer")
+    await UsersStore(_settings()).create_login("usr-1", "a@b.c")
     _sql, params = next((s, p) for s, p in pg.executed if "INSERT INTO accounts_users" in s)
-    assert params == ("usr-1", "a@b.c", None, "viewer")
+    assert params == ("usr-1", "a@b.c", None)
 
 
 async def test_create_login_email_taken_raises_typed(monkeypatch):
     pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_email_unique")])
     _pg(monkeypatch, pg)
     with pytest.raises(EmailTakenError):
-        await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
+        await UsersStore(_settings()).create_login("usr-1", "a@b.c")
 
 
 async def test_create_login_user_id_collision_raises_login_exists(monkeypatch):
@@ -74,18 +73,18 @@ async def test_create_login_user_id_collision_raises_login_exists(monkeypatch):
     pg = ScriptedPg(errors=[FakeUniqueViolation("accounts_users_user_id_unique")])
     _pg(monkeypatch, pg)
     with pytest.raises(LoginExistsError):
-        await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
+        await UsersStore(_settings()).create_login("usr-1", "a@b.c")
 
 
 async def test_create_login_unexpected_unique_reraises(monkeypatch):
     pg = ScriptedPg(errors=[FakeUniqueViolation("some_other_constraint")])
     _pg(monkeypatch, pg)
     with pytest.raises(FakeUniqueViolation):
-        await UsersStore(_settings()).create_login("usr-1", "a@b.c", "admin")
+        await UsersStore(_settings()).create_login("usr-1", "a@b.c")
 
 
 async def test_get_by_email_and_user_id(monkeypatch):
-    row = {"user_id": "usr-1", "email": "a@b", "password_hash": None, "role": "admin", "disabled": False}
+    row = {"user_id": "usr-1", "email": "a@b", "password_hash": None, "disabled": False}
     pg = ScriptedPg(fetches=[row, None])
     _pg(monkeypatch, pg)
     store = UsersStore(_settings())
@@ -98,7 +97,6 @@ async def test_list_returns_rows(monkeypatch):
         {
             "user_id": "usr-1",
             "email": "a@b",
-            "role": "admin",
             "disabled": False,
             "created_at": future(0),
             "pending_invite": True,
@@ -114,69 +112,10 @@ async def test_mutations_execute(monkeypatch):
     _pg(monkeypatch, pg)
     store = UsersStore(_settings())
     await store.set_password_hash("usr-1", "h")
-    await store.set_role("usr-1", "viewer")
     await store.set_disabled("usr-1", True)
     await store.delete("usr-1")
     kinds = [sql.split()[0] for sql, _ in pg.executed]
-    assert kinds == ["UPDATE", "UPDATE", "UPDATE", "DELETE"]
-
-
-async def test_admin_count(monkeypatch):
-    pg = ScriptedPg(fetches=[{"n": 2}, None])
-    _pg(monkeypatch, pg)
-    store = UsersStore(_settings())
-    assert await store.count_other_enabled_admins("usr-1") == 2
-    assert await store.count_other_enabled_admins("usr-2") == 0  # None row -> 0
-
-
-async def test_admin_guard_txn_locks_counts_and_mutates(monkeypatch):
-    # The advisory lock, the last-admin count, and its authorized mutation all run
-    # on one connection/transaction — the atomic guard against concurrent removals.
-    pg = ScriptedPg(fetches=[{"n": 1}])
-    _pg(monkeypatch, pg)
-    store = UsersStore(_settings())
-    async with store.admin_guard_txn() as guard:
-        assert await guard.count_other_enabled_admins("usr-1") == 1
-        await guard.set_disabled("usr-1", True)
-        await guard.set_role("usr-1", "viewer")
-        await guard.delete("usr-1")
-    sqls = [sql for sql, _ in pg.executed]
-    assert any("pg_advisory_xact_lock" in s for s in sqls)
-    assert any("UPDATE accounts_users SET disabled" in s for s in sqls)
-    assert any("UPDATE accounts_users SET role" in s for s in sqls)
-    assert any("DELETE FROM accounts_users WHERE user_id" in s for s in sqls)
-
-
-async def test_admin_guard_txn_reads_target_and_cleans_credentials(monkeypatch):
-    # read_target re-reads the locked role/disabled; the credential cleanup runs on
-    # the same guard cursor (sessions + invites in this transaction).
-    pg = ScriptedPg(fetches=[{"role": "admin", "disabled": False}])
-    _pg(monkeypatch, pg)
-    store = UsersStore(_settings())
-    async with store.admin_guard_txn() as guard:
-        assert await guard.read_target("usr-1") == {"role": "admin", "disabled": False}
-        await guard.delete_sessions_for_user("usr-1")
-        await guard.delete_invites_for_user("usr-1")
-    sqls = [sql for sql, _ in pg.executed]
-    assert any("SELECT role, disabled FROM accounts_users WHERE user_id" in s for s in sqls)
-    assert any("DELETE FROM accounts_sessions WHERE user_id" in s for s in sqls)
-    assert any("DELETE FROM accounts_invites WHERE user_id" in s for s in sqls)
-
-
-async def test_admin_guard_txn_read_target_missing_is_none(monkeypatch):
-    pg = ScriptedPg(fetches=[None])
-    _pg(monkeypatch, pg)
-    store = UsersStore(_settings())
-    async with store.admin_guard_txn() as guard:
-        assert await guard.read_target("ghost") is None
-
-
-async def test_admin_guard_txn_count_none_row_is_zero(monkeypatch):
-    pg = ScriptedPg(fetches=[None])
-    _pg(monkeypatch, pg)
-    store = UsersStore(_settings())
-    async with store.admin_guard_txn() as guard:
-        assert await guard.count_other_enabled_admins("usr-1") == 0
+    assert kinds == ["UPDATE", "UPDATE", "DELETE"]
 
 
 async def test_sessions_create_sweeps_then_inserts(monkeypatch):
@@ -192,7 +131,6 @@ async def test_sessions_resolve_and_touch(monkeypatch):
     row = {
         "user_id": "usr-1",
         "email": "a@b",
-        "role": "admin",
         "disabled": False,
         "last_seen_at": past(30),
         "absolute_expires_at": future(),

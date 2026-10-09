@@ -114,13 +114,13 @@ def _active_accounts_provider_items() -> list[tuple[str, AccountsProvider]]:
     """The CURRENT epoch's live accounts providers as name-sorted ``(name, provider)`` pairs.
 
     The registry name is the platform routing key the opaque tokens embed, so the Members
-    surface enumerates providers WITH their names. Reads the serving core so a build in
+    surface enumerates providers WITH their names. Reads the app's recorded providers, so a build in
     flight resolves the epoch being built, else the live one — the same source
     ``list_members`` and ``login`` read.
     """
     from tai42_skeleton.app.instance import app
 
-    recorded = app._serving_core.active_auth_providers
+    recorded = app.recorded_auth_providers()
     return [(name, provider) for name, provider in sorted(recorded.items()) if isinstance(provider, AccountsProvider)]
 
 

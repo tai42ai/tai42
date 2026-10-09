@@ -78,7 +78,7 @@ def test_baseline_creates_the_three_owned_tables():
 
 def test_users_table_keys_and_columns():
     block = _table_block(_baseline_sql(), "accounts_users")
-    for column in ("user_id", "email", "password_hash", "role", "disabled", "created_at"):
+    for column in ("user_id", "email", "password_hash", "disabled", "created_at"):
         assert re.search(rf"\b{column}\b", block) is not None, f"{column} missing from accounts_users"
     # password_hash is nullable (NULL until an invite is accepted); the tri-state
     # cannot be a NOT NULL column.

@@ -44,10 +44,14 @@ from tai42_kit.db import component_store_settings
 
 from tai42_accounts_postgres.db import COMPONENT, accounts_store_configured
 
-# The section name in the backup manifest + the payload schema version. A payload
-# from a NEWER schema is refused loudly rather than mis-restored under old rules.
+# The section name in the backup manifest + the payload schema version. A payload of
+# any other version is refused loudly before any write.
 _SECTION = "accounts"
-_VERSION = 1
+_VERSION = 2
+
+
+class AccountsArchiveVersionError(ValueError):
+    """An accounts archive of a version this plugin does not read."""
 
 
 class _BackupUserStore:
@@ -67,7 +71,7 @@ class _BackupUserStore:
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT user_id, email, password_hash, role, disabled, created_at "
+                "SELECT user_id, email, password_hash, disabled, created_at "
                 "FROM accounts_users ORDER BY created_at, user_id"
             )
             rows = await cur.fetchall()
@@ -76,7 +80,6 @@ class _BackupUserStore:
                 "user_id": r["user_id"],
                 "email": r["email"],
                 "password_hash": r["password_hash"],
-                "role": r["role"],
                 "disabled": r["disabled"],
                 "created_at": r["created_at"].isoformat(),
             }
@@ -112,7 +115,7 @@ class _BackupUserStore:
                     ValueError,
                     AttributeError,
                     # psycopg adaptation/typing deaths for JSON-representable garbage
-                    # (a dict-valued role → "cannot adapt type 'dict'"; a list → a
+                    # (a dict-valued email → "cannot adapt type 'dict'"; a list → a
                     # server-side DatatypeMismatch). Deliberately NOT OperationalError
                     # or broad psycopg.Error: a dead connection must fail the restore
                     # loudly, never be mislabeled "malformed row".
@@ -138,14 +141,13 @@ class _BackupUserStore:
             user["user_id"],
             user["email"],
             user.get("password_hash"),
-            user["role"],
             bool(user.get("disabled", False)),
             _parse_ts(user.get("created_at")),
         )
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "INSERT INTO accounts_users (user_id, email, password_hash, role, disabled, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
+                "INSERT INTO accounts_users (user_id, email, password_hash, disabled, created_at) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
                 params,
             )
             row = await cur.fetchone()
@@ -182,14 +184,23 @@ async def export_accounts() -> dict[str, Any]:
 async def import_accounts(payload: dict[str, Any]) -> BackupSectionReport:
     """The section importer: restore absent users from ``payload`` (skip-only), returning the typed report.
 
-    A payload from a newer schema version is refused.
+    Only an archive of exactly :data:`_VERSION` is read; any other version raises
+    :class:`AccountsArchiveVersionError` before any write.
     """
     version = payload.get("version")
     # bool is an int subclass — refuse it explicitly (True would pass as 1).
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise ValueError(f"accounts backup payload carries no valid version (got {version!r})")
+        raise AccountsArchiveVersionError(f"accounts backup payload carries no valid version (got {version!r})")
     if version > _VERSION:
-        raise ValueError(f"accounts backup payload version {version!r} is newer than this plugin supports ({_VERSION})")
+        raise AccountsArchiveVersionError(
+            f"accounts backup payload version {version!r} is newer than this plugin supports ({_VERSION})"
+        )
+    if version < _VERSION:
+        raise AccountsArchiveVersionError(
+            f"accounts backup payload version {version!r} predates this plugin's archive format "
+            f"(version {_VERSION}, which carries no role); recreate the archive from a deployment on the "
+            "current baseline"
+        )
     if not accounts_store_configured():
         raise RuntimeError(
             "cannot import the accounts section: the accounts store is not configured on this deployment"

@@ -60,22 +60,13 @@ async def _parse[BodyT: BaseModel](
 
 
 def _presented_session_hash(request: Request) -> str | None:
-    """Hash of the caller's own session token so a self password change can spare it.
+    """Hash of the session the caller authenticated with, so a self password change can spare it.
 
-    Reads the bearer / X-Api-Key credential; ``None`` when not a session token.
+    Reads the credential the access-control gate verified; ``None`` when it is not a session.
     """
-    token: str | None = None
-    auth = request.headers.get("Authorization")
-    if auth:
-        scheme, _, rest = auth.partition(" ")
-        if not rest:
-            token = scheme
-        elif scheme.lower() == "bearer":
-            token = rest.strip() or None
-    if token is None:
-        token = request.headers.get("X-Api-Key")
-    if token and token.startswith(SESSION_TOKEN_PREFIX):
-        return service.token_hash(token)
+    credential = tai42_app.accounts.authenticated_credential(request)
+    if credential is not None and credential.startswith(SESSION_TOKEN_PREFIX):
+        return service.token_hash(credential)
     return None
 
 
@@ -95,7 +86,7 @@ def _presented_session_hash(request: Request) -> str | None:
 async def change_own_password(request: Request) -> Response:
     """Self password change: verify the current password, set the new one, and revoke every other session.
 
-    The presented session survives.
+    The session the caller authenticated with survives.
     """
     caller = get_current_user_id()
     if caller is None:

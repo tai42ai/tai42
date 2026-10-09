@@ -28,7 +28,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 148 (sub-protocol, member) pairs over 144
+# The frozen facade surface: the 149 (sub-protocol, member) pairs over 145
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -75,8 +75,9 @@ EXPECTED_FACADE = {
     "register_connector",
     "token_store",
     "resolve_connection_auth",
-    # accounts (1)
+    # accounts (2)
     "active_provider",
+    "authenticated_credential",
     # webhook_verifiers (2)
     "register",
     "get",
@@ -311,11 +312,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 148 (sub-protocol, member) pairs over 144 distinct names — ``store`` is exposed
+    # 149 (sub-protocol, member) pairs over 145 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 144, f"union={len(union)}"
-    assert total == 148 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 145, f"union={len(union)}"
+    assert total == 149 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
@@ -658,3 +659,11 @@ def test_app_media_facet_methods_are_coroutines_with_the_expected_parameters():
     assert list(bind_sig.parameters) == ["self", "media_id", "origin"]
     assert bind_sig.parameters["media_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     assert bind_sig.parameters["origin"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_accounts_facet_exposes_the_authenticated_credential():
+    from tai42_contract.app import AppAccounts
+
+    assert protocol_members(AppAccounts) == {"active_provider", "authenticated_credential"}
+    signature = inspect.signature(AppAccounts.authenticated_credential)
+    assert list(signature.parameters) == ["self", "request"]

@@ -679,6 +679,20 @@ class _PgCursor:
             self._all = [
                 (list(p["scopes"]), p["policy_data"], p["condition"]) for p in pg.policies if p["user_id"] in enabled
             ]
+        elif norm.startswith(
+            "SELECT pr.user_id, p.scopes, p.policy_data, p.condition FROM access_control_principals pr"
+        ):
+            (user_ids,) = params
+            rows = []
+            for pr in pg.principals:
+                if pr["user_id"] not in user_ids:
+                    continue
+                p = next((p for p in pg.policies if p["user_id"] == pr["user_id"]), None)
+                if p is None:
+                    rows.append((pr["user_id"], None, None, None))
+                else:
+                    rows.append((pr["user_id"], list(p["scopes"]), p["policy_data"], p["condition"]))
+            self._all = rows
         elif norm.startswith("INSERT INTO access_control_principals"):
             # The full form carries created_by; the first-principal form hardcodes NULL.
             if "NULL)" in norm:

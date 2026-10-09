@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from tai42_contract.access_control.identity import IdentityProvider
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 
 @runtime_checkable
@@ -27,6 +30,15 @@ class AppAccounts(Protocol):
 
         An ``AccountsProvider`` is an ``IdentityProvider``. ``None`` means no provider is
         active under that name — the name is not configured, or a build is mid-flight.
+        """
+        ...
+
+    def authenticated_credential(self, request: Request) -> str | None:
+        """The raw credential the access-control gate authenticated ``request`` with.
+
+        When a request presents several credentials, this is the one that verified, not
+        merely the first presented. ``None`` when the request is unauthenticated or access
+        control is off.
         """
         ...
 

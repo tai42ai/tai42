@@ -275,6 +275,18 @@ def test_member_entry_requires_non_empty_id_email_role():
             MemberEntry(**kwargs)  # pyright: ignore[reportArgumentType]
 
 
+def test_roles_are_nullable_on_every_member_and_invite_shape():
+    # ``None``: the principal's policy was not written from a role template.
+    now = datetime.now(UTC)
+    member = MemberEntry(id="usr-1", email="a@x.test", role=None, created_at=now, principal_ids=["usr-1"])
+    invite = InviteEntry(id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now)
+    row = MemberRow(id="usr-1", email="a@x.test", role=None, created_at=now, principals=[], disabled=False, handle="h")
+    invite_row = InviteRow(id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now, handle="h")
+    assert (member.role, invite.role, row.role, invite_row.role) == (None, None, None, None)
+    for model in (MemberRow, InviteRow, InviteEntry):
+        assert model.model_json_schema()["properties"]["role"]["anyOf"][1] == {"type": "null"}
+
+
 def test_member_entry_requires_at_least_one_principal_id():
     with pytest.raises(ValidationError):
         MemberEntry(id="usr-1", email="a@x.test", role="editor", created_at=datetime.now(UTC), principal_ids=[])

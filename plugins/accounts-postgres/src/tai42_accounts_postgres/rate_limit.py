@@ -8,8 +8,10 @@ blocked and an attacker cannot lock a victim out. Two dimensions:
 - per-IP: a fixed-window failure count across all emails from one source.
 
 Every key carries the per-deployment ``redis_key_prefix`` namespace. A Redis
-failure propagates (fail closed). Client IP is the direct peer — no
-``X-Forwarded-For`` parsing; proxied deployments throttle at their ingress.
+failure propagates (fail closed). The per-IP key is the kit's client bucket: the
+direct peer unless the deployment declares its proxies
+(``TAI_RATE_LIMIT_TRUSTED_PROXIES`` / ``TAI_RATE_LIMIT_TRUSTED_HOPS``), in which case
+the forwarded client; an IPv6 client is bucketed by its /64.
 """
 
 from __future__ import annotations

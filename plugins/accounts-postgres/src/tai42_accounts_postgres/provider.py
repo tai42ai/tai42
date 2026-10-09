@@ -37,6 +37,8 @@ from tai42_accounts_postgres.hashing import hash_password_async
 from tai42_accounts_postgres.settings import accounts_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from tai42_contract.accounts import AccountsProviderSettings
 
 logger = logging.getLogger(__name__)
@@ -102,7 +104,7 @@ class PostgresAccountsProvider(LoginAttachingProvider):
 
         return AuthIdentity(
             user_id=user_id,
-            claims={"email": row["email"], "role": row["role"], "kind": "session"},
+            claims={"email": row["email"], "kind": "session"},
         )
 
     def login_methods(self) -> list[LoginMethod]:
@@ -152,17 +154,19 @@ class PostgresAccountsProvider(LoginAttachingProvider):
         principal per user, keyed by ``user_id``) so the Members aggregator joins the
         access-control ``disabled`` state from the platform's own principal record; the
         provider does not report ``disabled`` itself (``users.disabled`` stays this
-        plugin's private bookkeeping). Each row names the provider's own action ids that
-        apply to it.
+        plugin's private bookkeeping). Each row's role is the one its principal holds, read
+        for every user in one ``principal_roles`` call; a user with no principal raises
+        (fail loud). Each row names the provider's own action ids that apply to it.
         """
         rows = await service.users_store().list()
         open_invites = await service.invites_store().list_open()
         invited_ids = {row["user_id"] for row in open_invites}
+        roles = await self.settings.admin.principal_roles([row["user_id"] for row in rows])
         members = [
             MemberEntry(
                 id=row["user_id"],
                 email=row["email"],
-                role=row["role"],
+                role=_principal_role(roles, row["user_id"]),
                 created_at=row["created_at"],
                 principal_ids=[row["user_id"]],
                 actions=list(member_actions.MEMBER_ROW_ACTIONS),
@@ -174,7 +178,7 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             InviteEntry(
                 id=row["user_id"],
                 email=row["email"],
-                role=row["role"],
+                role=_principal_role(roles, row["user_id"]),
                 created_at=row["created_at"],
                 expires_at=row["expires_at"],
                 actions=list(member_actions.INVITE_ROW_ACTIONS),
@@ -212,7 +216,7 @@ class PostgresAccountsProvider(LoginAttachingProvider):
         :class:`PasswordCredential` sets the password now and returns ``attached=True``;
         an :class:`InviteCredential` leaves the password unset and returns the one-time
         invite link on the attachment. Either way the ``accounts_users`` login row is
-        created for the owner, whose role mirrors the owner's admin principal. A too-short
+        created for the owner. A too-short
         password raises :class:`~tai42_contract.accounts.errors.LoginAttachError`; a login
         already existing for the principal or a taken email raises
         :class:`~tai42_contract.accounts.errors.LoginConflictError` (through the store's
@@ -225,13 +229,13 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             if len(credential.password) < service.PASSWORD_MIN_LENGTH:
                 raise LoginAttachError(f"password must be at least {service.PASSWORD_MIN_LENGTH} characters")
             password_hash = await hash_password_async(credential.password)
-            await store.create_login(user_id, email, service.ADMIN_ROLE, password_hash)
+            await store.create_login(user_id, email, password_hash)
             return LoginAttachment(attached=True)
 
         # An invite credential: create the password-less login row, then mint the
         # one-time invite. If the invite mint fails, drop the just-created row so the
         # owner attach stays re-runnable rather than leaving a login with no way in.
-        await store.create_login(user_id, email, service.ADMIN_ROLE)
+        await store.create_login(user_id, email)
         try:
             raw_invite = service.new_invite_token()
             expires_at = datetime.now(UTC) + timedelta(seconds=accounts_settings().invite_ttl_seconds)
@@ -263,6 +267,13 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             ReadinessTarget("accounts", PostgresClient, component_store_settings(COMPONENT)),
             ReadinessTarget("accounts", RedisClient, accounts_settings().redis),
         )
+
+
+def _principal_role(roles: Mapping[str, str | None], user_id: str) -> str | None:
+    """The role ``user_id``'s principal holds, or raise when the user has no principal."""
+    if user_id not in roles:
+        raise RuntimeError(f"accounts user {user_id!r} has no access-control principal")
+    return roles[user_id]
 
 
 # One call registers the factory in both the accounts and identity registries

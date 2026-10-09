@@ -57,7 +57,7 @@ def _active_login_attaching_provider() -> LoginAttachingProvider | None:
     """
     from tai42_skeleton.app.instance import app
 
-    recorded = app._serving_core.active_auth_providers
+    recorded = app.recorded_auth_providers()
     for _name, provider in sorted(recorded.items()):
         if isinstance(provider, LoginAttachingProvider):
             return provider
