@@ -14,12 +14,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import SecretStr
-from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord
+from tai42_contract.connectors.models import AuthHealthState, ConnectionGrant, ConnectionRecord
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.service import CompleteConnectResult
 
+from tai42_skeleton.connectors.oauth import authorization, state
 from tai42_skeleton.connectors.oauth import client as oauth_client
-from tai42_skeleton.connectors.oauth import state
+from tai42_skeleton.connectors.oauth.discovery import same_issuer
 from tai42_skeleton.connectors.service import connection_service as _svc
 from tai42_skeleton.connectors.service import manifest_writer
 
@@ -31,16 +32,33 @@ logger = logging.getLogger(__name__)
 async def complete_connect(
     *,
     flow_id: str,
-    code: str,
+    code: str | None,
+    iss: str | None = None,
+    error: str | None = None,
 ) -> CompleteConnectResult:
-    """Exchange code for tokens, persist the encrypted ConnectionRecord, and write managed manifest entries.
+    """Finish a login from its redirect: check the issuer, exchange the code, persist, write manifest entries.
 
-    The token-exchange ``redirect_uri`` is the one stored in the flow state at authorize-start (byte-identical
-    per RFC 6749), never recomputed from the completion request.
+    The flow record is single-use and is consumed first. Before ``error`` or ``code`` is acted on,
+    the redirect's ``iss`` is checked against the issuer the login was started with (a mismatch
+    raises :class:`~tai42_skeleton.connectors.oauth.authorization.OAuthIssuerMismatchError`); an
+    accepted ``error`` raises ``OAuthAuthorizationCancelledError``. The token-exchange
+    ``redirect_uri`` is the one stored at authorize-start (byte-identical per RFC 6749), and the
+    login's recorded issuer, resource and client are the truth for this exchange: when the
+    provider's authorization now resolves to another issuer or resource the completion fails
+    before any token request.
     """
     flow_state = await state.get_and_delete(flow_id)
     if flow_state is None:
         raise oauth_client.OAuthError("state mismatch: no flow record found for the given flow_id")
+
+    authorization.check_redirect_issuer(
+        recorded_issuer=flow_state.issuer, iss_required=flow_state.iss_required, iss=iss
+    )
+    if error is not None:
+        # The provider's error text is neither acted on nor echoed: only its presence.
+        raise authorization.OAuthAuthorizationCancelledError("the authorization server reported an error")
+    if not code:
+        raise oauth_client.OAuthError("the authorization response carries no code")
 
     try:
         descriptor = _svc.get_provider(flow_state.provider_id)
@@ -55,16 +73,36 @@ async def complete_connect(
     # fell off the allow-list since authorize-start cannot drive an exchange.
     oauth_client.validate_redirect_uri(flow_state.redirect_uri)
 
-    # On RECONNECT / TOGGLE the provider may not re-issue a refresh_token; the
-    # existing one is inherited in _complete_reconnect_or_toggle.
-    require_refresh_token = flow_state.operation == state.FlowOperation.CONNECT
+    resolved = await authorization.resolve_authorization(descriptor, bound_issuer=flow_state.issuer)
+    if not same_issuer(flow_state.issuer, resolved.issuer):
+        raise oauth_client.OAuthError(
+            f"provider {descriptor.id!r} now resolves to issuer {resolved.issuer!r}; "
+            f"the login was started with {flow_state.issuer!r}"
+        )
+    if resolved.resource != flow_state.resource:
+        raise oauth_client.OAuthError(
+            f"provider {descriptor.id!r} now resolves to resource {resolved.resource!r}; "
+            f"the login was started for {flow_state.resource!r}"
+        )
+    client = await authorization.resolve_client(
+        descriptor, resolved, redirect_uri=flow_state.redirect_uri, client_id=flow_state.client_id
+    )
+
+    # A declared provider's first Connect must return a refresh token. A
+    # discovered provider's server may issue none; on RECONNECT / TOGGLE an
+    # existing one may be inherited in _complete_reconnect_or_toggle.
+    require_refresh_token = flow_state.operation == state.FlowOperation.CONNECT and not descriptor.is_discovered
     token_resp = await oauth_client.exchange_code(
         descriptor=descriptor,
+        resolved=resolved,
+        client=client,
         code=code,
         code_verifier=flow_state.pkce_verifier,
         redirect_uri=flow_state.redirect_uri,
+        resource=flow_state.resource,
         require_refresh_token=require_refresh_token,
     )
+    grant = authorization.grant_for(descriptor, resolved, client)
 
     if flow_state.operation in (
         state.FlowOperation.RECONNECT,
@@ -74,6 +112,8 @@ async def complete_connect(
             flow_state=flow_state,
             descriptor=descriptor,
             token_resp=token_resp,
+            grant=grant,
+            guarded=resolved.guarded,
         )
 
     account_identity = _extract_account_identity(token_resp.raw) or "unknown"
@@ -92,6 +132,7 @@ async def complete_connect(
         refresh_token=SecretStr(token_resp.refresh_token) if token_resp.refresh_token is not None else None,
         access_token_expires_at=token_resp.expires_at,
         auth_health_state=AuthHealthState.HEALTHY,
+        grant=grant,
         created_at=now,
     )
 
@@ -119,7 +160,7 @@ async def complete_connect(
             # The just-issued grant is brand-new and unshared; the completion
             # failed before it was persisted, so revoke it upstream rather than
             # orphan a live consent. Best-effort, never masks the original error.
-            await _revoke_fresh_grant(descriptor, token_resp)
+            await _revoke_fresh_grant(descriptor, resolved, client, token_resp)
             raise
 
         # Append the managed entries through the single pipeline: it validates,
@@ -136,18 +177,23 @@ async def complete_connect(
     )
 
 
-async def _revoke_fresh_grant(descriptor: ProviderDescriptor, token_resp: oauth_client.TokenResponse) -> None:
+async def _revoke_fresh_grant(
+    descriptor: ProviderDescriptor,
+    resolved: authorization.ResolvedAuthorization,
+    client: authorization.ResolvedClient,
+    token_resp: oauth_client.TokenResponse,
+) -> None:
     """Best-effort upstream revoke of a brand-new, unshared grant whose fresh Connect failed after the code exchange.
 
-    Only ever called on the fresh-CONNECT path: that ``refresh_token`` is unshared
-    (a reconnect/toggle would inherit an existing record's token, so revoking it
-    could kill a live connection — those paths deliberately do NOT revoke). Logged,
-    never raises, never masks the caller's original error.
+    Revokes at the login's own authorization server with the login's own client (there is no stored
+    record to read): the refresh token when the answer carried one, else the access token. Only
+    ever called on the fresh-CONNECT path: that grant is unshared (a reconnect/toggle may inherit an
+    existing record's token, so revoking it could kill a live connection — those paths deliberately
+    do NOT revoke). Logged, never raises, never masks the caller's original error.
     """
-    if token_resp.refresh_token is None:
-        return
+    token = token_resp.refresh_token or token_resp.access_token
     try:
-        outcome = await oauth_client.revoke(descriptor=descriptor, token=token_resp.refresh_token)
+        outcome = await oauth_client.revoke(descriptor=descriptor, resolved=resolved, client=client, token=token)
         logger.warning(
             "connectors: revoked orphaned fresh grant for provider %s (outcome=%s)",
             descriptor.id,
@@ -166,10 +212,14 @@ async def _complete_reconnect_or_toggle(
     flow_state: state.OAuthFlowState,
     descriptor: ProviderDescriptor,
     token_resp: oauth_client.TokenResponse,
+    grant: ConnectionGrant | None,
+    guarded: bool,
 ) -> CompleteConnectResult:
-    """Replace tokens + scopes + enabled_sub_services on an existing record, under the connection lock.
+    """Replace the grant, tokens, scopes and enabled_sub_services on an existing record, under the connection lock.
 
-    Reconciles its managed manifest entries.
+    The old refresh token is kept, when the answer carries none, only if the new grant has the
+    record's issuer and client; otherwise the record takes the answer's tokens as they are. A
+    successful reconnect clears ``scopes_wanted``. Reconciles its managed manifest entries.
     """
     cid = flow_state.reconnect_connection_id
     if not cid:
@@ -180,10 +230,19 @@ async def _complete_reconnect_or_toggle(
     async with _svc.connection_lock(cid):
         record, started_blob = await _svc.load_record_with_blob(cid)
 
-        record.access_token = SecretStr(token_resp.access_token)
-        record.access_token_expires_at = token_resp.expires_at
+        same_grant = _same_grant(record.grant, grant)
         if token_resp.refresh_token:
             record.refresh_token = SecretStr(token_resp.refresh_token)
+        elif not same_grant:
+            record.refresh_token = None
+        record.access_token = SecretStr(token_resp.access_token)
+        expires_at = token_resp.expires_at
+        if expires_at is None and record.refresh_token is not None:
+            # An inherited refresh token makes an answer without ``expires_in`` assume the default life.
+            expires_at = oauth_client.expiry_without_expires_in(has_refresh_token=True, guarded=guarded)
+        record.access_token_expires_at = expires_at
+        record.grant = grant
+        record.scopes_wanted = []
         # A provider that omits ``scope`` on the exchange is treated as granting
         # exactly what this flow requested (mirrors the CONNECT path), never as
         # revoking every scope.
@@ -250,6 +309,13 @@ async def _complete_reconnect_or_toggle(
         removed_manifest_entries=removed,
         fanout=fanout,
     )
+
+
+def _same_grant(old: ConnectionGrant | None, new: ConnectionGrant | None) -> bool:
+    """Whether two grants come from the same authorization server and client (two ``None`` grants are equal)."""
+    if old is None or new is None:
+        return old is None and new is None
+    return same_issuer(old.issuer, new.issuer) and old.client_id == new.client_id
 
 
 def _extract_account_identity(raw_token_payload: dict) -> str | None:

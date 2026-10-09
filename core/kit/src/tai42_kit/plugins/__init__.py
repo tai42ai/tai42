@@ -435,8 +435,9 @@ def required_env(item: PluginItem) -> tuple[EnvRequirement, ...]:
 
     An ``mcp-server`` item requires each REQUIRED (no-default) ``!ENV`` marker
     var in its ``mcp`` block — deduped, ``secret=False`` (the marker cannot know).
-    An ``oauth`` connector requires its client-credential pair
-    (``client_id_env`` non-secret, ``client_secret_env`` secret). A ``none``
+    An ``oauth`` connector that names an env client requires its client-credential
+    pair (``client_id_env`` non-secret, ``client_secret_env`` secret); a discovered one
+    with a stored client requires nothing. A ``none``
     connector requires nothing at install (its ``config_fields`` are supplied by
     the end user at connect time), and every other kind requires nothing.
     """
@@ -456,6 +457,10 @@ def required_env(item: PluginItem) -> tuple[EnvRequirement, ...]:
         if provider.kind == "oauth":
             client_id_env = provider.client_id_env
             client_secret_env = provider.client_secret_env
+            if client_id_env is None and client_secret_env is None and provider.oauth is None:
+                # A discovered provider with a stored client: an administrator sets its
+                # client after install, never through the environment.
+                return ()
             if client_id_env is None or client_secret_env is None:
                 raise ValueError(f"oauth provider {provider.id!r} is missing client_id_env/client_secret_env")
             return (

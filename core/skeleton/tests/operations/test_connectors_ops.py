@@ -62,6 +62,7 @@ def _record(cid="c1"):
         account_identity="me@x",
         enabled_sub_services=["repo"],
         granted_scopes=["repo"],
+        scopes_wanted=["repo.admin"],
         auth_health_state=AuthHealthState.HEALTHY,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
@@ -82,6 +83,7 @@ async def test_get_connection_returns_secret_free_view(monkeypatch: pytest.Monke
     assert view["connection_id"] == "c1"
     assert "access_token" not in view
     assert "config_values" not in view
+    assert view["scopes_wanted"] == ["repo.admin"]
 
 
 async def test_reconnect_returns_authorize_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -664,3 +666,25 @@ async def test_list_connector_providers_off_serves_empty_categories(monkeypatch:
     out = await conn_ops.list_connector_providers()
     assert out["categories"] == []
     assert [p["id"] for p in out["providers"]] == ["acme"]
+
+
+def test_the_catalog_view_of_a_discovered_provider_passes_no_icon_through() -> None:
+    from tai42_contract.connectors.providers import McpServerDescriptor, ProviderDescriptor, SubServiceDescriptor
+
+    provider = ProviderDescriptor(
+        id="remote",
+        display_name="Remote",
+        kind="oauth",
+        origin="community",
+        category="dev",
+        sub_services={
+            "files": SubServiceDescriptor(
+                id="files",
+                display_name="Files",
+                mcp_server=McpServerDescriptor(type="http", url="https://m.example/mcp"),
+            )
+        },
+    )
+    view = conn_ops._provider_view(provider)
+    assert view.icon_url is None
+    assert view.sub_services[0].scopes == []

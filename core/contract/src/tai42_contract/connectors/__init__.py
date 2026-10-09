@@ -8,6 +8,7 @@ error types.
 from __future__ import annotations
 
 from tai42_contract.connectors.errors import (
+    ConnectorClientRequiredError,
     ConnectorError,
     OperatorMisconfiguredError,
 )
@@ -17,6 +18,7 @@ from tai42_contract.connectors.models import (
     UUID_RE,
     AuthHealthState,
     ConnectedAccountView,
+    ConnectionGrant,
     ConnectionRecord,
     ConnectionsListResponse,
     ConnectorCategoryView,
@@ -66,10 +68,12 @@ __all__ = [
     "CompleteConnectResult",
     "ConfigFieldSpec",
     "ConnectedAccountView",
+    "ConnectionGrant",
     "ConnectionRecord",
     "ConnectionService",
     "ConnectionsListResponse",
     "ConnectorCategoryView",
+    "ConnectorClientRequiredError",
     "ConnectorError",
     "ConnectorRef",
     "ConnectorTokenStore",

@@ -313,3 +313,40 @@ def test_read_dir_docs_symlinked_root_inside_plugin_dir_raises(tmp_path: Path):
     (plugin_dir / "docs").symlink_to(other, target_is_directory=True)
     with pytest.raises(PluginDocsError, match="is not a real docs/ directory"):
         read_dir_docs(plugin_dir)
+
+
+def _discovered_provider(
+    *, client_id_env: str | None = None, client_secret_env: str | None = None, issuer: str | None = None
+) -> ProviderDescriptor:
+    return ProviderDescriptor(
+        id="remote",
+        display_name="Remote",
+        kind="oauth",
+        origin="community",
+        category="dev",
+        sub_services={
+            "files": SubServiceDescriptor(
+                id="files",
+                display_name="Files",
+                mcp_server=McpServerDescriptor(type="http", url="https://mcp.example.com/mcp"),
+            )
+        },
+        client_id_env=client_id_env,
+        client_secret_env=client_secret_env,
+        issuer=issuer,
+    )
+
+
+def test_required_env_discovered_stored_client_connector_requires_nothing():
+    # Its client is set by an administrator after install, never through the environment.
+    assert required_env(_connector_item(_discovered_provider())) == ()
+
+
+def test_required_env_discovered_env_client_connector_returns_client_pair():
+    provider = _discovered_provider(
+        client_id_env="REMOTE_ID", client_secret_env="REMOTE_SECRET", issuer="https://auth.example.com"
+    )
+    assert required_env(_connector_item(provider)) == (
+        EnvRequirement(name="REMOTE_ID", secret=False),
+        EnvRequirement(name="REMOTE_SECRET", secret=True),
+    )

@@ -241,8 +241,10 @@ def test_provider_oauth_valid():
     assert _oauth_provider().kind == "oauth"
 
 
-def test_provider_oauth_requires_endpoints():
-    with pytest.raises(ValueError, match="requires oauth endpoints"):
+def test_provider_oauth_without_endpoints_and_partial_client_is_refused():
+    # No ``oauth`` block makes the descriptor discovered; the env names then need
+    # their issuer pin.
+    with pytest.raises(ValueError, match="issuer"):
         _oauth_provider(oauth=None)
 
 
@@ -347,3 +349,127 @@ def test_provider_noauth_target_channel_mismatch_raises():
     # stdio sub -> env channel, but the field declares header.
     with pytest.raises(ValueError, match=r"must .*match the transport channel"):
         _noauth_provider(config_fields=[ConfigFieldSpec(key="token", label="T", target="header")])
+
+
+def test_provider_icon_url_may_be_absent():
+    assert _oauth_provider(icon_url=None).icon_url is None
+
+
+# discovered mode (kind oauth, no ``oauth`` block)
+
+
+def _mcp_sub(sub_id: str = "files", *, url: str = "https://mcp.example.com/mcp", scopes: list[str] | None = None):
+    return SubServiceDescriptor(
+        id=sub_id,
+        display_name=sub_id.title(),
+        scopes=scopes if scopes is not None else [],
+        mcp_server=McpServerDescriptor(type="http", url=url),
+    )
+
+
+def _discovered(**overrides: Any) -> ProviderDescriptor:
+    base: dict[str, Any] = {
+        "id": "remote",
+        "display_name": "Remote",
+        "kind": "oauth",
+        "origin": "community",
+        "category": "dev",
+        "sub_services": {"files": _mcp_sub()},
+    }
+    base.update(overrides)
+    return ProviderDescriptor(**base)
+
+
+def test_discovered_descriptor_with_stored_client_validates():
+    p = _discovered()
+    assert p.is_discovered
+    assert p.oauth is None
+    assert p.issuer is None
+    assert p.icon_url is None
+    assert p.discovery_url == "https://mcp.example.com/mcp"
+
+
+def test_discovered_descriptor_with_env_client_and_issuer_pin_validates():
+    p = _discovered(client_id_env="R_ID", client_secret_env="R_SECRET", issuer="https://auth.example.com/tenant")
+    assert p.is_discovered
+    assert p.issuer == "https://auth.example.com/tenant"
+
+
+def test_discovered_issuer_may_be_http_on_loopback_only():
+    pinned = {"client_id_env": "R_ID", "client_secret_env": "R_SECRET"}
+    assert _discovered(issuer="http://127.0.0.1:9000", **pinned).issuer == "http://127.0.0.1:9000"
+    assert _discovered(issuer="http://localhost:9000/x", **pinned).issuer == "http://localhost:9000/x"
+    with pytest.raises(ValueError, match="issuer"):
+        _discovered(issuer="http://auth.example.com", **pinned)
+    with pytest.raises(ValueError, match="issuer"):
+        _discovered(issuer="auth.example.com", **pinned)
+
+
+def test_discovered_scopes_may_be_empty_and_several_sub_services_share_one_url():
+    p = _discovered(sub_services={"files": _mcp_sub("files"), "docs": _mcp_sub("docs", scopes=["docs.read"])})
+    assert p.discovery_url == "https://mcp.example.com/mcp"
+
+
+def test_discovered_refuses_a_stdio_sub_service():
+    stdio = SubServiceDescriptor(
+        id="files", display_name="Files", mcp_server=McpServerDescriptor(type="stdio", command="x")
+    )
+    with pytest.raises(ValueError, match="http mcp_server"):
+        _discovered(sub_services={"files": stdio})
+
+
+def test_discovered_refuses_a_websocket_sub_service():
+    ws = SubServiceDescriptor(
+        id="files", display_name="Files", mcp_server=McpServerDescriptor(type="websocket", url="wss://m")
+    )
+    with pytest.raises(ValueError, match="http mcp_server"):
+        _discovered(sub_services={"files": ws})
+
+
+def test_discovered_refuses_an_entry_point_sub_service():
+    sub = SubServiceDescriptor(id="files", display_name="Files", entry_point="tai-mcp-x")
+    with pytest.raises(ValueError, match="http mcp_server"):
+        _discovered(sub_services={"files": sub}, pkg_manager="uvx")
+
+
+def test_discovered_refuses_two_different_urls():
+    subs = {"files": _mcp_sub("files"), "docs": _mcp_sub("docs", url="https://mcp.example.com/other")}
+    with pytest.raises(ValueError, match="one mcp_server url"):
+        _discovered(sub_services=subs)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"client_id_env": "R_ID", "client_secret_env": "R_SECRET"},
+        {"issuer": "https://auth.example.com"},
+        {"client_id_env": "R_ID"},
+        {"client_secret_env": "R_SECRET", "issuer": "https://auth.example.com"},
+    ],
+)
+def test_discovered_env_client_and_issuer_are_all_set_or_all_unset(fields: dict[str, str]):
+    with pytest.raises(ValueError, match="all set or all unset"):
+        _discovered(**fields)
+
+
+def test_discovered_refuses_config_fields():
+    with pytest.raises(ValueError, match="must not declare config_fields"):
+        _discovered(config_fields=[ConfigFieldSpec(key="k", label="K", target="header")])
+
+
+def test_declared_descriptor_refuses_an_issuer():
+    with pytest.raises(ValueError, match="issuer"):
+        _oauth_provider(issuer="https://auth.example.com")
+
+
+def test_declared_descriptor_has_no_discovery_url():
+    p = _oauth_provider()
+    assert not p.is_discovered
+    with pytest.raises(RuntimeError, match="declared"):
+        _ = p.discovery_url
+
+
+def test_noauth_descriptor_refuses_an_issuer_and_is_not_discovered():
+    assert not _noauth_provider().is_discovered
+    with pytest.raises(ValueError, match="issuer"):
+        _noauth_provider(issuer="https://auth.example.com")

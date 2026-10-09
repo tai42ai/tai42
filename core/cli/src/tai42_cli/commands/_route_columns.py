@@ -88,6 +88,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "auth_health_state",
             "enabled_sub_services",
             "granted_scopes",
+            "scopes_wanted",
             "unreachable_sub_services",
             "created_at",
         ),

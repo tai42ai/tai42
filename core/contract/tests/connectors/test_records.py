@@ -3,6 +3,7 @@ and the request models that cap ``enabled_sub_services``."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -10,13 +11,18 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from tai42_contract.connectors import ConnectorClientRequiredError
 from tai42_contract.connectors.models import (
+    ConnectedAccountView,
+    ConnectionGrant,
     ConnectionRecord,
     ConnectorRef,
     PatchSubServicesRequest,
+    ProviderCatalogEntry,
     StartConnectRequest,
     StartReconnectRequest,
 )
+from tai42_contract.errors import ErrorKind, error_kind
 
 UUID = "12345678-1234-1234-1234-123456789ABC"
 
@@ -98,19 +104,14 @@ def test_record_oauth_valid():
     assert _oauth_record().kind == "oauth"
 
 
-def test_record_oauth_requires_tokens():
-    with pytest.raises(ValueError, match="access \\+ refresh tokens"):
+def test_record_oauth_requires_an_access_token():
+    with pytest.raises(ValueError, match="requires an access token"):
         _oauth_record(access_token=None)
 
 
 def test_record_oauth_requires_account_identity():
     with pytest.raises(ValueError, match="requires account_identity"):
         _oauth_record(account_identity=None)
-
-
-def test_record_oauth_requires_expires_at():
-    with pytest.raises(ValueError, match="access_token_expires_at"):
-        _oauth_record(access_token_expires_at=None)
 
 
 def test_record_oauth_forbids_config_values():
@@ -178,3 +179,65 @@ def test_request_enabled_sub_services_length_bounds(build: Callable[[list[str]],
         build([f"s{i}" for i in range(65)])
     with pytest.raises(ValueError, match="at least 1"):
         build([])
+
+
+# -- grant, optional refresh token and expiry --------------------------------
+
+
+def test_record_oauth_without_refresh_token_or_expiry_validates():
+    rec = _oauth_record(refresh_token=None, access_token_expires_at=None)
+    assert rec.refresh_token is None
+    assert rec.access_token_expires_at is None
+
+
+def test_record_grant_round_trips_through_storage_json():
+    grant = ConnectionGrant(issuer="https://auth.example.com", resource="https://mcp.example.com/mcp", client_id="c-1")
+    rec = _oauth_record(grant=grant, scopes_wanted=["files.write"])
+    loaded = ConnectionRecord.model_validate_json(rec.to_storage_json())
+    assert loaded.grant == grant
+    assert loaded.scopes_wanted == ["files.write"]
+    assert loaded.refresh_token is not None
+    assert loaded.refresh_token.get_secret_value() == "r-token"
+
+
+def test_record_grant_defaults_to_none_and_a_stored_record_without_the_key_loads():
+    data = json.loads(_oauth_record().to_storage_json())
+    data.pop("grant")
+    data.pop("scopes_wanted")
+    loaded = ConnectionRecord.model_validate(data)
+    assert loaded.grant is None
+    assert loaded.scopes_wanted == []
+
+
+def test_record_noauth_refuses_a_grant():
+    with pytest.raises(ValueError, match="grant"):
+        _noauth_record(grant=ConnectionGrant(issuer="https://auth.example.com"))
+
+
+def test_record_noauth_refuses_scopes_wanted():
+    with pytest.raises(ValueError, match="scopes_wanted"):
+        _noauth_record(scopes_wanted=["x"])
+
+
+def test_connected_account_view_carries_scopes_wanted():
+    assert "scopes_wanted" in ConnectedAccountView.model_fields
+
+
+def test_catalog_entry_icon_url_may_be_absent():
+    entry = ProviderCatalogEntry(
+        id="remote",
+        display_name="Remote",
+        icon_url=None,
+        kind="oauth",
+        origin="community",
+        category="dev",
+        sub_services=[],
+    )
+    assert entry.icon_url is None
+
+
+def test_connector_client_required_error_names_the_provider_and_its_kind():
+    exc = ConnectorClientRequiredError("remote")
+    assert exc.provider_id == "remote"
+    assert "remote" in str(exc)
+    assert error_kind(exc) is ErrorKind.UNAVAILABLE

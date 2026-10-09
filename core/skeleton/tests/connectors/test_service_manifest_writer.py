@@ -20,7 +20,7 @@ from tai42_skeleton.connectors.service.manifest_writer import (
     remove_managed_entries,
 )
 
-from .conftest import CID, CID2, make_oauth_descriptor
+from .conftest import CID, CID2, make_discovered_descriptor, make_oauth_descriptor
 
 
 def test_managed_title():
@@ -158,3 +158,17 @@ def test_remove_leaves_hand_authored_entries_untouched():
     add_managed_entries(doc, descriptor=desc, enabled_sub_services=["mail"], alias="work", connection_id=CID)
     remove_managed_entries(doc, connection_id=CID)
     assert [e["title"] for e in doc["mcp"]] == ["hand_authored"]
+
+
+def test_add_managed_entries_for_a_discovered_provider_reads_its_mcp_server_only():
+    desc = make_discovered_descriptor(mcp_url="https://mcp.example.com/mcp")
+    doc: dict[str, Any] = {"mcp": []}
+    added = add_managed_entries(
+        doc, descriptor=desc, enabled_sub_services=["files", "notes"], alias="team", connection_id=CID
+    )
+    assert added == ["remote_files_team", "remote_notes_team"]
+    files, notes = doc["mcp"]
+    assert files["config"]["url"] == "https://mcp.example.com/mcp"
+    assert notes["config"]["url"] == "https://mcp.example.com/mcp"
+    assert notes["config"]["headers"] == {"X-Area": "notes"}
+    assert files["managed"] == {"connection_id": CID, "provider_id": "remote", "sub_service": "files"}

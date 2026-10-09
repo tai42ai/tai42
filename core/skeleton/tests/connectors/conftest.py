@@ -26,6 +26,8 @@ from tai42_contract.connectors.providers import (
 )
 from tai42_kit.settings import reset_all_settings
 
+from tai42_skeleton.connectors.oauth import authorization
+
 # Deterministic test secrets: a 32-byte KEK and a 32-byte state-HMAC key.
 TEST_KEK_B64 = base64.b64encode(bytes(range(32))).decode("ascii")
 TEST_HMAC_B64 = base64.b64encode(bytes(range(32, 64))).decode("ascii")
@@ -111,6 +113,43 @@ def make_oauth_descriptor(
                 mcp_server=McpServerDescriptor(type="http", url="https://acme.test/mcp/cal"),
             ),
         },
+    )
+
+
+def make_discovered_descriptor(
+    *,
+    mcp_url: str = "https://mcp.example.com/mcp",
+    provider_id: str = "remote",
+    issuer: str | None = None,
+    scopes: list[str] | None = None,
+) -> ProviderDescriptor:
+    """A discovered OAuth provider (no ``oauth`` block) with two sub-services on one MCP URL.
+
+    With ``issuer`` it names the env client ``REMOTE_CLIENT_ID`` / ``REMOTE_CLIENT_SECRET`` pinned
+    to that issuer; without, it has a stored client.
+    """
+    return ProviderDescriptor(
+        id=provider_id,
+        display_name="Remote",
+        kind="oauth",
+        origin="community",
+        category="dev",
+        sub_services={
+            "files": SubServiceDescriptor(
+                id="files",
+                display_name="Files",
+                scopes=scopes or [],
+                mcp_server=McpServerDescriptor(type="http", url=mcp_url),
+            ),
+            "notes": SubServiceDescriptor(
+                id="notes",
+                display_name="Notes",
+                mcp_server=McpServerDescriptor(type="http", url=mcp_url, extra_headers={"X-Area": "notes"}),
+            ),
+        },
+        client_id_env="REMOTE_CLIENT_ID" if issuer is not None else None,
+        client_secret_env="REMOTE_CLIENT_SECRET" if issuer is not None else None,
+        issuer=issuer,
     )
 
 
@@ -271,3 +310,14 @@ def oauth_client_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide the operator-supplied OAuth client credentials."""
     monkeypatch.setenv("ACME_CLIENT_ID", "client-123")
     monkeypatch.setenv("ACME_CLIENT_SECRET", "secret-xyz")
+
+
+ENV_CLIENT = authorization.ResolvedClient(
+    client_id="client-123", client_secret="secret-xyz", auth_method="client_secret_post", source="env"
+)
+
+
+def declared_call(descriptor: ProviderDescriptor | None = None) -> dict:
+    """The ``descriptor`` / ``resolved`` / ``client`` keywords of an OAuth client call for a declared provider."""
+    desc = descriptor if descriptor is not None else make_oauth_descriptor()
+    return {"descriptor": desc, "resolved": authorization._declared(desc), "client": ENV_CLIENT}

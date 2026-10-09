@@ -81,8 +81,23 @@ def _patch_cooldown(monkeypatch) -> set[str]:
     return cooldown
 
 
+def _patch_keep_alive_marker(monkeypatch) -> set[str]:
+    """Replace the Redis keep-alive marker with an in-memory set and forget this process's stamps."""
+    markers: set[str] = set()
+
+    async def _claim(connection_id, interval_seconds):
+        if connection_id in markers:
+            return False
+        markers.add(connection_id)
+        return True
+
+    monkeypatch.setattr(resolver_mod, "claim_keep_alive", _claim)
+    resolver_mod.reset_keep_alive_stamps()
+    return markers
+
+
 @pytest.fixture
-def wiring(monkeypatch):
+def wiring(monkeypatch, oauth_client_env):
     """Patch the resolver's collaborators; return a config object for tweaking."""
     store = _FakeStore(stored=_STARTED_BLOB)
     state = {"record": None, "descriptor": make_oauth_descriptor(), "cooldown": None}
@@ -104,6 +119,7 @@ def wiring(monkeypatch):
     monkeypatch.setattr(resolver_mod, "token_store", lambda: store)
     monkeypatch.setattr(resolver_mod, "get_provider", lambda pid: state["descriptor"])
     state["cooldown"] = _patch_cooldown(monkeypatch)
+    state["markers"] = _patch_keep_alive_marker(monkeypatch)
 
     async def _noop_sleep(_d):
         return None
@@ -193,7 +209,7 @@ async def test_stale_token_refreshes_under_lock(wiring, monkeypatch):
     state, store = wiring
     state["record"] = make_oauth_record(expires_in_seconds=10)  # within safety margin
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         return _token_response(access_token="rotated-at")
 
     monkeypatch.setattr(oauth_client, "refresh", fake_refresh)
@@ -208,7 +224,7 @@ async def test_invalid_grant_marks_reconnect_required(wiring, monkeypatch):
     record = make_oauth_record(expires_in_seconds=10)
     state["record"] = record
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         raise TokenRefreshFailedError("dead", reason="invalid_grant")
 
     monkeypatch.setattr(oauth_client, "refresh", fake_refresh)
@@ -224,7 +240,7 @@ async def test_transient_budget_exhausted_marks_refresh_failing(wiring, monkeypa
     state["record"] = record
     calls = {"n": 0}
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         calls["n"] += 1
         raise TokenRefreshFailedError("flaky", reason="transient")
 
@@ -240,7 +256,7 @@ async def test_transient_then_success(wiring, monkeypatch):
     state["record"] = make_oauth_record(expires_in_seconds=10)
     calls = {"n": 0}
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         calls["n"] += 1
         if calls["n"] < 3:
             raise TokenRefreshFailedError("flaky", reason="transient")
@@ -439,7 +455,7 @@ async def test_force_refresh_always_refreshes(wiring, monkeypatch):
     state, _ = wiring
     state["record"] = make_oauth_record(expires_in_seconds=3600)  # still fresh
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         return _token_response(access_token="forced-at")
 
     monkeypatch.setattr(oauth_client, "refresh", fake_refresh)
@@ -489,7 +505,7 @@ async def test_force_refresh_still_refreshes_when_token_unchanged(wiring, monkey
     state, _ = wiring
     state["record"] = make_oauth_record(expires_in_seconds=3600)
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         return _token_response(access_token="forced-at")
 
     monkeypatch.setattr(oauth_client, "refresh", fake_refresh)
@@ -504,7 +520,7 @@ async def test_exhausted_budget_opens_cooldown_breaker(wiring, monkeypatch):
     state, _ = wiring
     state["record"] = make_oauth_record(expires_in_seconds=10)
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         raise TokenRefreshFailedError("flaky", reason="transient")
 
     monkeypatch.setattr(oauth_client, "refresh", fake_refresh)
@@ -538,7 +554,7 @@ async def test_successful_refresh_clears_cooldown(wiring, monkeypatch):
     # refresh runs — here we assert the refresh path clears any armed breaker.
     calls = {"n": 0}
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         calls["n"] += 1
         return _token_response(access_token="recovered")
 
@@ -567,7 +583,10 @@ def _fence_wiring(monkeypatch, *, store, refresh_behaviour, peer):
         lambda cid: _aiter_next(iter([(peer, _PEER_BLOB)])),
     )
     monkeypatch.setattr(oauth_client, "refresh", refresh_behaviour)
+    monkeypatch.setenv("ACME_CLIENT_ID", "client-123")
+    monkeypatch.setenv("ACME_CLIENT_SECRET", "secret-xyz")
     _patch_cooldown(monkeypatch)
+    _patch_keep_alive_marker(monkeypatch)
 
     async def _noop_sleep(_d):
         return None
@@ -588,7 +607,7 @@ async def test_stale_invalid_grant_does_not_clobber_rotated_record(monkeypatch):
     # The store has moved to the peer's blob, so our CAS against _STARTED loses.
     store = _FakeStore(stored=_PEER_BLOB)
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         assert refresh_token == "RT0"  # we exchanged the token we started with
         raise TokenRefreshFailedError("dead", reason="invalid_grant")
 
@@ -610,7 +629,7 @@ async def test_stale_success_does_not_clobber_rotated_record(monkeypatch):
 
     store = _FakeStore(stored=_PEER_BLOB)
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         return _token_response(access_token="our-late-at", refresh_token="RT2")
 
     _fence_wiring(monkeypatch, store=store, refresh_behaviour=fake_refresh, peer=peer)
@@ -631,7 +650,7 @@ async def test_unrotated_token_still_persists(monkeypatch):
 
     peer = make_oauth_record(expires_in_seconds=3600)  # unused — CAS commits
 
-    async def fake_refresh(*, descriptor, refresh_token):
+    async def fake_refresh(*, descriptor, refresh_token, **_kwargs):
         return _token_response(access_token="rotated-at", refresh_token="RT1")
 
     _fence_wiring(monkeypatch, store=store, refresh_behaviour=fake_refresh, peer=peer)

@@ -80,6 +80,16 @@ _BLOCKED_NETWORKS: tuple[IPv4Network | IPv6Network, ...] = tuple(
 )
 
 
+def is_loopback_host(host: str) -> bool:
+    """Whether ``host`` names this machine: ``localhost`` or a loopback IP literal (``127.0.0.0/8``, ``::1``)."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 def _is_blocked_address(ip_text: str, allow_nets: list[IPv4Network | IPv6Network]) -> bool:
     ip = ip_address(ip_text)
     # An IPv4-mapped IPv6 address (``::ffff:127.0.0.1``) is judged on its IPv4 form.

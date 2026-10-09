@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+import anyio
 import pytest
 
 import tai42_skeleton.connectors.runtime.locks as locks
@@ -13,6 +15,7 @@ from tai42_skeleton.connectors.runtime.locks import (
     _lock_key,
     _refresh_cooldown_key,
     _release,
+    claim_keep_alive,
     clear_refresh_cooldown,
     connection_lock,
     open_refresh_cooldown,
@@ -197,3 +200,83 @@ async def test_cooldown_active_redis_error_is_fail_open(install_redis, caplog):
         # surfaced as a WARNING — never silently.
         assert await refresh_cooldown_active(CID) is False
     assert any(rec.levelno == logging.WARNING for rec in caplog.records)
+
+
+# -- the release under cancellation ---------------------------------------------------
+
+
+class SlowReleaseRedis(FakeRedis):
+    """A release that awaits real I/O time, as the Redis round trip does."""
+
+    def __init__(self, *, release_delay: float = 0.02, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.release_delay = release_delay
+
+    async def eval(self, script, numkeys, key, token):
+        await asyncio.sleep(self.release_delay)
+        return await super().eval(script, numkeys, key, token)
+
+
+async def _hold_until_cancelled() -> None:
+    async with connection_lock(CID):
+        await asyncio.sleep(10)
+
+
+async def test_a_body_cancelled_by_wait_for_gives_the_key_back(install_redis):
+    redis = install_redis(SlowReleaseRedis())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(_hold_until_cancelled(), 0.05)
+    assert redis.value is None
+    assert await _acquire(CID) is not None
+
+
+async def test_a_body_cancelled_by_an_anyio_scope_gives_the_key_back(install_redis):
+    redis = install_redis(SlowReleaseRedis())
+    with anyio.move_on_after(0.05) as scope:
+        await _hold_until_cancelled()
+    assert scope.cancelled_caught
+    assert redis.value is None
+    assert await _acquire(CID) is not None
+
+
+async def test_a_release_that_never_answers_ends_at_its_deadline(install_redis, monkeypatch, caplog):
+    redis = install_redis(SlowReleaseRedis(release_delay=30))
+    monkeypatch.setattr(locks, "RELEASE_DEADLINE_SECONDS", 0.1)
+    started = asyncio.get_running_loop().time()
+    with caplog.at_level(logging.WARNING, logger=locks.__name__):
+        async with connection_lock(CID):
+            pass
+    assert asyncio.get_running_loop().time() - started < 1.0
+    assert redis.value is not None  # left to its expiry
+    assert any("will expire via PX" in record.message for record in caplog.records)
+
+
+# -- the keep-alive marker -------------------------------------------------------------
+
+
+class MarkerRedis:
+    def __init__(self, *, error: bool = False) -> None:
+        self.keys: dict[str, int | None] = {}
+        self.error = error
+
+    async def set(self, key, value, nx=False, ex=None):
+        if self.error:
+            raise RuntimeError("redis down")
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = ex
+        return True
+
+
+async def test_the_keep_alive_marker_is_claimed_once_per_interval(install_redis):
+    redis = install_redis(MarkerRedis())
+    assert await claim_keep_alive(CID, 3600) is True
+    assert await claim_keep_alive(CID, 3600) is False
+    assert redis.keys == {f"connectors:keep_alive:{CID}": 3600}
+
+
+async def test_a_redis_error_on_the_marker_claims_the_write_and_is_logged(install_redis, caplog):
+    install_redis(MarkerRedis(error=True))
+    with caplog.at_level(logging.WARNING, logger=locks.__name__):
+        assert await claim_keep_alive(CID, 3600) is True
+    assert any("writing it anyway" in record.message for record in caplog.records)

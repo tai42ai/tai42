@@ -16,7 +16,7 @@ from tai42_skeleton.connectors.service import manifest_writer
 
 from .flow import _start_flow
 from .persist import _persist
-from .validation import _scopes_for, _validate_return_url, _validate_sub_services
+from .validation import _validate_return_url, _validate_sub_services
 
 
 async def patch_sub_services(
@@ -138,12 +138,12 @@ async def patch_sub_services(
         descriptor=descriptor,
         alias=record.alias,
         enabled_sub_services=consent_subs,
-        requested_scopes=_scopes_for(descriptor, consent_subs),
         return_url=return_url,
         redirect_uri=redirect_uri,
         origin=origin,
         operation=state.FlowOperation.TOGGLE_SUBSERVICE_ON,
         reconnect_connection_id=connection_id,
+        record=record,
     )
     return PatchResult(
         connection_id=connection_id,

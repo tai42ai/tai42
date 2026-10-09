@@ -22,6 +22,7 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anyio
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -43,6 +44,8 @@ LOCK_TTL_SECONDS = 60.0
 # holder's key expiry rather than bailing one tick early.
 ACQUIRE_TIMEOUT_SECONDS = 61.0
 _POLL_INTERVAL_SECONDS = 0.1
+# Bound on the shielded release as a whole (the lock's Redis client already fails one command after 5 s).
+RELEASE_DEADLINE_SECONDS = 5.0
 
 # Compare-and-delete: only release if we still hold the lock (the stored value
 # is still our token), so we never delete a lock a later holder acquired after
@@ -177,15 +180,56 @@ async def _release(connection_id: str, token: str | None) -> None:
         )
 
 
+async def _release_shielded(connection_id: str, token: str | None) -> None:
+    """Give the key back even when the caller is being cancelled, within :data:`RELEASE_DEADLINE_SECONDS`.
+
+    An anyio cancel scope delivers its cancellation again at every wake-up, so an unshielded release
+    awaited in a cancelled caller is cut and the key stays for its whole TTL. Past the deadline the
+    key is left to expire, logged at WARNING.
+    """
+    with anyio.CancelScope(shield=True), anyio.move_on_after(RELEASE_DEADLINE_SECONDS) as deadline:
+        await _release(connection_id, token)
+    if deadline.cancelled_caught:
+        logger.warning(
+            "connectors: releasing the lock for %s took over %ss; it will expire via PX",
+            connection_id,
+            RELEASE_DEADLINE_SECONDS,
+        )
+
+
 @asynccontextmanager
 async def connection_lock(connection_id: str) -> AsyncIterator[None]:
     """Hold the per-connection lock for the duration of the ``async with`` body.
 
     Best-effort: a ``None`` token (Redis error / wait timeout) still enters the
-    body — the WARNING from ``_acquire`` records that the body ran unlocked.
+    body — the WARNING from ``_acquire`` records that the body ran unlocked. The
+    release runs shielded from the caller's cancellation.
     """
     token = await _acquire(connection_id)
     try:
         yield
     finally:
-        await _release(connection_id, token)
+        await _release_shielded(connection_id, token)
+
+
+def _keep_alive_key(connection_id: str) -> str:
+    return f"{connector_store_settings().key_prefix}keep_alive:{connection_id}"
+
+
+async def claim_keep_alive(connection_id: str, interval_seconds: int) -> bool:
+    """Claim, across processes, the one keep-alive write of ``connection_id`` for the next ``interval_seconds``.
+
+    ``SET NX`` of a marker that lives for the interval: ``True`` for the caller that set it (it does
+    the write), ``False`` while another process's marker lives. A Redis error is logged at WARNING
+    and claims the write: an extra write is harmless, a skipped one would let the session lapse.
+    """
+    try:
+        async with client_ctx(RedisClient, connector_store_settings().redis) as client:
+            return bool(await client.set(_keep_alive_key(connection_id), b"1", nx=True, ex=interval_seconds))
+    except Exception:
+        logger.warning(
+            "connectors: redis error claiming the keep-alive of %s — writing it anyway",
+            connection_id,
+            exc_info=True,
+        )
+        return True

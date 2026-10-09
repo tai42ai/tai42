@@ -25,7 +25,7 @@ from tai42_skeleton.connectors.service import manifest_writer
 
 from .flow import _start_flow
 from .persist import _persist
-from .validation import _scopes_for, _validate_config_values, _validate_return_url, _validate_sub_services
+from .validation import _validate_config_values, _validate_return_url, _validate_sub_services
 
 
 async def start_connect(
@@ -79,7 +79,6 @@ async def start_connect(
         descriptor=descriptor,
         alias=alias,
         enabled_sub_services=enabled_sub_services,
-        requested_scopes=_scopes_for(descriptor, enabled_sub_services),
         return_url=return_url,
         redirect_uri=redirect_uri,
         origin=origin,
@@ -176,10 +175,10 @@ async def start_reconnect(
         descriptor=descriptor,
         alias=record.alias,
         enabled_sub_services=enabled_sub_services,
-        requested_scopes=_scopes_for(descriptor, enabled_sub_services),
         return_url=return_url,
         redirect_uri=redirect_uri,
         origin=origin,
         operation=state.FlowOperation.RECONNECT,
         reconnect_connection_id=connection_id,
+        record=record,
     )

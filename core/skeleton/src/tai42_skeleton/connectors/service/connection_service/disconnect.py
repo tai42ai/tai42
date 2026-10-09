@@ -9,10 +9,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from tai42_contract.connectors.errors import ConnectorError
+from tai42_contract.connectors.errors import ConnectorClientRequiredError, OperatorMisconfiguredError
+from tai42_contract.connectors.models import ConnectionRecord
 from tai42_contract.connectors.service import DisconnectResult
 
+from tai42_skeleton.connectors.oauth import authorization
 from tai42_skeleton.connectors.oauth import client as oauth_client
+from tai42_skeleton.connectors.oauth.discovery import OAuthDiscoveryError
 from tai42_skeleton.connectors.service import connection_service as _svc
 from tai42_skeleton.connectors.service import manifest_writer
 
@@ -42,8 +45,7 @@ async def disconnect(
             removed[:] = manifest_writer.remove_managed_entries(document, connection_id=connection_id)
 
         # No-auth has no token to revoke and no provider creds to read — skip the
-        # upstream revoke (and the catalog get_provider lookup) entirely, before
-        # the token access below would crash on a None refresh_token.
+        # upstream revoke (and the catalog get_provider lookup) entirely.
         if record.kind == "none":
             # Remove the managed entries through the single pipeline (validate +
             # persist + reload + broadcast) before purging the blob.
@@ -57,28 +59,7 @@ async def disconnect(
                 fanout=applied.fanout,
             )
 
-        if record.refresh_token is None:
-            # An oauth record without a refresh token is corrupt — fail loudly
-            # rather than send an empty revocation upstream.
-            raise ConnectorError(f"oauth record {connection_id} has no refresh_token")
-        try:
-            descriptor = _svc.get_provider(record.provider_id)
-        except KeyError:
-            # The provider plugin was removed, so there is nothing to revoke
-            # against — but the local blob + manifest entries must still be
-            # purgeable. Skip the upstream revoke and proceed with local removal.
-            logger.warning(
-                "connectors: provider %r for connection %s is no longer registered; "
-                "skipping upstream revoke and purging locally",
-                record.provider_id,
-                connection_id,
-            )
-            revoke_outcome = oauth_client.RevokeOutcome(outcome="skipped")
-        else:
-            revoke_outcome = await oauth_client.revoke(
-                descriptor=descriptor,
-                token=record.refresh_token.get_secret_value(),
-            )
+        revoke_outcome = await _revoke_upstream(record)
 
         # Remove manifest entries first so the tool stops being callable
         # immediately, then purge the blob. revoke() already ran above, so a
@@ -98,4 +79,57 @@ async def disconnect(
         upstream_revoke_status=revoke_outcome.http_status,
         removed_manifest_entries=removed,
         fanout=applied.fanout,
+    )
+
+
+async def _revoke_upstream(record: ConnectionRecord) -> oauth_client.RevokeOutcome:
+    """Best-effort revoke of an OAuth record's grant; never raises, so the local purge always runs.
+
+    The token revoked is the refresh token when the record has one, else the access token, sent to
+    the revocation endpoint of the authorization server the grant is bound to with the grant's
+    client. When the grant no longer belongs to what the descriptor names (another issuer or
+    client), or its authorization or client cannot be resolved, nothing is sent and the outcome is
+    ``failed``; a provider that is gone, or no revocation endpoint, is ``skipped``.
+    """
+    connection_id = record.connection_id
+    token_secret = record.refresh_token or record.access_token
+    if token_secret is None:
+        logger.warning("connectors: oauth record %s holds no token to revoke", connection_id)
+        return oauth_client.RevokeOutcome(outcome="skipped")
+    try:
+        descriptor = _svc.get_provider(record.provider_id)
+    except KeyError:
+        # The provider plugin was removed, so there is nothing to revoke
+        # against — but the local blob + manifest entries must still be
+        # purgeable. Skip the upstream revoke and proceed with local removal.
+        logger.warning(
+            "connectors: provider %r for connection %s is no longer registered; "
+            "skipping upstream revoke and purging locally",
+            record.provider_id,
+            connection_id,
+        )
+        return oauth_client.RevokeOutcome(outcome="skipped")
+    try:
+        target = await authorization.resolve_for_grant(descriptor, record.grant)
+        # A declared provider's revoke sends only the token, so it needs no client.
+        client = (
+            await authorization.resolve_client(descriptor, target.resolved, client_id=target.client_id)
+            if target.resolved.guarded
+            else None
+        )
+    except (
+        authorization.GrantUnservableError,
+        OAuthDiscoveryError,
+        ConnectorClientRequiredError,
+        OperatorMisconfiguredError,
+    ) as exc:
+        logger.warning(
+            "connectors: not revoking the grant of connection %s upstream (%s: %s); purging locally",
+            connection_id,
+            type(exc).__name__,
+            exc,
+        )
+        return oauth_client.RevokeOutcome(outcome="failed")
+    return await oauth_client.revoke(
+        descriptor=descriptor, resolved=target.resolved, client=client, token=token_secret.get_secret_value()
     )

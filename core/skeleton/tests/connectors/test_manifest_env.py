@@ -57,3 +57,22 @@ def test_an_oauth_entry_with_no_names_contributes_nothing() -> None:
 )
 def test_a_missing_or_malformed_connectors_section_contributes_nothing(manifest: dict[str, Any]) -> None:
     assert connector_client_env_refs(manifest) == []
+
+
+def test_a_discovered_connector_names_its_env_client_only_when_it_has_one() -> None:
+    manifest = {
+        "connectors": [
+            {"id": "stored", "kind": "oauth", "sub_services": {}},
+            {
+                "id": "pinned",
+                "kind": "oauth",
+                "issuer": "https://auth.example.com",
+                "client_id_env": "P_ID",
+                "client_secret_env": "P_SECRET",
+            },
+        ]
+    }
+    assert connector_client_env_refs(manifest) == [
+        ConnectorEnvRef(index=1, field="client_id_env", var="P_ID"),
+        ConnectorEnvRef(index=1, field="client_secret_env", var="P_SECRET"),
+    ]

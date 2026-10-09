@@ -25,6 +25,7 @@ import tai42_skeleton.operations.connectors as conn_ops
 import tai42_skeleton.routers.connectors as router
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import state
+from tai42_skeleton.connectors.oauth.authorization import OAuthAuthorizationCancelledError
 from tai42_skeleton.connectors.store.catalog_store import ConnectorCategory
 
 # The mode-wrapped fan-out summary the service threads onto a mutating result; the
@@ -66,6 +67,7 @@ def _record(cid="c1", health=AuthHealthState.HEALTHY):
         account_identity="me@x",
         enabled_sub_services=["repo"],
         granted_scopes=["repo"],
+        scopes_wanted=[],
         auth_health_state=health,
         is_healthy=lambda: health == AuthHealthState.HEALTHY,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -467,13 +469,12 @@ async def test_oauth_complete_completion_error_maps_to_failed(wiring, monkeypatc
     assert body["reason"] == type(exc).__name__
 
 
-async def test_oauth_complete_drops_redirect_uri_arg(wiring, monkeypatch):
-    """oauth/complete no longer passes redirect_uri — it is read from the stored
-    flow state inside complete_connect."""
+async def test_oauth_complete_hands_the_redirects_iss_and_error_to_the_completion(wiring, monkeypatch):
     monkeypatch.setattr(router.state, "decode", lambda s: state.DecodedState(flow_id="f1", origin="https://app"))
+    seen: list[dict] = []
 
     async def _complete(**kw):
-        assert "redirect_uri" not in kw
+        seen.append(kw)
         return CompleteConnectResult(
             connection_id="c1",
             return_url="/connectors",
@@ -483,8 +484,68 @@ async def test_oauth_complete_drops_redirect_uri_arg(wiring, monkeypatch):
         )
 
     monkeypatch.setattr(router.connection_service, "complete_connect", _complete)
-    resp = await router.oauth_complete(_req({"state": "ok", "code": "c"}))
+    resp = await router.oauth_complete(_req({"state": "ok", "code": "c", "iss": "https://as.example.com"}))
     assert _data(resp)["data"]["kind"] == "success"
+    assert seen == [{"flow_id": "f1", "code": "c", "iss": "https://as.example.com", "error": None}]
+
+
+async def test_oauth_complete_an_error_with_a_state_reaches_the_completion(wiring, monkeypatch):
+    monkeypatch.setattr(router.state, "decode", lambda s: state.DecodedState(flow_id="f1", origin="https://app"))
+    seen: list[dict] = []
+
+    async def _complete(**kw):
+        seen.append(kw)
+        raise OAuthAuthorizationCancelledError("the authorization server reported an error")
+
+    monkeypatch.setattr(router.connection_service, "complete_connect", _complete)
+    resp = await router.oauth_complete(_req({"state": "ok", "error": "access_denied"}))
+    assert resp.status_code == 200
+    assert _data(resp)["data"]["kind"] == "cancelled"
+    assert seen[0]["error"] == "access_denied"
+    assert seen[0]["code"] is None
+
+
+async def test_oauth_complete_an_error_with_a_state_that_does_not_decode_is_cancelled(wiring, monkeypatch):
+    def _decode(s):
+        raise state.StateInvalidError("bad")
+
+    monkeypatch.setattr(router.state, "decode", _decode)
+    resp = await router.oauth_complete(_req({"state": "bad", "error": "access_denied"}))
+    assert _data(resp)["data"]["kind"] == "cancelled"
+
+
+async def test_oauth_complete_an_error_with_a_wrong_iss_is_failed_and_never_echoed(wiring, monkeypatch):
+    # The real completion: the flow record names an issuer, the redirect another.
+    monkeypatch.setattr(router.state, "decode", lambda s: state.DecodedState(flow_id="f1", origin="https://app"))
+    flow = state.OAuthFlowState(
+        flow_id="f1",
+        provider_id="remote",
+        alias="team",
+        requested_scopes=[],
+        enabled_sub_services=["files"],
+        pkce_verifier="v",
+        return_url="/connectors",
+        redirect_uri="https://app/oauth-bridge.html",
+        operation=FlowOperation.CONNECT,
+        issuer="https://as.example.com",
+        iss_required=True,
+    )
+
+    async def _pop(flow_id):
+        return flow
+
+    monkeypatch.setattr(router.connection_service.state, "get_and_delete", _pop)
+    resp = await router.oauth_complete(
+        _req({"state": "ok", "error": "server-said-SECRET-THING", "iss": "https://evil.example.com"})
+    )
+    assert resp.status_code == 400
+    assert _data(resp)["data"] == {"kind": "failed", "reason": "IssuerMismatch"}
+    assert b"SECRET-THING" not in bytes(resp.body)
+
+
+async def test_oauth_complete_a_non_string_iss_is_400(wiring):
+    resp = await router.oauth_complete(_req({"state": "ok", "code": "c", "iss": 3}))
+    assert resp.status_code == 400
 
 
 async def test_oauth_complete_success(wiring, monkeypatch):
