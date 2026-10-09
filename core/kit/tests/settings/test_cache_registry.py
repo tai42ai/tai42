@@ -15,6 +15,8 @@ from tai42_kit.settings.cache_registry import (
     _EPOCH_STAMP_ATTR,
     register_settings_reset,
     reset_all_settings,
+    restamp_settings_born_after,
+    settings_birth_mark,
     settings_cache,
     sweep_stale_settings,
 )
@@ -444,3 +446,97 @@ def test_sweep_still_reports_a_module_level_reference_after_collecting():
 
     assert len(found) == 1
     assert found[0].holders == ("builtins.list",)
+
+
+def test_restamp_moves_only_the_instances_born_after_the_mark_into_the_current_epoch():
+    class _EarlierSettings(BaseSettings):
+        value: int = 1
+
+    class _LaterSettings(BaseSettings):
+        value: int = 1
+
+    earlier = _EarlierSettings()
+    cache_registry._stamp_settings(earlier)
+    mark = settings_birth_mark()
+    later = _LaterSettings()
+    cache_registry._stamp_settings(later)
+    retired = advance_client_epoch()
+
+    restamp_settings_born_after(mark)
+
+    found = sweep_stale_settings(retired)
+    # The instance read before the mark still belongs to the retired epoch and is reported;
+    # the one read after it now carries the current epoch and is not.
+    assert _of_type(found, _EarlierSettings)
+    assert not _of_type(found, _LaterSettings)
+    assert getattr(later, _EPOCH_STAMP_ATTR) == current_client_epoch()
+    assert earlier.value == later.value == 1
+
+
+def test_a_restamped_instance_is_reported_when_its_own_epoch_retires():
+    class _GenerationSettings(BaseSettings):
+        value: int = 1
+
+    mark = settings_birth_mark()
+    kept = _GenerationSettings()
+    cache_registry._stamp_settings(kept)
+    advance_client_epoch()
+    restamp_settings_born_after(mark)
+    own_epoch = advance_client_epoch()
+
+    found = _of_type(sweep_stale_settings(own_epoch), _GenerationSettings)
+    assert len(found) == 1
+    assert found[0].epoch == own_epoch
+    assert kept.value == 1
+
+
+def test_the_birth_mark_advances_with_each_stamped_instance():
+    class _MarkedSettings(BaseSettings):
+        value: int = 1
+
+    before = settings_birth_mark()
+    first = _MarkedSettings()
+    cache_registry._stamp_settings(first)
+    after = settings_birth_mark()
+    assert after > before
+    assert settings_birth_mark() == after  # reading the mark constructs nothing
+
+
+class _AccessorSettings(BaseSettings):
+    value: int = 1
+
+
+def _register_accessor():
+    """Register a zero-arg accessor under one fixed qualified name, as each import of its module does."""
+
+    @settings_cache
+    def accessor_settings() -> _AccessorSettings:
+        return _AccessorSettings()
+
+    return accessor_settings
+
+
+def test_an_instance_a_superseded_accessor_builds_after_the_mark_keeps_its_epoch():
+    superseded = _register_accessor()
+    reset_all_settings()
+    mark = settings_birth_mark()
+    current = _register_accessor()  # the re-import registers a new accessor under the same name
+    current_instance = current()
+    superseded_instance = superseded()  # the code that still calls the superseded accessor
+    retired = advance_client_epoch()
+
+    restamp_settings_born_after(mark)
+
+    # The registered accessor's instance belongs to the new epoch; the superseded one's keeps
+    # the epoch of the code that called it, and is reported when that epoch is swept.
+    assert getattr(current_instance, _EPOCH_STAMP_ATTR) == current_client_epoch()
+    assert getattr(superseded_instance, _EPOCH_STAMP_ATTR) == retired
+    del current_instance, superseded_instance
+    found = _of_type(sweep_stale_settings(retired), _AccessorSettings)
+    assert [h.holders for h in found] == [("functools._lru_cache_wrapper",)]
+    # The next retire resets the registered accessor; the superseded instance is never
+    # reported as the newer generation's.
+    newer = advance_client_epoch()
+    reset_all_settings()
+    assert _of_type(sweep_stale_settings(newer), _AccessorSettings) == []
+    assert superseded is not current

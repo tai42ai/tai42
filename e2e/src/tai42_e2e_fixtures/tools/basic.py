@@ -113,24 +113,38 @@ async def e2e_settings_snapshot() -> dict:
     live process env (the precedence a freshly-constructed singleton reads under — a
     reset cache re-reads it), masking ``secret`` / ``key_material`` fields (value ``None``,
     only a ``set`` flag). ``settings_epoch`` and ``client_pool_epoch`` are the ONE shared
-    process counter (``current_client_epoch``). ``stale_holders`` is the sanctioned
-    :func:`sweep_stale_settings` run over every RETIRED epoch — a settings instance of a
-    retired epoch a holder still keeps alive; a clean flip leaves ZERO. ``stale_pool_epochs``
-    are retired client-pool epochs still present (a clean retire drains + detaches them);
+    process counter (``current_client_epoch``). ``retired_generations_alive`` are the
+    retired serving generations whose serving surface is still reachable (a task, timer,
+    transport or stream of the runtime still carries one of their requests' contexts, an
+    open inbox stream among them) — such a generation is not judged. ``stale_holders`` is
+    the sanctioned :func:`sweep_stale_settings` run over every other RETIRED epoch — a
+    settings instance of a retired epoch a holder still keeps alive once nothing a request
+    left behind reaches it; a clean flip leaves ZERO. ``stale_pool_epochs`` are retired
+    client-pool epochs still present (a clean retire drains + detaches them);
     ``pool_leases_by_epoch`` is the live lease count per pooled epoch. Probes never mock:
     every field is read off in-process live state."""
+    import gc
+
     import tai42_kit.clients.base as clients_base
     from tai42_kit.settings import registered_settings
     from tai42_kit.settings.cache_registry import sweep_stale_settings
+    from tai42_skeleton.app.retired_generations import retired_generations
 
     # Settings + client pools share ONE monotonic counter; read it once.
     current = current_client_epoch()
 
-    # Stale settings holders: sweep every retired epoch (< current) through the
-    # sanctioned sweep. ``sweep_stale_settings`` rejects the current/future epoch, so the
-    # range stops one short of ``current``.
+    # Collect what nothing reaches first, so a released generation's serving surface is gone
+    # and only a generation something still reaches is reported alive.
+    gc.collect()
+    retired_generations_alive = [generation.number for generation in retired_generations() if generation.surface_alive]
+
+    # Stale settings holders: sweep every retired epoch (< current) whose serving surface is
+    # collected through the sanctioned sweep. ``sweep_stale_settings`` rejects the
+    # current/future epoch, so the range stops one short of ``current``.
     stale_holders: list[dict] = []
     for retired in range(current):
+        if retired in retired_generations_alive:
+            continue
         stale_holders.extend(
             {"settings_type": holder.settings_type, "epoch": holder.epoch, "holders": list(holder.holders)}
             for holder in sweep_stale_settings(retired)
@@ -183,6 +197,7 @@ async def e2e_settings_snapshot() -> dict:
         "pid": os.getpid(),
         "settings_epoch": current,
         "client_pool_epoch": current,
+        "retired_generations_alive": retired_generations_alive,
         "stale_holder_count": len(stale_holders),
         "stale_holders": stale_holders,
         "pool_leases_by_epoch": {str(epoch): count for epoch, count in sorted(leases_by_epoch.items())},

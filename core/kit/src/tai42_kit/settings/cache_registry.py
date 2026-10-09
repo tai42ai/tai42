@@ -30,9 +30,22 @@ from tai42_kit.settings.env_file import EnvFileIdentity, env_file_identity
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(eq=False, frozen=True)
+class _Accessor:
+    """One registration of a cached settings accessor: its qualified name and its cache clear.
+
+    Compared by identity: registering again under the same name (a module re-import)
+    replaces the registration, and the replaced one is superseded.
+    """
+
+    key: str
+    clear: Callable[[], None]
+
+
 # Keyed by qualified name so a module re-import replaces its registration
 # instead of growing the registry or double-running a hook.
-_CACHE_CLEARS: dict[str, Callable[[], None]] = {}
+_CACHE_CLEARS: dict[str, _Accessor] = {}
 _RESET_HOOKS: dict[str, Callable[[], None]] = {}
 
 # Epoch stamp written on each constructed settings instance via
@@ -40,9 +53,17 @@ _RESET_HOOKS: dict[str, Callable[[], None]] = {}
 # ``model_fields`` only) and weakref-safe. The roster is a list of weakrefs
 # (settings instances are unhashable, so no set/dict) pruned by callback as
 # instances die, leaving only the still-live ones for the sweep to inspect.
-# Every append/remove/snapshot of the roster is serialized under ``_roster_lock``,
-# reached concurrently as settings are constructed and swept across threads.
+# Every append/remove/snapshot of the roster, and every birth number, is
+# serialized under ``_roster_lock``, reached concurrently as settings are
+# constructed and swept across threads.
 _EPOCH_STAMP_ATTR = "__tai_settings_epoch__"
+# Birth number written beside the epoch stamp: a process-wide count of stamped
+# instances, so a caller can tell the instances constructed after a mark apart.
+_BIRTH_ATTR = "__tai_settings_birth__"
+# The accessor registration that constructed the instance, written beside the epoch
+# stamp, so a re-stamp can tell an instance a superseded accessor built apart.
+_ACCESSOR_ATTR = "__tai_settings_accessor__"
+_last_birth = 0
 _stamp_roster: "list[weakref.ref[BaseSettings]]" = []
 # An RLock, not a plain Lock: the ``_prune_roster`` weakref callback can fire
 # during the ``append`` in ``_stamp_settings`` (a gc triggered on the same thread
@@ -68,8 +89,11 @@ def _prune_roster(dead: "weakref.ref") -> None:
         _stamp_roster.remove(dead)
 
 
-def _stamp_settings(value: object) -> None:
+def _stamp_settings(value: object, accessor: _Accessor | None = None) -> None:
     """Stamp a constructed settings instance with the current epoch and roster it.
+
+    ``accessor`` is the registration that constructed it (``None`` for an instance
+    stamped outside a cached accessor).
 
     Only ``BaseSettings`` instances are stamped. The non-model accessors return
     primitives (``str``/``float``/``None`` — e.g. skeleton ``config_mode() ->
@@ -78,11 +102,58 @@ def _stamp_settings(value: object) -> None:
     those are skipped. They are few, core-owned, and recycle/excluded-class, so
     the miss is acceptable.
     """
+    global _last_birth
     if not isinstance(value, BaseSettings):
         return
     object.__setattr__(value, _EPOCH_STAMP_ATTR, _current_epoch())
+    object.__setattr__(value, _ACCESSOR_ATTR, accessor)
     with _roster_lock:
+        _last_birth += 1
+        object.__setattr__(value, _BIRTH_ATTR, _last_birth)
         _stamp_roster.append(weakref.ref(value, _prune_roster))
+
+
+def settings_birth_mark() -> int:
+    """The birth number of the most recently stamped settings instance (0 before any).
+
+    Every instance stamped after this call has a larger birth number, so the mark
+    separates what was constructed before it from what is constructed after it
+    (see :func:`restamp_settings_born_after`).
+    """
+    with _roster_lock:
+        return _last_birth
+
+
+def _built_by_a_superseded_accessor(instance: object) -> bool:
+    accessor = getattr(instance, _ACCESSOR_ATTR, None)
+    return accessor is not None and _CACHE_CLEARS.get(accessor.key) is not accessor
+
+
+def restamp_settings_born_after(mark: int) -> None:
+    """Stamp every live settings instance constructed after ``mark`` with the current epoch.
+
+    A serving generation built off to the side reads its settings while the epoch it
+    will serve under is not yet current, so those instances carry the epoch it
+    replaces. Once its epoch is current, the builder re-stamps everything constructed
+    since the mark it took when the build began: a sweep of the replaced epoch then
+    judges only the instances read before the build, and the new generation's own
+    instances are judged when its epoch retires.
+
+    An instance constructed by a superseded accessor (one whose name a module
+    re-import has registered again) is not re-stamped: only the code of the replaced
+    generation still calls that accessor, so the instance keeps that generation's epoch.
+    """
+    epoch = _current_epoch()
+    with _roster_lock:
+        roster = list(_stamp_roster)
+    for ref in roster:
+        instance = ref()
+        if (
+            instance is not None
+            and getattr(instance, _BIRTH_ATTR, 0) > mark
+            and not _built_by_a_superseded_accessor(instance)
+        ):
+            object.__setattr__(instance, _EPOCH_STAMP_ATTR, epoch)
 
 
 def settings_cache[F: Callable](fn: F) -> F:
@@ -96,11 +167,12 @@ def settings_cache[F: Callable](fn: F) -> F:
 
     def _construct():
         value = fn()
-        _stamp_settings(value)
+        _stamp_settings(value, accessor)
         return value
 
     cached = lru_cache(maxsize=1)(_construct)
-    _CACHE_CLEARS[_key(fn)] = cached.cache_clear
+    accessor = _Accessor(key=_key(fn), clear=cached.cache_clear)
+    _CACHE_CLEARS[accessor.key] = accessor
     return cast(F, cached)
 
 
@@ -126,11 +198,12 @@ def keyed_settings_cache[K: Hashable, V](fn: Callable[[K], V]) -> Callable[[K], 
         if entry is not None and entry[0] == token:
             return entry[1]
         value = fn(key)
-        _stamp_settings(value)
+        _stamp_settings(value, accessor)
         entries[key] = (token, value)
         return value
 
-    _CACHE_CLEARS[_key(fn)] = entries.clear
+    accessor = _Accessor(key=_key(fn), clear=entries.clear)
+    _CACHE_CLEARS[accessor.key] = accessor
     return cached
 
 
@@ -142,8 +215,8 @@ def register_settings_reset(fn: Callable[[], None]) -> Callable[[], None]:
 
 def reset_all_settings() -> None:
     """Drop every registered settings cache, then run the reset hooks."""
-    for clear in list(_CACHE_CLEARS.values()):
-        clear()
+    for accessor in list(_CACHE_CLEARS.values()):
+        accessor.clear()
     for hook in list(_RESET_HOOKS.values()):
         hook()
 

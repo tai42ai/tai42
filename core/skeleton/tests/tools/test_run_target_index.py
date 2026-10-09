@@ -15,6 +15,7 @@ from fastmcp import FastMCP
 from fastmcp.tools import Tool
 
 from tai42_skeleton.app import epoch as epoch_mod
+from tai42_skeleton.app import retired_generations as retired_mod
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -153,15 +154,20 @@ def _tool(fn: Any) -> Tool:
     return Tool.from_function(fn, name="probe")
 
 
+async def _serving_handle(scope: Any, receive: Any, send: Any) -> None:
+    """The generation's ASGI handle; the swap records it (weakly) as the serving surface."""
+
+
 @pytest.fixture
 def _epoch_state() -> Iterator[None]:
-    saved = {name: getattr(epoch_mod, name) for name in ("_current", "_serving_slot", "_retiring_epoch")}
+    saved = {name: getattr(epoch_mod, name) for name in ("_current", "_serving_slot")}
     try:
         yield
     finally:
         for name, value in saved.items():
             setattr(epoch_mod, name, value)
         epoch_mod._building_epoch = None
+        retired_mod.detach_retired_generations()
 
 
 @pytest.mark.usefixtures("_epoch_state")
@@ -187,7 +193,7 @@ def test_two_coexisting_cores_each_answer_with_their_own_tool(asked: list[str]) 
                 epoch.core = core
             finally:
                 app._building = None
-            return object()
+            return _serving_handle
 
         async def no_loops() -> None:
             return None

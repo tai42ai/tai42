@@ -1,6 +1,7 @@
 """Per-event-loop, epoch-aware pooling for shared driver clients."""
 
 import asyncio
+import contextvars
 import json
 import logging
 import threading
@@ -256,7 +257,8 @@ class PooledClient[T]:
         Captures the epoch once and pools consistently under it: a client created
         under epoch N lands in epoch N's dict or is closed-and-retried, never
         orphaned in N+1. Creation is double-checked under a per-(epoch, class, key)
-        lock so two concurrent first-use callers build exactly one client.
+        lock so two concurrent first-use callers build exactly one client. A caller
+        cancelled once the client exists still hands it over before re-raising.
         """
         build_options = self._build_options(**kwargs)
         while True:
@@ -283,7 +285,24 @@ class PooledClient[T]:
                 if entry is not None:
                     self._ensure_build_options_match(entry, kwargs)
                     return entry, epoch
-                created = await self._create(**kwargs)
+                # The client is shared by every later caller of this epoch on this loop,
+                # so it is created from an empty context: a task its creation starts (a
+                # driver pool's workers) copies the context it is created in, and would
+                # otherwise keep the first caller's state (its request) for the
+                # client's whole life.
+                creation = asyncio.create_task(self._create(**kwargs), context=contextvars.Context())
+                try:
+                    created = await creation
+                except BaseException:
+                    # A caller cancelled while the creation runs cancels the creation
+                    # (``_create``'s own guard tears down what it opened). A caller
+                    # cancelled after the creation finished, before it resumed, gets the
+                    # cancellation instead of the client: the client is still handed
+                    # over (pooled, or closed when its epoch retired) before the
+                    # cancellation propagates.
+                    if creation.done() and not creation.cancelled() and creation.exception() is None:
+                        await self._register_or_close(loop, epoch, key, creation.result(), build_options)
+                    raise
                 # ``_create`` awaited, so the epoch may have advanced and a
                 # shutdown/drain may have detached the pool. ``_register`` re-reads
                 # both atomically: it lands the client in the LIVE current-epoch
@@ -292,6 +311,13 @@ class PooledClient[T]:
                 registered = self._register(loop, epoch, key, created, build_options)
                 if registered is not None:
                     return registered, epoch
+            await self._close(created)
+
+    async def _register_or_close(
+        self, loop: AbstractEventLoop, epoch: int, key: str, created: T, build_options: dict
+    ) -> None:
+        """Pool ``created`` under ``epoch`` or, when that epoch has retired, close it."""
+        if self._register(loop, epoch, key, created, build_options) is None:
             await self._close(created)
 
     @asynccontextmanager

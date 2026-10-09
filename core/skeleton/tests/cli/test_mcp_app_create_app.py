@@ -9,9 +9,11 @@ the CLI wiring, not the real MCP app.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import socket
+import types
 
 import click
 import pytest
@@ -78,6 +80,25 @@ def test_create_app_http_lifespan_and_dispatch(patch_app_seam, monkeypatch: pyte
     assert app.http_called is True
     assert app.sse_called is False
     assert inner.lifespan_entered is True
+
+
+def test_the_worker_lifespan_keeps_no_reference_to_the_boot_serving_app(
+    patch_app_seam, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker lifespan stays suspended for the whole process; a reload later retires the
+    boot generation, so the lifespan must not be what keeps that generation's app alive."""
+    monkeypatch.setenv("TAI_TRANSPORT", "http")
+    inner = _FakeInnerApp()
+    patch_app_seam(_FakeApp(inner))
+
+    star = mcp_app.create_app()
+    with TestClient(star):
+        suspended_lifespans = [
+            referrer
+            for referrer in gc.get_referrers(inner)
+            if isinstance(referrer, types.AsyncGeneratorType) and referrer.ag_code.co_name == "_worker_lifespan"
+        ]
+    assert suspended_lifespans == []
 
 
 def test_create_app_sse_transport_selects_sse(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:

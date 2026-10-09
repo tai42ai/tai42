@@ -142,8 +142,7 @@ async def kill_park(
         # down whole-chain and no address to deliver a FAILED to. A plain status-gated prune.
         return await store.prune_pending(r, interaction_id, group_id or target.group_id or "", reason=reason)
 
-    settings = interactions_settings()
-    horizon = settings.idle_ttl_seconds
+    horizon = interactions_settings().idle_ttl_seconds
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     result = await store.enqueue_kill(
         r,
@@ -157,7 +156,7 @@ async def kill_park(
         # A generous TTL backstop; the record's own ``deadline_ms`` (one horizon out) governs the
         # reaper's give-up while the record still stands, so ``run_delivery_id`` is readable then.
         kill_due_ttl=2 * horizon,
-        first_attempt_at_ms=now_ms + int(settings.expiry_reaper_interval_seconds * 1000),
+        first_attempt_at_ms=now_ms + int(interactions_settings().expiry_reaper_interval_seconds * 1000),
         deadline_ms=now_ms + horizon * 1000,
         act_on=act_on,
     )
