@@ -692,24 +692,64 @@ async def test_a_call_to_another_url_is_refused_before_anything_is_resolved(monk
     assert pool.requests == 0
 
 
-async def test_the_connectors_own_entry_left_behind_is_told_to_reconnect(monkeypatch, acme):
-    _Resolver(monkeypatch, initial=ManagedAuth(access_token="secret"))
-    with pytest.raises(ConnectorConnectionError, match="reconnect the account"):
-        await _call(_acme_entry(url="https://old.acme.test/mcp/mail"), _FakePool([]))
+_OAUTH_REPAIR = (
+    "reconnect the account to rewrite the entry the connector wrote for that connection, "
+    "or remove the reference from this entry if it is not that one"
+)
+_NO_AUTH_REPAIR = (
+    "save the connection's services again to rewrite the entry the connector wrote for that connection, "
+    "or remove the reference from this entry if it is not that one"
+)
 
 
-async def test_a_no_auth_connectors_own_entry_left_behind_is_told_to_save_its_services(monkeypatch, acme):
+@pytest.mark.parametrize("title", ["acme_mail_work", "acme_mail_home", "mine"])
+async def test_a_refused_entry_is_told_both_repairs_whatever_its_title(monkeypatch, acme, title):
+    resolver = _Resolver(monkeypatch, initial=ManagedAuth(access_token="secret"))
+    pool = _FakePool([_ok()])
+    with pytest.raises(ConnectorConnectionError) as caught:
+        await _call(_acme_entry(url="https://old.acme.test/mcp/mail", title=title), pool)
+    assert str(caught.value) == (
+        f"MCP entry {title!r} carries the reference of connection {CID} but its url is not the one provider "
+        f"'acme' defines for sub-service 'mail', so no credential is sent to it; {_OAUTH_REPAIR}"
+    )
+    assert resolver.resolves == []
+    assert pool.requests == 0
+
+
+@pytest.mark.parametrize("title", ["httpsvc_main_main", "httpsvc_main_other"])
+async def test_a_refused_no_auth_entry_is_told_to_save_its_services_or_remove_the_reference(monkeypatch, acme, title):
     resolver = _Resolver(monkeypatch, initial=ManagedAuth(headers={"token": "static"}))
     config = TaiMCPConfig(
-        title="httpsvc_main_x",
+        title=title,
         config=MCPConfig(type="http", url="https://old.httpsvc.test/mcp"),
         managed=ConnectorRef(connection_id=CID, provider_id="httpsvc", sub_service="main"),
     )
     pool = _FakePool([_ok()])
-    with pytest.raises(ConnectorConnectionError, match="save the connection's services again"):
+    with pytest.raises(ConnectorConnectionError) as caught:
         await _call(config, pool)
+    assert str(caught.value) == (
+        f"MCP entry {title!r} carries the reference of connection {CID} but its url is not the one provider "
+        f"'httpsvc' defines for sub-service 'main', so no credential is sent to it; {_NO_AUTH_REPAIR}"
+    )
     assert resolver.resolves == []
     assert pool.requests == 0
+
+
+async def test_an_entry_of_an_unregistered_provider_is_told_to_register_it_or_remove_the_reference(monkeypatch, acme):
+    resolver = _Resolver(monkeypatch, initial=ManagedAuth(access_token="secret"))
+    config = TaiMCPConfig(
+        title="ghost_mail_work",
+        config=MCPConfig(type="http", url="https://acme.test/mcp/mail"),
+        managed=ConnectorRef(connection_id=CID, provider_id="ghost", sub_service="mail"),
+    )
+    with pytest.raises(ConnectorConnectionError) as caught:
+        await _call(config, _FakePool([]))
+    assert str(caught.value) == (
+        f"MCP entry 'ghost_mail_work' carries the reference of connection {CID} but provider 'ghost' is not "
+        "registered, so no credential is sent to it; register provider 'ghost' again, or remove the reference "
+        "from this entry"
+    )
+    assert resolver.resolves == []
 
 
 async def test_an_entry_equal_to_the_builders_output_passes(monkeypatch, acme):

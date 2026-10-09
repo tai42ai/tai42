@@ -27,7 +27,7 @@ from typing import Any, NoReturn
 
 import mcp
 from mcp.shared.exceptions import McpError
-from tai42_contract.connectors.models import ALIAS_RE, ConnectorRef
+from tai42_contract.connectors.models import ConnectorRef
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.errors import ClientDisconnectedError
 from tai42_contract.manifest import TaiMCPConfig
@@ -49,7 +49,6 @@ from tai42_skeleton.connectors.runtime.resolver import (
     note_scopes_wanted,
     resolve_managed_auth,
 )
-from tai42_skeleton.connectors.service.manifest_writer import managed_title
 from tai42_skeleton.connectors.settings import connector_adapter_settings
 from tai42_skeleton.manifest.transport import detect_transport
 from tai42_skeleton.settings.mcp_settings import mcp_dispatch_settings
@@ -142,12 +141,6 @@ def __getattr__(name: str) -> object:
 # -- The provider's own server -------------------------------------------------
 
 
-def _builder_title(config: TaiMCPConfig, ref: ConnectorRef) -> bool:
-    """Whether ``config``'s title has the shape the managed-entry builder gives ``ref``'s sub-service."""
-    prefix = managed_title(ref.provider_id, ref.sub_service, "")
-    return config.title.startswith(prefix) and ALIAS_RE.match(config.title[len(prefix) :]) is not None
-
-
 def require_own_server(config: TaiMCPConfig) -> ProviderDescriptor | None:
     """Refuse a managed entry whose ``url`` is not its provider's own server, before any credential is touched.
 
@@ -155,7 +148,9 @@ def require_own_server(config: TaiMCPConfig) -> ProviderDescriptor | None:
     managed, or not talking to a ``url``: a stdio entry's token goes to a process launched from the
     entry's own command). The descriptor comes from the registry generation in force where this runs.
     A refusal is logged at ERROR and raised as :class:`ConnectorConnectionError`, whose message names
-    the entry and the connection and says what to do.
+    the entry and the connection and says both repairs: rewriting the entry the connector wrote for the
+    connection, or removing the reference from any other entry. Which entry the connector wrote for the
+    connection is on the connection record, which this check never reads.
     """
     ref = config.managed
     if ref is None or detect_transport(config.config) != "http":
@@ -167,16 +162,18 @@ def require_own_server(config: TaiMCPConfig) -> ProviderDescriptor | None:
     reason = own_server_refusal(config, descriptor)
     if reason is None:
         return descriptor
-    entry = f"MCP entry {config.title!r} carries the reference of connection {ref.connection_id} but {reason}"
-    if not _builder_title(config, ref):
-        message = (
-            f"{entry}; this entry is not the connector's own, and a connector's credential is sent only to the "
-            "connector's server: remove the reference from the entry"
-        )
-    elif descriptor is not None and descriptor.kind == "none":
-        message = f"{entry}; the connector's own entry fell behind its provider: save the connection's services again"
+    if descriptor is None:
+        repair = f"register provider {ref.provider_id!r} again, or remove the reference from this entry"
     else:
-        message = f"{entry}; the connector's own entry fell behind its provider: reconnect the account"
+        rewrite = "save the connection's services again" if descriptor.kind == "none" else "reconnect the account"
+        repair = (
+            f"{rewrite} to rewrite the entry the connector wrote for that connection, "
+            "or remove the reference from this entry if it is not that one"
+        )
+    message = (
+        f"MCP entry {config.title!r} carries the reference of connection {ref.connection_id} but {reason}, "
+        f"so no credential is sent to it; {repair}"
+    )
     logger.error("connectors: %s", message)
     raise ConnectorConnectionError(message, connection_id=ref.connection_id)
 
