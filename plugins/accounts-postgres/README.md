@@ -43,7 +43,9 @@ migration chain:
 
 - `accounts_users` — one row per human user: the opaque, stable `user_id`
   (`usr-…`), the normalized email, the argon2id password hash (NULL until an
-  invite is accepted), the role-template name, and the disabled flag.
+  invite is accepted), and the disabled flag. A member's role is not stored here:
+  it is the role the person's platform principal holds, read through
+  `AccountsAdminServices.principal_roles`.
 - `accounts_sessions` — one row per live login: the SHA-256 hash of the
   `tai-sess-…` token (the raw token is never stored), with sliding-idle
   (`last_seen_at`) and absolute (`absolute_expires_at`) expiry.
@@ -56,7 +58,10 @@ namespaced per deployment.
 The plugin NEVER touches the skeleton's `access_control_policies` /
 `access_control_routes` tables or any `ac:*` Redis key directly — all policy and
 role writes go through the injected `AccountsAdminServices`
-(`apply_role` / `remove_policy` / `set_user_disabled`).
+(`apply_role` / `remove_policy` / `set_user_disabled`), and role reads through its
+`principal_roles`. The last-admin rule is the platform's: those services refuse a
+change that would leave no enabled admin principal (any admin principal counts, not
+only accounts), and the member actions surface the refusal as a `409`.
 
 ## HTTP surface
 
@@ -119,9 +124,11 @@ ships no first-owner route of its own.
 > `pg_db` must set distinct `TAI_ACCOUNTS_REDIS_KEY_PREFIX` values, or they will
 > cross-read each other's rate-limit counters.
 
-> **Proxies:** the per-IP throttle reads the direct peer — there is no
-> `X-Forwarded-For` parsing. A deployment behind a shared proxy must throttle at
-> its ingress, or all callers collapse to one throttled IP.
+> **Proxies:** the per-IP throttle keys on the platform's client resolver: the
+> direct peer unless the deployment declares its proxies
+> (`TAI_RATE_LIMIT_TRUSTED_PROXIES` / `TAI_RATE_LIMIT_TRUSTED_HOPS`), in which case
+> the forwarded client; an IPv6 client counts by its `/64`. Behind a proxy with no
+> declared trust, all callers collapse to one throttled address.
 
 ## Schema migrations + startup guard
 
@@ -177,7 +184,7 @@ ACCESS_CONTROL_AUTH_PROVIDERS=["accounts-postgres","redis"]
   verify on unknown email) so timing does not enumerate users.
 - **Failures-only rate limiting:** a correct password is never blocked — only a
   failed attempt records against the per-account and per-IP counters (the per-IP
-  dimension reads the direct peer; proxied deployments throttle at ingress). The
+  dimension keys on the platform's client resolver under the declared proxy trust). The
   argon2 verify is additionally bounded by a concurrency semaphore that sheds
   with a 503 under a hash flood. Redis being down fails the throttle CLOSED.
 - **No-email invites:** the plugin returns an origin-relative `login_path` for the

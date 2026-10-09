@@ -60,6 +60,18 @@ same ``user_id`` fails closed. Authorization anchor, never a display field.
 """
 
 
+DISABLED_CLAIM = "disabled"
+"""``policy_data`` claim projecting a principal's ``disabled`` state onto its own policy row.
+
+``True`` while the principal is disabled, absent otherwise. The principal record's
+``disabled`` field is the authority; this claim is its enforcement projection, so the
+per-request policy read denies a disabled principal (and every key it owns) without a
+second lookup. Written only by the application's disabled writer, in the same transaction
+as the principal record — never by a key mint, which refuses it, nor by a policy edit or a
+rollback, which carry the stored value forward. Authorization anchor, never policy content.
+"""
+
+
 class IdentityProvider(ABC):
     """Validates an opaque token and returns the caller's identity."""
 

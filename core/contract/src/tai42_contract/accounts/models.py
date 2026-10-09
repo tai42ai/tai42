@@ -22,6 +22,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tai42_contract.template import TemplatedText
 
+# A member's platform role name, or ``None`` when the principal's policy was not written
+# from a role template.
+_RoleName = Annotated[str, Field(min_length=1)] | None
+
 _ROUTE_PATH_CHARS = re.compile(r"\A[A-Za-z0-9._~/%-]*\Z")
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 
@@ -215,7 +219,8 @@ class MemberEntry(BaseModel):
     ``id`` is the provider's stable handle for the person — the id its own actions act on.
     ``email`` is the sign-in identity the provider holds for them. ``role`` names the
     platform role the person holds; only the name rides here, the role's definition is read
-    from the role listing. ``created_at`` is timezone-aware (UTC).
+    from the role listing. ``None`` — the principal's policy was not written from a role
+    template. ``created_at`` is timezone-aware (UTC).
 
     ``principal_ids`` are the platform principal id(s) this person holds (at least one — a
     person with none is an invitation, not a member); the Members operation joins them
@@ -228,7 +233,7 @@ class MemberEntry(BaseModel):
 
     id: str = Field(min_length=1)
     email: str = Field(min_length=1)
-    role: str = Field(min_length=1)
+    role: _RoleName
     created_at: datetime
     principal_ids: list[str] = Field(min_length=1)
     actions: list[str] = Field(default_factory=list)
@@ -246,7 +251,8 @@ class InviteEntry(BaseModel):
 
     ``id`` is the provider's stable handle for the invited person — the id its own actions
     act on. ``email`` is the invited address; ``role`` names the platform role the person
-    will hold (only the name, as on :class:`MemberEntry`). ``created_at`` and
+    will hold (only the name, as on :class:`MemberEntry`; ``None`` — the principal's policy
+    was not written from a role template). ``created_at`` and
     ``expires_at`` are timezone-aware (UTC). ``actions`` are the provider's OWN
     member-action ids applicable to this row. An invitation holds no principal yet, so it
     carries no ``principal_ids``.
@@ -256,7 +262,7 @@ class InviteEntry(BaseModel):
 
     id: str = Field(min_length=1)
     email: str = Field(min_length=1)
-    role: str = Field(min_length=1)
+    role: _RoleName
     created_at: datetime
     expires_at: datetime
     actions: list[str] = Field(default_factory=list)
@@ -306,14 +312,15 @@ class MemberRow(BaseModel):
     joins and echoes both, never parses them. ``principals`` carries each principal's
     joined state; ``disabled`` is derived True only when EVERY principal is disabled, so a
     person with any enabled principal still reads active while the per-principal truth
-    stays visible. ``role`` is provider-sourced.
+    stays visible. ``role`` is provider-sourced; ``None`` — the principal's policy was not
+    written from a role template.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     email: str = Field(min_length=1)
-    role: str = Field(min_length=1)
+    role: _RoleName
     created_at: datetime
     principals: list[MemberPrincipalState]
     disabled: bool
@@ -325,15 +332,15 @@ class InviteRow(BaseModel):
     """An invite row in the aggregated directory the Members door returns.
 
     Display fields plus the opaque routing tokens. An invitation holds no principal, so it
-    carries no principal state; ``role`` is provider-sourced, correct while no principal
-    exists yet.
+    carries no principal state; ``role`` is provider-sourced; ``None`` — the principal's
+    policy was not written from a role template.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     email: str = Field(min_length=1)
-    role: str = Field(min_length=1)
+    role: _RoleName
     created_at: datetime
     expires_at: datetime
     handle: str = Field(min_length=1)

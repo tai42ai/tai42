@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.setup import SetupRequest
+from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -26,16 +27,14 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations.setup import setup_deployment as _setup_deployment_op
 
 
-def _client_ip(request: Request) -> str:
-    # The direct peer — no X-Forwarded-For parsing, so the throttle keys on the
-    # connection the platform actually sees.
-    return request.client.host if request.client else "unknown"
-
-
 async def _extract_setup(request: Request) -> dict:
-    """Validate the body at the HTTP edge and add the caller IP the throttle keys on.
+    """Validate the body at the HTTP edge and add the client bucket the throttle keys on.
 
-    Owns the parse (so the operation stays request-free yet can read the IP): a malformed
+    The bucket is the kit's: the direct peer unless the deployment declares its proxies
+    (``TAI_RATE_LIMIT_TRUSTED_PROXIES`` / ``TAI_RATE_LIMIT_TRUSTED_HOPS``), in which case the
+    forwarded client; an IPv6 client is bucketed by its /64.
+
+    Owns the parse (so the operation stays request-free yet can read the client bucket): a malformed
     body is a 400 and a schema-invalid one a 422, before any token or initialize work runs.
     """
     try:
@@ -53,7 +52,9 @@ async def _extract_setup(request: Request) -> dict:
         "key_user_id": parsed.key_user_id,
         "key_description": parsed.key_description,
         "login": parsed.login,
-        "client_ip": _client_ip(request),
+        "client_ip": client_bucket(
+            request.client.host if request.client else None, request.headers.get(XFF_HEADER, "")
+        ),
     }
 
 

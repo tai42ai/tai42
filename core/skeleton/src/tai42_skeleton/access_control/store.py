@@ -38,9 +38,10 @@ RAW reads this store exposes; the store does no caching of its own.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
+from tai42_contract.access_control import DISABLED_CLAIM, KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient, read_connection
 from tai42_kit.db import component_store_settings
@@ -65,11 +66,48 @@ def _canonical_url(url: str) -> str:
     return canonicalize_path(url)
 
 
-# The server-owned, immutable ``policy_data`` anchors a client may never write or strip:
-# the per-mint key fingerprint (a binding's identity) and the owner claim (a key belongs
-# to a principal for its whole life). An edit or rollback drops any incoming value and
-# carries the stored one forward; a row that was never minted carries neither.
-_SERVER_OWNED_POLICY_CLAIMS = (KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM)
+# The server-owned ``policy_data`` anchors a client may never write or strip: the per-mint
+# key fingerprint (a binding's identity), the owner claim (a key belongs to a principal for
+# its whole life) and the ``disabled`` projection (written only by the principal's disabled
+# writer). An edit or rollback drops any incoming value and carries the stored one forward,
+# and an edit whose ``disabled`` value is not the stored state is refused
+# (:func:`_refuse_disabled_change`); the key mint stamps the fingerprint and the owner itself
+# and refuses a supplied ``disabled`` (:func:`refuse_disabled_claim_at_mint`). A row that was
+# never minted carries no fingerprint or owner, and an enabled principal's row carries no
+# ``disabled`` claim.
+_SERVER_OWNED_POLICY_CLAIMS = (KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM, DISABLED_CLAIM)
+
+# The refusal of a policy edit whose ``disabled`` claim differs from the stored state.
+DISABLED_NOT_POLICY_CONTENT_MESSAGE = (
+    "'disabled' is not policy content: a principal is disabled or re-enabled through the principals door "
+    "(or its accounts provider's member action) and an API key is revoked; nothing was written"
+)
+
+
+def _refuse_disabled_change(new_policy_data: dict[str, Any], stored_policy_data: dict[str, Any]) -> None:
+    """Raise ``ValueError`` when an edit's ``disabled`` claim is not exactly the stored state.
+
+    The stored state is the boolean ``stored_policy_data.get("disabled") is True``. An absent
+    claim, or the boolean equal to that state (a client round-tripping the body it read), is
+    accepted; the stored value is then carried by :func:`_carry_server_owned_claims`. Any other
+    value — the opposite boolean or a non-boolean such as ``"true"`` or ``1`` — is refused.
+    """
+    if DISABLED_CLAIM not in new_policy_data:
+        return
+    value = new_policy_data[DISABLED_CLAIM]
+    if not isinstance(value, bool) or value != (stored_policy_data.get(DISABLED_CLAIM) is True):
+        raise ValueError(DISABLED_NOT_POLICY_CONTENT_MESSAGE)
+
+
+def refuse_disabled_claim_at_mint(policy_data: Mapping[str, Any]) -> None:
+    """Raise ``ValueError`` when a key mint's ``policy_data`` carries a ``disabled`` claim.
+
+    A minted key starts with no ``disabled`` state and only the principal's disabled writer
+    projects one, so the mint refuses any supplied value, as an edit refuses one that is not
+    the stored state.
+    """
+    if DISABLED_CLAIM in policy_data:
+        raise ValueError(DISABLED_NOT_POLICY_CONTENT_MESSAGE)
 
 
 def _carry_server_owned_claims(new_policy_data: dict[str, Any], stored_policy_data: dict[str, Any]) -> dict[str, Any]:
@@ -82,7 +120,7 @@ def _carry_server_owned_claims(new_policy_data: dict[str, Any], stored_policy_da
     return new_policy_data
 
 
-def _policy_body(row: tuple[Any, ...]) -> dict[str, Any]:
+def policy_body_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
     """Assemble the canonical policy body from a ``_POLICY_COLUMNS`` row.
 
     ``condition`` is the stored templated-text document (``{content|id, kwargs}``) or
@@ -193,8 +231,13 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         value, not a scope). Any prior binding for ``url`` — its scope AND its
         pattern — is replaced by the upsert, so a re-point, a pattern change, and a
         pattern drop all leave exactly what this call writes. The url is stored in its
-        canonical form; the ``pattern`` regex is stored verbatim.
+        canonical form; the ``pattern`` regex is stored verbatim. The universal grant
+        ``"*"`` is not a route scope: removing such a route's last url would cascade
+        ``"*"`` out of every admin's grant, so mapping a url to it raises ``ValueError``
+        with nothing written.
         """
+        if scope_id == UNIVERSAL_SCOPE:
+            raise ValueError(f"{scope_id!r} is the universal grant, not a route scope")
         url = _canonical_url(url)
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -337,12 +380,16 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         absent, so the caller 404s; a scope with token references but no url mapping
         still strips those references, so the count is non-zero and the caller treats
         it as found), and, for each token the cascade rewrote, the exact committed
-        body. The public marker names no scope, so removing it raises ``ValueError``.
-        All of it commits as one transaction.
+        body. The public marker names no scope, so removing it raises ``ValueError``. The
+        universal grant ``"*"`` is not a route scope either: stripping it would take every
+        admin and every role holder's grant at once, so removing it raises ``ValueError``
+        with nothing written. All of it commits as one transaction.
         """
         public = self._settings().public_resource_id
         if scope_id == public:
             raise ValueError(f"{scope_id!r} is the public marker, not a removable scope")
+        if scope_id == UNIVERSAL_SCOPE:
+            raise ValueError(f"{scope_id!r} is the universal grant, not a removable scope")
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -372,7 +419,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
             (scope_id, scope_id),
         )
         rows = await cur.fetchall()
-        return [(user_id, _policy_body(tuple(policy_cols))) for user_id, *policy_cols in rows]
+        return [(user_id, policy_body_from_row(tuple(policy_cols))) for user_id, *policy_cols in rows]
 
     # -- policy reads / writes -----------------------------------------------
 
@@ -391,7 +438,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
                 (user_id,),
             )
             row = await cur.fetchone()
-        return _policy_body(row) if row is not None else None
+        return policy_body_from_row(row) if row is not None else None
 
     async def count_policies_with_role(self, role_name: str, pointer_key: str) -> int:
         """How many enforced policies currently point at role ``role_name``.
@@ -435,7 +482,7 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
                 (KEY_FINGERPRINT_CLAIM,),
             )
             rows = await cur.fetchall()
-        return [(row[0], _policy_body(row[1:])) for row in rows]
+        return [(row[0], policy_body_from_row(row[1:])) for row in rows]
 
     async def create_policy(
         self,
@@ -493,30 +540,10 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
-                if updates.get("scopes"):
-                    await self._lock_and_validate_scopes(cur, updates["scopes"])
-                await cur.execute(
-                    f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",  # noqa: S608 query built from constant, code-defined identifiers, not user input
-                    (user_id,),
-                )
-                row = await cur.fetchone()
-                if row is None:
+                body = await resolve_policy_update(self, cur, user_id, updates)
+                if body is None:
                     return None
-                body = _policy_body(row)
-                if "scopes" in updates:
-                    body["scopes"] = updates["scopes"]
-                if "policy_data" in updates:
-                    # An edit rewrites policy_data wholesale, but the server-owned anchors
-                    # (the per-mint fingerprint and the owner claim) are immutable: a client
-                    # can never write or strip them, and a hook bound to an edited (not
-                    # reminted) key keeps resolving. A never-minted row carries neither.
-                    new_policy_data = _carry_server_owned_claims(
-                        dict(updates["policy_data"] or {}), body["policy_data"]
-                    )
-                    body["policy_data"] = new_policy_data
-                if "condition" in updates:
-                    body["condition"] = updates["condition"]
-                await self._write_policy_body(cur, user_id, body)
+                await write_policy_body(cur, user_id, body)
             return body
 
     async def restore_policy_body(self, user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
@@ -529,32 +556,24 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
         must restore verbatim even if a scope's route was removed afterwards (such a
         scope is inert at enforcement).
 
-        The server-owned anchors — the per-mint key fingerprint and the owner claim — are
-        the fields a rollback does NOT restore from history: they are the live key's
-        identity and ownership, not policy content. The live-stored values are forced onto
-        the restored ``policy_data`` (restoring a historical fingerprint would revive a hook
-        bound to a revoked key; the owner is immutable for the key's whole life). A
-        never-minted row has neither to preserve. Committed in one transaction.
+        The server-owned anchors — the per-mint key fingerprint, the owner claim and the
+        ``disabled`` projection — are the fields a rollback does NOT restore from history:
+        they are the live key's identity, its ownership and its principal's enabled state,
+        not policy content. The live-stored values are forced onto the restored
+        ``policy_data`` (restoring a historical fingerprint would revive a hook bound to a
+        revoked key; the owner is immutable for the key's whole life; a principal is
+        disabled or re-enabled only by its disabled writer). A never-minted row has no
+        fingerprint or owner to preserve. Committed in one transaction.
         """
-        resolved = {
-            "scopes": list(body.get("scopes") or []),
-            "policy_data": dict(body.get("policy_data") or {}),
-            "condition": body.get("condition"),
-        }
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
-                await cur.execute(
-                    f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",  # noqa: S608 query built from constant, code-defined identifiers, not user input
-                    (user_id,),
-                )
-                row = await cur.fetchone()
-                if row is None:
+                resolved = await resolve_policy_restore(cur, user_id, body)
+                if resolved is None:
                     return None
-                _carry_server_owned_claims(resolved["policy_data"], _policy_body(row)["policy_data"])
-                await self._write_policy_body(cur, user_id, resolved)
+                await write_policy_body(cur, user_id, resolved)
             return resolved
 
     async def delete_policy(self, user_id: str) -> bool:
@@ -605,16 +624,73 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
             if scope not in live:
                 raise ValueError(f"scope {scope!r} does not exist or has no urls assigned")
 
-    async def _write_policy_body(self, cur: Any, user_id: str, body: dict[str, Any]) -> None:
-        await cur.execute(
-            "UPDATE access_control_policies SET scopes = %s, policy_data = %s, condition = %s WHERE user_id = %s",
-            (
-                body["scopes"],
-                Json(body["policy_data"]),
-                Json(body["condition"]),
-                user_id,
-            ),
-        )
+
+async def write_policy_body(cur: Any, user_id: str, body: dict[str, Any]) -> None:
+    """Overwrite ``user_id``'s policy row with ``body`` on the caller's cursor (no row, no write)."""
+    await cur.execute(
+        "UPDATE access_control_policies SET scopes = %s, policy_data = %s, condition = %s WHERE user_id = %s",
+        (
+            body["scopes"],
+            Json(body["policy_data"]),
+            Json(body["condition"]),
+            user_id,
+        ),
+    )
+
+
+async def resolve_policy_update(
+    store: PostgresAccessControlStore, cur: Any, user_id: str, updates: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The body a partial policy edit commits, read and locked on ``cur``; ``None`` when no row exists.
+
+    Supplied scopes are validated with their route rows locked ``FOR SHARE``; the row is
+    locked ``FOR UPDATE``. Server-owned claims are carried from the stored row; a supplied
+    ``disabled`` claim that differs from the stored state raises ``ValueError``. Writes nothing.
+    """
+    if updates.get("scopes"):
+        await store._lock_and_validate_scopes(cur, updates["scopes"])
+    await cur.execute(
+        f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",  # noqa: S608 query built from constant, code-defined identifiers, not user input
+        (user_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    body = policy_body_from_row(row)
+    if "scopes" in updates:
+        body["scopes"] = updates["scopes"]
+    if "policy_data" in updates:
+        # An edit rewrites policy_data wholesale, but the server-owned anchors (the per-mint
+        # fingerprint, the owner claim and the disabled projection) are carried from the
+        # stored row: a client can never write or strip them, a hook bound to an edited (not
+        # reminted) key keeps resolving, and the principal's enabled state never changes.
+        new_policy_data = dict(updates["policy_data"] or {})
+        _refuse_disabled_change(new_policy_data, body["policy_data"])
+        body["policy_data"] = _carry_server_owned_claims(new_policy_data, body["policy_data"])
+    if "condition" in updates:
+        body["condition"] = updates["condition"]
+    return body
+
+
+async def resolve_policy_restore(cur: Any, user_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+    """The body a rollback commits, with the live server-owned claims forced on; ``None`` when no row exists.
+
+    The row is locked ``FOR UPDATE`` on ``cur``. Writes nothing.
+    """
+    resolved = {
+        "scopes": list(body.get("scopes") or []),
+        "policy_data": dict(body.get("policy_data") or {}),
+        "condition": body.get("condition"),
+    }
+    await cur.execute(
+        f"SELECT {_POLICY_COLUMNS} FROM access_control_policies WHERE user_id = %s FOR UPDATE",  # noqa: S608 query built from constant, code-defined identifiers, not user input
+        (user_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    _carry_server_owned_claims(resolved["policy_data"], policy_body_from_row(row)["policy_data"])
+    return resolved
 
 
 def access_control_store() -> PostgresAccessControlStore:

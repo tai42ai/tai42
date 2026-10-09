@@ -34,10 +34,6 @@ logger = logging.getLogger(__name__)
 SESSION_TOKEN_PREFIX = "tai-sess-"  # noqa: S105 constant identifier, not a secret value
 INVITE_TOKEN_PREFIX = "tai-inv-"  # noqa: S105 constant identifier, not a secret value
 
-# ``"admin"`` is a reserved, non-renamable, non-deletable role name, so admin-ness
-# is exactly ``role == "admin"`` — the basis the last-admin guard keys on.
-ADMIN_ROLE = "admin"
-
 # Minimum password length (no composition rules — NIST 800-63B stance).
 PASSWORD_MIN_LENGTH = 10
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -48,15 +49,39 @@ class AccountsAdminServices(Protocol):
         ...
 
     async def apply_role(self, user_id: str, role: str) -> None:
-        """Copy the named role template into the principal's enforced policy."""
+        """Copy the named role template into the principal's enforced policy.
+
+        Guarded: raises :class:`~tai42_contract.accounts.errors.LastAdminError` (nothing
+        written) when the principal is the last enabled admin and ``role`` is not an
+        allow-all role. Raises ``KeyError`` on an unknown role.
+        """
         ...
 
     async def remove_policy(self, user_id: str) -> None:
-        """Delete the principal's enforced policy and row (and revoke keys it owned)."""
+        """Delete the principal's enforced policy and row (and revoke keys it owned).
+
+        Guarded: raises :class:`~tai42_contract.accounts.errors.LastAdminError` (nothing
+        written) when the principal is the last enabled admin. Raises ``KeyError`` when the
+        principal or its policy is absent.
+        """
         ...
 
     async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
-        """Set/clear the disabled marker on the principal."""
+        """Set/clear the disabled marker on the principal.
+
+        Guarded for ``disabled=True``: raises
+        :class:`~tai42_contract.accounts.errors.LastAdminError` (nothing written) when the
+        principal is the last enabled admin. Raises ``KeyError`` when no principal exists.
+        """
+        ...
+
+    async def principal_roles(self, user_ids: Sequence[str]) -> Mapping[str, str | None]:
+        """The role each principal holds.
+
+        The reserved admin role name when its own policy is admin-shaped, else its role
+        pointer, else ``None`` (a policy not written from a role template). A user id with no
+        principal is absent from the mapping.
+        """
         ...
 
 
@@ -176,8 +201,7 @@ class LoginAttachingProvider(AccountsProvider):
     Ownership of a principal's disable/delete follows the login: the principals
     door asks every registered attaching provider :meth:`has_login`, and a
     principal some provider claims is managed through that provider's users door
-    (which cleans its login row and runs its own guard), never the principals
-    door.
+    (which cleans its login row), never the principals door.
     """
 
     @abstractmethod

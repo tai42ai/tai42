@@ -21,6 +21,7 @@ from typing import Any, ClassVar
 import psycopg
 import pytest
 from starlette.requests import Request
+from tai42_contract.accounts.errors import LastAdminError
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
@@ -78,13 +79,19 @@ class _FakeLifecycle:
 class _FakeAccounts:
     """The ``tai42_app.accounts`` facet: resolves the current epoch's recorded provider
     instance by name (``wire`` records ``accounts-postgres`` here), so the routes'
-    ``service.provider_settings`` resolution finds the provider under test."""
+    ``service.provider_settings`` resolution finds the provider under test, and answers
+    the credential the gate verified (``verified``, set by a test through
+    :func:`gate_verified`)."""
 
     def __init__(self) -> None:
         self.providers: dict[str, object] = {}
+        self.verified: str | None = None
 
     def active_provider(self, name: str) -> object:
         return self.providers.get(name)
+
+    def authenticated_credential(self, request: object) -> str | None:
+        return self.verified
 
 
 class _FakeApp:
@@ -99,6 +106,11 @@ _fake_app = _FakeApp()
 from tai42_contract.app import tai42_app  # noqa: E402
 
 tai42_app.bind(_fake_app)
+
+
+def gate_verified(credential: str | None) -> None:
+    """Declare ``credential`` the one the access-control gate verified for the next requests."""
+    _fake_app.accounts.verified = credential
 
 
 def record_provider_settings(settings: object) -> None:
@@ -279,58 +291,11 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-class _FakeAdminGuard:
-    """Mirrors ``_AdminGuard``: the last-admin count and mutation over the same
-    in-memory rows, as one 'transaction' the guard hook can race."""
-
-    def __init__(self, store: FakeUsersStore) -> None:
-        self._store = store
-
-    async def read_target(self, user_id: str) -> dict[str, Any] | None:
-        row = self._store.rows.get(user_id)
-        return None if row is None else {"role": row["role"], "disabled": row["disabled"]}
-
-    async def count_other_enabled_admins(self, user_id: str) -> int:
-        return sum(
-            1 for uid, r in self._store.rows.items() if uid != user_id and r["role"] == "admin" and not r["disabled"]
-        )
-
-    async def set_disabled(self, user_id: str, disabled: bool) -> None:
-        self._store.rows[user_id]["disabled"] = disabled
-
-    async def set_role(self, user_id: str, role: str) -> None:
-        self._store.rows[user_id]["role"] = role
-
-    async def delete(self, user_id: str) -> None:
-        self._store.rows.pop(user_id, None)
-
-    async def delete_sessions_for_user(self, user_id: str) -> None:
-        # Delegate to the wired sessions store so the same rows disappear.
-        from tai42_accounts_postgres import service
-
-        await service.sessions_store().delete_for_user(user_id)
-
-    async def delete_invites_for_user(self, user_id: str) -> None:
-        from tai42_accounts_postgres import service
-
-        await service.invites_store().delete_for_user(user_id)
-
-
 class FakeUsersStore:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
-        # Fires once on guarded-txn "lock acquire" to simulate a concurrent removal
-        # committing before this one re-counts.
-        self.admin_guard_hook: Any = None
 
-    @asynccontextmanager
-    async def admin_guard_txn(self):
-        if self.admin_guard_hook is not None:
-            hook, self.admin_guard_hook = self.admin_guard_hook, None
-            hook(self)
-        yield _FakeAdminGuard(self)
-
-    async def create_login(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> None:
+    async def create_login(self, user_id: str, email: str, password_hash: str | None = None) -> None:
         from tai42_accounts_postgres.stores import EmailTakenError, LoginExistsError
 
         if any(r["email"] == email for r in self.rows.values()):
@@ -341,7 +306,6 @@ class FakeUsersStore:
             "user_id": user_id,
             "email": email,
             "password_hash": password_hash,
-            "role": role,
             "disabled": False,
             "created_at": _now(),
         }
@@ -361,7 +325,6 @@ class FakeUsersStore:
             {
                 "user_id": r["user_id"],
                 "email": r["email"],
-                "role": r["role"],
                 "disabled": r["disabled"],
                 "created_at": r["created_at"],
                 "pending_invite": r["password_hash"] is None,
@@ -372,17 +335,11 @@ class FakeUsersStore:
     async def set_password_hash(self, user_id: str, password_hash: str) -> None:
         self.rows[user_id]["password_hash"] = password_hash
 
-    async def set_role(self, user_id: str, role: str) -> None:
-        self.rows[user_id]["role"] = role
-
     async def set_disabled(self, user_id: str, disabled: bool) -> None:
         self.rows[user_id]["disabled"] = disabled
 
     async def delete(self, user_id: str) -> None:
         self.rows.pop(user_id, None)
-
-    async def count_other_enabled_admins(self, user_id: str) -> int:
-        return sum(1 for uid, r in self.rows.items() if uid != user_id and r["role"] == "admin" and not r["disabled"])
 
 
 class FakeSessionsStore:
@@ -407,7 +364,6 @@ class FakeSessionsStore:
         return {
             "user_id": row["user_id"],
             "email": user["email"],
-            "role": user["role"],
             "disabled": user["disabled"],
             "last_seen_at": row["last_seen_at"],
             "absolute_expires_at": row["absolute_expires_at"],
@@ -461,7 +417,6 @@ class FakeInvitesStore:
                 {
                     "user_id": user["user_id"],
                     "email": user["email"],
-                    "role": user["role"],
                     "created_at": user["created_at"],
                     "expires_at": row["expires_at"],
                 }
@@ -471,18 +426,29 @@ class FakeInvitesStore:
 
 @dataclass
 class FakeAdminServices:
-    """Records the injected policy-service calls; can be told to fail role application.
+    """The platform's admin services as the plugin sees them: principals, roles and the last-admin rule.
 
-    ``known_roles`` mirrors the real role application: a role name outside it raises
-    ``KeyError`` before writing any policy. ``None`` accepts every name. Both
-    ``create_principal`` (which creates the principal AND applies its role) and the
-    standalone ``apply_role`` honour ``known_roles`` / ``fail_apply_role`` so a role
-    failure is exercised the same way through either seam.
+    Records every call. ``roles`` holds each principal's role (``create_principal`` and
+    ``apply_role`` write it, ``remove_policy`` drops it) and ``disabled`` the disabled
+    principals; ``principal_roles`` answers from ``roles``. The last-admin rule is the
+    platform's: a demotion, a disable or a removal of the last enabled ``admin`` raises
+    ``LastAdminError`` with nothing written. ``known_roles`` mirrors role application: a
+    name outside it raises ``KeyError`` before writing. ``None`` accepts every name.
+    ``fail_apply_role`` fails role application with a store fault.
     """
 
     calls: list[tuple[Any, ...]] = field(default_factory=list)
     fail_apply_role: bool = False
     known_roles: set[str] | None = None
+    roles: dict[str, str | None] = field(default_factory=dict)
+    disabled: set[str] = field(default_factory=set)
+
+    def _refuse_if_last_admin(self, user_id: str) -> None:
+        if self.roles.get(user_id) != "admin" or user_id in self.disabled:
+            return
+        others = [uid for uid, role in self.roles.items() if uid != user_id and role == "admin"]
+        if not [uid for uid in others if uid not in self.disabled]:
+            raise LastAdminError("the last enabled admin principal cannot be demoted, disabled or deleted")
 
     async def create_principal(
         self,
@@ -498,6 +464,7 @@ class FakeAdminServices:
             raise KeyError(f"unknown role: {role!r}")
         if self.fail_apply_role:
             raise RuntimeError("apply_role boom")
+        self.roles[user_id] = role
 
     async def apply_role(self, user_id: str, role: str) -> None:
         self.calls.append(("apply_role", user_id, role))
@@ -505,12 +472,27 @@ class FakeAdminServices:
             raise KeyError(f"unknown role: {role!r}")
         if self.fail_apply_role:
             raise RuntimeError("apply_role boom")
+        if role != "admin":
+            self._refuse_if_last_admin(user_id)
+        self.roles[user_id] = role
 
     async def remove_policy(self, user_id: str) -> None:
         self.calls.append(("remove_policy", user_id))
+        self._refuse_if_last_admin(user_id)
+        self.roles.pop(user_id, None)
+        self.disabled.discard(user_id)
 
     async def set_user_disabled(self, user_id: str, disabled: bool) -> None:
         self.calls.append(("set_user_disabled", user_id, str(disabled)))
+        if disabled:
+            self._refuse_if_last_admin(user_id)
+            self.disabled.add(user_id)
+        else:
+            self.disabled.discard(user_id)
+
+    async def principal_roles(self, user_ids: Sequence[str]) -> dict[str, str | None]:
+        self.calls.append(("principal_roles", tuple(user_ids)))
+        return {uid: self.roles[uid] for uid in user_ids if uid in self.roles}
 
 
 @dataclass
@@ -590,10 +572,12 @@ def _reset_plugin_state():
     accounts_settings.cache_clear()
     hashing.reset_hash_gate()
     _fake_app.accounts.providers.clear()
+    _fake_app.accounts.verified = None
     yield
     accounts_settings.cache_clear()
     hashing.reset_hash_gate()
     _fake_app.accounts.providers.clear()
+    _fake_app.accounts.verified = None
 
 
 @pytest.fixture(autouse=True)

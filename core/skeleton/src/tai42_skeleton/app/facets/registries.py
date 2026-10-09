@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.extensions.registry import extension_name
 
 from .base import _Facet
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from typing import Any, TypeVar
 
+    from starlette.requests import Request
     from tai42_contract.access_control.identity import IdentityProvider
     from tai42_contract.agent import Agent
     from tai42_contract.backend import Backend
@@ -252,3 +254,15 @@ class AccountsFacet(_Facet):
         # surviving epoch's memoized verifier (the zero-mutation invariant). See
         # ``TaiMCP._live_serving_core``.
         return self._app._live_serving_core.active_auth_providers.get(name)
+
+    def authenticated_credential(self, request: Request) -> str | None:
+        """The raw credential the access-control gate verified for ``request``, or ``None``.
+
+        The gate places a :class:`~tai42_skeleton.access_control.user.TaiUser` carrying the
+        verified token in the request scope; any other scope user (unauthenticated, or
+        access control off) has no verified credential.
+        """
+        user = request.scope.get("user")
+        if isinstance(user, TaiUser):
+            return user.token.token
+        return None

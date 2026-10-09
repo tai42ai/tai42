@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.accounts.errors import LastAdminError
 from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.claim_links import ClaimLinkError
 from tai42_skeleton.access_control.claim_links import create_claim_link as _create_claim_link
-from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    NotSupportedError,
+    operation,
+)
 from tai42_skeleton.operations._authority import owner_of, require_owned_by_caller
 from tai42_skeleton.operations.response_models_group_a import (
     ApiKeyCreateResult,
@@ -124,7 +132,7 @@ async def create_api_key(
     summary="Edit an api key",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=ApiKeyEdit,
     response_model=UserUpdateAck,
 )
@@ -145,17 +153,29 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     # check needs it).
     await ownership._authorize_key_edit(caller, user_id, updates)
 
-    try:
-        updated = await management.edit_user_payload(user_id=user_id, **updates)
-    except ValueError as exc:
-        raise BadRequestError(str(exc)) from exc
-    if not updated:
-        raise NotFoundError(f"user not found: {user_id!r}")
+    updated = await _edit_key_policy(user_id, **updates)
     # Store-first: the edit has landed in the enforced store (which invalidated the policy
     # cache) and returned the exact committed body; record it as a new PG version (see
     # ``_record_policy_version``).
     await _pkg._record_policy_version(user_id, updated)
     return {"user_id": user_id, "updated": True}
+
+
+async def _edit_key_policy(user_id: str, **updates: Any) -> dict[str, Any]:
+    """Write a partial key edit to the enforced store; return the committed body.
+
+    An unknown scope is a 400, an edit that would leave no enabled admin principal a 409, and
+    an unprovisioned ``user_id`` a 404.
+    """
+    try:
+        updated = await management.edit_user_payload(user_id=user_id, **updates)
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except LastAdminError as exc:
+        raise ConflictError(str(exc)) from exc
+    if not updated:
+        raise NotFoundError(f"user not found: {user_id!r}")
+    return updated
 
 
 def _reject_add_duplicates(add: list[str]) -> None:
@@ -169,7 +189,7 @@ def _reject_add_duplicates(add: list[str]) -> None:
     summary="Add/remove scopes on an api key",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=KeyScopesModify,
     response_model=ScopesUpdateAck,
 )
@@ -213,12 +233,7 @@ async def modify_api_key_scopes(
     # Store-first, byte-parallel to ``edit_api_key``: the edit lands in the enforced store
     # (invalidating the policy cache) and returns the committed body, then the durable
     # version record (incl. the ``updated`` None → 404 re-check).
-    try:
-        updated = await management.edit_user_payload(user_id=user_id, scopes=new)
-    except ValueError as exc:
-        raise BadRequestError(str(exc)) from exc
-    if not updated:
-        raise NotFoundError(f"user not found: {user_id!r}")
+    updated = await _edit_key_policy(user_id, scopes=new)
     await _pkg._record_policy_version(user_id, updated)
     return {"user_id": user_id, "updated": True, "scopes": new}
 

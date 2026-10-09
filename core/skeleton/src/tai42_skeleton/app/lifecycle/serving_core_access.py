@@ -1,8 +1,11 @@
 """Read/write the live epoch's serving core through the per-epoch forwarding accessors."""
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
+from tai42_contract.access_control.identity import IdentityProvider
 
 from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none
 from tai42_skeleton.app.lifecycle.state import LifecycleState
@@ -88,6 +91,24 @@ class ServingCoreAccessMixin(LifecycleState):
         if self._building is not None:
             return self._building
         raise RuntimeError("the live epoch has no serving core installed")
+
+    # -- recorded auth providers -------------------------------------------------
+
+    def record_auth_provider(self, name: str, provider: IdentityProvider) -> None:
+        """Record the identity provider instantiated for ``name`` on the serving core.
+
+        Written to the core under construction during a build (else the live one), so a
+        failed build's providers are discarded with its core.
+        """
+        self._serving_core.active_auth_providers[name] = provider
+
+    def recorded_auth_providers(self) -> Mapping[str, IdentityProvider]:
+        """The recorded identity providers by name, read-only, building core first.
+
+        A build in flight resolves the epoch being built, else the live one. The view
+        follows later records on the same core.
+        """
+        return MappingProxyType(self._serving_core.active_auth_providers)
 
     # Generation state on the epoch's core, reached read/write through these forwarding
     # properties: ``start()`` and the runtime MCP mutators write the epoch under

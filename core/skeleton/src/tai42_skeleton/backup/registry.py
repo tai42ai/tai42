@@ -42,6 +42,16 @@ class BackupSectionReportError(ValueError):
     """
 
 
+def _empty_report() -> BackupSectionReport:
+    """A zeroed report for a mode-aware section, its ``details`` carrying a ``skipped_existing`` tally.
+
+    ``skipped`` counts per-record REJECTIONS (invalid/unauthorized, each also in
+    ``errors``); ``details["skipped_existing"]`` counts records left untouched under
+    ``skip`` mode — a clean skip, never an error.
+    """
+    return BackupSectionReport(details={"skipped_existing": 0})
+
+
 def current_import_mode() -> BackupMode:
     """The mode of the import in progress, or ``skip`` outside an import."""
     return _import_mode.get()

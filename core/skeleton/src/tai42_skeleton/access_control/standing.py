@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
+from tai42_contract.access_control import DISABLED_CLAIM, KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy, JqAuthContext
 from tai42_contract.template import TemplatedText
 
@@ -104,7 +104,7 @@ async def resolve_standing(
     policy = await enforcer.get_policy_at(user_id, version)
     if policy_is_empty(policy):
         raise StandingDenied(StandingDenyReason.NO_POLICY, principal=user_id, subject=user_id)
-    if policy.policy_data.get("disabled") is True:
+    if policy.policy_data.get(DISABLED_CLAIM) is True:
         raise StandingDenied(StandingDenyReason.DISABLED, principal=user_id, subject=user_id)
     if bound_fingerprint is not None and not _fingerprint_matches(policy, bound_fingerprint):
         raise StandingDenied(StandingDenyReason.FINGERPRINT_MISMATCH, principal=user_id, subject=user_id)
@@ -125,7 +125,7 @@ async def resolve_standing(
     scopes = list(policy.scopes)
     if owner is not None:
         owner_policy = await enforcer.get_policy_at(owner, version)
-        if owner_policy.policy_data.get("disabled") is True:
+        if owner_policy.policy_data.get(DISABLED_CLAIM) is True:
             raise StandingDenied(StandingDenyReason.OWNER_DISABLED, principal=user_id, subject=owner)
         if policy_is_empty(owner_policy):
             raise StandingDenied(StandingDenyReason.OWNER_NO_POLICY, principal=user_id, subject=owner)

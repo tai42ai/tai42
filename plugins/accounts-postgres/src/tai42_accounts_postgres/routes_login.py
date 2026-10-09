@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
 # Arms the accounts backup-section on_startup hook. Homed HERE (a manifest-loaded
 # router module the host imports only post-bind) and NOT in the package __init__ —
@@ -78,9 +79,9 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _client_ip(request: Request) -> str:
-    # The direct peer — no X-Forwarded-For parsing.
-    return request.client.host if request.client else "unknown"
+def _client_bucket(request: Request) -> str:
+    """The throttle bucket of the client behind ``request``, resolved by the kit under the declared proxy trust."""
+    return client_bucket(request.client.host if request.client else None, request.headers.get(XFF_HEADER, ""))
 
 
 def _limiter() -> RateLimiter:
@@ -150,7 +151,7 @@ async def login_password(request: Request) -> Response:
         raise AssertionError
 
     email = service.normalize_email(body.email)
-    ip = _client_ip(request)
+    ip = _client_bucket(request)
     store = service.users_store()
     user = await store.get_by_email(email)
 
@@ -199,7 +200,7 @@ async def login_invite_accept(request: Request) -> Response:
     if body is None:
         raise AssertionError
 
-    ip = _client_ip(request)
+    ip = _client_bucket(request)
     too_short = _password_too_short(body.password)
     if too_short is not None:
         return _error(too_short, 422)

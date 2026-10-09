@@ -27,15 +27,6 @@ def _unauth(stack: TaiStack, port: int) -> ApiClient:
     return ApiClient(stack.origin(port))
 
 
-async def _register_star_scope(admin: ApiClient, uniq: Callable[[str], str]) -> None:
-    """Map a dummy url onto the ``"*"`` scope so it EXISTS for minting.
-
-    A key mint validates every requested scope against the scope→url table; the
-    seeded table carries only ``e2e-all``, so ``"*"`` must be registered before an
-    all-scopes key can be minted through the real provisioning surface."""
-    await admin.post("/api/auth/scopes", json={"scope_id": "*", "url": f"/{uniq('star')}"})
-
-
 async def _invited_session(stack: TaiStack, admin: ApiClient, uniq: Callable[[str], str], role: str) -> tuple[str, str]:
     """Provision a ``role`` user through the admin surface and log it in, returning
     ``(user_id, session_token)`` for that non-admin account."""
@@ -82,8 +73,8 @@ async def test_non_admin_mint_is_capped_to_own_scopes(accounts_stack: TaiStack, 
     assert excess_scope in excess.text, f"the 400 must name the offending scope: {excess.text}"
 
     # Admin is unrestricted: it may mint an admin-owned "*" key with no attenuation (a mint
-    # with no named owner defaults to the admin's own principal).
-    await _register_star_scope(admin, uniq)
+    # with no named owner defaults to the admin's own principal). The universal "*" names
+    # no route, so a mint carries it without any scope→url mapping.
     admin_raw = (
         await admin.post(
             "/api/auth/api-keys",
@@ -115,7 +106,6 @@ async def test_editor_star_key_is_non_admin_on_the_key_surface(
 
     # An editor session mints a condition-free ["*"] key owned by itself. Its ["*"]
     # scope does NOT make it admin — the owner claim classifies it non-admin.
-    await _register_star_scope(admin, uniq)
     _editor_id, editor_session = await _invited_session(stack, admin, uniq, role="editor")
     editor = stack.api(port=stack.port_a).with_token(editor_session)
     star_key_raw = (

@@ -183,7 +183,8 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     invites in its own ``accounts_*`` tables (applied into the e2e template DB, so
     the per-stack clone carries them); ``redis`` keeps ``sk-`` API keys validatable
     on the same deployment. The public ``/api/login`` aggregator + the plugin's
-    login/users routers are mounted, plus the authed ``/api/system/kinds`` door.
+    login/users routers are mounted, plus the authed ``/api/system/kinds`` door and the
+    backup doors (the plugin's ``accounts`` archive restores through them).
     Seeded with a root key (``seed_auth=True``) so a spec can compare key-auth and
     session-auth against one stack. The setup door is mounted (``routers.setup``) behind the
     pinned ``TAI_SETUP_TOKEN``; the deployment is seeded, so the door answers 409 and a
@@ -200,6 +201,7 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
             "tai42_skeleton.routers.members",
             "tai42_skeleton.routers.member_actions",
             "tai42_skeleton.routers.system_kinds",
+            "tai42_skeleton.routers.backup",
             "tai42_accounts_postgres.routes_login",
             "tai42_accounts_postgres.routes_users",
         ],
