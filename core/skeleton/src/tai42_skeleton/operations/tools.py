@@ -52,8 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
-from tai42_contract.app.responses import OpaqueJson
-from tai42_contract.interactions import RunTerminalFailed
+from tai42_contract.interactions import RunAnswer, RunResultAnswer, RunTerminalFailed
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
@@ -62,6 +61,7 @@ from tai42_contract.tools import UndeclaredPauseError
 
 from tai42_skeleton.access_control import user as access_control_user
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.app.bus.ops import ReloadTool, RemoveTool
 from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -82,6 +82,7 @@ from tai42_skeleton.operations.response_models_group_b import (
     ToolsSchemaMap,
     ToolTagListResponse,
 )
+from tai42_skeleton.operations.response_models_group_c import RunAnswerResponse
 from tai42_skeleton.states import api_context
 from tai42_skeleton.tools.attribution import run_attribution
 from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError, find_lone_surrogate
@@ -197,16 +198,16 @@ async def tools_schema() -> dict:
     return {name: _tool_schema(tool) for name, tool in tools.items()}
 
 
-def _run_tool_return(outcome: VisitOutcome) -> Any:
-    """The synchronous door's body for a visit outcome.
+def _run_tool_return(outcome: VisitOutcome) -> RunAnswer:
+    """The synchronous door's body for a visit outcome: the run answer, discriminated on ``kind``.
 
-    A plain result is the tool's own value, its wrapped secrets revealed here for the one live
-    caller; every other kind is the shared park answer (the caller ask entries, the suspended
-    sentinel, or null), which reveals no secret — only this door does.
+    A finished run's value has its wrapped secrets revealed here for the one live caller; every
+    other kind is the shared run answer (the caller ask entries and the sentinel, the sentinel, or
+    nothing), which reveals no secret — only this door does.
     """
     if outcome.kind == "result":
-        return unwrap_secrets(outcome.result)
-    return tai42_app.interactions.park_answer(outcome)
+        return RunResultAnswer(result=unwrap_secrets(outcome.result))
+    return tai42_app.interactions.run_answer(outcome)
 
 
 @operation(
@@ -225,9 +226,9 @@ def _run_tool_return(outcome: VisitOutcome) -> Any:
         OperationFailedError,
     ],
     request_model=RunToolRequest,
-    response_model=OpaqueJson,
+    response_model=RunAnswerResponse,
 )
-async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateSubject | None = None) -> Any:
+async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateSubject | None = None) -> RunAnswer:
     """Execute an arbitrary registered tool with REAL side effects.
 
     Reaching this route is full-execution privilege — the Studio key runs any
@@ -242,8 +243,8 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
 
     The tool starts through the shared :func:`~tai42_skeleton.interactions.visit.visit`, under
     the ``door="api"`` :class:`StateContext` the caller's named ``subject`` deposits: a tool
-    whose async ask parks then indexes under that subject and returns a park receipt rather
-    than raising. A tool that never parks returns its result.
+    whose async ask parks then indexes under that subject and answers ``asks``/``parked`` rather
+    than raising. A tool that never parks answers ``result`` carrying its value.
     """
     # Resolve the name first: an unknown tool is a loud 404 (matching the schema route),
     # told apart from a tool that raises DURING execution. Only the unknown-tool error is
@@ -404,7 +405,7 @@ async def reload_tool(kind: str, name: str, targets: list[str] | None = None) ->
     the kind and name. The response embeds the per-worker fleet report.
     """
     return await broadcast(
-        {"op": "reload_tool", "kind": kind, "name": name},
+        ReloadTool(op="reload_tool", kind=kind, name=name),
         targets,
         lambda: tai42_app.admin.run_tool_reload(kind, "reload", name),
     )
@@ -425,7 +426,7 @@ async def remove_tool(kind: str, name: str, targets: list[str] | None = None) ->
     ``targets``); the response embeds the per-worker fleet report.
     """
     return await broadcast(
-        {"op": "remove_tool", "kind": kind, "name": name},
+        RemoveTool(op="remove_tool", kind=kind, name=name),
         targets,
         lambda: tai42_app.admin.run_tool_reload(kind, "remove", name),
     )

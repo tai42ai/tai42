@@ -12,6 +12,7 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tai42_contract.interactions.caller_ask_landing import CallerAskLanding
+from tai42_contract.interactions.continuation import DeliveryAddress
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FormData,
@@ -102,6 +103,41 @@ def _check_text_payload(payload: dict[str, Any] | None) -> None:
 def _check_no_payload(answer_format: AnswerFormat, payload: dict[str, Any] | None) -> None:
     if payload is not None:
         raise ValueError(f"{answer_format.value} answer_format carries no format_payload")
+
+
+def _check_external_answer_payload(payload: dict[str, Any] | None) -> None:
+    # The answer-check view of an EXTERNAL ask: only the optional ``schema`` the answer is
+    # checked against; the delivery keys (``url``, ``verifier``) are not part of it.
+    if payload is not None:
+        extra = set(payload) - {"schema"}
+        if extra:
+            raise ValueError(
+                f"external answer_format answer payload carries only an optional schema, got extra {sorted(extra)}"
+            )
+
+
+def check_format_payload(answer_format: AnswerFormat, payload: dict[str, Any] | None, *, durable: bool) -> None:
+    """Refuse a ``format_payload`` that does not fit ``answer_format``; raise ``ValueError`` naming the fault.
+
+    ``durable=True`` checks the payload a stored question carries, EXTERNAL's delivery ``url``
+    included; ``durable=False`` checks the answer-check view of a question, where EXTERNAL carries
+    only its optional ``schema``.
+    """
+    if answer_format is AnswerFormat.SELECT:
+        _check_select_payload(payload or {})
+    elif answer_format is AnswerFormat.FORM:
+        _check_form_payload(payload or {})
+    elif answer_format is AnswerFormat.EXTERNAL:
+        if durable:
+            _check_external_payload(payload or {})
+        else:
+            _check_external_answer_payload(payload)
+    elif answer_format is AnswerFormat.TEXT:
+        _check_text_payload(payload)
+    elif answer_format is AnswerFormat.FREE:
+        _check_free_payload(payload)
+    else:
+        _check_no_payload(answer_format, payload)
 
 
 def check_addressing(*, to: str, mode: str, question: str, payload: dict[str, Any] | None, answer_format: str) -> None:
@@ -252,14 +288,14 @@ class InteractionRequest(BaseModel):
     # of this interaction (its resume, kill or give-up). A re-park inherits the lineage of the
     # interaction being resumed. Empty when the run is nested under no chained call.
     chain_keys: list[str] = Field(default_factory=list)
-    # The RUN's durable out-of-band delivery address — the ``(tool, context)`` the door
+    # The RUN's durable out-of-band delivery address — the ``DeliveryAddress`` the door
     # that STARTED the run bound as its completion, captured from the ambient run-delivery
     # context at park time. A PER-RUN fact: every ask of the run (``to="user"`` and
     # ``to="caller"``, nested included) stores the SAME address, so whichever ask drives
     # the run to its single terminal delivers the outcome to the run's address once. None
     # when the run started at a receiver-less door (a hook, schedule, background job, or
     # direct run) — then the outcome falls to the subject rung.
-    delivery: tuple[str | None, dict[str, Any] | None] | None = None
+    delivery: DeliveryAddress | None = None
     # The RUN's single delivery identity (a uuid4 minted once at the outermost run start),
     # shared by every ask, sibling branch and re-park of the run so its one terminal
     # delivers exactly once. Captured with ``delivery`` at park time. None for a sync ask
@@ -349,18 +385,7 @@ class InteractionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_payload(self) -> InteractionRequest:
-        if self.answer_format is AnswerFormat.SELECT:
-            _check_select_payload(self.format_payload or {})
-        elif self.answer_format is AnswerFormat.FORM:
-            _check_form_payload(self.format_payload or {})
-        elif self.answer_format is AnswerFormat.EXTERNAL:
-            _check_external_payload(self.format_payload or {})
-        elif self.answer_format is AnswerFormat.TEXT:
-            _check_text_payload(self.format_payload)
-        elif self.answer_format is AnswerFormat.FREE:
-            _check_free_payload(self.format_payload)
-        else:
-            _check_no_payload(self.answer_format, self.format_payload)
+        check_format_payload(self.answer_format, self.format_payload, durable=True)
         return self
 
     @model_validator(mode="after")

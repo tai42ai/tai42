@@ -19,12 +19,13 @@ from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     AnswerFormat,
+    DeliveryAddress,
     InteractionRequest,
     ParkResumeUnauthorizedError,
-    register_park_kill_handler,
 )
-from tai42_contract.interactions import continuation as contract_continuation
 from tai42_contract.states import StateContext, SubjectCandidates
+from tai42_kit.interactions import park_kill as kit_park_kill
+from tai42_kit.interactions.park_kill import register_park_kill_handler
 
 from tai42_skeleton.interactions import authorization
 from tai42_skeleton.interactions import continuation as continuation_module
@@ -56,7 +57,7 @@ def wired(monkeypatch, fake_redis, fake_client_ctx):
 def kill_handlers(monkeypatch):
     # A fresh, isolated handler list per test (the seam is a process-global registry).
     handlers: list[Any] = []
-    monkeypatch.setattr(contract_continuation, "_park_kill_handlers", handlers)
+    monkeypatch.setattr(kit_park_kill, "_park_kill_handlers", handlers)
     return handlers
 
 
@@ -98,7 +99,7 @@ async def _add_park(
     *,
     iid: str,
     gid: str = "kg",
-    delivery: tuple[str, dict[str, Any]] | None,
+    delivery: DeliveryAddress | None,
     run_delivery_id: str,
     candidates: SubjectCandidates | None = None,
     to: str = "user",
@@ -131,7 +132,7 @@ async def _add_park(
         continuation_fingerprint="fp-1",
         thread_id=thread_id,
         to=to,  # type: ignore[arg-type]
-        delivery={"tool": delivery[0], "context": delivery[1]} if delivery is not None else None,
+        delivery=delivery,
         run_delivery_id=run_delivery_id,
     )
 
@@ -157,7 +158,7 @@ async def _answered_park_with_expired_state(
     await _add_park(
         wired,
         iid=iid,
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id=run_delivery_id,
         candidates=candidates,
     )
@@ -181,7 +182,12 @@ async def test_kill_prunes_fires_the_handler_and_delivers_the_door_failed(wired,
     tools = _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
     record: list[tuple[str, str]] = []
     register_park_kill_handler(_recording_handler(record))
-    await _add_park(wired, iid="k1", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
+    await _add_park(
+        wired,
+        iid="k1",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
 
     result = await kill_park(wired.fake, wired.store, "k1", "kg", reason="cancelled")
 
@@ -205,7 +211,11 @@ async def test_kill_entering_a_nested_caller_ask_fires_the_runs_own_door_once(wi
     tools = _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
     register_park_kill_handler(_recording_handler([]))
     await _add_park(
-        wired, iid="nested", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-9", to="caller"
+        wired,
+        iid="nested",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-9",
+        to="caller",
     )
     await kill_park(wired.fake, wired.store, "nested", "kg", reason="cancelled")
     fires = [c for c in tools.calls if c["key"] == "deliver_tool"]
@@ -232,7 +242,12 @@ async def test_kill_clears_a_buffered_siblings_due_record_even_when_answered(wir
     # kill MULTI clears it UNCONDITIONALLY so nothing redelivers into the torn-down run.
     _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
     register_park_kill_handler(_recording_handler([]))
-    await _add_park(wired, iid="sib", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-3")
+    await _add_park(
+        wired,
+        iid="sib",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-3",
+    )
     # Drive it to answered, enqueuing its continuation-due record.
     from tai42_contract.interactions import InteractionResponse
 
@@ -302,8 +317,18 @@ async def test_kill_binds_run_authorization_so_the_handler_authorizes_on_the_run
 ):
     _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
     # An ANCESTOR interaction of the SAME run (shares run_delivery_id ``rd-4``).
-    await _add_park(wired, iid="ancestor", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-4")
-    await _add_park(wired, iid="leaf", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-4")
+    await _add_park(
+        wired,
+        iid="ancestor",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-4",
+    )
+    await _add_park(
+        wired,
+        iid="leaf",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-4",
+    )
     authorized: list[bool] = []
 
     async def _handler(interaction_id: str, reason: str) -> None:
@@ -334,7 +359,12 @@ async def test_transient_handler_raise_propagates_keeps_kill_due_and_the_reaper_
             raise RuntimeError("ancestor not torn down yet")
 
     register_park_kill_handler(_handler)
-    await _add_park(wired, iid="tr", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-5")
+    await _add_park(
+        wired,
+        iid="tr",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-5",
+    )
 
     # The first kill propagates the transient raise; the kill-due record is KEPT, the FAILED not fired.
     with pytest.raises(RuntimeError):
@@ -364,7 +394,7 @@ async def test_kill_due_redelivered_after_a_simulated_crash(wired, monkeypatch, 
             "reason": "cancelled",
             "attempts": "0",
             "deadline_ms": str(int(datetime.now(UTC).timestamp() * 1000) + 3_600_000),
-            "delivery": '{"tool": "deliver_tool", "context": {"thread_id": "t1"}}',
+            "delivery": DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1").model_dump_json(),
             "run_delivery_id": "rd-6",
         },
     )
@@ -434,14 +464,14 @@ async def test_expiry_kill_tears_the_run_down_and_fires_the_door_failed(wired, m
         expiry_at=past,
         on_expiry="kill",
         run_delivery_id="rd-8",
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
     )
     await wired.store.add(
         wired.fake,
         request,
         idle_ttl=86400,
         continuation_fingerprint="fp-1",
-        delivery={"tool": "deliver_tool", "context": {"thread_id": "t1"}},
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id="rd-8",
     )
 
@@ -463,7 +493,12 @@ async def test_expiry_kill_skips_a_park_answered_in_the_claim_window(wired, monk
     tools = _wire_tools(monkeypatch, {"deliver_tool": lambda a: None})
     record: list[tuple[str, str]] = []
     register_park_kill_handler(_recording_handler(record))
-    await _add_park(wired, iid="race", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-race")
+    await _add_park(
+        wired,
+        iid="race",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-race",
+    )
     # The answer lands (the run is now resuming, its continuation-due record enqueued).
     now = datetime.now(UTC)
     await wired.store.record_answer(
@@ -660,7 +695,7 @@ async def test_erase_by_subject_key_reaches_a_park_on_another_thread(wired, monk
     await _add_park(
         wired,
         iid="erased",
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id="rd-e",
         candidates=candidates,
     )
@@ -734,7 +769,7 @@ async def test_cancel_parks_for_thread_kills_via_both_indices(wired, monkeypatch
     await _add_park(
         wired,
         iid="bg",
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id="rd-bg",
         thread_id="bridge:chat:z",
     )
@@ -743,7 +778,7 @@ async def test_cancel_parks_for_thread_kills_via_both_indices(wired, monkeypatch
     await _add_park(
         wired,
         iid="conv",
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id="rd-conv",
         candidates=candidates,
     )

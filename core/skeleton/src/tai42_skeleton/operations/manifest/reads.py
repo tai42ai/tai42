@@ -11,6 +11,7 @@ from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 import tai42_skeleton.operations.manifest as _pkg
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.app.bus.ops import ListFailedMcps
 from tai42_skeleton.manifest import TaiMCPConfig
 from tai42_skeleton.operations import operation
 from tai42_skeleton.operations._broadcast import broadcast
@@ -140,4 +141,4 @@ async def list_failed_mcps(targets: list[str] | None = None) -> Any:
         # entry as the payload.
         return tai42_app.admin.list_failed_mcps()
 
-    return await broadcast({"op": "list_failed_mcps"}, targets, _apply)
+    return await broadcast(ListFailedMcps(op="list_failed_mcps"), targets, _apply)

@@ -251,9 +251,19 @@ async def test_run_tool_happy(install):
     fake = install(_FakeTools({"alpha": _tool("alpha")}, run_result={"ok": 1}))
     resp = await router.run_tool(_body_req(b'{"tool_name": "alpha", "arguments": {"x": 2}}'))
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"ok": 1}}
+    assert _json(resp) == {"data": {"kind": "result", "result": {"ok": 1}}}
     # The sync door offloads a sync tool body onto a worker thread.
     assert fake.run_calls == [("alpha", {"x": 2}, True)]
+
+
+async def test_run_tool_a_tool_value_shaped_like_a_park_is_a_result(install):
+    # The body is discriminated by the visit outcome, never by the tool value's shape: a tool whose
+    # own value looks like a caller-ask answer comes back as a ``result`` carrying that value.
+    value = {"kind": "asks", "asks": [{"interaction_id": "i-1", "question": "?"}]}
+    install(_FakeTools({"alpha": _tool("alpha")}, run_result=value))
+    resp = await router.run_tool(_body_req(b'{"tool_name": "alpha"}'))
+    assert resp.status_code == 200
+    assert _json(resp) == {"data": {"kind": "result", "result": value}}
 
 
 async def test_run_tool_defaults_arguments_to_empty(install):
@@ -321,7 +331,7 @@ async def test_run_tool_sync_body_does_not_stall_the_loop(install):
     tick_task = asyncio.ensure_future(ticker())
     resp = await router.run_tool(_body_req(b'{"tool_name": "slow"}'))
     await tick_task
-    assert _json(resp) == {"data": {"done": True}}
+    assert _json(resp) == {"data": {"kind": "result", "result": {"done": True}}}
     # The loop kept ticking while the sync body blocked its thread.
     assert len(ticks) == 30
 

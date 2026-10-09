@@ -19,12 +19,11 @@ from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     ResumeBuffered,
     SuspendedInteraction,
-    read_suspended_interaction_marker,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
-    suspended_interaction_marker,
 )
 from tai42_contract.tools import ClientToolError, UndeclaredPauseError
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker, suspended_interaction_marker
 from tests.app._fixtures.pause_counter import BODY_RUNS
 
 from tai42_skeleton.app.instance import app

@@ -49,7 +49,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
-from tai42_contract.interactions.continuation import get_park_completion
+from tai42_contract.interactions.continuation import DeliveryAddress, get_park_completion
 
 
 @dataclass(frozen=True, eq=False)
@@ -58,13 +58,13 @@ class RunDelivery:
 
     ``run_delivery_id`` is the ``uuid4`` minted once at the outermost run start,
     shared by every nested dispatch, sibling branch, and re-park of the run so
-    its single terminal delivers once. ``delivery`` is the ``(tool, context)``
+    its single terminal delivers once. ``delivery`` is the :class:`DeliveryAddress`
     the starting door bound as the run's completion address, or ``None`` when the
     door has no receiver.
     """
 
     run_delivery_id: str
-    delivery: tuple[str | None, Mapping[str, Any] | None] | None
+    delivery: DeliveryAddress | None
 
 
 class NestedDoorFrameError(RuntimeError):
@@ -101,7 +101,7 @@ def get_run_delivery_id() -> str | None:
     return delivery.run_delivery_id if delivery is not None else None
 
 
-def get_run_delivery() -> tuple[str | None, Mapping[str, Any] | None] | None:
+def get_run_delivery() -> DeliveryAddress | None:
     """The current run's out-of-band delivery address, or ``None`` when receiver-less or unbound."""
     delivery = _run_delivery.get()
     return delivery.delivery if delivery is not None else None
@@ -173,7 +173,7 @@ def tool_call_frame(
     delivery_token: Token[RunDelivery | None] | None = None
     if continues_chain is None and not prior_chain and _run_delivery.get() is None:
         completion = get_park_completion()
-        delivery = completion if completion[0] is not None else None
+        delivery = completion if completion.tool is not None else None
         delivery_token = _run_delivery.set(RunDelivery(run_delivery_id=str(uuid.uuid4()), delivery=delivery))
     try:
         yield

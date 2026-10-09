@@ -174,14 +174,12 @@ def _wire(monkeypatch, fake_client_ctx) -> InteractionsSettings:
     return settings
 
 
-async def test_ask_captures_thread_from_tool_park_completion_context(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_captures_thread_from_a_tool_route_delivery_address(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    # A TOOL/flow route target binds the delivery thread as the park-completion context.
-    completion_token = set_park_completion(
-        "deliver_tool_completion", {"delivery_thread_id": _THREAD, "route_name": "chat"}
-    )
+    # A TOOL route target binds the turn's thread on its delivery address.
+    completion_token = set_park_completion("deliver_tool_completion", {"route_name": "chat"}, thread_id=_THREAD)
     try:
         with tool_call_frame():
             result = await ask("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
@@ -195,20 +193,16 @@ async def test_ask_captures_thread_from_tool_park_completion_context(monkeypatch
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {result.interaction_id}
 
 
-async def test_ask_captures_thread_from_agent_bridge_turn_context(monkeypatch, fake_redis, fake_client_ctx):
+async def test_ask_captures_thread_from_an_agent_route_delivery_address(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    # An AGENT route target runs inside the bridge turn context AND co-sets a park completion
-    # whose context is keyed by ITS delivery tool's own routing parameter (``thread_id``), never
-    # ``delivery_thread_id`` (exactly as _run_agent_turn binds it). So the thread must come from
-    # the bridge, and this pins that a foreign-keyed completion context never shadows it.
-    # The completion context names a DIFFERENT thread than the bridge on purpose: only a
-    # DISCRIMINATING value can tell "read the bridge" apart from "read whatever ``thread_id``
-    # key is in the opaque context" — with both naming the same thread either read passes.
-    park_token = set_park_completion("agent_completion", {"thread_id": _OTHER_THREAD})
+    # An AGENT route target binds its thread on the delivery address too, and runs inside a bridge
+    # turn context. The bridge names a DIFFERENT thread on purpose: only a discriminating value
+    # shows the park reads the address, never the bridge.
+    park_token = set_park_completion("agent_completion", {"message_id": "m-1"}, thread_id=_THREAD)
     bridge = BridgeTurnContext(
-        thread_id=_THREAD, route_name="chat", channel="twilio", our_identity="+1", client_address="+15550001111"
+        thread_id=_OTHER_THREAD, route_name="chat", channel="twilio", our_identity="+1", client_address="+15550001111"
     )
     try:
         with tool_call_frame(), bridge_turn_context(bridge):
@@ -221,7 +215,6 @@ async def test_ask_captures_thread_from_agent_bridge_turn_context(monkeypatch, f
     assert isinstance(result, SuspendedInteraction)
     store = InteractionStore("interactions:")
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {result.interaction_id}
-    # Nothing was indexed under the completion context's thread — it never shadowed the bridge.
     assert await fake_redis.smembers(store.thread_parks_key(_OTHER_THREAD)) == set()
 
 

@@ -14,12 +14,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import (
-    BlankInboundTextError,
-    build_inbound_media_params,
-    inbound_media_placeholder,
-    validate_entry_params,
-)
+from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaAlreadyBoundError,
@@ -27,6 +22,7 @@ from tai42_contract.interactions import (
     MediaOrigin,
 )
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
+from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_web.channel import _media_frame_item
@@ -165,6 +161,7 @@ def _turn_text_and_params_for_media(
     first = bound[0]
     turn_text = text if text.strip() else inbound_media_placeholder(first.item.kind.value, filename=first.item.filename)
     media_params = build_inbound_media_params(
+        door="web",
         kind=first.item.kind.value,
         media_id=first.media_id,
         mime_type=first.mime,

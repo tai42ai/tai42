@@ -13,6 +13,7 @@ from typing import Any, Final, Literal, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
+from tai42_contract.interactions import DeliveryAddress
 
 from . import events, records, serde
 from .writes_base import AskTo, _StoreWritesBase
@@ -56,7 +57,7 @@ class _StoreKillWrites(_StoreWritesBase):
         interaction_id: str,
         group_id: str | None,
         *,
-        delivery: dict[str, Any] | None,
+        delivery: DeliveryAddress | None,
         run_delivery_id: str | None,
         subjects: dict[str, Any] | None,
         chain_keys: list[str],
@@ -105,7 +106,7 @@ class _StoreKillWrites(_StoreWritesBase):
         kill_mapping = records._kill_due_mapping(
             reason,
             deadline_ms,
-            json.dumps(delivery) if delivery is not None else None,
+            delivery.model_dump_json() if delivery is not None else None,
             run_delivery_id,
             json.dumps(subjects) if subjects is not None else None,
             json.dumps(chain_keys) if chain_keys else None,

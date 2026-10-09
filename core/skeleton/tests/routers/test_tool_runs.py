@@ -54,7 +54,7 @@ def _interactions_double() -> SimpleNamespace:
     """
     return SimpleNamespace(
         visit=visit_module.visit,
-        park_answer=visit_module.park_answer,
+        run_answer=visit_module.run_answer,
         normalise_started=visit_module.normalise_started,
     )
 

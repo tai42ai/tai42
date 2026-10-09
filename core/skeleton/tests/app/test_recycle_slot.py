@@ -23,6 +23,7 @@ from tai42_contract.app import tai42_app
 
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, WorkerState, _PresenceValue
+from tai42_skeleton.app.bus.ops import Recycle
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.instance import app
@@ -205,7 +206,7 @@ async def test_recycle_dispatch_arms_the_graceful_exit_of_this_worker(kind: Work
     m = _Mixin()
     m._bus = _make_bus(kind)
 
-    result = await m._dispatch_bus_op({"op": "recycle"})
+    result = await m._dispatch_bus_op(Recycle(op="recycle"))
 
     # The applied payload names the graceful-exit kind only — never an env value.
     assert result == {"recycling": kind.value}
@@ -221,12 +222,15 @@ async def test_apply_bus_op_recycle_returns_payload_and_fires_hook() -> None:
     m = _Mixin()
     m._bus = _make_bus(WorkerKind.backend)
     fired: list[str] = []
-    m._on_fleet_op_applied(lambda name, _budget: fired.append(name))
+    fired_effects: list[frozenset] = []
+    m._on_fleet_op_applied(lambda applied: (fired.append(applied.op), fired_effects.append(applied.effects)))
 
     result = await m._apply_bus_op({"op": "recycle"}, deadline=1e9)
 
     assert result == {"recycling": "backend"}
     assert fired == ["recycle"]
+    # A recycle ends the process: it declares no effect a post-apply handler acts on.
+    assert fired_effects == [frozenset()]
 
 
 async def test_recycle_dispatch_writes_recycling_state_before_arming(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,7 +281,7 @@ async def test_recycle_dispatch_writes_recycling_state_before_arming(monkeypatch
 
     monkeypatch.setattr(bus, "arm_post_reply", capture_arm)
 
-    result = await m._dispatch_bus_op({"op": "recycle"})
+    result = await m._dispatch_bus_op(Recycle(op="recycle"))
 
     assert result == {"recycling": "serve"}
     assert state_at_arm == [WorkerState.recycling]  # written BEFORE the arm

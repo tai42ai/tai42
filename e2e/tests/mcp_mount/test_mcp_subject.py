@@ -31,13 +31,14 @@ def _subject(key: str) -> dict[str, str]:
 async def _parked_ids(api: Any, subject: dict[str, str]) -> list[str]:
     """The ids ``list_parked`` reports for ``subject``, read through the run-tool HTTP door which
     deposits that subject's context — the same interaction store the MCP edge parked into."""
-    entries = await api.post(
+    answer = await api.post(
         "/api/run-tool",
         json={"tool_name": "list_parked", "arguments": {}, "subject": subject},
         expect=200,
         retry_on_reloading=True,
     )
-    return [entry["id"] for entry in entries]
+    assert answer["kind"] == "result", answer
+    return [entry["id"] for entry in answer["result"]]
 
 
 async def test_mcp_call_edge_carries_subject(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:

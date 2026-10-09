@@ -25,12 +25,7 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import (
-    InboundMediaKind,
-    InboundRejectionReason,
-    build_inbound_media_params,
-    inbound_media_placeholder,
-)
+from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaOrigin,
@@ -39,6 +34,7 @@ from tai42_contract.interactions import (
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
 from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
 from tai42_kit.settings import require_secret
 
@@ -342,6 +338,7 @@ async def _bridge_one_file(
         event_id,
         attachments=[outcome.item],
         params=build_inbound_media_params(
+            door="slack",
             kind=kind,
             media_id=outcome.media_id,
             mime_type=outcome.mime,
@@ -411,7 +408,7 @@ async def _bridge_files(event: dict, our_identity: str | None, event_id: str) ->
             channel,
             caption,
             event_id,
-            params=build_inbound_media_params(kind=_media_kind(first_mime), mime_type=first_mime),
+            params=build_inbound_media_params(door="slack", kind=_media_kind(first_mime), mime_type=first_mime),
         )
         bridged = True
 

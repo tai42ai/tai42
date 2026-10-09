@@ -45,8 +45,8 @@ async def test_a_dead_collector_is_counted_and_alerted(
         },
     )
 
-    result = await api.post("/api/run-tool", json={"tool_name": "e2e_echo_monitor", "arguments": {"payload": "p"}})
-    assert result is not None
+    answer = await api.post("/api/run-tool", json={"tool_name": "e2e_echo_monitor", "arguments": {"payload": "p"}})
+    assert answer["kind"] == "result", answer
 
     async def export_failures_counted() -> float | None:
         value = stack.app_scrape().sample("tai42_monitoring_export_failures_total", {})

@@ -9,6 +9,7 @@ whose own ``status`` reads failure-adjacent still maps. A still-parked run is a 
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -224,34 +225,59 @@ async def test_a_mapping_failure_logs_the_value_free_result_shape(env, monkeypat
     ]
     assert len(shape_logs) == 1
     shape = shape_logs[0]
-    assert "status='success'" in shape
-    assert "result_keys=['compose_messages', 'extract_todo']" in shape
-    assert "outputs_surface_sizes" not in shape
-    assert "missing_results=['build_state_consent', 'build_state_language']" in shape
+    assert "keys=['missing_results', 'result', 'status']" in shape
+    assert "result: type=dict keys=['compose_messages', 'extract_todo']" in shape
+    assert "missing_results: type=list len=2 first=str" in shape
+    assert "success" not in shape
     assert secret not in shape
     assert all(secret not in r.getMessage() for r in caplog.records)
 
 
-async def test_result_shape_is_value_free_and_structural():
-    # Unit-pins the descriptor directly: it renders NAMES, the status token, surface SIZES and the
-    # missing_results names — never a participant VALUE, and never crashes on odd inputs.
+async def test_result_shape_is_a_value_free_structural_walk():
+    # The descriptor walks the structure two levels deep: key NAMES at both levels, each value at
+    # the second level as its type and approximate serialized size, a list as its length and first
+    # element's type, a scalar as its type and length. It reads no named key and renders no value —
+    # not a participant's text, and not a status token either.
     secret = "PLAINTEXT-should-never-appear"
+    outputs = {"compose_messages": [{"text": secret}]}
     shape = tool_result_module._result_shape(
         {
-            "status": "success",
-            "result": {"outputs": {"compose_messages": [{"text": secret}], "note": secret}},
+            "status": "succeeded-token",
+            "result": {"outputs": outputs, "note": secret},
             "missing_results": ["compose_messages", "extract_todo"],
         }
     )
-    assert "status='success'" in shape
-    assert "keys=['missing_results', 'result', 'status']" in shape
-    assert "'compose_messages'" in shape
-    assert "'note'" in shape
-    assert "missing_results=['compose_messages', 'extract_todo']" in shape
+    assert shape == (
+        "type=dict keys=['missing_results', 'result', 'status'] {"
+        "missing_results: type=list len=2 first=str; "
+        "result: type=dict keys=['note', 'outputs'] {"
+        f"note: type=str size={len(json.dumps(secret))}; "
+        f"outputs: type=dict size={len(json.dumps(outputs))}"
+        "}; "
+        "status: type=str len=15"
+        "}"
+    )
     assert secret not in shape
-    # A non-dict result degrades to a type + length, never a repr of the value.
+    assert "succeeded-token" not in shape
+
+
+async def test_result_shape_degrades_without_rendering_a_value():
+    # A non-dict result is its type and its length when it has one, never a repr of the value.
     assert tool_result_module._result_shape("the reply text") == "type=str len=14"
     assert tool_result_module._result_shape(42) == "type=int"
+    assert tool_result_module._result_shape([]) == "type=list len=0"
+    # A second-level value no encoder renders reports size -1 rather than its content.
+    assert tool_result_module._result_shape({"result": {"odd": {(1, 2): "x"}}}) == (
+        "type=dict keys=['result'] {result: type=dict keys=['odd'] {odd: type=dict size=-1}}"
+    )
+
+
+async def test_result_shape_caps_the_key_names_per_level():
+    wide = {f"k{index:03d}": index for index in range(60)}
+    shape = tool_result_module._result_shape(wide)
+
+    assert shape.startswith(f"type=dict keys={sorted(wide)[:40]} {{")
+    assert "k040" not in shape
 
 
 async def test_a_parked_typed_value_binds_completion_and_delivers_on_resume(env, monkeypatch):
@@ -281,17 +307,18 @@ async def test_a_parked_typed_value_binds_completion_and_delivers_on_resume(env,
     assert record.delivery_status is DeliveryStatus.SILENT
     assert channel.sends == []
     assert len(bound) == 1
-    tool_name, context = bound[0]
-    assert tool_name == turn_module.DELIVER_TOOL_COMPLETION_NAME
-    thread_id = context["delivery_thread_id"]
+    address = bound[0]
+    assert address.tool == turn_module.DELIVER_TOOL_COMPLETION_NAME
+    thread_id = address.thread_id
     assert thread_id == "bridge:tool-line:+15550002222"
-    assert context["route_name"] == "tool-line"
+    assert address.context is not None
+    assert address.context["route_name"] == "tool-line"
 
     from tai42_skeleton.runs.chokepoint import delivery_fire
 
     with delivery_fire("c-resume"):
         out = await turn_module.deliver_tool_completion(
-            delivery_thread_id=thread_id,
+            thread_id=thread_id,
             completion_id="c-resume",
             result={"result": {"outputs": {"compose_messages": "your quote is ready"}}},
             status=PARK_COMPLETION_SUCCEEDED,

@@ -38,9 +38,9 @@ from tai42_contract.interactions import (
     get_resume_continuation_tool,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
-    suspended_interaction_marker,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_marker import suspended_interaction_marker
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, collect_pending_interrupts
 from tai42_agents._internal.park.drive import _park_interactions
@@ -493,7 +493,7 @@ def test_marker_round_trips_through_msg_content_output() -> None:
     # msg_content_output before it becomes ToolMessage.content; the reserved marker must
     # survive that serialization so the park hook recognizes it off the message content.
     from langgraph.prebuilt.tool_node import msg_content_output
-    from tai42_contract.interactions import read_suspended_interaction_marker
+    from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
     for expiry in (None, datetime(2030, 1, 1, tzinfo=UTC)):
         marker = suspended_interaction_marker(

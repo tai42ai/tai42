@@ -23,6 +23,11 @@ def test_text_format_has_no_payload():
     assert build_payload(AnswerFormat.CONFIRM, None, None) is None
 
 
+def test_free_format_carries_its_schema_when_given():
+    assert build_payload(AnswerFormat.FREE, None, {"type": "integer"}) == {"schema": {"type": "integer"}}
+    assert build_payload(AnswerFormat.FREE, None, None) is None
+
+
 def test_select_requires_options():
     assert build_payload(AnswerFormat.SELECT, ["a", "b"], None) == {"options": ["a", "b"]}
     with pytest.raises(ValueError, match="requires options"):

@@ -1,4 +1,4 @@
-"""Pool turnover after a pool-turnover fleet op.
+"""Pool turnover after a fleet op that declares an effect.
 
 Only a runtime whose worker processes PERSIST ACROSS JOBS holds a snapshot of
 this process's tool registry (or its own compiled-template cache), so only that
@@ -16,10 +16,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import ClassVar
 
 import pytest
-from tai42_contract.backend.runtime import (
-    POOL_TURNOVER_FLEET_OPS,
-    BackendRuntime,
-)
+from tai42_contract.backend.runtime import BackendRuntime, FleetOpApplied, FleetOpEffect
 
 from tai42_kit.backend import ManagedBackend
 
@@ -100,31 +97,30 @@ async def test_the_hook_is_registered_before_the_build(app: FakeApp, monkeypatch
     await asyncio.wait_for(task, timeout=5)
 
 
-@pytest.mark.parametrize("op_name", sorted(POOL_TURNOVER_FLEET_OPS))
-async def test_a_pool_turnover_op_turns_the_pool_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
-    # Every pool-turnover op recycles a persisting pool — a registry mutation the
-    # workers snapshot, AND a template eviction their compiled cache would miss (a
-    # forking backend's children are bus non-members reached only by turnover).
-    await _handler(app)(op_name, 30.0)
-
-    assert wired.turnovers == [(op_name, 27.0)]
+def _applied(op: str, *effects: FleetOpEffect, budget: float = 30.0) -> FleetOpApplied:
+    return FleetOpApplied(op=op, effects=frozenset(effects), budget=budget)
 
 
-@pytest.mark.parametrize("op_name", ["evict_template", "clear_template_cache"])
-async def test_a_template_eviction_op_turns_the_pool_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
-    # Called out explicitly: a template edit reaches only bus members, so a forking
-    # backend's prefork children keep rendering the stale compilation until the pool
-    # turns over — the same canonical mechanism a reload rides.
-    await _handler(app)(op_name, 30.0)
+@pytest.mark.parametrize(
+    "effects",
+    [(FleetOpEffect.registry,), (FleetOpEffect.templates,), (FleetOpEffect.registry, FleetOpEffect.templates)],
+    ids=["registry", "templates", "both"],
+)
+async def test_an_op_with_an_effect_turns_the_pool_over(
+    wired: FakeThreadWorker, app: FakeApp, effects: tuple[FleetOpEffect, ...]
+) -> None:
+    # A registry change the workers snapshot and a template eviction their compiled cache would
+    # miss both recycle a persisting pool (a forking backend's children are bus non-members
+    # reached only by turnover); the op's name rides only as the turnover reason.
+    await _handler(app)(_applied("probe_op", *effects))
 
-    assert wired.turnovers == [(op_name, 27.0)]
+    assert wired.turnovers == [("probe_op", 27.0)]
 
 
-@pytest.mark.parametrize("op_name", ["list_failed_mcps", "recycle"])
-async def test_a_non_turnover_op_turns_nothing_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
-    # A query mutates no registry and a recycle ends the process, so replacing
-    # workers for either would be pure downtime.
-    await _handler(app)(op_name, 30.0)
+async def test_an_op_declaring_no_effect_turns_nothing_over(wired: FakeThreadWorker, app: FakeApp) -> None:
+    # A query changes nothing and a recycle ends the process, so replacing workers for either
+    # would be pure downtime.
+    await _handler(app)(_applied("probe_query"))
 
     assert wired.turnovers == []
     assert os.environ[_MANIFEST_ENV] == ""
@@ -133,7 +129,7 @@ async def test_a_non_turnover_op_turns_nothing_over(wired: FakeThreadWorker, app
 async def test_the_manifest_env_is_refreshed_before_the_pool_turns_over(wired: FakeThreadWorker, app: FakeApp) -> None:
     app.admin.live_manifest = {"tools": ["reloaded"]}
 
-    await _handler(app)("reload_config", 30.0)
+    await _handler(app)(_applied("reload_config", FleetOpEffect.registry))
 
     # Captured INSIDE turn_over_pool: the replacement workers inherit the env, so
     # a refresh landing after the call would hand them the pre-mutation registry.
@@ -146,7 +142,7 @@ async def test_a_failing_turnover_fails_the_op(wired: FakeThreadWorker, app: Fak
     wired.turnover_error = RuntimeError("pool did not come back")
 
     with pytest.raises(RuntimeError, match="pool did not come back"):
-        await _handler(app)("reload_tool", 30.0)
+        await _handler(app)(_applied("reload_tool", FleetOpEffect.registry))
 
 
 async def test_a_backend_with_no_dispatch_settings_is_refused_at_turnover(app: FakeApp) -> None:
@@ -159,7 +155,7 @@ async def test_a_backend_with_no_dispatch_settings_is_refused_at_turnover(app: F
     runtime = await running_runtime(FakeThreadWorker)
 
     with pytest.raises(NotImplementedError, match="_NoSettingsBackend declares a runtime requiring pool turnover"):
-        await _handler(app)("reload_mcp", 30.0)
+        await _handler(app)(_applied("reload_mcp", FleetOpEffect.registry))
 
     runtime.release()
     await asyncio.wait_for(task, timeout=5)
@@ -175,6 +171,6 @@ async def test_the_budget_is_the_handed_window_less_a_margin_floored(
     # The host hands what is left of the apply window; the turnover keeps a margin under
     # it so a confirm-or-raise lands before the report cut, and a tiny window never
     # collapses the budget to nothing.
-    await _handler(app)("reload_config", handed)
+    await _handler(app)(_applied("reload_config", FleetOpEffect.registry, budget=handed))
 
     assert wired.turnovers == [("reload_config", expected)]

@@ -73,12 +73,14 @@ async def ask(
             - "external": the human acts on an EXTERNAL surface (sign, approve,
               pay) reached through ``link``, and the external system delivers the
               answer through a public callback URL. Returns the callback payload.
+            - "free": any JSON value, returned as given (checked against ``schema``
+              when one is given).
         options: For "select", the allowed values (required) — the answer is one of
             them. For "text", an OPTIONAL list of suggested replies: a tap submits that
             option's text as the free-text answer (any string is still accepted), so it
-            is a convenience, not a constraint. Forbidden for "confirm"/"form"/"external".
-        schema: A JSON schema describing the answer object; required for "form",
-            optional for "external" (validates the callback payload). A "form"
+            is a convenience, not a constraint. Forbidden for every other format.
+        schema: A JSON schema describing the answer; required for "form", optional for
+            "external" and "free" (the answer is checked against it). A "form"
             delivered over a ``channel`` must use the channel-deliverable subset
             (it is answered on a server-rendered page): root object with a
             non-empty ``properties`` map, every property a scalar

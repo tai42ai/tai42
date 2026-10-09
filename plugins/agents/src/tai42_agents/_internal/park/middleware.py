@@ -45,12 +45,9 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langgraph.prebuilt.tool_node import msg_content_output
 from langgraph.types import interrupt
-from tai42_contract.interactions import (
-    MalformedParkMarkerError,
-    NestedParkOwnershipError,
-    assert_park_adoptable,
-    read_suspended_interaction_marker,
-)
+from tai42_contract.interactions import MalformedParkMarkerError, NestedParkOwnershipError
+from tai42_kit.interactions.park_adoption import assert_park_adoptable
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
 from tai42_agents._internal.park.errors import AgentParkMarkerError
 

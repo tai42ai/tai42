@@ -19,6 +19,7 @@ from tai42_contract.interactions import AnswerFormat, check_addressing, check_as
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 
+from .format_args import check_format_arguments, parse_answer_format
 from .payload import normalize_schema
 
 
@@ -79,6 +80,10 @@ def validate_ask_arguments(
         channel, link, verifier, fmt, schema, question, recipient, reaction_tool
     )
     _validate_external_args(is_external, link, channel, schema, verifier)
+    if fmt is AnswerFormat.FREE and schema is not None:
+        # A FREE answer is checked against its schema; normalize it here so a bad schema fails
+        # before any state is written.
+        schema = normalize_schema(schema)
     return AskValidation(fmt=fmt, is_external=is_external, channel_obj=channel_obj, audience=audience, schema=schema)
 
 
@@ -106,21 +111,10 @@ def _validate_timing_and_format(
         # never fire its continuation and the idle TTL would drop it silently — refuse
         # it up front rather than persist an unresumable park.
         raise ValueError("async mode requires expiry_at")
-    try:
-        fmt = AnswerFormat(answer_format)
-    except ValueError as exc:
-        raise ValueError(f"unknown answer_format: {answer_format!r}") from exc
-    # ``options`` are the SELECT answer set (required there) and, for TEXT, an OPTIONAL
-    # set of suggested replies; every other format carries none — refuse loudly here.
-    if options is not None and fmt not in (AnswerFormat.SELECT, AnswerFormat.TEXT):
-        raise ValueError(f"options are not valid with answer_format {fmt.value!r}")
-    # ``data``/``pages`` enrich a FORM ask only, and a reacting form's ``reaction_tool`` +
-    # ``reactions`` triggers are FORM-only too — refuse them loudly on every other format
-    # before any state is written.
-    if (data is not None or pages is not None) and fmt is not AnswerFormat.FORM:
-        raise ValueError(f"data and pages are not valid with answer_format {fmt.value!r}")
-    if (reaction_tool is not None or reactions is not None) and fmt is not AnswerFormat.FORM:
-        raise ValueError(f"reaction_tool and reactions are not valid with answer_format {fmt.value!r}")
+    fmt = parse_answer_format(answer_format)
+    check_format_arguments(
+        fmt, options=options, data=data, pages=pages, reactions=reactions, reaction_tool=reaction_tool
+    )
     return fmt
 
 

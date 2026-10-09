@@ -293,9 +293,10 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
     assert protocol_members(AppInteractions) == {
         "ask",
         "check_answer",
+        "question_format",
         "react",
         "visit",
-        "park_answer",
+        "run_answer",
         "normalise_started",
         "list_parked",
         "list_parked_for",
@@ -360,6 +361,9 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
         def check_answer(self, question: object, answer: object) -> object:
             return answer
 
+        def question_format(self, answer_format: str, **arguments: object) -> object:
+            return None
+
         async def react(
             self, interaction_id: str, event: dict[str, object], partial_values: dict[str, object]
         ) -> dict[str, object]:
@@ -369,7 +373,7 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
         def visit(self) -> object:
             return None
 
-        def park_answer(self, outcome: object) -> object:
+        def run_answer(self, outcome: object) -> object:
             return None
 
         async def normalise_started(self, value: object) -> object:

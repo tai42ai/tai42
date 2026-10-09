@@ -25,6 +25,7 @@ import asyncio
 from langchain_core.tools import StructuredTool
 from tai42_contract.interactions import (
     ChainedResume,
+    DeliveryAddress,
     get_chained_resume,
     get_park_completion,
     reset_park_completion,
@@ -33,7 +34,7 @@ from tai42_contract.interactions import (
 from tests._client_tool import FakeClientTool, client_tool
 
 # A bound completion standing in for what the conversation door binds around an agent turn.
-BOUND_COMPLETION: tuple[str, dict[str, str]] = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
+BOUND_COMPLETION = DeliveryAddress(tool="conversation_deliver", context=None, thread_id="bridge:acme:alice")
 
 
 def probe_tool(name: str = "probe") -> tuple[FakeClientTool, list[ChainedResume | None]]:
@@ -54,7 +55,7 @@ def assert_delivery_scoped(handed: StructuredTool, seen: list[ChainedResume | No
     cleared to ``None``; the door's out-of-band address (``_park_completion``) flows down unchanged,
     surviving the dispatch untouched.
     """
-    token = set_park_completion(*BOUND_COMPLETION)
+    token = set_park_completion(BOUND_COMPLETION.tool, thread_id=BOUND_COMPLETION.thread_id)
     try:
         assert asyncio.run(handed.ainvoke({})) == "peeked"
         assert get_park_completion() == BOUND_COMPLETION

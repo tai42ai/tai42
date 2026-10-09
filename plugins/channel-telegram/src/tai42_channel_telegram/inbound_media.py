@@ -14,18 +14,14 @@ from typing import NamedTuple
 
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import (
-    InboundMediaKind,
-    InboundRejectionReason,
-    build_inbound_media_params,
-    inbound_media_placeholder,
-)
+from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
 from tai42_contract.interactions import (
     MediaOrigin,
     MediaStoreUnavailableError,
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
 from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
 from tai42_kit.settings import require_secret
 
@@ -210,6 +206,7 @@ async def _bridge_media(
 
     text = media.caption or inbound_media_placeholder(member.kind, filename=ingested.item.filename, voice=member.voice)
     params = build_inbound_media_params(
+        door="telegram",
         kind=member.kind,
         media_id=ingested.media_id,
         mime_type=ingested.mime,
@@ -248,6 +245,6 @@ async def _reject_media(
     if media.caption is not None:
         # A rejected media that was a reply to a pending ask never resolves it (the media does not
         # exist): the caption bridges as a fresh turn and the ask stays pending.
-        text_params = build_inbound_media_params(kind=member.kind, mime_type=member.declared_mime)
+        text_params = build_inbound_media_params(door="telegram", kind=member.kind, mime_type=member.declared_mime)
         return await _bridge(settings, media.chat_id, media.caption, update, params=text_params)
     return _ignored("media rejected")

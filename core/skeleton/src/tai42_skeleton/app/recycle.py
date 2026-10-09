@@ -56,6 +56,7 @@ from tai42_skeleton.app.bus import (
     WorkerState,
     presence_fresh,
 )
+from tai42_skeleton.app.bus.ops import Recycle
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +339,7 @@ async def _recycle_one(
     error or the worker's error) and raises :class:`RecycleError`. A reply that does
     not name the target is a bus contract violation and raises with no row.
     """
-    result = await bus.publish({"op": "recycle"}, targets=[name], local=None)
+    result = await bus.publish(Recycle(op="recycle"), targets=[name], local=None)
     if not result.reachable:
         _stop(report, kind, (name, generation), FAILED, result.error or "bus unreachable")
         raise RecycleError(f"recycle: bus unreachable while recycling {name!r}: {result.error}", report)

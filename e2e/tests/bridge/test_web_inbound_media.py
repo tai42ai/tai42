@@ -28,7 +28,7 @@ from typing import cast
 
 import pytest
 import redis as redis_lib
-from tai42_contract.conversations import inbound_media_placeholder
+from tai42_kit.conversations.inbound_media import inbound_media_placeholder
 
 from tai42_e2e.channel_stubs import TINY_PDF, TINY_PNG
 from tai42_e2e.settings import HarnessSettings

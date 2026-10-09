@@ -107,7 +107,7 @@ async def test_misbehaving_tools_are_mounted(misbehaving_mcp_stack: TaiStack) ->
 
 async def test_healthy_tool_round_trips(misbehaving_mcp_stack: TaiStack) -> None:
     data = await misbehaving_mcp_stack.api().post("/api/run-tool", json={"tool_name": _OK_TOOL, "arguments": {}})
-    assert data == {"ok": True}, f"the healthy tool did not round trip: {data!r}"
+    assert data == {"kind": "result", "result": {"ok": True}}, f"the healthy tool did not round trip: {data!r}"
 
 
 async def test_plain_text_is_not_a_failure(misbehaving_mcp_stack: TaiStack) -> None:

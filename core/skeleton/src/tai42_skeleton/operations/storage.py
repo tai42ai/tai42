@@ -37,6 +37,7 @@ from pydantic import BaseModel
 from tai42_contract.storage import Storage, StoragePathConflictError
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.bus.ops import EvictTemplate
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
@@ -109,7 +110,7 @@ async def _write_then_evict(resource_id: str, write: Callable[[], Awaitable[None
         await write()
         manager.evict_compiled(resource_id)
 
-    await broadcast({"op": "evict_template", "path": resource_id}, None, _apply)
+    await broadcast(EvictTemplate(op="evict_template", path=resource_id), None, _apply)
 
 
 def _upload_write(
@@ -284,7 +285,7 @@ async def delete_dir(dir_path: str) -> dict:
 
     try:
         await broadcast(
-            {"op": "evict_template", "path": dir_path, "prefix": True},
+            EvictTemplate(op="evict_template", path=dir_path, prefix=True),
             None,
             _apply,
             publish_on_local_failure=True,

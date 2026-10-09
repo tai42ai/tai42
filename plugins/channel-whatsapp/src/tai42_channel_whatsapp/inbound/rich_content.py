@@ -25,12 +25,7 @@ import logging
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import (
-    InboundMediaKind,
-    InboundRejectionReason,
-    build_inbound_media_params,
-    inbound_media_placeholder,
-)
+from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaOrigin,
@@ -40,6 +35,7 @@ from tai42_contract.interactions import (
     MediaTypeNotAllowedError,
 )
 from tai42_contract.interactions.models import LocationElement
+from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
 from tai42_kit.net import MediaFetchError, UrlGuardError
 
 from tai42_channel_whatsapp.client import fetch_media_metadata, media_endpoint_host, open_media_download
@@ -95,6 +91,7 @@ async def _handle_media(
 
     text = caption or inbound_media_placeholder(kind, filename=ingested.item.filename, voice=voice)
     media_params = build_inbound_media_params(
+        door="whatsapp",
         kind=kind,
         media_id=ingested.media_id,
         mime_type=ingested.mime,
@@ -197,7 +194,7 @@ async def _reject_media(
         reason=reason,
     )
     if caption:
-        media_params = build_inbound_media_params(kind=kind, mime_type=declared_mime)
+        media_params = build_inbound_media_params(door="whatsapp", kind=kind, mime_type=declared_mime)
         await _bridge_inbound(phone_number_id, wa_id, caption, wamid, params=_merged_params(base_params, media_params))
     else:
         await mark_seen(wamid)

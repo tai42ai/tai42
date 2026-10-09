@@ -162,8 +162,8 @@ test('a per-send form with data + pages renders in the widget, steps, and resolv
   // per-send option value `date=a`, which is not a schema enum.
   const askRes = await askPromise;
   expect(askRes.status(), await askRes.text()).toBe(200);
-  const body = (await askRes.json()) as { data: unknown };
-  expect(body.data).toEqual(answer);
+  const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+  expect(body.data).toEqual({ kind: 'result', result: answer });
 });
 
 test('a notify_user form with data + pages opens in the widget already filled in and stepped', async ({

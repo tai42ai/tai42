@@ -16,13 +16,10 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.events import SuspendedFinal
-from tai42_contract.interactions import (
-    SuspendedInteraction,
-    get_resume_continuation_tool,
-    read_suspended_interaction_marker,
-)
+from tai42_contract.interactions import SuspendedInteraction, get_resume_continuation_tool
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 from tests._client_tool import client_tool
 from tests._tools_agent_park_support import (
     ScriptedChatModel,

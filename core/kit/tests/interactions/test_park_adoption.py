@@ -1,16 +1,362 @@
-"""The terminal chain notice: one payload shape for a success and for a failed terminal."""
+"""Park adoption, the chained-call claims ledger, and the chain fires every driver builds.
+
+The single-owner adoption guard reads the resume binding to decide whether a returned park may
+become the CALLER's own park — adopting it, or CHAINING the nested call so the run parks on the
+call and the nested terminal re-enters it. A neutral driver at the end exercises adopt, chain and
+refuse through one nested dispatch and reads both chain fires back.
+"""
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+import pytest
+from tai42_contract.errors import ErrorKind, error_kind
 from tai42_contract.interactions import (
+    CHAINED_PARK_KEY_PREFIX,
     CHAINED_PARK_TOKEN_KEY,
     PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
     ChainedResume,
+    NestedParkOwnershipError,
     RunFailed,
+    SuspendedInteraction,
+    get_resume_continuation_tool,
+    reset_chained_resume,
+    reset_park_completion,
+    reset_resume_continuation_tool,
+    set_chained_resume,
+    set_park_completion,
+    set_resume_continuation_tool,
 )
 
-from tai42_kit.interactions.park_adoption import terminal_chain_notice
+from tai42_kit.interactions.park_adoption import (
+    assert_park_adoptable,
+    attach_chained_park,
+    chained_park_claims,
+    is_chained_park_key,
+    new_chained_park_key,
+    repark_notice,
+    resolve_park_adoption,
+    terminal_chain_notice,
+)
+
+
+def test_a_park_raised_under_the_bound_continuation_is_adoptable():
+    # The caller's own binding raised the ask, so the caller is the park's resume owner and
+    # may record it as its own suspended state.
+    token = set_resume_continuation_tool("agent_resume")
+    try:
+        assert_park_adoptable("agent_resume", interaction_id="i1", tool_name="ask")
+    finally:
+        reset_resume_continuation_tool(token)
+
+
+def test_a_nested_drivers_park_is_refused_by_the_caller():
+    # A nested driver bound its OWN continuation for the ask, so the platform resumes THAT
+    # driver — a caller adopting the park would wait on a resume never fired at it.
+    token = set_resume_continuation_tool("agent_resume")
+    try:
+        with pytest.raises(NestedParkOwnershipError) as caught:
+            assert_park_adoptable("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+    finally:
+        reset_resume_continuation_tool(token)
+    message = str(caught.value)
+    # The refusal names the offending tool and the park, so the operator can locate it.
+    assert "run_target" in message
+    assert "i1" in message
+    # But it names NEITHER owner: echoing the bound continuation would hand a model the exact
+    # string to name for a claim, and the guard is a nesting discriminator, not an owner report.
+    assert "'nested_driver_resume'" not in message
+    assert "agent_resume" not in message
+    assert error_kind(caught.value) is ErrorKind.CONFLICT
+
+
+def test_an_ownerless_park_is_refused_by_a_bound_caller():
+    # A park surfaced with NO owner belongs to a nested RUN driving its own resume (an agent
+    # run parked at its tool face); a bound caller may not adopt it either.
+    token = set_resume_continuation_tool("agent_resume")
+    try:
+        with pytest.raises(NestedParkOwnershipError) as caught:
+            assert_park_adoptable(None, interaction_id="i1", tool_name="inner_agent")
+    finally:
+        reset_resume_continuation_tool(token)
+    message = str(caught.value)
+    # The ownerless case gets its OWN sentence: there is no owning driver to name, so the
+    # message never claims the park is "owned by None".
+    assert "no adoptable owner" in message
+    assert "None" not in message
+    # And it never names the bound continuation either.
+    assert "agent_resume" not in message
+
+
+def test_an_ownerless_park_is_refused_for_an_unbound_caller_too():
+    # ``None`` is not adoptable by ANY caller, bound or not: an ask that parks always stamps
+    # the continuation it was raised under, so an ownerless park is one no ask minted for this
+    # caller. An unbound caller has no continuation the platform could fire either way, so a
+    # park it claimed could only hang.
+    assert get_resume_continuation_tool() is None
+    with pytest.raises(NestedParkOwnershipError):
+        assert_park_adoptable(None, interaction_id="i1", tool_name="ask")
+
+
+def test_an_owned_park_is_refused_when_nothing_is_bound_here():
+    # A real park reaching a caller that binds no resume path at all: still refused as a park
+    # raised under a different run's binding.
+    assert get_resume_continuation_tool() is None
+    with pytest.raises(NestedParkOwnershipError, match="different run's resume binding"):
+        assert_park_adoptable("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+
+
+def test_the_refusal_leads_with_the_remedy_and_trails_the_diagnostics():
+    # A tool error is read by a MODEL: the actionable sentence comes first and the identifiers
+    # ride at the end, so a truncated read still carries what to do about it.
+    token = set_resume_continuation_tool("agent_resume")
+    try:
+        with pytest.raises(NestedParkOwnershipError) as caught:
+            assert_park_adoptable("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+    finally:
+        reset_resume_continuation_tool(token)
+    message = str(caught.value)
+    assert message.startswith("Tool 'run_target' cannot be used inside this run")
+    assert message.index("conversation route") < message.index("[interaction i1")
+    assert message.rstrip().endswith("]")
+
+
+def test_a_blank_owner_reads_as_no_owner():
+    # A blank owner names no registered tool the platform could dispatch: it takes the ownerless
+    # (nested/foreign) branch rather than being reported as an owner.
+    token = set_resume_continuation_tool("agent_resume")
+    try:
+        with pytest.raises(NestedParkOwnershipError, match="no adoptable owner"):
+            assert_park_adoptable("   ", interaction_id="i1", tool_name="relay")
+    finally:
+        reset_resume_continuation_tool(token)
+
+
+_CHAIN_TOOL = "deliver_chained_park"
+
+
+def _chain(key: str):
+    """Bind the chain routing for one nested dispatch, as the platform seam does."""
+    return set_chained_resume(ChainedResume(delivery_tool=_CHAIN_TOOL, chain_key=key, asked_by=("main",)))
+
+
+def test_a_chained_key_is_namespaced_and_unique_per_call():
+    first, second = new_chained_park_key(), new_chained_park_key()
+    assert first != second
+    assert first.startswith(CHAINED_PARK_KEY_PREFIX)
+    # A key naming a CALL is distinguishable from a platform interaction id, which is what
+    # lets a driver indexing both apply chain-only policy to the right one.
+    assert is_chained_park_key(first)
+    assert not is_chained_park_key("i1")
+
+
+def test_this_runs_own_park_is_adopted_by_its_interaction_id():
+    resume = set_resume_continuation_tool("agent_resume")
+    completion = _chain("tai42:chained-park:k1")
+    try:
+        # The ask was raised under THIS run's binding — a chained dispatch around it changes
+        # nothing: the run parks on its own interaction, under its own owner, and the platform
+        # resumes it directly.
+        assert resolve_park_adoption("agent_resume", interaction_id="i1", tool_name="ask") == ("i1", "agent_resume")
+    finally:
+        reset_chained_resume(completion)
+        reset_resume_continuation_tool(resume)
+
+
+def test_a_nested_runs_park_is_chained_when_the_dispatch_was_chained():
+    resume = set_resume_continuation_tool("agent_resume")
+    completion = _chain("tai42:chained-park:k1")
+    try:
+        # The nested run keeps its own park and its own resume; this run parks on the CALL —
+        # a park owned by its OWN resume continuation, so the claim point downstream agrees.
+        claimed = resolve_park_adoption("nested_driver_resume", interaction_id="i-nested", tool_name="run_target")
+    finally:
+        reset_chained_resume(completion)
+        reset_resume_continuation_tool(resume)
+    assert claimed == ("tai42:chained-park:k1", "agent_resume")
+
+
+def test_an_ownerless_nested_park_is_chained_too():
+    # A nested RUN parked at its tool face names no adoptable owner; it is still chainable,
+    # because the chain never adopts its park — it waits on the run's terminal.
+    resume = set_resume_continuation_tool("agent_resume")
+    completion = _chain("tai42:chained-park:k1")
+    try:
+        assert resolve_park_adoption(None, interaction_id="i-nested", tool_name="inner_agent") == (
+            "tai42:chained-park:k1",
+            "agent_resume",
+        )
+    finally:
+        reset_chained_resume(completion)
+        reset_resume_continuation_tool(resume)
+
+
+def test_an_unchained_dispatch_still_refuses_a_nested_runs_park():
+    # Nothing chained the call, so there is no way to wait on the nested terminal: the loud
+    # refusal is unchanged, and it now names chaining as the other way out.
+    resume = set_resume_continuation_tool("agent_resume")
+    try:
+        with pytest.raises(NestedParkOwnershipError) as caught:
+            resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+    finally:
+        reset_resume_continuation_tool(resume)
+    message = str(caught.value)
+    # The refusal stays store-name-free: it never echoes the expected owner (a public
+    # continuation name would hand a caller the exact string to name for a claim).
+    assert "'nested_driver_resume'" not in message
+    assert "raised under a different run's resume binding" in message
+    # The diagnostics name the door that was shut: nothing chained this call.
+    assert "nothing chained this call" in message
+    assert error_kind(caught.value) is ErrorKind.CONFLICT
+
+
+def test_a_bound_door_completion_without_chain_routing_neither_chains_nor_notifies():
+    # A door's own delivery binding is not a chain: with no chain routing bound, a nested run's
+    # park is refused exactly as with nothing bound, and a re-park raises no horizon notice.
+    resume = set_resume_continuation_tool("agent_resume")
+    completion = set_park_completion("conversation_deliver", {"route_name": "chat"}, thread_id="thread-1")
+    try:
+        with pytest.raises(NestedParkOwnershipError):
+            resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+        assert repark_notice(datetime(2030, 1, 1, tzinfo=UTC)) is None
+    finally:
+        reset_park_completion(completion)
+        reset_resume_continuation_tool(resume)
+
+
+def test_a_chained_adoption_is_recorded_in_the_open_claims_ledger():
+    resume = set_resume_continuation_tool("agent_resume")
+    try:
+        with chained_park_claims() as claims:
+            completion = _chain("tai42:chained-park:k1")
+            try:
+                resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+            finally:
+                reset_chained_resume(completion)
+            # The driver reads the ledger when its drive stops: a claim it never turned into a
+            # park is a dead chain it must detach.
+            assert claims == {"tai42:chained-park:k1"}
+    finally:
+        reset_resume_continuation_tool(resume)
+
+
+def test_an_adopted_own_park_records_no_claim():
+    resume = set_resume_continuation_tool("agent_resume")
+    try:
+        with chained_park_claims() as claims:
+            completion = _chain("tai42:chained-park:k1")
+            try:
+                resolve_park_adoption("agent_resume", interaction_id="i1", tool_name="ask")
+            finally:
+                reset_chained_resume(completion)
+            # Nothing was chained, so nothing needs detaching — no key is written for a chain
+            # the run never parked on.
+            assert claims == set()
+    finally:
+        reset_resume_continuation_tool(resume)
+
+
+def test_a_claim_recorded_in_a_child_task_is_visible_to_the_opener():
+    async def scenario() -> None:
+        resume = set_resume_continuation_tool("agent_resume")
+        try:
+            with chained_park_claims() as claims:
+
+                async def dispatch(key: str) -> None:
+                    # Every nested dispatch runs in a child context (its own binding), so the
+                    # ledger has to be shared by identity, not by contextvar value.
+                    completion = _chain(key)
+                    try:
+                        resolve_park_adoption("nested_driver_resume", interaction_id="i", tool_name="run_target")
+                    finally:
+                        reset_chained_resume(completion)
+
+                await asyncio.gather(dispatch("tai42:chained-park:a"), dispatch("tai42:chained-park:b"))
+                assert claims == {"tai42:chained-park:a", "tai42:chained-park:b"}
+        finally:
+            reset_resume_continuation_tool(resume)
+
+    asyncio.run(scenario())
+
+
+def test_the_claims_ledger_is_closed_outside_a_drive():
+    # No ledger open (any code outside a driver's drive): a chained adoption still resolves,
+    # it simply records nothing.
+    resume = set_resume_continuation_tool("agent_resume")
+    completion = _chain("tai42:chained-park:k1")
+    try:
+        assert resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target") == (
+            "tai42:chained-park:k1",
+            "agent_resume",
+        )
+    finally:
+        reset_chained_resume(completion)
+        reset_resume_continuation_tool(resume)
+
+
+def test_a_repark_notice_is_none_with_no_chain_routing_bound():
+    # Nothing bound: no chain routing, so no horizon notice fires.
+    assert repark_notice(datetime(2030, 1, 1, tzinfo=UTC)) is None
+
+
+def test_a_repark_notice_carries_the_chain_key_the_new_deadline_and_the_status():
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+    completion = _chain("tai42:chained-park:k1")
+    try:
+        notice = repark_notice(deadline)
+    finally:
+        reset_chained_resume(completion)
+    assert notice is not None
+    tool, payload = notice
+    assert tool == _CHAIN_TOOL
+    assert payload[CHAINED_PARK_TOKEN_KEY] == "tai42:chained-park:k1"
+    assert payload["expiry_at"] == deadline.isoformat()
+    # The one NON-terminal status: the run did not finish, it re-parked on a new ask.
+    assert payload["status"] == PARK_COMPLETION_REPARKED
+    assert PARK_COMPLETION_REPARKED not in {PARK_COMPLETION_SUCCEEDED, PARK_COMPLETION_FAILED}
+
+
+def test_a_repark_notice_renders_a_deadline_less_park_as_none():
+    completion = _chain("tai42:chained-park:k1")
+    try:
+        notice = repark_notice(None)
+    finally:
+        reset_chained_resume(completion)
+    assert notice is not None
+    assert notice[1]["expiry_at"] is None
+
+
+def test_attaching_a_claim_drops_it_from_the_ledger():
+    resume = set_resume_continuation_tool("agent_resume")
+    try:
+        with chained_park_claims() as claims:
+            completion = _chain("tai42:chained-park:k1")
+            try:
+                key, _owner = resolve_park_adoption("nested_driver_resume", interaction_id="i1", tool_name="run_target")
+            finally:
+                reset_chained_resume(completion)
+            # The driver recorded a park on the key, so it is attached, not dead.
+            attach_chained_park(key)
+            assert claims == set()
+    finally:
+        reset_resume_continuation_tool(resume)
+
+
+def test_attaching_an_unclaimed_key_outside_a_ledger_is_a_no_op():
+    # A driver that persists a park with no ledger open (a park face that never chains) still
+    # calls this on every key it writes.
+    attach_chained_park("tai42:chained-park:never-claimed")
+    with chained_park_claims() as claims:
+        attach_chained_park("i1")
+        assert claims == set()
+
+
+# --- the terminal chain notice ---------------------------------------------------------
 
 _ROUTING = ChainedResume(delivery_tool="probe_chain_deliver", chain_key="k-1", asked_by=("caller",))
 
@@ -29,3 +375,61 @@ def test_a_failed_terminal_carries_its_outcome_under_the_failed_status() -> None
     assert set(payload) == {CHAINED_PARK_TOKEN_KEY, "result", "status"}
     assert payload["result"] == {"status": "error", "error": "down"}
     assert payload["status"] == PARK_COMPLETION_FAILED
+
+
+# --- a neutral driver exercising adopt, chain and refuse through one nested dispatch ----------
+
+
+@dataclass
+class _ProbeDriver:
+    """A driver with its own resume continuation that dispatches one nested call and records its park."""
+
+    resume_tool: str
+    parks: dict[str, str | None] = field(default_factory=dict)
+
+    def dispatch(self, nested_park: SuspendedInteraction, *, chained: ChainedResume | None) -> str:
+        resume = set_resume_continuation_tool(self.resume_tool)
+        routing = set_chained_resume(chained) if chained is not None else None
+        try:
+            with chained_park_claims() as claims:
+                key, owner = resolve_park_adoption(
+                    nested_park.resume_owner, interaction_id=nested_park.interaction_id, tool_name="probe_nested"
+                )
+                self.parks[key] = owner
+                attach_chained_park(key)
+                assert claims == set()
+        finally:
+            if routing is not None:
+                reset_chained_resume(routing)
+            reset_resume_continuation_tool(resume)
+        return key
+
+
+def test_a_driver_adopts_its_own_park_chains_a_nested_one_and_refuses_an_unchained_one():
+    driver = _ProbeDriver(resume_tool="probe_resume")
+
+    own = driver.dispatch(SuspendedInteraction(interaction_id="i-own", resume_owner="probe_resume"), chained=None)
+    routing = ChainedResume(delivery_tool="probe_chain_deliver", chain_key=new_chained_park_key(), asked_by=("probe",))
+    chained = driver.dispatch(SuspendedInteraction(interaction_id="i-nested", resume_owner=None), chained=routing)
+    with pytest.raises(NestedParkOwnershipError):
+        driver.dispatch(SuspendedInteraction(interaction_id="i-foreign", resume_owner="other_resume"), chained=None)
+
+    assert own == "i-own"
+    assert chained == routing.chain_key
+    assert driver.parks == {"i-own": "probe_resume", routing.chain_key: "probe_resume"}
+
+    # The nested run, still under the chain routing, re-parks and then terminates: both fires carry
+    # the chain key the driver's park is recorded under, so the delivery tool reverses them to it.
+    token = set_chained_resume(routing)
+    try:
+        notice = repark_notice(datetime(2030, 1, 1, tzinfo=UTC))
+    finally:
+        reset_chained_resume(token)
+    assert notice is not None
+    terminal = terminal_chain_notice(routing, {"done": True})
+    for tool, payload in (notice, terminal):
+        assert tool == "probe_chain_deliver"
+        assert payload[CHAINED_PARK_TOKEN_KEY] in driver.parks
+    assert set(notice[1]) == {CHAINED_PARK_TOKEN_KEY, "expiry_at", "status"}
+    assert set(terminal[1]) == {CHAINED_PARK_TOKEN_KEY, "result", "status"}
+    assert get_resume_continuation_tool() is None
