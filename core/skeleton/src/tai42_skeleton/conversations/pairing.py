@@ -10,7 +10,7 @@ message (``/link``/``/unlink`` — never ``/link extra``, which is ordinary text
 matches the first ``LINK-XXXXXXXX`` token anywhere in the raw text, so a code carried inside a
 sentence, or pasted from an invite link, still redeems (multiple codes → the first wins). On a
 target with multichannel OFF the caller never routes here, so all four forms reach the target
-as plain text (byte-identical to today).
+as plain text.
 
 :func:`mint_pairing_code` is the tool-side feature body: it resolves the
 ``(channel, our_identity)`` route exactly as the accept path does (canonicalizing

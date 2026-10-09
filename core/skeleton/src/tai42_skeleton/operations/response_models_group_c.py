@@ -1,6 +1,6 @@
 """Response models for the Group C ``@operation`` success bodies.
 
-Each model DESCRIBES the inner payload a Group C operation returns today (the
+Each model DESCRIBES the inner payload a Group C operation returns (the
 adapter wraps it in the ``{"data": ...}`` envelope — the models never re-declare
 that envelope and never reshape a wire body). Genuinely-open sub-fields (an
 agent's input JSON schema, a trace's free-form input/output/metadata, a

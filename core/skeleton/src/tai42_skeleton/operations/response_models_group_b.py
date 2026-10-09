@@ -3,7 +3,7 @@
 Covers config, hooks, connectors, templates, tools, tool_meta, tool_extensions, tool_runs, roles, storage,
 schedules.
 
-Each model DESCRIBES the inner payload a route returns today — the shape the adapter
+Each model DESCRIBES the inner payload a route returns — the shape the adapter
 wraps in the ``{"data": ...}`` success envelope — and never re-declares the envelope or
 reshapes a wire body. Shared cross-package models (``ApplyResponse``, ``FanoutSummary``,
 ``ProfileApplyResponse``, ``OpaqueJson``) live in ``tai42_contract.app.responses`` and are

@@ -645,7 +645,8 @@ async def resolve_policy_update(
 
     Supplied scopes are validated with their route rows locked ``FOR SHARE``; the row is
     locked ``FOR UPDATE``. Server-owned claims are carried from the stored row; a supplied
-    ``disabled`` claim that differs from the stored state raises ``ValueError``. Writes nothing.
+    ``disabled`` claim that differs from the stored state raises ``ValueError``, as does an edit
+    that leaves neither a scope nor a condition. Writes nothing.
     """
     if updates.get("scopes"):
         await store._lock_and_validate_scopes(cur, updates["scopes"])
@@ -669,6 +670,13 @@ async def resolve_policy_update(
         body["policy_data"] = _carry_server_owned_claims(new_policy_data, body["policy_data"])
     if "condition" in updates:
         body["condition"] = updates["condition"]
+    if updates and not body["scopes"] and body["condition"] is None:
+        # An edit that leaves neither a scope nor a condition grants nothing and reads as no key
+        # at every door (``policy_is_empty``); the key is revoked instead.
+        raise ValueError(
+            "the edit leaves the policy with neither a scope nor a condition: a policy with neither "
+            "grants nothing, and every door treats it as no key; revoke the key instead"
+        )
     return body
 
 

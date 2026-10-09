@@ -290,8 +290,17 @@ class HarnessSettings(BaseSettings):
     pg_admin_db: str = "postgres"
 
     # Deadline for a stack to reach readiness (all app ports healthy, metrics
-    # up, backend present in the census).
-    boot_timeout: float = 30.0
+    # up, backend present in the census), and for a restarted process to rejoin.
+    # It bounds a wait on those readiness events; a boot imports the serve stack
+    # twice in a multi-worker master (the master, then each spawned worker re-imports
+    # it), which takes tens of seconds on a loaded host.
+    boot_timeout: float = 120.0
+
+    # Seconds a booting uvicorn worker of a multi-worker ``tai serve`` has to answer
+    # its master's health ping (passed as ``--timeout-worker-healthcheck``). A spawned
+    # worker answers only once it has re-imported the serve stack, so a ping shorter
+    # than that import makes the master kill the worker while it boots.
+    worker_healthcheck_timeout: int = 60
 
     # Keep per-stack config + log dirs after teardown for debugging.
     keep_stacks: bool = Field(default=False)

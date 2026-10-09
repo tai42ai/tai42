@@ -37,7 +37,7 @@ class _SilentOutcome:
     turn is silent when that is worth keeping — set for a turn that went silent because the
     run PAUSED with its reply still pending, so the record reads as not-yet-answered rather
     than a plain designed no-reply. ``None`` for an ordinary silent outcome, which records no
-    detail (byte-identical to before).
+    detail.
     """
 
     note: str | None = None
@@ -50,7 +50,7 @@ class _ResolvedOutcome:
     ``parts`` is the ORDERED, non-empty list of rich :class:`AnswerPart` messages the turn
     produced — one for a single-message answer, several for an ordered multi-message one (a tool
     route emitting an array of strings and/or part objects). ``answer`` is the part MESSAGE texts
-    joined with a blank line — the whole-text form every legacy reader keeps consuming.
+    joined with a blank line — the whole-text form every plain-text reader consumes.
     """
 
     answer_status: Literal["answered", "error"]
@@ -61,8 +61,8 @@ class _ResolvedOutcome:
     def answer(self) -> str:
         """The part messages as one joined string.
 
-        What intake dedup, transcripts and the api door body read, and byte-identical to the old
-        single ``answer`` for one part. A media-only part contributes nothing, so an all-media
+        What intake dedup, transcripts and the api door body read, and equal to the single part's
+        text for one part. A media-only part contributes nothing, so an all-media
         outcome joins to ``""``.
         """
         return joined_answer_text(self.parts)

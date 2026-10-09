@@ -705,7 +705,9 @@ async def test_failing_callback_reports_failed(wire_bus_client: None) -> None:
 
 
 async def test_subscriber_skips_op_outside_targets(wire_bus_client: None) -> None:
-    publisher = make_bus()
+    # The publisher returns on the targeted worker's terminal reply, so its reply windows only
+    # bound a hang; they are generous so a slow host still collects the ``applied`` reply.
+    publisher = make_bus(ack_timeout=_REPLY_WINDOW, apply_timeout=_REPLY_WINDOW)
     worker_a = make_bus()
     worker_b = make_bus()
     a_seen: list[dict] = []
@@ -726,8 +728,12 @@ async def test_subscriber_skips_op_outside_targets(wire_bus_client: None) -> Non
         assert id_b.name not in by_name
         assert by_name[id_a.name].outcome == OpOutcome.applied
         assert a_seen == [{"op": "reload_config"}]
-        await asyncio.sleep(0.05)
-        assert b_seen == []
+        # B reads the op stream in order: once B has applied an op published AFTER the first,
+        # the first has passed B by, so B holding only the later op proves it skipped the first.
+        marker = {"op": "reload_config", "marker": "after"}
+        later = await publisher.publish(marker, targets=[id_b.name], local=None)
+        assert {r.name: r.outcome for r in later.results} == {id_b.name: OpOutcome.applied}
+        assert b_seen == [marker]
     finally:
         await _stop(task_a, task_b)
 
@@ -841,3 +847,7 @@ async def test_deliberate_stop_removes_the_index_member_and_presence_key(wire_bu
     assert ident.name not in await client.smembers(bus._settings.presence_index)
     assert await client.get(bus._settings.presence_key(ident.name)) is None
     await client.aclose()
+
+
+# The publisher's ack and apply windows in a test that waits on a terminal reply: a hang bound.
+_REPLY_WINDOW = 30.0

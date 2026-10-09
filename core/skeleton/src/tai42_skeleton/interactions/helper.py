@@ -250,7 +250,7 @@ async def ask(
     ``on_mismatch`` is the per-ask digression policy the shared inbound-answer
     ladder reads when the answer door REJECTS a participant reply on a LIVE
     channel-delivered ask (a 400 — the reply did not fit the format).
-    ``AnswerMismatchPolicy.RETRY`` (the default, today's behavior) keeps the ask
+    ``AnswerMismatchPolicy.RETRY`` (the default) keeps the ask
     parked and tells the participant what is expected so they answer again in place;
     ``AnswerMismatchPolicy.BRIDGE`` treats an unmatched reply as a DIGRESSION —
     keep the ask parked with NO participant notice and hand the reply to the
@@ -315,8 +315,7 @@ async def ask(
     ``mode="async"``, and any ``choices`` field requires the ``submitted`` trigger (the request
     model enforces all three loudly). A reacting form over a ``channel`` requires that channel
     to advertise ``supports_form_reaction`` (refused loudly otherwise); a ``channel=None``
-    reacting form is served by the in-app reaction door. Absent both is a static form, exactly
-    today's behavior.
+    reacting form is served by the in-app reaction door. Absent both is a static form.
 
     ``mode`` selects the wait discipline. ``"sync"`` (the default) blocks and
     returns the typed answer as described above. ``"async"`` PARKS the caller: it

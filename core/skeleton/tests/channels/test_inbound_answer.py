@@ -321,7 +321,7 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
         "retry_in_place": True,
         # Default bridge: core sent the generic notice, so it owns it.
         "notice_owner": "core",
-        # Default ask policy is retry (today's behavior).
+        # Default ask policy is retry.
         "policy": "retry",
     }
 
@@ -753,7 +753,7 @@ async def test_400_bridge_policy_keeps_correlation_bridges_and_sends_no_notice(w
 async def test_400_retry_policy_is_the_default_and_tags_the_event(wired, monkeypatch):
     from tai42_contract.channels import InboundAnswerOutcome
 
-    # A default (retry) ask keeps today's behavior exactly: correlation kept, participant notified,
+    # A default (retry) ask: correlation kept, participant notified,
     # reply NOT bridged, and the operator event carries policy="retry".
     store = FakeStore(_entry())  # default on_mismatch == retry
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "not a valid choice", "retry_in_place": True}))
@@ -796,7 +796,7 @@ async def test_retry_custom_mismatch_notice_without_placeholder_is_verbatim(wire
 
 
 async def test_retry_default_mismatch_notice_unchanged_when_none(wired, monkeypatch):
-    # None keeps today's built-in notice (carrying the door reason).
+    # None keeps the built-in notice (carrying the door reason).
     store = FakeStore(_entry())  # mismatch_notice defaults to None
     door_body = {"error": "Please answer with yes or no.", "retry_in_place": True}
     _stub_forward(monkeypatch, httpx.Response(400, json=door_body))

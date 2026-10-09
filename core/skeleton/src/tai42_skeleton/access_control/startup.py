@@ -94,9 +94,9 @@ async def check_route_rows_canonical() -> None:
     """Refuse to boot on a route table holding a row whose url is not in its canonical form.
 
     Every request is looked up by its canonical path, so a non-canonical row is a mapping no
-    request can reach — and one its own remove/unpin could not address. The fix is a reset of
-    the access-control store; the rows are never rewritten here. Gated like
-    :func:`seed_roles` — skipped when no skeleton store is configured.
+    request can reach — and one its own remove/unpin could not address. The operator corrects or
+    deletes the named rows in the ``access_control_routes`` table; the rows are never rewritten
+    here. Gated like :func:`seed_roles` — skipped when no skeleton store is configured.
     """
     from tai42_kit.db import component_store_configured
 
@@ -116,9 +116,10 @@ async def check_route_rows_canonical() -> None:
             stranded.append(url)
     if stranded:
         raise RuntimeError(
-            f"access_control: the route table holds non-canonical rows: {sorted(stranded)} — reset the "
-            "access-control store (the canonical form decodes each segment once, collapses slashes and dot "
-            "segments, and drops a trailing slash)"
+            f"access_control: the route table holds non-canonical rows: {sorted(stranded)} — correct or "
+            "delete these rows in the access_control_routes table (the canonical form decodes each segment "
+            "once, collapses slashes and dot segments, and drops a trailing slash; a url with no canonical "
+            "form can only be deleted)"
         )
 
 
@@ -209,12 +210,14 @@ async def check_spa_shell_public() -> None:
     exhaustiveness is what lets the runtime fallback (concrete-match only) rely on it for
     templated routes rather than build a second matcher — see ``resolve_resource_ids``.
 
-    Finally it confirms the terminal-deny exclusion: a probe under each control-plane prefix
-    is excluded from the shell tier, so the GET fallback can never open the control plane.
+    Finally it confirms the terminal-deny exclusion: the resolver's SPA-shell tier refuses a
+    GET probe under each control-plane prefix, so the GET fallback can never open the control
+    plane.
     (Exercised end-to-end by the terminal-deny + route-walk tests.)
     """
+    from tai42_skeleton.access_control import verifier as verifier_module
     from tai42_skeleton.access_control.path_canon import under_prefix
-    from tai42_skeleton.access_control.verifier import registered_reserved_get_paths, under_control_plane
+    from tai42_skeleton.access_control.verifier import registered_reserved_get_paths
     from tai42_skeleton.app.route_registry import route_registry
 
     settings = access_control_settings()
@@ -230,7 +233,8 @@ async def check_spa_shell_public() -> None:
     acknowledged = frozenset(settings.acknowledged_public_routes)
 
     logger.info(
-        "access_control: SPA-shell public fallback %s; derived reserved (gated) non-/api GET routes: %s",
+        "access_control: SPA-shell public fallback %s; derived reserved (gated) GET routes outside the control "
+        "plane: %s",
         "ON" if settings.spa_shell_public else "OFF",
         ", ".join(sorted(derived)) or "(none)",
     )
@@ -240,15 +244,16 @@ async def check_spa_shell_public() -> None:
 
     if audit.acknowledged_present:
         logger.info(
-            "access_control: acknowledged public-by-declaration non-/api GET routes: %s",
+            "access_control: acknowledged public-by-declaration routes outside the control plane: %s",
             ", ".join(sorted(set(audit.acknowledged_present))),
         )
 
-    # Terminal-deny confirmation: the resolver structurally excludes the control plane
-    # from the shell tier, so no unmatched control-plane path can ever reach the SPA shell.
+    # Terminal-deny confirmation: the resolver's SPA-shell tier itself is asked whether an
+    # unmatched GET under each control-plane prefix would be served the public shell; it must
+    # answer no, so the GET fallback can never open the control plane.
     for prefix in control_plane:
         probe = f"{prefix}/__boot_probe__"
-        if not under_control_plane(probe):
+        if verifier_module.spa_shell_fallback_admits(probe, "GET", settings):
             raise RuntimeError(
                 f"access_control: control-plane probe {probe!r} is not excluded from the SPA-shell tier — "
                 "the terminal-deny invariant is broken"
@@ -337,18 +342,18 @@ def _assert_spa_shell_audit_clean(audit: _SpaShellAudit) -> None:
         )
     if audit.invisible_authed:
         raise RuntimeError(
-            "access_control: authed=True non-/api GET route(s) would be served the public SPA shell — they are "
-            f"not visible in the derived reserved set: {sorted(set(audit.invisible_authed))}. A concrete route must "
-            "register so it joins the derived set; a TEMPLATED route is structurally not derivable, so /api-prefix "
-            "it (control-plane excluded) or add its registered template to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES "
-            "if it is genuinely public"
+            "access_control: authed=True GET route(s) outside the control plane would be served the public SPA "
+            "shell — they are not visible in the derived reserved set: "
+            f"{sorted(set(audit.invisible_authed))}. A concrete route must register so it joins the derived set; "
+            "a TEMPLATED route is structurally not derivable, so /api-prefix it (control-plane excluded) or add its "
+            "registered template to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES if it is genuinely public"
         )
     if audit.unacknowledged:
         raise RuntimeError(
-            "access_control: authed=False non-/api GET route(s) are public by declaration but not acknowledged: "
-            f"{sorted(set(audit.unacknowledged))} — add each (the registered path, or the template string for a "
-            "templated route) to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES if it is intentionally public, else set "
-            "authed=True or remove the route"
+            "access_control: authed=False route(s) outside the control plane are public by declaration but not "
+            f"acknowledged: {sorted(set(audit.unacknowledged))} — add each (the registered path, or the template "
+            "string for a templated route) to ACCESS_CONTROL_ACKNOWLEDGED_PUBLIC_ROUTES if it is intentionally "
+            "public, else set authed=True or remove the route"
         )
 
 

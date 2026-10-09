@@ -57,7 +57,7 @@ def _route_registering_modules() -> set[str]:
         # Drop the module and, when it is a route-registering PACKAGE, its already-imported
         # submodules, so a re-import re-runs the submodule bodies that register the routes
         # (a package's ``__init__`` re-import alone would rebind cached submodules and
-        # register nothing). A plain module has no submodules and is dropped as before.
+        # register nothing). A plain module has no submodules and is dropped alone.
         for mod in [name, *(m for m in list(sys.modules) if m.startswith(name + "."))]:
             sys.modules.pop(mod, None)
 

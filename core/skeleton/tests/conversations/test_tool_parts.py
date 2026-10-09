@@ -134,7 +134,7 @@ class _MediaFakeChannel(FakeChannel):
 async def test_tool_route_array_reply_delivers_ordered_parts(env, monkeypatch):
     # A tool route whose reply_expr emits a JSON array of strings produces an ORDERED
     # multi-message answer: each string is its own part, delivered as its own message in order,
-    # and ``answer`` is the blank-line join every legacy reader still sees.
+    # and ``answer`` is the blank-line join every plain-text reader sees.
     channel = FakeChannel()
     route = _tool_channel_route(reply_expr=".messages")
     _wire(monkeypatch, FakeManager(route), channel)
@@ -297,7 +297,7 @@ async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, pa
     )
     await _settle()
 
-    # Byte-identical to today's payload apart from the generic turn block: no ``params`` key.
+    # The payload carries the generic turn block and no ``params`` key.
     kwargs = tools.calls[0]["arguments"]
     assert kwargs.pop("turn") == {
         "id": message_id,

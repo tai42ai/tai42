@@ -74,7 +74,7 @@ REJECT_MESSAGE = "reloading — the server is applying a config reload; retry sh
 # A reload therefore proceeds UNGUARDED — logging the fork gate's ERROR — in exactly two
 # residual cases: a solo/gevent job that has already been running longer than 30s, or a
 # fork instant that happens to collide with the tail of an exhausted quiesce. In both the
-# child is exposed to the re-import race exactly as it was before the gate existed. That
+# child is exposed to the re-import race the gate otherwise closes. That
 # is the accepted tradeoff: the alternative is a reload that misses its fleet ack (and, on
 # a sibling, blocks fleet convergence) behind a long-running job.
 #

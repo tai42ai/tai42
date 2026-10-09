@@ -299,8 +299,11 @@ async def _authorize_pinned_route(
 
     scopes = _pinned_scope_set(caller_identity, principal.standing, is_execution_fire)
     # Publicness (the public id ALONE — deny wins) relaxes the SCOPE test alone; the policy,
-    # jq and LEVEL passes still run.
-    if not is_public_only(resource_ids, public):
+    # jq and LEVEL passes still run. A route declaring ``any_authenticated`` is reachable by
+    # any authenticated identity whatever its scopes, as the HTTP resource guard admits it
+    # ahead of table resolution, so it skips the SCOPE test too; the jq and LEVEL passes
+    # still run, as they do at the HTTP edge.
+    if not route.any_authenticated and not is_public_only(resource_ids, public):
         _assert_scope_covers(resource_ids, scopes, public)
 
     # 3. The jq policy fences over the canonical path.

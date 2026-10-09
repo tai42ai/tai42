@@ -72,7 +72,7 @@ def security_headers(nonce: str) -> dict[str, str]:
     ``https:`` so a question's media images render directly from remote https
     origins (``http:`` stays excluded — mixed content); images cannot execute
     script, so the ``script-src`` posture is unaffected. ``worker-src 'self'`` is
-    stated explicitly as future-proofing: today workers fall back to
+    stated explicitly: without it workers fall back to
     ``script-src`` whose ``'self'`` already admits same-origin worker URLs, but a
     later hardening (e.g. ``'strict-dynamic'``) would silently break them — the
     explicit directive pins the studio's same-origin jq worker independently of

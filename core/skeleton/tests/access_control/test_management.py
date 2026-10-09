@@ -127,12 +127,12 @@ async def test_mint_requires_an_existing_enabled_owner_principal(
     # Every api key belongs to a principal. An empty owner, an unknown owner, and a
     # disabled owner each raise loudly BEFORE the provider mints anything.
     with pytest.raises(ValueError, match="owner_user_id is required"):
-        await management.add_user_api_key("k", "d", [], owner_user_id="")
+        await management.add_user_api_key("k", "d", ["*"], owner_user_id="")
     with pytest.raises(ValueError, match="does not exist"):
-        await management.add_user_api_key("k", "d", [], owner_user_id="ghost")
+        await management.add_user_api_key("k", "d", ["*"], owner_user_id="ghost")
     pg.add_principal("off", disabled=True)
     with pytest.raises(ValueError, match="disabled"):
-        await management.add_user_api_key("k", "d", [], owner_user_id="off")
+        await management.add_user_api_key("k", "d", ["*"], owner_user_id="off")
     assert provider.provision_calls == []
     assert pg.policy("k") is None
 
@@ -175,7 +175,7 @@ async def test_mint_rejects_duplicate_user_before_provisioning(
 ) -> None:
     pg.add_policy("u1", scopes=[])
     with pytest.raises(ValueError, match="already in use"):
-        await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+        await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     assert provider.provision_calls == []
 
 
@@ -186,7 +186,7 @@ async def test_mint_step2_failure_raises_and_leaves_key_policy_less(
     # revoke-then-remint recovery. The key exists but is denied everything.
     pg.fault = ("INSERT INTO access_control_policies", RuntimeError("pg down"))
     with pytest.raises(RuntimeError, match="revoke_api_key"):
-        await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+        await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     assert provider.identities == {"u1": "desc"}  # key provisioned
     assert pg.policy("u1") is None  # but no policy
 
@@ -198,10 +198,10 @@ async def test_revoke_then_remint_recovery_succeeds(
     # revoke-then-remint, which then succeeds with a fresh key.
     pg.fault = ("INSERT INTO access_control_policies", RuntimeError("pg down"))
     with pytest.raises(RuntimeError):
-        await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+        await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     pg.fault = None
     assert await management.revoke_api_key("u1") is True
-    raw_key, _body, _fingerprint = await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    raw_key, _body, _fingerprint = await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     assert raw_key == "sk-u1"
     assert pg.policy("u1") is not None
 
@@ -211,9 +211,9 @@ async def test_revoke_then_remint_mints_a_fresh_fingerprint(
 ) -> None:
     # A revoke deletes the policy row, fingerprint and all, so a remint of the same
     # user_id writes a brand-new one that no old binding can match.
-    _raw, _body, first = await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    _raw, _body, first = await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     assert await management.revoke_api_key("u1") is True
-    _raw2, body2, second = await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    _raw2, body2, second = await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     assert first != second
     assert body2["policy_data"][KEY_FINGERPRINT_CLAIM] == second
 
@@ -221,10 +221,10 @@ async def test_revoke_then_remint_mints_a_fresh_fingerprint(
 async def test_plain_remint_of_same_user_raises_duplicate(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     # NOT idempotent: a plain retry hits the duplicate-user guard.
     with pytest.raises(ValueError, match="already in use"):
-        await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+        await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
 
 
 # -- first-mintable resolution + owner threading -----------------------------
@@ -239,7 +239,7 @@ async def test_first_mintable_provider_chosen(pg: FakeAccessControlPg, redis: Fa
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", '["validator", "mintable"]')
     reset_all_settings()
     try:
-        raw_key, _body, _fingerprint = await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+        raw_key, _body, _fingerprint = await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
         assert raw_key == "sk-u1"
         assert spy.provision_calls == ["u1"]
     finally:
@@ -252,7 +252,7 @@ async def test_no_mintable_provider_raises_typeerror(pg: FakeAccessControlPg, mo
     reset_all_settings()
     try:
         with pytest.raises(TypeError, match="no configured identity provider"):
-            await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+            await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     finally:
         reset_all_settings()
 
@@ -272,7 +272,7 @@ async def test_owner_threaded_to_provision_and_written_to_policy(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
     pg.add_principal("owner-1", kind="service", display_name="svc")
-    _raw, body, _fingerprint = await management.add_user_api_key("k1", "desc", [], owner_user_id="owner-1")
+    _raw, body, _fingerprint = await management.add_user_api_key("k1", "desc", ["*"], owner_user_id="owner-1")
     # Owner reaches the provider (identity-claim home) as a keyword arg ...
     assert provider.provision_owners["k1"] == "owner-1"
     # ... and is dual-homed into the committed policy_data (management/listing home).
@@ -286,7 +286,7 @@ async def test_owner_threaded_to_provision_and_written_to_policy(
 async def test_revoke_kills_policy_first_then_context_then_key(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     # An external metering writer accrued live counters into the context hash.
     redis._hashes[_ctx_key("u1")] = {"used": "9"}
     assert await management.revoke_api_key("u1") is True
@@ -302,7 +302,7 @@ async def test_revoke_bumps_the_policy_version_with_the_policy_delete(
     # The policy cache is keyed on (user_id, version), so a warm slot keeps serving the
     # revoked key until the version moves: the bump must ride with the policy-row delete.
     settings = management._settings()
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     before = redis._strings.get(settings.policy_version_key)
 
     async def _boom(*_a, **_k):
@@ -335,7 +335,7 @@ async def test_revoke_leaves_a_policy_row_that_was_never_a_key_untouched(
 async def test_revoke_failed_policy_delete_raises_leaving_the_key_authority_less(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     pg.fault = ("DELETE FROM access_control_policies", RuntimeError("pg down"))
     with pytest.raises(RuntimeError, match="pg down"):
         await management.revoke_api_key("u1")
@@ -350,7 +350,7 @@ async def test_revoke_retry_after_a_failed_policy_delete_completes(
 ) -> None:
     # The identity record (the existence signal) is deleted LAST, so a retry finishes the
     # revocation instead of answering 404 over a row that still carries fire authority.
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     pg.fault = ("DELETE FROM access_control_policies", RuntimeError("pg down"))
     with pytest.raises(RuntimeError, match="pg down"):
         await management.revoke_api_key("u1")
@@ -366,7 +366,7 @@ async def test_revoke_failed_context_delete_raises(
 ) -> None:
     plain = FakeRedis(strings={})
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(plain))
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     # Now make the context delete fail: an orphaned context hash would corrupt a
     # future remint, so the failure must surface loudly.
     broken = FakeRedis(hashes={_ctx_key("u1"): {"used": "1"}})
@@ -391,11 +391,11 @@ async def test_revoke_failed_context_delete_raises(
 async def test_remint_after_revoke_starts_with_fresh_context(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     redis._hashes[_ctx_key("u1")] = {"used": "99"}  # simulate accrued counters
     await management.revoke_api_key("u1")
     assert _ctx_key("u1") not in redis._hashes
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     # A remint of the reused id starts fresh: no seed, no hash — an absent hash is
     # the empty live view, never inheriting the dead key's counters.
     assert _ctx_key("u1") not in redis._hashes
@@ -408,7 +408,7 @@ async def test_edit_splits_description_to_provider_and_policy_to_store(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
     await management.add_url_to_scope("scope-b", "/b")
-    await management.add_user_api_key("u1", "old-desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "old-desc", ["*"], owner_user_id=OWNER)
     updated = await management.edit_user_payload("u1", description="new-desc", scopes=["scope-b"])
     assert updated is not None
     assert updated["scopes"] == ["scope-b"]  # policy → store
@@ -420,14 +420,14 @@ async def test_edit_description_only_leaves_policy_untouched(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
     _raw, _body, fingerprint = await management.add_user_api_key(
-        "u1", "old", [], policy_data={"k": 1}, condition=TemplatedText(content=".c"), owner_user_id=OWNER
+        "u1", "old", ["*"], policy_data={"k": 1}, condition=TemplatedText(content=".c"), owner_user_id=OWNER
     )
     updated = await management.edit_user_payload("u1", description="new")
     assert updated is not None
     # A description-only edit preserves every stored policy field (returns them),
     # including the per-mint fingerprint and the owner claim the mint stamped into policy_data.
     assert updated == {
-        "scopes": [],
+        "scopes": ["*"],
         "policy_data": {"k": 1, KEY_FINGERPRINT_CLAIM: fingerprint, OWNER_USER_ID_CLAIM: OWNER},
         "condition": {"content": ".c"},
     }
@@ -438,7 +438,7 @@ async def test_edit_scopes_only_never_touches_provider(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
     await management.add_url_to_scope("scope-b", "/b")
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     await management.edit_user_payload("u1", scopes=["scope-b"])
     # description left _UNSET → the provider is never called.
     assert provider.description_calls == []
@@ -448,7 +448,7 @@ async def test_edit_explicit_null_clears_policy_fields(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
     _raw, _body, fingerprint = await management.add_user_api_key(
-        "u1", "desc", [], policy_data={"k": 1}, condition=TemplatedText(content=".c"), owner_user_id=OWNER
+        "u1", "desc", ["*"], policy_data={"k": 1}, condition=TemplatedText(content=".c"), owner_user_id=OWNER
     )
     updated = await management.edit_user_payload("u1", policy_data=None, condition=None)
     assert updated is not None
@@ -466,7 +466,7 @@ async def test_edit_unknown_user_returns_none_without_provider_call(
 
 
 async def test_edit_rejects_unknown_scope(pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis) -> None:
-    await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     with pytest.raises(ValueError, match="does not exist"):
         await management.edit_user_payload("u1", scopes=["ghost"])
 
@@ -487,7 +487,7 @@ async def test_edit_missing_identity_while_a_policy_row_exists_raises(
 async def test_tokens_payload_merges_identity_and_policy(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    _raw, _body, fingerprint = await management.add_user_api_key("u1", "desc", [], owner_user_id=OWNER)
+    _raw, _body, fingerprint = await management.add_user_api_key("u1", "desc", ["*"], owner_user_id=OWNER)
     pg.policy("u1")["scopes"] = ["scope-a"]
     payload = await management.get_all_existing_tokens_payload()
     assert payload == [
@@ -530,7 +530,7 @@ async def test_tokens_payload_flags_orphaned_minted_rows(
 ) -> None:
     # A live key (identity + minted policy), an orphan (minted policy, no identity),
     # and an account row (no fingerprint, no identity — never a key).
-    await management.add_user_api_key("live", "live-desc", [], owner_user_id=OWNER)
+    await management.add_user_api_key("live", "live-desc", ["*"], owner_user_id=OWNER)
     pg.add_policy("orphan", scopes=["s"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-x"})
     pg.add_policy("account", scopes=["hooks"])
 
@@ -549,7 +549,7 @@ async def test_api_key_state_reads_the_four_states(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
     assert await management.api_key_state("nobody") == "absent"
-    await management.add_user_api_key("live", "d", [], owner_user_id=OWNER)
+    await management.add_user_api_key("live", "d", ["*"], owner_user_id=OWNER)
     assert await management.api_key_state("live") == "live"
     pg.add_policy("orphan", scopes=[], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     assert await management.api_key_state("orphan") == "orphaned"
@@ -586,7 +586,7 @@ async def test_mint_on_an_orphaned_id_raises_naming_the_orphan_case(
 ) -> None:
     pg.add_policy("orphan", scopes=[], policy_data={KEY_FINGERPRINT_CLAIM: "fp"})
     with pytest.raises(ValueError, match="orphaned policy row"):
-        await management.add_user_api_key("orphan", "d", [], owner_user_id=OWNER)
+        await management.add_user_api_key("orphan", "d", ["*"], owner_user_id=OWNER)
     # No auto-heal: the provider mints nothing on a plain mint over an orphan.
     assert provider.provision_calls == []
 
@@ -622,7 +622,7 @@ async def test_remint_orphan_with_no_owner_claim_raises(
 async def test_remint_refuses_a_non_orphaned_state(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:
-    await management.add_user_api_key("live", "d", [], owner_user_id=OWNER)
+    await management.add_user_api_key("live", "d", ["*"], owner_user_id=OWNER)
     with pytest.raises(ValueError, match="not an orphaned"):
         await management.remint_orphaned_api_key("live", "x")
     # No second provision on the refusal (only the original live mint).
@@ -726,7 +726,7 @@ async def test_restore_policy_body_bumps_only_when_restored(
 ) -> None:
     assert await management.restore_policy_body("ghost", {"scopes": [], "policy_data": {}, "condition": None}) is None
     assert bumps == []
-    _, body, _ = await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    _, body, _ = await management.add_user_api_key("u1", "d", ["*"], owner_user_id=OWNER)
     bumps.clear()
     assert await management.restore_policy_body("u1", body) is not None
     assert bumps == [1]
@@ -735,7 +735,7 @@ async def test_restore_policy_body_bumps_only_when_restored(
 async def test_add_user_api_key_bumps_once_after_the_policy_write(
     pg: FakeAccessControlPg, provider: _SpyProvider, bumps: list[int]
 ) -> None:
-    await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id=OWNER)
     assert bumps == [1]
 
 
@@ -752,7 +752,7 @@ async def test_edit_user_payload_bumps_once_and_not_for_an_unknown_user(
 ) -> None:
     assert await management.edit_user_payload("ghost", scopes=[]) is None
     assert bumps == []
-    await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id=OWNER)
     bumps.clear()
     assert await management.edit_user_payload("u1", condition=None) is not None
     assert bumps == [1]
@@ -761,7 +761,7 @@ async def test_edit_user_payload_bumps_once_and_not_for_an_unknown_user(
 async def test_revoke_bumps_immediately_inside_a_batch(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis, bumps: list[int]
 ) -> None:
-    await management.add_user_api_key("u1", "d", [], owner_user_id=OWNER)
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id=OWNER)
     bumps.clear()
     async with management.policy_write_batch():
         await management.revoke_api_key("u1")

@@ -156,7 +156,7 @@ async def test_both_cadence_forms_given_is_ambiguous():
 
 
 async def test_no_cadence_dispatches_the_named_tool_once():
-    # An empty ``schedule_kwargs`` on a base tool keeps today's behavior: the named tool
+    # An empty ``schedule_kwargs`` on a base tool: the named tool
     # is dispatched once, unchanged, and no schedule is registered.
     async with app.app_context(_manifest()):
         result = await schedules_ops.create_schedule("demo_report", {"payload": "y"}, {})

@@ -505,7 +505,7 @@ def test_run_tool_injects_the_ambient_session_thread_when_caller_pins_none():
 
 def test_run_tool_injects_nothing_without_a_deposit_fresh():
     # No deposit: the contextvar stays None, the run tool injects no thread_id, and the run
-    # is byte-identical to the pre-deposit behavior (the agent mints its own fresh thread).
+    # mints its own fresh thread.
     async def run() -> None:
         async with app.app_context(_thread_recorder_manifest()):
             _thread_recorder_seen().clear()

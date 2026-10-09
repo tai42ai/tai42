@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,7 +21,10 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.manifest import Manifest
 
-from .conftest import _budget_flag, _LogCapture, _plain_tools_manifest
+from .conftest import _budget_flag, _LogCapture, _ManualClock, _plain_tools_manifest
+
+# The longest a test waits on a worker-thread signal before failing.
+_THREAD_SIGNAL_TIMEOUT = 30.0
 
 # -- the MCP tool-call edge secret reveal -------------------------------------
 
@@ -309,22 +311,42 @@ def test_mcp_edge_non_secret_preset_schema_violation_quotes_the_offending_instan
 
 def test_offloaded_sync_tool_outruns_cancellation_and_completes_in_background(set_turn_timeout):
     # Python cannot cancel a running thread: when a plain (sync) tool is offloaded via
-    # ``asyncio.to_thread`` and the budget expires, the awaiting caller is answered with
-    # ``TurnTimeoutError``, but the thread runs to completion in the background — the real
-    # boundary of the turn budget.
+    # ``asyncio.to_thread`` and the budget expires while its body is running, the awaiting
+    # caller is answered with ``TurnTimeoutError``, but the thread runs to completion in the
+    # background — the real boundary of the turn budget.
+    #
+    # The loop clock is frozen before the dispatch arms the budget, so the deadline cannot
+    # elapse before the worker thread has entered the body (a call still queued on the
+    # executor would be cancelled instead, which is not the case pinned here). The clock is
+    # advanced past the deadline only once the body signals it started, and the body is
+    # held until after the caller has been answered.
     set_turn_timeout("0.05")
 
     async def run() -> None:
         async with app.app_context(_plain_tools_manifest("blocking_sync_tool")):
-            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
-                await app.tools.run_tool("blocking_sync_tool", {"seconds": 0.4}, offload_sync=True)
+            started = _budget_flag("blocking_sync_started")
+            release = _budget_flag("blocking_sync_release")
+            finished = _budget_flag("blocking_sync_finished")
+            loop = asyncio.get_running_loop()
+            clock = _ManualClock(loop.time)
+            saved_time = loop.time
+            loop.time = clock  # type: ignore[method-assign]
+            try:
+                clock.freeze()
+                task = asyncio.ensure_future(app.tools.run_tool("blocking_sync_tool", {}, offload_sync=True))
+                assert await asyncio.to_thread(started.wait, _THREAD_SIGNAL_TIMEOUT), "the offloaded body never started"
+                clock.advance(1.0)
+                with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
+                    await task
+            finally:
+                loop.time = saved_time  # type: ignore[method-assign]
+            # The caller was answered while the body was still running.
+            assert list(_budget_flag("blocking_sync_completions")) == []
+            release.set()
+            assert await asyncio.to_thread(finished.wait, _THREAD_SIGNAL_TIMEOUT), "the offloaded body never finished"
 
     asyncio.run(run())
-    # The caller was answered on expiry, yet the offloaded thread could not be interrupted
-    # and recorded its completion in the background.
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not _budget_flag("blocking_sync_completions"):
-        time.sleep(0.02)
+    # The offloaded thread could not be interrupted and recorded its completion after expiry.
     assert list(_budget_flag("blocking_sync_completions")) == ["blocking_sync_tool"]
 
 

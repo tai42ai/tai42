@@ -396,7 +396,7 @@ async def test_admin_owned_scoped_key_cannot_reach_backup_import(mem, pg, redis_
     assert cause is DenialCause.HARD_FENCE
 
 
-# -- defaults reproduce today's reach (structural) ---------------------------
+# -- the default roles' reach (structural) ------------------------------------
 
 
 async def test_default_grant_maps_cover_all_grantable_tags(mem, pg, redis_mgmt, monkeypatch):

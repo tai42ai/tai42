@@ -22,7 +22,7 @@ from .conftest import (
 
 def test_with_greeting_prepends_a_leading_part():
     # A due first-contact greeting is its OWN leading message ahead of the turn's parts (the
-    # joined answer stays byte-identical to the old "greeting\n\nanswer" prefix).
+    # joined answer reads "greeting\n\nanswer").
     outcome = outcome_module._ResolvedOutcome(
         answer_status="answered",
         parts=[outcome_module._text_part("first"), outcome_module._text_part("second")],

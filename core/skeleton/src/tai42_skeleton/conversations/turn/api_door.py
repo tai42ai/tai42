@@ -63,7 +63,7 @@ async def submit_api_message(
     rate bucket (so the cap bounds the accountable party, not a value the caller picks).
 
     Non-empty ``params`` reach a tool target's payload under ``params``; ``None``/empty
-    leave the turn byte-identical to today. The door validates their bounds before submit;
+    leave the turn without a ``params`` block. The door validates their bounds before submit;
     this seam runs only a cheap isinstance sweep against its in-process caller.
 
     ``form`` is the structured participant submission riding WITH ``text``

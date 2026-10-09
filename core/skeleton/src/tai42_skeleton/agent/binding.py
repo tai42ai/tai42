@@ -257,8 +257,7 @@ class AgentBinding:
             # tool advertising a thread parameter. The deposit is a caller-external
             # steering vector like any thread id, so it passes the SAME reserved-namespace
             # guard: a ``bridge:`` deposit stays refused however it arrives. Absent a
-            # deposit this is a no-op and the run mints its own fresh thread (config_util)
-            # — byte-identical to the pre-deposit behavior.
+            # deposit this is a no-op and the run mints its own fresh thread (config_util).
             #
             # "Caller pinned" covers EVERY spelling a thread can arrive in: the top-level
             # ``thread_id`` kwarg AND a ``configurable.thread_id`` on ANY config-shaped

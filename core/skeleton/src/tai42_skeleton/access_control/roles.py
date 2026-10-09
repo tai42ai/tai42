@@ -378,7 +378,8 @@ async def apply_role(user_id: str, role_name: str) -> None:
     :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written, and the
     row is written (created when absent, so the bootstrap owner and every admin-created or
     invited user never stay on the empty ``AccessPolicy()`` default). Enforcement is
-    refreshed after the commit. Raises ``KeyError`` on an unknown role (loud).
+    refreshed after the commit. Raises ``KeyError`` on an unknown role (loud), and
+    ``ValueError`` when ``user_id`` is a minted api key's id (a role belongs to a principal).
     """
     try:
         body = await role_store().get_active_body(role_name)
@@ -401,6 +402,13 @@ async def apply_role(user_id: str, role_name: str) -> None:
 
     async with access_control_store().principal_guard_txn() as guard:
         existing = await guard.policy_body(user_id)
+        if existing is not None and management.is_minted_policy(existing):
+            # A key's own row is a credential's policy, never a principal's: assigning a role to
+            # it would leave the key's fingerprint and owner on a "principal" enforced as that
+            # owner's key.
+            raise ValueError(
+                f"user id {user_id!r} is an api key's id; a role is assigned to a principal, never to a key"
+            )
         policy_data = dict((existing or {}).get("policy_data") or {})
         if role.allow_all:
             policy_data.pop(ROLE_POINTER_KEY, None)

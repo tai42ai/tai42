@@ -255,8 +255,8 @@ class AccessControlSettings(TaiBaseSettings):
         # compared against the SAME canonical path form the resolver classifies in, so a
         # non-canonical entry could never match and would silently mis-gate. Reject any
         # entry that is not absolute, does not canonicalize to itself (a ``.``/``..`` or a
-        # double slash), carries a percent-encoded byte, or overlaps the always-public login
-        # surface. (An ``acknowledged_public_routes`` entry under the control plane is refused
+        # double slash), carries a percent-encoded byte, or overlaps an operator's always-public
+        # prefix. (An ``acknowledged_public_routes`` entry under the control plane is refused
         # by the boot audit, which reads the served control-plane prefixes.)
         for field_name, entries in (
             ("reserved_operational_supplement", self.reserved_operational_supplement),

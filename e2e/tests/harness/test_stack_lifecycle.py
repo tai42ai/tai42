@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e import StackConfig, StackResources, ports
+from tai42_e2e import Infra, StackConfig, StackResources, ports
 from tai42_e2e.manifests import (
     build_agents_redis_stack,
     build_agents_stack,
@@ -65,6 +65,21 @@ async def test_stack_boots_and_tears_down_leak_free(fresh_stack: Callable[..., T
     for port in allocated:
         assert ports.is_free(port), f"port {port} still bound after teardown"
     assert not any(handle.is_running() for handle in stack._procs.values())
+
+
+@pytest.mark.backendless
+@pytest.mark.needs("process")
+async def test_a_multi_worker_serve_gets_the_worker_healthcheck_window(
+    fresh_stack: Callable[..., TaiStack], infra: Infra
+) -> None:
+    # A spawned uvicorn worker answers its master's health ping only once it has imported
+    # the serve stack; the harness hands ``tai serve`` its configured window for that.
+    stack = fresh_stack(build_core_stack)
+    assert stack.config.workers > 1
+    argv = stack._specs["serve"].argv
+    flag = argv.index("--timeout-worker-healthcheck")
+    assert argv[flag + 1] == str(infra.settings.worker_healthcheck_timeout)
+    assert all(handle.is_running() for handle in stack._procs.values())
 
 
 @pytest.mark.needs("no-stack")

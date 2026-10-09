@@ -189,7 +189,7 @@ async def test_helper_threads_on_mismatch_into_delivery_and_request(wired, fake_
 
 
 async def test_helper_default_on_mismatch_is_retry_on_both_frames(wired, fake_redis, driver):
-    # An ask that does not set the policy keeps today's behavior exactly: RETRY on both
+    # An ask that does not set the policy gets the default exactly: RETRY on both
     # the delivery and the durable record, and no custom notice.
     result = await ask(
         "proceed?",

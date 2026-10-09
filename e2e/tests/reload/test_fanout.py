@@ -95,14 +95,42 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     assert outcomes[dead_name] != "applied", f"the dead backend was reported as applied: {data}"
 
     # Once its presence row expires (kill -9 = no graceful delete, so it lapses on the TTL),
-    # the surviving HTTP workers all confirm applied.
+    # the next reload names only the surviving HTTP workers, and every one of them applies it.
     async def census_dropped_backend() -> bool:
         return not any(worker.pid == dead_pid for worker in stack.census())
 
     await wait_for_async(census_dropped_backend, deadline=35.0, message="dead worker never left the census")
+    survivor_ports = [stack.port_a, stack.port_b]
+    epochs_before = {port: await _settings_epoch(stack, port) for port in survivor_ports}
     async with stack.mcp(port=stack.port_a) as mcp:
         await mcp.list_tools()
         ok = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
     ok_data = ok.data if isinstance(ok.data, dict) else ok.structured_content
     assert isinstance(ok_data, dict), f"reload_config returned no result map: {ok!r}"
-    assert all(r["outcome"] == "applied" for r in ok_data["results"]), f"a survivor did not apply: {ok_data}"
+    ok_outcomes = {r["name"]: r["outcome"] for r in ok_data["results"]}
+    assert dead_name not in ok_outcomes, f"the expired backend was still named: {ok_data}"
+    # The stack pins a 5 s apply timeout for the dead-worker wait above, so a survivor whose
+    # rebuild runs longer is reported ``timed_out`` (acked, still applying) rather than
+    # ``applied``; either way it took the reload, which each survivor's settings epoch shows.
+    assert all(outcome in ("applied", "timed_out") for outcome in ok_outcomes.values()), (
+        f"a survivor did not take the reload: {ok_data}"
+    )
+    for port in survivor_ports:
+
+        async def applied(port: int = port) -> bool:
+            return await _settings_epoch(stack, port) > epochs_before[port]
+
+        await wait_for_async(
+            applied,
+            deadline=infra.settings.boot_timeout,
+            message=f"the survivor on port {port} never applied the reload",
+        )
+
+
+async def _settings_epoch(stack: TaiStack, port: int) -> int:
+    """The settings epoch of the worker serving ``port`` — every applied reload advances it."""
+    async with stack.mcp(port=port) as mcp:
+        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+    data = result.data if isinstance(result.data, dict) else result.structured_content
+    assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
+    return int(data["settings_epoch"])

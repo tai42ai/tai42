@@ -1057,3 +1057,48 @@ def test_pre_auth_operation_short_circuits_every_policy_layer(ac_env, bound_app,
     # and the LEVEL pass denies.
     with _recorded_login_route(pre_auth=False):
         asyncio.run(undeclared())
+
+
+# -- an any-authenticated route (HTTP <-> MCP parity) -------------------------
+
+
+def test_any_authenticated_operation_admits_a_scoped_key_at_both_edges(ac_env, bound_app, monkeypatch):
+    """A route declaring ``any_authenticated`` is reachable by any authenticated identity
+    whatever its scopes: the HTTP resource guard admits it before table resolution, and
+    the tool edge drops the scope test for it the same way. The jq fences and the per-tag
+    LEVEL pass still run at both edges."""
+    from tai42_skeleton.operations import operation_metadata_of
+    from tai42_skeleton.operations.api_keys import get_me
+
+    settings = AccessControlSettings()
+    meta = operation_metadata_of(get_me)
+    path = meta.route_template
+    assert path is not None
+    route = resolve_route_meta(path, "GET")
+    assert route is not None
+    assert route.any_authenticated
+
+    async def _max_grants(role_name: str, version: int):
+        return dict.fromkeys(grantable_feature_tags(), "write")
+
+    monkeypatch.setattr(role_grants_module, "resolve_role_grants", _max_grants)
+    # A scoped key: its one scope covers nothing the route table maps for the route.
+    ac_env.add_policy(
+        "scoped1", scopes=["things"], policy_data={ROLE_POINTER_KEY: "editor"}, condition={"content": "true"}
+    )
+    identity = CallerIdentity(user_id="scoped1", effective_scopes=("things",))
+
+    async def run() -> bool:
+        await check(identity, meta, {}, settings=settings)
+        return await _http_reaches(
+            _ClaimsVerifier("scoped1", {"sub": "scoped1"}), {"X-Api-Key": "tok-scoped1"}, path, settings, method="GET"
+        )
+
+    assert asyncio.run(run()) is True
+
+    # Non-vacuous: the jq fence still applies at the tool edge.
+    ac_env.add_policy(
+        "fenced1", scopes=["things"], policy_data={ROLE_POINTER_KEY: "editor"}, condition={"content": "false"}
+    )
+    with pytest.raises(PermissionDeniedError):
+        asyncio.run(check(CallerIdentity(user_id="fenced1", effective_scopes=("things",)), meta, {}, settings=settings))

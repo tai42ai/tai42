@@ -453,7 +453,7 @@ async def _dispatch_schedule_creation(dispatch_name: str, coro_factory: Callable
 def _run_once_response(outcome: Any) -> Any:
     """Map a run-once fire's ``VisitOutcome`` to the create op's ``OpaqueJson`` response.
 
-    ``result`` → the dispatch's raw body (today's shape); ``asks`` → the parked caller ask entries;
+    ``result`` → the dispatch's raw body; ``asks`` → the parked caller ask entries;
     ``parked`` → the park notice (the parked interaction ids); ``none`` → ``null``.
     """
     if outcome.kind == "result":

@@ -125,9 +125,9 @@ def _asks_record(route):
     )
 
 
-async def test_evidence_tool_caller_ask_with_no_reply_resume_parks_nowhere_today(env, monkeypatch):
+async def test_a_tool_caller_ask_with_no_reply_or_resume_parks_nowhere(env, monkeypatch):
     # A non-agent tool (a flow) that caller-asks under a tool route
-    # with NO reply/resume. Establish BY TEST what the tool turn does with that caller-ask TODAY: the
+    # with NO reply/resume. What the tool turn does with that caller-ask: the
     # ask surfaces as an ``asks`` outcome and, with no ``reply_expr``, is dropped SILENTLY — the
     # question never reaches the user. With no ``resume_expr`` the door has no path to resume the
     # parked run either, and the completion-delivery path carries the run's TERMINAL (which never
@@ -153,11 +153,11 @@ async def test_evidence_tool_caller_ask_with_no_reply_resume_parks_nowhere_today
         record=record,
         batch=overlap_module.Batch(lead=record, members=[record]),
     )
-    # TODAY: the caller-ask is dropped silently — it parks nowhere.
+    # The caller-ask is dropped silently — it parks nowhere.
     assert isinstance(outcome, outcome_module._SilentOutcome)
 
 
-async def test_evidence_tool_caller_ask_with_reply_and_resume_lands_today(env, monkeypatch):
+async def test_a_tool_caller_ask_with_reply_and_resume_lands(env, monkeypatch):
     # The counterpart: WITH both exprs the same caller-ask lands — its entries map through
     # ``reply_expr`` to a delivered question, so landing is exactly reply_expr + resume_expr.
     from tai42_contract.interactions import ParkedEntry, VisitOutcome

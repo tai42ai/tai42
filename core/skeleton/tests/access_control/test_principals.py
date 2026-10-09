@@ -166,6 +166,23 @@ async def test_create_duplicate_principal_is_409(
         await principals_ops.create_principal(user_id="svc", kind="service", display_name="X", role="editor")
 
 
+async def test_create_principal_over_a_minted_key_id_is_409(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller
+) -> None:
+    # The id is already in use by an api key: the door answers the 409 its docstring
+    # promises for a duplicate id, and the key's policy is left as minted.
+    await _seed_roles(pg)
+    pg.add_principal("owner", kind="human", display_name="O")
+    pg.add_policy("owner", scopes=["*"])
+    await management.add_user_api_key("key-1", "d", ["*"], owner_user_id="owner")
+    key_body = pg.policy_body("key-1")
+    with pytest.raises(ConflictError) as exc:
+        await principals_ops.create_principal(user_id="key-1", kind="service", display_name="K", role="editor")
+    assert exc.value.message == "user id 'key-1' is an api key's id; a role is assigned to a principal, never to a key"
+    assert pg.principal("key-1") is None
+    assert pg.policy_body("key-1") == key_body
+
+
 async def test_create_unknown_role_is_400_and_compensates(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis_mgmt: FakeRedis, admin_caller
 ) -> None:
@@ -302,7 +319,7 @@ async def test_delete_service_principal_revokes_owned_keys(
 ) -> None:
     pg.add_principal("a", kind="service", display_name="A")
     await management.access_control_store().create_policy("a", [])
-    await management.add_user_api_key("a-key", "machine", [], owner_user_id="a")
+    await management.add_user_api_key("a-key", "machine", ["*"], owner_user_id="a")
     result = await principals_ops.delete_principal(user_id="a")
     assert result == {"user_id": "a", "deleted": True}
     assert "a-key" not in provider.identities  # owned key revoked

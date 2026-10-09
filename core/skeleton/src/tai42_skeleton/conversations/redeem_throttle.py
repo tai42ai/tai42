@@ -16,7 +16,7 @@ Same posture and shape as the login-failure throttle: Redis-backed (durable and 
 across workers, because brute force is patient), plain ``INCR``/``EXPIRE``/``SET`` with the
 benign-race tolerance a counter allows, and it lives ENTIRELY behind the multichannel gate —
 its caller only reaches it for a classified redeem on a multichannel-on target, so an
-unlinked or multichannel-off conversation is byte-identical to today.
+unlinked or multichannel-off conversation never reaches it.
 """
 
 from __future__ import annotations

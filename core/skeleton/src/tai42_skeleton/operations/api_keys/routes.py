@@ -38,6 +38,10 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
     public marker for a public pin, or ``null`` when the path has no mapping. Exact-key
     lookup only: this door does not attempt dynamic-pattern matching.
 
+    ``declared_public`` is ``True`` for a route public by its own declaration: it answers
+    everyone whatever scope it is mapped to (the access check's declared-public tier), so the
+    scope writer refuses to map it.
+
     Each entry is JOINED with its :class:`RouteMetadata` (from
     ``route_registry.load_all_routes()``, a separate collection) to also carry the
     route's feature ``tags`` + ``summary`` + authorization ``action`` — the data the
@@ -50,8 +54,10 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
     """
     # OFF: access control disabled → no scope mappings exist, so the honest answer
     # is the empty route list (no AC store touched under the synthetic admin).
-    if not _pkg.access_control_settings().enable:
+    settings = _pkg.access_control_settings()
+    if not settings.enable:
         return []
+    from tai42_skeleton.access_control.verifier import declares_public_reach
     from tai42_skeleton.app.route_registry import load_all_routes
 
     mappings = await management.get_all_route_mappings()
@@ -73,6 +79,9 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
         methods = sorted(m for m in (route.methods or set()) if m != "HEAD")
         entry: dict[str, Any] = {"path": route.path, "methods": methods, "mapped": mappings.get(route.path)}
         meta = meta_by_key.get((route.path, frozenset(methods)))
+        # ``declared_public``: the route answers everyone by its own declaration — the same
+        # predicate the access check's declared-public tier reads — so a scope row cannot gate it.
+        entry["declared_public"] = declares_public_reach(meta, route.path, settings)
         if meta is not None:
             entry.update(tags=list(meta.tags), summary=meta.summary, action=meta.action)
         elif route.path in registered_paths:

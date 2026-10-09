@@ -167,9 +167,12 @@ def _make_run_request(name: str, body: bytes, *, disconnect: bool = False) -> Re
             idx["i"] += 1
             return scripted[i]
         # Past the scripted messages: a disconnected client keeps reporting
-        # disconnect; a live one reports a benign (non-disconnect) frame so the
-        # monitor's ``is_disconnected`` stays False.
-        return {"type": "http.disconnect"} if disconnect else {"type": "http.request", "body": b"", "more_body": False}
+        # disconnect; for a live one the read blocks, as a real server's does until
+        # the client drops.
+        if disconnect:
+            return {"type": "http.disconnect"}
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable: the live connection never reports a message")
 
     scope = {
         "type": "http",
@@ -602,7 +605,7 @@ async def test_run_recursion_limit_outcome_emits_a_terminal_event(one_agent):
 
 async def test_run_user_park_emits_the_suspended_frame_parked(one_agent, monkeypatch):
     # ``parked``: an async ask to the USER surfaces as the suspended frame carrying the park's
-    # interaction ids (today's ``SuspendedFinal`` shape). With no caller ask in the run's parked
+    # interaction ids (the ``SuspendedFinal`` shape). With no caller ask in the run's parked
     # list, the whole park classifies as ``parked``.
     monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
     one_agent(_FakeAgent([SuspendedFinal(interaction_ids=["i1", "i2"], thread_id="t1")]))
@@ -721,3 +724,49 @@ async def test_run_on_a_held_subject_ends_with_one_stream_error_naming_the_save(
     frames = _data_frames(await _collect(resp))
     assert frames == [{"type": "stream.error", "message": message}]
     assert agent.received_kwargs is None  # no run started
+
+
+# -- run route: the disconnect monitor -----------------------------------------
+
+
+async def test_disconnect_monitor_stops_when_cancelled_while_it_reads_the_connection():
+    # The stream cancels its disconnect monitor once the run has ended, and then awaits it:
+    # a monitor that outlived that cancellation would hold the finished stream open until
+    # the client hung up. The cancellation here lands while the monitor is reading the
+    # connection (a live client: the read blocks, as a real server's does), and must stop it.
+    entered = asyncio.Event()
+
+    async def receive() -> dict:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable: the live connection never reports a message")
+
+    scope = {"type": "http", "method": "POST", "path": "/api/agents/faker/runs", "headers": [], "query_string": b""}
+    monitor = asyncio.ensure_future(router._wait_until_disconnected(Request(scope, receive)))
+    await entered.wait()
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(monitor, _MONITOR_STOP_TIMEOUT)
+
+
+async def test_disconnect_monitor_returns_when_the_client_disconnects():
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/agents/faker/runs", "headers": [], "query_string": b""}
+    await asyncio.wait_for(router._wait_until_disconnected(Request(scope, receive)), _MONITOR_STOP_TIMEOUT)
+
+
+async def test_disconnect_monitor_raises_on_a_message_the_asgi_contract_does_not_allow():
+    # After the request body only ``http.disconnect`` may arrive; any other message is a
+    # server fault the monitor raises instead of reading it as a live or a gone client.
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/agents/faker/runs", "headers": [], "query_string": b""}
+    with pytest.raises(RuntimeError, match=r"only 'http\.disconnect' may follow it"):
+        await router._wait_until_disconnected(Request(scope, receive))
+
+
+# The longest a test waits for the disconnect monitor to stop before failing.
+_MONITOR_STOP_TIMEOUT = 5.0

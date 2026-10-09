@@ -3,7 +3,7 @@
 Drives ``ToolBinding.run_tool`` (the one seam every consumer shares) against a
 mock ``FunctionTool``: a registry-declared policy re-fires ONLY the resolved
 invocation — authorization and resolution happen once per logical dispatch —
-while a policy-less tool keeps today's single attempt with zero added
+while a policy-less tool runs a single attempt with zero added
 monitoring. Also pins the composition rule with a body that retries internally
 (the channel-delivery shape): the seam adds attempts only for a tool that
 DECLARED them.
@@ -118,8 +118,7 @@ async def test_no_policy_dispatch_fails_on_the_first_attempt(sleeps):
 
 async def test_no_policy_dispatch_adds_zero_spans(sleeps, backend):
     # The byte-identical guarantee, observed at the seam: with a trace active a
-    # policy-less run_tool emits exactly the spans it emits today — none from
-    # this seam.
+    # policy-less run_tool emits no span from this seam.
     backend.writer.active_trace_id = "trace-1"
     flaky, calls = _flaky_fn(0)
     binding = _binding_for(flaky)

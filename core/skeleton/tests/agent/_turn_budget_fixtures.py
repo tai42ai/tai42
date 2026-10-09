@@ -13,7 +13,7 @@ on each ``app_context`` enter).
 from __future__ import annotations
 
 import asyncio
-import time
+import threading
 
 from tai42_contract.app import tai42_app
 
@@ -113,17 +113,33 @@ async def parked_sensitive_question_tool(seconds: float = 0.0) -> str:
     return "parked-done"
 
 
+# The offloaded body's checkpoints, each a ``threading.Event`` because the body runs on a
+# worker thread: ``started`` is set the instant the thread enters the body, the body then
+# holds until the test sets ``release``, and ``finished`` is set once it has recorded its
+# completion. A test thereby expires the turn budget while the thread is provably running,
+# and observes that the thread still runs to its end afterwards.
+blocking_sync_started = threading.Event()
+blocking_sync_release = threading.Event()
+blocking_sync_finished = threading.Event()
 # Records each thread that ran ``blocking_sync_tool`` to its end — a marker the turn
-# budget cannot prevent once the body is offloaded to a worker thread.
+# budget cannot prevent once the body is running on a worker thread.
 blocking_sync_completions: list[str] = []
+# The longest the body holds for ``release``; a body never released raises instead of
+# parking its worker thread forever.
+BLOCKING_SYNC_RELEASE_TIMEOUT = 30.0
 
 
 @tai42_app.tools.tool
-def blocking_sync_tool(seconds: float = 0.0) -> str:
+def blocking_sync_tool() -> str:
     """A plain (non-coroutine) tool offloaded to a worker thread via ``asyncio.to_thread``.
-    Blocks ``seconds`` with ``time.sleep`` then records completion. When the turn budget
-    expires the awaiting caller is answered with ``TurnTimeoutError``, but Python cannot
-    cancel a running thread, so this body runs to its end and records here regardless."""
-    time.sleep(seconds)
+    Signals ``blocking_sync_started``, blocks until ``blocking_sync_release`` is set, then
+    records completion and signals ``blocking_sync_finished``. When the turn budget expires
+    while the body is running, the awaiting caller is answered with ``TurnTimeoutError``,
+    but Python cannot cancel a running thread, so this body runs to its end and records
+    here regardless."""
+    blocking_sync_started.set()
+    if not blocking_sync_release.wait(BLOCKING_SYNC_RELEASE_TIMEOUT):
+        raise TimeoutError(f"blocking_sync_tool was not released within {BLOCKING_SYNC_RELEASE_TIMEOUT}s")
     blocking_sync_completions.append("blocking_sync_tool")
+    blocking_sync_finished.set()
     return "blocking-done"

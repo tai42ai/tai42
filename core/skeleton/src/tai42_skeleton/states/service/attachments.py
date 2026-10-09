@@ -62,11 +62,12 @@ class _AttachmentMixin(_StatesServiceBase):
         """Refuse a subject the declared ``subject_kinds`` do not admit.
 
         An undeclared kind, or — for kind ``person`` — an unknown person or a person whose target does
-        not match the subject's. The ``ConversationPersonStore`` is constructed LAZILY and ONLY on
-        the ``person`` branch (its constructor raises 501 without the redis conversations backend),
-        so no state of another kind is gated on redis. The write path calls this inside the record
-        transaction, under the declaration ``FOR SHARE`` lock, from the ``subject_kinds`` the locked
-        declaration row returns — so the subject is refused without a second declaration read.
+        not match the subject's. The person store is reached through the conversations manager
+        (``get_conversations_manager().persons``) ONLY on the ``person`` branch (it refuses with a
+        501 without the redis conversations backend), so no state of another kind is gated on
+        redis. The write path calls this inside the record transaction, under the declaration
+        ``FOR SHARE`` lock, from the ``subject_kinds`` the locked declaration row returns — so the
+        subject is refused without a second declaration read.
         """
         if subject.kind not in subject_kinds:
             raise SubjectRefusedError(

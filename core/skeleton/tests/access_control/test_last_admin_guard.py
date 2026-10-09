@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.accounts.errors import LastAdminError
+from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import management, roles
@@ -184,7 +185,7 @@ async def test_a_keys_only_admin_counts(pg: FakeAccessControlPg) -> None:
 async def test_key_door_edit_that_demotes_the_last_admin_principal_is_refused(pg: FakeAccessControlPg) -> None:
     _admin(pg, "a")
     with pytest.raises(LastAdminError, match="last enabled admin"):
-        await management.edit_user_payload("a", scopes=[])
+        await management.edit_user_payload("a", condition=TemplatedText(content="true"))
     assert pg.policy_body("a") == _ADMIN_BODY
 
 
@@ -197,17 +198,17 @@ async def test_key_door_edit_keeping_the_admin_shape_is_allowed(pg: FakeAccessCo
 async def test_key_door_edit_with_another_admin_is_allowed(pg: FakeAccessControlPg) -> None:
     _admin(pg, "a")
     _admin(pg, "b")
-    committed = await management.edit_user_payload("a", scopes=[])
+    committed = await management.edit_user_payload("a", condition=TemplatedText(content="true"))
     assert committed is not None
-    assert committed["scopes"] == []
+    assert committed["condition"] == {"content": "true"}
 
 
 async def test_key_door_edit_of_a_key_row_writes_as_before(pg: FakeAccessControlPg) -> None:
     # A key row has no principal: it never counts as an admin principal, so no count runs.
     pg.add_policy("key-1", scopes=["*"])
-    committed = await management.edit_user_payload("key-1", scopes=[])
+    committed = await management.edit_user_payload("key-1", condition=TemplatedText(content="true"))
     assert committed is not None
-    assert committed["scopes"] == []
+    assert committed["condition"] == {"content": "true"}
     assert not any(s.startswith("SELECT pg_advisory_xact_lock") for s in pg.executed)
 
 
@@ -342,7 +343,7 @@ async def test_an_admin_whose_policy_carries_the_disabled_marker_is_not_counted(
     with pytest.raises(LastAdminError, match="last enabled admin"):
         await roles.delete_principal("a")
     with pytest.raises(LastAdminError, match="last enabled admin"):
-        await management.edit_user_payload("a", scopes=[])
+        await management.edit_user_payload("a", condition=TemplatedText(content="true"))
     assert pg.principal("a")["disabled"] is False
     assert pg.policy_body("a") == _ADMIN_BODY
 
@@ -366,29 +367,33 @@ async def test_mint_refuses_a_disabled_claim_and_writes_nothing(
 ) -> None:
     _admin(pg, "a")
     with pytest.raises(ValueError, match=_NOT_POLICY_CONTENT):
-        await management.add_user_api_key("k1", "d", [], {"disabled": value, "note": "n"}, owner_user_id="a")
+        await management.add_user_api_key("k1", "d", ["*"], {"disabled": value, "note": "n"}, owner_user_id="a")
     assert pg.policy("k1") is None
     assert "k1" not in identity_provider.identities
 
 
 async def test_mint_without_a_disabled_claim_writes_an_enabled_key(pg: FakeAccessControlPg) -> None:
     _admin(pg, "a")
-    _raw, body, _fingerprint = await management.add_user_api_key("k1", "d", [], {"note": "n"}, owner_user_id="a")
+    _raw, body, _fingerprint = await management.add_user_api_key("k1", "d", ["*"], {"note": "n"}, owner_user_id="a")
     assert "disabled" not in body["policy_data"]
     assert "disabled" not in pg.policy_body("k1")["policy_data"]
 
 
-async def test_a_principal_created_over_a_minted_key_id_reads_as_enforced(pg: FakeAccessControlPg) -> None:
-    # The mint plants no marker, so a principal that takes over a key's row shows the
-    # enabled state enforcement acts on.
+async def test_a_principal_is_never_created_over_a_minted_key_id(pg: FakeAccessControlPg) -> None:
+    # A key's id names a credential, not a principal: creating a principal under it would turn
+    # the key's own row into the principal's policy (keeping its fingerprint and owner), so it
+    # is refused with the principal row compensated away and the key's policy untouched.
     await seed_default_roles()
     _admin(pg, "a")
-    with pytest.raises(ValueError, match=_NOT_POLICY_CONTENT):
-        await management.add_user_api_key("k5", "d", [], {"disabled": True}, owner_user_id="a")
-    await management.add_user_api_key("k5", "d", [], None, owner_user_id="a")
-    await roles.create_principal("k5", kind="service", display_name="K5", created_by="a", role="admin")
-    assert pg.principal("k5")["disabled"] is False
-    assert "disabled" not in pg.policy_body("k5")["policy_data"]
+    await management.add_user_api_key("k5", "d", ["*"], None, owner_user_id="a")
+    key_body = pg.policy_body("k5")
+    with pytest.raises(ValueError, match=_KEY_ID_REFUSAL):
+        await roles.create_principal("k5", kind="service", display_name="K5", created_by="a", role="admin")
+    assert pg.principal("k5") is None
+    assert pg.policy_body("k5") == key_body
+
+
+_KEY_ID_REFUSAL = r"^user id 'k5' is an api key's id; a role is assigned to a principal, never to a key$"
 
 
 # -- the doors map the refusal to 409 ------------------------------------------------
@@ -412,7 +417,7 @@ async def test_edit_api_key_door_maps_the_refusal_to_409(
     _admin_caller(monkeypatch)
     _admin(pg, "a")
     with pytest.raises(ConflictError, match="last enabled admin"):
-        await api_keys_ops.edit_api_key("a", {"scopes": []})
+        await api_keys_ops.edit_api_key("a", {"condition": TemplatedText(content="true")})
     assert pg.policy_body("a") == _ADMIN_BODY
 
 
@@ -455,8 +460,9 @@ async def test_modify_scopes_door_maps_the_refusal_to_409(
     monkeypatch.setattr(api_keys_ops, "access_control_settings", lambda: AccessControlSettings(enable=True))
     _admin_caller(monkeypatch)
     _admin(pg, "a")
+    pg.add_route("/x", "things")
     with pytest.raises(ConflictError, match="last enabled admin"):
-        await api_keys_ops.modify_api_key_scopes("a", remove=["*"])
+        await api_keys_ops.modify_api_key_scopes("a", add=["things"], remove=["*"])
     assert pg.policy_body("a") == _ADMIN_BODY
 
 

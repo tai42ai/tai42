@@ -101,7 +101,7 @@ async def test_prune_pending_reason_tags_the_removed_event(fake_redis):
     # A per-interaction cancel prunes with ``reason="cancelled"``, which TAGS the removed
     # event so a live operator surface tells a deliberate withdrawal apart from a
     # timeout/expiry removal. An UNTAGGED prune (the timeout path / thread cascade) emits
-    # the removed event with NO reason field, byte-identical to before.
+    # the removed event with NO reason field.
     store = InteractionStore("t:")
     await store.add(fake_redis, _request("cx", "gc", store), idle_ttl=100)
     await store.add(fake_redis, _request("tx", "gt", store), idle_ttl=100)

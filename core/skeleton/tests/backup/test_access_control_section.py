@@ -94,7 +94,7 @@ def _token(user_id: str, description: str = "restored", owner: str = "owner-1") 
     return {
         "user_id": user_id,
         "description": description,
-        "scopes": [],
+        "scopes": ["*"],
         "policy_data": {OWNER_USER_ID_CLAIM: owner},
         "condition": None,
     }
@@ -121,7 +121,7 @@ async def test_import_re_mints_an_orphan_and_leaves_its_policy_unchanged(
 
 
 async def test_import_skips_a_live_key(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
-    await management.add_user_api_key("live", "live-desc", [], owner_user_id="owner-1")
+    await management.add_user_api_key("live", "live-desc", ["*"], owner_user_id="owner-1")
     report = await ac_backup.import_access_control({"tokens": [_token("live")]}, "skip")
     # Policy AND identity present: left in place, never re-minted.
     assert report.details["skipped_existing"] == 1
@@ -190,6 +190,47 @@ async def test_import_restores_principals_before_tokens(pg: FakeAccessControlPg,
     # The token minted, owned by the just-restored principal.
     assert provider.identities["k1"] == "restored"
     assert any(row["user_id"] == "k1" for row in report.details["new_api_keys"])
+
+
+async def test_import_restores_a_key_owned_by_a_disabled_principal(
+    pg: FakeAccessControlPg, provider: _SpyProvider
+) -> None:
+    # A key keeps living when its owner principal is disabled after the mint, so an archive
+    # can hold a disabled principal with a key it owns. The restore re-mints that key and
+    # leaves the principal disabled, as archived.
+    payload = {
+        "principals": [
+            {
+                "user_id": "owner-2",
+                "kind": "service",
+                "display_name": "Owner Two",
+                "created_by": "owner-1",
+                "disabled": True,
+                "created_at": None,
+                "policy": {"scopes": ["*"], "policy_data": {}, "condition": None},
+            }
+        ],
+        "tokens": [_token("k2", owner="owner-2")],
+    }
+    report = await ac_backup.import_access_control(payload, "skip")
+    assert report.errors == []
+    assert provider.identities["k2"] == "restored"
+    assert any(row["user_id"] == "k2" for row in report.details["new_api_keys"])
+    assert pg.principal("owner-2")["disabled"] is True
+
+
+async def test_import_reports_a_mapping_of_a_route_public_by_its_declaration(
+    pg: FakeAccessControlPg, provider: _SpyProvider
+) -> None:
+    # The scope writer refuses a declared-public route; the restore names it and restores the rest.
+    pg.add_route("/api/things", "things")
+    report = await ac_backup.import_access_control({"scopes": {"/health": "studio", "/api/x": "things"}}, "skip")
+    assert report.errors == [
+        "route '/health': '/health' is public by its own declaration and stays open to everyone whatever "
+        "scope it is mapped to, so it cannot be mapped into scope 'studio'"
+    ]
+    assert pg.route("/health") is None
+    assert pg.route("/api/x")["scope_id"] == "things"
 
 
 async def test_import_existing_principal_is_a_clean_skip(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
@@ -396,8 +437,8 @@ async def test_restore_store_calls_in_order_with_one_bump_at_the_end(recorder: _
         ("create_principal", "p-new", "service", "p-new", "owner-1"),
         ("get_policy_body", "p-new"),
         ("create_policy", "p-new", ["*"], {}, None),
-        ("set_principal_disabled", "p-new", True),
         ("add_url_to_scope", "things", "/api/things", None),
+        ("set_principal_disabled", "p-new", True),
         ("bump",),
     ]
 

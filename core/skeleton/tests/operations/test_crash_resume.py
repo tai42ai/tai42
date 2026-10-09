@@ -2,7 +2,7 @@
 record, and the re-dispatch branch in the liveness→``lost`` reconciler.
 
 A run whose record carries the flag is re-dispatched from scratch when its supervisor
-dies; every un-flagged run keeps today's quiet ``lost`` behavior byte-for-byte.
+dies; every un-flagged run is marked a quiet ``lost``, byte-for-byte.
 """
 
 from __future__ import annotations
@@ -230,7 +230,7 @@ async def test_reconcile_does_not_redispatch_an_unflagged_lost_run(wired, monkey
     record = await store.get_run(fake, "r4")
     assert record is not None
     result = await _reconcile_lost_with_liveness(fake, store, "r4", record, liveness_present=False, ttl=60)
-    # Today's quiet lost EXACTLY — no re-dispatch.
+    # The quiet lost EXACTLY — no re-dispatch.
     assert result["status"] == "lost"
     assert spawned == []
 

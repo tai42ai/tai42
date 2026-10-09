@@ -94,10 +94,6 @@ _KEEPALIVE_FRAME = ": keepalive\n\n"
 # interactions stream's connect frame.
 _CONNECT_FRAME = ": connected\n\n"
 
-# How often the disconnect monitor checks whether the client is gone. A dropped
-# client cancels the underlying run within this window even mid-stream, so an
-# abandoned run never keeps executing.
-_DISCONNECT_POLL_SECONDS = 1
 # Bound the producer→consumer buffer so a fast agent feeding a stalled client
 # applies backpressure (``_produce`` awaits ``queue.put``, which blocks when full)
 # instead of accumulating events in memory until the disconnect poll fires.
@@ -279,7 +275,7 @@ async def _drive_capturing_terminal(
     ``StructuredFinal`` / ``MessageFinal`` / a typed non-fatal outcome —
     ``StructuredOutputUnresolvedFinal`` / ``RecursionLimitFinal``) is captured WITHOUT streaming and
     its ``visit`` value returned — a :class:`SuspendedInteraction` for a park, the final event itself
-    for a finish, so ``visit`` classifies the finish as a ``result`` and re-emits today's terminal
+    for a finish, so ``visit`` classifies the finish as a ``result`` and re-emits it as the terminal
     frame. ``None`` when the drive ended on an interrupt (already streamed) — ``visit`` classifies it
     ``none``.
     """
@@ -297,8 +293,8 @@ async def _drive_capturing_terminal(
 def _terminal_stream_item(outcome: Any, captured: StreamEvent | None) -> tuple[str, Any] | None:
     """The ONE terminal SSE item mapped from a ``VisitOutcome`` kind, or ``None`` when none is emitted.
 
-    ``result`` re-emits the captured finish event (today's ``StructuredFinal``/``MessageFinal``
-    frame); ``parked`` re-emits the captured ``SuspendedFinal`` (today's suspended frame carrying the
+    ``result`` re-emits the captured finish event (the ``StructuredFinal``/``MessageFinal``
+    frame); ``parked`` re-emits the captured ``SuspendedFinal`` (the suspended frame carrying the
     park's ``interaction_ids``); ``asks`` emits an :class:`AsksFinal` carrying the caller ask entries;
     ``none`` emits nothing (an interrupt already streamed its ``interrupt_final``).
     """
@@ -363,13 +359,20 @@ async def _produce(
 
 
 async def _wait_until_disconnected(request: Request) -> None:
-    """Complete once the client has disconnected, polling on a fixed cadence.
+    """Complete once the client has disconnected.
 
-    ``is_disconnected`` is cheap (a non-blocking receive peek), so a poll loop is
-    both correct and low-cost.
+    The run's body has been read in full before the stream starts, so the connection's next
+    message is the ``http.disconnect`` the server sends when the client drops (the ASGI
+    contract); the read blocks until then. It is a plain await, so cancelling the monitor
+    (the stream does once the run has ended) always stops it. Any other message breaks that
+    contract and raises.
     """
-    while not await request.is_disconnected():
-        await asyncio.sleep(_DISCONNECT_POLL_SECONDS)
+    message = await request.receive()
+    if message["type"] != "http.disconnect":
+        raise RuntimeError(
+            f"agent run stream: the server delivered {message['type']!r} after the request body was "
+            "complete; only 'http.disconnect' may follow it"
+        )
 
 
 def _render_stream_item(kind: str, payload: Any) -> tuple[str, bool]:
@@ -435,7 +438,9 @@ async def _agent_event_stream(
                 {get_task, monitor}, timeout=_KEEPALIVE_SECONDS, return_when=asyncio.FIRST_COMPLETED
             )
             if monitor in done:
-                # Client gone — stop; ``finally`` cancels the run.
+                # Client gone — stop; ``finally`` cancels the run. A monitor that raised
+                # re-raises here.
+                monitor.result()
                 return
             if get_task not in done:
                 yield _KEEPALIVE_FRAME

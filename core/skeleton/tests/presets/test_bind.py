@@ -532,7 +532,7 @@ async def test_baked_payload_defaults_survive_a_mutating_consumer():
 
 async def test_no_baked_payload_behavior_is_unchanged():
     # When the payload arg is NOT baked, the caller's validated object is delivered
-    # verbatim (no merge step); byte-identical to the pre-defaults path.
+    # verbatim (no merge step).
     authored = {
         "type": "object",
         "properties": {"a": {"type": "integer"}, "b": {"type": "string"}},

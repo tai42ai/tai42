@@ -145,7 +145,7 @@ def test_secret_preset_output_schema_rejects_when_real_value_violates(pg: FakeVe
 
 def test_non_secret_preset_output_schema_validates_structured_content(pg: FakeVersioningPg):
     # A NON-secret preset's dispatch arms the gate but stows nothing, so the guard
-    # validates the structured content exactly as before: a conforming result passes
+    # validates the structured content: a conforming result passes
     # and a violating one raises loudly.
     from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
