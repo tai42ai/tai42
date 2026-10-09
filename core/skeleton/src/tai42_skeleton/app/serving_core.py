@@ -233,6 +233,8 @@ class ServingCore:
         self._mcp_bound_tools: dict[str, set[str]] = {}
         self._mcp_preset_conflicts: dict[str, set[str]] = {}
         self._mcp_unusable_tools: dict[str, set[str]] = {}
+        # The titles whose server answered their last listing's request without a credential with a 401.
+        self._mcp_credential_demanded: set[str] = set()
         # Cached resource manager: dropped each start() so a reload rebuilds it against
         # the freshly-imported storage provider rather than pinning the previous pool.
         self._resource_manager_cache: ResourceManager | None = None

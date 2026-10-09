@@ -74,7 +74,8 @@ async def test_require_refresh_token_true_for_connect_false_for_reconnect(harnes
     await complete_connect(flow_id=connect_flow.flow_id, code="auth")
     assert seen == [True]
 
-    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail"])
+    # Another connection of the same provider (its own alias, so its own entry titles).
+    records[CID] = make_oauth_record(connection_id=CID, alias="home", enabled_sub_services=["mail"])
     reconnect_flow = _flow(operation=FlowOperation.RECONNECT, reconnect_cid=CID)
     flows[reconnect_flow.flow_id] = reconnect_flow
     await complete_connect(flow_id=reconnect_flow.flow_id, code="auth")
@@ -129,7 +130,11 @@ async def test_complete_reconnect_no_sub_service_delta_carries_no_fanout(harness
         enabled_sub_services=["mail"],
         granted_scopes=["mail.read", "mail.send"],
     )
-    # The reconnect flow's enabled set equals the record's ⇒ no add/remove delta.
+    # The connection's entry is in the manifest as the builder wrote it, and the reconnect
+    # flow's enabled set equals the record's ⇒ nothing to append, remove or rewrite.
+    cs_mod.ConfigService.from_app().seed(
+        descriptor=_providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID
+    )
     flow = _flow(operation=FlowOperation.RECONNECT, reconnect_cid=CID)
     flows[flow.flow_id] = flow
 

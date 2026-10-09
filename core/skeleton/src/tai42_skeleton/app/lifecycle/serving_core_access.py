@@ -166,6 +166,14 @@ class ServingCoreAccessMixin(LifecycleState):
         self._serving_core._mcp_preset_conflicts = value
 
     @property
+    def _mcp_credential_demanded(self) -> set[str]:
+        return self._serving_core._mcp_credential_demanded
+
+    @_mcp_credential_demanded.setter
+    def _mcp_credential_demanded(self, value: set[str]) -> None:
+        self._serving_core._mcp_credential_demanded = value
+
+    @property
     def _mcp_unusable_tools(self) -> dict[str, set[str]]:
         return self._serving_core._mcp_unusable_tools
 

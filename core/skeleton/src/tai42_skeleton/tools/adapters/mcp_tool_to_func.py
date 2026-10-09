@@ -12,7 +12,7 @@ from makefun import create_function
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from tai42_contract.errors import ClientDisconnectedError
-from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+from tai42_contract.manifest import TaiMCPConfig
 from tai42_contract.monitoring import MonitoringLevel
 from tai42_kit.clients.impl.mcp import FastMCPClient
 from tai42_kit.utils.data.json_schema_util import json_schema_to_pydantic_model
@@ -26,19 +26,17 @@ from tai42_kit.utils.data.string_util import makefun_func_name
 from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorAuthExpiredError,
     ConnectorConnectionError,
+    ConnectorInsufficientScopeError,
 )
 from tai42_skeleton.connectors.token_injection import (
     McpDispatchError,
     call_with_auth,
     check_managed_transport,
-    extract_connector_error_payload,
-    handle_token_expired,
-    is_token_expired,
     managed_auth_error_result,
     mcp_dispatch_failed_result,
-    resolve_managed_auth_for_config,
     upstream_mcp_unavailable_result,
 )
+from tai42_skeleton.manifest.transport import detect_transport
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.settings.mcp_settings import mcp_dispatch_settings
 from tai42_skeleton.tools import mcp_health
@@ -160,33 +158,6 @@ def _build_input_value(input_model: type[BaseModel], **kwargs):
     return input_instance.model_dump(exclude_defaults=True, by_alias=True)
 
 
-# -- Transport dispatch -------------------------------------------------------
-
-
-_FIELD_TO_TRANSPORT = {"command": "stdio", "url": "http", "uds": "uds"}
-
-
-def _detect_transport(inner: MCPConfig) -> str:
-    """Return ``"stdio"`` | ``"http"`` | ``"uds"`` from the set transport field.
-
-    Raises if no field or more than one is set.
-    """
-    flags = [
-        k
-        for k, v in (
-            ("command", inner.command),
-            ("url", inner.url),
-            ("uds", inner.uds),
-        )
-        if v
-    ]
-    if not flags:
-        raise RuntimeError("MCPConfig has no transport set (need command, url, or uds)")
-    if len(flags) > 1:
-        raise RuntimeError(f"MCPConfig has ambiguous transport: {flags!r}")
-    return _FIELD_TO_TRANSPORT[flags[0]]
-
-
 # -- Call wrapper -------------------------------------------------------------
 
 
@@ -197,39 +168,15 @@ async def _dispatch_once(
     arguments: dict[str, Any],
     mcp_client: FastMCPClient,
 ):
-    """Resolve auth, dispatch the call, and drive the token-expired retry.
+    """Dispatch the call through the managed-credential seam, which drives the token-expired retry inside it.
 
     Re-runnable end to end: auth is re-resolved on every call so a reconnect
     re-run picks up a token rotated in the meantime and opens a fresh pooled
-    session (the prior one was already evicted on disconnect).
+    session (the prior one was already evicted on disconnect). An auth failure
+    is classified inside the seam, so it never reaches the reconnect retry as a
+    disconnect.
     """
-    auth = await resolve_managed_auth_for_config(config)
-
-    response = await call_with_auth(
-        config,
-        auth,
-        transport,
-        tool_name,
-        arguments,
-        mcp_client,
-    )
-
-    # Only an OAuth managed entry (resolved a token) can token-expire; a no-auth
-    # entry has no token to refresh, so a forged token_expired must not drive
-    # force_refresh (which raises for no-auth).
-    if config.is_managed and auth is not None and auth.access_token:
-        payload = extract_connector_error_payload(response)
-        if is_token_expired(payload):
-            response = await handle_token_expired(
-                config,
-                transport,
-                tool_name,
-                arguments,
-                mcp_client,
-                auth,
-                failed_access_token=auth.access_token,
-            )
-    return response
+    return await call_with_auth(config, transport, tool_name, arguments, mcp_client)
 
 
 async def _dispatch_with_reconnect(
@@ -300,14 +247,15 @@ async def mcp_tool_call_wrapper(
     """
     mcp_client = FastMCPClient()
     arguments = _build_input_value(tool_input_model, **tool_arguments)
-    transport = _detect_transport(config.config)
+    transport = detect_transport(config.config)
     check_managed_transport(config, transport)
 
     try:
         response = await _dispatch_with_reconnect(config, transport, tool_name, arguments, mcp_client)
-    except (ConnectorConnectionError, ConnectorAuthExpiredError) as exc:
+    except (ConnectorConnectionError, ConnectorAuthExpiredError, ConnectorInsufficientScopeError) as exc:
         # A managed call blocked on user action — invalid_grant (reconnect),
-        # refresh budget exhausted, or auth still expired after a forced refresh —
+        # refresh budget exhausted, auth still expired after a forced refresh, an
+        # entry refused its credential, or the server's scope challenge —
         # is surfaced as a structured connector-error result, not a raw exception,
         # so a client can offer a reconnect instead of showing generic error text.
         # It then flows through the same span-annotation + output path below as any
@@ -316,7 +264,7 @@ async def mcp_tool_call_wrapper(
     except McpDispatchError as exc:
         # The upstream was reached but the remote tool call did not yield a usable result — a
         # protocol error / timeout or a response that violated the tool's advertised output
-        # schema (classified at the single remote-call seam, :func:`call_with_auth`). Record the
+        # schema (classified at the single remote-call seam, :func:`with_managed_auth`). Record the
         # health failure against the ORIGINAL cause and surface the SAME structured tool-error
         # result the auth/unavailable paths produce, so no door sees a raw exception; the raw
         # text lands in this log line and the health store's last_error, both operator surfaces.

@@ -4,6 +4,7 @@ token-response / flow-state / descriptor builders the operation tests reuse."""
 
 from __future__ import annotations
 
+import copy
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -71,6 +72,9 @@ class _FakeConfigService:
             alias=alias,
             connection_id=connection_id,
         )
+
+    def read_manifest_document(self) -> dict[str, Any]:
+        return copy.deepcopy(self.doc)
 
     async def apply_change(self, mutator):
         self.applies += 1

@@ -40,6 +40,9 @@ from tai42_skeleton.tools.adapters.mcp_tool_to_func import (
 
 CONN_ID = "11111111-1111-1111-1111-111111111111"
 
+# Every managed entry here sits on its provider's own server.
+pytestmark = pytest.mark.usefixtures("managed_providers")
+
 _RESOLVER = "tai42_skeleton.connectors.token_injection.resolve_managed_auth"
 _REFRESHER = "tai42_skeleton.connectors.token_injection.force_refresh"
 

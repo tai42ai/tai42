@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -17,6 +19,7 @@ from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorReconnectRequiredError,
     ConnectorRefreshFailingError,
     force_refresh,
+    note_scopes_wanted,
     resolve_managed_auth,
 )
 
@@ -658,3 +661,149 @@ async def test_unrotated_token_still_persists(monkeypatch):
     auth = await resolver_mod._refresh(started, _STARTED)
     assert auth.access_token == "rotated-at"
     assert store.committed  # committed normally
+
+
+async def test_force_refresh_without_a_refresh_token_requires_reconnect(wiring, monkeypatch):
+    """A grant with no refresh token leaves service by the server's 401: the forced refresh takes the
+    terminal transition instead of attempting a refresh."""
+    state, store = wiring
+    record = make_oauth_record(expires_in_seconds=3600)
+    record.refresh_token = None
+    state["record"] = record
+
+    async def _boom(**_kwargs):
+        raise AssertionError("must not attempt a refresh without a refresh token")
+
+    monkeypatch.setattr(oauth_client, "refresh", _boom)
+    with pytest.raises(ConnectorReconnectRequiredError):
+        await force_refresh(CID, failed_access_token="access-tok")
+    assert record.auth_health_state is AuthHealthState.RECONNECT_REQUIRED
+    assert len(store.committed) == 1
+
+
+# -- note_scopes_wanted --------------------------------------------------------
+
+
+class _SealedStore:
+    """A compare-and-set store over the real sealed blob; ``lose_next`` makes the next put lose to a peer."""
+
+    def __init__(self, record) -> None:
+        from tai42_skeleton.connectors.oauth import crypto
+
+        self._crypto = crypto
+        self.blob = crypto.encrypt(record.to_storage_json().encode(), aad=record.connection_id)
+        self.writes = 0
+        self.lose_next: Callable[[], None] | None = None
+        self.fail: Exception | None = None
+
+    def record(self):
+        from tai42_contract.connectors.models import ConnectionRecord
+
+        return ConnectionRecord.model_validate_json(self._crypto.decrypt(self.blob, aad=CID))
+
+    def seal(self, record) -> None:
+        self.blob = self._crypto.encrypt(record.to_storage_json().encode(), aad=CID)
+
+    async def put(self, connection_id, blob, *, create_only=False, expected_blob=None, session_expires_at=None):
+        if self.fail is not None:
+            raise self.fail
+        if self.lose_next is not None:
+            peer, self.lose_next = self.lose_next, None
+            peer()
+        if expected_blob is not None and expected_blob != self.blob:
+            return False
+        self.blob = blob
+        self.writes += 1
+        return True
+
+
+@pytest.fixture
+def sealed(monkeypatch) -> Callable[..., _SealedStore]:
+    def _make(record) -> _SealedStore:
+        store = _SealedStore(record)
+
+        async def _load(connection_id):
+            return store.record(), store.blob
+
+        @asynccontextmanager
+        async def _lock(connection_id):
+            yield
+
+        monkeypatch.setattr(resolver_mod, "load_record_with_blob", _load)
+        monkeypatch.setattr(resolver_mod, "connection_lock", _lock)
+        monkeypatch.setattr(resolver_mod, "token_store", lambda: store)
+        return store
+
+    return _make
+
+
+async def test_noted_scopes_are_kept_in_order_and_the_health_is_untouched(sealed):
+    store = sealed(make_oauth_record())
+    assert await note_scopes_wanted(CID, ["files:read", "files:write"]) is True
+    stored = store.record()
+    assert stored.scopes_wanted == ["files:read", "files:write"]
+    assert stored.auth_health_state is AuthHealthState.HEALTHY
+
+
+async def test_a_second_challenge_adds_only_what_is_new(sealed):
+    store = sealed(make_oauth_record())
+    await note_scopes_wanted(CID, ["files:read"])
+    assert await note_scopes_wanted(CID, ["files:read", "files:write"]) is True
+    assert store.record().scopes_wanted == ["files:read", "files:write"]
+    writes = store.writes
+    assert await note_scopes_wanted(CID, ["files:write"]) is False
+    assert store.writes == writes
+
+
+async def test_a_union_past_the_bound_changes_nothing(sealed, caplog):
+    record = make_oauth_record()
+    record.scopes_wanted = [f"s{i}" for i in range(resolver_mod.SCOPES_WANTED_MAX)]
+    store = sealed(record)
+    with caplog.at_level(logging.WARNING):
+        assert await note_scopes_wanted(CID, ["one-more"]) is False
+    assert store.writes == 0
+    assert CID in caplog.text
+
+
+async def test_a_lost_compare_and_set_is_retried_once_and_keeps_the_peers_tokens(sealed):
+    store = sealed(make_oauth_record())
+
+    def _peer_refresh() -> None:
+        peer = store.record()
+        peer.refresh_token = SecretStr("rotated-by-peer")
+        store.seal(peer)
+
+    store.lose_next = _peer_refresh
+    assert await note_scopes_wanted(CID, ["files:read"]) is True
+    stored = store.record()
+    assert stored.scopes_wanted == ["files:read"]
+    assert stored.refresh_token is not None
+    assert stored.refresh_token.get_secret_value() == "rotated-by-peer"
+
+
+async def test_two_lost_compare_and_sets_give_up_with_a_warning(sealed, caplog):
+    store = sealed(make_oauth_record())
+
+    def _peer() -> None:
+        peer = store.record()
+        peer.granted_scopes = [*peer.granted_scopes, "x"]
+        store.seal(peer)
+        store.lose_next = _again
+
+    def _again() -> None:
+        peer = store.record()
+        peer.granted_scopes = [*peer.granted_scopes, "y"]
+        store.seal(peer)
+
+    store.lose_next = _peer
+    with caplog.at_level(logging.WARNING):
+        assert await note_scopes_wanted(CID, ["files:read"]) is False
+    assert store.record().scopes_wanted == []
+    assert "lost the compare-and-set twice" in caplog.text
+
+
+async def test_a_store_error_while_noting_propagates(sealed):
+    store = sealed(make_oauth_record())
+    store.fail = ConnectionError("store down")
+    with pytest.raises(ConnectionError):
+        await note_scopes_wanted(CID, ["files:read"])
