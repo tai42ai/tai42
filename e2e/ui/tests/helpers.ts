@@ -435,7 +435,8 @@ export async function provisionAdminSession(request: APIRequestContext): Promise
 
 /**
  * Run a registered tool synchronously through the skeleton's own execution door
- * (`POST /api/run-tool`) and return its result. Proves a UI-created preset is a
+ * (`POST /api/run-tool`) and return its result: the door's run answer must be a
+ * finished `result`, whose value is returned. Proves a UI-created preset is a
  * LIVE, runnable tool on the real stack, not merely a stored row.
  *
  * The sync door is a `fenced`, admin-only meta-executor, so `key` must be an ADMIN
@@ -453,8 +454,9 @@ export async function runTool(
     data: { tool_name: toolName, arguments: args },
   });
   expect(res.status(), await res.text()).toBe(200);
-  const body = (await res.json()) as { data: unknown };
-  return body.data;
+  const body = (await res.json()) as { data: { kind: string; result?: unknown } };
+  expect(body.data.kind, JSON.stringify(body.data)).toBe('result');
+  return body.data.result;
 }
 
 /**

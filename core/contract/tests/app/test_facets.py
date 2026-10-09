@@ -28,7 +28,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 151 (sub-protocol, member) pairs over 147
+# The frozen facade surface: the 152 (sub-protocol, member) pairs over 148
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -108,9 +108,10 @@ EXPECTED_FACADE = {
     # runs, and the platform's resume/delivery authorization + redelivery-horizon facets a driver reaches.
     "ask",
     "check_answer",
+    "question_format",
     "react",
     "visit",
-    "park_answer",
+    "run_answer",
     "normalise_started",
     "list_parked",
     "list_parked_for",
@@ -314,11 +315,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 151 (sub-protocol, member) pairs over 147 distinct names — ``store`` is exposed
+    # 152 (sub-protocol, member) pairs over 148 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 147, f"union={len(union)}"
-    assert total == 151 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 148, f"union={len(union)}"
+    assert total == 152 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
@@ -434,17 +435,18 @@ def test_config_manager_both_transaction_seams_required():
     assert mgr.read_env() == {"KEEP": "1"}  # DROP deleted (absent), BLANK filtered
 
 
-def test_app_lifecycle_fleet_op_handler_takes_the_op_name_and_the_budget():
-    # ``on_fleet_op_applied`` sits alongside the zero-arg siblings; its handler takes
-    # the op name and the seconds left of the apply window. A registrar exposing every
-    # member conforms to the runtime-checkable protocol.
+def test_app_lifecycle_fleet_op_handler_takes_the_applied_op():
+    # ``on_fleet_op_applied`` sits alongside the zero-arg siblings; its handler takes ONE
+    # argument, the applied op with its effects and budget. A registrar exposing every member
+    # conforms to the runtime-checkable protocol.
     from tai42_contract.app import AppLifecycle
 
     assert "on_fleet_op_applied" in protocol_members(AppLifecycle)
     sig = inspect.signature(AppLifecycle.on_fleet_op_applied)
     assert "func" in sig.parameters
-    assert sig.parameters["func"].annotation == "Callable[[str, float], Any]"
+    assert sig.parameters["func"].annotation == "Callable[[FleetOpApplied], Any]"
     doc = AppLifecycle.on_fleet_op_applied.__doc__ or ""
+    assert "effects" in doc
     assert "budget" in doc
     assert "must raise" in doc
     sibling_sig = inspect.signature(AppLifecycle.on_startup)
@@ -472,16 +474,21 @@ def test_app_lifecycle_fleet_op_handler_takes_the_op_name_and_the_budget():
     registrar = Registrar()
     assert isinstance(registrar, AppLifecycle)
 
-    # A neutral handler receives the op name and the remaining budget.
-    seen: list[tuple[str, float]] = []
+    # A neutral handler receives the applied op and decides on its effects.
+    from tai42_contract.backend import FleetOpApplied, FleetOpEffect
 
-    def handler(op_name: str, budget: float) -> None:
-        seen.append((op_name, budget))
+    seen: list[FleetOpApplied] = []
+
+    def handler(applied: FleetOpApplied) -> None:
+        if applied.effects:
+            seen.append(applied)
 
     registered = registrar.on_fleet_op_applied(handler)
     assert registered is handler
-    handler("some_op", 12.5)
-    assert seen == [("some_op", 12.5)]
+    changed = FleetOpApplied(op="some_op", effects=frozenset({FleetOpEffect.registry}), budget=12.5)
+    handler(changed)
+    handler(FleetOpApplied(op="some_query", effects=frozenset(), budget=12.5))
+    assert seen == [changed]
 
     class MissingHook:
         def on_startup(self, func: object) -> object:

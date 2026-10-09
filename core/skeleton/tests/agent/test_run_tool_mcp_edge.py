@@ -14,9 +14,10 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from tai42_contract.access_control import reset_request_user_id, set_request_user_id
-from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_contract.tools import TOOL_META_PAUSES
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError

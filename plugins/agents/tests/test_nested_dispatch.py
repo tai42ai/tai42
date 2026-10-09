@@ -30,11 +30,11 @@ from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     ChainedResume,
+    DeliveryAddress,
     SuspendedInteraction,
     get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
-    is_chained_park_key,
     reset_park_completion,
     reset_resume_continuation_tool,
     set_park_completion,
@@ -42,6 +42,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
+from tai42_kit.interactions.park_adoption import is_chained_park_key
 from tests._client_tool import FakeClientTool, client_tool
 from tests.conftest import bind_park_index
 
@@ -59,7 +60,7 @@ from .conftest import fake_run_trace
 
 _COMPLETION_TOOL = "conversation_deliver"
 _THREAD = "bridge:acme:alice"
-_CONTEXT = {"thread_id": _THREAD}
+_ADDRESS = DeliveryAddress(tool=_COMPLETION_TOOL, context=None, thread_id=_THREAD)
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -142,7 +143,7 @@ class _NestedDriverTool:
 
     def __init__(self) -> None:
         self.chain_seen: list[ChainedResume | None] = []
-        self.door_seen: list[tuple[str | None, Any]] = []
+        self.door_seen: list[DeliveryAddress] = []
 
     def tool(self) -> FakeClientTool:
         def peek() -> str:
@@ -203,7 +204,7 @@ def test_nested_tool_captures_a_chain_while_the_agent_park_is_outermost(
     agent = _agent()
 
     async def go() -> None:
-        token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
+        token = set_park_completion(_COMPLETION_TOOL, thread_id=_THREAD)
         try:
             # The door opens the outermost minting frame around the drive (reading the bound
             # completion as the run's out-of-band address), exactly as a live door does.
@@ -223,7 +224,7 @@ def test_nested_tool_captures_a_chain_while_the_agent_park_is_outermost(
         # unchanged — the platform, not the nested driver, delivers the agent's own answer there.
         assert len(nested.chain_seen) == 1
         _assert_chain_routing(nested.chain_seen[0])
-        assert nested.door_seen[0] == (_COMPLETION_TOOL, _CONTEXT)
+        assert nested.door_seen[0] == _ADDRESS
 
         # The agent's own park, raised outside any tool body, is OUTERMOST: it captured no chain
         # (its terminal fires nothing; the platform delivers to the run's own address).
@@ -263,7 +264,7 @@ def test_nested_tool_captures_a_chain_on_the_deep_agent_resume_drive(
     agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> None:
-        token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
+        token = set_park_completion(_COMPLETION_TOOL, thread_id=_THREAD)
         try:
             # The door opens the outermost minting frame around the drive (reading the bound
             # completion as the run's out-of-band address), exactly as a live door does.
@@ -290,15 +291,15 @@ def test_the_chain_is_reset_after_a_nested_dispatch_and_the_door_flows_through()
     # Scoped to the dispatch ONLY: the ambient chain is restored on both sides, and the door's
     # out-of-band address is never touched — it flows down unchanged.
     resume = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
-    token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
+    token = set_park_completion(_COMPLETION_TOOL, thread_id=_THREAD)
     try:
         assert get_chained_resume() is None
         with nested_tool_dispatch(chain=True):
             _assert_chain_routing(get_chained_resume())
             # The door's address flows down unchanged inside the dispatch.
-            assert get_park_completion() == (_COMPLETION_TOOL, _CONTEXT)
+            assert get_park_completion() == _ADDRESS
         assert get_chained_resume() is None
-        assert get_park_completion() == (_COMPLETION_TOOL, _CONTEXT)
+        assert get_park_completion() == _ADDRESS
     finally:
         reset_park_completion(token)
         reset_resume_continuation_tool(resume)

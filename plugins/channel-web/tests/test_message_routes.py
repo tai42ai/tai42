@@ -11,8 +11,9 @@ from typing import Any
 
 import pytest
 from starlette.responses import StreamingResponse
-from tai42_contract.conversations import BlankInboundTextError, inbound_media_placeholder
+from tai42_contract.conversations import BlankInboundTextError
 from tai42_contract.interactions import MediaAlreadyBoundError, MediaKind, MediaNotFoundError
+from tai42_kit.conversations.inbound_media import inbound_media_placeholder
 
 import tai42_channel_web.routes  # noqa: F401  (route registration side-effect)
 from tai42_channel_web.channel import WebChannel

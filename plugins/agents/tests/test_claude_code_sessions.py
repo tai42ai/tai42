@@ -20,6 +20,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.interactions import (
     ChainedResume,
+    DeliveryAddress,
     SuspendedInteraction,
     get_chained_resume,
     get_park_completion,
@@ -276,9 +277,9 @@ def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatc
     # so there is no hijack to guard). The door binding is restored around the dispatch.
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(TOOL_CALL))
-    bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
+    bound = DeliveryAddress(tool="conversation_deliver", context=None, thread_id="bridge:acme:alice")
     chain_seen: list[ChainedResume | None] = []
-    door_seen: list[tuple[str | None, Any]] = []
+    door_seen: list[DeliveryAddress] = []
 
     def peeking_tool(**_kwargs: Any) -> str:
         chain_seen.append(get_chained_resume())
@@ -287,7 +288,7 @@ def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatc
 
     app = build_local_app(tool_runners={"peektool": peeking_tool})
 
-    completion_token = set_park_completion(*bound)
+    completion_token = set_park_completion(bound.tool, thread_id=bound.thread_id)
     # A proxied tool call needs a bound execution identity (the door's entitlement gate).
     user_token = set_request_user_id("user-1")
     try:

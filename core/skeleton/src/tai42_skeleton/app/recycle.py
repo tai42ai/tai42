@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from pydantic import BaseModel, Field
 
 from tai42_skeleton.app.bus import OpOutcome, WorkerBus, WorkerKind, WorkerRow, WorkerState, presence_fresh
+from tai42_skeleton.app.bus.ops import Recycle
 
 RECYCLED = "recycled"
 """A target whose recycle op applied and whose convergence was confirmed."""
@@ -224,7 +225,7 @@ async def _recycle_one(bus: WorkerBus, name: str, generation: int, kind: WorkerK
     A bus-unreachable publish or a non-applied outcome raises loudly before any
     row is recorded.
     """
-    result = await bus.publish({"op": "recycle"}, targets=[name], local=None)
+    result = await bus.publish(Recycle(op="recycle"), targets=[name], local=None)
     if not result.reachable:
         raise RecycleError(f"recycle: bus unreachable while recycling {name!r}: {result.error}", report)
     entry = next((r for r in result.results if r.name == name), None)

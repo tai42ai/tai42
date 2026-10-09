@@ -63,7 +63,7 @@ async def test_fenced_tool_over_http_run_tool(
     # Admin: the run-tool door executes the fenced tool.
     ok = await admin.request_raw("POST", "/api/run-tool", json={"tool_name": _FENCED, "arguments": {"payload": "x"}})
     assert ok.status_code == 200, ok.text
-    assert ok.json()["data"] == "x", ok.text
+    assert ok.json()["data"] == {"kind": "result", "result": "x"}, ok.text
 
     # Non-admin: refused (the run-tool route is admin-fenced; a non-admin never reaches a
     # tool through it).

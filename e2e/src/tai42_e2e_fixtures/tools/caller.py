@@ -97,7 +97,13 @@ async def held_route_park(marker: str) -> object:
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_ask(
-    marker: str, expiry_seconds: float, reask: bool = False, deeper: bool = False, on_expiry: str = "kill"
+    marker: str,
+    expiry_seconds: float,
+    reask: bool = False,
+    deeper: bool = False,
+    on_expiry: str = "kill",
+    answer_format: str = "text",
+    schema: dict[str, object] | None = None,
 ) -> object:
     """Async-ask the CALLER from the innermost frame and park, returning the suspended receipt.
 
@@ -107,7 +113,7 @@ async def held_ask(
     deep re-park's ``held_deeper``) are what the chain records. ``reask``/``deeper`` ride the
     ask's ``payload`` so the resumed continuation reads them off the stored request; ``on_expiry``
     picks whether an unanswered park is killed (the chain torn down, one FAILED delivered) or
-    resumed with the expiry marker.
+    resumed with the expiry marker; ``answer_format``/``schema`` are passed to the ask as given.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -124,6 +130,8 @@ async def held_ask(
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
         return await ask(
             marker,
+            answer_format=answer_format,
+            schema=schema,
             to="caller",
             mode="async",
             expiry_at=expiry_at,
@@ -134,7 +142,13 @@ async def held_ask(
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def held_run(
-    marker: str, reask: bool = False, deeper: bool = False, expiry_seconds: float = 3600, on_expiry: str = "kill"
+    marker: str,
+    reask: bool = False,
+    deeper: bool = False,
+    expiry_seconds: float = 3600,
+    on_expiry: str = "kill",
+    answer_format: str = "text",
+    schema: dict[str, object] | None = None,
 ) -> object:
     """Ask the CALLER (through ``held_ask`` one frame down) and park, returning the receipt.
 
@@ -142,6 +156,8 @@ async def held_run(
     chain is observable on the re-park's ``asked_by``; ``deeper`` makes that second ask fire one
     frame lower (through ``held_deeper``) so the deeper tool's name is pushed onto the chain.
     ``on_expiry`` picks the unanswered-park policy — ``"kill"`` (the default) or ``"resume"``.
+    ``answer_format`` and ``schema`` are the ask's own, so a spec can park a ``free`` ask whose
+    answer is checked against a schema.
     """
     return await tai42_app.tools.run_tool(
         "held_ask",
@@ -151,6 +167,8 @@ async def held_run(
             "reask": reask,
             "deeper": deeper,
             "on_expiry": on_expiry,
+            "answer_format": answer_format,
+            "schema": schema,
         },
     )
 

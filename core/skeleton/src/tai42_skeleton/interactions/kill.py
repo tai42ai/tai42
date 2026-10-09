@@ -25,15 +25,15 @@ Per kill, in order:
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
-from tai42_contract.interactions import PARK_COMPLETION_FAILED, fire_park_killed
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, DeliveryAddress
 from tai42_contract.states import SubjectCandidates
 from tai42_contract.tools import RunDelivery, run_delivery
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.interactions.park_kill import fire_park_killed
 
 from tai42_skeleton.interactions.continuation import _deliver_terminal
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
@@ -51,13 +51,6 @@ logger = logging.getLogger(__name__)
 _KILL_OUTCOME_KEY: Final[str] = "tai42:run_killed"
 
 
-def _delivery_tuple(delivery: dict[str, Any] | None) -> tuple[str | None, Mapping[str, Any] | None] | None:
-    """Shape a stored ``{tool, context}`` delivery into the ``(tool, context)`` the ladder fires, or ``None``."""
-    if delivery is None:
-        return None
-    return delivery.get("tool"), delivery.get("context")
-
-
 def _candidates(subjects: dict[str, Any] | None) -> SubjectCandidates | None:
     """Rebuild the ``SubjectCandidates`` a killed run's FAILED subject-tracks under, or ``None`` when receiver-less."""
     if subjects is None:
@@ -71,7 +64,7 @@ async def _teardown_and_deliver(
     store: InteractionStore,
     *,
     interaction_id: str,
-    delivery: dict[str, Any] | None,
+    delivery: DeliveryAddress | None,
     run_delivery_id: str | None,
     subjects: dict[str, Any] | None,
     chain_keys: list[str],
@@ -87,8 +80,7 @@ async def _teardown_and_deliver(
     ``completion_id`` off ``run_delivery_id``, so a kill entering at ANY interaction of the run
     delivers once and any second fire dedupes.
     """
-    delivery_tuple = _delivery_tuple(delivery)
-    bound: RunDelivery | None = RunDelivery(run_delivery_id, delivery_tuple) if run_delivery_id is not None else None
+    bound: RunDelivery | None = RunDelivery(run_delivery_id, delivery) if run_delivery_id is not None else None
     with resume_origin(interaction_id), resume_lineage(chain_keys), run_delivery(bound):
         await fire_park_killed(interaction_id, reason)
     await _deliver_terminal(
@@ -96,7 +88,7 @@ async def _teardown_and_deliver(
         interaction_id=interaction_id,
         outcome={_KILL_OUTCOME_KEY: reason},
         status=PARK_COMPLETION_FAILED,
-        delivery=delivery_tuple,
+        delivery=delivery,
         run_delivery_id=run_delivery_id,
         candidates=_candidates(subjects),
     )

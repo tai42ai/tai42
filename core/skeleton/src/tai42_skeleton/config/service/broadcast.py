@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
+from tai42_skeleton.app.bus.ops import ReloadConfig
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service.base import _ConfigServiceBase
 from tai42_skeleton.config.service.results import ApplyResult
@@ -34,7 +35,9 @@ class _BroadcastMixin(_ConfigServiceBase):
         """
         local = LocalApplyResult(outcome=OpOutcome.applied, payload={"status": "ok"})
         try:
-            report = await self._bus.publish({"op": "reload_config"}, None, local, expected_at_start=expected_at_start)
+            report = await self._bus.publish(
+                ReloadConfig(op="reload_config"), None, local, expected_at_start=expected_at_start
+            )
         except Exception as broadcast_error:
             error = f"{type(broadcast_error).__name__}: {broadcast_error}"
             report = FleetResult(op="reload_config", reachable=False, error=error)
@@ -82,7 +85,7 @@ class _BroadcastMixin(_ConfigServiceBase):
             local = LocalApplyResult(outcome=OpOutcome.applied, payload=local_result)
 
         try:
-            report = await self._bus.publish({"op": op_name}, None, local, expected_at_start=at_start)
+            report = await self._bus.publish(ReloadConfig(op="reload_config"), None, local, expected_at_start=at_start)
         except Exception as broadcast_error:
             # The persist already committed, so a raw broadcast failure must not escape
             # the post-persist contract. Surface it as a FleetBroadcastError carrying

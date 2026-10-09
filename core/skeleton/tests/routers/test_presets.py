@@ -35,6 +35,7 @@ from tai42_skeleton.app.bus import (
     WorkerRow,
     WorkerState,
 )
+from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
@@ -1667,12 +1668,13 @@ class _RecordingBus:
         return None
 
     async def publish(
-        self, op: dict[str, Any], targets: Any, local: Any, *, expected_at_start: dict[str, int] | None = None
+        self, op: FleetOp, targets: Any, local: Any, *, expected_at_start: dict[str, int] | None = None
     ) -> FleetResult:
         self.expected_at_start_calls.append(expected_at_start)
         if self.fail:
             raise RuntimeError("worker gh-2 did not confirm within timeout")
-        name, kind, tool = op["op"], op["kind"], op["name"]
+        wire = fleet_op_wire(op)
+        name, kind, tool = wire["op"], wire["kind"], wire["name"]
         if name == "reload_tool":
             self.reloaded.append((kind, tool))
             self.ops.append(("reload", kind, tool))

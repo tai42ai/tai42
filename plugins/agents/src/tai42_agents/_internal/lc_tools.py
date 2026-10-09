@@ -29,16 +29,12 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool, ToolException
 from tai42_contract.agent import PresetSpec
-from tai42_contract.interactions import (
-    NestedParkOwnershipError,
-    RunTerminalFailed,
-    SuspendedInteraction,
-    failed_outcome_text,
-    resolve_park_adoption,
-    suspended_interaction_marker,
-)
+from tai42_contract.interactions import NestedParkOwnershipError, RunTerminalFailed, SuspendedInteraction
 from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import AppTools, ClientTool, ClientToolError, UndeclaredPauseError
+from tai42_kit.interactions.outcome_text import failed_outcome_text
+from tai42_kit.interactions.park_adoption import resolve_park_adoption
+from tai42_kit.interactions.park_marker import suspended_interaction_marker
 from tai42_kit.llm.models import check_tool_name
 
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch

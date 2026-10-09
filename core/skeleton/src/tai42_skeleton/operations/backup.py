@@ -28,6 +28,7 @@ from tai42_contract.app.responses import FanoutSummary
 from tai42_contract.backup import BackupSectionReport
 
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.app.bus.ops import ClearTemplateCache
 from tai42_skeleton.backup.registry import BackupMode, import_mode
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
@@ -160,7 +161,7 @@ async def _evict_templates_fleetwide() -> FanoutSummary:
     async def _apply() -> None:
         manager.clear_cache()
 
-    fleet = FleetResult.model_validate(await broadcast({"op": "clear_template_cache"}, None, _apply))
+    fleet = FleetResult.model_validate(await broadcast(ClearTemplateCache(op="clear_template_cache"), None, _apply))
     return FanoutSummary.model_validate(fleet_fanout(fleet))
 
 

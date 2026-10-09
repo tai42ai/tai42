@@ -48,6 +48,11 @@ from tai42_contract.interactions import (
     QuestionFormat,
     ResumeBuffered,
     ResumeItem,
+    RunAnswer,
+    RunAsksAnswer,
+    RunNoneAnswer,
+    RunParkedAnswer,
+    RunResultAnswer,
     SuspendedInteraction,
     TakeItem,
     UndeclaredExtrasKeyError,
@@ -582,21 +587,23 @@ async def _entries_for(
 # --- the shared park answer + start normalisation --------------------------------------
 
 
-def park_answer(outcome: VisitOutcome) -> Any:
-    """The ONE park-answer shape a direct door hands back for a visit outcome.
+def run_answer(outcome: VisitOutcome) -> RunAnswer:
+    """The ONE run answer a direct door hands back for a visit outcome, discriminated on ``kind``.
 
-    A plain ``result`` is the tool's own value; an ``asks`` outcome is the caller ask entries
-    the run parked; a ``parked`` outcome is the full suspended sentinel dump; ``none`` is null.
-    Wrapped secrets are NOT revealed here — the sync door reveals them on the ``result`` kind
-    itself and every recorder masks its own copy.
+    Wrapped secrets are NOT revealed here — the sync door reveals them on its own ``result`` and
+    every recorder masks its own copy. The visit always sets the sentinel on an ``asks``/``parked``
+    outcome, so one without it is a defect and raises.
     """
     if outcome.kind == "result":
-        return outcome.result
+        return RunResultAnswer(result=outcome.result)
+    if outcome.kind == "none":
+        return RunNoneAnswer()
+    suspended = outcome.suspended
+    if suspended is None:
+        raise RuntimeError(f"visit outcome of kind {outcome.kind!r} carries no suspended sentinel")
     if outcome.kind == "asks":
-        return {"asks": [entry.model_dump(mode="json") for entry in outcome.asks]}
-    if outcome.kind == "parked":
-        return outcome.suspended.model_dump(mode="json") if outcome.suspended is not None else None
-    return None
+        return RunAsksAnswer(asks=outcome.asks, suspended=suspended)
+    return RunParkedAnswer(suspended=suspended)
 
 
 async def normalise_started(value: Any) -> VisitOutcome:
@@ -675,7 +682,7 @@ __all__ = [
     "cancel_parked",
     "list_parked",
     "normalise_started",
-    "park_answer",
     "resume_parked",
+    "run_answer",
     "visit",
 ]

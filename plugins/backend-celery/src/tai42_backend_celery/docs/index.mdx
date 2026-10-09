@@ -53,7 +53,8 @@ a cold stop, and the drain is awaited to completion before the process tears
 down.
 
 Celery is the one shipped backend whose workers PERSIST ACROSS JOBS, so it is the
-one that declares pool turnover: after a registry-mutating fleet op applies, the
+one that declares pool turnover: after a fleet op that declares an effect (the tool
+registry or the compiled-template cache changed) applies, the
 live manifest is re-exported into the env and the prefork pool is replaced and
 confirmed before the op reports `applied`. The turnover's budget is what is left of
 the bus apply window (`TAI_BUS_APPLY_TIMEOUT`), measured from this worker's receipt

@@ -21,6 +21,7 @@ from pydantic import BaseModel, JsonValue, RootModel
 from tai42_contract.accounts.models import LoginMethod
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.channels import ChannelTemplate, Option, OptionSection
+from tai42_contract.interactions import RunAnswer
 from tai42_contract.interactions.models import LocationElement, MediaItem
 
 from tai42_skeleton.app.kind_status import KindStatus
@@ -596,6 +597,13 @@ class SandboxInfo(BaseModel):
     module: str | None = None
     sessions: int
     policy: SandboxPolicy
+
+
+# --- Tools ------------------------------------------------------------------
+
+
+class RunAnswerResponse(RootModel[RunAnswer]):
+    """The sync run-tool body: the run answer, discriminated on ``kind``."""
 
 
 # --- Sub-MCP ----------------------------------------------------------------

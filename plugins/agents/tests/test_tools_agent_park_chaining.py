@@ -25,11 +25,11 @@ from tai42_contract.interactions import (
     RunFailed,
     SuspendedInteraction,
     get_chained_resume,
-    is_chained_park_key,
     reset_chained_resume,
     set_chained_resume,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.interactions.park_adoption import is_chained_park_key
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionRecord, superstep_id
 from tai42_kit.settings import reset_all_settings
@@ -203,13 +203,12 @@ def test_two_chained_calls_in_one_super_step_resume_together(
     asyncio.run(go())
 
 
-def test_the_delivery_tool_accepts_the_whole_contract_fire_payload(
+def test_the_delivery_tool_resumes_on_the_chain_payload_and_refuses_any_other_key(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # A fire may carry the whole contract completion payload — the terminal plus fields this tool
-    # never reads (a residual caller context, the reserved thread field a driver stamps). A fire
-    # carrying them must not be a signature error: that failure mode is a turn that parks, resumes
-    # nowhere, and is retried until it is dropped.
+    # The chain fire every driver builds is ``{chain_token, result, status}`` (plus the id a
+    # redelivery may carry); a key of another payload — the thread a completion fire carries — is
+    # a signature error, raised before anything is resumed.
     saver = InMemorySaver()
     nested = _NestedDriverStandIn("i-nested", "nested_driver_resume")
     model = ScriptedChatModel([_preset_call(), AIMessage(content="the call approved it")])
@@ -235,11 +234,9 @@ def test_the_delivery_tool_accepts_the_whole_contract_fire_payload(
             "result": "the call said yes",
             "completion_id": "c-1",
             "status": PARK_COMPLETION_SUCCEEDED,
-            # Fields this tool accepts but never reads: a residual caller context and the reserved
-            # thread field a driver may stamp on the fire.
-            "chained_context": {"tool": "deliver_tool_completion", "context": {"delivery_thread_id": "bridge:r:a"}},
-            "delivery_thread_id": "bridge:r:a",
         }
+        with pytest.raises(TypeError, match="thread_id"):
+            await deliver_chained_park(**{**fire, "thread_id": "relay:r:a"})
         assert await deliver_chained_park(**fire) == "the call approved it"
 
     asyncio.run(go())

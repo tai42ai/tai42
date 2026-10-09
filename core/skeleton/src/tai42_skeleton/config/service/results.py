@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.operations._broadcast import fleet_fanout
 
 if TYPE_CHECKING:
@@ -68,7 +69,7 @@ class _FleetPublisher(Protocol):
 
     async def publish(
         self,
-        op: dict[str, Any],
+        op: FleetOp,
         targets: list[str] | None,
         local: LocalApplyResult | None,
         *,

@@ -9,12 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import (
-    NestedParkOwnershipError,
-    SuspendedInteraction,
-    assert_park_adoptable,
-)
+from tai42_contract.interactions import NestedParkOwnershipError, SuspendedInteraction
 from tai42_contract.tools import UndeclaredPauseError
+from tai42_kit.interactions.park_adoption import assert_park_adoptable
 
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
 from tai42_agents.claude_code.protocol import ProtocolError, ToolCallFrame, ToolResultFrame, dump_frame

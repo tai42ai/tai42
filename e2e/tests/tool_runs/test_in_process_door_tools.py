@@ -75,9 +75,12 @@ async def _create_tool_api_route(api: ApiClient, *, route_name: str, tool: str, 
 
 
 async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any]) -> dict:
-    return await api.post(
+    """The finished run's own value: the sync door's answer must be a ``result``."""
+    answer = await api.post(
         "/api/run-tool", json={"tool_name": tool_name, "arguments": arguments}, expect=200, retry_on_reloading=True
     )
+    assert answer["kind"] == "result", answer
+    return answer["result"]
 
 
 @pytest.mark.needs("setting:seeded-key-id=bridge-root")

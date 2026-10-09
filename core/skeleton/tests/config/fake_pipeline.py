@@ -12,6 +12,7 @@ import pytest
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerIdentity, WorkerKind, WorkerResult
+from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 from tai42_skeleton.config.service import ConfigService
 
 if TYPE_CHECKING:
@@ -139,18 +140,19 @@ class RecordingBus:
 
     async def publish(
         self,
-        op: dict[str, Any],
+        op: FleetOp,
         targets: list[str] | None,
         local: LocalApplyResult | None,
         *,
         expected_at_start: dict[str, int] | None = None,
     ) -> FleetResult:
-        self.publish_calls.append((op, targets, local))
+        # Recorded as the wire dict the real bus publishes.
+        self.publish_calls.append((fleet_op_wire(op), targets, local))
         self.expected_at_start_calls.append(expected_at_start)
         if self._publish_error is not None:
             raise self._publish_error
         if not self._reachable:
-            return FleetResult(op=op["op"], reachable=False, error=self._error)
+            return FleetResult(op=op.op, reachable=False, error=self._error)
         results: list[WorkerResult] = []
         if local is not None:
             results.append(
@@ -158,7 +160,7 @@ class RecordingBus:
             )
         for remote in self._remotes:
             results.append(WorkerResult(name=remote, outcome=self._remote_outcome, detail="crafted"))
-        return FleetResult(op=op["op"], results=results)
+        return FleetResult(op=op.op, results=results)
 
 
 def _service(

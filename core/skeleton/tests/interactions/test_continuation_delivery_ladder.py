@@ -10,7 +10,6 @@ identity.
 
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -18,11 +17,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     AnswerFormat,
+    DeliveryAddress,
     InteractionRequest,
     InteractionResponse,
     ParkDeliveryUnauthorizedError,
@@ -100,7 +101,7 @@ async def _drive(
     *,
     tool: str,
     interaction_id: str = "iid-1",
-    delivery: tuple[str | None, dict[str, Any] | None] | None,
+    delivery: DeliveryAddress | None,
     run_delivery_id: str | None = "rd-1",
     candidates: SubjectCandidates | None = None,
     receives_outcome: bool = False,
@@ -157,13 +158,18 @@ async def test_terminal_success_fires_the_address_with_the_run_completion_id(wir
         },
     )
     await _seed_due(wired, "iid-1")
-    await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
 
     # The continuation drove with the RE-ESTABLISHED run-delivery identity and NO delivery-fire,
     # then the address fired ONCE, inside the fire context, carrying the run's completion id + result.
     drive_call = next(c for c in tools.calls if c["key"] == "resume_tool")
     assert drive_call["run_delivery_id"] == "rd-1"
-    assert drive_call["run_delivery_address"] == ("deliver_tool", {"thread_id": "t1"})
+    assert drive_call["run_delivery_address"] == DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1")
     assert drive_call["delivery_fire"] is None
     fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
     assert fire["arguments"] == {
@@ -185,7 +191,12 @@ async def test_a_returned_value_is_fired_succeeded_without_status_inspection(wir
         monkeypatch,
         {"resume_tool": lambda _a: {"status": "failed", "error": "a plain field"}, "deliver_tool": lambda a: None},
     )
-    await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
     fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
     assert fire["arguments"]["status"] == PARK_COMPLETION_SUCCEEDED
     assert fire["arguments"]["result"] == {"status": "failed", "error": "a plain field"}
@@ -197,7 +208,12 @@ async def test_run_terminal_failed_delivers_failed_and_clears_due(wired, monkeyp
 
     tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
     await _seed_due(wired, "iid-1")
-    await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
     fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
     assert fire["arguments"]["status"] == PARK_COMPLETION_FAILED
     assert fire["arguments"]["result"] == {"aborted": True}
@@ -211,7 +227,12 @@ async def test_plain_raise_keeps_the_due_record_and_fires_nothing(wired, monkeyp
     tools = _wire_tools(monkeypatch, {"resume_tool": _raise, "deliver_tool": lambda a: None})
     await _seed_due(wired, "iid-1")
     with pytest.raises(RuntimeError):
-        await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
+        await _drive(
+            wired,
+            tool="resume_tool",
+            delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+            run_delivery_id="rd-1",
+        )
     # A receiver-less plain raise KEEPS the record for the reaper and fires no address.
     assert not any(c["key"] == "deliver_tool" for c in tools.calls)
     assert await _due_present(wired, "iid-1")
@@ -229,7 +250,7 @@ async def test_address_delivery_drops_the_subject_index_membership(wired, monkey
     await _drive(
         wired,
         tool="resume_tool",
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id="rd-1",
         candidates=candidates,
     )
@@ -273,8 +294,18 @@ async def test_subject_waiting_outcome_is_written_once_on_redelivery(wired, monk
 
 async def test_redelivery_fires_the_same_completion_id(wired, monkeypatch):
     tools = _wire_tools(monkeypatch, {"resume_tool": lambda _a: {"status": "success"}, "deliver_tool": lambda a: None})
-    await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
-    await _drive(wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1")
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
+    await _drive(
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
+    )
     fires = [c for c in tools.calls if c["key"] == "deliver_tool"]
     assert len(fires) == 2
     # Both fires carry the SAME per-run completion id, so completion_delivery dedups the second.
@@ -291,7 +322,10 @@ async def test_reparked_suspended_interaction_delivers_nothing(wired, monkeypatc
     )
     await _seed_due(wired, "iid-1")
     result = await _drive(
-        wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1"
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
     )
     assert isinstance(result, SuspendedInteraction)
     assert not any(c["key"] == "deliver_tool" for c in tools.calls)
@@ -306,7 +340,10 @@ async def test_resume_buffered_delivers_nothing(wired, monkeypatch):
         {"resume_tool": lambda _a: ResumeBuffered(remaining_ids=["iid-3"]), "deliver_tool": lambda a: None},
     )
     result = await _drive(
-        wired, tool="resume_tool", delivery=("deliver_tool", {"thread_id": "t1"}), run_delivery_id="rd-1"
+        wired,
+        tool="resume_tool",
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
+        run_delivery_id="rd-1",
     )
     assert isinstance(result, ResumeBuffered)
     assert not any(c["key"] == "deliver_tool" for c in tools.calls)
@@ -323,7 +360,7 @@ async def test_inline_receiver_gets_the_outcome_and_nothing_is_fired(wired, monk
     result = await _drive(
         wired,
         tool="resume_tool",
-        delivery=("deliver_tool", {"thread_id": "t1"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
         run_delivery_id="rd-1",
         receives_outcome=True,
     )
@@ -344,7 +381,7 @@ async def test_inline_receiver_propagates_a_run_terminal_failed(wired, monkeypat
         await _drive(
             wired,
             tool="resume_tool",
-            delivery=("deliver_tool", {"thread_id": "t1"}),
+            delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="t1"),
             run_delivery_id="rd-1",
             receives_outcome=True,
         )
@@ -458,7 +495,7 @@ async def test_permanent_giveup_delivers_failed_off_the_stored_delivery(wired, m
         continuation_identity="svc-key",
         expiry_at=datetime.now(UTC) + timedelta(hours=1),
         run_delivery_id="rd-g",
-        delivery=("deliver_tool", {"thread_id": "tg"}),
+        delivery=DeliveryAddress(tool="deliver_tool", context=None, thread_id="tg"),
     )
     await giveup_delivery.deliver_park_giveup(wired.store, request, fingerprint=None)
     fire = next(c for c in tools.calls if c["key"] == "deliver_tool")
@@ -470,7 +507,7 @@ async def test_permanent_giveup_delivers_failed_off_the_stored_delivery(wired, m
 # --- persist denormalizes the run address; the reaper fast-path reads it back --------------
 
 
-def _caller_ask(store, *, iid: str, run_delivery_id: str, delivery_tuple):
+def _caller_ask(store, *, iid: str, run_delivery_id: str, delivery: DeliveryAddress):
     now = datetime.now(UTC)
     return InteractionRequest(
         interaction_id=iid,
@@ -485,33 +522,31 @@ def _caller_ask(store, *, iid: str, run_delivery_id: str, delivery_tuple):
         continuation_identity="svc-key",
         expiry_at=now + timedelta(hours=1),
         run_delivery_id=run_delivery_id,
-        delivery=delivery_tuple,
+        delivery=delivery,
     )
 
 
 async def test_persist_denormalizes_delivery_and_the_redelivery_fastpath_reads_it(wired):
-    # persist passes the run's ``(tool, context)`` address as ``{tool, context}`` and its
-    # ``run_delivery_id`` into ``store.add``; the state hash carries both, and the answer path
-    # copies them onto the continuation-due record so the reaper's DETACHED redelivery reconstructs
-    # the run's address + delivery identity without re-reading the request.
-    delivery_dict = {"tool": "deliver_tool", "context": {"thread_id": "tp"}}
-    request = _caller_ask(
-        wired.store, iid="iid-p", run_delivery_id="rd-p", delivery_tuple=("deliver_tool", {"thread_id": "tp"})
-    )
+    # persist passes the run's address and its ``run_delivery_id`` into ``store.add``; the state
+    # hash carries both, and the answer path copies them onto the continuation-due record so the
+    # reaper's DETACHED redelivery reconstructs the run's address + delivery identity without
+    # re-reading the request.
+    address = DeliveryAddress(tool="deliver_tool", context={"route_name": "r"}, thread_id="tp")
+    request = _caller_ask(wired.store, iid="iid-p", run_delivery_id="rd-p", delivery=address)
     await wired.store.add(
         wired.fake,
         request,
         idle_ttl=86400,
         continuation_fingerprint="fp-1",
         to="caller",
-        delivery=delivery_dict,
+        delivery=address,
         run_delivery_id="rd-p",
     )
 
     # The durable state hash carries the denormalized address + identity.
     raw = await wired.fake.hgetall(wired.store.state_key("iid-p"))
     fields = {serde.as_str(k): serde.as_str(v) for k, v in raw.items()}
-    assert json.loads(fields["delivery"]) == delivery_dict
+    assert DeliveryAddress.model_validate_json(fields["delivery"]) == address
     assert fields["run_delivery_id"] == "rd-p"
 
     # Resolve the ask, then the reaper's retry-claim reconstructs a due record carrying both.
@@ -528,5 +563,20 @@ async def test_persist_denormalizes_delivery_and_the_redelivery_fastpath_reads_i
     assert claimed is True
     due = await wired.store.claim_continuation_retry(wired.fake, "iid-p", now + timedelta(hours=2), 1000, 1000)
     assert isinstance(due, ContinuationDue)
-    assert due.delivery == delivery_dict
+    assert due.delivery == address
     assert due.run_delivery_id == "rd-p"
+
+
+async def test_a_stored_address_lacking_its_thread_fails_to_decode_loudly(wired):
+    # Every address field is required: a stored address of any other shape never decodes into a
+    # fire, so no delivery tool is reached with a guessed thread.
+    await _seed_due(wired, "iid-old")
+    await wired.fake.hset(
+        wired.store.continuation_due_key("iid-old"),
+        mapping={"delivery": '{"tool": "deliver_tool", "context": {"route_name": "r"}}', "run_delivery_id": "rd-o"},
+    )
+
+    with pytest.raises(ValidationError, match="thread_id"):
+        await wired.store.claim_continuation_retry(
+            wired.fake, "iid-old", datetime.now(UTC) + timedelta(hours=2), 1000, 1000
+        )

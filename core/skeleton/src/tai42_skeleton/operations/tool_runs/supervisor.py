@@ -365,9 +365,9 @@ async def _supervise(
                         # they land in the durable record (a background run has no live-caller door
                         # to reveal them to). An ``asks``/``parked`` terminal did NOT succeed: its
                         # answer is delivered out of band by the run's own resumer, so it terminates
-                        # PARKED carrying the shared park answer — the caller ask entries or the
-                        # suspended sentinel, the SAME shape a poller reads off the sync door, so a
-                        # caller-ask park is answerable through ``resume_parked``.
+                        # PARKED carrying the shared run answer (``kind`` ``asks`` or ``parked``) —
+                        # the SAME shape a poller reads off the sync door, so a caller-ask park is
+                        # answerable through ``resume_parked``.
                         if outcome.kind in ("result", "none"):
                             fields = {
                                 "status": _SUCCEEDED,
@@ -379,7 +379,9 @@ async def _supervise(
                             fields = {
                                 "status": _PARKED,
                                 "finished_at": _pkg._now().isoformat(),
-                                "result": json.dumps(mask_secrets(tai42_app.interactions.park_answer(outcome))),
+                                "result": json.dumps(
+                                    mask_secrets(tai42_app.interactions.run_answer(outcome).model_dump(mode="json"))
+                                ),
                                 "resumed_interactions": json.dumps(resumed),
                             }
                     # Gate the terminal write on the record still being ``running`` so it

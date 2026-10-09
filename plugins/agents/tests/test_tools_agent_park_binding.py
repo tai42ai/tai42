@@ -19,10 +19,10 @@ from tai42_contract.interactions import (
     get_resume_continuation_tool,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
-    suspended_interaction_marker,
 )
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
+from tai42_kit.interactions.park_marker import suspended_interaction_marker
 from tests._tools_agent_park_support import (
     ScriptedChatModel,
     _agent,

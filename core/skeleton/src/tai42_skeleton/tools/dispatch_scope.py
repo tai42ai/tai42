@@ -22,7 +22,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.middleware import Middleware
-from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.monitoring import RunAttribution
 from tai42_contract.tools import (
     ToolInvocation,
@@ -31,6 +31,7 @@ from tai42_contract.tools import (
     set_current_tool_invocation,
     tool_call_frame,
 )
+from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
 from tai42_skeleton.runs.chokepoint import RunRecord, record_outermost_preset_run
 from tai42_skeleton.tools.attribution import (

@@ -28,8 +28,12 @@ from tai42_skeleton.app.bus import (
     WorkerState,
     _PresenceValue,
 )
+from tai42_skeleton.app.bus.ops import ReloadConfig
 
 from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
+
+_RELOAD = ReloadConfig(op="reload_config")
+_RELOAD_WIRE = {"op": "reload_config"}
 
 # -- slot claim / generation / ownership (compare-token) ----------------------
 
@@ -128,7 +132,7 @@ async def test_echo_skip_is_keyed_on_name_and_generation() -> None:
         applied.append(op)
 
     def frame(name: str, generation: int) -> dict:
-        return {"data": json.dumps({"payload": {"op": "reload_config"}, "name": name, "generation": generation})}
+        return {"data": json.dumps({"payload": _RELOAD_WIRE, "name": name, "generation": generation})}
 
     # Own (name, generation): echo-skipped.
     await bus._handle_op(None, record, frame("serve-1", 3))
@@ -136,15 +140,15 @@ async def test_echo_skip_is_keyed_on_name_and_generation() -> None:
 
     # SAME name, EARLIER generation: a prior life's frame is foreign and applied.
     await bus._handle_op(None, record, frame("serve-1", 2))
-    assert applied == [{"op": "reload_config"}]
+    assert applied == [_RELOAD_WIRE]
 
     # A different name is foreign and applied.
     await bus._handle_op(None, record, frame("serve-2", 3))
-    assert applied == [{"op": "reload_config"}, {"op": "reload_config"}]
+    assert applied == [_RELOAD_WIRE, _RELOAD_WIRE]
 
     # A malformed frame is discarded without applying.
     await bus._handle_op(None, record, {"data": "not valid json"})
-    assert applied == [{"op": "reload_config"}, {"op": "reload_config"}]
+    assert applied == [_RELOAD_WIRE, _RELOAD_WIRE]
 
 
 # -- fork non-member derivation ------------------------------------------------
@@ -185,7 +189,7 @@ async def test_fork_from_an_unclaimed_member_poisons_the_identity(wire_bus_clien
         _ = bus.identity
     local = LocalApplyResult(outcome=OpOutcome.applied)
     with pytest.raises(RuntimeError, match="had not yet claimed"):
-        await bus.publish({"op": "reload_config"}, targets=None, local=local)
+        await bus.publish(_RELOAD, targets=None, local=local)
 
 
 # -- reconnect / resubscribe after transport failure --------------------------
@@ -218,7 +222,7 @@ async def test_reconnect_after_transport_drop(wire_bus_client: None, server: fak
         census_names = {row.name for row in await publisher.census()}
         assert worker.identity.name in census_names
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker.identity.name].outcome == OpOutcome.applied
     finally:
@@ -251,7 +255,7 @@ async def test_reconnect_after_wrapped_disconnect(wire_pooled_bus_client: None, 
         census_names = {row.name for row in await publisher.census()}
         assert worker.identity.name in census_names
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker.identity.name].outcome == OpOutcome.applied
     finally:
@@ -298,7 +302,7 @@ async def test_heartbeat_death_forces_reconnect(
         census_names = {row.name for row in await publisher.census()}
         assert worker.identity.name in census_names
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker.identity.name].outcome == OpOutcome.applied
     finally:
@@ -609,7 +613,7 @@ async def test_last_op_is_stamped_after_a_terminal_reply(wire_bus_client: None) 
     task, worker_id = await _spawn_subscriber(worker, apply)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        await publisher.publish(_RELOAD, targets=None, local=local)
 
         async def _stamped() -> bool:
             rows = {r.name: r for r in await publisher.census()}
@@ -640,7 +644,7 @@ async def test_the_callback_deadline_is_the_receipt_instant_plus_the_apply_windo
     try:
         before = time.monotonic()
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        await publisher.publish(_RELOAD, targets=None, local=local)
         after = time.monotonic()
         assert len(deadlines) == 1
         assert before + 7.0 <= deadlines[0] <= after + 7.0
@@ -692,7 +696,7 @@ async def test_failing_callback_reports_failed(wire_bus_client: None) -> None:
     task, worker_id = await _spawn_subscriber(worker, boom)
     try:
         local = LocalApplyResult(outcome=OpOutcome.applied)
-        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        result = await publisher.publish(_RELOAD, targets=None, local=local)
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.failed
         assert "nope" in (by_name[worker_id.name].error or "")
@@ -720,12 +724,12 @@ async def test_subscriber_skips_op_outside_targets(wire_bus_client: None) -> Non
     task_a, id_a = await _spawn_subscriber(worker_a, record_a)
     task_b, id_b = await _spawn_subscriber(worker_b, record_b)
     try:
-        result = await publisher.publish({"op": "reload_config"}, targets=[id_a.name], local=None)
+        result = await publisher.publish(_RELOAD, targets=[id_a.name], local=None)
         by_name = {r.name: r for r in result.results}
         assert set(by_name) == {id_a.name}
         assert id_b.name not in by_name
         assert by_name[id_a.name].outcome == OpOutcome.applied
-        assert a_seen == [{"op": "reload_config"}]
+        assert a_seen == [_RELOAD_WIRE]
         await asyncio.sleep(0.05)
         assert b_seen == []
     finally:
@@ -748,7 +752,7 @@ async def test_empty_targets_list_reaches_nobody(wire_bus_client: None) -> None:
     task_a, _ = await _spawn_subscriber(worker_a, record_a)
     task_b, _ = await _spawn_subscriber(worker_b, record_b)
     try:
-        result = await publisher.publish({"op": "reload_config"}, targets=[], local=None)
+        result = await publisher.publish(_RELOAD, targets=[], local=None)
         assert result.results == []
         await asyncio.sleep(0.05)
         assert a_seen == []

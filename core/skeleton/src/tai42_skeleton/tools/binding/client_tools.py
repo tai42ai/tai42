@@ -20,9 +20,10 @@ from fastmcp.tools.base import Tool
 from fastmcp.utilities.types import get_cached_typeadapter
 from makefun import create_function
 from pydantic import ValidationError
-from tai42_contract.interactions import ResumeBuffered, RunTerminalFailed, SuspendedInteraction, failed_outcome_text
+from tai42_contract.interactions import ResumeBuffered, RunTerminalFailed, SuspendedInteraction
 from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import ClientTool, ClientToolError, UndeclaredPauseError, tool_call_frame
+from tai42_kit.interactions.outcome_text import failed_outcome_text
 from tai42_kit.llm.models import check_tool_name
 from tai42_kit.utils.data import makefun_func_name
 

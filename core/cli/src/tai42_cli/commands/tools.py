@@ -121,7 +121,7 @@ def run_tool(
     subject_key: Annotated[str | None, typer.Option("--subject-key", help=_SUBJECT_KEY_HELP)] = None,
     subject_target: Annotated[str | None, typer.Option("--subject-target", help=_SUBJECT_TARGET_HELP)] = None,
 ) -> None:
-    """Run a registered tool synchronously and print its result.
+    """Run a registered tool synchronously and print its run answer: ``{kind: result|asks|parked|none, …}``.
 
     Example: ``tai tools run add --kw a=1 --kw b=2``
     """

@@ -201,16 +201,12 @@ async def persist_question(
         # ``add``'s ``to`` denormalization onto the state hash, which the read/answer
         # surfaces gate on.
         cap = settings.max_concurrent_caller if to == "caller" else settings.max_concurrent
-        # The RUN's captured out-of-band address, denormalized onto the state hash as
-        # ``{tool, context}`` alongside the run's ``run_delivery_id``, so the answer path copies
-        # both onto the continuation-due record and the reaper's detached redelivery binds the
-        # run's address + delivery identity without re-reading the request. Both ``None``
-        # for a sync ask or a run started at a receiver-less door.
-        delivery = (
-            {"tool": park_binding.delivery[0], "context": park_binding.delivery[1]}
-            if park_binding.delivery is not None
-            else None
-        )
+        # The RUN's captured out-of-band address, denormalized onto the state hash alongside the
+        # run's ``run_delivery_id``, so the answer path copies both onto the continuation-due
+        # record and the reaper's detached redelivery binds the run's address + delivery identity
+        # without re-reading the request. Both ``None`` for a sync ask or a run started at a
+        # receiver-less door.
+        delivery = park_binding.delivery
         if cap is not None:
             reserved = await store.reserve_open_slot(r, request, cap, to=to)
             if not reserved:

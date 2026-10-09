@@ -14,29 +14,22 @@ from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
-    PARK_COMPLETION_THREAD_KEY,
     CallerAskLanding,
+    DeliveryAddress,
     RunTerminalFailed,
     caller_ask_no_landing_outcome,
     chained_lineage,
     current_caller_ask_landing,
     get_park_completion,
     get_resume_continuation_tool,
-    repark_notice,
 )
 from tai42_contract.states import StateBinding, StateContext
 from tai42_contract.tools import get_run_delivery, get_run_delivery_id
+from tai42_kit.interactions.park_adoption import repark_notice
 
 from tai42_skeleton.runs.chokepoint import get_resume_lineage
 
 logger = logging.getLogger(__name__)
-
-# The park-completion context key a tool/flow route target binds the delivery thread under
-# (see ``conversations.turn.tool_turn._run_tool_turn``'s ``set_park_completion``). The CONTRACT names it:
-# it is the one reserved field inside an otherwise-opaque completion context, so the read here,
-# the turn-layer write, and any party that composes a context over another (a chained dispatch
-# carries it up to the new top level) all agree on the field.
-_PARK_COMPLETION_THREAD_KEY = PARK_COMPLETION_THREAD_KEY
 
 
 @dataclass(frozen=True)
@@ -58,7 +51,7 @@ class AsyncParkBinding:
     # is always present for a parkable run (the persist raises without one); the address
     # is ``None`` for a receiver-less run. Both are stored verbatim on the request.
     run_delivery_id: str | None = None
-    delivery: tuple[str | None, dict[str, Any] | None] | None = None
+    delivery: DeliveryAddress | None = None
     # The caller-ask landing the door declared around the run, captured so the resume re-establishes
     # it. ``None`` when no door declared one.
     caller_ask_landing: CallerAskLanding | None = None
@@ -115,9 +108,8 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
         # A caller ask's outcome is handed back through the parking run's subject, read
         # from the ambient state context; with none there is no subject to track it on.
         raise RuntimeError("a caller ask (to='caller') requires an ambient state context")
-    # The bound conversation thread (from the turn layer's park-completion / bridge
-    # context), so this park joins its thread's reverse index and a thread delete can
-    # cancel it. ``None`` outside a bound conversation turn.
+    # The run's conversation thread (off its delivery address), so this park joins its thread's
+    # reverse index and a thread delete can cancel it. ``None`` outside a conversation run.
     park_thread_id = bound_park_thread_id()
     # The RUN's delivery identity + address, bound once at the outermost run start on the
     # ambient run-delivery context. A parkable run ALWAYS started through the frame that
@@ -126,12 +118,7 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
     run_delivery_id = get_run_delivery_id()
     if run_delivery_id is None:
         raise RuntimeError("async ask parked with no ambient run_delivery_id (the run started outside a call frame)")
-    raw_delivery = get_run_delivery()
-    delivery = (
-        (raw_delivery[0], dict(raw_delivery[1]) if raw_delivery[1] is not None else None)
-        if raw_delivery is not None
-        else None
-    )
+    delivery = get_run_delivery()
     # The merged door binding the outermost dispatch deposited (after its injections ran), so the
     # deferred UPDATES apply once at the run's real terminal. Function-local import mirrors the
     # others above: an edge from interactions into the tools dispatch layer at module load would
@@ -172,54 +159,16 @@ def park_chain_keys() -> tuple[str, ...]:
 def bound_park_thread_id() -> str | None:
     """The conversation thread this async park belongs to, or ``None`` when none is bound.
 
-    A background tool run or a direct/agent-less ask has none. Two turn-layer bindings expose it and
-    this reads whichever is set, staying engine-agnostic (it names no engine, only the
-    generic bindings):
-
-    * a TOOL/flow route target binds the thread as the park-completion context's
-      ``delivery_thread_id`` (``conversations.turn.tool_turn._run_tool_turn``), read here off
-      :func:`get_park_completion`;
-    * an AGENT route target runs inside the bridge turn context that carries the thread
-      (``conversations.turn.agent_turn._run_agent_turn``), read here off ``current_bridge_turn``. Its own
-      park-completion context is keyed by ITS delivery tool's routing parameter, not this one,
-      and is deliberately not read here — a completion context is opaque, so only the ONE key
-      this module owns is ever looked up in it.
-
-    Never fabricates a thread id — an unbound park indexes nothing. A park raised where neither
-    binding is set is therefore not thread-indexed and not cascade-cancellable. Three cases sit on
-    that boundary, and they do NOT all behave alike:
-
-    * a background tool run (no turn at all) — unbound, unindexed. Nothing was indexed before this
-      index existed, so this is a floor, not a regression.
-    * a RE-PARK during an out-of-band resume drive, which delivers via ``deliver_*_completion``
-      without re-wrapping the turn. A resuming driver rebinds the stored completion around the
-      drive, so a TOOL-route re-park is indexed (its rebound context carries
-      ``delivery_thread_id``) while an AGENT-route re-park is NOT: its context is keyed by ITS
-      delivery tool's parameter, which this module deliberately does not read, and there is no
-      bridge turn context out of band. The asymmetry follows from the opacity rule above rather
-      than from any judgement that one deserves indexing more.
-    * a nested park inside an AGENT running as a TOOL route's target. The door's completion
-      binding flows down through every nested dispatch unchanged (a nested driver binds only
-      its chain routing, never a completion of its own), so the nested park reads the same
-      reserved field the door bound and is indexed to the same thread; a tool turn establishes
-      no bridge turn context, so the thread comes from that binding alone.
-
-    Closing the open cases means the resume drive (and the tool-turn door) establishing the thread
-    binding in their own right, left to a follow-up.
+    Read off the run's delivery address: the one the run's outermost frame captured when a run
+    delivery is bound — the platform re-establishes it around every out-of-band drive (an answer,
+    an expiry, a reaper redelivery), so a re-park there keeps its thread for both route kinds —
+    else the completion address the door bound. A background tool run or a direct ask binds no
+    thread, so its park is not thread-indexed and a thread delete does not reach it.
     """
-    _completion_tool, completion_ctx = get_park_completion()
-    if completion_ctx is not None:
-        candidate = completion_ctx.get(_PARK_COMPLETION_THREAD_KEY)
-        if isinstance(candidate, str) and candidate:
-            return candidate
-    # Function-local, mirroring the ``get_execution_identity`` import above: a module-level
-    # edge from interactions into conversations would couple two peer packages at import time.
-    from tai42_skeleton.conversations.turn_context import current_bridge_turn
-
-    bridge = current_bridge_turn()
-    if bridge is not None:
-        return bridge.thread_id
-    return None
+    run_address = get_run_delivery()
+    if run_address is not None:
+        return run_address.thread_id
+    return get_park_completion().thread_id
 
 
 async def notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> None:

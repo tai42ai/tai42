@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
+from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import SELF_DEFERRED
 from tai42_skeleton.operations.errors import BadRequestError, OperationFailedError
 
@@ -222,7 +223,7 @@ async def snapshot_membership(bus: CensusPublisher, op_name: str) -> dict[str, i
 
 
 async def broadcast(
-    op: dict[str, Any],
+    op: FleetOp,
     targets: list[str] | None,
     apply: Callable[[], Awaitable[Any]],
     *,
@@ -231,7 +232,7 @@ async def broadcast(
 ) -> dict[str, Any]:
     """Validate targets, pin the expected membership, apply locally per the self-targeting rule, then broadcast.
 
-    ``op`` is the wire op dict (``{"op": <name>, ...}``); ``targets`` is ``None`` for
+    ``op`` is the typed fleet op; ``targets`` is ``None`` for
     the whole fleet or the explicit worker list; ``apply`` runs this worker's own
     apply and returns its result (rides the self entry as the payload). Returns the
     :class:`~tai42_skeleton.app.bus.FleetResult` as a JSON-ready dict.
@@ -259,7 +260,7 @@ async def broadcast(
 
     # Read the membership the report will be judged against BEFORE the local apply below
     # can age it out.
-    expected_at_start = await snapshot_membership(bus, str(op.get("op"))) if targets is None else None
+    expected_at_start = await snapshot_membership(bus, op.op) if targets is None else None
 
     local: LocalApplyResult | None = None
     local_failure: Exception | None = None

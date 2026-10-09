@@ -18,6 +18,7 @@ from typing import Any, cast
 import pytest
 
 from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerBus, WorkerKind, WorkerResult, WorkerRow, WorkerState
+from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import (
     RECYCLED,
     SELF_DEFERRED,
@@ -122,17 +123,17 @@ class _ScriptedBus:
     async def census(self) -> list[WorkerRow]:
         return list(self._rows)
 
-    async def publish(self, op: dict[str, Any], targets: list[str] | None, local: Any) -> FleetResult:
+    async def publish(self, op: FleetOp, targets: list[str] | None, local: Any) -> FleetResult:
         target = (targets or [None])[0]
         assert target is not None
-        self.published.append((op["op"], tuple(targets or ())))
+        self.published.append((op.op, tuple(targets or ())))
         if not self._reachable:
-            return FleetResult(op=op["op"], reachable=False, error="bus unreachable")
+            return FleetResult(op=op.op, reachable=False, error="bus unreachable")
         if self._empty_results:
-            return FleetResult(op=op["op"], results=[])
+            return FleetResult(op=op.op, results=[])
         if self._target_outcome is OpOutcome.applied and any(r.name == target for r in self._rows):
             self._rows = self._transform(list(self._rows), target)
-        return FleetResult(op=op["op"], results=[WorkerResult(name=target, outcome=self._target_outcome)])
+        return FleetResult(op=op.op, results=[WorkerResult(name=target, outcome=self._target_outcome)])
 
 
 def _bus(fake: _ScriptedBus) -> WorkerBus:

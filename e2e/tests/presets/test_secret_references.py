@@ -130,7 +130,7 @@ async def test_secret_reference_round_trips_every_door(
 
     # -- dispatch: the probe receives the resolved value; the record masks it ----------
     revealed = await api.post("/api/run-tool", json={"tool_name": name, "arguments": {}})
-    assert revealed == {"payload": _SECRET_VALUE}, revealed
+    assert revealed == {"kind": "result", "result": {"payload": _SECRET_VALUE}}, revealed
 
     submitted = await api.post("/api/tool-runs", json={"tool_name": name, "arguments": {}}, expect=202)
     run_id = submitted["run_id"]
@@ -196,5 +196,8 @@ async def test_secret_reference_reaches_a_typed_str_parameter(
     assert detail["fixed_kwargs"] == {"token": _MARKER}
 
     received = await api.post("/api/run-tool", json={"tool_name": name, "arguments": {}})
-    assert received == {"type": "str", "length": len(_SECRET_VALUE), "last": _SECRET_VALUE[-1]}, received
+    assert received == {
+        "kind": "result",
+        "result": {"type": "str", "length": len(_SECRET_VALUE), "last": _SECRET_VALUE[-1]},
+    }, received
     assert _SECRET_VALUE not in json.dumps(received)

@@ -101,16 +101,14 @@ async def deliver_chained_park(
     completion_id: str | None = None,
     status: str | None = PARK_COMPLETION_FAILED,
     expiry_at: str | None = None,
-    chained_context: dict[str, Any] | None = None,
-    delivery_thread_id: str | None = None,
 ) -> Any:
     """Deliver a nested run's terminal to the agent run that parked on the CALL.
 
     The completion continuation an agent binds around every tool dispatch it can wait on: when
     the tool drove a nested run that async-parked, the agent parked on ``chain_token`` and this
-    is what resumes it. The fire is the contract-generic completion payload — the bound chained
-    context merged with ``{result, completion_id, status}`` — so any driver that fires
-    completions reaches it without naming this plugin.
+    is what resumes it. The fire is the chain payload every driver builds the same way —
+    ``{chain_token, result, status}`` at a terminal, ``{chain_token, expiry_at, status}`` on a
+    re-park — so any driver reaches it without naming this plugin.
 
     ``status`` decides the outcome: ``succeeded`` resumes the waiting run with ``result`` as the
     awaited tool's result; ``reparked`` is not a terminal at all — the nested run asked again,
@@ -149,11 +147,6 @@ async def deliver_chained_park(
     its park yet, which the platform's redelivery fixes, so the retry ticket is kept. A run that
     ends without ever parking on a chain it claimed detaches that key itself, which is what
     turns the truly-dead case into the benign tombstone rather than an endless retry.
-
-    ``chained_context`` and ``delivery_thread_id`` are accepted because the whole fire payload may
-    ride them (the reserved thread field the platform's park-by-thread index reads, and a caller's
-    residual context). Neither is read here; they are declared so a complete fire is never a
-    signature error.
     """
     if not chain_token:
         logger.error(

@@ -28,7 +28,7 @@ async def test_sync_run_tool_door_reveals_the_real_value(core_stack: TaiStack, u
     result = await core_stack.api().post(
         "/api/run-tool", json={"tool_name": _TOOL, "arguments": {"credential": secret}}
     )
-    assert result == {"credential": secret}, result
+    assert result == {"kind": "result", "result": {"credential": secret}}, result
 
 
 @pytest.mark.needs("kind:tool_runs")

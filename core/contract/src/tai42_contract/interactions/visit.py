@@ -16,9 +16,9 @@ gets back is a :class:`~tai42_contract.interactions.models.ResumeBuffered`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import SuspendedInteraction
@@ -143,6 +143,40 @@ class VisitOutcome(BaseModel):
     suspended: SuspendedInteraction | None = None
 
 
+class RunResultAnswer(BaseModel, frozen=True):
+    """A run that finished: its value, whatever shape it has."""
+
+    kind: Literal["result"] = "result"
+    result: Any
+
+
+class RunAsksAnswer(BaseModel, frozen=True):
+    """A run that parked with asks addressed to its caller: their entries and the re-park sentinel."""
+
+    kind: Literal["asks"] = "asks"
+    asks: list[ParkedEntry]
+    suspended: SuspendedInteraction
+
+
+class RunParkedAnswer(BaseModel, frozen=True):
+    """A run that parked on asks only someone else answers: the re-park sentinel alone."""
+
+    kind: Literal["parked"] = "parked"
+    suspended: SuspendedInteraction
+
+
+class RunNoneAnswer(BaseModel, frozen=True):
+    """A visit that ran nothing."""
+
+    kind: Literal["none"] = "none"
+
+
+# The answer a run door hands its caller, discriminated on ``kind`` so a reader never infers the
+# outcome from the shape of a value: a finished run's own value rides inside ``result`` whatever it
+# looks like.
+RunAnswer = Annotated[RunResultAnswer | RunAsksAnswer | RunParkedAnswer | RunNoneAnswer, Field(discriminator="kind")]
+
+
 @runtime_checkable
 class Visit(Protocol):
     """Drive a parkable run through the one shared cancel / resume / take / start order."""
@@ -177,6 +211,11 @@ __all__ = [
     "ParkedEntry",
     "ParkedEntryGoneError",
     "ParkedStatus",
+    "RunAnswer",
+    "RunAsksAnswer",
+    "RunNoneAnswer",
+    "RunParkedAnswer",
+    "RunResultAnswer",
     "UndeclaredExtrasKeyError",
     "Visit",
     "VisitOutcome",

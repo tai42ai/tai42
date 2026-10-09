@@ -30,7 +30,9 @@ _FIRST_VALUE = "alpha-" * 2000
 
 async def test_a_reference_reads_back_and_resolves_to_the_referenced_value(monitoring_stack: TaiStack) -> None:
     api = monitoring_stack.api()
-    probe = await api.post("/api/run-tool", json={"tool_name": "e2e_record_probe", "arguments": {}})
+    answer = await api.post("/api/run-tool", json={"tool_name": "e2e_record_probe", "arguments": {}})
+    assert answer["kind"] == "result", answer
+    probe = answer["result"]
     trace_id, first, second = probe["trace_id"], probe["first_span"], probe["second_span"]
 
     async def trace_with_both_records() -> dict[str, Any] | None:

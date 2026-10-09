@@ -35,6 +35,7 @@ from tai42_skeleton.app.bus import (
     WorkerState,
     presence_fresh,
 )
+from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 
 
 def _row(name: str, kind: WorkerKind, *, pid: int, generation: int, pttl_ms: int) -> WorkerRow:
@@ -109,13 +110,14 @@ class FakeBus:
 
     async def publish(
         self,
-        op: dict[str, Any],
+        op: FleetOp,
         targets: list[str] | None,
         local: LocalApplyResult | None,
         *,
         expected_at_start: dict[str, int] | None = None,
     ) -> FleetResult:
-        self.publish_calls.append((op, targets, local))
+        # Recorded as the wire dict the real bus publishes, so a publisher's assertion reads the bytes.
+        self.publish_calls.append((fleet_op_wire(op), targets, local))
         self.expected_at_start_calls.append(expected_at_start)
         results: list[WorkerResult] = []
         if local is not None:
@@ -129,4 +131,4 @@ class FakeBus:
         )
         for name in reached:
             results.append(WorkerResult(name=name, outcome=OpOutcome.applied))
-        return FleetResult(op=op["op"], results=results)
+        return FleetResult(op=op.op, results=results)

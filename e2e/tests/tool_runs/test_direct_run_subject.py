@@ -36,12 +36,15 @@ def _subject(key: str) -> dict[str, str]:
 
 
 async def _run_tool(api: Any, tool_name: str, arguments: dict[str, Any], subject: dict[str, str]) -> Any:
-    return await api.post(
+    """The finished run's own value: the sync door's answer must be a ``result``."""
+    answer = await api.post(
         "/api/run-tool",
         json={"tool_name": tool_name, "arguments": arguments, "subject": subject},
         expect=200,
         retry_on_reloading=True,
     )
+    assert answer["kind"] == "result", answer
+    return answer["result"]
 
 
 async def _parked_ids(api: Any, subject: dict[str, str]) -> list[str]:

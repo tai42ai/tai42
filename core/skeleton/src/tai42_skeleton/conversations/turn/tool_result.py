@@ -5,76 +5,58 @@ carrying the driver's outcome as an OPAQUE payload; the turn catches it and reco
 WHOLE through :func:`~tai42_skeleton.interactions.terminal_failure.failed_outcome_detail`, never
 reading a key inside it. A RETURNED value is a success the turn maps through ``reply_expr`` with NO
 status inspection, and a still-parked run is already a typed contract value the visit normalises.
-This module no longer classifies a returned envelope by status: it renders a value-free structural
-shape diagnostic for a reply-mapping fault. No participant content ever crosses into a log line.
+When the reply mapping faults, the turn logs a value-free structural walk of the value: names, types,
+lengths and sizes only — no participant content ever crosses into a log line.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
 
-#: The failure-path structural diagnostic lists at most this many key names per level, so a
-#: wide envelope cannot bloat the log line.
+#: The structural walk lists at most this many key names per level, so a wide value cannot bloat
+#: the log line.
 _RESULT_SHAPE_KEY_CAP = 40
 
+#: The walk names keys this many levels deep; the values at the last level are reported by type and
+#: approximate serialized size.
+_RESULT_SHAPE_DEPTH = 2
 
-def _shape_key_names(mapping: dict[Any, Any]) -> list[str]:
-    """The mapping's string keys, sorted and capped — NAMES only.
 
-    An envelope key, a ``result`` key, or a ``return_result`` surface id is a protocol/authoring
-    identifier, never participant content, so its NAME is client-safe to log; its VALUE is not and
-    never reaches here.
-    """
+def _key_names(mapping: dict[object, object]) -> list[str]:
+    """The mapping's string keys, sorted and capped — NAMES only, never a value."""
     return sorted(key for key in mapping if isinstance(key, str))[:_RESULT_SHAPE_KEY_CAP]
 
 
-def _shape_surface_sizes(outputs: dict[Any, Any]) -> dict[str, int]:
-    """Each ``result.outputs`` surface's NAME mapped to the approximate serialized SIZE of its value.
+def _leaf(value: object) -> str:
+    """A last-level value as its type and approximate serialized size (``-1`` when unserializable)."""
+    try:
+        size = len(json.dumps(value, default=str))
+    except Exception:
+        size = -1
+    return f"type={type(value).__name__} size={size}"
 
-    Never the value itself. The size is the one datum that separates an ABSENT surface (not here at
-    all) from a PRESENT-BUT-EMPTY one (a size of ~2, an empty list/object), decided without a
-    participant byte reaching the log. An unserializable value records ``-1`` rather than rendering
-    it.
-    """
-    sizes: dict[str, int] = {}
-    for name in _shape_key_names(outputs):
-        try:
-            sizes[name] = len(json.dumps(outputs[name], default=str))
-        except Exception:
-            sizes[name] = -1
-    return sizes
+
+def _walk(value: object, level: int) -> str:
+    if isinstance(value, dict):
+        names = _key_names(value)
+        children = [
+            f"{name}: {_leaf(value[name]) if level == _RESULT_SHAPE_DEPTH else _walk(value[name], level + 1)}"
+            for name in names
+        ]
+        return f"type=dict keys={names} {{{'; '.join(children)}}}" if children else f"type=dict keys={names}"
+    if isinstance(value, (list, tuple)):
+        first = f" first={type(value[0]).__name__}" if value else ""
+        return f"type={type(value).__name__} len={len(value)}{first}"
+    length = len(value) if isinstance(value, (str, bytes, set)) else None
+    return f"type={type(value).__name__}" + (f" len={length}" if length is not None else "")
 
 
 def _result_shape(result: object) -> str:
-    """A VALUE-FREE structural descriptor of a tool result, logged when the reply mapping faults.
+    """A VALUE-FREE structural walk of a tool result, logged when the reply mapping faults.
 
-    Yields the envelope's SHAPE as ground truth on the next live failure — which flagged surface
-    is ABSENT vs PRESENT-BUT-EMPTY — instead of an inference from the guard's error text.
-
-    Client-safe by construction: it emits only STRUCTURE — the type, the envelope's own key NAMES
-    (protocol/authoring identifiers, never participant content), the ``status`` token, the
-    ``return_result`` surface NAMES present under ``result.outputs`` with their approximate
-    serialized SIZES, and the ``missing_results`` surface NAMES the run reported unproduced. A
-    participant's message text lives in the VALUES under those surfaces, which this NEVER renders — only
-    names, counts, and sizes cross into the log.
+    For a dict: its sorted key names (capped per level), recursing one level further, where each
+    value is its type and approximate serialized size; for a list: its length and first element's
+    type; for a scalar: its type and its length when it has one. It reads no named key and renders
+    no value — a status token is a value too.
     """
-    if not isinstance(result, dict):
-        length = len(result) if isinstance(result, (str, bytes, list, tuple, dict, set)) else None
-        return f"type={type(result).__name__}" + (f" len={length}" if length is not None else "")
-    parts = [f"type=dict keys={_shape_key_names(result)}"]
-    status = result.get("status")
-    if isinstance(status, str):
-        parts.append(f"status={status!r}")
-    inner = result.get("result")
-    if isinstance(inner, dict):
-        parts.append(f"result_keys={_shape_key_names(inner)}")
-        outputs = inner.get("outputs")
-        if isinstance(outputs, dict):
-            parts.append(f"outputs_surface_sizes={_shape_surface_sizes(outputs)}")
-    missing = result.get("missing_results")
-    if isinstance(missing, list):
-        parts.append(
-            f"missing_results={sorted(name for name in missing if isinstance(name, str))[:_RESULT_SHAPE_KEY_CAP]}"
-        )
-    return "; ".join(parts)
+    return _walk(result, 1)

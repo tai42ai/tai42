@@ -26,6 +26,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LastOp, WorkerKind, WorkerState, presence_fresh
+from tai42_skeleton.app.bus import ops as fleet_ops
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations._broadcast import broadcast
@@ -129,7 +130,7 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
     # so it publishes anyway and re-raises with the fleet report attached.
     return FleetResult.model_validate(
         await broadcast(
-            {"op": "reload_config"},
+            fleet_ops.ReloadConfig(op="reload_config"),
             targets,
             lambda: reload_gate.run(tai42_app.admin.reload_config, reimports=True),
             publish_on_local_failure=True,

@@ -18,10 +18,13 @@ import pytest
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
+from tai42_skeleton.app.bus.ops import ReloadTool
 from tai42_skeleton.operations import _broadcast
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 
 from .._fakes.bus import FakeBus
+
+_RELOAD_TOOL = ReloadTool(op="reload_tool", kind="example_tool", name="probe")
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, bus: FakeBus) -> FakeBus:
@@ -49,7 +52,7 @@ async def test_untargeted_membership_is_censused_before_the_local_apply(
         sibling.pttl_ms = 0
         return "applied"
 
-    await broadcast({"op": "reload_tool"}, None, apply)
+    await broadcast(_RELOAD_TOOL, None, apply)
 
     assert sibling.pttl_ms == 0
     assert bus.expected_at_start_calls == [{"serve-b": 1}]
@@ -63,7 +66,7 @@ async def test_untargeted_snapshot_excludes_self_and_gap_rows(monkeypatch: pytes
     bus = _install(monkeypatch, FakeBus(origin="serve-a", remotes=["serve-b", "serve-c"]))
     next(row for row in bus.rows if row.name == "serve-c").pttl_ms = 0
 
-    await broadcast({"op": "reload_tool"}, None, _applied)
+    await broadcast(_RELOAD_TOOL, None, _applied)
 
     assert bus.expected_at_start_calls == [{"serve-b": 1}]
 
@@ -75,7 +78,7 @@ async def test_targeted_broadcast_takes_no_op_start_census(monkeypatch: pytest.M
     # ran one for validation.
     bus = _install(monkeypatch, FakeBus(origin="serve-a", remotes=["serve-b"]))
 
-    await broadcast({"op": "reload_tool"}, ["serve-b"], _applied)
+    await broadcast(_RELOAD_TOOL, ["serve-b"], _applied)
 
     assert bus.validate_calls == [["serve-b"]]
     assert bus.expected_at_start_calls == [None]
@@ -96,7 +99,7 @@ async def test_op_start_census_failure_is_loud_but_never_aborts_the_op(
     monkeypatch.setattr(bus, "expected_at_start", raising_census)
 
     with caplog.at_level(logging.WARNING, logger=_broadcast.logger.name):
-        report = await broadcast({"op": "reload_tool"}, None, _applied)
+        report = await broadcast(_RELOAD_TOOL, None, _applied)
 
     assert {row["name"]: row["outcome"] for row in report["results"]} == {"serve-a": "applied", "serve-b": "applied"}
     assert bus.expected_at_start_calls == [None]

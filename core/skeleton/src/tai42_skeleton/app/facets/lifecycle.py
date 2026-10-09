@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
+    from tai42_contract.backend import FleetOpApplied
     from tai42_contract.config import ConfigManager
     from tai42_contract.sub_mcp import SubMcpAppRouter
 
@@ -39,8 +40,8 @@ class LifecycleFacet(_Facet):
         """
         return self._app._on_post_swap(func)
 
-    def on_fleet_op_applied(self, func: Callable[[str, float], Any]) -> Callable[[str, float], Any]:
-        """Register ``func`` to run after a fleet op is applied, given the op name and the apply budget."""
+    def on_fleet_op_applied(self, func: Callable[[FleetOpApplied], Any]) -> Callable[[FleetOpApplied], Any]:
+        """Register ``func`` to run after a fleet op is applied, given the applied op with its effects and budget."""
         return self._app._on_fleet_op_applied(func)
 
     def reload_registries(self, manifest: ManifestImpl) -> dict[str, Any]:

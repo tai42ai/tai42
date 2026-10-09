@@ -34,6 +34,7 @@ from tai42_contract.storage import StoragePathConflictError
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 from tai42_skeleton.operations.response_models_group_b import (
@@ -171,7 +172,7 @@ async def upload_template(path: str, content: str) -> dict:
     try:
         fleet = FleetResult.model_validate(
             await broadcast(
-                {"op": "evict_template", "path": key},
+                EvictTemplate(op="evict_template", path=key),
                 None,
                 lambda: manager.upload_template(path=key, content=content),
             )
@@ -206,7 +207,7 @@ async def delete_template(path: str) -> dict:
     manager = tai42_app.storage.resource_manager
     fleet = FleetResult.model_validate(
         await broadcast(
-            {"op": "evict_template", "path": key},
+            EvictTemplate(op="evict_template", path=key),
             None,
             lambda: manager.delete_template(key),
         )
@@ -250,7 +251,7 @@ async def delete_template_dir(path: str) -> dict:
     try:
         fleet = FleetResult.model_validate(
             await broadcast(
-                {"op": "evict_template", "path": key, "prefix": True},
+                EvictTemplate(op="evict_template", path=key, prefix=True),
                 None,
                 lambda: manager.delete_template_dir(key),
                 publish_on_local_failure=True,
@@ -308,6 +309,6 @@ async def clear_templates_cache() -> dict:
         manager.clear_cache()
 
     fleet = FleetResult.model_validate(
-        await broadcast({"op": "clear_template_cache"}, None, _apply),
+        await broadcast(ClearTemplateCache(op="clear_template_cache"), None, _apply),
     )
     return {"cleared": True, "fanout": fleet_fanout(fleet)}

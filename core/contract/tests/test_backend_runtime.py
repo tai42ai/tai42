@@ -1,5 +1,6 @@
-"""``BackendRuntime`` declaration surface: the two host-agreed constants and the
-default bodies a binding either honors or trips over.
+"""``BackendRuntime`` declaration surface: the host-agreed constants, the fleet-op effect
+vocabulary a post-apply handler decides on, and the default bodies a binding either honors
+or trips over.
 
 Unlike a plain ABC stub, each default here carries a decision — a declaration
 the binding did not implement must raise NAMING the class, and a runtime with no
@@ -14,15 +15,15 @@ from collections.abc import Callable, Sequence
 from typing import Self
 
 import pytest
+from pydantic import ValidationError
 
 from tai42_contract.backend import (
     CONSUMING_RUNTIME,
-    POOL_TURNOVER_FLEET_OPS,
-    REGISTRY_MUTATING_FLEET_OPS,
-    TEMPLATE_EVICTION_FLEET_OPS,
     Backend,
     BackendRuntime,
     ExecutionMode,
+    FleetOpApplied,
+    FleetOpEffect,
 )
 
 
@@ -54,35 +55,22 @@ def test_consuming_runtime_is_the_manifest_export_name():
     assert CONSUMING_RUNTIME == "worker"
 
 
-def test_registry_mutating_ops_exclude_query_and_recycle():
-    # A query mutates nothing and a recycle ends the process, so neither can be
-    # a reason to turn a pool over.
-    assert "list_failed_mcps" not in REGISTRY_MUTATING_FLEET_OPS
-    assert "recycle" not in REGISTRY_MUTATING_FLEET_OPS
-    expected = frozenset(
-        {
-            "reload_config",
-            "reload_mcp",
-            "deregister_mcp",
-            "reload_tool",
-            "remove_tool",
-            "reload_failed_mcps",
-        }
-    )
-    assert expected == REGISTRY_MUTATING_FLEET_OPS
+def test_the_fleet_op_effects_are_the_registry_and_the_template_cache():
+    assert {effect.value for effect in FleetOpEffect} == {"registry", "templates"}
 
 
-def test_pool_turnover_ops_are_the_registry_and_template_superset():
-    # The turnover gate reads this superset, not the registry set alone: a template
-    # eviction leaves a persisting pool holding a stale compilation, so it too must
-    # recycle. The template ops ride the turnover set while staying OUT of the
-    # registry-mutating set (they touch no tool registry).
-    template_ops = frozenset({"evict_template", "clear_template_cache"})
-    assert template_ops == TEMPLATE_EVICTION_FLEET_OPS
-    assert POOL_TURNOVER_FLEET_OPS == REGISTRY_MUTATING_FLEET_OPS | TEMPLATE_EVICTION_FLEET_OPS
-    assert not (TEMPLATE_EVICTION_FLEET_OPS & REGISTRY_MUTATING_FLEET_OPS)
-    assert "list_failed_mcps" not in POOL_TURNOVER_FLEET_OPS
-    assert "recycle" not in POOL_TURNOVER_FLEET_OPS
+def test_an_applied_op_carries_its_effects_and_budget_and_is_frozen():
+    applied = FleetOpApplied(op="probe_op", effects=frozenset({FleetOpEffect.templates}), budget=12.5)
+
+    assert applied.effects == {FleetOpEffect.templates}
+    assert FleetOpApplied.model_validate_json(applied.model_dump_json()) == applied
+    with pytest.raises(ValidationError):
+        applied.op = "other"  # type: ignore[misc]
+
+
+def test_an_applied_op_refuses_an_effect_outside_the_vocabulary():
+    with pytest.raises(ValidationError):
+        FleetOpApplied(op="probe_op", effects=frozenset({"cache"}), budget=1.0)  # type: ignore[arg-type]
 
 
 def test_build_and_aclose_default_to_nothing():

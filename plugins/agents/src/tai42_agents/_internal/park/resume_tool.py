@@ -25,11 +25,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import RunFailed, register_park_kill_handler
+from tai42_contract.interactions import RunFailed
 from tai42_contract.tools import TOOL_META_PAUSES, ToolAlreadyRegisteredError
 from tai42_kit.interactions.park_adoption import terminal_chain_notice
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionMissingError
+from tai42_kit.interactions.park_kill import register_park_kill_handler
 
 from tai42_agents._internal.park.capability import chained_resume_from_entry
 from tai42_agents._internal.park.errors import AgentResumeBarrierNotFoundError, ParkKillNotReadyError
