@@ -65,7 +65,11 @@ def install(monkeypatch: pytest.MonkeyPatch):
     def _install(provider: Storage | None) -> Storage | None:
         monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
         # A write evicts the template render state of what it wrote, here and fleet-wide.
-        monkeypatch.setattr(instance.app, "_resource_manager_cache", ResourceManager(provider))
+        monkeypatch.setattr(
+            instance.app,
+            "_resource_manager_cache",
+            ResourceManager(provider, on_evicted=instance.app._fire_template_evicted),
+        )
         monkeypatch.setattr(instance.app, "_bus", FakeBus())
         return provider
 

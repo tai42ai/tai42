@@ -5,6 +5,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from tai42_contract.template import TemplateEviction
+
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 
 logger = logging.getLogger(__name__)
@@ -13,8 +15,8 @@ logger = logging.getLogger(__name__)
 class LifecycleHandlersMixin(LifecycleState):
     """Registries and runners for the app's lifecycle handlers.
 
-    Holds the startup, reload, post-swap, fleet-op-applied, shutdown, and tool-reloader
-    registries and the coroutines that fire each set at the right phase.
+    Holds the startup, reload, post-swap, fleet-op-applied, template-evicted, shutdown, and
+    tool-reloader registries and the runners that fire each set at the right phase.
     """
 
     def _on_startup(self, func: Callable):
@@ -42,6 +44,22 @@ class LifecycleHandlersMixin(LifecycleState):
         """
         self._fleet_op_applied_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
+
+    def _on_template_evicted(self, func: Callable[[TemplateEviction], Any]) -> Callable[[TemplateEviction], Any]:
+        """Register a synchronous handler fired with every template eviction this process applies.
+
+        Keyed by qualified name so a module re-import replaces rather than accumulates. A
+        coroutine function is refused: the eviction seams are synchronous and call it inline.
+        """
+        if inspect.iscoroutinefunction(func):
+            raise TypeError(f"template eviction handler {func.__qualname__!r} must be synchronous")
+        self._template_evicted_handlers[f"{func.__module__}.{func.__qualname__}"] = func
+        return func
+
+    def _fire_template_evicted(self, eviction: TemplateEviction) -> None:
+        """Call every template eviction handler, in registration order; a raising handler propagates."""
+        for handler in list(self._template_evicted_handlers.values()):
+            handler(eviction)
 
     def _tool_reloader(self, kind: str) -> Callable:
         """Register an ``(action, name) -> dict`` reloader for one tool kind.

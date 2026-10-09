@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING
 
 from tai42_skeleton.access_control.user import TaiUser
 from tai42_skeleton.extensions.registry import extension_name
+from tai42_skeleton.template.reads import template_reads
 
 from .base import _Facet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from contextlib import AbstractContextManager
     from typing import Any, TypeVar
 
     from starlette.requests import Request
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from tai42_contract.monitoring import Monitoring
     from tai42_contract.sandbox import Sandbox, SandboxPolicy
     from tai42_contract.storage import Storage
+    from tai42_contract.template import TemplateEviction
     from tai42_contract.webhooks import WebhookVerifier
 
     from tai42_skeleton.template import ResourceManager
@@ -131,6 +134,14 @@ class StorageFacet(_Facet):
         """
         return self._app._resource_manager
 
+    def on_template_evicted(self, func: Callable[[TemplateEviction], Any]) -> Callable[[TemplateEviction], Any]:
+        """Register a synchronous handler called after the template store drops cached content in this process."""
+        return self._app._on_template_evicted(func)
+
+    def template_reads(self) -> AbstractContextManager[set[str]]:
+        """Record, into the yielded set, the id of every stored template a render in the block resolves or probes."""
+        return template_reads()
+
 
 class MonitoringFacet(_Facet):
     """``app.monitoring`` — monitoring backend registration (``AppMonitoring``)."""
@@ -159,10 +170,11 @@ class ExtensionsFacet(_Facet):
         kind: ExtensionKind,
         name: str | None = None,
         requires_body_locality: bool = False,
+        pauses: bool = False,
     ) -> Callable[..., Any]:
         """Register an extension of ``kind`` (or return the decorator when called bare)."""
         return self._app._extension_registry.extension(
-            f, kind=kind, name=name, requires_body_locality=requires_body_locality
+            f, kind=kind, name=name, requires_body_locality=requires_body_locality, pauses=pauses
         )
 
     def available_extensions(self) -> list[dict]:

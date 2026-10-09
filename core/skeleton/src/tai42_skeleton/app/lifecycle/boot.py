@@ -89,6 +89,10 @@ class BootMixin(LifecycleState):
         # extras key a tool no longer reads.
         self._tool_extras_registry.reset()
 
+        # Reset the bound pausing-tool names for the same reload reason — a dropped
+        # pause declaration must not keep a tool on the pausing side.
+        self._tool_pause_registry.reset()
+
         # Reset the rename-referee collection and the declared-preset-seed registry
         # alongside the registries above: a reload re-imports the plugin modules (which
         # re-run their register_rename_referee/register_seed calls) and the

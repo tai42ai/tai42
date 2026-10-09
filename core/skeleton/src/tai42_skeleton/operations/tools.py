@@ -56,6 +56,7 @@ from tai42_contract.interactions import RunTerminalFailed
 from tai42_contract.secrets import unwrap_secrets
 from tai42_contract.states import StateSubject
 from tai42_contract.states.errors import StatePendingSaveFailedError, StatePendingSaveTimeoutError
+from tai42_contract.tools import UndeclaredPauseError
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.interactions.terminal_failure import failed_outcome_detail
@@ -63,6 +64,7 @@ from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
     NotFoundError,
+    NotSupportedError,
     OperationError,
     OperationFailedError,
     PermissionDeniedError,
@@ -295,68 +297,88 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
                     receives_outcome=True,
                 )
                 return _run_tool_return(outcome)
-        except ToolResultEncodingError as exc:
-            # The tool ran but produced output no JSON encoder can render (a lone UTF-16
-            # surrogate). That is the tool's OUTPUT at fault, not the caller's request (never a
-            # 4xx) and not an unexpected server bug (never the 500 the wire encode would otherwise
-            # trigger): a 502 naming the tool and the offending JSON path. Caught before the
-            # generic handler so it maps to the bad-tool-output error rather than a flat failure.
-            logger.warning("run-tool: %r produced a result that cannot be JSON-encoded at %s", tool_name, exc.json_path)
-            raise UpstreamError(str(exc), extra={"tool": exc.tool_name, "path": exc.json_path}) from exc
-        except UnknownToolError as exc:
-            # Discriminate by NAME: the requested tool vanishing between lookup and dispatch
-            # (a concurrent reload) is still a 404, warned because the caller sees only a
-            # plain 404; a DIFFERENT tool failing to resolve is a raise DURING execution and
-            # takes the structured-500 path, never the requested tool's 404.
-            if exc.tool_name == tool_name:
-                logger.warning(
-                    "run-tool: %r resolved at lookup but did not resolve at dispatch; answering 404", tool_name
-                )
-                raise NotFoundError(f"unknown tool: {tool_name}") from exc
-            logger.exception("run-tool %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
-            raise OperationFailedError(str(exc)) from exc
-        except RunTerminalFailed as exc:
-            # A driver's FAILED terminal RAISES this carrying the failed outcome WHOLE (never a
-            # returned status-keyed value) — the live receiver this door started owns the failure.
-            # This admin-fenced door is the one privileged live caller that delivers the opaque
-            # payload WHOLE to its caller: not a capped repr in the message (which would truncate a
-            # real graceful surface past the record cap), but the payload itself as DATA under the
-            # contract's generic ``outcome`` field, so the adapter answers ``{"error": <plain
-            # message>, "outcome": <the payload>}`` — never reading a key inside it. The SERVER-SIDE
-            # record keeps the capped detail: the 200 cap stays for what is logged, only the caller
-            # delivery is whole.
-            detail = failed_outcome_detail(exc.outcome)
-            logger.exception("run-tool %r failed on a terminal: %s", tool_name, detail)
-            # The contract guarantees the outcome is a plain JSON-serializable mapping; the one
-            # residual an encoder still rejects is a lone UTF-16 surrogate (json.dumps passes it, the
-            # utf-8 wire encode does not). A driver that broke the contract this way is a bad tool
-            # output: refuse it LOUDLY through the SAME named path as an un-encodable result — a 502
-            # naming the tool and the offending JSON path — never stringified past the encoder into
-            # the delivered body (which would re-introduce the transport 500 the guard exists to stop).
-            offending_path = find_lone_surrogate(exc.outcome)
-            if offending_path is not None:
-                logger.warning(
-                    "run-tool: %r failed with an outcome that cannot be JSON-encoded at %s",
-                    tool_name,
-                    offending_path,
-                )
-                raise UpstreamError(
-                    str(ToolResultEncodingError(tool_name, offending_path)),
-                    extra={"tool": tool_name, "path": offending_path},
-                ) from exc
-            raise OperationFailedError("tool run failed", extra={"outcome": exc.outcome}) from exc
         except OperationError:
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.
             raise
-        except (StatePendingSaveFailedError, StatePendingSaveTimeoutError) as exc:
-            # A subject of the run has a pending save (at the run entry, or a read inside the run).
-            raise _pending_save_refusal(exc) from exc
         except Exception as exc:
-            logger.exception("run-tool %r raised during execution", tool_name)
-            # A bare raise stringifies to ""; the class-name fallback keeps the envelope
-            # from emitting {"error": ""}.
-            raise OperationFailedError(str(exc) or type(exc).__name__) from exc
+            raise _dispatch_failure(tool_name, exc) from exc
+
+
+def _dispatch_failure(tool_name: str, exc: Exception) -> OperationError:
+    """The run-tool door's typed answer for a raise during the dispatch phase.
+
+    Called from inside the ``except`` block, so its ``logger.exception`` records carry the
+    caught traceback. Every branch returns the error the door raises ``from exc``.
+    """
+    if isinstance(exc, ToolResultEncodingError):
+        # The tool ran but produced output no JSON encoder can render (a lone UTF-16
+        # surrogate). That is the tool's OUTPUT at fault, not the caller's request (never a
+        # 4xx) and not an unexpected server bug (never the 500 the wire encode would otherwise
+        # trigger): a 502 naming the tool and the offending JSON path.
+        logger.warning("run-tool: %r produced a result that cannot be JSON-encoded at %s", tool_name, exc.json_path)
+        return _unencodable_output(exc)
+    if isinstance(exc, UnknownToolError):
+        # Discriminate by NAME: the requested tool vanishing between lookup and dispatch
+        # (a concurrent reload) is still a 404, warned because the caller sees only a
+        # plain 404; a DIFFERENT tool failing to resolve is a raise DURING execution and
+        # takes the structured-500 path, never the requested tool's 404.
+        if exc.tool_name == tool_name:
+            logger.warning("run-tool: %r resolved at lookup but did not resolve at dispatch; answering 404", tool_name)
+            return NotFoundError(f"unknown tool: {tool_name}")
+        logger.exception("run-tool %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
+        return OperationFailedError(str(exc))
+    if isinstance(exc, RunTerminalFailed):
+        return _terminal_failure(tool_name, exc)
+    if isinstance(exc, UndeclaredPauseError):
+        # The tool ran and parked without declaring that it can pause: the deployment's
+        # registration lacks the capability declaration this call needs, not an execution
+        # failure. The dispatch scope already recorded the run's ``error``.
+        return NotSupportedError(str(exc), extra={"tool": exc.tool})
+    if isinstance(exc, (StatePendingSaveFailedError, StatePendingSaveTimeoutError)):
+        # A subject of the run has a pending save (at the run entry, or a read inside the run).
+        return _pending_save_refusal(exc)
+    logger.exception("run-tool %r raised during execution", tool_name)
+    # A bare raise stringifies to ""; the class-name fallback keeps the envelope
+    # from emitting {"error": ""}.
+    return OperationFailedError(str(exc) or type(exc).__name__)
+
+
+def _terminal_failure(tool_name: str, exc: RunTerminalFailed) -> OperationError:
+    """The run-tool door's answer for a driver's FAILED terminal, delivering its outcome WHOLE.
+
+    A driver's FAILED terminal RAISES this carrying the failed outcome WHOLE (never a
+    returned status-keyed value) — the live receiver this door started owns the failure.
+    This admin-fenced door is the one privileged live caller that delivers the opaque
+    payload WHOLE to its caller: not a capped repr in the message (which would truncate a
+    real graceful surface past the record cap), but the payload itself as DATA under the
+    contract's generic ``outcome`` field, so the adapter answers ``{"error": <plain
+    message>, "outcome": <the payload>}`` — never reading a key inside it. The SERVER-SIDE
+    record keeps the capped detail: the 200 cap stays for what is logged, only the caller
+    delivery is whole.
+    """
+    detail = failed_outcome_detail(exc.outcome)
+    logger.exception("run-tool %r failed on a terminal: %s", tool_name, detail)
+    # The contract guarantees the outcome is a plain JSON-serializable mapping; the one
+    # residual an encoder still rejects is a lone UTF-16 surrogate (json.dumps passes it, the
+    # utf-8 wire encode does not). A driver that broke the contract this way is a bad tool
+    # output: refuse it LOUDLY through the SAME named path as an un-encodable result — a 502
+    # naming the tool and the offending JSON path — never stringified past the encoder into
+    # the delivered body (which would re-introduce the transport 500 the guard exists to stop).
+    offending_path = find_lone_surrogate(exc.outcome)
+    if offending_path is not None:
+        logger.warning(
+            "run-tool: %r failed with an outcome that cannot be JSON-encoded at %s",
+            tool_name,
+            offending_path,
+        )
+        return _unencodable_output(ToolResultEncodingError(tool_name, offending_path))
+    return OperationFailedError("tool run failed", extra={"outcome": exc.outcome})
+
+
+def _unencodable_output(exc: ToolResultEncodingError) -> UpstreamError:
+    """The 502 for tool output no JSON encoder can render, naming the tool and the offending JSON path."""
+    return UpstreamError(str(exc), extra={"tool": exc.tool_name, "path": exc.json_path})
 
 
 def _pending_save_refusal(exc: StatePendingSaveFailedError | StatePendingSaveTimeoutError) -> OperationError:

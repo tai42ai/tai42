@@ -74,18 +74,50 @@ class TestEnvGuard:
     async def test_user_function_is_legitimate(self):
         assert await run_jq_first("def f(x): x*2; f(.a)", {"a": 3}) == 6
 
-    async def test_trailing_comment_does_not_swallow_guard_paren(self):
+    async def test_trailing_line_comment_is_accepted(self):
         assert await run_jq_first(".a\n# trailing comment", {"a": 11}) == 11
 
     def test_syntax_error_reports_author_position(self):
-        # The raw pre-compile runs first, so the reported error names the
-        # author's own position, not an offset shifted by the preamble.
+        # A failed compile is reworded from the bare program, so the reported error
+        # names the author's own position, not an offset shifted by the guard.
         with pytest.raises(ValueError, match="syntax error"):
             get_compiled_jq("this is (not valid")
 
     def test_empty_expression_still_raises(self):
         with pytest.raises(ValueError, match="error"):
             get_compiled_jq("")
+
+
+class TestEnvelopeSealed:
+    # ``$__in`` is the binding mechanism's envelope; a program or a prelude def that
+    # names it is refused before the compile, so channel data reaches a program
+    # only as ``.`` and variables only as their own ``$name``.
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        get_compiled_jq.cache_clear()
+        yield
+        get_compiled_jq.cache_clear()
+
+    @pytest.mark.parametrize("expr", ["$__in.d", '"\\($__in.d)"', ". as $__in | .", "$__in"])
+    def test_an_expression_naming_the_envelope_is_refused(self, expr):
+        with pytest.raises(ValueError, match=r"\$__in is reserved"):
+            get_compiled_jq(expr)
+
+    def test_a_prelude_def_naming_the_envelope_is_refused(self):
+        with pytest.raises(ValueError, match=r"\$__in is reserved"):
+            get_compiled_jq("f", prelude="def f: $__in.d;")
+
+    async def test_the_refusal_reaches_run_jq_first(self):
+        with pytest.raises(ValueError, match=r"\$__in is reserved"):
+            await run_jq_first("$__in.v", {})
+
+    def test_the_refusal_reaches_compile_check(self):
+        with pytest.raises(ValueError, match=r"\$__in is reserved"):
+            compile_check("$__in.d.outputs")
+
+    async def test_a_longer_name_sharing_the_prefix_compiles(self):
+        assert await run_jq_first(".a as $__inbox | $__inbox + 1", {"a": 1}) == 2
 
 
 class TestRunJqFirst:
@@ -115,7 +147,7 @@ class TestRunJqFirst:
         # TimeoutError names the env var and returns promptly (well under the
         # 1s the fake would otherwise block for).
         class _SlowProgram:
-            def input(self, payload):
+            def input_text(self, text):
                 return self
 
             def first(self):
@@ -166,7 +198,7 @@ class TestRunJqBounded:
         # A slow evaluation is bounded by JQ_TIMEOUT_SECONDS; the raised TimeoutError
         # names the env var and returns promptly (well under the 1s the fake blocks for).
         class _SlowProgram:
-            def input(self, payload):
+            def input_text(self, text):
                 return self
 
             def __iter__(self):
@@ -202,7 +234,7 @@ class TestPrelude:
         assert _first(program, {"x": 40}) == 42
 
     def test_prelude_def_placed_after_guard_still_evaluates(self):
-        # The prelude lands after the guard's ``{} as $ENV | (`` and the variable
+        # The prelude lands after the guard's ``{} as $ENV | `` and the variable
         # bindings; a def there must still resolve and evaluate.
         program = get_compiled_jq("greet", prelude='def greet: "hi";')
         assert _first(program, None) == "hi"
@@ -248,6 +280,87 @@ class TestPrelude:
         # bare call (the guard wrapper and variable bindings alone, no extra defs).
         assert await run_jq_first(".a", {"a": 42}, prelude="") == 42
         assert _first(get_compiled_jq(".a", prelude=""), {"a": 5}) == 5
+
+
+class TestOneCompilePerMiss:
+    """A cache miss compiles the guarded program once; the raw program is compiled only to word a failure."""
+
+    @pytest.fixture
+    def compiles(self, monkeypatch):
+        import jq
+
+        get_compiled_jq.cache_clear()
+        seen: list[str] = []
+        real = jq.compile
+
+        def _counting(source, *args, **kwargs):
+            seen.append(source)
+            return real(source, *args, **kwargs)
+
+        monkeypatch.setattr(jq, "compile", _counting)
+        yield seen
+        get_compiled_jq.cache_clear()
+
+    def test_a_successful_miss_compiles_once(self, compiles):
+        get_compiled_jq(".a + $n", "def f: 1;", ("n",))
+        assert len(compiles) == 1
+        assert compiles[0].startswith("def env:")
+
+    def test_a_hit_compiles_nothing(self, compiles):
+        get_compiled_jq(".hit")
+        get_compiled_jq(".hit")
+        assert len(compiles) == 1
+
+    def test_the_paren_escape_is_refused(self):
+        for prelude in ("", "def a: 1;"):
+            with pytest.raises(ValueError, match="syntax error"):
+                get_compiled_jq(".a) | (.b", prelude)
+
+    @pytest.mark.parametrize(
+        ("expression", "prelude", "variables", "message"),
+        [
+            (
+                "this is (not valid",
+                "",
+                (),
+                "jq: error: syntax error, unexpected IDENT, expecting end of file at <top-level>, line 1, column 29:\n"
+                "    . as $__in | $__in.d | this is (not valid\n"
+                "                                ^^\n"
+                "jq: 1 compile error",
+            ),
+            (
+                ".a |\n.b |\n.c d",
+                "def a: 1;\ndef b: 2;\ndef c: 3;\ndef d: 4;",
+                (),
+                "jq: error: syntax error, unexpected IDENT, expecting end of file at <top-level>, line 3, column 4:\n"
+                "    .c d\n"
+                "       ^\n"
+                "jq: 1 compile error",
+            ),
+            (
+                ".a + $nope",
+                "",
+                (),
+                "jq: error: $nope is not defined at <top-level>, line 1, column 29:\n"
+                "    . as $__in | $__in.d | .a + $nope\n"
+                "                                ^^^^^\n"
+                "jq: 1 compile error",
+            ),
+            (
+                ".a + $nope",
+                "def a: 1;",
+                ("x",),
+                "jq: error: $nope is not defined at <top-level>, line 1, column 16:\n"
+                "    $__in.d | .a + $nope\n"
+                "                   ^^^^^\n"
+                "jq: 1 compile error",
+            ),
+        ],
+    )
+    def test_a_failed_compile_reports_the_author_relative_message(self, expression, prelude, variables, message):
+        with pytest.raises(ValueError, match="jq: 1 compile error") as exc:
+            get_compiled_jq(expression, prelude, variables)
+        assert str(exc.value) == message
 
 
 class TestNamedVariables:

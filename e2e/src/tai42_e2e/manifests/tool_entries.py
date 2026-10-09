@@ -45,7 +45,11 @@ _CORE_ROUTERS = [
 
 
 def _probe_tools_entry(
-    *, with_backend_branches: bool, with_schedule_branch: bool = False, with_monitor_branch: bool = False
+    *,
+    with_backend_branches: bool,
+    with_schedule_branch: bool = False,
+    with_monitor_branch: bool = False,
+    with_undeclared_park_chain: bool = False,
 ) -> dict:
     """The SUT-side probe tools entry. ``with_backend_branches`` attaches the
     ``sync_task`` combos (needs a backend stack). ``with_schedule_branch`` attaches
@@ -84,6 +88,11 @@ def _probe_tools_entry(
         # Trace a standalone e2e_echo call as one TOOL span, giving the observability read
         # surface a run to serve back (build_monitoring_stack's langfuse records it).
         extensions["e2e_echo"] = [*extensions["e2e_echo"], ["monitor"]]
+    if with_undeclared_park_chain:
+        # Branch the undeclared parking probe into e2e_undeclared_park_chain: a pausing
+        # ``chain`` whose body dispatches the undeclared tool, so a spec drives the refusal
+        # from inside a branch an agent calls.
+        extensions["e2e_undeclared_park"] = [["chain"]]
     return {"title": PROBE_TOOLS_TITLE, "module": "tai42_e2e_fixtures.tools", "extensions": extensions}
 
 

@@ -234,7 +234,7 @@ class _BlockingProgram:
     """A stand-in compiled jq program whose evaluation blocks on the worker
     thread, standing in for a pathological expression such as ``[range(1e9)]``."""
 
-    def input(self, payload: Any) -> "_BlockingProgram":
+    def input_text(self, text: str) -> "_BlockingProgram":
         return self
 
     def first(self) -> Any:

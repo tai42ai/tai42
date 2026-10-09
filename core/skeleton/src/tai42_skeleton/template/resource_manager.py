@@ -1,7 +1,6 @@
 """Fetch, render, schema-infer, and cache stored (and inline) templates."""
 
 import asyncio
-import base64
 import itertools
 import logging
 import mimetypes
@@ -10,23 +9,24 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, cast
-from urllib.parse import unquote_to_bytes, urlsplit
+from urllib.parse import urlsplit
 
 from async_lru import alru_cache
 from babel.core import Locale, UnknownLocaleError
 from babel.lists import format_list
 from jinja2 import FunctionLoader, meta, pass_context
 from jinja2 import Template as JinjaTemplate
-from jinja2.sandbox import SandboxedEnvironment
 from jinja2schema import JSONSchemaDraft4Encoder, infer, to_json_schema
 from tai42_contract.storage import Storage
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateEviction
 from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.net import fetch_url
 
 from tai42_skeleton.template.absent_ids import AbsentTemplateIds
+from tai42_skeleton.template.data_uri import assert_image, data_uri, decode_data_uri
 from tai42_skeleton.template.media import ContentPart, MediaBlock
 from tai42_skeleton.template.path_guard import safe_template_path
+from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
 from tai42_skeleton.template.settings import template_cache_settings
 
 logger = logging.getLogger(__name__)
@@ -90,34 +90,6 @@ def _list_format(context: Any, value: Any, style: str = "standard") -> str:
     return format_list(items, style=cast(Any, style), locale=parsed)
 
 
-def _decode_data_uri(uri: str) -> tuple[bytes, str | None]:
-    """Decode a ``data:`` URI into ``(bytes, mime)``.
-
-    Parses the inline ``data:[<mediatype>][;base64],<payload>`` form — no network
-    or storage access. A URI without the required comma separator is malformed and
-    raises loudly.
-    """
-    header, sep, payload = uri[len("data:") :].partition(",")
-    if not sep:
-        raise ValueError(f"Malformed data URI (missing ','): {uri[:64]!r}")
-    is_base64 = header.endswith(";base64")
-    mediatype = header[: -len(";base64")] if is_base64 else header
-    data = base64.b64decode(payload) if is_base64 else unquote_to_bytes(payload)
-    mime = mediatype.split(";", 1)[0] or None
-    return data, mime
-
-
-def _data_uri(data: bytes, mime: str) -> str:
-    """Build a base64 ``data:`` URI that always carries a resolved ``mime``."""
-    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-
-
-def _assert_image(mime: str | None, source: object) -> None:
-    """Guard the image-only media boundary: a resolved ``image/*`` mime is required."""
-    if mime is None or not mime.startswith("image/"):
-        raise ValueError(f"normalize_media requires an image resource; resolved mime {mime!r} for {source!r}")
-
-
 #: The process-wide source of :attr:`ResourceManager.epoch`: never reset, so every manager built in
 #: this process (at boot or after a reload) carries a value no earlier manager had.
 _EPOCHS = itertools.count(1)
@@ -128,15 +100,18 @@ class ResourceManager:
 
     ``epoch`` identifies this manager among every manager the process builds; ``generation`` counts
     its local cache evictions. A cache of renders made through a manager keys on both, so a rebuilt
-    manager or an evicted stored template re-renders.
+    manager or an evicted stored template re-renders. Every eviction seam ends by calling
+    ``on_evicted`` with what it dropped, after every cache of the manager is dropped.
     """
 
-    def __init__(self, provider: Storage | None):
+    def __init__(self, provider: Storage | None, *, on_evicted: Callable[[TemplateEviction], None]):
         """Wire the sandboxed Jinja environment and the compiled-template caches from settings.
 
-        ``provider`` is the Storage backend, or ``None`` when none is registered.
+        ``provider`` is the Storage backend, or ``None`` when none is registered; ``on_evicted``
+        receives every eviction this manager applies.
         """
         self._provider = provider
+        self._on_evicted = on_evicted
         self.epoch: int = next(_EPOCHS)
         self.generation: int = 0
         # Sandboxed engine: template text is an authoring surface (hook
@@ -145,7 +120,7 @@ class ResourceManager:
         # ``{{ ''.__class__.__mro__[1].__subclasses__() }}`` raises SecurityError
         # instead of reaching host primitives. Normal ``{{ var }}``, filters, and
         # ``{% include %}`` are unaffected.
-        self._env = SandboxedEnvironment(loader=FunctionLoader(self._sync_loader))
+        self._env = RecordingEnvironment(loader=FunctionLoader(self._sync_loader))
         # The locale-aware list formatter is available to every rendered template; it reads
         # the render's resolved locale from the reserved context key, never a template arg.
         self._env.filters["list_format"] = _list_format
@@ -370,7 +345,7 @@ class ResourceManager:
         if scheme in ("http", "https"):
             return await fetch_url(source)
         if scheme == "data":
-            return _decode_data_uri(source)
+            return decode_data_uri(source)
         if scheme == "" and "://" not in source:
             # A bare storage id is a caller-supplied logical key; enforce root
             # containment before it reaches the provider, so this one seam guards
@@ -415,10 +390,10 @@ class ResourceManager:
             from tai42_skeleton.template.file_loading import detect_mime
 
             mime = detect_mime(source)
-            _assert_image(mime, "<bytes>")
+            assert_image(mime, "<bytes>")
             if mime is None:
                 raise AssertionError
-            return {"type": "image_url", "image_url": {"url": _data_uri(source, mime)}}
+            return {"type": "image_url", "image_url": {"url": data_uri(source, mime)}}
 
         parts = urlsplit(source)
         scheme = parts.scheme
@@ -432,15 +407,15 @@ class ResourceManager:
         if scheme == "data":
             mediatype = source[len("data:") :].partition(",")[0]
             mime = mediatype.split(";", 1)[0] or None
-            _assert_image(mime, source)
+            assert_image(mime, source)
             return {"type": "image_url", "image_url": {"url": source}}
 
         # Storage id (empty scheme) or a bad scheme -> load() validates and raises.
         data, mime = await self.load(source)
-        _assert_image(mime, source)
+        assert_image(mime, source)
         if mime is None:
             raise AssertionError
-        return {"type": "image_url", "image_url": {"url": _data_uri(data, mime)}}
+        return {"type": "image_url", "image_url": {"url": data_uri(data, mime)}}
 
     def _evict_engine_cache(self, matches: Callable[[str], bool]) -> None:
         """Drop every engine-cached dependency template whose name ``matches``.
@@ -485,6 +460,7 @@ class ResourceManager:
         if self._env.cache is not None:
             self._env.cache.clear()
         self._absent.forget(lambda _template_id: True)
+        self._on_evicted(TemplateEviction(path=None))
 
     def evict_compiled(self, template_id: str) -> None:
         """Evict a single template from the compiled cache and the engine cache.
@@ -504,6 +480,7 @@ class ResourceManager:
         self._cached_template_ids.discard(template_id)
         self._evict_engine_cache(lambda name: name == template_id)
         self._absent.forget(lambda tracked: tracked == template_id)
+        self._on_evicted(TemplateEviction(path=template_id))
 
     def evict_dir(self, path: str) -> None:
         """Evict every compiled template under ``path/`` (no-op if caching is off).
@@ -514,6 +491,7 @@ class ResourceManager:
         compilation under the prefix through this one seam. Idempotent.
         """
         self._evict_compiled_prefix(path.rstrip("/") + "/")
+        self._on_evicted(TemplateEviction(path=path.rstrip("/"), prefix=True))
 
     def _evict_compiled_prefix(self, prefix: str) -> None:
         """Evict every compiled template whose id falls under ``prefix``.
@@ -608,7 +586,14 @@ class ResourceManager:
     async def render_by_id(
         self, template_id: str, kwargs: dict[str, Any] | None = None, locale: str | None = None
     ) -> str:
-        """Render the stored template ``template_id`` for ``locale`` with ``kwargs`` as its context."""
+        """Render the stored template ``template_id`` for ``locale`` with ``kwargs`` as its context.
+
+        Every id of the locale probe chain is recorded as read before it resolves, so a later
+        write of a variant that is missing now is seen by a reads recorder too.
+        """
+        probes = [template_id] if locale is None else self._locale_variant_ids(template_id, locale)
+        for candidate in probes:
+            record_template_read(candidate)
         template = await self._compiled_for_locale(template_id, locale)
         context = self._with_locale(kwargs or {}, locale)
 

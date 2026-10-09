@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.tools import UndeclaredPauseError
 
 import tai42_toolbox._internal.extensions.batch_executor as batch_executor
 import tai42_toolbox.extensions.batch as batch_module
@@ -150,6 +151,20 @@ def test_fail_fast_false_fills_the_slot_with_the_error(bind_fake_app, execution_
     params = [{"n": 1}, {"fail": True, "n": 2}, {"n": 3}]
     results = asyncio.run(execute_batch("tool", params, execution_mode=execution_mode, fail_fast=False))
     assert results == [1, "boom", 3]
+
+
+@pytest.mark.parametrize("execution_mode", ["sequential", "parallel"])
+def test_fail_fast_false_re_raises_an_undeclared_park(bind_fake_app, execution_mode):
+    # An undeclared park is a registration fault, never an item error: it ends the batch under either mode.
+    async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
+        if arguments.get("park"):
+            raise UndeclaredPauseError(key)
+        return arguments["n"]
+
+    bind_fake_app(FakeTools(run_tool=run_tool))
+    params = [{"n": 1}, {"park": True, "n": 2}, {"n": 3}]
+    with pytest.raises(UndeclaredPauseError):
+        asyncio.run(execute_batch("tool", params, execution_mode=execution_mode, fail_fast=False))
 
 
 def test_parallel_rejects_non_positive_concurrency(bind_fake_app):

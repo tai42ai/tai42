@@ -15,6 +15,7 @@ import logging
 import pytest
 from langchain_core.tools import ToolException
 from pydantic import BaseModel
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -188,7 +189,7 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
 
-            @app.tools.tool(force=True)
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parks(q: str):
                 """A tool that async-parks and returns the suspension sentinel."""
                 # Faithful to ``ask(mode="async")``: the park names the continuation

@@ -31,6 +31,7 @@ from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredF
 from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import TOOL_META_PAUSES
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
@@ -98,7 +99,7 @@ register_chained_park_tool()
 @tai42_app.agents.agent(
     "langchain_deep_agent",
     tags={"agents"},
-    meta={"tai42/crash_resume": langchain_deep_agent_crash_resume()},
+    meta={"tai42/crash_resume": langchain_deep_agent_crash_resume(), TOOL_META_PAUSES: True},
 )
 class DeepAgent(Agent):
     """A LangChain deep agent: planning, subagents, skills, and a filesystem."""

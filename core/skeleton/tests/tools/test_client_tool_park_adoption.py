@@ -33,7 +33,7 @@ from tai42_contract.interactions import (
     set_chained_resume,
     set_resume_continuation_tool,
 )
-from tai42_contract.tools import current_call_chain, tool_call_frame
+from tai42_contract.tools import TOOL_META_PAUSES, current_call_chain, tool_call_frame
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -59,7 +59,7 @@ async def _run_parking_tool(
     key its caller bound around the dispatch."""
     async with app.app_context(Manifest.model_validate({})):
 
-        @app.tools.tool(force=True)
+        @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
         async def parks(q: str) -> SuspendedInteraction:
             """A tool whose call async-parked its caller."""
             return SuspendedInteraction(interaction_id="i1", resume_owner=resume_owner, expiry_at=expiry_at)
@@ -168,7 +168,7 @@ def test_a_real_ask_park_is_adoptable_by_the_binding_that_raised_it():
     async def run() -> Any:
         async with app.app_context(Manifest.model_validate({})):
 
-            @app.tools.tool(force=True)
+            @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def asks(q: str) -> Any:
                 """A tool that async-parks through the real ask helper."""
                 from tai42_skeleton.authz.execution_identity import (

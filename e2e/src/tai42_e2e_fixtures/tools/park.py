@@ -9,6 +9,7 @@ import os
 from typing import Literal
 
 from tai42_contract.app import tai42_app
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
@@ -234,7 +235,7 @@ async def e2e_async_multipark_resume(interaction_id: str, answer: object) -> dic
 # execution identity ``ask`` needs, and only when the stack has not already bound one
 # (see its docstring), then returns the ``SuspendedInteraction`` the in-process tool seam
 # stamps into the park marker the agent's park middleware interrupts on.
-@tai42_app.tools.tool(tags={"e2e"})
+@tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
 async def e2e_agent_async_ask(question: str, expiry_seconds: float, on_expiry: str = "kill") -> object:
     """Async ``ask`` an agent tool call reaches, parking the agent run.
 
@@ -282,6 +283,51 @@ async def e2e_agent_async_ask(question: str, expiry_seconds: float, on_expiry: s
     record = json.dumps({"pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast(Awaitable[int], client.rpush(f"e2e:rec:agent_async_ask:{suspended.interaction_id}", record))
+    return suspended
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_undeclared_park(question: str, expiry_seconds: float) -> object:
+    """An async ``ask`` from a tool that does NOT declare ``tai42/pauses``: every door refuses its park.
+
+    Drives the ask under whatever resume continuation and execution identity the caller already
+    bound (an agent turn binds its own), binding ``e2e_async_resume`` and the synthetic identity
+    only where none is bound (a direct run-tool or MCP call), so the ask parks on every door.
+    RPUSHes ``{pid}`` onto ``e2e:rec:undeclared_park:{question}`` so a spec reads that the ask
+    fired exactly once, and returns the ``SuspendedInteraction`` the platform refuses by name."""
+    from collections.abc import Awaitable
+    from contextlib import ExitStack
+    from datetime import UTC, datetime, timedelta
+    from typing import cast
+
+    from tai42_contract.interactions import get_resume_continuation_tool
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+    from tai42_skeleton.authz.execution_identity import (
+        get_execution_identity,
+        reset_execution_identity,
+        set_execution_identity,
+    )
+    from tai42_skeleton.authz.identity import CallerIdentity
+    from tai42_skeleton.interactions import ask
+
+    identity = (
+        None
+        if get_execution_identity() is not None
+        else CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-undeclared-fp")
+    )
+    with ExitStack() as binding:
+        if get_resume_continuation_tool() is None:
+            binding.enter_context(driving_as(continuation="e2e_async_resume", identity=identity))
+        elif identity is not None:
+            identity_token = set_execution_identity(identity)
+            binding.callback(reset_execution_identity, identity_token)
+        expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
+        suspended = await ask(question, mode="async", expiry_at=expiry_at)
+    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
+        await cast(
+            Awaitable[int], client.rpush(f"e2e:rec:undeclared_park:{question}", json.dumps({"pid": os.getpid()}))
+        )
     return suspended
 
 

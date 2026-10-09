@@ -365,7 +365,7 @@ async def test_a_real_manager_eviction_seam_each_rerender_once(
     pg: FakeStatesPg, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
-    manager = ResourceManager(None)
+    manager = ResourceManager(None, on_evicted=lambda _eviction: None)
     renders: list[str] = []
     real_render = ResourceManager.render_templated_text
 
@@ -425,5 +425,8 @@ def test_a_reload_rerenders_through_the_rebuilt_manager(pg: FakeStatesPg, monkey
 
 
 def test_two_managers_built_in_sequence_carry_different_epochs() -> None:
-    first, second = ResourceManager(None), ResourceManager(None)
+    first, second = (
+        ResourceManager(None, on_evicted=lambda _eviction: None),
+        ResourceManager(None, on_evicted=lambda _eviction: None),
+    )
     assert second.epoch > first.epoch

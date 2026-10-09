@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.secrets import SecretValue
+from tai42_contract.tools import TOOL_META_PAUSES
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -100,12 +101,12 @@ def test_reducer_signals_an_unencodable_model_leaf_with_its_path() -> None:
 # -- the run_tool seam ------------------------------------------------------
 
 
-def _dispatch(tool_fn: Callable[[], object]) -> object:
-    """Register ``tool_fn`` on a fresh app and dispatch it through the ``run_tool`` seam."""
+def _dispatch(tool_fn: Callable[[], object], *, pauses: bool = False) -> object:
+    """Register ``tool_fn`` (declared able to pause when ``pauses``) on a fresh app and dispatch it via ``run_tool``."""
 
     async def run() -> object:
         async with app.app_context(Manifest.model_validate({})):
-            app.tools.tool(force=True)(tool_fn)
+            app.tools.tool(force=True, meta={TOOL_META_PAUSES: True} if pauses else None)(tool_fn)
             return await app.tools.run_tool(tool_fn.__name__, {})
 
     return asyncio.run(run())
@@ -202,13 +203,13 @@ def test_seam_passes_an_encodable_emoji_unchanged() -> None:
 
 
 def test_seam_does_not_flag_a_suspended_interaction_park() -> None:
-    result = _dispatch(emit_park)
+    result = _dispatch(emit_park, pauses=True)
     assert isinstance(result, SuspendedInteraction)
     assert result.interaction_id == "i1"
 
 
 def test_seam_does_not_flag_a_resume_buffered_park() -> None:
-    result = _dispatch(emit_buffered)
+    result = _dispatch(emit_buffered, pauses=True)
     assert isinstance(result, ResumeBuffered)
     assert result.remaining_ids == ["i1"]
 

@@ -47,8 +47,8 @@ _CLAUDE_ENV_VARS = (
     ],
 )
 def test_crash_resume_setting_reaches_the_binding_as_meta(name: str, setting: bool) -> None:
-    # The recorded meta is exactly the one generic key, carrying the live setting value.
-    assert APP.agents.meta[name] == {_CRASH_RESUME_META_KEY: setting}
+    # The recorded meta carries the generic key with the live setting value (beside the pause declaration).
+    assert APP.agents.meta[name][_CRASH_RESUME_META_KEY] == setting
 
 
 def test_crash_resume_true_flows_through_the_registration_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,7 +91,7 @@ def test_import_without_creds_succeeds_and_full_validation_still_raises_at_run(
         # Executing the module body runs the decorator with NO creds env present; it must NOT raise,
         # and the crash_resume meta defaults to False when unset.
         spec.loader.exec_module(fresh)
-        assert APP.agents.meta["claude_code"] == {_CRASH_RESUME_META_KEY: False}
+        assert APP.agents.meta["claude_code"][_CRASH_RESUME_META_KEY] is False
         # The full config validation is unchanged — with no model credential it raises loudly, so
         # the loud error lands at run start (the first ``astream``/``run`` calls this), not import.
         with pytest.raises(ValidationError):

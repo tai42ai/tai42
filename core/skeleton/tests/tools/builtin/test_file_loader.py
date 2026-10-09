@@ -77,7 +77,7 @@ async def test_file_loader_rejects_traversal_id(bind_app) -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    real_manager = ResourceManager(registry.provider)
+    real_manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
     bind_app(SimpleNamespace(storage=SimpleNamespace(resource_manager=real_manager)))
 
     with pytest.raises(UnsafeTemplatePathError):

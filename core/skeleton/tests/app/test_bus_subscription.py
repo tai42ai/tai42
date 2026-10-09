@@ -367,7 +367,7 @@ class _StubStorage(Storage):
 
 def _install_manager(monkeypatch: pytest.MonkeyPatch, items: dict[str, str]) -> ResourceManager:
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
-    manager = ResourceManager(_StubStorage(items))
+    manager = ResourceManager(_StubStorage(items), on_evicted=lambda _eviction: None)
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
     return manager
 

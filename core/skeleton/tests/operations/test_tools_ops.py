@@ -764,6 +764,27 @@ async def test_run_tool_async_park_returns_a_park_receipt(monkeypatch: pytest.Mo
     assert result["interaction_ids"] == ["i1"]
 
 
+async def test_run_tool_of_an_undeclared_park_is_a_501_naming_the_tool(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    # A tool that parks without declaring that it can pause is refused at the dispatch seam; the
+    # door answers the deployment's missing declaration (501) naming the tool, logs nothing of its
+    # own (the dispatch scope recorded the run), and never flattens it into an execution failure.
+    from tai42_contract.tools import UndeclaredPauseError
+
+    from tai42_skeleton.operations.errors import NotSupportedError
+
+    tools = _Tools({"parky"}, run_exc=UndeclaredPauseError("parky"))
+    _install(monkeypatch, tools=tools)
+    with caplog.at_level(logging.DEBUG, logger=tools_ops.logger.name), pytest.raises(NotSupportedError) as caught:
+        await tools_ops.run_tool("parky", {})
+    assert caught.value.status == 501
+    assert caught.value.message == (
+        "tool 'parky' returned a park signal but does not declare that it can pause; "
+        "register it with meta={'tai42/pauses': True}"
+    )
+    assert caught.value.extra == {"tool": "parky"}
+    _assert_nothing_logged_server_side(caplog)
+
+
 async def test_run_tool_deposits_the_api_subject_context(monkeypatch: pytest.MonkeyPatch) -> None:
     # A named subject deposits the ``door="api"`` state context around the dispatch, so an async park
     # of the run would index under the caller's subject.

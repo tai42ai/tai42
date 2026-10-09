@@ -567,6 +567,23 @@ def test_put_state_template_with_template_jq_section_succeeds(monkeypatch: pytes
         assert byid["template_jq"]["any_due"]["jq"] == {"id": "stored-any-due"}
 
 
+def test_put_state_template_whose_program_reads_the_binding_envelope_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _real_states_door(monkeypatch)
+    with tai42_app.bound(app), pytest.raises(ValidationRejectedError) as excinfo:
+        asyncio.run(
+            ops.put_state_template(
+                "summary-envelope",
+                {
+                    "schema": _LEDGER_SCHEMA,
+                    "template_jq": {"peek": {"purpose": "input", "jq": {"content": "$__in.d.ledger"}}},
+                },
+            )
+        )
+    assert excinfo.value.status == 422
+    assert "template_jq 'peek' jq is not a valid jq expression" in str(excinfo.value)
+    assert "$__in is reserved" in str(excinfo.value)
+
+
 def test_put_state_template_by_id_body_that_cannot_be_fetched_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     app = _real_states_door(monkeypatch)
     with tai42_app.bound(app), pytest.raises(ValidationRejectedError) as excinfo:

@@ -93,6 +93,12 @@ nested run that async-parks, the agent parks on that **call** rather than blocki
 nested run reaches its terminal the agent's turn resumes with that terminal as the tool's
 result, and a non-success terminal comes back as a model-visible tool error.
 
+The parking agents' run tools (`tools_agent`, `langchain_deep_agent`, `claude_code`) and the
+hidden `agent_resume` and `deliver_chained_park` tools declare that they can pause
+(`meta={"tai42/pauses": True}`), so a caller's park recognition accepts the park they return. A tool an agent calls
+that returns a park signal without that declaration fails the agent's run with
+`UndeclaredPauseError` naming the tool; the model is not handed a tool error to retry around.
+
 ### Parking tools
 
 An agent that lists the generic parking tools in its `tool_names` — `list_parked`,

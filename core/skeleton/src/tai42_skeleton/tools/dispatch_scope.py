@@ -276,6 +276,19 @@ async def dispatch_scope(
         reset_current_tool_invocation(invocation_token)
 
 
+async def _refuse_undeclared_mcp_park(app: TaiMCP, name: str) -> None:
+    """Refuse a park marker from a tool that does not declare it can pause.
+
+    Raised as the edge's own tool error carrying the refusal text, with the refusal as its cause.
+    """
+    from fastmcp.exceptions import ToolError
+    from tai42_contract.tools import UndeclaredPauseError
+
+    if not await app._tool_binding.pauses(name):
+        refusal = UndeclaredPauseError(name)
+        raise ToolError(str(refusal)) from refusal
+
+
 class DispatchScopeMiddleware(Middleware):
     """Enter the shared :func:`dispatch_scope` at the MCP ``tools/call`` edge.
 
@@ -358,6 +371,10 @@ class DispatchScopeMiddleware(Middleware):
                         # silently recorded as success.
                         marker = read_suspended_interaction_marker(getattr(result, "structured_content", None))
                         if marker is not None:
+                            # Only a tool that declares it can pause may park: the refusal is the
+                            # edge's own tool error carrying the refusal text, raised inside the
+                            # scope so the row records ``error``.
+                            await _refuse_undeclared_mcp_park(self._app, name)
                             scope.observe_park(marker["interaction_id"])
                         else:
                             # Observe the tool's REDUCED output, not the opaque ``ToolResult`` wrapper,
