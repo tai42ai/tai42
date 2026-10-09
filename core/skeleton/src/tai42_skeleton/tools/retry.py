@@ -9,10 +9,11 @@ ONE logical dispatch: one run-index row (its terminal outcome is the FINAL
 result), one authorization decision, one resolved target re-fired per attempt.
 Every consumer of the seam (flows, agents-as-tools, hooks, backend workers,
 direct calls) shares the behavior because they all dispatch through
-``run_tool``. The langchain client-tool adapter (an in-graph agent's own tool
-call) sits deliberately OUTSIDE this seam: there a tool failure surfaces to the
-model as a ``ToolException`` and the agent loop owns the recovery decision —
-an automatic retry would silently rewrite what the model observed.
+``run_tool``. A client-tool handle's ``invoke`` (an in-process agent's own tool
+call, ``get_client_tools``) sits deliberately OUTSIDE this seam: there a tool
+failure surfaces to the agent as a ``ClientToolError`` and the agent loop owns
+the recovery decision — an automatic retry would silently rewrite what the model
+observed.
 
 OPT-IN, ALLOWLIST, BOUNDED
 --------------------------

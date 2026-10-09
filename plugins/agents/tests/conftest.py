@@ -15,7 +15,7 @@ through the handle:
 * ``monitoring`` (``AppMonitoring``) — ``active`` exposes a backend whose writer is
   the kit's real OpenTelemetry writer over an in-memory exporter, so a test reads back
   the records an agent run produced with no live backend.
-* ``tools`` (``AppTools``) — ``get_client_tools`` / ``run_tool`` are backed by the
+* ``tools`` (``AppTools``) — ``get_client_tools`` / ``get_tool`` / ``run_tool`` are backed by the
   mutable ``client_tools`` / ``tool_runners`` maps. A test populates the map it
   needs; an unknown name raises a ``RuntimeError`` carrying the name — the
   ``AppTools`` contract prescribes no exception type, so that is the fake's own
@@ -44,6 +44,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+from fastmcp.tools import Tool
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from tai42_contract.agent import Agent
@@ -177,7 +178,7 @@ class RecordingTools:
     """An ``AppTools`` impl backed by mutable maps a test populates.
 
     ``client_tools`` maps a name to the :class:`~tai42_contract.tools.ClientTool` handle
-    ``get_client_tools`` returns (``tests._client_tool.client_tool`` builds one);
+    ``get_client_tools`` returns (``tests._client_tool.client_tool`` builds one) and ``get_tool`` reads;
     ``tool_runners`` maps a base-tool name to a callable invoked by ``run_tool`` (used by
     preset binding). An unknown name raises a ``RuntimeError`` carrying the tool name: the
     ``AppTools`` contract declares no exception type for these calls, so this is the fake's own unknown-tool signal
@@ -227,6 +228,13 @@ class RecordingTools:
         if missing:
             raise RuntimeError(f"unknown client tools: {missing}")
         return [self.client_tools[name] for name in names]
+
+    async def get_tool(self, key: str) -> Tool:
+        """The registered tool ``key`` built from its handle's name, description and argument schema."""
+        if key not in self.client_tools:
+            raise RuntimeError(f"unknown tool: {key}")
+        handle = self.client_tools[key]
+        return Tool(name=handle.name, description=handle.description, parameters=handle.input_schema)
 
     async def run_tool(
         self,
