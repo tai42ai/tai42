@@ -38,6 +38,13 @@ class ResolveAgain:
 
 RESOLVE_AGAIN: Final = ResolveAgain()
 
+
+class _Refused:
+    """Returned by the owner's loop for a hand-over that lands after :func:`aclose` began."""
+
+
+_REFUSED: Final = _Refused()
+
 _loop: asyncio.AbstractEventLoop | None = None
 _pid: int | None = None
 _closing = False
@@ -76,7 +83,14 @@ def _log_outcome(connection_id: str, task: asyncio.Task[Any]) -> None:
         logger.error("connectors: owned refresh of %s failed", connection_id, exc_info=exc)
 
 
-async def _on_owner_loop[T](connection_id: str, start: Callable[[], Awaitable[T]]) -> T | ResolveAgain:
+async def _on_owner_loop[T](connection_id: str, start: Callable[[], Awaitable[T]]) -> T | ResolveAgain | _Refused:
+    if _closing:
+        # A caller on another loop saw the owner live, then shutdown began before its hand-over ran:
+        # the owner takes no new work, and the caller runs the slow path inline instead.
+        logger.warning(
+            "connectors: refresh of %s handed over after shutdown began; it runs inline in its caller", connection_id
+        )
+        return _REFUSED
     running = _tasks.get(connection_id)
     if running is not None:
         # Join the refresh in flight; its outcome reaches this caller through the stored state.
@@ -100,25 +114,32 @@ async def run[T](connection_id: str, start: Callable[[], Awaitable[T]]) -> T | R
     Returns the slow path's result, or :data:`RESOLVE_AGAIN` when this caller joined a task already
     in flight for the connection. The caller's cancellation never reaches the owned task. The owned
     coroutine runs on the owner's loop and does not see the caller's context variables, so
-    ``start`` must close over everything it needs.
+    ``start`` must close over everything it needs. A hand-over the owner refuses because
+    :func:`aclose` began after this caller found it live runs inline, as any call after that point does.
     """
     loop = _loop
     if loop is None or not is_live():
         return await start()
     if asyncio.get_running_loop() is loop:
-        return await _on_owner_loop(connection_id, start)
-    handed: Future[T | ResolveAgain] = asyncio.run_coroutine_threadsafe(_on_owner_loop(connection_id, start), loop)
-    waiting = asyncio.wrap_future(handed)
-    waiting.add_done_callback(_retrieve)
-    return await asyncio.shield(waiting)
+        outcome = await _on_owner_loop(connection_id, start)
+    else:
+        handed: Future[T | ResolveAgain | _Refused] = asyncio.run_coroutine_threadsafe(
+            _on_owner_loop(connection_id, start), loop
+        )
+        waiting = asyncio.wrap_future(handed)
+        waiting.add_done_callback(_retrieve)
+        outcome = await asyncio.shield(waiting)
+    if isinstance(outcome, _Refused):
+        return await start()
+    return outcome
 
 
 async def aclose() -> None:
     """Stop accepting work, cancel the owned tasks and wait for them, then unbind (the lifespan-shutdown hook).
 
-    From its start the owner is not live, so a new call runs inline. A task in a refresh section
-    finishes its write-back before it honours the cancellation; one still running after
-    :data:`ACLOSE_TIMEOUT_SECONDS` is logged at ERROR by connection id and left behind.
+    From its start the owner is not live and refuses every hand-over, so a new call runs inline. A
+    task in a refresh section finishes its write-back before it honours the cancellation; one still
+    running after :data:`ACLOSE_TIMEOUT_SECONDS` is logged at ERROR by connection id and left behind.
     """
     global _loop, _pid, _closing
     _closing = True

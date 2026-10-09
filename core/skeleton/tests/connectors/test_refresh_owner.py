@@ -31,10 +31,14 @@ from .oauth_fakes import FakeOAuthServer, Reply, serve
 
 
 class _Store:
+    """A compare-and-set store; with ``hang`` its write sets ``entered`` and waits until ``release`` is set."""
+
     def __init__(self, record: ConnectionRecord, *, hang: bool = False) -> None:
         self.blob = crypto.encrypt(record.to_storage_json().encode(), connection_id=record.connection_id)
         self.cid = record.connection_id
         self.hang = hang
+        self.entered = threading.Event()
+        self.release = threading.Event()
         self.writes = 0
 
     def record(self) -> ConnectionRecord:
@@ -42,7 +46,9 @@ class _Store:
 
     async def put(self, connection_id, blob, *, create_only=False, expected_blob=None, session_expires_at=None):
         if self.hang:
-            await asyncio.Event().wait()
+            self.entered.set()
+            while not self.release.is_set():
+                await asyncio.sleep(0.01)
         if expected_blob is not None and expected_blob != self.blob:
             return False
         self.blob = blob
@@ -54,6 +60,7 @@ class _Wiring:
     def __init__(self) -> None:
         self.stores: dict[str, _Store] = {}
         self.lock_gates: dict[str, threading.Event] = {}
+        self.lock_waiting: dict[str, threading.Event] = {}
 
 
 @pytest.fixture(autouse=True)
@@ -90,6 +97,9 @@ def wiring(monkeypatch: pytest.MonkeyPatch, fake: FakeOAuthServer) -> _Wiring:
     @asynccontextmanager
     async def _lock(connection_id):
         gate = w.lock_gates.get(connection_id)
+        waiting = w.lock_waiting.get(connection_id)
+        if waiting is not None:
+            waiting.set()
         while gate is not None and not gate.is_set():
             await asyncio.sleep(0.01)
         yield
@@ -200,29 +210,51 @@ async def _warm(fake: FakeOAuthServer, loop: asyncio.AbstractEventLoop | None = 
 # -- leaving at the budget ----------------------------------------------------------------
 
 
+async def _the_held_refresh_runs_on(store: _Store, loop: asyncio.AbstractEventLoop) -> None:
+    """After the caller left: the refresh had produced nothing, reaches its write-back, and ends once released."""
+    assert store.writes == 0
+    assert await asyncio.to_thread(store.entered.wait, 10)
+
+    async def _owned() -> asyncio.Task:
+        return refresh_owner._tasks[CID]
+
+    owned = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_owned(), loop))
+    assert not owned.done()
+    store.release.set()
+    await _eventually_rotated(store)
+    await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(asyncio.wait([owned], timeout=10), loop))
+    assert owned.done()
+    assert not owned.cancelled()
+    assert store.writes == 1
+
+
 async def test_a_throwaway_loop_caller_leaves_at_its_budget_and_the_refresh_still_completes(
     wiring: _Wiring, fake: FakeOAuthServer, owner_loop
 ):
-    store = wiring.stores[CID] = _Store(_expired(issuer=f"{fake.base}/a"))
-    _slow_token(fake)
+    # The refresh's write-back is held until released, so it cannot finish within the caller's budget.
+    store = wiring.stores[CID] = _Store(_expired(issuer=f"{fake.base}/a"), hang=True)
+    _slow_token(fake, delay=0.0)
     await _warm(fake, owner_loop)
 
-    async def _caller():
-        return await asyncio.wait_for(resolve_managed_auth(CID, "remote", "files"), 0.2)
+    async def _caller() -> float:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(resolve_managed_auth(CID, "remote", "files"), 0.2)
+        return time.monotonic() - started
 
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        await asyncio.to_thread(run_blocking, _caller)
-    assert time.monotonic() - started < 0.5
-    await _eventually_rotated(store)
+    # The outer bound only stops a caller that never leaves from hanging the test.
+    elapsed = await asyncio.wait_for(asyncio.to_thread(run_blocking, _caller), 10)
+    assert elapsed < 1.0
+    await _the_held_refresh_runs_on(store, owner_loop)
 
 
 @pytest.mark.parametrize("cancel", ["wait_for", "anyio"])
 async def test_a_caller_on_the_owners_loop_leaves_at_its_budget(
     wiring: _Wiring, fake: FakeOAuthServer, owner_loop, cancel
 ):
-    store = wiring.stores[CID] = _Store(_expired(issuer=f"{fake.base}/a"))
-    _slow_token(fake)
+    # The refresh's write-back is held until released, so it cannot finish within the caller's budget.
+    store = wiring.stores[CID] = _Store(_expired(issuer=f"{fake.base}/a"), hang=True)
+    _slow_token(fake, delay=0.0)
     await _warm(fake, owner_loop)
 
     async def _caller() -> float:
@@ -236,9 +268,10 @@ async def test_a_caller_on_the_owners_loop_leaves_at_its_budget(
             assert scope.cancelled_caught
         return time.monotonic() - started
 
-    elapsed = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_caller(), owner_loop))
-    assert elapsed < 0.5
-    await _eventually_rotated(store)
+    # The outer bound only stops a caller that never leaves from hanging the test.
+    elapsed = await asyncio.wait_for(asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_caller(), owner_loop)), 10)
+    assert elapsed < 1.0
+    await _the_held_refresh_runs_on(store, owner_loop)
 
 
 # -- one refresh per connection ---------------------------------------------------------
@@ -261,19 +294,29 @@ async def test_two_callers_for_one_connection_cause_one_token_request(
 async def test_callers_for_two_connections_run_concurrently(wiring: _Wiring, fake: FakeOAuthServer, owner_loop):
     wiring.stores[CID] = _Store(_expired(CID, issuer=f"{fake.base}/a"))
     wiring.stores[CID2] = _Store(_expired(CID2, issuer=f"{fake.base}/a"))
-    _slow_token(fake, delay=0.5)
+    # Each token request is answered only once both are in flight at the same time.
+    both_in_flight = threading.Barrier(2, timeout=10)
     fake.route(
         "POST",
         "/a/token",
         [
-            Reply(delay=0.5, body={"access_token": "at-1", "refresh_token": "rt-rotated", "expires_in": 3600}),
-            Reply(delay=0.5, body={"access_token": "at-2", "refresh_token": "rt-rotated", "expires_in": 3600}),
+            Reply(
+                hold=both_in_flight.wait,
+                body={"access_token": "at-1", "refresh_token": "rt-rotated", "expires_in": 3600},
+            ),
+            Reply(
+                hold=both_in_flight.wait,
+                body={"access_token": "at-2", "refresh_token": "rt-rotated", "expires_in": 3600},
+            ),
         ],
     )
-    await _warm(fake, owner_loop)
-    started = time.monotonic()
-    await asyncio.gather(resolve_managed_auth(CID, "remote", "files"), resolve_managed_auth(CID2, "remote", "files"))
-    assert time.monotonic() - started < 0.95
+    first, second = await asyncio.gather(
+        resolve_managed_auth(CID, "remote", "files"), resolve_managed_auth(CID2, "remote", "files")
+    )
+    assert first is not None
+    assert second is not None
+    assert {first.access_token, second.access_token} == {"at-1", "at-2"}
+    assert not both_in_flight.broken
     assert len(fake.requests_to("/a/token")) == 2
 
 
@@ -338,16 +381,63 @@ async def test_a_task_whose_only_waiter_left_logs_its_failure(owner_loop, caplog
 async def test_aclose_with_a_store_that_never_answers_returns_at_its_bound(
     wiring: _Wiring, fake: FakeOAuthServer, owner_loop, monkeypatch: pytest.MonkeyPatch, caplog
 ):
-    wiring.stores[CID] = _Store(_expired(issuer=f"{fake.base}/a"), hang=True)
+    store = wiring.stores[CID] = _Store(_expired(issuer=f"{fake.base}/a"), hang=True)
     _slow_token(fake, delay=0.0)
     monkeypatch.setattr(refresh_owner, "ACLOSE_TIMEOUT_SECONDS", 0.4)
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(resolve_managed_auth(CID, "remote", "files"), 0.3)
+    caller = asyncio.ensure_future(resolve_managed_auth(CID, "remote", "files"))
+    # The owned refresh is inside its finishing section, waiting on the store's write.
+    assert await asyncio.to_thread(store.entered.wait, 10)
+    owned = refresh_owner._tasks[CID]
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
     started = time.monotonic()
     with caplog.at_level(logging.ERROR, logger="tai42_skeleton.connectors.runtime.refresh_owner"):
-        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(refresh_owner.aclose(), owner_loop))
-    assert time.monotonic() - started < 1.5
+        await asyncio.wait_for(
+            asyncio.wrap_future(asyncio.run_coroutine_threadsafe(refresh_owner.aclose(), owner_loop)), 10
+        )
+    assert 0.4 <= time.monotonic() - started < 1.5
+    assert not owned.done()
     assert any(CID in record.message and record.levelno == logging.ERROR for record in caplog.records)
+    store.release.set()
+    await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(asyncio.wait([owned], timeout=10), owner_loop))
+    assert owned.cancelled()
+    assert store.writes == 1
+
+
+async def test_a_hand_over_landing_after_aclose_began_runs_inline_in_its_caller(
+    owner_loop, caplog: pytest.LogCaptureFixture
+):
+    in_flight = threading.Event()
+
+    async def _forever():
+        in_flight.set()
+        await asyncio.Event().wait()
+
+    first = asyncio.ensure_future(refresh_owner.run(CID, _forever))
+    assert await asyncio.to_thread(in_flight.wait, 10)
+    release = threading.Event()
+    owner_loop.call_soon_threadsafe(release.wait)  # holds the owner loop so aclose and the hand-over queue up
+    closing = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(refresh_owner.aclose(), owner_loop))
+    assert refresh_owner.is_live()
+    loops: list[asyncio.AbstractEventLoop] = []
+
+    async def _late():
+        loops.append(asyncio.get_running_loop())
+        return "late"
+
+    late = asyncio.ensure_future(refresh_owner.run(CID2, _late))
+    await asyncio.sleep(0)  # the late caller has handed its refresh over, queued behind aclose
+    assert loops == []
+    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.connectors.runtime.refresh_owner"):
+        release.set()
+        await asyncio.wait_for(closing, 10)
+        assert await asyncio.wait_for(late, 10) == "late"
+    assert loops == [asyncio.get_running_loop()]
+    assert refresh_owner._tasks == {}
+    assert any(CID2 in record.message and record.levelno == logging.WARNING for record in caplog.records)
+    with pytest.raises(asyncio.CancelledError):
+        await first
 
 
 async def test_aclose_lets_a_section_write_back_and_cancels_a_lock_waiter(
@@ -356,15 +446,34 @@ async def test_aclose_lets_a_section_write_back_and_cancels_a_lock_waiter(
     writing = wiring.stores[CID] = _Store(_expired(CID, issuer=f"{fake.base}/a"))
     waiting = wiring.stores[CID2] = _Store(_expired(CID2, issuer=f"{fake.base}/a"))
     wiring.lock_gates[CID2] = threading.Event()  # never opened: this one waits for the lock
-    _slow_token(fake, delay=0.5)
-    await _warm(fake, owner_loop)
+    wiring.lock_waiting[CID2] = threading.Event()
+    token_sent = threading.Event()
+    answer_token = threading.Event()
+
+    def _hold_token() -> None:
+        token_sent.set()
+        if not answer_token.wait(10):
+            raise RuntimeError("the token answer was never released")
+
+    fake.route(
+        "POST",
+        "/a/token",
+        Reply(hold=_hold_token, body={"access_token": "at-new", "refresh_token": "rt-rotated", "expires_in": 3600}),
+    )
     callers = [
         asyncio.ensure_future(resolve_managed_auth(CID, "remote", "files")),
         asyncio.ensure_future(resolve_managed_auth(CID2, "remote", "files")),
     ]
-    await asyncio.sleep(0.2)  # the first section is in flight, the second waits for its lock
+    # The first section is in flight, the second waits for its lock.
+    assert await asyncio.to_thread(token_sent.wait, 10)
+    assert await asyncio.to_thread(wiring.lock_waiting[CID2].wait, 10)
     closing = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(refresh_owner.aclose(), owner_loop))
-    await asyncio.sleep(0.05)
+
+    async def _after_aclose_began() -> None:
+        return None
+
+    # Queued behind aclose on the owner loop: once it runs, aclose has begun.
+    await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_after_aclose_began(), owner_loop))
     assert not refresh_owner.is_live()
     loops: list[asyncio.AbstractEventLoop] = []
 
@@ -374,7 +483,8 @@ async def test_aclose_lets_a_section_write_back_and_cancels_a_lock_waiter(
 
     assert await refresh_owner.run("other", _start) == "inline"
     assert loops == [asyncio.get_running_loop()]
-    await closing
+    answer_token.set()
+    await asyncio.wait_for(closing, 10)
     results = await asyncio.gather(*callers, return_exceptions=True)
     assert all(isinstance(result, BaseException) for result in results)
     await _eventually_rotated(writing)

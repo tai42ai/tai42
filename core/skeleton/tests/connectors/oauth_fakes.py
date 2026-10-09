@@ -11,7 +11,7 @@ import http.server
 import json
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -25,6 +25,9 @@ class Reply:
     # Seconds to wait before answering (the whole answer, headers included).
     delay: float = 0.0
     raw: bytes | None = None
+    # Called on the server thread after the request is recorded and before the answer (a test holds or
+    # synchronizes the answer here).
+    hold: Callable[[], object] | None = None
 
 
 @dataclass
@@ -65,6 +68,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             reply = (route.pop(0) if route else Reply(status=599)) if isinstance(route, list) else route
         if reply is None:
             reply = Reply(status=404, body={"error": "not_found"})
+        if reply.hold is not None:
+            reply.hold()
         if reply.delay:
             time.sleep(reply.delay)
         payload = (
