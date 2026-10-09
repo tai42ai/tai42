@@ -132,7 +132,13 @@ opt-in toggle, and an `integer`/`number` a numeric text field. A `string` with
 **CalendarPicker** (an unconstrained date stays a plain date picker); a declared
 date range is drawn as **two scalar date fields** and its ordering/span is
 enforced at the single answer facet, so the submitted answer is always the two
-date values, never a combined object. A page's **display blocks** (heading/body/
+date values, never a combined object. A field may carry a **second line** of text
+(its schema `description`): it draws as the control's **helper-text** on a text or
+date field and, since a choice control and an opt-in take no helper-text, as a
+**caption** rendered immediately after such a control (inside the same `If` when the
+field is conditional), so the content is never dropped; a per-send option may carry a
+**second line** too (its `description`), drawn under the option title. A page's
+**display blocks** (heading/body/
 image, each static or a reaction-filled slot) render ahead of its inputs, a
 **review** page shows a generic readback of the entered values, and a field with
 a `visibleWhen` predicate is shown/hidden by client-side `If`s — one per value

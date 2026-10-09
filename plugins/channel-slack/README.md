@@ -165,6 +165,13 @@ strings** → a **checkbox group** of five choices or fewer, a **multi-select** 
 that, or a multiline text box (one entry per line) when the array declares no
 choices; `boolean` → a Yes/No radio; `integer`/`number` → a number input.
 
+**Second lines.** A field may carry a **second line** of text (its schema
+`description`), drawn as the input block's **hint** under the control; a per-send
+option may carry a **second line** too (its `description`), drawn as the option's
+**description** under its label. Both are capped at Slack's own per-element limits
+(an option description at 75 characters) and an over-cap value is refused loudly,
+naming the field — never truncated, never dropped.
+
 **Dates (the Slack degrade).** Slack's date picker draws **no** minimum,
 maximum or disabled dates, and Slack has **no** range picker. So a declared date
 bound, an unavailable-days rule, or a range (two date fields — an end field naming

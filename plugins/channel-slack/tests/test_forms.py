@@ -771,3 +771,96 @@ def test_array_value_tolerates_odd_entries(entry):
     state = {"tags": {FIELD_ACTION_ID: entry}}
     # An unreadable/odd array entry yields no list -> the field is omitted, never guessed at.
     assert extract_answer(schema, state) == {}
+
+
+def test_option_description_renders_as_the_second_line_on_a_radio_group():
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}}
+    options = {"plan": [{"value": "s", "label": "Standard", "description": "2-3 days"}]}
+    (block,) = build_modal_blocks(schema, {}, options)
+
+    element = block["element"]
+    # A short per-send list is a radio group; the option carries its second line verbatim.
+    assert element["type"] == "radio_buttons"
+    assert element["options"] == [
+        {
+            "text": {"type": "plain_text", "text": "Standard"},
+            "value": "s",
+            "description": {"type": "plain_text", "text": "2-3 days"},
+        }
+    ]
+
+
+def test_option_description_renders_on_a_static_select_above_the_threshold():
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}}
+    options = {
+        "plan": [
+            {"value": f"p{i}", "label": f"Plan {i}", "description": f"desc {i}"}
+            for i in range(RADIO_OPTION_THRESHOLD + 1)
+        ]
+    }
+    (block,) = build_modal_blocks(schema, {}, options)
+
+    element = block["element"]
+    assert element["type"] == "static_select"
+    assert element["options"][0]["description"] == {"type": "plain_text", "text": "desc 0"}
+
+
+def test_option_description_renders_on_a_checkboxes_group():
+    schema = {"type": "object", "properties": {"plans": {"type": "array", "items": {"type": "string"}}}}
+    options = {"plans": [{"value": "a", "label": "Alpha", "description": "first"}]}
+    (block,) = build_modal_blocks(schema, {}, options)
+
+    element = block["element"]
+    assert element["type"] == "checkboxes"
+    assert element["options"][0]["description"] == {"type": "plain_text", "text": "first"}
+
+
+def test_option_description_renders_on_a_multi_static_select_above_the_threshold():
+    schema = {"type": "object", "properties": {"plans": {"type": "array", "items": {"type": "string"}}}}
+    options = {
+        "plans": [
+            {"value": f"a{i}", "label": f"Alpha {i}", "description": f"d{i}"} for i in range(RADIO_OPTION_THRESHOLD + 1)
+        ]
+    }
+    (block,) = build_modal_blocks(schema, {}, options)
+
+    element = block["element"]
+    assert element["type"] == "multi_static_select"
+    assert element["options"][0]["description"] == {"type": "plain_text", "text": "d0"}
+
+
+def test_option_without_a_description_carries_no_description_key():
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}}
+    (block,) = build_modal_blocks(schema, {}, {"plan": [{"value": "s", "label": "Standard"}]})
+    assert "description" not in block["element"]["options"][0]
+
+
+def test_over_long_option_description_is_a_loud_cap_error():
+    schema = {"type": "object", "properties": {"plan": {"type": "string"}}}
+    options = {"plan": [{"value": "s", "label": "Standard", "description": "d" * 76}]}
+    with pytest.raises(FormSchemaError, match="description exceeds 75 characters"):
+        build_modal_blocks(schema, {}, options)
+
+
+def test_field_description_renders_as_the_input_block_hint():
+    schema = {"type": "object", "properties": {"amount": {"type": "string", "description": "in whole units"}}}
+    (block,) = build_modal_blocks(schema)
+    assert block["hint"] == {"type": "plain_text", "text": "in whole units"}
+
+
+def test_blank_field_description_draws_no_hint():
+    schema = {"type": "object", "properties": {"amount": {"type": "string", "description": "   "}}}
+    (block,) = build_modal_blocks(schema)
+    assert "hint" not in block
+
+
+def test_over_long_field_description_is_a_loud_cap_error():
+    schema = {"type": "object", "properties": {"amount": {"type": "string", "description": "d" * 2001}}}
+    with pytest.raises(FormSchemaError, match="hint exceeds"):
+        build_modal_blocks(schema)
+
+
+def test_validate_form_schema_refuses_an_over_cap_field_description():
+    schema = {"type": "object", "properties": {"amount": {"type": "string", "description": "d" * 2001}}}
+    with pytest.raises(FormSchemaError, match="hint exceeds"):
+        validate_form_schema(schema, "q")

@@ -68,6 +68,79 @@ describe('SchemaFormAnswer', () => {
     expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'b' });
   });
 
+  it("folds an option's second line onto its option text as 'label — description'", () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour' } },
+    };
+    renderCard(
+      formQuestion(
+        schema,
+        {
+          values: {},
+          options: { colour: [{ value: 'r', label: 'Red', description: 'Warm tone' }] },
+        },
+        null,
+      ),
+    );
+
+    // A native <option> has no second-line slot, so the description rides the option text.
+    expect(screen.getByRole('option', { name: 'Red — Warm tone' })).toBeInTheDocument();
+  });
+
+  it('renders an option with no second line as just its label', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour' } },
+    };
+    renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        null,
+      ),
+    );
+
+    expect(screen.getByRole('option', { name: 'Red' })).toBeInTheDocument();
+  });
+
+  it('draws a field hint under the option-select label from the schema description', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour', description: 'Pick a tone' } },
+    };
+    renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        null,
+      ),
+    );
+
+    const hint = document.querySelector('.tai-field-hint');
+    expect(hint).not.toBeNull();
+    expect(hint).toHaveTextContent('Pick a tone');
+  });
+
+  it('renders no hint and no fold for a blank field or option second line', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour', description: '   ' } },
+    };
+    renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'r', label: 'Red', description: '   ' }] } },
+        null,
+      ),
+    );
+
+    // A whitespace-only second line is dropped on both surfaces: no hint paragraph, and the
+    // option text is the bare label with no trailing em dash.
+    expect(document.querySelector('.tai-field-hint')).toBeNull();
+    expect(screen.getByRole('option', { name: 'Red' })).toBeInTheDocument();
+  });
+
   it('renders a format:date property as a native date input and posts the ISO value', async () => {
     const user = userEvent.setup();
     const schema: JsonSchema = {

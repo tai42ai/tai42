@@ -1,7 +1,8 @@
 """Form-property → Block Kit input element mapping.
 
 The per-property half of the modal form renderer: it maps one answer-schema property
-onto the Block Kit element that collects it — the choice-option objects, the single /
+onto the Block Kit element that collects it — the choice-option objects (each with its
+label, submitted value and optional second-line ``description``), the single /
 multiple-choice controls, the Yes/No boolean radio, the date/time pickers and their
 prefills — and refuses, naming the property, anything the subset cannot express or any
 value Slack cannot display. The block/view assembly and the public entry points consume
@@ -54,7 +55,7 @@ def _array_items_string(spec: dict[str, Any]) -> bool:
 def _options_from_spec(
     name: str, spec: dict[str, Any], per_send_options: list[dict[str, Any]] | None
 ) -> list[dict[str, Any]] | None:
-    """The ``{value, label?}`` choice list for a property, or ``None`` when it has none.
+    """The ``{value, label?, description?}`` choice list for a property, or ``None`` when it has none.
 
     A per-send list wins (it replaces the schema choices for this send) and rides a string
     or array-of-strings property only — on any other type it is refused naming the property.
@@ -84,20 +85,33 @@ def _options_from_spec(
     return None
 
 
-def _option_block(name: str, label: str, value: str) -> dict[str, Any]:
-    """One option object: the ``label`` shown, the ``value`` submitted."""
+def _option_block(name: str, label: str, value: str, description: str | None = None) -> dict[str, Any]:
+    """One option object: the ``label`` shown, the ``value`` submitted, an optional second line.
+
+    ``description`` renders as the option's second-line ``description`` text; it carries
+    answer-relevant content (a time, a price), so a value past Slack's cap is refused naming
+    the property, never truncated or dropped.
+    """
     if len(label) > _MAX_OPTION_TEXT_LEN:
         raise FormSchemaError(
             f"form schema property {name!r} option {label!r} exceeds {_MAX_OPTION_TEXT_LEN} characters"
         )
-    return {"text": {"type": "plain_text", "text": label}, "value": value}
+    block: dict[str, Any] = {"text": {"type": "plain_text", "text": label}, "value": value}
+    if description is not None:
+        if len(description) > _MAX_OPTION_TEXT_LEN:
+            raise FormSchemaError(
+                f"form schema property {name!r} option {label!r} description exceeds {_MAX_OPTION_TEXT_LEN} characters"
+            )
+        block["description"] = {"type": "plain_text", "text": description}
+    return block
 
 
 def _option_blocks(name: str, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build the option objects for a choice control from a ``{value, label?}`` list.
+    """Build the option objects for a choice control from a ``{value, label?, description?}`` list.
 
     An empty list or one past the option cap is refused naming the property; each option's
-    label (falling back to its value) is shown and its value submitted.
+    label (falling back to its value) is shown, its value submitted, and its second-line
+    ``description`` (when present) carried onto the option object.
     """
     if not options:
         raise FormSchemaError(f"form schema property {name!r} option list must be a non-empty list")
@@ -107,7 +121,9 @@ def _option_blocks(name: str, options: list[dict[str, Any]]) -> list[dict[str, A
     for option in options:
         value = str(option["value"])
         label = str(option.get("label") or value)
-        blocks.append(_option_block(name, label, value))
+        raw_description = option.get("description")
+        description = str(raw_description) if raw_description is not None else None
+        blocks.append(_option_block(name, label, value, description))
     return blocks
 
 

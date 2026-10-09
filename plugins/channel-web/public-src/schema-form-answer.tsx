@@ -31,13 +31,28 @@ export function MalformedNotice({ message }: { readonly message: string }): Reac
   );
 }
 
+/** The text shown for one option: its label (falling back to the value) and, when it
+ * carries a second line, that line folded on after an em dash — a native `<option>` has
+ * no slot for a second line, so the content rides the option text rather than being lost. */
+function optionText(option: FormOptionData): string {
+  const label = option.label ?? option.value;
+  const description =
+    typeof option.description === 'string' && option.description.trim() !== ''
+      ? option.description
+      : null;
+  return description === null ? label : `${label} — ${description}`;
+}
+
 /** A per-send option field: a native `<select>` whose options show their label
  * (falling back to the value) and post their value. Native so it is keyboard
  * reachable and themed by the widget's tokens; a leading placeholder keeps it
- * controlled and unselected until the visitor (or a prefill) picks a value. */
+ * controlled and unselected until the visitor (or a prefill) picks a value. A field
+ * `hint` (the schema property's second line) draws under the label, matching the SDK's
+ * own field hint; an option's second line folds onto its option text. */
 function OptionSelect({
   id,
   label,
+  hint,
   options,
   value,
   error,
@@ -45,6 +60,7 @@ function OptionSelect({
 }: {
   readonly id: string;
   readonly label: string;
+  readonly hint: string | undefined;
   readonly options: readonly FormOptionData[];
   readonly value: unknown;
   readonly error: string | undefined;
@@ -56,6 +72,7 @@ function OptionSelect({
       <label className="tcw-form-field-label" htmlFor={id}>
         {label}
       </label>
+      {hint !== undefined ? <p className="tai-field-hint">{hint}</p> : null}
       <select
         id={id}
         className="tcw-select"
@@ -67,7 +84,7 @@ function OptionSelect({
         </option>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
-            {option.label ?? option.value}
+            {optionText(option)}
           </option>
         ))}
       </select>
@@ -108,10 +125,15 @@ function FormField({
   const choices = options[field];
   if (choices !== undefined) {
     const label = typeof prop?.title === 'string' ? prop.title : field;
+    const hint =
+      typeof prop?.description === 'string' && prop.description.trim() !== ''
+        ? prop.description
+        : undefined;
     return (
       <OptionSelect
         id={`${idPrefix}-${field}`}
         label={label}
+        hint={hint}
         options={choices}
         value={isPlainObject(value) ? value[field] : undefined}
         error={errors[field]}
