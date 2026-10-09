@@ -25,6 +25,7 @@ from tai42_skeleton.app.route_registry import (
     RouteMetadata,
     load_all_routes,
     method_to_action,
+    route_registry,
 )
 from tai42_skeleton.middleware.audit_log import UNMATCHED_ROUTE
 
@@ -83,8 +84,12 @@ def grant_map_admits(meta: RouteMetadata, method: str, grants: RoleGrants) -> tu
 # -- concrete (path, method) → registered route resolution -------------------
 
 # The route registry is import-populated, so the concrete/templated index is built lazily
-# and reused. :func:`reset_route_index` must drop it whenever the registry can have GAINED
-# routes, so the index never outlives the surface it describes.
+# and reused while it is current: it stores the registry version it was built at, and a
+# lookup rebuilds it once the registry's version has moved past that. Every record bumps the
+# version, so a route recorded after the build — the transports and the sub-MCP mount a
+# serving app records as it is assembled, after the startup audits built the index, or a
+# route a reload re-attaches — is resolved the moment it exists.
+_index_version: int | None = None
 _concrete_index: dict[tuple[str, str], RouteMetadata] | None = None
 _templated_matchers: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] | None = None
 # The MOUNTED surfaces (MCP transports, the sub-MCP mount), indexed SEPARATELY from the
@@ -148,12 +153,22 @@ def _index_entry(
             concrete[canonical, method] = meta
 
 
+def _index_is_current() -> bool:
+    return _concrete_index is not None and _index_version == route_registry.version
+
+
 def _build_index() -> None:
-    global _concrete_index, _templated_matchers, _mounted_concrete, _mounted_matchers
+    global _index_version, _concrete_index, _templated_matchers, _mounted_concrete, _mounted_matchers
     concrete: dict[tuple[str, str], RouteMetadata] = {}
     templated: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] = []
     mounted_concrete: dict[tuple[str, str], RouteMetadata] = {}
     mounted_templated: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] = []
+    # Read the version BEFORE the enumeration, so the index can only ever UNDER-claim: a
+    # route recorded while it builds (``load_all_routes`` may import router modules; an epoch
+    # build records on its own thread) leaves the stored version behind the registry's and
+    # the next lookup rebuilds. Reading it after would stamp the index with a version whose
+    # routes it does not hold.
+    version = route_registry.version
     # ``load_all_routes`` ensures the enumeration universe is imported so the registry is
     # populated before the index builds — in a started process that is the deployment's
     # served router surface (so the index matches what is served); in a CLI/test process it
@@ -173,17 +188,17 @@ def _build_index() -> None:
     _templated_matchers = templated
     _mounted_concrete = mounted_concrete
     _mounted_matchers = mounted_templated
+    _index_version = version
 
 
 @register_settings_reset
 def reset_route_index() -> None:
-    """Drop the cached concrete/templated route index so it rebuilds against the current registry.
+    """Drop the cached concrete/templated route index so the next lookup rebuilds it against the current registry.
 
-    MUST be called AFTER a reload has re-imported the router modules and every router has
-    re-attached its routes — ``start()`` does. A stale index answers ``None`` for every
-    newly mounted route, which denies every caller at the tool edge and skips the route's
-    fence at the request gate. The ``@register_settings_reset`` drop fires at the START of
-    a reload, before the reimport, so it cannot close that window on its own.
+    A record never needs this call to become resolvable: every lookup already rebuilds an
+    index whose stored version the registry has moved past. The drop serves what the version
+    does not count — the settings reset (``@register_settings_reset``) and a registry whose
+    records were replaced wholesale instead of recorded.
     """
     global _concrete_index, _templated_matchers, _mounted_concrete, _mounted_matchers
     _concrete_index = None
@@ -209,7 +224,7 @@ def resolve_route_meta(path: str, method: str | None) -> RouteMetadata | None:
     """
     if method is None:
         return None
-    if _concrete_index is None or _templated_matchers is None:
+    if not _index_is_current():
         _build_index()
     if _concrete_index is None:
         raise AssertionError
@@ -254,7 +269,7 @@ def resolve_served_surface(path: str, method: str | None) -> RouteMetadata | Non
         return handler
     if method is None:
         return None
-    if _mounted_concrete is None or _mounted_matchers is None:
+    if not _index_is_current():
         _build_index()
     if _mounted_concrete is None or _mounted_matchers is None:
         raise AssertionError
