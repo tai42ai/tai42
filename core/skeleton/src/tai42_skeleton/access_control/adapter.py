@@ -19,7 +19,7 @@ from tai42_skeleton.access_control.backend import (
     IdentityProviderUnavailableError,
     ReloadInProgressError,
 )
-from tai42_skeleton.access_control.middleware import ResourceGuardMiddleware
+from tai42_skeleton.access_control.middleware import PolicyVersionScopeMiddleware, ResourceGuardMiddleware
 from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
 from tai42_skeleton.access_control.role_gate import refusal_route
 from tai42_skeleton.access_control.roles import SkeletonAccountsAdminServices
@@ -131,6 +131,9 @@ class AuthAdapter(TokenVerifier):
             return []
 
         return [
+            # 0. One policy-version read for the whole access-control decision below; the
+            #    resource guard closes it as it hands the request to the app.
+            Middleware(PolicyVersionScopeMiddleware),
             # 1. Identity & Policy (Reads cached Redis data)
             Middleware(
                 AuthenticationMiddleware,

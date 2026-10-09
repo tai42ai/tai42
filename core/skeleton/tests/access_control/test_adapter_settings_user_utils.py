@@ -92,7 +92,8 @@ def test_adapter_builds_middleware_stack_without_resolving_provider():
     adapter = AuthAdapter(AccessControlSettings())
     assert adapter._internal_verifier._providers is None
     stack = adapter.get_middleware()
-    assert len(stack) == 3
+    # The policy-version scope, authentication, the auth context, the resource guard.
+    assert len(stack) == 4
     assert all(isinstance(m, Middleware) for m in stack)
 
 

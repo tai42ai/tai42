@@ -15,6 +15,7 @@ from tai42_contract.access_control.context import (
 
 from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
 from tai42_skeleton.access_control.path_canon import MalformedPathError, request_canonical_path
+from tai42_skeleton.access_control.policy_version_scope import close_policy_version_scope, policy_version_scope
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
     reset_request_identity_claims,
@@ -46,6 +47,27 @@ _REASON_SCOPE_MISS = "scope-miss"
 _DISABLE_HINT = "set ACCESS_CONTROL_ENABLE=false to disable access control for local development"
 
 
+class PolicyVersionScopeMiddleware:
+    """Open the request-scoped policy-version memo for every http/websocket request.
+
+    Installed first in the access-control stack, so the auth backend and the resource guard
+    decide on one version read; the resource guard closes the memo as it hands the request
+    to the app (see :mod:`~tai42_skeleton.access_control.policy_version_scope`).
+    """
+
+    def __init__(self, app: ASGIApp):
+        """Wrap the ASGI ``app`` whose access-control decision shares one version read."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        """Run the wrapped app inside a fresh version memo (http and websocket scopes only)."""
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        with policy_version_scope():
+            await self.app(scope, receive, send)
+
+
 class ResourceGuardMiddleware:
     """The route-authorization guard.
 
@@ -74,6 +96,7 @@ class ResourceGuardMiddleware:
         """Guard the request: resolve its route's resource, enforce access, then pass to the wrapped app."""
         # 1. Skip non-HTTP scopes (lifespan, etc.); http + websocket are guarded.
         if scope["type"] not in ("http", "websocket"):
+            close_policy_version_scope()
             await self.app(scope, receive, send)
             return
 
@@ -289,6 +312,9 @@ class ResourceGuardMiddleware:
             # the flag is absent.
             secret_capability_token = set_request_secret_capability(bool(getattr(user, "is_admin", False)))
 
+        # The access-control decision is made: the app and everything it starts read the
+        # policy version live, so a bump during a long-lived request is seen.
+        close_policy_version_scope()
         try:
             await self.app(scope, receive, send)
         finally:

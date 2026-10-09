@@ -46,6 +46,7 @@ from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.access_control.policy_version_scope import remember_policy_version
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.utils.redis_typing import awaited
@@ -651,8 +652,12 @@ async def revoke_api_key(user_id: str) -> bool:
 async def bump_policy_version() -> int:
     """Increment the policy-version counter (plain Redis), forcing a cross-worker cache miss on the next read.
 
-    Returns the new version. A failed bump RAISES loudly — it is never swallowed.
+    Returns the new version. A failed bump RAISES loudly — it is never swallowed. Inside an
+    open request scope the new version replaces the remembered one, so the rest of that
+    access-control decision reads what this bump wrote.
     """
     s = _settings()
     async with client_ctx(RedisClient, s.redis) as r:
-        return await awaited(r.incr(s.policy_version_key))
+        version = await awaited(r.incr(s.policy_version_key))
+    remember_policy_version(version)
+    return version
