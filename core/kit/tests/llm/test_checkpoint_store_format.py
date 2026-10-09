@@ -29,6 +29,9 @@ from ._real_redis import real_redis_url
 
 _METADATA: dict[str, Any] = {"source": "input", "step": 0, "parents": {}}
 
+# The Redis marker value this version records in an empty store.
+_REDIS_MARKER = str(CHECKPOINT_STORE_FORMAT_GENERATION).encode()
+
 
 def _refusal(provider: str, found: str) -> str:
     return (
@@ -42,8 +45,8 @@ async def _put_one(saver: Any) -> None:
     await saver.aput(config, empty_checkpoint(), _METADATA, {})
 
 
-def test_the_generation_is_two():
-    assert CHECKPOINT_STORE_FORMAT_GENERATION == 2
+def test_the_generation_is_three():
+    assert CHECKPOINT_STORE_FORMAT_GENERATION == 3
 
 
 async def test_memory_store_carries_no_marker():
@@ -214,7 +217,7 @@ async def test_redis_empty_store_records_the_generation(redis_store):
     _saver, resource = redis_store
     await ensure_store_format(resource)
     await ensure_store_format(resource)
-    assert await resource.redis_client.get(store_format.REDIS_FORMAT_KEY) == b"2"
+    assert await resource.redis_client.get(store_format.REDIS_FORMAT_KEY) == _REDIS_MARKER
 
 
 @integration
@@ -247,7 +250,7 @@ async def test_redis_a_garbage_marker_is_refused(redis_store):
 async def test_redis_concurrent_first_builds_converge(redis_store):
     _saver, resource = redis_store
     await asyncio.gather(*(ensure_store_format(resource) for _ in range(4)))
-    assert await resource.redis_client.get(store_format.REDIS_FORMAT_KEY) == b"2"
+    assert await resource.redis_client.get(store_format.REDIS_FORMAT_KEY) == _REDIS_MARKER
 
 
 async def test_a_redis_resource_without_its_client_is_refused():

@@ -7,6 +7,11 @@ rewrites every such value into a kit-owned envelope before the saver's JSON enco
 :class:`FaithfulRedisSerializer` decodes those envelopes on every read path. A value the codec cannot
 store faithfully is refused at write; an envelope that cannot be decoded raises at read.
 
+A ``datetime`` or ``time`` is stored as its fields: the wall-clock text, its ``tzinfo`` and its
+``fold``. A ``tzinfo`` is kept when it is a fixed offset (``datetime.timezone``, with its name) or an
+IANA zone (``zoneinfo.ZoneInfo``, by its key); any other ``tzinfo``, and a zone read from a file
+(which has no key), is refused at write.
+
 One envelope shape carries every kind::
 
     {"lc": 2, "type": "constructor", "id": KIT_ENVELOPE_ID, "args": [kind, payload]}
@@ -30,9 +35,10 @@ import uuid
 import zlib
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextvars import ContextVar, Token
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from zoneinfo import ZoneInfo
 
 import pydantic
 from langchain_core.load.serializable import Serializable
@@ -72,6 +78,7 @@ CODEC_KINDS: Final[frozenset[str]] = frozenset(
         "dataclass",
         "exception",
         "inflate",
+        "zoneinfo",
     }
 )
 
@@ -247,21 +254,45 @@ def _walk_langchain(value: Serializable, path: str) -> Any:
     return {**data, "kwargs": {name: _walk(item, f"{path}.{name}") for name, item in kwargs.items()}}
 
 
-def _walk_scalar(value: Any) -> Any:
+def _walk_timedelta(value: timedelta) -> dict[str, Any]:
+    return _envelope("timedelta", [value.days, value.seconds, value.microseconds])
+
+
+def _walk_tzinfo(tz: tzinfo, owner: Any, path: str) -> dict[str, Any]:
+    """The envelope of ``tz``, a bare value or the tzinfo of ``owner`` at ``path``; any other kind is refused."""
+    if isinstance(tz, timezone):
+        offset = tz.utcoffset(None)
+        default_name = timezone(offset).tzname(None)
+        name = tz.tzname(None)
+        return _envelope("timezone", [_walk_timedelta(offset), None if name == default_name else name])
+    if type(tz) is ZoneInfo:
+        if tz.key is None:
+            raise _refuse(owner, path, "its zone was read from a file and carries no key to read it back by")
+        return _envelope("zoneinfo", tz.key)
+    raise _refuse(
+        owner,
+        path,
+        f"its tzinfo of type {type(tz).__qualname__} is neither a datetime.timezone nor a zoneinfo.ZoneInfo",
+    )
+
+
+def _walk_wall_clock(kind: str, value: datetime | time, path: str) -> dict[str, Any]:
+    tz = None if value.tzinfo is None else _walk_tzinfo(value.tzinfo, value, path)
+    return _envelope(kind, [value.replace(tzinfo=None).isoformat(), tz, value.fold])
+
+
+def _walk_scalar(value: Any, path: str) -> Any:
     """The envelope of a datetime-family, decimal or uuid value; ``None`` when ``value`` is none of those."""
     if isinstance(value, datetime):
-        return _envelope("datetime", value.isoformat())
+        return _walk_wall_clock("datetime", value, path)
     if isinstance(value, date):
         return _envelope("date", value.isoformat())
     if isinstance(value, time):
-        return _envelope("time", value.isoformat())
+        return _walk_wall_clock("time", value, path)
     if isinstance(value, timedelta):
-        return _envelope("timedelta", [value.days, value.seconds, value.microseconds])
-    if isinstance(value, timezone):
-        offset = value.utcoffset(None)
-        default_name = timezone(offset).tzname(None)
-        name = value.tzname(None)
-        return _envelope("timezone", [_walk_scalar(offset), None if name == default_name else name])
+        return _walk_timedelta(value)
+    if isinstance(value, timezone) or type(value) is ZoneInfo:
+        return _walk_tzinfo(value, value, path)
     if isinstance(value, Decimal):
         return _envelope("decimal", str(value))
     if isinstance(value, uuid.UUID):
@@ -295,7 +326,7 @@ def _walk(value: Any, path: str) -> Any:  # noqa: C901, PLR0912 -- one ordered d
             field.name: _walk(getattr(value, field.name), f"{path}.{field.name}") for field in dataclasses.fields(value)
         }
         return _envelope("dataclass", [*_class_ref(kind, path), fields])
-    scalar = _walk_scalar(value)
+    scalar = _walk_scalar(value, path)
     if scalar is not None:
         return scalar
     if kind is tuple:
@@ -462,6 +493,18 @@ def _decode_timezone(payload: Any) -> timezone:
     return timezone(offset) if name is None else timezone(offset, _expect(name, str))
 
 
+def _decode_wall_clock[T: (datetime, time)](payload: Any, parse: Callable[[str], T]) -> T:
+    text, tz, fold = _expect(payload, list)
+    if tz is not None and not isinstance(tz, tzinfo):
+        raise TypeError("the tzinfo slot must be a tzinfo envelope or null")
+    if type(fold) is not int or fold not in (0, 1):
+        raise ValueError("fold must be 0 or 1")
+    wall = parse(_expect(text, str))
+    if wall.tzinfo is not None:
+        raise ValueError("the wall-clock text must carry no offset")
+    return wall.replace(tzinfo=tz, fold=fold)
+
+
 def _decode_timedelta(payload: Any) -> timedelta:
     days, seconds, microseconds = payload
     return timedelta(days=_expect(days, int), seconds=_expect(seconds, int), microseconds=_expect(microseconds, int))
@@ -469,11 +512,12 @@ def _decode_timedelta(payload: Any) -> timedelta:
 
 _SIMPLE_DECODERS: Final[dict[str, Callable[[Any], Any]]] = {
     "int_key_dict": lambda p: dict(_expect(p, list)),
-    "datetime": lambda p: datetime.fromisoformat(_expect(p, str)),
+    "datetime": lambda p: _decode_wall_clock(p, datetime.fromisoformat),
     "date": lambda p: date.fromisoformat(_expect(p, str)),
-    "time": lambda p: time.fromisoformat(_expect(p, str)),
+    "time": lambda p: _decode_wall_clock(p, time.fromisoformat),
     "timedelta": _decode_timedelta,
     "timezone": _decode_timezone,
+    "zoneinfo": lambda p: ZoneInfo(_expect(p, str)),
     "decimal": lambda p: Decimal(_expect(p, str)),
     "uuid": lambda p: uuid.UUID(_expect(p, str)),
     "tuple": lambda p: tuple(_expect(p, list)),

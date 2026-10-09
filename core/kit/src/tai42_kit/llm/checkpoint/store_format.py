@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from tai42_kit.llm.checkpoint.checkpoint import CheckpointResource
 
-CHECKPOINT_STORE_FORMAT_GENERATION: Final[int] = 2
+CHECKPOINT_STORE_FORMAT_GENERATION: Final[int] = 3
 
 # The Redis key holding the store's format generation.
 REDIS_FORMAT_KEY: Final = "tai42:checkpoint:format"
