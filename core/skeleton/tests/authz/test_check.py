@@ -432,11 +432,10 @@ async def _reload_added_handler(request):
 
 
 def test_a_route_added_by_an_in_place_reload_is_dispatchable_without_a_restart():
-    """A reload drops the route index BEFORE re-importing the routers, so a request served
-    in that window can freeze the index against the pre-reimport surface. ``start()`` must
-    drop it AGAIN once the reimport completes, or a reload-added route stays undispatchable
-    until restart. Only ``start()`` clears the frozen index here, so the assertion fails if
-    that post-reimport drop is absent."""
+    """A request served while a reload re-imports the routers builds the route index before a
+    reload-added route is recorded. The index follows the registry's version, so the route
+    recorded afterwards is dispatchable the moment it exists — without a restart and without
+    any explicit drop of the index."""
     from tai42_skeleton.app.instance import app
     from tai42_skeleton.authz.check import _own_route
     from tai42_skeleton.manifest import Manifest
@@ -447,7 +446,7 @@ def test_a_route_added_by_an_in_place_reload_is_dispatchable_without_a_restart()
     async def run() -> None:
         async with app.app_context(manifest):
             reset_all_settings()  # the reload's settings reset drops the index
-            # A request in the window rebuilds the index before the route is registered.
+            # A request in the window builds the index before the route is registered.
             assert resolve_route_meta(added, "POST") is None
             # The reimport completes: the reload-added router records its route.
             route_registry.record(
@@ -464,10 +463,6 @@ def test_a_route_added_by_an_in_place_reload_is_dispatchable_without_a_restart()
                 action="write",
             )
             try:
-                # Non-vacuous: the frozen index still answers nothing for the new route.
-                assert resolve_route_meta(added, "POST") is None
-                # No manual reset: ``start()``'s own drop is what must clear the index.
-                app.start(manifest)
                 meta = _op(OperationRegistry(), route=added)
                 assert _own_route(meta, added, "POST").path == added
             finally:

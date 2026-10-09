@@ -177,10 +177,8 @@ class BootMixin(LifecycleState):
         self._initialize_registries()
         self._initialize_components()
 
-        # The route index must be dropped HERE, AFTER the reimport re-attached every
-        # route: a request served in the reload window can have rebuilt it against the
-        # previous surface. A stale index resolves an added route to None, which denies
-        # every caller at the tool edge and skips the route's fence at the request gate.
+        # Drop the route index once the reimport has re-attached every route, so the next
+        # lookup rebuilds it against this surface.
         from tai42_skeleton.access_control.role_gate import reset_route_index
 
         reset_route_index()
