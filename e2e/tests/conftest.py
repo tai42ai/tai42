@@ -48,6 +48,7 @@ from tai42_e2e.manifests import (
     build_dead_collector_monitoring_stack,
     build_deep_agent_durable_stack,
     build_default_router_stack,
+    build_discovered_connectors_stack,
     build_door_schedule_stack,
     build_embed_prefix_stack,
     build_embed_stack,
@@ -94,6 +95,7 @@ from tai42_e2e.stack import TaiStack
 from tai42_e2e.stripe_stub import FakeStripe
 from tai42_e2e.topology import StackConfig
 from tai42_e2e.variants import Variants
+from tai42_e2e_fixtures.oauth_mcp_server import OAuthMcpServer
 
 # The monitoring / marketplace / fleet suites only collect when their opt-in gate is
 # on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
@@ -836,6 +838,36 @@ def connectors_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, oau
     }
     yield from _boot(
         infra, tmp_path_factory.mktemp("connectors"), build_connectors_stack, resource_kwargs=resource_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def oauth_mcp_env_server() -> Iterator[OAuthMcpServer]:
+    """The OAuth MCP fixture the discovered-servers profile's hand-written env-client descriptor pins."""
+    server = OAuthMcpServer()
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+@pytest.fixture(scope="module")
+def discovered_connectors_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, oauth_mcp_env_server: OAuthMcpServer
+) -> Iterator[TaiStack]:
+    """REPLICAS with access control ON, for MCP servers added by their address (the provider door)."""
+    resource_kwargs = {
+        "oauth_mcp_base_url": oauth_mcp_env_server.base_url,
+        "connectors_kek": base64.b64encode(secrets.token_bytes(32)).decode(),
+        "connectors_state_hmac_key": base64.b64encode(secrets.token_bytes(32)).decode(),
+    }
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("discovered-connectors"),
+        build_discovered_connectors_stack,
+        resource_kwargs=resource_kwargs,
+        seed_auth=True,
     )
 
 

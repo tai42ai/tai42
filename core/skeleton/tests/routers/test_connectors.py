@@ -88,6 +88,8 @@ def _provider():
         category="dev",
         sub_services={"repo": sub},
         config_fields=[field],
+        is_discovered=False,
+        client_id_env="GITHUB_CLIENT_ID",
     )
 
 
@@ -120,6 +122,8 @@ async def test_providers_view(wiring, monkeypatch):
     assert p["config_fields"][0]["key"] == "host"
     # The category groupings are served alongside the providers.
     assert body["categories"] == [{"id": "productivity", "display_name": "Productivity", "sort_order": 2}]
+    # A declared provider is not removable through the provider door; its client comes from env.
+    assert (p["removable"], p["client_source"]) == (False, "env")
 
 
 async def test_connections_list_excludes_secrets(wiring, monkeypatch):

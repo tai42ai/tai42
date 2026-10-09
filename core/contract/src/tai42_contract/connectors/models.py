@@ -317,6 +317,94 @@ class ProviderCatalogEntry(BaseModel):
     # No-auth only: the client-fillable config fields (empty for oauth). Drives
     # the connect-form in the UI.
     config_fields: list[ConfigFieldSpec] = Field(default_factory=list[ConfigFieldSpec])
+    # Whether the provider door may remove this provider: a discovered provider with a stored
+    # client, in the manifest's ``connectors`` list, that no installed plugin provides.
+    removable: bool = False
+    # Where the provider's sign-in client comes from: ``env`` (named env variables), or what the
+    # client store holds — ``manual``, else a usable ``dynamic`` row, else ``unset``. ``None`` for a
+    # no-auth provider.
+    client_source: Literal["env", "manual", "dynamic", "unset"] | None = None
+
+
+class DiscoverServerRequest(BaseModel):
+    """Look up an MCP server's authorization: by its address, or the server of an existing discovered provider."""
+
+    url: str | None = None
+    provider_id: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> DiscoverServerRequest:
+        if (self.url is None) == (self.provider_id is None):
+            raise ValueError("give exactly one of url or provider_id")
+        return self
+
+
+class DiscoveredServerView(BaseModel):
+    """What a look-up found: the server's protected resource and the sign-in service a new login would use."""
+
+    url: str
+    resource: str
+    resource_name: str | None = None
+    # The sign-in service a new login would use: by address the first listed; for a provider, the
+    # one its logins are bound to (its manual client's issuer, else its pin, else the first listed).
+    issuer: str
+    # Every sign-in service the server lists, in its order.
+    authorization_servers: list[str]
+    # A look-up by provider only: the sign-in service its manual client credentials are stored
+    # for, whether or not the server still lists it; ``None`` when it has none.
+    client_issuer: str | None = None
+    registration_supported: bool
+    # A login started from the origin of this request needs no client credentials from anyone.
+    automatic_client: bool
+    scopes_supported: list[str]
+    suggested_id: str
+    suggested_display_name: str
+    # The address an app registered by hand must allow for sign-ins started from the origin of this
+    # request; ``None`` when no sign-in can start from that origin.
+    redirect_uri: str | None = None
+
+
+class AddServerRequest(BaseModel):
+    """Add the MCP server at ``url`` as a discovered provider."""
+
+    url: str
+    id: str | None = None
+    display_name: str | None = None
+    description: str = ""
+    icon_url: str | None = None
+    category: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str | None) -> str | None:
+        return None if value is None else check_slug(value)
+
+
+class SetConnectorClientRequest(BaseModel):
+    """Store the client credentials of an app registered by hand for a discovered provider."""
+
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr | None = None
+    token_endpoint_auth_method: Literal["client_secret_post", "client_secret_basic", "none"] | None = None
+    # The sign-in service the credentials belong to; the secret is sent to no other.
+    issuer: str | None = None
+
+
+class ProviderMutationResponse(BaseModel):
+    """The provider's catalog entry after a change, and the fleet report of the manifest write it made."""
+
+    provider: ProviderCatalogEntry
+    # The awaited per-origin fleet report embedded untyped; ``None`` when no manifest write occurred.
+    fanout: dict[str, Any] | None = None
+
+
+class RemoveProviderResponse(BaseModel):
+    """A removed provider, how many stored clients went with it, and the fleet report of the manifest write."""
+
+    provider_id: str
+    removed_clients: int
+    fanout: dict[str, Any] | None = None
 
 
 class ConnectorCategoryView(BaseModel):

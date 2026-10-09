@@ -25,6 +25,10 @@ _ROUTES = [
     Route("/api/connectors/connections/{connection_id}/reconnect", router.reconnect, methods=["POST"]),
     Route("/api/connectors/connections/{connection_id}/sub-services", router.patch_sub_services, methods=["PATCH"]),
     Route("/api/connectors/oauth/complete", router.oauth_complete, methods=["POST"]),
+    Route("/api/connectors/providers/discover", router.discover_provider_server, methods=["POST"]),
+    Route("/api/connectors/providers", router.add_provider, methods=["POST"]),
+    Route("/api/connectors/providers/{provider_id}", router.remove_provider, methods=["DELETE"]),
+    Route("/api/connectors/providers/{provider_id}/client", router.set_provider_client, methods=["PUT"]),
 ]
 _STANCES = {
     r"/api/connectors/providers": AUTHED,
@@ -34,6 +38,9 @@ _STANCES = {
     r"/api/connectors/connections/[^/]+": AUTHED,
     r"/api/connectors/connections/[^/]+/reconnect": AUTHED,
     r"/api/connectors/connections/[^/]+/sub-services": AUTHED,
+    r"/api/connectors/providers/discover": AUTHED,
+    r"/api/connectors/providers/[^/]+": AUTHED,
+    r"/api/connectors/providers/[^/]+/client": AUTHED,
 }
 
 
@@ -77,6 +84,14 @@ def test_oauth_complete_rejected_without_auth(monkeypatch):
     assert client.post("/api/connectors/oauth/complete", json={}).status_code in (401, 403)
 
 
+def test_the_provider_door_is_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.post("/api/connectors/providers/discover", json={}).status_code in (401, 403)
+    assert client.post("/api/connectors/providers", json={}).status_code in (401, 403)
+    assert client.delete("/api/connectors/providers/abc").status_code in (401, 403)
+    assert client.put("/api/connectors/providers/abc/client", json={}).status_code in (401, 403)
+
+
 # The REAL authed stance of each registered connectors route, keyed by
 # (path, methods) — every connectors door is AUTHED. The tests below pin the
 # actual ``@custom_route(authed=...)`` metadata the OpenAPI emitter and the auth
@@ -94,6 +109,10 @@ _REGISTERED_AUTHED = {
     ("/api/connectors/connections/{connection_id}/sub-services", ("PATCH",)): True,
     ("/api/connectors/oauth/complete", ("POST",)): True,
     ("/api/connectors/tokens/reencrypt", ("POST",)): True,
+    ("/api/connectors/providers/discover", ("POST",)): True,
+    ("/api/connectors/providers", ("POST",)): True,
+    ("/api/connectors/providers/{provider_id}", ("DELETE",)): True,
+    ("/api/connectors/providers/{provider_id}/client", ("PUT",)): True,
 }
 
 

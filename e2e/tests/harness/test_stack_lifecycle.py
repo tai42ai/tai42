@@ -17,6 +17,7 @@ from tai42_e2e.manifests import (
     build_channel_stack,
     build_connectors_stack,
     build_core_stack,
+    build_discovered_connectors_stack,
     build_embed_stack,
     build_extensions_stack,
     build_minimal_stack,
@@ -45,6 +46,7 @@ _ALL_BUILDERS: list[Callable[[StackResources, Variants], StackConfig]] = [
     build_agents_redis_stack,
     build_studio_stack,
     build_connectors_stack,
+    build_discovered_connectors_stack,
     build_extensions_stack,
     build_monitoring_stack,
     build_channel_stack,
@@ -114,6 +116,7 @@ def test_harness_never_sets_multiproc_env() -> None:
         telegram_api_base_url="http://127.0.0.1:1",
         slack_api_base_url="http://127.0.0.1:1/api",
         twilio_api_base_url="http://127.0.0.1:1",
+        oauth_mcp_base_url="http://127.0.0.1:1",
     )
     variants = resolve_variants(HarnessSettings())
     for builder in _ALL_BUILDERS:

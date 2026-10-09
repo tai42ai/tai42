@@ -218,6 +218,90 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
     )
 
 
+# The hand-written discovered provider of the discovered-servers profile: an env client pinned to the
+# OAuth MCP fixture's issuer — the shape a vendor descriptor plugin takes.
+DISCOVERED_ENV_PROVIDER_ID = "e2e_discovered_env"
+DISCOVERED_ENV_CLIENT_ID = "e2e-discovered-env-client"
+_DISCOVERED_ENV_CLIENT_SECRET = "e2e-discovered-env-secret"
+# The ``https`` origin the client-identity document scenario presents; the stack serves plain http,
+# so the fixture fetches this origin's document from a replica with this ``Host``.
+DOCUMENT_ORIGIN = "https://app.e2e.test"
+
+
+def discovered_env_client_descriptor(fixture_base: str) -> dict[str, object]:
+    """The hand-written discovered descriptor with an env client, pinned to the fixture at ``fixture_base``."""
+    descriptor = ProviderDescriptor(
+        id=DISCOVERED_ENV_PROVIDER_ID,
+        display_name="E2E Discovered (env client)",
+        kind="oauth",
+        origin="community",
+        category="dev-tools",
+        client_id_env="E2E_DISCOVERED_CLIENT_ID",
+        client_secret_env="E2E_DISCOVERED_CLIENT_SECRET",
+        issuer=fixture_base,
+        sub_services={
+            "default": SubServiceDescriptor(
+                id="default",
+                display_name="Default",
+                mcp_server=McpServerDescriptor(type="http", url=f"{fixture_base}/mcp"),
+            )
+        },
+    )
+    return descriptor.model_dump(mode="json", exclude_none=True)
+
+
+def build_discovered_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """REPLICAS, access control ON — MCP servers added by their address against the OAuth MCP fixture.
+
+    The connectors router over a live store, the probe tools, the core routers (a manifest write and
+    a hand-written ``mcp`` entry among them), and the hand-written discovered descriptor
+    with an env client pinned to the fixture at ``res.oauth_mcp_base_url``. The redirect allow-list
+    carries both replicas' origins and :data:`DOCUMENT_ORIGIN`.
+    """
+    if res.oauth_mcp_base_url is None:
+        raise RuntimeError("the discovered-servers profile needs the OAuth MCP fixture's base URL")
+    manifest = {
+        "default_routers": "none",
+        "connectors": [discovered_env_client_descriptor(res.oauth_mcp_base_url)],
+        "routers_modules": [
+            *_CORE_ROUTERS,
+            "tai42_skeleton.routers.connectors",
+            "tai42_skeleton.routers.api_keys",
+        ],
+        "lifecycle_modules": [variants.identity.lifecycle_module],
+        "extensions_modules": _EXTENSION_MODULES,
+        "backend_module": variants.backend.module,
+        "storage_module": variants.storage.module,
+        "tools": [_probe_tools_entry(with_backend_branches=False), *_builtin_entries()],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env["ACCESS_CONTROL_ENABLE"] = "true"
+    env.update(variants.identity.auth_provider_env())
+    if res.connectors_kek is not None:
+        env["CONNECTORS_KEK"] = res.connectors_kek
+    if res.connectors_state_hmac_key is not None:
+        env["CONNECTORS_STATE_HMAC_KEY"] = res.connectors_state_hmac_key
+    env["E2E_DISCOVERED_CLIENT_ID"] = DISCOVERED_ENV_CLIENT_ID
+    env["E2E_DISCOVERED_CLIENT_SECRET"] = _DISCOVERED_ENV_CLIENT_SECRET
+    return StackConfig(
+        name="discovered-connectors",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=env,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+        origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+        extra_allowlist_origins=[DOCUMENT_ORIGIN],
+    )
+
+
+# The env client secret the fixture registers by hand for the hand-written descriptor.
+DISCOVERED_ENV_CLIENT_SECRET = _DISCOVERED_ENV_CLIENT_SECRET
+
+
 # The shipped connector plugin dirs whose ``tai-plugin.yml`` descriptor each stack loads.
 _SHIPPED_CONNECTOR_NAMES = ("google", "atlassian", "slack", "github")
 
