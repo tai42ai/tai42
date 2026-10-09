@@ -53,6 +53,7 @@ from tai42_contract.interactions.models.request import (
     QUESTION_MAX_CHARS,
     InteractionRequest,
     check_addressing,
+    check_format_payload,
 )
 from tai42_contract.interactions.models.response import (
     InteractionResponse,
@@ -101,6 +102,7 @@ __all__ = [
     "check_form_pages",
     "check_form_reactions",
     "check_form_tag",
+    "check_format_payload",
     "check_media_list",
     "served_media_id",
     "validate_action_url",

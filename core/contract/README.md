@@ -6,10 +6,16 @@ Pure interface contracts for the TAI ecosystem: the protocols, ABCs, pydantic
 models, and enums every other package builds against. At runtime this package
 imports nothing but `pydantic`, and its behaviour is limited to a narrow
 whitelisted surface — the `tai42_app` forwarding handle, model-level
-validators/normalizers, the storage path guard, and `Agent`'s default
+validators/normalizers, the bind/read/reset accessors of the ambient run context
+variables, the storage path guard, and `Agent`'s default
 `astream`/terminal-drain with its park conversion `SuspendedFinal.to_suspended_interaction`;
 everything else is a pydantic model, Protocol, ABC, or
-enum. Vendor types (fastmcp, starlette, mcp) appear only inside
+enum. Logic over this vocabulary that plugins, engines and the server share
+lives in `tai42-kit`: park adoption and the chained-call notices
+(`tai42_kit.interactions.park_adoption`), the park marker builder and reader
+(`park_marker`), the whole-chain kill handlers (`park_kill`), the failed-outcome
+text (`outcome_text`), and the inbound-media turn shaping and entry-params policy
+(`tai42_kit.conversations.inbound_media`, `tai42_kit.conversations.entry_params`). Vendor types (fastmcp, starlette, mcp) appear only inside
 `TYPE_CHECKING` blocks, so they are never loaded when the code runs.
 
 ## Position in the ecosystem

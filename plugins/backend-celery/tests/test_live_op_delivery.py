@@ -24,6 +24,10 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from tai42_contract.backend import FleetOpApplied, FleetOpEffect
+
+_REGISTRY = frozenset({FleetOpEffect.registry})
+_NONE: frozenset[FleetOpEffect] = frozenset()
 
 _BROKER_ENV = "TAI_TEST_CELERY_BROKER"
 _BROKER_REQUIRED = _BROKER_ENV in os.environ
@@ -158,7 +162,7 @@ def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any, stub
     # (the boot child was forked before the registry was populated).
     probe.SERVED_TOOLS.clear()
     probe.SERVED_TOOLS.update({"alpha", "beta"})
-    asyncio.run(bus_op_applied("reload_config", 30.0))
+    asyncio.run(bus_op_applied(FleetOpApplied(op="reload_config", effects=_REGISTRY, budget=30.0)))
 
     child_pid, tools = _submit(celery_app)
     assert tools == ["alpha", "beta"]
@@ -173,20 +177,20 @@ def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any, stub
     assert stale_tools == ["alpha", "beta"]
 
     # A query op must NOT re-fork the pool (a read never re-forks).
-    asyncio.run(bus_op_applied("list_failed_mcps", 30.0))
+    asyncio.run(bus_op_applied(FleetOpApplied(op="list_failed_mcps", effects=_NONE, budget=30.0)))
     same_pid, _ = _submit(celery_app)
     assert same_pid == child_pid
 
     # The mutating op: re-fork the pool and CONFIRM turnover (real pool_restart +
     # stats poll).
-    asyncio.run(bus_op_applied("deregister_mcp", 30.0))
+    asyncio.run(bus_op_applied(FleetOpApplied(op="deregister_mcp", effects=_REGISTRY, budget=30.0)))
     dereg_pid, dereg_tools = _submit(celery_app)
     assert dereg_pid != child_pid  # a genuinely new child answered
     assert dereg_tools == ["alpha"]  # and it serves the post-deregister registry
 
     # --- reload_config: the parent registry gains "gamma" ---
     probe.SERVED_TOOLS.add("gamma")
-    asyncio.run(bus_op_applied("reload_config", 30.0))
+    asyncio.run(bus_op_applied(FleetOpApplied(op="reload_config", effects=_REGISTRY, budget=30.0)))
     reload_pid, reload_tools = _submit(celery_app)
     assert reload_pid != dereg_pid
     assert reload_tools == ["alpha", "gamma"]

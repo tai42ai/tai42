@@ -167,14 +167,15 @@ async def _drive_visit(
 
         # Bind the generic tool-route completion for the turn: a parking tool captures it, and its
         # resumer fires the deferred outcome back to THIS thread out of band. A non-parking tool
-        # never reads it. Pin the ORIGINATING route beside the delivery thread and this turn's
-        # ``message_id`` (the late-path deliverer rebuilds ``$turn`` from that stored record) — a
-        # linked person may write from a different route before the resume, and the completion must
-        # map the outcome through THIS route's reply_expr, not the route the thread's newest record
-        # names. Reset in a finally so it never leaks past the turn.
+        # never reads it. Pin the ORIGINATING route and this turn's ``message_id`` (the late-path
+        # deliverer rebuilds ``$turn`` from that stored record) beside the thread — a linked person
+        # may write from a different route before the resume, and the completion must map the
+        # outcome through THIS route's reply_expr, not the route the thread's newest record names.
+        # Reset in a finally so it never leaks past the turn.
         completion_token = set_park_completion(
             DELIVER_TOOL_COMPLETION_NAME,
-            {"delivery_thread_id": thread_id, "route_name": route.route_name, "message_id": message_id},
+            {"route_name": route.route_name, "message_id": message_id},
+            thread_id=thread_id,
         )
 
         # ``offload_sync``: a synchronous tool runs off the event loop, matching the meta-executor

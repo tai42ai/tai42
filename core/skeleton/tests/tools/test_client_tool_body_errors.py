@@ -278,7 +278,8 @@ def test_tool_body_failed_terminal_renders_the_whole_outcome_as_text():
     # not the bare contract message the generic arm would collapse it to.
     import json
 
-    from tai42_contract.interactions import RunTerminalFailed, failed_outcome_text
+    from tai42_contract.interactions import RunTerminalFailed
+    from tai42_kit.interactions.outcome_text import failed_outcome_text
 
     from tai42_skeleton.interactions.terminal_failure import FAILED_OUTCOME_DETAIL_LIMIT, failed_outcome_detail
 

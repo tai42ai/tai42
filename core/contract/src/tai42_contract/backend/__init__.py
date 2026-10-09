@@ -10,20 +10,18 @@ from tai42_contract.backend.base import Backend
 from tai42_contract.backend.callback import CallbackSchema
 from tai42_contract.backend.runtime import (
     CONSUMING_RUNTIME,
-    POOL_TURNOVER_FLEET_OPS,
-    REGISTRY_MUTATING_FLEET_OPS,
-    TEMPLATE_EVICTION_FLEET_OPS,
     BackendRuntime,
     ExecutionMode,
+    FleetOpApplied,
+    FleetOpEffect,
 )
 
 __all__ = [
     "CONSUMING_RUNTIME",
-    "POOL_TURNOVER_FLEET_OPS",
-    "REGISTRY_MUTATING_FLEET_OPS",
-    "TEMPLATE_EVICTION_FLEET_OPS",
     "Backend",
     "BackendRuntime",
     "CallbackSchema",
     "ExecutionMode",
+    "FleetOpApplied",
+    "FleetOpEffect",
 ]

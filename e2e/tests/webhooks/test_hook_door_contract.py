@@ -52,6 +52,7 @@ async def _fire(api: ApiClient, topic: str, payload: dict[str, Any]) -> None:
 
 
 async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any], subject: dict[str, str]) -> Any:
+    """The sync door's run answer, discriminated on ``kind``."""
     return await api.post(
         "/api/run-tool",
         json={"tool_name": tool_name, "arguments": arguments, "subject": subject},
@@ -60,8 +61,15 @@ async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any], s
     )
 
 
+async def _run_tool_result(api: ApiClient, tool_name: str, arguments: dict[str, Any], subject: dict[str, str]) -> Any:
+    """The finished run's own value: the answer must be a ``result``."""
+    answer = await _run_tool(api, tool_name, arguments, subject)
+    assert answer["kind"] == "result", answer
+    return answer["result"]
+
+
 async def _parked(api: ApiClient, subject: dict[str, str]) -> list[dict[str, Any]]:
-    return await _run_tool(api, "list_parked", {}, subject)
+    return await _run_tool_result(api, "list_parked", {}, subject)
 
 
 @pytest.mark.needs("store:redis")
@@ -145,7 +153,7 @@ async def test_hook_resume_of_a_caller_ask_waits_on_the_subject_and_a_later_run_
     )
 
     # A later run on the subject TAKES the waiting outcome (resume_parked with no payload = a take).
-    taken = await _run_tool(api, "resume_parked", {"interaction_id": outcome_id}, subject)
+    taken = await _run_tool_result(api, "resume_parked", {"interaction_id": outcome_id}, subject)
     assert taken["action"] == "taken", taken
     assert answer in json.dumps(taken), taken
     # The take consumed it — the subject no longer lists the outcome.
@@ -162,6 +170,7 @@ async def test_hook_cancel_expr_cancels_a_parked_interaction(
     parked = await _run_tool(
         api, "e2e_caller_hold", {"question": uniq("hook-q"), "expiry_seconds": _PARK_EXPIRY_SECONDS}, subject
     )
+    assert parked["kind"] == "asks", parked
     interaction_id = parked["asks"][0]["id"]
     assert interaction_id in [e["id"] for e in await _parked(api, subject)]
 

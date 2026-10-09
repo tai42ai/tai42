@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from tai42_contract.conversation_target import ConversationTargetKind
-from tai42_contract.interactions import CallerAskLanding
+from tai42_contract.interactions import CallerAskLanding, DeliveryAddress
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 
@@ -59,12 +59,12 @@ class ContinuationDue:
     # redelivery restores the same chain the immediate fire did — passed as
     # ``continues_chain`` on the re-entry. Empty when the park carried no chain.
     asked_by: list[str] = field(default_factory=list)
-    # The RUN's durable out-of-band address ``{tool, context}`` and its per-run delivery
+    # The RUN's durable out-of-band address and its per-run delivery
     # identity, self-contained copies of the interaction's stored fields so the reaper's
     # DETACHED redelivery binds the address and re-establishes the run's delivery identity
     # without re-reading the request. ``None`` for a park that ran under no run-delivery
     # context (a receiver-less door) or a sync question.
-    delivery: dict[str, Any] | None = None
+    delivery: DeliveryAddress | None = None
     run_delivery_id: str | None = None
     # The door's caller-ask landing (the ``CallerAskLanding`` as a model), re-established around the
     # reaper's detached redelivery so a caller re-ask during that re-drive is judged by the same
@@ -177,7 +177,7 @@ class KillTarget:
     ``kind`` is ``"park"`` (a pending ask), ``"running"`` (an answered/resuming entry — its state
     hash retained or only its continuation-due record left), or ``"outcome"`` (a completed run's
     waiting result). ``group_id`` is the pending park's group (for the prune's count cleanup),
-    ``None`` for the other kinds. ``delivery`` (the run's out-of-band address ``{tool, context}``),
+    ``None`` for the other kinds. ``delivery`` (the run's out-of-band address),
     ``run_delivery_id`` and ``subjects`` (the descriptor) are the run's delivery identity the kill
     copies onto its durable record and delivers its single FAILED under — ``None`` when the run
     carried none (a receiver-less door, no subject). ``chain_keys`` are the chained calls the
@@ -187,7 +187,7 @@ class KillTarget:
 
     kind: Literal["park", "running", "outcome"]
     group_id: str | None
-    delivery: dict[str, Any] | None
+    delivery: DeliveryAddress | None
     run_delivery_id: str | None
     subjects: dict[str, Any] | None
     chain_keys: list[str] = field(default_factory=list)
@@ -210,7 +210,7 @@ class KillDue:
     reason: str
     attempts: int
     deadline_ms: int
-    delivery: dict[str, Any] | None = None
+    delivery: DeliveryAddress | None = None
     run_delivery_id: str | None = None
     subjects: dict[str, Any] | None = None
     chain_keys: list[str] = field(default_factory=list)

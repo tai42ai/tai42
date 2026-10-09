@@ -5,10 +5,10 @@ This is the unified park-completion binding's core new path, end to end on the r
 
 * A ``target_kind=tool`` web route dispatches ``e2e_tool_target_park`` per inbound message. That
   tool does NOT bind its own probe continuation — it reads the ``deliver_tool_completion``
-  binding the conversation door's REAL ``_run_tool_turn`` pins around the dispatch (the opaque
-  ``{delivery_thread_id, route_name}`` context), binds a resume continuation, and async-parks on
-  ``ask(mode="async")``. So the PRODUCTION completion continuation is what carries the
-  deferred reply back.
+  binding the conversation door's REAL ``_run_tool_turn`` pins around the dispatch (the delivery
+  address carrying the thread and the opaque ``{route_name, message_id}`` context), binds a
+  resume continuation, and async-parks on ``ask(mode="async")``. So the PRODUCTION completion
+  continuation is what carries the deferred reply back.
 * A visitor's message parks the turn SILENTLY — no synchronous reply is posted, the interaction
   is persisted — mirroring the web round-trip harness of ``test_web_public_chat``.
 * The park is answered OUT OF BAND through a DIFFERENT replica's interactions door (the

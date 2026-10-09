@@ -86,7 +86,8 @@ app: a backend-runtime process joins that bus through the app's single
 long-lived subscription and receives each op (`reload_config`, `reload_mcp`, …)
 exactly like a serving HTTP worker — this backend carries no control-plane of
 its own. Its one obligation on top of the bus is the prefork-pool turnover:
-after every applied MUTATING op the backend re-forks this worker's pool (see
+after every applied op that declares an effect (the tool registry or the
+compiled-template cache changed) the backend re-forks this worker's pool (see
 [Live reload and the prefork pool](#live-reload-and-the-prefork-pool)).
 
 The worker runs on a background thread so this process's event loop stays alive
@@ -154,13 +155,15 @@ Settings are read from the `CELERY_` environment group (see `CelerySettings`):
 
 ### Live reload and the prefork pool
 
-After the worker bus applies a MUTATING op in this process, the backend re-forks
+After the worker bus applies an op in this process that declares an effect (the
+post-apply hook receives the op's `effects`), the backend re-forks
 this worker's prefork pool so its children re-inherit the parent's updated tool
 registry, and it CONFIRMS the restart rather than assuming it: it polls `stats`
 until every pre-restart child PID is gone and the pool is back to full size. A pool
 that does not fully re-fork fails the op loudly, naming the worker — turning this
 worker's bus reply into `failed` rather than reporting an applied op behind stale
-children. The query op `list_failed_mcps` never re-forks the pool.
+children. A query op such as `list_failed_mcps` declares no effect, so it never
+re-forks the pool.
 
 The cap of **one pool child** is what makes that confirmation achievable. Celery's
 `pool_restart` is a *soft* restart: it arms a per-child restart sentinel and returns

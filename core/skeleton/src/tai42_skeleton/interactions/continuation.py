@@ -46,14 +46,13 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     CallerAskLanding,
+    DeliveryAddress,
     InteractionRequest,
     ResumeBuffered,
     RunFailed,
     RunTerminalFailed,
     SuspendedInteraction,
     declare_caller_ask_landing,
-    register_execution_identity_accessor,
-    register_execution_identity_binder,
 )
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 from tai42_contract.tools import RunDelivery, run_delivery
@@ -68,9 +67,9 @@ from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
 from tai42_skeleton.runs.chokepoint import delivery_fire, resume_lineage, resume_origin
 from tai42_skeleton.states.context import current_state_context, state_context
 
-# The out-of-band delivery address the platform captured on a resumed interaction: the
-# ``(tool, context)`` of the door that started the run, or ``None`` for a receiver-less run.
-_Delivery = tuple[str | None, Mapping[str, Any] | None] | None
+# The out-of-band delivery address the platform captured on a resumed interaction: the door that
+# started the run, or ``None`` for a receiver-less run.
+_Delivery = DeliveryAddress | None
 
 logger = logging.getLogger(__name__)
 
@@ -239,14 +238,18 @@ async def _deliver_terminal(
             "(a parkable run always mints one at its outermost start)"
         )
     completion_id = _completion_id(run_delivery_id)
-    delivery_tool = delivery[0] if delivery is not None else None
-    if delivery_tool is not None:
-        context = dict(delivery[1]) if delivery is not None and delivery[1] is not None else {}
-        payload = {**context, "result": outcome, "completion_id": completion_id, "status": status}
+    if delivery is not None and delivery.tool is not None:
+        payload = {
+            **(delivery.context or {}),
+            "thread_id": delivery.thread_id,
+            "result": outcome,
+            "completion_id": completion_id,
+            "status": status,
+        }
         # Fire the door's address under the platform's delivery-fire context so the address tool
         # passes ``assert_delivery_authorized`` — the ONE place an address is fired.
         with delivery_fire(completion_id):
-            await tai42_app.tools.run_tool(delivery_tool, payload)
+            await tai42_app.tools.run_tool(delivery.tool, payload)
         # The run is complete: drop its ``running`` subject-index membership (an answered park kept
         # it while the run drove). The subject-track rung does this through ``add_outcome``; the
         # address rung must do it too, after the fire so a fire failure leaves it for a redelivery.
@@ -636,7 +639,6 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
     identity and chain lineage without re-reading the request.
     """
     candidates = due.state_context.candidates if due.state_context is not None else None
-    delivery: _Delivery = (due.delivery["tool"], due.delivery["context"]) if due.delivery is not None else None
     _spawn_detached_delivery(
         store,
         identity=due.identity,
@@ -648,7 +650,7 @@ def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> Non
         park_asked_by=due.asked_by,
         caller_ask_landing=due.caller_ask_landing,
         chain_keys=due.chain_keys,
-        delivery=delivery,
+        delivery=due.delivery,
         run_delivery_id=due.run_delivery_id,
         candidates=candidates,
         deferred_binding=due.deferred_binding,
@@ -679,32 +681,3 @@ def _current_state_context_for_park() -> StateContext | None:
     parking turn's own context.
     """
     return current_state_context()
-
-
-def _current_execution_identity_for_park() -> tuple[str | None, str]:
-    """Read the current execution identity as ``(user id, fingerprint)`` for a park to record.
-
-    ``(None, "")`` when none is bound — the same two values this module captures onto the
-    durable resume-continuation record (``continuation_identity`` + fingerprint). Imported
-    function-locally to keep an ``authz`` module-load edge (its ``access_control.backend`` chain)
-    out of this module's import.
-    """
-    from tai42_skeleton.authz.execution_identity import capture_fire_identity
-
-    return capture_fire_identity()
-
-
-def _bind_execution_identity_for_park_fire(execution_key: str, fingerprint: str) -> Any:
-    """Bind ``execution_key`` (under ``fingerprint``) as the execution identity for an out-of-band park fire.
-
-    The SAME bind the detached resume drive uses.
-    """
-    return bind_execution_identity(execution_key, bound_fingerprint=fingerprint)
-
-
-# Wire the skeleton's execution identity into the contract's park bridge at import, so a park
-# records the identity its run is authorized as and an out-of-band fire performed for it runs under
-# that identity rather than fail-open. Both the capture worker and the reaper worker import this
-# module at boot, so both halves are registered where they are needed.
-register_execution_identity_accessor(_current_execution_identity_for_park)
-register_execution_identity_binder(_bind_execution_identity_for_park_fire)

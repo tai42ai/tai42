@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
-from tai42_contract.interactions import InteractionRequest, InteractionState
+from tai42_contract.interactions import DeliveryAddress, InteractionRequest, InteractionState
 
 from . import events, records, scripts, serde, ttl
 from .writes_base import AskTo, _StoreWritesBase
@@ -55,7 +55,7 @@ class _StoreWrites(_StoreWritesBase):
         expiry_ttl_margin_seconds: int = ttl._DEFAULT_EXPIRY_TTL_MARGIN_SECONDS,
         thread_id: str | None = None,
         to: AskTo = "user",
-        delivery: dict[str, Any] | None = None,
+        delivery: DeliveryAddress | None = None,
         run_delivery_id: str | None = None,
     ) -> None:
         """Persist a new question and refresh its TTLs.
@@ -139,7 +139,7 @@ class _StoreWrites(_StoreWritesBase):
         continuation_fingerprint: str | None,
         thread_id: str | None,
         to: AskTo = "user",
-        delivery: dict[str, Any] | None = None,
+        delivery: DeliveryAddress | None = None,
         run_delivery_id: str | None = None,
     ) -> dict[str, str]:
         """Shape the durable state hash.
@@ -200,7 +200,7 @@ class _StoreWrites(_StoreWritesBase):
         state_mapping: dict[str, str],
         request: InteractionRequest,
         to: AskTo,
-        delivery: dict[str, Any] | None,
+        delivery: DeliveryAddress | None,
         run_delivery_id: str | None,
     ) -> None:
         """Fold the addressing/subject/delivery denormalizations onto the state hash.
@@ -229,7 +229,7 @@ class _StoreWrites(_StoreWritesBase):
         if request.chain_keys:
             state_mapping["chain_keys"] = json.dumps(request.chain_keys)
         if delivery is not None:
-            state_mapping["delivery"] = json.dumps(delivery)
+            state_mapping["delivery"] = delivery.model_dump_json()
         if run_delivery_id is not None:
             state_mapping["run_delivery_id"] = run_delivery_id
         if request.deferred_binding is not None:

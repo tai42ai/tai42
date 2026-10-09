@@ -10,6 +10,7 @@ from tai42_kit.utils.data import load_manifest
 
 from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.app.bus.ops import DeregisterMcp, ReloadFailedMcps, ReloadMcp
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
@@ -39,7 +40,7 @@ async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
     if title not in titles:
         raise NotFoundError(f"unknown mcp title: {title!r}")
     return await broadcast(
-        {"op": "reload_mcp", "title": title},
+        ReloadMcp(op="reload_mcp", title=title),
         targets,
         lambda: reload_gate.run(lambda: tai42_app.admin.reload_mcp(title), reimports=False),
     )
@@ -97,7 +98,7 @@ async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     """
     # Run the heavy sync re-probe pass on a worker thread through the gate.
     return await broadcast(
-        {"op": "reload_failed_mcps"},
+        ReloadFailedMcps(op="reload_failed_mcps"),
         targets,
         lambda: reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False),
     )
@@ -120,7 +121,7 @@ async def deregister_mcp(title: str, targets: list[str] | None = None) -> Any:
     """
     # Run the heavy sync detach on a worker thread through the gate.
     return await broadcast(
-        {"op": "deregister_mcp", "title": title},
+        DeregisterMcp(op="deregister_mcp", title=title),
         targets,
         lambda: reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title), reimports=False),
     )

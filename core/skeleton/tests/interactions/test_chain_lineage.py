@@ -32,16 +32,16 @@ from tai42_contract.interactions import (
     ResumeItem,
     RunFailed,
     SuspendedInteraction,
-    register_park_kill_handler,
     reset_chained_resume,
     reset_resume_continuation_tool,
     set_chained_resume,
     set_resume_continuation_tool,
 )
-from tai42_contract.interactions import continuation as contract_continuation
 from tai42_contract.tools import RunDelivery, run_delivery, tool_call_frame
 from tai42_kit.interactions import park_giveup
+from tai42_kit.interactions import park_kill as kit_park_kill
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
+from tai42_kit.interactions.park_kill import register_park_kill_handler
 
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -93,7 +93,7 @@ def wired(monkeypatch: pytest.MonkeyPatch, fake_redis: Any, fake_client_ctx: Any
 @pytest.fixture(autouse=True)
 def _isolated_handlers(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # Both seams are process-global registries: give each test its own empty list.
-    monkeypatch.setattr(contract_continuation, "_park_kill_handlers", [])
+    monkeypatch.setattr(kit_park_kill, "_park_kill_handlers", [])
     saved = list(park_giveup._park_giveup_handlers)
     park_giveup._park_giveup_handlers.clear()
     yield

@@ -135,7 +135,7 @@ def test_tools_agent_run_park_is_outermost_and_captures_no_chain(
     async def go() -> None:
         # The door's out-of-band delivery address is bound and flows down unchanged; the driver
         # does not capture it as the park's chain routing.
-        token = set_park_completion("conversation_deliver", {"thread_id": "bridge:acme:alice"})
+        token = set_park_completion("conversation_deliver", thread_id="bridge:acme:alice")
         try:
             receipt = await agent.run(
                 tool_names=["ask"],

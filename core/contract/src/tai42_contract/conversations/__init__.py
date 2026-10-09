@@ -41,8 +41,6 @@ from tai42_contract.conversations.inbound_media import (
     STICKER_ANIMATED_PARAM,
     InboundMediaKind,
     InboundRejectionReason,
-    build_inbound_media_params,
-    inbound_media_placeholder,
 )
 from tai42_contract.conversations.overlap import OverlapPolicy, TurnSupersededError
 from tai42_contract.conversations.persons import Person, PersonAddress
@@ -124,9 +122,7 @@ __all__ = [
     "TargetBindValidator",
     "TargetConversationConfig",
     "TurnSupersededError",
-    "build_inbound_media_params",
     "current_conversation_turn",
-    "inbound_media_placeholder",
     "joined_answer_text",
     "reset_conversation_turn",
     "set_conversation_turn",

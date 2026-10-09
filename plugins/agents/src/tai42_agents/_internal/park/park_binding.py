@@ -6,8 +6,7 @@ interaction id. The agents plugin reverses that id to the parked run through the
 Redis (``TAI_AGENTS_REDIS_URL``, falling back to ``TAI_DEFAULT_REDIS_URL``) — independent of the
 checkpoint provider, so a cross-worker resume finds the park even when the paused graph is
 checkpointed to postgres. Each entry is the agents' rebuild payload: ``{agent_name, thread_id,
-superstep_id, interrupt_id, rebuild_kwargs, completion_tool, completion_context, retention_bound,
-execution_identity, execution_fingerprint}``.
+superstep_id, interrupt_id, rebuild_kwargs, completion_tool, completion_context, retention_bound}``.
 
 The index library imports no Redis client at import time, so the shipped agents import graph stays
 free of it; an unconfigured Redis fails loudly at the first read or write.

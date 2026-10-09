@@ -17,7 +17,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from tai42_contract.interactions import AnswerFormat, InteractionRequest, InteractionResponse
+from tai42_contract.interactions import AnswerFormat, DeliveryAddress, InteractionRequest, InteractionResponse
 from tai42_contract.states import StateContext, SubjectCandidates
 
 from tai42_skeleton.interactions import InteractionStore
@@ -408,7 +408,7 @@ async def test_pending_and_list_pending_hide_caller_asks(fake_redis):
 
 async def test_continuation_due_carries_delivery_and_run_identity(fake_redis):
     store = InteractionStore("t:")
-    delivery = {"tool": "conversation_deliver", "context": {"chat": "c1"}}
+    delivery = DeliveryAddress(tool="conversation_deliver", context={"chat": "c1"}, thread_id="c1")
     await store.add(
         fake_redis,
         _park(store, "i1", candidates=_candidates(person="pA")),

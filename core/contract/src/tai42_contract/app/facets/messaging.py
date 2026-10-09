@@ -17,7 +17,7 @@ from tai42_contract.conversations import (
 from tai42_contract.interactions.answer_check import QuestionFormat
 from tai42_contract.interactions.asker import Ask
 from tai42_contract.interactions.models import LocationElement, MediaItem
-from tai42_contract.interactions.visit import ParkedEntry, Visit, VisitOutcome
+from tai42_contract.interactions.visit import ParkedEntry, RunAnswer, Visit, VisitOutcome
 from tai42_contract.states import StateContext
 from tai42_contract.webhooks import WebhookVerifier
 
@@ -38,6 +38,24 @@ class AppInteractions(Protocol):
         dotted path when the fault locates to one) otherwise. The answer door, the callback
         door, a resumed run's ``visit`` and plugins all validate through this one callable so
         every surface applies identical rules per format.
+        """
+        ...
+
+    def question_format(
+        self,
+        answer_format: str,
+        *,
+        options: list[str] | None = None,
+        schema: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        pages: list[dict[str, Any]] | None = None,
+        reactions: dict[str, Any] | None = None,
+    ) -> QuestionFormat:
+        """The answer-check view of an ask with these arguments (the parameter names are the ``ask`` tool's own).
+
+        The stored ``format_payload`` minus EXTERNAL's delivery keys (``url``, ``verifier``), ready
+        for :meth:`check_answer`. Raises ``ValueError`` for an unknown format, an argument not valid
+        for the format, or a value of the wrong shape.
         """
         ...
 
@@ -108,16 +126,16 @@ class AppInteractions(Protocol):
         """
         ...
 
-    def park_answer(self, outcome: VisitOutcome) -> Any:
-        """The ONE park-answer shape a direct door hands back for a :class:`VisitOutcome`.
+    def run_answer(self, outcome: VisitOutcome) -> RunAnswer:
+        """The ONE :data:`~tai42_contract.interactions.RunAnswer` a run door hands back for a :class:`VisitOutcome`.
 
-        A plain ``result`` is the tool's own value; an ``asks`` outcome is the caller ask entries
-        the run parked (``{"asks": [entry, ...]}``); a ``parked`` outcome is the suspended
-        sentinel; ``none`` is ``None``. Both the synchronous run-tool door and the background
-        submit's terminal record shape a park through this ONE callable, so a poller of either
-        door reads identical bytes and can tell a caller-ask park (answerable through
-        ``resume_parked``) from a user-ask park. It never reveals a wrapped secret — the sync door
-        reveals those on the ``result`` kind itself and every recorder masks its own copy.
+        Discriminated on ``kind``: ``result`` carries the run's own value, ``asks`` the caller ask
+        entries the run parked with its re-park sentinel, ``parked`` the sentinel alone, ``none``
+        nothing. Both the synchronous run-tool door and the background submit's parked record
+        shape a run through this ONE callable, so a poller of either door reads identical bytes.
+        It never reveals a wrapped secret — the sync door reveals those on its own ``result`` and
+        every recorder masks its own copy. An ``asks``/``parked`` outcome carrying no sentinel
+        raises ``RuntimeError``.
         """
         ...
 

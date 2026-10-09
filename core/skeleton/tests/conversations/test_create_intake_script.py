@@ -331,7 +331,7 @@ async def test_the_tool_completion_creates_and_refreshes_in_one_script(env, site
 
     with delivery_fire("c-tool"):
         await turn_module.deliver_tool_completion(
-            delivery_thread_id="bridge:tool-line:+15550002222",
+            thread_id="bridge:tool-line:+15550002222",
             completion_id="c-tool",
             result={"result": {"reply": "done"}},
             status=PARK_COMPLETION_SUCCEEDED,

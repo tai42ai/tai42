@@ -39,14 +39,14 @@ async def e2e_tool_target_park(marker: str) -> object:
     """A conversation tool-target that async-parks on ``ask`` and later delivers its
     resumed reply back through the door's generic park-completion binding.
 
-    Runs as the target of a ``target_kind=tool`` conversation route. The conversation door binds
-    ``deliver_tool_completion`` plus its opaque ``{delivery_thread_id, route_name}`` context around
-    this dispatch, so ``ask(mode="async")`` captures that binding as the park's stored delivery
-    address; this tool binds its OWN resume continuation (``e2e_tool_target_deliver``) and parks —
-    returning the ``SuspendedInteraction`` the tool seam keeps by type, so the turn ends SILENTLY
-    (no synchronous reply). The turn already runs under the route's bound execution identity, so
-    the park stores THAT as its continuation identity and the resume rebinds as it — the tool binds
-    no identity of its own.
+    Runs as the target of a ``target_kind=tool`` conversation route. The conversation door binds a
+    delivery address naming ``deliver_tool_completion``, the turn's thread and its opaque
+    ``{route_name, message_id}`` context around this dispatch, so ``ask(mode="async")`` captures
+    that address as the park's stored delivery address; this tool binds its OWN resume
+    continuation (``e2e_tool_target_deliver``) and parks — returning the ``SuspendedInteraction``
+    the tool seam keeps by type, so the turn ends SILENTLY (no synchronous reply). The turn
+    already runs under the route's bound execution identity, so the park stores THAT as its
+    continuation identity and the resume rebinds as it — the tool binds no identity of its own.
 
     It verifies the door wired the binding (fail loud rather than park with no path back) and
     RPUSHes the parked interaction id onto ``e2e:rec:tool_target_park:{marker}`` (so a spec that
@@ -61,11 +61,11 @@ async def e2e_tool_target_park(marker: str) -> object:
     from tai42_kit.clients.impl.redis import RedisClient
     from tai42_skeleton.interactions import ask
 
-    # The door binds ``deliver_tool_completion`` + its opaque delivery context around this
-    # dispatch; ``ask`` captures it as the park's stored delivery address. A binding of
-    # ``(None, None)`` means the door wired none — fail loud rather than park with no path back.
-    completion_tool, completion_context = get_park_completion()
-    if completion_tool is None or completion_context is None:
+    # The door binds its delivery address around this dispatch; ``ask`` captures it as the park's
+    # stored delivery address. An address without the tool, the thread or the originating route
+    # means the door wired none — fail loud rather than park with no path back.
+    address = get_park_completion()
+    if address.tool is None or address.thread_id is None or "route_name" not in (address.context or {}):
         raise RuntimeError("e2e_tool_target_park ran with no park-completion binding from the conversation door")
 
     with driving_as(continuation="e2e_tool_target_deliver"):

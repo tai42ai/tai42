@@ -56,11 +56,12 @@ def test_tools_run_posts_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
         # ``{tool_name, arguments}`` shape ``read_tool_call`` enforces, or a live
         # server 400s. Asserting the literal dict alone let the two drift apart.
         assert _parse_tool_call(request) == ("add", {"a": 1, "b": 2})
-        return data_response({"sum": 3})
+        return data_response({"kind": "result", "result": {"sum": 3}})
 
     result = run_cli(monkeypatch, handler, ["tools", "run", "add", "--kw", "a=1", "--kw", "b=2"], json_output=True)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"sum": 3}
+    # The run answer is printed whole, its ``kind`` included.
+    assert json.loads(result.output) == {"kind": "result", "result": {"sum": 3}}
 
 
 @pytest.mark.parametrize(

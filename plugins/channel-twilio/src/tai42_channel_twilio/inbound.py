@@ -35,8 +35,6 @@ from tai42_contract.conversations import (
     DeliveryReceipt,
     InboundMediaKind,
     InboundRejectionReason,
-    build_inbound_media_params,
-    inbound_media_placeholder,
 )
 from tai42_contract.interactions import (
     MediaOrigin,
@@ -45,6 +43,7 @@ from tai42_contract.interactions import (
     MediaTooLargeError,
     MediaTypeNotAllowedError,
 )
+from tai42_kit.conversations.inbound_media import build_inbound_media_params, inbound_media_placeholder
 from tai42_kit.net import MediaFetchError, UrlGuardError, open_media_stream
 from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 from tai42_kit.settings import require, require_secret
@@ -413,6 +412,7 @@ async def _accept_media_item(
         provider_message_id=provider_message_id,
         attachments=[ingested.item],
         params=build_inbound_media_params(
+            door="twilio",
             kind=kind,
             media_id=ingested.media_id,
             mime_type=ingested.mime,
@@ -463,7 +463,7 @@ async def _reject_media_item(
             cap_key=client_address,
             text=caption,
             provider_message_id=f"{message_sid}-{index}",
-            params=build_inbound_media_params(kind=kind, mime_type=declared_mime),
+            params=build_inbound_media_params(door="twilio", kind=kind, mime_type=declared_mime),
         )
 
 

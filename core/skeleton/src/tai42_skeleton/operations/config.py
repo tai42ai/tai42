@@ -37,6 +37,7 @@ from tai42_kit.settings import present_env_value, registered_settings
 
 from tai42_skeleton.app.boot_rules import translate_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.app.bus.ops import ReloadConfig
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config import config_mode
 from tai42_skeleton.config.boundary import reload_class_by_env_var
@@ -289,7 +290,7 @@ async def reload_config(targets: list[str] | None = None) -> Any:
     # Run the heavy sync reload on a worker thread through the gate so this call (on
     # the serving loop) does not freeze it.
     report = await broadcast(
-        {"op": "reload_config"},
+        ReloadConfig(op="reload_config"),
         targets,
         lambda: reload_gate.run(tai42_app.admin.reload_config, reimports=True),
         publish_on_local_failure=True,

@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from enum import StrEnum
 from typing import ClassVar, Final, Self
 
+from pydantic import BaseModel
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,47 +42,28 @@ backend. A backend that names its consuming runtime anything else does not get
 the manifest export."""
 
 
-REGISTRY_MUTATING_FLEET_OPS: Final[frozenset[str]] = frozenset(
-    {
-        "reload_config",
-        "reload_mcp",
-        "deregister_mcp",
-        "reload_tool",
-        "remove_tool",
-        "reload_failed_mcps",
-        "reprobe_failed_mcps",
-    }
-)
-"""Worker-bus ops that mutate this process's tool registry.
+class FleetOpEffect(StrEnum):
+    """What applying a worker-bus op changed in this process — the vocabulary a post-apply handler decides on."""
 
-``list_failed_mcps`` is a query and ``recycle`` ends the process, so neither is
-here. These are one input to :data:`POOL_TURNOVER_FLEET_OPS`, the set the turnover
-gate actually reads."""
+    registry = "registry"
+    """This process's tool registry changed."""
+
+    templates = "templates"
+    """This process's compiled-template cache was dropped."""
 
 
-TEMPLATE_EVICTION_FLEET_OPS: Final[frozenset[str]] = frozenset(
-    {
-        "evict_template",
-        "clear_template_cache",
-    }
-)
-"""Worker-bus ops that drop this process's compiled-template cache.
+class FleetOpApplied(BaseModel, frozen=True):
+    """A worker-bus op that applied in this process, as a post-apply handler receives it.
 
-A runtime whose worker processes render templates and PERSIST ACROSS JOBS hold their
-own compiled cache; a store edit dispatched over the bus reaches only bus MEMBERS, so
-those workers keep serving a stale compilation until the pool turns over. One input to
-:data:`POOL_TURNOVER_FLEET_OPS`."""
+    ``effects`` is what the op changed here (empty for a query or a process exit); a handler
+    decides on it, never on ``op``, which names the op for logs and a turnover reason.
+    ``budget`` is the seconds left before the publisher's report cut, measured from this
+    process's receipt of the op; a post-apply obligation that cannot finish within it must raise.
+    """
 
-
-POOL_TURNOVER_FLEET_OPS: Final[frozenset[str]] = REGISTRY_MUTATING_FLEET_OPS | TEMPLATE_EVICTION_FLEET_OPS
-"""Worker-bus ops after which a pool that PERSISTS ACROSS JOBS must be turned over —
-the superset of "mutates the tool registry" and "evicts the compiled-template cache".
-
-A registry mutation leaves persisted workers holding a stale snapshot; a template
-eviction leaves them holding a stale compilation; either way the fix is the same
-canonical pool turnover. The turnover gate reads THIS set, so a runtime whose workers
-hold a snapshot of the registry OR their own compiled cache turns its pool over after
-one of these applies."""
+    op: str
+    effects: frozenset[FleetOpEffect]
+    budget: float
 
 
 class BackendRuntime(ABC):

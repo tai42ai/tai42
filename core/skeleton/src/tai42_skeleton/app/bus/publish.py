@@ -28,6 +28,7 @@ from tai42_skeleton.app.bus.models import (
     _merge_terminal,
     presence_fresh,
 )
+from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 from tai42_skeleton.utils.redis_typing import eval_script
 
 if TYPE_CHECKING:
@@ -72,14 +73,11 @@ class WorkerBusPublishMixin:
             """This worker's identity, supplied by the composed :class:`WorkerBus`."""
             ...
 
-        @staticmethod
-        def _op_name(op: dict[str, Any]) -> str: ...
-
         def _local_row(self) -> WorkerRow: ...
 
     async def publish(
         self,
-        op: dict[str, Any],
+        op: FleetOp,
         targets: list[str] | None,
         local: LocalApplyResult | None,
         *,
@@ -108,14 +106,14 @@ class WorkerBusPublishMixin:
         snapshot generation, so it is either collected or given an honest computed
         verdict. See :meth:`_carry_expected` for what it does NOT override.
         """
-        op_name = self._op_name(op)
+        op_name = op.op
         self._validate_local_targets(local, targets)
 
         if self._local:
             return self._local_publish(op_name, targets, local)
 
         try:
-            fleet = await self._broadcast(op_name, op, targets, expected_at_start)
+            fleet = await self._broadcast(op_name, fleet_op_wire(op), targets, expected_at_start)
         except TRANSPORT_ERRORS as exc:
             logger.error("worker bus: publish of %r failed — bus unreachable", op_name, exc_info=True)
             return FleetResult(op=op_name, reachable=False, error=f"{type(exc).__name__}: {exc}")

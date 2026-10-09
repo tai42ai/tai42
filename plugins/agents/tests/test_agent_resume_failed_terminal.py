@@ -391,7 +391,7 @@ def test_a_re_park_value_round_trips_the_resolution_record(park_redis: Any, agen
 def test_a_failed_detach_is_logged_and_the_drive_result_is_kept(
     park_redis: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from tai42_contract.interactions.continuation import _chained_park_claims
+    from tai42_kit.interactions.park_adoption import _chained_park_claims
 
     index = agents_park_index()
 

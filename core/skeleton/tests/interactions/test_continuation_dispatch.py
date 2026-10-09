@@ -558,31 +558,6 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
     assert await wired.store.due_continuations(wired.fake, datetime.now(UTC) + timedelta(hours=1)) == []
 
 
-def test_execution_identity_bridge_reflects_the_bound_skeleton_identity():
-    # Importing the skeleton continuation module wires skeleton's execution identity into the
-    # contract park bridge: the accessor reads the CURRENTLY bound identity as (key, fingerprint)
-    # — what a park records — and the binder is registered for an out-of-band fire.
-    from tai42_contract.interactions import continuation as contract_cont
-    from tai42_contract.interactions import current_execution_identity
-
-    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
-    from tai42_skeleton.authz.identity import CallerIdentity
-
-    assert contract_cont._execution_identity_accessor is not None
-    assert contract_cont._execution_identity_binder is not None
-
-    # No identity bound: the accessor yields none, so a park under no identity records none.
-    assert current_execution_identity() == (None, "")
-
-    token = set_execution_identity(CallerIdentity(user_id="user-x", execution_key_fingerprint="fp-x"))
-    try:
-        # The same two values the durable continuation record captures (user_id + fingerprint).
-        assert current_execution_identity() == ("user-x", "fp-x")
-    finally:
-        reset_execution_identity(token)
-    assert current_execution_identity() == (None, "")
-
-
 async def test_expiry_pass_survives_a_poison_member(wired, monkeypatch, caplog):
     # One expiry-index member whose per-member work deterministically raises must not
     # abort the whole pass and starve the rest: it is logged loudly and left for the

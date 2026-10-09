@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 from redis.asyncio import Redis
 from tai42_contract.conversation_target import ConversationTargetKind
-from tai42_contract.interactions import CallerAskLanding, InteractionRequest, InteractionResponse, InteractionState
+from tai42_contract.interactions import (
+    CallerAskLanding,
+    DeliveryAddress,
+    InteractionRequest,
+    InteractionResponse,
+    InteractionState,
+)
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 from . import scripts, serde, ttl
@@ -313,7 +319,7 @@ class _StoreReads(_StoreKeys):
             attempts=int(fields["attempts"]),
             state_context=StateContext.model_validate_json(raw_context) if raw_context is not None else None,
             asked_by=json.loads(raw_asked_by) if raw_asked_by is not None else [],
-            delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+            delivery=DeliveryAddress.model_validate_json(raw_delivery) if raw_delivery is not None else None,
             run_delivery_id=fields.get("run_delivery_id"),
             caller_ask_landing=CallerAskLanding.model_validate_json(raw_landing) if raw_landing is not None else None,
             deferred_binding=StateBinding.model_validate_json(raw_binding) if raw_binding is not None else None,
@@ -341,7 +347,7 @@ class _StoreReads(_StoreKeys):
             return KillTarget(
                 kind="park" if fields.get("status") == "pending" else "running",
                 group_id=fields.get("group_id"),
-                delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+                delivery=DeliveryAddress.model_validate_json(raw_delivery) if raw_delivery is not None else None,
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
                 chain_keys=_chain_keys(fields),
@@ -374,7 +380,7 @@ class _StoreReads(_StoreKeys):
             return KillTarget(
                 kind="running",
                 group_id=None,
-                delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+                delivery=DeliveryAddress.model_validate_json(raw_delivery) if raw_delivery is not None else None,
                 run_delivery_id=fields.get("run_delivery_id"),
                 subjects=subjects,
                 chain_keys=_chain_keys(fields),
@@ -430,7 +436,7 @@ class _StoreReads(_StoreKeys):
             reason=fields.get("reason", ""),
             attempts=int(fields["attempts"]),
             deadline_ms=int(fields["deadline_ms"]),
-            delivery=json.loads(raw_delivery) if raw_delivery is not None else None,
+            delivery=DeliveryAddress.model_validate_json(raw_delivery) if raw_delivery is not None else None,
             run_delivery_id=fields.get("run_delivery_id"),
             subjects=json.loads(raw_subjects) if raw_subjects is not None else None,
             chain_keys=_chain_keys(fields),

@@ -60,7 +60,7 @@ async def test_a_caller_ask_behind_a_preset_answers_with_the_caller_ask_at_the_s
     }
     answer = await stack.api().post("/api/run-tool", json=body, expect=200, retry_on_reloading=True)
 
-    assert list(answer) == ["asks"], answer
+    assert answer["kind"] == "asks", answer
     (entry,) = answer["asks"]
     assert entry["to"] == "caller"
     assert entry["question"] == question

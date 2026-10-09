@@ -20,11 +20,8 @@ from typing import Any
 
 from langgraph.types import StateSnapshot
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, SuspendedFinal
-from tai42_contract.interactions import (
-    chained_park_claims,
-    reset_resume_continuation_tool,
-    set_resume_continuation_tool,
-)
+from tai42_contract.interactions import reset_resume_continuation_tool, set_resume_continuation_tool
+from tai42_kit.interactions.park_adoption import chained_park_claims
 
 from tai42_agents._internal.park.capability import ParkIdentity
 from tai42_agents._internal.park.errors import AgentParkMarkerError, AgentParkNotHostableError

@@ -60,8 +60,9 @@ test('ask blocks a run, is answered in the browser, and the run unblocks', async
   // API: the blocked run wakes and returns the answered value verbatim.
   const askRes = await askPromise;
   expect(askRes.status(), await askRes.text()).toBe(200);
-  const body = (await askRes.json()) as { data: unknown };
-  expect(JSON.stringify(body.data)).toContain(answer);
+  const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+  expect(body.data.kind).toBe('result');
+  expect(JSON.stringify(body.data.result)).toContain(answer);
 });
 
 test('an answer during an SSE reconnect gap still heals the inbox card', async ({
@@ -120,8 +121,9 @@ test('an answer during an SSE reconnect gap still heals the inbox card', async (
   // API: the parked run woke on the API answer and returns the value verbatim.
   const askRes = await askPromise;
   expect(askRes.status(), await askRes.text()).toBe(200);
-  const body = (await askRes.json()) as { data: unknown };
-  expect(JSON.stringify(body.data)).toContain(answer);
+  const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+  expect(body.data.kind).toBe('result');
+  expect(JSON.stringify(body.data.result)).toContain(answer);
 });
 
 // A 1x1 PNG data URI passed as the image item's INPUT url. A data:image is stored
@@ -221,8 +223,9 @@ test('a media-bearing question renders images + links in the inbox and still ans
   // display-only media changed nothing about answering.
   const askRes = await askPromise;
   expect(askRes.status(), await askRes.text()).toBe(200);
-  const body = (await askRes.json()) as { data: unknown };
-  expect(JSON.stringify(body.data)).toContain(answer);
+  const body = (await askRes.json()) as { data: { kind: string; result?: unknown } };
+  expect(body.data.kind).toBe('result');
+  expect(JSON.stringify(body.data.result)).toContain(answer);
 });
 
 test('the served SPA response pins the media img-src CSP directive', async ({ request }) => {

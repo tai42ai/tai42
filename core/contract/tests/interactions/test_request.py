@@ -5,12 +5,15 @@ the async park discipline, ``SuspendedInteraction``, the ``check_ask_timing`` gu
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from tai42_contract.interactions.asker import Ask, check_ask_timing
+from tai42_contract.interactions.continuation import DeliveryAddress
 from tai42_contract.interactions.models import (
     QUESTION_MAX_CHARS,
     AnswerFormat,
@@ -282,13 +285,19 @@ def test_on_expiry_defaults_to_kill_and_round_trips():
     assert restored.on_expiry == "resume"
 
 
-def test_delivery_and_run_delivery_id_round_trip_as_a_tuple():
-    # The run's address is stored as a ``(tool, context)`` pair; JSON round-trips it to a
-    # tuple (never a keyed dict) so the delivery chokepoint can unpack it.
-    req = _caller(run_delivery_id="rid-1", delivery=("deliver_tool", {"thread": "t1"}))
+def test_delivery_and_run_delivery_id_round_trip_as_a_delivery_address():
+    address = DeliveryAddress(tool="deliver_tool", context={"route_name": "chat"}, thread_id="t1")
+    req = _caller(run_delivery_id="rid-1", delivery=address)
     restored = InteractionRequest.model_validate_json(req.model_dump_json())
     assert restored.run_delivery_id == "rid-1"
-    assert restored.delivery == ("deliver_tool", {"thread": "t1"})
+    assert restored.delivery == address
+
+
+def test_a_stored_delivery_of_another_shape_fails_to_decode():
+    stored = json.loads(_caller(run_delivery_id="rid-1").model_dump_json())
+    stored["delivery"] = ["deliver_tool", {"route_name": "chat"}]
+    with pytest.raises(ValidationError, match="delivery"):
+        InteractionRequest.model_validate(stored)
 
 
 def test_delivery_defaults_none_for_a_receiverless_run():

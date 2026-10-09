@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import RunResultAnswer
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_contract.secrets import SecretValue
 
@@ -85,12 +86,12 @@ class _Interactions:
             return VisitOutcome(action="started", cancelled=list(cancel), kind="parked", suspended=result)
         return VisitOutcome(action="started", cancelled=list(cancel), kind="result", result=result)
 
-    def park_answer(self, outcome: Any) -> Any:
+    def run_answer(self, outcome: Any) -> Any:
         # The sync door shapes a park through the real pure shaper — the same callable the
-        # background submit records with, so the door's receipt matches the recorded one.
-        from tai42_skeleton.interactions.visit import park_answer
+        # background submit records with, so the door's answer matches the recorded one.
+        from tai42_skeleton.interactions.visit import run_answer
 
-        return park_answer(outcome)
+        return run_answer(outcome)
 
 
 class _Admin:
@@ -162,7 +163,7 @@ async def test_run_tool_delegates_and_returns(monkeypatch: pytest.MonkeyPatch) -
 
     result = await tools_ops.run_tool("calc", {"a": 1})
 
-    assert result == {"answer": 42}
+    assert result == RunResultAnswer(result={"answer": 42})
     # The sync door offloads a sync tool body onto a worker thread.
     assert tools.run_calls == [("calc", {"a": 1}, True)]
 
@@ -206,7 +207,7 @@ async def test_run_tool_reveals_wrapped_secrets_for_the_live_caller(monkeypatch:
 
     result = await tools_ops.run_tool("vault", {})
 
-    assert result == {"token": "tok-4242-xyzzy"}
+    assert result == RunResultAnswer(result={"token": "tok-4242-xyzzy"})
 
 
 async def test_run_tool_of_a_secret_preset_reveals_to_the_live_caller() -> None:
@@ -226,7 +227,7 @@ async def test_run_tool_of_a_secret_preset_reveals_to_the_live_caller() -> None:
         finally:
             await app.preset_manager.remove("acme_vault")
 
-    assert result == {"account": "acme", "token": "tok-acme"}
+    assert result == RunResultAnswer(result={"account": "acme", "token": "tok-acme"})
 
 
 async def test_run_tool_unencodable_result_is_a_502_bad_tool_output(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
@@ -729,7 +730,7 @@ async def test_run_tool_degrades_to_unbound_when_the_rebuild_cannot_answer(monke
 
     result = await tools_ops.run_tool("calc", {"a": 1})
 
-    assert result == {"ok": 1}
+    assert result == RunResultAnswer(result={"ok": 1})
     assert tools.seen_identities == [None]
     assert get_execution_identity() is None
 
@@ -749,19 +750,18 @@ async def test_run_tool_unauthenticated_binds_nothing(monkeypatch: pytest.Monkey
 # -- the direct run-tool door parks and deposits the subject context ------
 
 
-async def test_run_tool_async_park_returns_a_park_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A tool whose async ask parks returns a park receipt (the suspended sentinel's interaction ids),
-    # not a 500 — the door starts through the shared visit, which classifies the park.
-    from tai42_contract.interactions import SuspendedInteraction
+async def test_run_tool_async_park_answers_parked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A tool whose async ask parks answers ``parked`` carrying the suspended sentinel, not a 500 —
+    # the door starts through the shared visit, which classifies the park.
+    from tai42_contract.interactions import RunParkedAnswer, SuspendedInteraction
 
-    tools = _Tools({"parky"}, run_result=SuspendedInteraction(interaction_id="i1", interaction_ids=["i1"]))
+    sentinel = SuspendedInteraction(interaction_id="i1", interaction_ids=["i1"])
+    tools = _Tools({"parky"}, run_result=sentinel)
     _install(monkeypatch, tools=tools)
 
     result = await tools_ops.run_tool("parky", {})
 
-    assert isinstance(result, dict)
-    assert result["interaction_id"] == "i1"
-    assert result["interaction_ids"] == ["i1"]
+    assert result == RunParkedAnswer(suspended=sentinel)
 
 
 async def test_run_tool_of_an_undeclared_park_is_a_501_naming_the_tool(monkeypatch: pytest.MonkeyPatch, caplog) -> None:

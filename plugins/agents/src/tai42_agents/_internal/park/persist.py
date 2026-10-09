@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from tai42_contract.interactions import attach_chained_park, is_chained_park_key
+from tai42_kit.interactions.park_adoption import attach_chained_park, is_chained_park_key
 from tai42_kit.interactions.park_index import barrier_ttl_seconds, entry_ttl_seconds, superstep_id
 
 from tai42_agents._internal.park.capability import ParkIdentity
@@ -143,12 +143,6 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
             # (a chained park whose nested run re-parked further out) re-clamps against the
             # same bound the persist used instead of guessing one. ``None`` = keep-forever.
             "retention_bound": identity.retention_bound.isoformat() if identity.retention_bound else None,
-            # The execution identity this run is authorized as, carried forward onto every entry so
-            # the out-of-band abandonment fire binds it and never runs fail-open. ``None`` key = no
-            # identity was bound; the fire runs unbound. Present on every entry this code writes —
-            # an entry LACKING the key is one persisted before parks recorded it.
-            "execution_identity": identity.execution_identity,
-            "execution_fingerprint": identity.execution_fingerprint,
         }
 
     expected = dict(union)
