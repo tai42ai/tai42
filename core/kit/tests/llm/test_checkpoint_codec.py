@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 import orjson
 import pydantic
 import pytest
+from pydantic_core import TzInfo
 
 pytest.importorskip("langgraph.checkpoint.redis")
 
@@ -99,7 +100,7 @@ PLUS_TWO = timezone(timedelta(hours=2), "Plus Two")
 
 
 class FixedHourZone(tzinfo):
-    """A tzinfo class of its own: neither a ``datetime.timezone`` nor a ``zoneinfo.ZoneInfo``."""
+    """A fixed-offset tzinfo class of its own: the codec cannot name its rule from the class, so it is refused."""
 
     def utcoffset(self, dt: datetime | None) -> timedelta:
         return timedelta(hours=1)
@@ -223,6 +224,7 @@ def test_the_codec_kinds():
         (Shade.DARK, "enum"),
         (UTC, "timezone"),
         (BERLIN, "zoneinfo"),
+        (TzInfo(7200), "timezone"),
     ],
 )
 def test_each_degrading_type_is_stored_as_its_kit_envelope(value, kind):
@@ -649,6 +651,25 @@ def test_a_model_field_holding_a_zoned_datetime_keeps_its_zone():
         assert back.at.tzinfo == BERLIN
 
 
+def test_a_datetime_and_a_time_parsed_by_pydantic_round_trip_as_their_fixed_offset():
+    model = Stamp.model_validate_json('{"at":"2026-03-01T10:00:00Z"}')
+    clocks = [
+        pydantic.TypeAdapter(datetime).validate_python("2026-03-01T10:00:00+02:00"),
+        pydantic.TypeAdapter(time).validate_python("10:00:00-05:00"),
+    ]
+    assert all(type(value.tzinfo) is TzInfo for value in [model.at, *clocks])
+    got_document, got_write, _ = _both_paths([model, *clocks])
+    for back in (got_document, got_write):
+        assert back[0] == model
+        for got, value in zip([back[0].at, *back[1:]], [model.at, *clocks], strict=True):
+            assert got == value
+            assert got.utcoffset() == value.utcoffset()
+            assert got.tzname() == value.tzname()
+            assert got.dst() == value.dst()
+            assert got.isoformat() == value.isoformat()
+            assert type(got.tzinfo) is timezone
+
+
 def test_a_datetime_and_a_time_are_stored_as_wall_clock_text_tzinfo_and_fold():
     values = [
         datetime(2026, 3, 1, 10, 0, tzinfo=BERLIN),
@@ -656,6 +677,8 @@ def test_a_datetime_and_a_time_are_stored_as_wall_clock_text_tzinfo_and_fold():
         datetime(2026, 1, 1, 1, 1),
         datetime(2026, 1, 1, 1, 1, tzinfo=PLUS_TWO),
         time(10, 0, 0, 5, tzinfo=BERLIN),
+        pydantic.TypeAdapter(datetime).validate_python("2026-03-01T10:00:00Z"),
+        pydantic.TypeAdapter(datetime).validate_python("2026-03-01T10:00:00+02:00"),
     ]
     _, _, stored = _both_paths(values)
     plus_two = _env("timezone", [_env("timedelta", [0, 7200, 0]), "Plus Two"])
@@ -665,6 +688,8 @@ def test_a_datetime_and_a_time_are_stored_as_wall_clock_text_tzinfo_and_fold():
         _env("datetime", ["2026-01-01T01:01:00", None, 0]),
         _env("datetime", ["2026-01-01T01:01:00", plus_two, 0]),
         _env("time", ["10:00:00.000005", _env("zoneinfo", "Europe/Berlin"), 0]),
+        _env("datetime", ["2026-03-01T10:00:00", _env("timezone", [_env("timedelta", [0, 0, 0]), None]), 0]),
+        _env("datetime", ["2026-03-01T10:00:00", _env("timezone", [_env("timedelta", [0, 7200, 0]), "+02:00"]), 0]),
     ]
 
 
@@ -672,6 +697,14 @@ def test_a_bare_iana_zone_round_trips_by_its_key():
     got_document, got_write, stored = _both_paths(BERLIN)
     assert got_document is got_write is BERLIN
     assert stored == _env("zoneinfo", "Europe/Berlin")
+
+
+def test_a_bare_pydantic_fixed_offset_round_trips_as_a_datetime_timezone():
+    got_document, got_write, _ = _both_paths(TzInfo(7200))
+    for back in (got_document, got_write):
+        assert type(back) is timezone
+        assert back == timezone(timedelta(hours=2))
+        assert back.tzname(None) == "+02:00"
 
 
 @pytest.mark.parametrize(
@@ -684,8 +717,25 @@ def test_a_value_whose_tzinfo_is_another_class_is_refused_naming_its_path(value)
         _serde().dumps_typed(_checkpoint({"v": {"at": value}}))
     assert str(excinfo.value) == (
         f"checkpoint value at $.channel_values.v.at of type {type(value).__name__} cannot be stored faithfully on "
-        "the redis checkpointer: its tzinfo of type FixedHourZone is neither a datetime.timezone nor a "
-        "zoneinfo.ZoneInfo"
+        "the redis checkpointer: its tzinfo of type FixedHourZone is neither a fixed offset (datetime.timezone, "
+        "pydantic_core.TzInfo) nor a zoneinfo.ZoneInfo"
+    )
+
+
+class NoOffsetZone(tzinfo):
+    """A tzinfo answering no offset, standing in for a fixed-offset class."""
+
+    def utcoffset(self, dt: datetime | None) -> None:
+        return None
+
+
+def test_a_fixed_offset_class_answering_no_offset_is_refused_naming_its_path(monkeypatch):
+    monkeypatch.setattr(codec, "TzInfo", NoOffsetZone)
+    with pytest.raises(CheckpointSerializationError) as excinfo:
+        _serde().dumps_typed({"at": datetime(2026, 3, 1, 10, 0, tzinfo=NoOffsetZone())})
+    assert str(excinfo.value) == (
+        "checkpoint value at $.at of type datetime cannot be stored faithfully on the redis checkpointer: "
+        "its fixed-offset tzinfo of type NoOffsetZone answers no offset"
     )
 
 

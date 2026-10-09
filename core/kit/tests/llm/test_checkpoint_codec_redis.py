@@ -81,6 +81,9 @@ VALUES: dict[str, Any] = {
     "named_offset_datetime": datetime(2026, 1, 2, 3, 4, tzinfo=_TZ),
     "zoned_time": time(2, 30, tzinfo=_BERLIN, fold=1),
     "zoneinfo": _BERLIN,
+    "pydantic_datetime": pydantic.TypeAdapter(datetime).validate_python("2026-03-01T10:00:00+02:00"),
+    "pydantic_time": pydantic.TypeAdapter(time).validate_python("02:30:00-05:00"),
+    "parsed_model": Inner.model_validate({"amount": "2.25", "at": "2026-01-01T00:00:00Z"}),
     "model": Outer(Count=5, inner=Inner(amount=Decimal("2.25"), at=datetime(2026, 1, 1, tzinfo=_BERLIN))),
     "enum": Shade.DARK,
     "tuple": (1, "a", (2, 3)),
@@ -111,6 +114,7 @@ def _config(thread_id: str) -> dict[str, Any]:
 def _assert_same_clock(got: Any, original: Any) -> None:
     """A datetime or time read back carries the original's tzinfo, its zone name and its fold."""
     assert got.tzinfo == original.tzinfo
+    assert got.utcoffset() == original.utcoffset()
     assert got.tzname() == original.tzname()
     assert got.fold == original.fold
     if isinstance(original, datetime) and original.tzinfo is not None:
@@ -144,6 +148,8 @@ async def test_value_round_trips_equal_on_both_paths(redis_saver: Any, name: str
             _assert_same_clock(got, original)
         if isinstance(original, Outer):
             _assert_same_clock(got.inner.at, original.inner.at)
+        if isinstance(original, Inner):
+            _assert_same_clock(got.at, original.at)
         if isinstance(original, dict):
             for key, item in original.items():
                 assert type(got[key]) is type(item)

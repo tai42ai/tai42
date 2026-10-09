@@ -8,9 +8,10 @@ rewrites every such value into a kit-owned envelope before the saver's JSON enco
 store faithfully is refused at write; an envelope that cannot be decoded raises at read.
 
 A ``datetime`` or ``time`` is stored as its fields: the wall-clock text, its ``tzinfo`` and its
-``fold``. A ``tzinfo`` is kept when it is a fixed offset (``datetime.timezone``, with its name) or an
-IANA zone (``zoneinfo.ZoneInfo``, by its key); any other ``tzinfo``, and a zone read from a file
-(which has no key), is refused at write.
+``fold``. A ``tzinfo`` is kept when it is a fixed offset (``datetime.timezone`` or the
+``pydantic_core.TzInfo`` pydantic attaches to a parsed value — read back as a ``datetime.timezone`` with
+the same offset and name) or an IANA zone (``zoneinfo.ZoneInfo``, by its key); any other ``tzinfo``, and a
+zone read from a file (which has no key), is refused at write.
 
 One envelope shape carries every kind::
 
@@ -48,6 +49,7 @@ from langgraph.checkpoint.redis.util import to_storage_safe_id
 from langgraph.checkpoint.serde.jsonplus import LC_REVIVER, _is_safe_json_type
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import Interrupt, Send
+from pydantic_core import TzInfo
 from redisvl.query import CountQuery
 from redisvl.query.filter import Tag
 
@@ -260,8 +262,10 @@ def _walk_timedelta(value: timedelta) -> dict[str, Any]:
 
 def _walk_tzinfo(tz: tzinfo, owner: Any, path: str) -> dict[str, Any]:
     """The envelope of ``tz``, a bare value or the tzinfo of ``owner`` at ``path``; any other kind is refused."""
-    if isinstance(tz, timezone):
+    if isinstance(tz, (timezone, TzInfo)):
         offset = tz.utcoffset(None)
+        if offset is None:
+            raise _refuse(owner, path, f"its fixed-offset tzinfo of type {type(tz).__qualname__} answers no offset")
         default_name = timezone(offset).tzname(None)
         name = tz.tzname(None)
         return _envelope("timezone", [_walk_timedelta(offset), None if name == default_name else name])
@@ -272,7 +276,8 @@ def _walk_tzinfo(tz: tzinfo, owner: Any, path: str) -> dict[str, Any]:
     raise _refuse(
         owner,
         path,
-        f"its tzinfo of type {type(tz).__qualname__} is neither a datetime.timezone nor a zoneinfo.ZoneInfo",
+        f"its tzinfo of type {type(tz).__qualname__} is neither a fixed offset "
+        "(datetime.timezone, pydantic_core.TzInfo) nor a zoneinfo.ZoneInfo",
     )
 
 
@@ -291,7 +296,7 @@ def _walk_scalar(value: Any, path: str) -> Any:
         return _walk_wall_clock("time", value, path)
     if isinstance(value, timedelta):
         return _walk_timedelta(value)
-    if isinstance(value, timezone) or type(value) is ZoneInfo:
+    if isinstance(value, (timezone, TzInfo)) or type(value) is ZoneInfo:
         return _walk_tzinfo(value, value, path)
     if isinstance(value, Decimal):
         return _envelope("decimal", str(value))
