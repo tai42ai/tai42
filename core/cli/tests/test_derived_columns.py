@@ -71,17 +71,24 @@ def test_connectors_connections_list_derives_columns(monkeypatch) -> None:
 
 
 def test_reencrypt_tokens_renders_the_sweep_summary(monkeypatch) -> None:
-    # The reencrypt route has a generated table entry, but the command renders the
-    # whole summary (counts + failed ids) as a single result.
+    # The command renders the whole summary — the connection and the client counts and both
+    # failed-id lists — as a single result.
     payload = {
         "scanned": 3,
         "reencrypted": 2,
         "skipped": 1,
         "failed": 0,
         "failed_connection_ids": [],
+        "clients_scanned": 2,
+        "clients_reencrypted": 1,
+        "clients_skipped": 0,
+        "clients_failed": 1,
+        "failed_client_row_ids": ["row-9"],
         "cas_retries": 0,
     }
     result = run_cli(monkeypatch, _serves(payload), ["connectors", "reencrypt-tokens"])
     assert result.exit_code == 0, result.output
     assert "scanned" in result.output
     assert "reencrypted" in result.output
+    assert "clients_reencrypted" in result.output
+    assert "row-9" in result.output

@@ -1,4 +1,4 @@
-"""AES-GCM-256 wrap/unwrap for connector token blobs.
+"""AES-GCM-256 wrap/unwrap for the connector engine's sealed blobs.
 
 Blob layout: [1-byte format version] || [12-byte nonce] || [ciphertext + 16-byte
 GCM tag]. The leading version byte (``0x01``) names the blob format version, so a
@@ -6,8 +6,9 @@ reader detects a blob written in a different format instead of misreading it.
 Encryption always uses the current ``CONNECTORS_KEK``; decryption trial-decrypts a
 key ring — the current key followed by any ``CONNECTORS_KEK_PREVIOUS`` keys — so a KEK
 rotation can serve blobs still under a superseded key until the re-encrypt sweep
-converges. The connection_id is bound as AAD so a blob cannot be swapped between
-connections.
+converges. Every blob is bound to the row that holds it through its associated data
+(``aad``): a connection's token blob to its connection id, a stored OAuth client's blob
+to ``oauth-client:<client_row_id>``, so a blob cannot be moved between rows or tables.
 """
 
 from __future__ import annotations
@@ -48,21 +49,21 @@ def ensure_decrypt_ring() -> list[bytes]:
         raise ConnectorEncryptionConfigError(str(exc)) from exc
 
 
-def _aad(connection_id: str) -> bytes:
-    return connection_id.encode("ascii")
+def _aad(aad: str) -> bytes:
+    return aad.encode("ascii")
 
 
-def encrypt(plaintext: bytes, *, connection_id: str) -> bytes:
-    """Wrap ``plaintext`` under the current KEK, binding ``connection_id`` as AAD."""
+def encrypt(plaintext: bytes, *, aad: str) -> bytes:
+    """Wrap ``plaintext`` under the current KEK, binding ``aad`` as associated data."""
     if not isinstance(plaintext, (bytes, bytearray)):
         raise TypeError("plaintext must be bytes")
     kek = ensure_kek()
     nonce = os.urandom(_NONCE_LEN)
-    ct = AESGCM(kek).encrypt(nonce, bytes(plaintext), _aad(connection_id))
+    ct = AESGCM(kek).encrypt(nonce, bytes(plaintext), _aad(aad))
     return bytes([_KEK_FORMAT_VERSION]) + nonce + ct
 
 
-def _decrypt_with_ring(blob: bytes, *, connection_id: str, ring: list[bytes]) -> tuple[bytes, int]:
+def _decrypt_with_ring(blob: bytes, *, aad: str, ring: list[bytes]) -> tuple[bytes, int]:
     """Trial-decrypt ``blob`` against ``ring``, returning ``(plaintext, ring_index)`` for the first opener.
 
     ``ring`` is ordered current key first, then each previous key.
@@ -80,27 +81,27 @@ def _decrypt_with_ring(blob: bytes, *, connection_id: str, ring: list[bytes]) ->
     if version != _KEK_FORMAT_VERSION:
         raise ValueError(f"unsupported connector token-blob format version byte: {version:#04x}")
     nonce, ct = blob[1 : 1 + _NONCE_LEN], blob[1 + _NONCE_LEN :]
-    aad = _aad(connection_id)
+    associated = _aad(aad)
     for index, key in enumerate(ring):
         try:
-            return AESGCM(key).decrypt(nonce, ct, aad), index
+            return AESGCM(key).decrypt(nonce, ct, associated), index
         except InvalidTag:
             continue
     raise InvalidTag
 
 
-def decrypt(blob: bytes, *, connection_id: str) -> bytes:
-    """Unwrap ``blob`` via the decrypt key ring, with ``connection_id`` as AAD."""
-    plaintext, _ = _decrypt_with_ring(blob, connection_id=connection_id, ring=ensure_decrypt_ring())
+def decrypt(blob: bytes, *, aad: str) -> bytes:
+    """Unwrap ``blob`` via the decrypt key ring, with ``aad`` as associated data."""
+    plaintext, _ = _decrypt_with_ring(blob, aad=aad, ring=ensure_decrypt_ring())
     return plaintext
 
 
-def decrypt_reporting_key(blob: bytes, *, connection_id: str) -> tuple[bytes, bool]:
+def decrypt_reporting_key(blob: bytes, *, aad: str) -> tuple[bytes, bool]:
     """Decrypt via the ring, returning ``(plaintext, under_current_key)``.
 
     Used by the re-encrypt sweep to skip a blob already under the current key: the
     current key is ring index 0, so ``under_current_key`` is ``True`` only when the
     current key opened the blob.
     """
-    plaintext, index = _decrypt_with_ring(blob, connection_id=connection_id, ring=ensure_decrypt_ring())
+    plaintext, index = _decrypt_with_ring(blob, aad=aad, ring=ensure_decrypt_ring())
     return plaintext, index == 0

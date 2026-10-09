@@ -68,7 +68,7 @@ def install_store(monkeypatch):
 
 def _encrypted_record() -> tuple[bytes, ConnectionRecord]:
     record = make_oauth_record()
-    blob = crypto.encrypt(record.to_storage_json().encode("utf-8"), connection_id=CID)
+    blob = crypto.encrypt(record.to_storage_json().encode("utf-8"), aad=CID)
     return blob, record
 
 
@@ -77,7 +77,7 @@ def _encrypted_shape_drift() -> bytes:
     ``ConnectionRecord``: the stored JSON with the required ``kind`` field dropped."""
     stored = json.loads(make_oauth_record().to_storage_json())
     del stored["kind"]
-    return crypto.encrypt(json.dumps(stored).encode("utf-8"), connection_id=CID)
+    return crypto.encrypt(json.dumps(stored).encode("utf-8"), aad=CID)
 
 
 def _assert_logged_server_side(caplog: pytest.LogCaptureFixture, detail: str) -> None:

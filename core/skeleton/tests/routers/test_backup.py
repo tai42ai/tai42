@@ -232,6 +232,7 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
         "schedules",
         "connector_categories",
         "connector_connections",
+        "connector_oauth_clients",
         "versioned_documents",
         "tool_meta",
     ]
@@ -243,6 +244,8 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
     # Secret sections carry the flag so the export credential gate applies.
     assert by_name["schedules"] is True
     assert by_name["connector_connections"] is True
+    # The stored OAuth clients carry sealed client secrets.
+    assert by_name["connector_oauth_clients"] is True
     # The versioned-document store covers secret-bearing bodies (preset kwargs,
     # AC-policy conditions), so its one kind-agnostic section is flagged secret.
     assert by_name["versioned_documents"] is True

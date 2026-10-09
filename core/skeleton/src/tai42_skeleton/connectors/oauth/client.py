@@ -109,6 +109,10 @@ class RefreshTokenMissingError(OAuthError):
 
 RefreshFailureReason = Literal["invalid_grant", "invalid_client", "transient"]
 
+ClientAuthMethod = Literal["client_secret_post", "client_secret_basic", "none"]
+#: The token-endpoint client authentication methods the engine speaks, in the order it prefers them.
+CLIENT_AUTH_METHODS: tuple[ClientAuthMethod, ...] = ("client_secret_post", "client_secret_basic", "none")
+
 
 class TokenRefreshFailedError(OAuthError):
     """Provider rejected the refresh_token grant.
@@ -282,7 +286,7 @@ def expiry_without_expires_in(*, has_refresh_token: bool, guarded: bool) -> date
     return None
 
 
-def _token_error_suffix(payload: dict) -> str:
+def provider_error_suffix(payload: dict) -> str:
     """Build a ``: error=... error_description=...`` suffix from the provider's RFC 6749 error fields.
 
     Uses the ``error`` / ``error_description`` fields when present, else ``""``
@@ -308,7 +312,7 @@ def _parse_token_response(
     # ``token_type`` is not checked: a shipped vendor's token endpoint answers a non-"Bearer" value.
     access = payload.get("access_token")
     if not access:
-        raise CodeExchangeFailedError("provider response is missing access_token" + _token_error_suffix(payload))
+        raise CodeExchangeFailedError("provider response is missing access_token" + provider_error_suffix(payload))
     if not isinstance(access, str):
         raise CodeExchangeFailedError(f"provider returned a non-string access_token (got {type(access).__name__})")
     refresh = payload.get("refresh_token") or fallback_refresh_token

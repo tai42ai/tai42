@@ -81,15 +81,15 @@ def test_falls_back_when_origin_blank(engine_cfg):
 def test_bridge_override_used_as_redirect_uri_when_set(engine_cfg):
     """With the bridge configured, the provider redirect points at the bridge
     origin — NOT this deployment's request origin."""
-    engine_cfg.oauth_bridge_url = "https://bridge.tai42.ai"
+    engine_cfg.oauth_bridge_url = "https://bridge.example.com"
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://bridge.tai42.ai{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == f"https://bridge.example.com{CALLBACK_PATH}"
 
 
 def test_bridge_override_trailing_slash_stripped(engine_cfg):
-    engine_cfg.oauth_bridge_url = "https://bridge.tai42.ai/"
+    engine_cfg.oauth_bridge_url = "https://bridge.example.com/"
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
-    assert compute_redirect_uri(cast(Request, req)) == f"https://bridge.tai42.ai{CALLBACK_PATH}"
+    assert compute_redirect_uri(cast(Request, req)) == f"https://bridge.example.com{CALLBACK_PATH}"
 
 
 def test_unset_override_preserves_origin_behavior(engine_cfg):
@@ -105,7 +105,7 @@ def test_unset_override_preserves_origin_behavior(engine_cfg):
 def test_deployment_origin_is_this_deployment_not_the_bridge(engine_cfg):
     """The origin signed into state is always this deployment's own origin, even
     when the provider redirect is bounced through the bridge."""
-    engine_cfg.oauth_bridge_url = "https://bridge.tai42.ai"
+    engine_cfg.oauth_bridge_url = "https://bridge.example.com"
     req = _FakeRequest(origin="https://app.example.com", base_url="https://api.x/")
     assert compute_deployment_origin(cast(Request, req)) == "https://app.example.com"
 

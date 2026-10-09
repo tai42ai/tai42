@@ -9,7 +9,7 @@ Routes (all AUTHED), prefixed ``/api/connectors``:
 - ``DELETE /connections/{id}``                 — disconnect.
 - ``POST   /connections/{id}/reconnect``       — re-run the OAuth flow.
 - ``PATCH  /connections/{id}/sub-services``    — toggle enabled sub-services.
-- ``POST   /tokens/reencrypt``                 — re-encrypt all token blobs under the current KEK.
+- ``POST   /tokens/reencrypt``                 — re-encrypt all token and client blobs under the current KEK.
 - ``POST   /oauth/complete``                   — finalize a callback (code + signed state).
 
 The first eight doors are thin adapters over the operations in
@@ -42,6 +42,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.connectors.errors import ConnectorClientRequiredError
 from tai42_contract.connectors.models import (
     PatchSubServicesRequest,
     StartConnectRequest,
@@ -388,11 +389,12 @@ async def oauth_complete(request: Request) -> Response:
         connection_service.AliasInUseError,
         connection_service.ConnectionNotFoundError,
         connection_service.ConcurrentConnectionUpdateError,
+        ConnectorClientRequiredError,
         oauth_client.OAuthError,
     ) as exc:
-        # A post-exchange completion failure (alias collision, CAS miss, the
-        # connection vanished, or a removed provider surfaced as OAuthError) is a
-        # 4xx discriminated failure, never a raw 500.
+        # A completion failure (alias collision, CAS miss, the connection vanished,
+        # the login's stored client removed or refused since the start, or a removed
+        # provider surfaced as OAuthError) is a 4xx discriminated failure, never a raw 500.
         return JSONResponse({"data": {"kind": "failed", "reason": type(exc).__name__}}, status_code=400)
 
     return JSONResponse(
