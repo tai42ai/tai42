@@ -19,6 +19,7 @@ from tai42_kit.clients.impl.redis import RedisClient, hgetall
 from tai42_kit.settings import register_settings_reset
 from tai42_kit.utils.data import run_jq_first
 
+from tai42_skeleton.access_control.policy_version_scope import memoized_policy_version, remember_policy_version
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.store import access_control_store
 
@@ -127,10 +128,19 @@ class PolicyEnforcer:
         backend error fails closed by RAISING (surfaces as a clean deny), never a silent default:
         a fixed version would pin every cache to one slot and serve stale policy for the ttl. A
         successful read with no key yet is version 0.
+
+        Inside an open request scope (:mod:`~tai42_skeleton.access_control.policy_version_scope`)
+        the first successful read is remembered and every later read of the same access-control
+        decision answers from it; a read that raises remembers nothing.
         """
+        memoized = memoized_policy_version()
+        if memoized is not None:
+            return memoized
         async with client_ctx(RedisClient, self.settings.redis) as r:
             raw = await r.get(self.settings.policy_version_key)
-        return int(raw) if raw is not None else 0
+        version = int(raw) if raw is not None else 0
+        remember_policy_version(version)
+        return version
 
     async def _raw_fetch_policy_versioned(self, user_id: str, version: int) -> AccessPolicy:
         # ``version`` participates only in the cache key (see ``__init__``); the
