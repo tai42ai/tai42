@@ -1,6 +1,7 @@
 """Tools contract: the ``ToolInfo`` model + the ``AppTools`` tool/toolkit registration sub-protocol.
 
-Vendor return types (fastmcp ``Tool``, langchain ``StructuredTool``) are ``TYPE_CHECKING``-only.
+The vendor return type fastmcp ``Tool`` is ``TYPE_CHECKING``-only; an in-process tool is the
+framework-neutral :class:`ClientTool` handle.
 
 ``AppTools`` is the ``app.tools`` namespace of the assembled facade (:mod:`tai42_contract.app`).
 """
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_chec
 from pydantic import BaseModel
 
 from tai42_contract.app.facets import RouteAction
+from tai42_contract.errors import ErrorKind
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.tools.call_frame import (
     NestedDoorFrameError,
@@ -41,7 +43,6 @@ from tai42_contract.tools.retry import (
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
-    from langchain_core.tools import StructuredTool
 
 # Preserves the decorated callable's type through ``tool`` / ``toolkit`` so
 # ``@app.tools.tool`` keeps the wrapped function's signature instead of ``Any``.
@@ -80,6 +81,60 @@ ToolDeleteReferee = Callable[[str], Awaitable[list[str]]]
 StateTemplateDetachReferee = Callable[[str, str], Awaitable[list[str]]]
 
 
+@runtime_checkable
+class ClientTool(Protocol):
+    """A registered tool bound for in-process use by an agent engine, framework-neutral.
+
+    ``name`` is the full registered name (never truncated); ``input_schema`` is the JSON Schema of
+    the arguments, the schema the MCP edge advertises. ``invoke`` returns the tool's value with
+    secrets masked, or a ``SuspendedInteraction`` / ``ResumeBuffered`` (by type, unadapted) when a
+    tool that declares it can pause parked; it raises :class:`ClientToolError` for a failure the
+    model should see (the body raised, a driver reached a FAILED terminal, the result cannot be
+    JSON-encoded, the arguments do not validate), and raises every other error raw (tier refusal,
+    authorization, unknown or vanished tool, a park signal from a tool that does not declare it can
+    pause — :class:`UndeclaredPauseError` — cancellation).
+    """
+
+    @property
+    def name(self) -> str:
+        """The full registered tool name."""
+        ...
+
+    @property
+    def description(self) -> str:
+        """The tool's description, as the model reads it."""
+        ...
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        """The JSON Schema of the tool's arguments."""
+        ...
+
+    async def invoke(self, arguments: Mapping[str, Any]) -> Any:
+        """Run the tool once with ``arguments``."""
+        ...
+
+
+class ClientToolError(Exception):
+    """One call's model-visible failure; the message is worded for the model and names the tool."""
+
+    def __init__(self, tool_name: str, message: str) -> None:
+        """Carry the failed tool's name beside the model-facing ``message``."""
+        super().__init__(message)
+        self.tool_name = tool_name
+
+
+class ToolAlreadyRegisteredError(ValueError):
+    """A tool of this name is already bound on the live tool surface."""
+
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
+    def __init__(self, name: str) -> None:
+        """Name the tool whose name is taken."""
+        super().__init__(f"tool {name!r} is already registered")
+        self.name = name
+
+
 class ToolInfo(BaseModel):
     """Descriptor for a registered tool.
 
@@ -113,7 +168,8 @@ class AppTools(Protocol):
     # ``extras`` keys this tool reads through :meth:`extras`; a key a target does not
     # declare is refused before the run, and a preset inherits its base tool's keys
     # (likewise registered only when the manifest includes the tool). A tool that can
-    # pause declares ``meta={TOOL_META_PAUSES: True}`` (see :meth:`pauses`).
+    # pause declares ``meta={TOOL_META_PAUSES: True}`` (see :meth:`pauses`). A registration
+    # raises :class:`ToolAlreadyRegisteredError` when a tool of that name is already bound.
     @overload
     def tool(self, func: F, /) -> F: ...
     @overload
@@ -145,8 +201,8 @@ class AppTools(Protocol):
         """Return every assembled tool keyed by name."""
         ...
 
-    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
-        """Return the client-facing tool objects, restricted to ``names`` when given."""
+    async def get_client_tools(self, names: list[str] | None = None) -> list[ClientTool]:
+        """The tools named in ``names`` (all when ``None``) as framework-neutral handles; an unknown name raises."""
         ...
 
     async def run_tool(
@@ -307,9 +363,12 @@ __all__ = [
     "NEVER_RETRYABLE_KINDS",
     "TOOL_META_PAUSES",
     "AppTools",
+    "ClientTool",
+    "ClientToolError",
     "NestedDoorFrameError",
     "RunDelivery",
     "StateTemplateDetachReferee",
+    "ToolAlreadyRegisteredError",
     "ToolDeleteReferee",
     "ToolInfo",
     "ToolInvocation",

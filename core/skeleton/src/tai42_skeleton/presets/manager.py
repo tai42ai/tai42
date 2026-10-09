@@ -34,9 +34,10 @@ import contextlib
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetExistsError, PresetNameConflictError, PresetNotFoundError
@@ -48,11 +49,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# A preset name is a live MCP tool name AND a ``{name}`` path segment, so it is
-# constrained to the tool-name-safe alphabet and the client-tool length cap
-# (``CLIENT_TOOL_NAME_MAX_LEN``): a slash-bearing name would never match the
-# ``/api/presets/{name}`` routes, and an over-long one collides after truncation.
-_PRESET_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# The contract's preset-name law: a preset name is a live tool name AND a ``{name}`` path segment.
+_PRESET_NAME_RE = re.compile(PRESET_NAME_PATTERN)
+
+# The quarantine reason of a stored preset whose name the preset-name law refuses.
+_NAME_LAW_REASON = "its name violates the preset-name law"
+
+# The refusal of an ``output_schema`` field beside an extension entry that declares the output shape.
+OUTPUT_SCHEMA_EXTENSION_CLASH = (
+    "output_schema field conflicts with an explicit output-schema-declaring extension entry; "
+    "declare the output shape in exactly one place"
+)
 
 
 def is_valid_preset_name(name: str) -> bool:
@@ -61,6 +68,21 @@ def is_valid_preset_name(name: str) -> bool:
     The create route's 400 guard and :meth:`PresetManager.register`'s backstop share this rule.
     """
     return _PRESET_NAME_RE.fullmatch(name) is not None
+
+
+def output_schema_extension_clash(
+    extensions: Sequence[Sequence[ExtensionElement]], declares_output_schema: Callable[[ExtensionElement], bool]
+) -> str | None:
+    """The clash refusal when an extension entry declares the output shape a preset ``output_schema`` also sets.
+
+    ``declares_output_schema`` answers for one entry from the live extension registry (an unknown
+    entry raises there).
+    """
+    for combo in extensions:
+        for element in combo:
+            if declares_output_schema(element):
+                return OUTPUT_SCHEMA_EXTENSION_CLASH
+    return None
 
 
 class PresetManager:
@@ -516,6 +538,10 @@ class PresetManager:
         preset_names: set[str],
         live: set[str],
     ) -> None:
+        if not is_valid_preset_name(name):
+            self._quarantine[name] = _NAME_LAW_REASON
+            logger.error("preset %r quarantined: %s", name, _NAME_LAW_REASON)
+            return
         bound = name in live
         ours = name in prior
         if bound and not ours:
@@ -545,6 +571,15 @@ class PresetManager:
             logger.error("preset %r quarantined: %s", name, reason)
             return
         try:
+            clash = (
+                output_schema_extension_clash(body.extensions, self._app._extension_registry.declares_output_schema)
+                if body.output_schema is not None
+                else None
+            )
+            if clash is not None:
+                self._quarantine[name] = clash
+                logger.error("preset %r quarantined: %s", name, clash)
+                return
             await self._register(
                 name,
                 base,

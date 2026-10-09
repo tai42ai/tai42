@@ -13,13 +13,12 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
-from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
+from tai42_agents._internal.lc_tools import resolve_tools, structured_tools
 from tai42_agents._internal.reject import resolve_response_format
-from tai42_agents._internal.resolve_tools import resolve_tools
+from tai42_agents._internal.subagent_spec import SubAgentSpec as NeutralSubAgentSpec
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 
@@ -89,14 +88,12 @@ class DeepSubAgentSpec(BaseModel):
 async def _resolve_subagent_spec(spec: DeepSubAgentSpec) -> ResolvedSubAgentSpec:
     """Convert one :class:`DeepSubAgentSpec` into a core :class:`ResolvedSubAgentSpec`.
 
-    Tool names are resolved to ``StructuredTool`` instances and nested subagents
+    Tool names are resolved to adapted ``StructuredTool`` instances and nested subagents
     are resolved recursively. ``response_format`` (a JSON Schema dict) passes
     through to the core spec unchanged.
     """
     resolved_response_format = await resolve_response_format(f"subagent {spec.name!r}", spec.response_format)
-    # Delivery-scoped: a subagent's tool is dispatched INSIDE the parent's turn, so it must
-    # not capture the completion binding addressing the parent's own deferred answer.
-    tools = scope_nested_dispatch_all(await tai42_app.tools.get_client_tools(spec.tools) if spec.tools else [])
+    tools = structured_tools(await tai42_app.tools.get_client_tools(spec.tools) if spec.tools else [])
     subagents = [await _resolve_subagent_spec(child) for child in spec.subagents]
     return ResolvedSubAgentSpec(
         name=spec.name,

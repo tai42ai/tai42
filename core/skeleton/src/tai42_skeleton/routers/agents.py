@@ -46,7 +46,6 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from datetime import datetime
 from typing import Any
 
 from pydantic import RootModel, ValidationError
@@ -63,7 +62,6 @@ from tai42_contract.agent.events import (
     SuspendedFinal,
 )
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.presets.errors import PresetNotFoundError
 from tai42_contract.states import StateSubject
 from tai42_contract.tools import tool_call_frame
@@ -239,29 +237,6 @@ def _subject_from_query(request: Request) -> StateSubject | None:
     return StateSubject(target_kind="agent", target_name=target, kind=kind, key=key)
 
 
-def _parse_expiry(iso: str | None) -> datetime | None:
-    """Parse an ISO-8601 park deadline into an aware ``datetime``, or ``None`` when the park carried none."""
-    return datetime.fromisoformat(iso) if iso is not None else None
-
-
-async def _suspended_sentinel(final: SuspendedFinal) -> SuspendedInteraction:
-    """The :class:`SuspendedInteraction` a park's :class:`SuspendedFinal` normalises to for ``visit``.
-
-    The caller/user split ``visit`` classifies on is read off the run's own parked list — the ids the
-    run parked ``to="caller"`` are the ones the live SSE caller must answer (``asks``); the rest are
-    user asks answered out of band (``parked``).
-    """
-    parked = await tai42_app.interactions.list_parked()
-    ids = set(final.interaction_ids)
-    caller_ids = [entry.id for entry in parked if entry.to == "caller" and entry.id in ids]
-    return SuspendedInteraction(
-        interaction_id=final.interaction_ids[0],
-        interaction_ids=list(final.interaction_ids),
-        caller_interaction_ids=caller_ids,
-        expiry_at=_parse_expiry(final.expiry_at),
-    )
-
-
 async def _drive_capturing_terminal(
     agent: Agent,
     run_kwargs: dict[str, Any],
@@ -285,7 +260,7 @@ async def _drive_capturing_terminal(
             SuspendedFinal | StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal,
         ):
             captured["terminal"] = event
-            return await _suspended_sentinel(event) if isinstance(event, SuspendedFinal) else event
+            return event.to_suspended_interaction() if isinstance(event, SuspendedFinal) else event
         await queue.put(("event", event))
     return None
 

@@ -15,7 +15,6 @@ beside their own suite (see ``tests/_delivery_scope.py``).
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -25,13 +24,13 @@ from fakeredis import aioredis
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     ChainedResume,
+    SuspendedInteraction,
     get_chained_resume,
     get_park_completion,
     get_resume_continuation_tool,
@@ -40,15 +39,16 @@ from tai42_contract.interactions import (
     reset_resume_continuation_tool,
     set_park_completion,
     set_resume_continuation_tool,
-    suspended_interaction_marker,
 )
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import tool_call_frame
+from tests._client_tool import FakeClientTool, client_tool
 from tests.conftest import bind_park_index
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
-from tai42_agents._internal.nested_dispatch import nested_tool_dispatch, scope_nested_dispatch
+from tai42_agents._internal.lc_tools import to_structured_tool
+from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME, agent_resume
 from tai42_agents._internal.park import capability as cap
 from tai42_agents._internal.park.park_binding import agents_park_index
@@ -144,13 +144,13 @@ class _NestedDriverTool:
         self.chain_seen: list[ChainedResume | None] = []
         self.door_seen: list[tuple[str | None, Any]] = []
 
-    def tool(self) -> StructuredTool:
+    def tool(self) -> FakeClientTool:
         def peek() -> str:
             self.chain_seen.append(get_chained_resume())
             self.door_seen.append(get_park_completion())
             return "peeked"
 
-        return StructuredTool.from_function(peek, name="peek", description="A nested driver's tool.")
+        return client_tool("peek", peek, description="A nested driver's tool.")
 
 
 class _ParkingAsk:
@@ -160,13 +160,17 @@ class _ParkingAsk:
         self._interaction_id = interaction_id
         self._expiry_at = expiry_at
 
-    def tool(self) -> StructuredTool:
-        def ask() -> dict[str, Any]:
+    def tool(self) -> FakeClientTool:
+        def ask() -> SuspendedInteraction:
             if get_resume_continuation_tool() is None:
                 raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
-            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
+            return SuspendedInteraction(
+                interaction_id=self._interaction_id,
+                expiry_at=self._expiry_at,
+                resume_owner=get_resume_continuation_tool(),
+            )
 
-        return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
+        return client_tool("ask", ask, description="Ask the user and park.")
 
 
 def _call(call_id: str, name: str) -> AIMessage:
@@ -337,69 +341,29 @@ def test_a_chained_dispatch_carries_the_ancestors_call_chain() -> None:
         reset_resume_continuation_tool(resume)
 
 
-def test_scoping_preserves_the_model_facing_tool_surface() -> None:
-    # A body swap only: the name, description and advertised argument schema an agent's model
-    # selects on are untouched, so scoping can be applied to the whole resolved tool list.
+def test_the_adapter_keeps_the_model_facing_tool_surface() -> None:
+    # The adapted tool advertises the handle's own name, description and argument schema, so a
+    # model selects on exactly what the platform advertises.
     def echo(text: str) -> str:
-        """Echo the text."""
         return text
 
-    original = StructuredTool.from_function(echo, name="echo", description="Echo the text.")
-    scoped = scope_nested_dispatch(original)
+    handle = client_tool("echo", echo, description="Echo the text.")
+    adapted = to_structured_tool(handle)
 
-    assert scoped is not original
-    assert scoped.name == original.name
-    assert scoped.description == original.description
-    assert scoped.args == original.args
-    assert scoped.func is not None
-    assert scoped.func("hi") == "hi"
-    # The ORIGINAL is left alone: ``get_client_tools`` builds these over the shared registry and a
-    # caller may hand one live tool to several agents, so scoping must never mutate in place.
-    assert original.func is not None
-    assert original.func is not scoped.func
+    assert adapted.name == "echo"
+    assert adapted.description == "Echo the text."
+    assert adapted.args_schema == handle.input_schema
+    assert asyncio.run(adapted.ainvoke({"text": "hi"})) == "hi"
 
 
-def test_scoping_clears_the_chain_through_an_async_body() -> None:
-    # The async half carries the SAME clearing property as the sync half — most client tools are
-    # coroutine-bodied, so asserting only the sync path would leave the common case unpinned.
+def test_the_adapter_clears_the_chain_outside_a_drive_that_can_park() -> None:
     # Outside a park-capable drive the dispatch binds no chain, so the body sees ``chained_resume``
     # cleared to None.
     seen: list[ChainedResume | None] = []
 
     async def peek() -> str:
-        """Peek at the chain."""
         seen.append(get_chained_resume())
         return "peeked"
 
-    scoped = scope_nested_dispatch(
-        StructuredTool.from_function(func=None, coroutine=peek, name="peek", description="Peek at the chain.")
-    )
-
-    async def drive() -> Any:
-        assert scoped.coroutine is not None
-        return await scoped.coroutine()
-
-    assert asyncio.run(drive()) == "peeked"
+    assert asyncio.run(to_structured_tool(client_tool("peek", peek)).ainvoke({})) == "peeked"
     assert seen == [None]
-
-
-def test_a_bodyless_tool_passes_through_with_a_warning(caplog) -> None:
-    # A plain ``BaseTool`` subclass implements ``_run``/``_arun`` and carries NEITHER ``func`` nor
-    # ``coroutine``: reading them directly raises, and this is the graceful path. It dispatches
-    # UNSCOPED, which is an ownership hole, so it is announced — never silently accepted, and
-    # never an exception that would take down a host whose tool works fine today.
-    class _PlainTool(BaseTool):
-        name: str = "plain"
-        description: str = "a bodyless tool"
-
-        def _run(self, *args: Any, **kwargs: Any) -> str:
-            return "ran"
-
-    plain = _PlainTool()
-    with caplog.at_level(logging.WARNING, logger="tai42_agents._internal.nested_dispatch"):
-        out = scope_nested_dispatch(plain)
-
-    assert out is plain
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "'plain'" in warnings[0]

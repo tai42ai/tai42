@@ -26,12 +26,13 @@ from pydantic import BaseModel, SecretStr
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.secrets import SecretValue
+from tai42_contract.tools import ClientTool
 from tai42_kit.clients.base import current_client_epoch
 from tai42_kit.logging.settings import logging_settings
 from tai42_kit.settings import register_settings_reset
 
 from tai42_agents._internal.base_tool_agent import _compile_tools_agent
-from tai42_agents._internal.resolve_tools import resolve_tools
+from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents.settings import agents_limits_settings
 
 
@@ -41,7 +42,7 @@ class ToolsAgentGraphSpec:
 
     tool_names: tuple[str, ...] = ()
     presets: tuple[PresetSpec, ...] = ()
-    live_tools: tuple[StructuredTool, ...] = ()
+    live_tools: tuple[ClientTool, ...] = ()
     system_message: str = ""
     system_content_kwargs: dict[str, Any] | None = None
     response_format: Any = None
@@ -129,7 +130,7 @@ _graphs_lock = threading.Lock()
 
 
 async def _build(spec: ToolsAgentGraphSpec) -> ToolsAgentGraph:
-    tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.live_tools), list(spec.presets))
+    tools = await resolve_tools(tai42_app.tools, spec.tool_names, spec.live_tools, spec.presets)
     agent, strategy = await _compile_tools_agent(
         tools,
         llm_provider=spec.llm_provider,

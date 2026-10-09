@@ -20,7 +20,7 @@ def _payload(**overrides: object) -> dict:
     base: dict = {
         "ws": _WS,
         "system_prompt": "be helpful",
-        "tool_names": [],
+        "proxy_tools": [],
         "skills": [],
         "subagents": [],
         "response_format": None,
@@ -63,9 +63,17 @@ def test_secret_values_never_ride_the_payload() -> None:
     assert ANTHROPIC_API_KEY_ENV not in payload["env"]
 
 
-def test_proxy_tools_map_one_per_name() -> None:
-    payload = _payload(tool_names=["alpha", "beta"])
-    assert payload["proxy_tool_names"] == ["alpha", "beta"]
+def test_proxy_tools_carry_each_granted_tools_schema_and_description() -> None:
+    granted = [
+        {"name": "alpha", "description": "The alpha tool.", "input_schema": {"type": "object", "properties": {}}},
+        {
+            "name": "beta",
+            "description": "The beta tool.",
+            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+        },
+    ]
+    payload = _payload(proxy_tools=granted)
+    assert payload["proxy_tools"] == granted
 
 
 def test_response_format_becomes_output_format() -> None:

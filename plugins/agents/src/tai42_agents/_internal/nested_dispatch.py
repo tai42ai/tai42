@@ -44,12 +44,8 @@ any tool body — captures no chain and is delivered by the platform to the run'
 from __future__ import annotations
 
 import contextlib
-import functools
-import logging
-from collections.abc import Iterable, Iterator
-from typing import Any
+from collections.abc import Iterator
 
-from langchain_core.tools import BaseTool
 from tai42_contract.interactions import (
     ChainedResume,
     get_resume_continuation_tool,
@@ -61,25 +57,17 @@ from tai42_contract.tools import current_call_chain
 
 from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME
 from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
-from tai42_agents._internal.park.middleware import resuming_park_interaction_ids
-
-logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
 def nested_tool_dispatch(*, chain: bool = False) -> Iterator[None]:
-    """Run a nested tool dispatch, rebinding the parent run's claim points for the tool body.
+    """Run a nested tool dispatch under its own chain routing.
 
     Wraps the exact call that hands control to a foreign tool body, and restores the caller's own
-    bindings in a ``finally``. The door's out-of-band delivery address (``_park_completion``) is NOT
+    routing in a ``finally``. The door's out-of-band delivery address (``_park_completion``) is NOT
     touched — it flows DOWN unchanged, because no driver fires the door completion (the
     platform delivers to the run's own address), so no driver can hijack another run's delivery by
     overwriting that address.
-
-    Two claim points the parent run set are rebound here. The resuming-park interaction ids name
-    what the PARENT run is resuming; a nested run dispatched inside the tool body must not inherit
-    them, or its claim point would adopt an ownerless marker that merely carries one of the parent's
-    resuming ids — so they are cleared to ``frozenset()`` for the whole dispatch, unconditionally.
 
     ``chain`` asks for the CHAINED resume routing: a fresh chained key addressing this one call,
     carried on ``chained_resume`` with the ancestor's own call chain, so a nested run that parks
@@ -102,87 +90,7 @@ def nested_tool_dispatch(*, chain: bool = False) -> Iterator[None]:
     else:
         routing = None
     token = set_chained_resume(routing)
-    with resuming_park_interaction_ids(frozenset()):
-        try:
-            yield
-        finally:
-            reset_chained_resume(token)
-
-
-def scope_nested_dispatch[ToolT: BaseTool](tool: ToolT) -> ToolT:
-    """``tool`` with its body wrapped in a CHAINED :func:`nested_tool_dispatch`.
-
-    Applied to every tool an agent is given, whatever it was resolved from (a live object, a
-    registered name, or a preset), so the ownership rule holds for the whole tool list rather
-    than the one resolution path that happens to reach a parking driver today. Chained because
-    this is the LangGraph loops' tool list: their park hook can host a park on the CALL, so a
-    nested run that parks is waited on rather than refused. A run of theirs that cannot park
-    binds no resume continuation, and the chain declines itself.
-
-    Typed over any :class:`~langchain_core.tools.BaseTool` and returning the caller's OWN tool
-    type: an agent whose list is ``list[StructuredTool]`` gets one back, while a bodyless subclass
-    (a real input, see below) is not a type error at the call site.
-
-    The wrapper is a body swap ON A COPY: the tool keeps its name, description, and advertised
-    ``args_schema``, and the wrapped callables carry the original's ``__signature__`` /
-    annotations, so nothing the model or the graph sees changes. A copy rather than an in-place
-    mutation because these objects are NOT this agent's to edit — ``get_client_tools`` builds them
-    over the shared tool registry and a caller may hand the same live ``StructuredTool`` to
-    several agents, so wrapping in place would push one agent's scope onto every other holder
-    (and re-wrap the same body on each resolution).
-
-    The two callable slots are read defensively: a plain :class:`~langchain_core.tools.BaseTool`
-    subclass implements ``_run``/``_arun`` and carries NEITHER attribute, so a direct read would
-    raise rather than take the fallback below.
-    """
-    update: dict[str, Any] = {}
-    func = getattr(tool, "func", None)
-    coroutine = getattr(tool, "coroutine", None)
-    if func is not None:
-        update["func"] = _scoped_sync(func)
-    if coroutine is not None:
-        update["coroutine"] = _scoped_async(coroutine)
-    if not update:
-        # No callable body to swap (a ``BaseTool`` subclass implementing ``_run``/``_arun``): this
-        # tool dispatches UNSCOPED, which is an ownership hole, so say so. Not an exception —
-        # raising would take down hosts whose tools work fine today over a hazard that only
-        # materializes if the tool turns out to host a parking driver.
-        logger.warning(
-            "agents: tool %r exposes no func/coroutine body to scope, so it dispatches without the "
-            "park-completion binding cleared; a parking driver reached through it could capture this "
-            "agent's deferred-answer address",
-            getattr(tool, "name", tool),
-        )
-        return tool
-    return tool.model_copy(update=update)
-
-
-def scope_nested_dispatch_all[ToolT: BaseTool](tools: Iterable[ToolT]) -> list[ToolT]:
-    """Every tool in ``tools``, delivery-scoped.
-
-    Applied wherever an agent's tool list is ASSEMBLED — the last point before the
-    list is handed to a graph — so the rule holds for every agent in the plugin,
-    not only the ones that build their list through
-    :func:`~tai42_agents._internal.resolve_tools.resolve_tools`.
-    """
-    return [scope_nested_dispatch(tool) for tool in tools]
-
-
-def _scoped_sync(func: Any) -> Any:
-    @functools.wraps(func)
-    def scoped(*args: Any, **kwargs: Any) -> Any:
-        # A fresh chained key per INVOCATION, not per wrap: two tool calls in one super-step
-        # are two calls, each waited on separately.
-        with nested_tool_dispatch(chain=True):
-            return func(*args, **kwargs)
-
-    return scoped
-
-
-def _scoped_async(coroutine: Any) -> Any:
-    @functools.wraps(coroutine)
-    async def scoped(*args: Any, **kwargs: Any) -> Any:
-        with nested_tool_dispatch(chain=True):
-            return await coroutine(*args, **kwargs)
-
-    return scoped
+    try:
+        yield
+    finally:
+        reset_chained_resume(token)

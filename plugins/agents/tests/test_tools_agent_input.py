@@ -5,7 +5,6 @@ memory-key guard surface.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from typing import Any
 
 import pytest
@@ -13,7 +12,7 @@ from pydantic import ValidationError
 from tai42_contract.agent import (
     Agent,
 )
-from tai42_contract.agent.base import PresetSpec, SubAgentSpec
+from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tests._tools_agent_support import (
@@ -22,8 +21,6 @@ from tests._tools_agent_support import (
     _get_agent,
 )
 
-from tai42_agents import tools_agent as tools_agent_module
-from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.tools_agent import ToolsAgent, ToolsAgentInput
 
 
@@ -161,15 +158,9 @@ def test_from_tool_input_rejects_both_system_prompt_and_system_message() -> None
         ToolsAgent.from_tool_input(validated)
 
 
-# The ABC ``run`` parameters this agent's runtime cannot honor — ALL the guard is
-# handed. Each is rejected loudly on BOTH faces rather than silently dropped, so
-# dropping any one from the guard call site fails a test here.
-# ``response_format`` is NOT here — it is honored (forces structured output).
-# ``resume`` is NOT here either — an async ``ask`` park makes a run resumable, so
-# a caller-driven ``Command(resume=...)`` is honored (see
-# ``test_run_honors_a_caller_driven_resume``).
-_UNHONORED_CASES = [
-    ("subagents", [SubAgentSpec(name="helper")]),
+# Keywords this agent does not declare: each is refused loudly on BOTH faces, never dropped.
+_UNDECLARED_CASES = [
+    ("subagents", [{"name": "helper"}]),
     ("strategy", "react"),
     ("interrupt_on", {"some_tool": {}}),
     ("skills", ["research"]),
@@ -178,68 +169,18 @@ _UNHONORED_CASES = [
 ]
 
 
-@pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_run_rejects_unhonored_params(param: str, value: Any) -> None:
-    """``run`` never silently drops an ABC parameter its runtime cannot honor: each
-    fails loud with a message naming the offending parameter, on the ``run`` face."""
+@pytest.mark.parametrize(("param", "value"), _UNDECLARED_CASES)
+def test_run_refuses_an_undeclared_keyword(param: str, value: Any) -> None:
     agent = _get_agent()
-    with pytest.raises(RuntimeError, match=rf"tools_agent\.run does not support .*\b{param}\b"):
+    with pytest.raises(TypeError, match=rf"tools_agent\.run got unknown run keyword argument\(s\): {param}"):
         asyncio.run(agent.run(user_message=TemplatedText(content="hi"), **{param: value}))
 
 
-@pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_astream_rejects_unhonored_params(param: str, value: Any) -> None:
-    """``astream`` rejects the same unhonored ABC parameters as ``run`` — parity —
-    each with a message naming the offending parameter, on the ``astream`` face."""
+@pytest.mark.parametrize(("param", "value"), _UNDECLARED_CASES)
+def test_astream_refuses_an_undeclared_keyword(param: str, value: Any) -> None:
     agent = _get_agent()
-    with pytest.raises(RuntimeError, match=rf"tools_agent\.astream does not support .*\b{param}\b"):
+    with pytest.raises(TypeError, match=rf"tools_agent\.astream got unknown run keyword argument\(s\): {param}"):
         _collect(agent, user_message=TemplatedText(content="hi"), **{param: value})
-
-
-def test_unhonored_cases_cover_the_full_reasons_map() -> None:
-    """Every key in the guard's reasons map has a parametrized reject case, so a key
-    added to the map without a matching test fails here immediately."""
-    assert {param for param, _ in _UNHONORED_CASES} == set(tools_agent_module._UNHONORED_REASONS)
-
-
-# The unhonored params whose ABC ``Agent.run`` default is an empty collection (``()`` /
-# ``""``), read from the contract signature — the independent source of truth for which
-# unhonored params are collection-typed. Intersected with this agent's reasons map it is
-# exactly the set ``_UNHONORED_COLLECTION_PARAMS`` must classify as collections. The
-# empty-collection test below parametrizes from HERE, not from the frozenset, so a member
-# dropped from the frozenset (reclassifying it as a scalar) turns a case red rather than
-# silently vanishing.
-_EMPTY_COLLECTION_ABC_DEFAULTS = frozenset(
-    name
-    for name, parameter in inspect.signature(Agent.run).parameters.items()
-    if isinstance(parameter.default, (tuple, list, str)) and not parameter.default
-)
-
-
-_COLLECTION_REJECT_PARAMS = sorted(tools_agent_module._UNHONORED_REASONS.keys() & _EMPTY_COLLECTION_ABC_DEFAULTS)
-
-
-def test_collection_params_match_the_abc_collection_defaults() -> None:
-    """``_UNHONORED_COLLECTION_PARAMS`` is exactly this agent's unhonored params whose ABC
-    default is an empty collection: no scalar wrongly listed (which would let a meaningful
-    falsy value slip through), none dropped (which would over-reject the not-requested
-    empty default)."""
-    assert set(tools_agent_module._UNHONORED_COLLECTION_PARAMS) == set(_COLLECTION_REJECT_PARAMS)
-
-
-@pytest.mark.parametrize("empty", [[], ""])
-@pytest.mark.parametrize("param", _COLLECTION_REJECT_PARAMS)
-def test_reject_unhonored_permits_empty_collection_param(param: str, empty: object) -> None:
-    """An empty collection is the ABC's "not requested" default for a collection parameter,
-    so the guard does not raise for it — in either falsy empty form (``[]`` / ``""``). Were
-    the parameter dropped from ``_UNHONORED_COLLECTION_PARAMS`` it would be classified as a
-    scalar (set whenever it is not ``None``) and this empty value would raise."""
-    reject_unhonored(
-        "tools_agent.run",
-        {param: empty},
-        tools_agent_module._UNHONORED_REASONS,
-        collection_params=tools_agent_module._UNHONORED_COLLECTION_PARAMS,
-    )
 
 
 @pytest.mark.parametrize("blank", ["", "   "])

@@ -55,15 +55,23 @@ async def test_a_non_object_output_schema_is_refused_with_the_door_text() -> Non
 
 
 async def test_an_output_schema_that_fails_the_meta_schema_is_refused() -> None:
-    error = await output_schema_body_error({"type": 5}, [])
+    error = await output_schema_body_error({"type": 5})
     assert error is not None
     assert error.startswith("output_schema is not a valid JSON Schema: ")
 
 
-async def test_an_output_schema_declared_twice_is_refused() -> None:
-    error = await output_schema_body_error({"type": "object"}, [["output_schema"]])
-    assert error is not None
-    assert error.startswith("output_schema field conflicts with an explicit 'output_schema' extension entry")
+def test_an_output_schema_beside_a_shape_declaring_extension_entry_is_the_clash() -> None:
+    from tai42_skeleton.presets.manager import OUTPUT_SCHEMA_EXTENSION_CLASH, output_schema_extension_clash
+
+    declares = {"shaped": True, "plain": False}
+
+    def declares_output_schema(element: object) -> bool:
+        return declares[str(element)]
+
+    assert output_schema_extension_clash([["plain"], ["shaped"]], declares_output_schema) == (
+        OUTPUT_SCHEMA_EXTENSION_CLASH
+    )
+    assert output_schema_extension_clash([["plain"]], declares_output_schema) is None
 
 
 async def test_an_unresolvable_schema_body_is_refused_with_its_resolution_text(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,7 +80,7 @@ async def test_an_unresolvable_schema_body_is_refused_with_its_resolution_text(m
             raise SchemaBodyError(f"{field}: its stored id 'gone' could not be rendered")
 
     monkeypatch.setattr(definition, "resolve_schema_body", _unresolvable)
-    assert await output_schema_body_error({"type": "object"}, []) == (
+    assert await output_schema_body_error({"type": "object"}) == (
         "output_schema: its stored id 'gone' could not be rendered"
     )
     with pytest.raises(PresetDefinitionError, match=r"^preset 'p' input_schema: its stored id 'gone'"):

@@ -19,9 +19,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from pydantic import BaseModel
-from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
+from tests.agent._memoryless import MemorylessTestAgent
 
 
 class _StructuredInput(BaseModel):
@@ -30,7 +30,7 @@ class _StructuredInput(BaseModel):
 
 
 @tai42_app.agents.agent("structured_agent")
-class StructuredAgent(Agent):
+class StructuredAgent(MemorylessTestAgent):
     tool_name = "structured_agent"
     tool_description = "A fake agent that advertises response_format and forces structured output."
     ToolInput = _StructuredInput
@@ -64,7 +64,7 @@ class _PlainInput(BaseModel):
 
 
 @tai42_app.agents.agent("plain_agent")
-class PlainAgent(Agent):
+class PlainAgent(MemorylessTestAgent):
     tool_name = "plain_agent"
     tool_description = "A fake agent with no response_format (the voting-agent shape)."
     ToolInput = _PlainInput

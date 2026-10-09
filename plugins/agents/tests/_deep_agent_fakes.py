@@ -14,22 +14,13 @@ from typing import Any, Protocol
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
-from langchain_core.tools import StructuredTool
+from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents.langchain_deep_agent.agent import DeepAgent
 
 
-def _client_tool(name: str) -> StructuredTool:
-    async def call_tool(**kwargs: object) -> object:
-        return kwargs
-
-    return StructuredTool.from_function(
-        func=None,
-        coroutine=call_tool,
-        name=name,
-        description="client tool",
-        args_schema={"type": "object", "properties": {}, "required": []},
-    )
+def _client_tool(name: str) -> FakeClientTool:
+    return client_tool(name, description="client tool")
 
 
 class _CompiledGraphLike(Protocol):

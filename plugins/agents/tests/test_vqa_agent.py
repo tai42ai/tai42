@@ -10,7 +10,6 @@ stands in for a real provider — no network, no live model.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -23,7 +22,6 @@ from tai42_contract.agent.events import MessageDelta, MessageFinal, RunUsage, St
 from tai42_contract.app import tai42_app
 
 import tai42_agents.vqa_agent as vqa
-from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents._internal.text import text_of
 from tai42_agents.vqa_agent import VqaAgent, VqaAgentInput
 
@@ -380,141 +378,58 @@ def test_native_oversized_int_is_reprompted_then_unresolved(monkeypatch: pytest.
     assert isinstance(result, StructuredOutputUnresolvedFinal)
 
 
-# Every key in ``_UNHONORED_REASONS`` paired with a representative SET value: a
-# non-empty collection for a collection param, a meaningful value for a scalar
-# (``resume=False`` pins the falsy-but-present case). Each is rejected on BOTH faces,
-# so dropping any one key from the guard's map fails a case here.
+# The contract keys a single completion cannot honor, each with a set value (an empty
+# ``user_message`` is set: it is a scalar, refused whenever it is not ``None``).
 _UNHONORED_CASES = [
-    ("tools", [object()]),
     ("tool_names", ["x"]),
-    ("presets", [object()]),
-    ("subagents", [object()]),
-    ("system_message", "sys"),
     ("user_message", "usr"),
-    ("strategy", "react"),
-    ("interrupt_on", {"tool": True}),
-    ("skills", ["s"]),
-    ("inline_skills", [{"name": "s", "content": "c"}]),
-    ("recursion_limit", 5),
+    ("user_message", ""),
     ("thread_id", "t"),
+]
+
+# Keywords this agent does not declare, refused by presence.
+_UNDECLARED_CASES = [
+    ("tools", [object()]),
+    ("system_message", "sys"),
     ("resume", False),
-    ("resume_checkpoint_id", "cp"),
+    ("recursion_limit", 0),
     ("checkpoint_provider", "redis"),
-    ("store_provider", "redis"),
-    ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
     ("user_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_run_rejects_unhonored_contract_param(fake_llm: None, param: str, value: Any) -> None:
-    """Every contract ``Agent.run`` parameter with no seam in a single completion
-    is rejected loudly on the run face, naming the offending parameter and the exact
-    ``run`` face it was called on."""
+def test_run_refuses_a_contract_key_it_cannot_honor(fake_llm: None, param: str, value: Any) -> None:
     with pytest.raises(RuntimeError, match=rf"vqa_agent\.run does not support .*\b{param}\b"):
-        # The base ``Agent.run`` signature types some of these non-optional, so the mismatch is expected.
-        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", **{param: value}))  # type: ignore[arg-type]
+        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", **{param: value}))
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_astream_rejects_unhonored_contract_param(fake_llm: None, param: str, value: Any) -> None:
-    """Parity with :meth:`run`: the stream face rejects the same unhonored contract
-    parameters loudly, naming the offending parameter and the exact ``astream`` face.
-    The run-face guard is load-bearing: dropping it would surface the ``astream``
-    token on a ``run`` call and fail :func:`test_run_rejects_unhonored_contract_param`."""
+def test_astream_refuses_a_contract_key_it_cannot_honor(fake_llm: None, param: str, value: Any) -> None:
     with pytest.raises(RuntimeError, match=rf"vqa_agent\.astream does not support .*\b{param}\b"):
-        asyncio.run(_collect(VqaAgent().astream(image_url="http://img", query="describe", **{param: value})))  # type: ignore[arg-type]
+        asyncio.run(_collect(VqaAgent().astream(image_url="http://img", query="describe", **{param: value})))
 
 
-def test_unhonored_cases_cover_the_full_reasons_map() -> None:
-    """Every key in the guard's reasons map has a parametrized reject case, so a key
-    added to the map without a matching test fails here immediately."""
-    assert {param for param, _ in _UNHONORED_CASES} == set(vqa._UNHONORED_REASONS)
+@pytest.mark.parametrize(("param", "value"), _UNDECLARED_CASES)
+def test_both_faces_refuse_an_undeclared_keyword(fake_llm: None, param: str, value: Any) -> None:
+    with pytest.raises(TypeError, match=rf"vqa_agent\.run got unknown run keyword argument\(s\): {param}"):
+        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", **{param: value}))
+    with pytest.raises(TypeError, match=rf"vqa_agent\.astream got unknown run keyword argument\(s\): {param}"):
+        asyncio.run(_collect(VqaAgent().astream(image_url="http://img", query="describe", **{param: value})))
 
 
-# The unhonored params whose ABC ``Agent.run`` default is an empty collection (``()`` /
-# ``""``), read from the contract signature — the independent source of truth for which
-# unhonored params are collection-typed. Intersected with this agent's reasons map it is
-# exactly the set ``_UNHONORED_COLLECTION_PARAMS`` must classify as collections. The
-# empty-collection test below parametrizes from HERE, not from the frozenset, so a member
-# dropped from the frozenset (reclassifying it as a scalar) turns a case red rather than
-# silently vanishing.
-_EMPTY_COLLECTION_ABC_DEFAULTS = frozenset(
-    name
-    for name, parameter in inspect.signature(Agent.run).parameters.items()
-    if isinstance(parameter.default, (tuple, list, str)) and not parameter.default
-)
-_COLLECTION_REJECT_PARAMS = sorted(vqa._UNHONORED_REASONS.keys() & _EMPTY_COLLECTION_ABC_DEFAULTS)
-
-
-def test_collection_params_match_the_abc_collection_defaults() -> None:
-    """``_UNHONORED_COLLECTION_PARAMS`` is exactly this agent's unhonored params whose ABC
-    default is an empty collection: no scalar wrongly listed (which would let a meaningful
-    falsy value slip through), none dropped (which would over-reject the not-requested
-    empty default)."""
-    assert set(vqa._UNHONORED_COLLECTION_PARAMS) == set(_COLLECTION_REJECT_PARAMS)
-
-
-@pytest.mark.parametrize("empty", [[], ""])
-@pytest.mark.parametrize("param", _COLLECTION_REJECT_PARAMS)
-def test_reject_unhonored_permits_empty_collection_param(param: str, empty: object) -> None:
-    """An empty collection is the ABC's "not requested" default for a collection parameter,
-    so the guard does not raise for it — in either falsy empty form (``[]`` / ``""``). Were
-    the parameter dropped from ``_UNHONORED_COLLECTION_PARAMS`` it would be classified as a
-    scalar (set whenever it is not ``None``) and this empty value would raise."""
-    reject_unhonored(
-        "vqa_agent.run",
-        {param: empty},
-        vqa._UNHONORED_REASONS,
-        collection_params=vqa._UNHONORED_COLLECTION_PARAMS,
+def test_the_not_requested_sentinels_pass_the_guard(fake_llm: None) -> None:
+    result = asyncio.run(
+        VqaAgent().run(
+            image_url="http://img",
+            query="describe",
+            thread_id=None,
+            user_message=None,
+            tool_names=(),
+            response_format=None,
+        )
     )
-
-
-@pytest.mark.parametrize(
-    ("param", "value"),
-    [
-        ("resume", False),
-        ("recursion_limit", 0),
-        ("strategy", ""),
-        ("system_message", ""),
-        ("user_message", ""),
-    ],
-)
-def test_run_rejects_falsy_but_meaningful_contract_param(fake_llm: None, param: str, value: Any) -> None:
-    """A falsy-but-meaningful scalar (``resume=False`` / ``recursion_limit=0`` /
-    ``strategy=""`` / ``system_message=""`` / ``user_message=""``) is still a request the
-    agent cannot honor and raises — a scalar is set whenever it is not ``None``, so it never
-    slips through a truthiness gate. ``system_message``/``user_message`` are scalar
-    (``TemplatedText | None``) contract params, so an empty string is a set value, not a
-    not-requested collection default."""
-    with pytest.raises(RuntimeError, match=rf"vqa_agent\.run does not support .*\b{param}\b"):
-        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", **{param: value}))  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("param", ["response_format", "resume", "thread_id", "recursion_limit", "strategy"])
-def test_unhonored_none_passes_the_guard(fake_llm: None, param: str) -> None:
-    """The ABC's ``None`` "not requested" sentinel passes the guard rather than being
-    over-rejected: an explicit ``response_format=None`` / ``resume=None`` / … reaches
-    the single completion and returns its text, in parity with the other agents."""
-    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", **{param: None}))
     assert result == "Hello"
-
-
-def test_unhonored_collection_empty_passes_the_guard(fake_llm: None) -> None:
-    """An empty collection is the ABC's "not requested" sentinel and passes the guard:
-    ``tools=()`` / ``subagents=[]`` reach the completion rather than raising."""
-    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", tools=(), subagents=[]))
-    assert result == "Hello"
-
-
-def test_plain_extension_kwargs_pass_through_both_faces(fake_llm: None) -> None:
-    """A kwarg that is NOT a contract ``Agent.run`` parameter is the ABC's role
-    extension point and stays allowed — it is not rejected on either face."""
-    result = asyncio.run(VqaAgent().run(image_url="http://img", query="describe", vqa_specific_extra="ok"))
-    assert result == "Hello"
-    stream = VqaAgent().astream(image_url="http://img", query="describe", vqa_specific_extra="ok")
-    events = asyncio.run(_collect(stream))
-    assert [event.type for event in events][-1] == "message_final"
 
 
 def test_honored_params_reach_the_llm_seam_on_both_faces(monkeypatch: pytest.MonkeyPatch) -> None:

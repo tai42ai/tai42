@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from langchain_core.tools import ToolException
-from tai42_contract.agent.base import PresetSpec, SubAgentSpec
+from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 from tests._tools_agent_support import (
@@ -21,7 +21,7 @@ from tests._tools_agent_support import (
 )
 
 from tai42_agents import tools_agent as tools_agent_module
-from tai42_agents._internal.resolve_tools import resolve_tools
+from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 
 
@@ -201,40 +201,6 @@ def test_run_response_format_without_title_raises_loudly(app_tools: Any, resourc
     agent = _get_agent()
     with pytest.raises(ValueError, match="top-level 'title'"):
         asyncio.run(agent.run(user_message=TemplatedText(content="hi"), response_format={"type": "object"}))
-
-
-def test_run_with_subagents_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``run`` never silently drops baked ``subagents``: sub-agent delegation is
-    langchain_deep_agent's domain, so a non-empty value fails loud rather than being ignored."""
-    invoked = False
-
-    async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        nonlocal invoked
-        invoked = True
-        return AgentInvokeResult(output="x", usage=CallUsage(0, 0, None))
-
-    monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
-    agent = _get_agent()
-    with pytest.raises(RuntimeError, match="subagents"):
-        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), subagents=[SubAgentSpec(name="helper")]))
-    assert invoked is False
-
-
-def test_run_with_strategy_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``run`` never silently drops a baked ``strategy``: it applies none, so a
-    non-null value fails loud rather than being ignored."""
-    invoked = False
-
-    async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
-        nonlocal invoked
-        invoked = True
-        return AgentInvokeResult(output="x", usage=CallUsage(0, 0, None))
-
-    monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
-    agent = _get_agent()
-    with pytest.raises(RuntimeError, match="strategy"):
-        asyncio.run(agent.run(user_message=TemplatedText(content="hi"), strategy="react"))
-    assert invoked is False
 
 
 def test_run_renders_message_by_template_id(

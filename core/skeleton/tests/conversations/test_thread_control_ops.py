@@ -10,11 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, ValidationError
-from tai42_contract.agent import Agent
 from tai42_contract.channels import ChannelTemplate, OptionSection, ReplyOption
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 from tai42_contract.interactions import LocationElement, MediaItem, MediaKind
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
@@ -53,7 +53,7 @@ class _AgentInput(BaseModel):
     user_message: str = ""
 
 
-class _MemoryAgent(Agent):
+class _MemoryAgent(MemorylessTestAgent):
     """A memory-holding agent — implements ``append_thread_messages``, so its route serves
     manual mode."""
 
@@ -67,7 +67,7 @@ class _MemoryAgent(Agent):
         return None
 
 
-class _MemorylessAgent(Agent):
+class _MemorylessAgent(MemorylessTestAgent):
     """An agent that leaves ``append_thread_messages`` the ABC default, so its route cannot
     serve manual mode."""
 

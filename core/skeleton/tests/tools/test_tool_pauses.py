@@ -15,7 +15,6 @@ import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import MiddlewareContext
 from fastmcp.tools.base import ToolResult
-from langchain_core.tools import ToolException
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     ResumeBuffered,
@@ -25,7 +24,7 @@ from tai42_contract.interactions import (
     set_resume_continuation_tool,
     suspended_interaction_marker,
 )
-from tai42_contract.tools import UndeclaredPauseError
+from tai42_contract.tools import ClientToolError, UndeclaredPauseError
 from tests.app._fixtures.pause_counter import BODY_RUNS
 
 from tai42_skeleton.app.instance import app
@@ -118,7 +117,11 @@ def test_run_tool_returns_a_declared_park(tool, kind):
 
 
 def _marker_result(interaction_id: str) -> ToolResult:
-    return ToolResult(structured_content=suspended_interaction_marker(interaction_id, None, None))
+    return ToolResult(
+        structured_content=suspended_interaction_marker(
+            interaction_id, None, None, interaction_ids=[interaction_id], caller_interaction_ids=[]
+        )
+    )
 
 
 def test_the_mcp_edge_refuses_an_undeclared_park_as_a_tool_error(runs):
@@ -171,7 +174,7 @@ def test_the_mcp_tools_call_answers_an_error_result_naming_the_tool():
     assert result.content[0].text == _REFUSAL.format("undeclared_park")
 
 
-# --- seam 3: the in-process agent client-tool adapter ---------------------------------------
+# --- seam 3: the in-process agent client-tool handle -----------------------------------------
 
 
 async def _client_handle(name: str):
@@ -180,20 +183,13 @@ async def _client_handle(name: str):
 
 
 @pytest.mark.parametrize("tool", ["undeclared_park", "undeclared_buffered"])
-def test_the_client_tool_adapter_refuses_an_undeclared_park_raw(tool, monkeypatch):
-    import tai42_skeleton.tools.binding.client_tools as client_tools
-
-    def _never(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("park adoption must not be reached")
-
-    monkeypatch.setattr(client_tools, "resolve_park_adoption", _never)
-
+def test_the_client_tool_handle_refuses_an_undeclared_park_raw(tool):
     async def run() -> None:
         async with app.app_context(_manifest()):
             handle = await _client_handle(tool)
             with pytest.raises(UndeclaredPauseError) as caught:
-                await handle.ainvoke({"q": "x"})
-            assert not isinstance(caught.value, ToolException)
+                await handle.invoke({"q": "x"})
+            assert not isinstance(caught.value, ClientToolError)
             assert caught.value.tool == tool
 
     asyncio.run(run())
@@ -204,26 +200,26 @@ def test_a_nested_refusal_leaves_the_handle_raw_and_the_tool_ran_once():
         async with app.app_context(_manifest()):
             handle = await _client_handle("redispatcher")
             with pytest.raises(UndeclaredPauseError) as caught:
-                await handle.ainvoke({"target": "undeclared_park"})
+                await handle.invoke({"target": "undeclared_park"})
             assert caught.value.tool == "undeclared_park"
 
     asyncio.run(run())
     assert BODY_RUNS["undeclared_park"] == 1
 
 
-def test_the_client_tool_adapter_returns_a_declared_park_as_today():
+def test_the_client_tool_handle_returns_a_declared_park_by_type():
     async def run() -> tuple[Any, Any]:
         async with app.app_context(_manifest()):
             token = set_resume_continuation_tool("agent_resume")
             try:
-                parked = await (await _client_handle("declared_park")).ainvoke({"q": "x"})
-                buffered = await (await _client_handle("declared_buffered")).ainvoke({"q": "x"})
+                parked = await (await _client_handle("declared_park")).invoke({"q": "x"})
+                buffered = await (await _client_handle("declared_buffered")).invoke({"q": "x"})
             finally:
                 reset_resume_continuation_tool(token)
             return parked, buffered
 
     parked, buffered = asyncio.run(run())
-    assert read_suspended_interaction_marker(parked) is not None
+    assert isinstance(parked, SuspendedInteraction)
     assert isinstance(buffered, ResumeBuffered)
 
 

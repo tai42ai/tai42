@@ -10,34 +10,25 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from langchain_core.tools import StructuredTool
 from tai42_contract.agent import (
     Agent,
     MessageFinal,
     StreamEvent,
 )
 from tai42_contract.app import tai42_app
+from tests._client_tool import FakeClientTool, client_tool
 
 from tai42_agents import tools_agent as tools_agent_module
 from tai42_agents._internal.graph_cache import ToolsAgentGraph, ToolsAgentGraphSpec
-from tai42_agents._internal.resolve_tools import resolve_tools
+from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
 from tai42_agents.tools_agent import ToolsAgent
 
 AGENT_NAME = "tools_agent"
 
 
-def make_tool(name: str, props: dict[str, Any] | None = None) -> StructuredTool:
-    async def call_tool(**kwargs: Any) -> Any:
-        return kwargs
-
-    return StructuredTool.from_function(
-        func=None,
-        coroutine=call_tool,
-        name=name,
-        description="t",
-        args_schema={"type": "object", "properties": props or {}, "required": []},
-    )
+def make_tool(name: str, props: dict[str, Any] | None = None) -> FakeClientTool:
+    return client_tool(name, properties=props or {}, description="t")
 
 
 class ScriptedGraph(ToolsAgentGraph):
@@ -50,7 +41,7 @@ def script_graph(monkeypatch: pytest.MonkeyPatch, module: Any = tools_agent_modu
     """Replace the face's graph build (in ``module``) with one that resolves the spec's tools and compiles nothing."""
 
     async def fake_graph(spec: ToolsAgentGraphSpec) -> ToolsAgentGraph:
-        tools = await resolve_tools(tai42_app.tools, list(spec.tool_names), list(spec.live_tools), list(spec.presets))
+        tools = await resolve_tools(tai42_app.tools, spec.tool_names, spec.live_tools, spec.presets)
         graph = ScriptedGraph(
             agent=None,
             strategy=None,

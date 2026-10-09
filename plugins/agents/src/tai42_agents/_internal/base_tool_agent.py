@@ -10,7 +10,6 @@ event projection lives in ``stream_events``).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
@@ -19,7 +18,6 @@ from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from tai42_contract.agent.events import SuspendedFinal
-from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
@@ -58,22 +56,6 @@ _async_park_middleware = AsyncParkMiddleware()
 #: against the FINAL (thread-id-resolved) run config — deferred so a keyless run's
 #: minted thread id is captured, never a pre-init ``None``.
 ParkBuilder = Callable[[dict[str, Any]], ParkIdentity | None]
-
-
-def _suspended_receipt(event: SuspendedFinal) -> SuspendedInteraction:
-    """The typed park value a parked run returns in place of an answer.
-
-    The same typed value :meth:`Agent._drain` yields, so a park is a clean non-error outcome
-    recognised by TYPE (never a status-keyed dict). Carries the whole super-step's two id lists and
-    the earliest deadline; it carries NO ``resume_owner`` — the platform re-normalises the park, no
-    caller adopts it. ``thread_id`` is dropped: no consumer reads it off the park value.
-    """
-    return SuspendedInteraction(
-        interaction_id=event.interaction_ids[0],
-        expiry_at=datetime.fromisoformat(event.expiry_at) if event.expiry_at else None,
-        interaction_ids=list(event.interaction_ids),
-        caller_interaction_ids=list(event.caller_interaction_ids),
-    )
 
 
 async def _compile_tools_agent(
@@ -247,7 +229,7 @@ async def ainvoke_tools_agent(
                 output="",
                 usage=aggregate_usage(state),
                 structured=None,
-                suspended=_suspended_receipt(event),
+                suspended=event.to_suspended_interaction(),
             )
     response_format = graph.response_format
     structured = extract_structured_output(state, response_format) if response_format is not None else None

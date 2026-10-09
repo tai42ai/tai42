@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton import agent as _agent
 
@@ -36,7 +37,7 @@ class _EchoInput(BaseModel):
     options: _Options = _Options()
 
 
-class _EchoAgent(Agent):
+class _EchoAgent(MemorylessTestAgent):
     """A minimal non-streaming agent: implements ``run`` only and inherits the
     free ``astream``/``_drain`` defaults."""
 
@@ -57,7 +58,7 @@ def test_incomplete_agent_cannot_instantiate() -> None:
     """``run`` is the one abstract method — an agent that omits it is not a valid
     ``Agent`` and the ABC refuses to instantiate it."""
 
-    class _Partial(Agent):  # no run()
+    class _Partial(MemorylessTestAgent):  # no run()
         tool_name = "partial"
 
     with pytest.raises(TypeError):

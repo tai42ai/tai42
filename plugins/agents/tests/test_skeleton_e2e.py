@@ -513,3 +513,28 @@ def test_hidden_continuation_tools_dispatch_through_the_registry_and_refuse_with
                 )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("key", ["thread_id", "resume", "resume_checkpoint_id", "checkpoint_provider"])
+def test_the_conversation_door_refuses_a_route_owned_key_on_the_real_tools_agent(key: str) -> None:
+    # The route owns the run's thread and continuity: a ``start_expr`` naming one is refused with
+    # the door's own text, read off the real agent's ``addressed_memory`` before any validation.
+    from tai42_skeleton.conversations.turn.agent_turn import _agent_run_kwargs
+
+    from tai42_agents.tools_agent import ToolsAgent
+
+    with pytest.raises(ValueError, match=rf"must not set the route-owned key\(s\) \['{key}'\]"):
+        _agent_run_kwargs(ToolsAgent(), "hi", {"user_message": {"content": "hi"}, key: "x"})
+
+
+def test_the_conversation_door_drives_a_voting_role_config_carrying_a_thread() -> None:
+    # A role's own config is not the run's identity: a voting start carrying a judge thread is
+    # driven (not refused) at this door.
+    from tai42_skeleton.conversations.turn.agent_turn import _agent_run_kwargs
+
+    from tai42_agents.voting_agent.agent import VotingAgent
+
+    start = {"judge_message": {"content": "decide"}, "judge_langgraph_config": {"configurable": {"thread_id": "t-1"}}}
+    run_kwargs, starts = _agent_run_kwargs(VotingAgent(), "hi", start)
+    assert starts is True
+    assert run_kwargs["judge_langgraph_config"] == {"configurable": {"thread_id": "t-1"}}

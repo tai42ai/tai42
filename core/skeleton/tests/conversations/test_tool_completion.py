@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 
 import pytest
-from tai42_contract.agent import Agent
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
@@ -422,7 +422,7 @@ async def test_agent_route_park_binds_the_thread_as_the_completion_context(env, 
 
     bound: list = []
 
-    class ParkingAgent(Agent):
+    class ParkingAgent(MemorylessTestAgent):
         tool_name = "echo"
         ToolInput = _EchoInput
 

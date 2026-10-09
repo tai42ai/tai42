@@ -2,7 +2,9 @@
 
 Every mutation of the main server's tool surface goes through :func:`add_surface_tool` /
 :func:`remove_surface_tool`, which bump a process-wide generation AFTER the mutation, so a
-cache filled from the old surface is stored under the old generation. Process-wide, not per
+cache filled from the old surface is stored under the old generation. The same two functions
+keep each server's bound names, so a second add of a bound name is refused with the contract's
+typed :class:`~tai42_contract.tools.ToolAlreadyRegisteredError` before the server is touched. Process-wide, not per
 server: the server is rebuilt per serving epoch, and a per-server counter would restart.
 :class:`SurfaceToolIndex` is the serving core's name lookup keyed on it.
 """
@@ -11,6 +13,9 @@ from __future__ import annotations
 
 import threading
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
+
+from tai42_contract.tools import ToolAlreadyRegisteredError
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -18,6 +23,8 @@ if TYPE_CHECKING:
 
 _generation = 0
 _lock = threading.Lock()
+# The names bound on each server's listed surface; a new server starts with none.
+_bound_names: WeakKeyDictionary[FastMCP, set[str]] = WeakKeyDictionary()
 
 
 def tool_surface_generation() -> int:
@@ -34,8 +41,17 @@ def bump_tool_surface_generation() -> int:
 
 
 def add_surface_tool(fast_mcp: FastMCP, tool: Tool) -> Tool:
-    """Add ``tool`` to ``fast_mcp``'s listed surface, then bump the generation."""
-    added = fast_mcp.add_tool(tool)
+    """Add ``tool`` to ``fast_mcp``'s listed surface, then bump the generation.
+
+    Raises :class:`~tai42_contract.tools.ToolAlreadyRegisteredError` when a tool of that name is
+    already bound on ``fast_mcp``.
+    """
+    with _lock:
+        bound = _bound_names.setdefault(fast_mcp, set())
+        if tool.name in bound:
+            raise ToolAlreadyRegisteredError(tool.name)
+        added = fast_mcp.add_tool(tool)
+        bound.add(tool.name)
     bump_tool_surface_generation()
     return added
 
@@ -43,7 +59,9 @@ def add_surface_tool(fast_mcp: FastMCP, tool: Tool) -> Tool:
 def remove_surface_tool(fast_mcp: FastMCP, name: str) -> None:
     """Remove the tool ``name`` from ``fast_mcp``'s listed surface, then bump the generation."""
     try:
-        fast_mcp.local_provider.remove_tool(name)
+        with _lock:
+            fast_mcp.local_provider.remove_tool(name)
+            _bound_names.get(fast_mcp, set()).discard(name)
     finally:
         bump_tool_surface_generation()
 

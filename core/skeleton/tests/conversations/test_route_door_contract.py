@@ -10,6 +10,7 @@ run's terminal to the reply.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
@@ -19,6 +20,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationRoute
 from tai42_contract.interactions import ParkedEntry, VisitOutcome
 from tai42_contract.template import TemplatedText
+from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.conversations import turn as turn_module
@@ -43,10 +45,16 @@ pytestmark = pytest.mark.usefixtures("env")
 
 
 class _Input(BaseModel):
-    user_message: str = ""
+    """The run kwargs a start may name: the message (inline or a templated mapping), a tool list,
+    a strategy knob and a probe field the agent reads."""
+
+    user_message: str | dict[str, Any] = ""
+    tool_names: list[str] = []
+    strategy: str | None = None
+    parked_nulls: list[str] | None = None
 
 
-class _RecordingAgent(Agent):
+class _RecordingAgent(MemorylessTestAgent):
     """An agent whose ``astream`` records the kwargs it was driven with and yields fixed events."""
 
     tool_name = "assistant"
@@ -160,7 +168,7 @@ async def test_agent_start_expr_builds_the_astream_kwargs(monkeypatch):
     assert kwargs["thread_id"] == "bridge:chat:+15550002222"
 
 
-class _InnerCallerAskAgent(Agent):
+class _InnerCallerAskAgent(MemorylessTestAgent):
     """An agent that declares no ``tool_names`` and resolves ``ask(to="caller")`` INSIDE its own run."""
 
     tool_name = "assistant"

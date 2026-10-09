@@ -11,11 +11,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from langchain_core.tools import StructuredTool
-from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
-from tai42_contract.tools import get_run_delivery_id
+from tai42_contract.tools import ClientTool, get_run_delivery_id
 
 from tai42_agents._internal.park import ParkIdentity, build_park_identity, chain_routing_slots
+from tai42_agents._internal.subagent_spec import SubAgentSpec as NeutralSubAgentSpec
 from tai42_agents.langchain_deep_agent.spec import InlineSkill
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
@@ -71,7 +70,7 @@ def build_astream_park(
     *,
     agent_name: str,
     config: dict[str, Any],
-    tools: Sequence[StructuredTool],
+    tools: Sequence[ClientTool],
     subagents: Sequence[NeutralSubAgentSpec | DeepSubAgentSpec] | None,
     tool_names: Sequence[str],
     skills: list[str] | None,

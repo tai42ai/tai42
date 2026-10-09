@@ -44,7 +44,7 @@ from tai42_contract.interactions import (
     PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
 )
-from tai42_contract.tools import TOOL_META_PAUSES
+from tai42_contract.tools import TOOL_META_PAUSES, ToolAlreadyRegisteredError
 
 from tai42_agents._internal.park.middleware import park_error_answer
 from tai42_agents._internal.park.park_binding import agents_park_index
@@ -188,9 +188,9 @@ def register_chained_park_tool() -> None:
 
     Called from the registration of every agent whose dispatches can chain, mirroring
     :func:`~tai42_agents._internal.park.resume_tool.register_agent_resume_tool`: the first call
-    binds, a later one on the same epoch catches the FastMCP duplicate-bind error and no-ops, so
-    a box loading any subset of those agents — and every reload epoch — ends with exactly one
-    binding. Any OTHER error propagates loudly.
+    binds, a later call on the same epoch gets ``ToolAlreadyRegisteredError`` and no-ops, so a box
+    loading any subset of those agents — and every reload epoch — ends with exactly one binding.
+    Any OTHER error propagates loudly.
 
     Registered ``force=True`` (a mandatory mechanism, never an operator-excludable catalog tool)
     and ``tai42/hidden`` (never offered to a model as a callable tool).
@@ -202,7 +202,5 @@ def register_chained_park_tool() -> None:
             meta={"tai42/hidden": True, TOOL_META_PAUSES: True},
             force=True,
         )(deliver_chained_park)
-    except ValueError as exc:
-        if "already exists" not in str(exc):
-            raise
+    except ToolAlreadyRegisteredError:
         logger.debug("deliver_chained_park tool already bound this epoch; registration is a no-op")

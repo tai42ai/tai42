@@ -11,6 +11,8 @@
 * :func:`with_run_trace_lineage` threads a resolved trace context onto a base config so
   a FEATURE run that drives several sub-runs (an evaluator/critic loop, parallel voters
   plus a judge) binds ONE lineage at its entry and nests every sub-run under it.
+* :func:`config_addressed` reads the thread and checkpoint ids a ``langgraph_config``-shaped
+  dict addresses, the answer every kind's ``addressed_memory`` builds from.
 * :func:`minted_thread_id` / :func:`unmark_caller_thread` / :func:`mark_minted_thread_finished`
   keep the checkpoint finished-thread ledger: a caller-supplied thread leaves the ledger when
   a run starts on it; a thread the run minted is marked finished when the run ends without
@@ -64,6 +66,23 @@ def build_run_config(
     if recursion_limit is not None:
         config["recursion_limit"] = recursion_limit
     return config
+
+
+def config_addressed(value: Any) -> tuple[set[str], set[str]]:
+    """The ``(thread_ids, checkpoint_ids)`` a ``langgraph_config``-shaped value carries in ``configurable``.
+
+    Anything that is not such a mapping addresses nothing.
+    """
+    if not isinstance(value, dict):
+        return set(), set()
+    configurable = value.get("configurable")
+    if not isinstance(configurable, dict):
+        return set(), set()
+    thread_id = configurable.get("thread_id")
+    checkpoint_id = configurable.get("checkpoint_id")
+    threads = {str(thread_id)} if thread_id is not None else set()
+    checkpoints = {str(checkpoint_id)} if checkpoint_id is not None else set()
+    return threads, checkpoints
 
 
 def init_langgraph_config(config: dict[str, Any] | None = None) -> RunTrace:

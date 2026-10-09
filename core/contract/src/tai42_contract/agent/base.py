@@ -14,23 +14,17 @@ Two faces are derived from one ``Agent`` class:
 path needs live in-process tool closures. So a developer writes ONLY the
 ``Agent`` class — no hand-written tool wrapper.
 
-Pure-contract note: the live-tool field ``SubAgentSpec.tools`` is typed
-``list[Any]`` here. Its concrete impl holds live ``langchain_core`` ``StructuredTool``
-objects, but a vendor type may not sit in a runtime pydantic field of a
-pydantic-only contract (a contract carries the shape, not the live objects).
-``Agent.run``'s ``tools=``/``StructuredTool`` parameter annotations stay vendor-named
-— they are lazy strings under ``from __future__ import annotations`` and only the
-type-checker (which gets the vendor lib as a dev dep) ever reads them.
+Live in-process tools are the contract's framework-neutral ``ClientTool`` handles
+(``tai42_contract.tools``); a framework adapter lives with the agent that uses it.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Sequence
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any, ClassVar, Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from tai42_contract.agent.events import (
     InterruptFinal,
@@ -43,11 +37,14 @@ from tai42_contract.agent.events import (
     final_event_for_value,
 )
 from tai42_contract.errors import ErrorKind
-from tai42_contract.interactions.models.response import SuspendedInteraction
 from tai42_contract.template import TemplatedText
 
-if TYPE_CHECKING:
-    from langchain_core.tools import StructuredTool
+#: The longest tool name the platform binds to a model: the strictest bound among the kit's providers
+#: (OpenAI function names).
+TOOL_NAME_MAX_LEN: Final[int] = 64
+
+#: The preset-name law: a preset name becomes a live tool name and a ``{name}`` path segment.
+PRESET_NAME_PATTERN: Final[str] = rf"^[A-Za-z0-9_-]{{1,{TOOL_NAME_MAX_LEN}}}$"
 
 
 class AgentInterruptedError(Exception):
@@ -88,19 +85,7 @@ def _resolve_drain_terminal(
     ``""`` for an empty run. Never returns a partial.
     """
     if suspended is not None:
-        # The park crosses as the shared typed sentinel, recognised by TYPE — carrying the whole
-        # super-step's two id lists so the platform's ``visit`` normalises it per ask, and the
-        # earliest deadline. It carries NO ``resume_owner``: the parked run recorded its own resume
-        # state against those interactions and is the only thing the platform resumes for them, so no
-        # caller may adopt the park as its own.
-        ids = suspended.interaction_ids
-        expiry = datetime.fromisoformat(suspended.expiry_at) if suspended.expiry_at else None
-        return SuspendedInteraction(
-            interaction_id=ids[0],
-            expiry_at=expiry,
-            interaction_ids=list(ids),
-            caller_interaction_ids=list(suspended.caller_interaction_ids),
-        )
+        return suspended.to_suspended_interaction()
     if interrupts:
         raise AgentInterruptedError(interrupts)
     if outcome is not None:
@@ -117,47 +102,31 @@ def _resolve_drain_terminal(
 
 
 class PresetSpec(BaseModel):
-    """A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at run time.
+    """A base tool bound to fixed kwargs, bound as one more tool of the run that carries it.
 
-    See ``resolve_tools``. A base tool that interprets its fixed kwargs as a nested document
-    carries that document opaquely here.
+    ``name`` follows :data:`PRESET_NAME_PATTERN`. A base tool that interprets its fixed kwargs as a
+    nested document carries that document opaquely here.
     """
 
-    name: str
+    name: str = Field(pattern=PRESET_NAME_PATTERN)
     description: str = ""
     base_tool: str
     fixed_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
-class SubAgentSpec(BaseModel):
-    """Neutral sub-agent descriptor — the in-process, live-tools shape.
+class AddressedMemory(BaseModel, frozen=True):
+    """The memory a set of run kwargs addresses, as the agent reads them.
 
-    Carries name/description/system_prompt/tool_names/tools(live)/presets/skills/
-    inline_skills/response_format/strategy/subagents — the fields a live sub-agent
-    (e.g. the mcp-finder) needs. ``inline_skills`` items are plain dicts
-    (``{"name", "content"}``). JSON callers use the richer ``DeepSubAgentSpec``
-    (full field set) instead of this type.
-
-    ``tools`` is ``list[Any]`` in the contract (live ``StructuredTool`` objects in
-    the impl) — a vendor type cannot be a runtime pydantic field here.
-
-    ``response_format`` is a live pydantic class (in-process), the ``TemplatedText | dict``
-    authored-schema union (a JSON caller's forced-output schema — inline, or named by stored
-    ``id`` and rendered/parsed to its schema at the point of use), or unset.
+    ``keys`` names the run kwargs present that steer THIS run's own thread or checkpoint
+    continuity (resuming, the checkpoint the run continues from, the checkpointer it runs on) — the
+    keys a door that owns the run's identity refuses. A key that only configures a sub-role's memory
+    is not one of them; its thread and checkpoint ids are still reported in ``thread_ids`` /
+    ``checkpoint_ids``.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    name: str
-    description: str = ""
-    system_prompt: TemplatedText | None = None
-    tool_names: list[str] = []
-    tools: list[Any] = []
-    presets: list[PresetSpec] = []
-    skills: list[str] = []
-    inline_skills: list[dict[str, Any]] = []
-    response_format: type[BaseModel] | TemplatedText | dict[str, Any] | None = None
-    strategy: str | None = None
-    subagents: list[SubAgentSpec] = []
+    keys: frozenset[str] = frozenset()
+    thread_ids: frozenset[str] = frozenset()
+    checkpoint_ids: frozenset[str] = frozenset()
 
 
 class Agent(ABC):
@@ -200,6 +169,11 @@ class Agent(ABC):
     so nothing static is known. An agent whose tool set is fixed declares it here;
     like ``spec_runnable`` it is the implementation's own declaration, never
     inferred.
+
+    :attr:`parks` declares that this agent can suspend on an async ask raised by a
+    tool it runs and resume out of band (it emits ``SuspendedFinal``). Like
+    ``spec_runnable`` it is the implementation's own declaration, never inferred; a
+    consumer reads it to know whether a run of this agent can park.
     """
 
     tool_name: ClassVar[str]
@@ -212,6 +186,21 @@ class Agent(ABC):
     # door's ``extras`` against this set before the run and refuses an undeclared key. The empty
     # default declares an agent that reads no extras.
     extras_keys: ClassVar[frozenset[str]] = frozenset()
+    parks: ClassVar[bool] = False
+
+    @classmethod
+    @abstractmethod
+    def addressed_memory(cls, run_kwargs: Mapping[str, Any]) -> AddressedMemory:
+        """Report the memory ``run_kwargs`` (the output of :meth:`from_tool_input`) address.
+
+        The names of the run kwargs present that steer the run's memory or continuity (``keys``),
+        and every thread id and checkpoint id they carry, however nested. The platform reserves
+        thread namespaces and decides caller pinning from this answer, so an agent that carries a
+        thread or checkpoint anywhere in its run kwargs MUST report it. An agent with no memory
+        returns ``AddressedMemory()``. The contract's own ``thread_id`` keyword is checked by the
+        platform itself and need not be reported.
+        """
+        ...
 
     @classmethod
     def from_tool_input(cls, validated: BaseModel) -> dict[str, Any]:
@@ -235,38 +224,22 @@ class Agent(ABC):
     async def run(
         self,
         *,
-        # Sequence + empty-tuple defaults: immutable, so no mutable default
-        # argument and no cast from () to a list type.
-        tools: Sequence[StructuredTool] = (),
-        tool_names: Sequence[str] = (),
-        presets: Sequence[PresetSpec] = (),
-        subagents: Sequence[SubAgentSpec] = (),
-        system_message: TemplatedText | None = None,
-        user_message: TemplatedText | None = None,
-        response_format: Any = None,
-        strategy: str | None = None,
-        interrupt_on: dict[str, Any] | None = None,
-        skills: Sequence[str] = (),
-        inline_skills: Sequence[dict[str, Any]] = (),
-        recursion_limit: int | None = None,
         thread_id: str | None = None,
-        resume: Any = None,
-        resume_checkpoint_id: str | None = None,
-        llm_provider: str | None = None,
-        checkpoint_provider: str | None = None,
-        store_provider: str | None = None,
-        llm_kwargs: dict[str, Any] | None = None,
+        user_message: TemplatedText | None = None,
+        # Sequence + empty-tuple default: immutable, so no mutable default argument.
+        tool_names: Sequence[str] = (),
+        response_format: TemplatedText | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Run the agent once and return its final value.
 
-        Tool inputs (``tools``/``tool_names``/``presets``) are uniform only for
-        tools-agent-shaped agents; role-specific agents (voting/vqa/refine) read
-        their own params off ``**kwargs``. ``response_format`` is
-        typed ``Any`` because the deep path passes a JSON-Schema ``dict`` while
-        the tools-agent path passes a pydantic class. ``resume_checkpoint_id``
-        forks past an aborted turn, distinct from ``resume`` (the interrupt
-        answer).
+        ``thread_id``, ``user_message``, ``tool_names`` and ``response_format`` are the keys the
+        platform supplies or reads; every other keyword is the agent's own, declared by its
+        ``ToolInput`` and documented by the agent. ``response_format``: a JSON-Schema ``dict`` MUST
+        carry a non-empty top-level ``title`` (the structured-output name the run forces), and each
+        ``oneOf`` variant its own; a ``TemplatedText`` names a stored schema rendered at the point of
+        use; an in-process pydantic class (an agent's own widening of this parameter) carries its
+        class name.
         """
         ...
 

@@ -1,9 +1,6 @@
 """The ``langchain_deep_agent`` JSON run-door contract.
 
-:class:`DeepAgentInput` is the tool-face parameter schema, and
-:data:`_UNHONORED_REASONS` / :data:`_UNHONORED_COLLECTION_PARAMS` name the two ABC
-``run``/``astream`` parameters this agent cannot honor, mapped to the reason each
-rejection raises.
+:class:`DeepAgentInput` is the tool-face parameter schema.
 """
 
 from __future__ import annotations
@@ -16,35 +13,14 @@ from tai42_contract.template import TemplatedText
 from tai42_agents.langchain_deep_agent.spec import InlineSkill
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
-# The two ABC ``run``/``astream`` parameters ``langchain_deep_agent`` cannot honor on the
-# main agent, mapped to the reason named in the raised error (the keys define this
-# agent's unhonored set). ``presets`` is truthiness-checked, ``strategy`` set when
-# not ``None``.
-_UNHONORED_REASONS: dict[str, str] = {
-    "presets": (
-        "its tool set is composed from tool_names and live tools on the main agent, not presets, "
-        "and it will not silently ignore one"
-    ),
-    "strategy": "the deepagents runtime applies no composition strategy and will not silently ignore one",
-    "system_content_kwargs": (
-        "its system prompt takes the server-wide cache mark at the build seam, so a per-node system "
-        "content key has no seat; toggle it with the server setting, or use user_content_kwargs instead"
-    ),
-    "resume_checkpoint_id": (
-        "the durable sandbox WORKSPACE volume cannot be forked alongside the LangGraph checkpoint, so "
-        "forking the checkpoint past an aborted turn would run a forked graph over post-abort workspace "
-        "state — a silent divergence; it is unhonored on the durable deep agent"
-    ),
-}
-_UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"presets"})
-
 
 class DeepAgentInput(BaseModel):
     """JSON tool-face parameters for ``langchain_deep_agent``.
 
-    Live ``tools=`` are absent from this JSON schema (a live ``StructuredTool`` is not
-    JSON-serializable), but both in-process faces — :meth:`DeepAgent.run` and
-    :meth:`DeepAgent.astream` — accept them directly.
+    Live ``tools=`` are absent from this JSON schema (a live
+    :class:`~tai42_contract.tools.ClientTool` handle is not JSON-serializable), but both
+    in-process faces — :meth:`DeepAgent.run` and :meth:`DeepAgent.astream` — accept them
+    directly.
 
     The schema advertises exactly the composable fields ``langchain_deep_agent``'s runtime
     honors — ``subagents``, ``skills``, ``inline_skills``, ``interrupt_on``,

@@ -184,6 +184,64 @@ def test_the_generation_never_decreases() -> None:
     assert seen == sorted(seen)
 
 
+# -- a duplicate bind is the contract's typed refusal -----------------------------------------
+
+
+def test_a_second_tool_of_one_name_is_refused_with_the_typed_error() -> None:
+    from tai42_contract.tools import ToolAlreadyRegisteredError
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            app.tools.tool(force=True)(second_probe)
+            with pytest.raises(ToolAlreadyRegisteredError) as caught:
+                app.tools.tool(force=True)(second_probe)
+            assert caught.value.name == "second_probe"
+            assert str(caught.value) == "tool 'second_probe' is already registered"
+
+    asyncio.run(run())
+
+
+def test_the_server_is_not_asked_to_add_a_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_contract.tools import ToolAlreadyRegisteredError
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            add_surface_tool(app._fast_mcp, _tool_object())
+            added: list[str] = []
+            real_add = app._fast_mcp.add_tool
+
+            def counting_add(tool: Any) -> Any:
+                added.append(tool.name)
+                return real_add(tool)
+
+            monkeypatch.setattr(app._fast_mcp, "add_tool", counting_add)
+            with pytest.raises(ToolAlreadyRegisteredError):
+                add_surface_tool(app._fast_mcp, _tool_object())
+            assert added == []
+
+    asyncio.run(run())
+
+
+def test_a_removed_name_can_be_bound_again() -> None:
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+            app.tools.tool(force=True)(second_probe)
+            app.tools.remove_tool("second_probe")
+            app.tools.tool(force=True)(second_probe)
+            assert "second_probe" in await app.tools.get_tools()
+
+    asyncio.run(run())
+
+
+def test_a_new_server_starts_with_no_bound_names() -> None:
+    from fastmcp import FastMCP
+
+    first, second = FastMCP("first"), FastMCP("second")
+    add_surface_tool(first, _tool_object())
+    add_surface_tool(second, _tool_object())
+    assert {tool.name for tool in asyncio.run(second.list_tools())} == {"second_probe"}
+
+
 # -- the chokepoint is structural ---------------------------------------------------------------
 
 _SKELETON_SRC = Path(__file__).resolve().parents[2] / "src" / "tai42_skeleton"

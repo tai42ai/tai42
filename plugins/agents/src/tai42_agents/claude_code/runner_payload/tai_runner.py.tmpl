@@ -101,8 +101,11 @@ async def _stdin_pump(reader: asyncio.StreamReader, wire: _Wire) -> None:
             continue
 
 
-def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tool_names: list[str]) -> Any:
-    """One in-process SDK MCP server exposing ask + one proxy tool per requested name."""
+def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tools: list[dict[str, Any]]) -> Any:
+    """One in-process SDK MCP server exposing ask + one proxy tool per granted tool.
+
+    Each proxy carries the granted tool's own description and argument JSON Schema.
+    """
 
     @tool("ask", "Ask a human a question and block for the answer.", {"question": str, "mode": str})
     async def ask(args: dict[str, Any]) -> dict[str, Any]:
@@ -116,8 +119,9 @@ def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tool_names: list
             return {"content": [{"type": "text", "text": str(reply.get("answer"))}], "is_error": True}
         return {"content": [{"type": "text", "text": json.dumps(reply.get("answer"))}]}
 
-    proxy_tools = [ask]
-    for name in proxy_tool_names:
+    tools = [ask]
+    for spec in proxy_tools:
+        name = spec["name"]
 
         async def _proxy(args: dict[str, Any], _name: str = name) -> dict[str, Any]:
             call_id = f"call-{_name}-{id(args)}"
@@ -126,9 +130,9 @@ def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tool_names: list
             text = json.dumps(reply.get("result"))
             return {"content": [{"type": "text", "text": text}], "is_error": bool(reply.get("is_error"))}
 
-        proxy_tools.append(tool(name, f"Proxy platform tool {name}.", {})(_proxy))
+        tools.append(tool(name, spec["description"], spec["input_schema"])(_proxy))
 
-    return create_sdk_mcp_server(name="tai42", version="1.0.0", tools=proxy_tools)
+    return create_sdk_mcp_server(name="tai42", version="1.0.0", tools=tools)
 
 
 def _build_options(payload: dict[str, Any], wire: _Wire, ask_id_seq: list[int]) -> ClaudeAgentOptions:
@@ -136,7 +140,7 @@ def _build_options(payload: dict[str, Any], wire: _Wire, ask_id_seq: list[int]) 
     for name in payload.get("env_passthrough", []):
         if name in os.environ:
             env[name] = os.environ[name]
-    server = _build_mcp_server(wire, ask_id_seq, payload.get("proxy_tool_names", []))
+    server = _build_mcp_server(wire, ask_id_seq, payload["proxy_tools"])
     kwargs: dict[str, Any] = {
         "cwd": payload["cwd"],
         "setting_sources": payload.get("setting_sources", ["project"]),

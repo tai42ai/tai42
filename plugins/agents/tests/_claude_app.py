@@ -22,6 +22,7 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.template import TemplatedText
+from tests._client_tool import FakeClientTool, client_tool
 from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
@@ -146,6 +147,14 @@ class _ToolsFacet:
         if args and callable(args[0]):
             return decorator(args[0])
         return decorator
+
+    async def get_client_tools(self, names: list[str] | None = None) -> list[FakeClientTool]:
+        """A handle per runner, named and described for the proxied tool."""
+        selected = list(self.runners) if names is None else names
+        unknown = [name for name in selected if name not in self.runners]
+        if unknown:
+            raise RuntimeError(f"unknown tools: {unknown}")
+        return [client_tool(name, self.runners[name], description=f"The {name} tool.") for name in selected]
 
     async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
         if key not in self.runners:

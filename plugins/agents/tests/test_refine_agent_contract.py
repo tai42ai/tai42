@@ -5,14 +5,12 @@ evaluator-message slot, and the input model.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessageChunk
 from pydantic import ValidationError
 from tai42_contract.agent import (
-    Agent,
     MessageFinal,
 )
 from tai42_contract.app import tai42_app
@@ -25,8 +23,6 @@ from tests._refine_agent_support import (
     _patch_loop,
 )
 
-import tai42_agents.refine_agent.agent as agent_mod
-from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.refine_agent.agent import RefineAgentInput
 from tai42_agents.refine_agent.prompt import (
     CRITIC_APPROVAL_MESSAGE,
@@ -63,170 +59,58 @@ def test_tool_names_honored_on_run_face(monkeypatch: pytest.MonkeyPatch, app_too
     ]
 
 
-# Each unhonored contract parameter with a MEANINGFUL value — a truthy collection or
-# a not-``None`` scalar — plus two falsy-but-meaningful scalars (``strategy=""``,
-# ``resume=False``) that must still raise (they are set whenever not ``None``, so they
-# never slip through a truthiness gate). ``X=None`` / ``X=()`` are the ABC's own
-# "not requested" sentinels and are pinned to PASS by the tests below.
-_UNHONORED_CASES = [
+# The contract keys the role-named loop cannot honor, each with a set value.
+_UNHONORED_CASES = [("user_message", "usr"), ("user_message", ""), ("thread_id", "t")]
+
+# Keywords the loop does not declare, refused by presence.
+_UNDECLARED_CASES = [
     ("tools", [object()]),
     ("presets", [object()]),
-    ("subagents", [object()]),
-    ("strategy", "react"),
-    ("strategy", ""),
     ("system_message", "sys"),
-    ("user_message", "usr"),
-    ("interrupt_on", {"tool": True}),
-    ("skills", ["s"]),
-    ("inline_skills", [{"name": "s", "content": "c"}]),
-    ("recursion_limit", 0),
-    ("thread_id", "t"),
+    ("strategy", ""),
     ("resume", False),
-    ("resume_checkpoint_id", "cp"),
+    ("recursion_limit", 0),
     ("llm_provider", "openai"),
-    ("store_provider", "redis"),
-    ("llm_kwargs", {"model": "x"}),
     ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 
+def _messages() -> dict[str, Any]:
+    return {
+        "evaluator_message": TemplatedText(content="write it"),
+        "critic_message": TemplatedText(content="review it"),
+    }
+
+
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_astream_rejects_unhonored_contract_param(
+def test_both_faces_refuse_a_contract_key_they_cannot_honor(
     param: str, value: Any, app_tools: Any, resource_manager: Any
 ) -> None:
-    """Every contract ``Agent.run`` parameter with no seat in the role-named loop
-    raises loudly on the stream face, naming the offending parameter and the exact
-    ``astream`` face it was called on. Falsy-but-meaningful scalars (``strategy=""``,
-    ``resume=False``) still raise."""
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=rf"refine_agent\.astream does not support .*\b{param}\b"):
-        _collect(
-            agent,
-            evaluator_message=TemplatedText(content="write it"),
-            critic_message=TemplatedText(content="review it"),
-            **{param: value},
-        )
+    match = rf"refine_agent\.astream does not support .*\b{param}\b"
+    with pytest.raises(RuntimeError, match=match):
+        _collect(agent, **_messages(), **{param: value})
+    with pytest.raises(RuntimeError, match=match):
+        asyncio.run(agent.run(**_messages(), **{param: value}))
 
 
-@pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
-def test_run_rejects_unhonored_contract_param(param: str, value: Any, app_tools: Any, resource_manager: Any) -> None:
-    """The ``run`` face rejects the same unsupported parameters, naming the exact
-    ``run`` face — the run-face guard is load-bearing (were it dropped, the delegated
-    ``astream`` guard would surface the ``astream`` token and fail this assertion)."""
+@pytest.mark.parametrize(("param", "value"), _UNDECLARED_CASES)
+def test_both_faces_refuse_an_undeclared_keyword(param: str, value: Any, app_tools: Any, resource_manager: Any) -> None:
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match=rf"refine_agent\.run does not support .*\b{param}\b"):
-        # The base ``Agent.run`` signature types some of these non-optional, so the mismatch is expected.
-        asyncio.run(
-            agent.run(
-                evaluator_message=TemplatedText(content="write it"),
-                critic_message=TemplatedText(content="review it"),
-                **{param: value},
-            )
-        )  # type: ignore[arg-type]
+    match = rf"refine_agent\.astream got unknown run keyword argument\(s\): {param}"
+    with pytest.raises(TypeError, match=match):
+        _collect(agent, **_messages(), **{param: value})
+    with pytest.raises(TypeError, match=match):
+        asyncio.run(agent.run(**_messages(), **{param: value}))
 
 
-def test_unhonored_cases_cover_the_full_reasons_map() -> None:
-    """Every key in the guard's reasons map has a parametrized reject case, so a key
-    added to the map without a matching test fails here immediately."""
-    assert {param for param, _ in _UNHONORED_CASES} == set(agent_mod._UNHONORED_REASONS)
-
-
-# The unhonored params whose ABC ``Agent.run`` default is an empty collection (``()`` /
-# ``""``), read from the contract signature — the independent source of truth for which
-# unhonored params are collection-typed. Intersected with this agent's reasons map it is
-# exactly the set ``_UNHONORED_COLLECTION_PARAMS`` must classify as collections. The
-# empty-collection test below parametrizes from HERE, not from the frozenset, so a member
-# dropped from the frozenset (reclassifying it as a scalar) turns a case red rather than
-# silently vanishing.
-_EMPTY_COLLECTION_ABC_DEFAULTS = frozenset(
-    name
-    for name, parameter in inspect.signature(Agent.run).parameters.items()
-    if isinstance(parameter.default, (tuple, list, str)) and not parameter.default
-)
-
-
-_COLLECTION_REJECT_PARAMS = sorted(agent_mod._UNHONORED_REASONS.keys() & _EMPTY_COLLECTION_ABC_DEFAULTS)
-
-
-def test_collection_params_match_the_abc_collection_defaults() -> None:
-    """``_UNHONORED_COLLECTION_PARAMS`` is exactly this agent's unhonored params whose ABC
-    default is an empty collection: no scalar wrongly listed (which would let a meaningful
-    falsy value slip through), none dropped (which would over-reject the not-requested
-    empty default)."""
-    assert set(agent_mod._UNHONORED_COLLECTION_PARAMS) == set(_COLLECTION_REJECT_PARAMS)
-
-
-@pytest.mark.parametrize("empty", [[], ""])
-@pytest.mark.parametrize("param", _COLLECTION_REJECT_PARAMS)
-def test_reject_unhonored_permits_empty_collection_param(param: str, empty: object) -> None:
-    """An empty collection is the ABC's "not requested" default for a collection parameter,
-    so the guard does not raise for it — in either falsy empty form (``[]`` / ``""``). Were
-    the parameter dropped from ``_UNHONORED_COLLECTION_PARAMS`` it would be classified as a
-    scalar (set whenever it is not ``None``) and this empty value would raise."""
-    reject_unhonored(
-        "refine_agent.run",
-        {param: empty},
-        agent_mod._UNHONORED_REASONS,
-        collection_params=agent_mod._UNHONORED_COLLECTION_PARAMS,
-    )
-
-
-@pytest.mark.parametrize(
-    "param", ["response_format", "strategy", "thread_id", "resume", "llm_provider", "recursion_limit"]
-)
-def test_unhonored_scalar_none_passes_the_guard(param: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ABC's ``None`` "not requested" sentinel passes the guard rather than being
-    over-rejected: an explicit ``response_format=None`` / ``resume=None`` / … reaches
-    the loop and completes, in parity with the LangGraph-backed agents."""
+def test_the_not_requested_sentinels_pass_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
     critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    events = _collect(
-        agent,
-        evaluator_message=TemplatedText(content="write it"),
-        critic_message=TemplatedText(content="review it"),
-        **{param: None},
-    )
-    assert any(isinstance(e, MessageFinal) for e in events)
-
-
-def test_unhonored_collection_empty_passes_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty collection is the ABC's "not requested" sentinel and passes the guard:
-    ``tools=()`` / ``presets=[]`` reach the loop rather than raising."""
-    evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
-    _patch_loop(monkeypatch, [evaluator, critic])
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    events = _collect(
-        agent,
-        evaluator_message=TemplatedText(content="write it"),
-        critic_message=TemplatedText(content="review it"),
-        tools=(),
-        presets=[],
-    )
-    assert any(isinstance(e, MessageFinal) for e in events)
-
-
-def test_extension_kwarg_is_not_rejected(
-    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
-) -> None:
-    """A plain extension kwarg beyond the contract names is the documented
-    extension point and passes through untouched rather than raising."""
-    evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
-    _patch_loop(monkeypatch, [evaluator, critic])
-
-    agent = tai42_app.agents.get_agent(AGENT_NAME)
-    events = _collect(
-        agent,
-        evaluator_message=TemplatedText(content="write it"),
-        critic_message=TemplatedText(content="review it"),
-        role_specific_extra="ok",
-    )
-
+    events = _collect(agent, **_messages(), thread_id=None, user_message=None, response_format=None)
     assert any(isinstance(e, MessageFinal) for e in events)
 
 

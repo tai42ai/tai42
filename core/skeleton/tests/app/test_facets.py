@@ -320,7 +320,12 @@ def test_extensions_facet_forwarding():
     f = ExtensionsFacet(app)
     assert f.extension(None, kind=ExtensionKind.WRAPPER, name="x") is app._extension_registry.extension.return_value
     app._extension_registry.extension.assert_called_once_with(
-        None, kind=ExtensionKind.WRAPPER, name="x", requires_body_locality=False, pauses=False
+        None,
+        kind=ExtensionKind.WRAPPER,
+        name="x",
+        requires_body_locality=False,
+        pauses=False,
+        declares_output_schema=False,
     )
     assert f.available_extensions() is app._extension_registry.available_extensions.return_value
     app._extension_registry.available_extensions.assert_called_once_with()

@@ -42,6 +42,7 @@ class _NullExtensions:
         name: str | None = None,
         requires_body_locality: bool = False,
         pauses: bool = False,
+        declares_output_schema: bool = False,
     ) -> Any:
         if callable(f):
             return f

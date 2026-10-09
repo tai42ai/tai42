@@ -247,3 +247,50 @@ def test_rehydrate_quarantines_a_preset_whose_secret_reference_is_unset(pg: Fake
             assert "TAI_TEST_ABSENT_SECRET" in caplog.text
 
     asyncio.run(run())
+
+
+def test_rehydrate_quarantines_a_stored_name_that_violates_the_preset_name_law(pg: FakeVersioningPg, caplog):
+    async def run():
+        async with app.app_context(_manifest()):
+            mgr = app.preset_manager
+            # A stored row whose name the preset-name law refuses (a path separator) reaches
+            # rehydrate through the generic store, as a restored backup writes it.
+            body = PresetBody(base_tool="weather", description="d", fixed_kwargs={}, extensions=[])
+            await app.versioning.store.create("preset", "a/b", body.model_dump())
+            with caplog.at_level(logging.ERROR, logger="tai42_skeleton.presets.manager"):
+                await mgr.rehydrate()
+
+            assert mgr.is_quarantined("a/b")
+            assert mgr.quarantine_reason("a/b") == "its name violates the preset-name law"
+            assert not mgr.is_registered("a/b")
+            assert "a/b" not in await app.tools.get_tools()
+            assert "a/b" in caplog.text
+
+    asyncio.run(run())
+
+
+def test_rehydrate_quarantines_an_output_schema_beside_a_shape_declaring_extension(pg: FakeVersioningPg, caplog):
+    # A stored body (a restored backup, say) setting ``output_schema`` beside an extension entry that
+    # declares the output shape is the shape declared twice: quarantined, never bound.
+    async def run():
+        async with app.app_context(_manifest()):
+            mgr = app.preset_manager
+            body = PresetBody(
+                base_tool="weather",
+                description="d",
+                fixed_kwargs={},
+                extensions=[["shaped"]],
+                output_schema={"type": "object", "properties": {}},
+            )
+            await app.versioning.store.create("preset", "twice", body.model_dump())
+            with caplog.at_level(logging.ERROR, logger="tai42_skeleton.presets.manager"):
+                await mgr.rehydrate()
+
+            assert mgr.is_quarantined("twice")
+            assert mgr.quarantine_reason("twice") == (
+                "output_schema field conflicts with an explicit output-schema-declaring extension entry; "
+                "declare the output shape in exactly one place"
+            )
+            assert "twice" not in await app.tools.get_tools()
+
+    asyncio.run(run())

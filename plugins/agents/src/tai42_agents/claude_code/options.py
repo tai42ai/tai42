@@ -80,7 +80,7 @@ def build_options_payload(
     *,
     ws: str,
     system_prompt: str,
-    tool_names: list[str],
+    proxy_tools: list[dict[str, Any]],
     skills: list[str],
     subagents: list[dict[str, Any]],
     response_format: dict[str, Any] | None,
@@ -97,6 +97,9 @@ def build_options_payload(
     effective id back on ``hello``); ``resume`` carries a persisted id on a later turn. They are
     mutually exclusive — the caller passes at most one.
 
+    ``proxy_tools`` are the granted tools as ``{name, description, input_schema}``: the runner
+    declares each to the model with its real description and argument schema.
+
     ``secret_env_names`` are the credential env-var NAMES the runner copies from its own process
     env (populated from ``spec.env``) into the spawned claude's env — the values never ride this
     payload.
@@ -110,9 +113,9 @@ def build_options_payload(
         # its ``.claude`` config subtree; Bash is allowed (the sandbox is the boundary).
         "allow_write_root": f"{ws}/project",
         "deny_write_subpaths": [f"{ws}/project/.claude"],
-        # One in-process SDK MCP server exposes ask + one proxy tool per requested name —
+        # One in-process SDK MCP server exposes ask + one proxy tool per granted tool —
         # no HTTP entry, no credential.
-        "proxy_tool_names": list(tool_names),
+        "proxy_tools": [dict(spec) for spec in proxy_tools],
         "skills": list(skills),
         "agents": build_agent_definitions(subagents),
         "max_turns": max_turns,

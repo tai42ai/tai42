@@ -11,9 +11,9 @@ if TYPE_CHECKING:
     from typing import Any
 
     from fastmcp.tools import Tool
-    from langchain_core.tools import StructuredTool
     from tai42_contract.manifest import ExtensionElement
     from tai42_contract.tools import (
+        ClientTool,
         StateTemplateDetachReferee,
         ToolDeleteReferee,
         ToolRefsExtractor,
@@ -46,8 +46,8 @@ class ToolsFacet(_Facet):
         """Every registered tool keyed by name."""
         return await self._app._tool_binding.get_tools()
 
-    async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
-        """The LangChain ``StructuredTool`` view of the tools named in ``names`` (all when ``None``)."""
+    async def get_client_tools(self, names: list[str] | None = None) -> list[ClientTool]:
+        """The framework-neutral handles of the tools named in ``names`` (all when ``None``)."""
         return await self._app._tool_binding.get_client_tools(names)
 
     async def run_tool(

@@ -34,9 +34,9 @@ leaf (``Any`` / ``object``) stays wrapped.
 
 An author-set ``output_schema`` (an object JSON Schema) dispatches on the base's
 kind. When the base is an AGENT run tool, the schema is baked into the run tool's
-``response_format`` (a hidden, fixed constant, with the preset ``name`` injected as
-its ``title`` when absent — the agent run seam requires a title, and the preset
-name is validated to the provider structured-output name charset) so the agent
+``response_format`` (a hidden, fixed constant; the contract's ``response_format`` rule
+requires a top-level ``title``, and the preset name — held to the preset-name law — is
+injected when absent) so the agent
 FORCES a structured output; the preset advertises the authored (title-free)
 schema. When the base is a plain tool, the schema is advertised as the bound
 tool's output schema and every result is validated against it at run time with
@@ -171,8 +171,8 @@ def _bind_agent_forced(
 ) -> Tool:
     """Force structured output by baking ``response_format`` from the authored schema.
 
-    The agent run seam requires a top-level ``title``; when the author left it off,
-    inject the preset name. The advertised output schema stays the authored
+    The contract's ``response_format`` rule requires a top-level ``title``; when the author
+    left it off, the preset name is injected. The advertised output schema stays the authored
     (title-free) value; the agent's own drain validates the forced result, so no
     second validation wrapper is attached.
     """

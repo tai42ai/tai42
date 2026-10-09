@@ -26,7 +26,7 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import RunFailed, register_park_kill_handler
-from tai42_contract.tools import TOOL_META_PAUSES
+from tai42_contract.tools import TOOL_META_PAUSES, ToolAlreadyRegisteredError
 from tai42_kit.interactions.park_adoption import terminal_chain_notice
 from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionMissingError
@@ -76,8 +76,7 @@ def register_agent_resume_tool() -> None:
     """Idempotently bind the hidden ``agent_resume`` continuation tool.
 
     Called from every parking agent's registration. The first call binds; a later call on
-    the same epoch re-attempts the bind and catches the FastMCP duplicate-bind error
-    (``ValueError('Component already exists: ...')``), debug-logging the no-op — NOT a
+    the same epoch gets ``ToolAlreadyRegisteredError`` and no-ops, debug-logging it — NOT a
     process-lifetime flag (that would starve every post-boot reload epoch of its binding,
     since the module is import-cached and not re-imported on reload). Any OTHER error
     propagates loudly so a genuine registration bug is never swallowed.
@@ -89,9 +88,7 @@ def register_agent_resume_tool() -> None:
             meta={"tai42/hidden": True, TOOL_META_PAUSES: True},
             force=True,
         )(agent_resume_tool)
-    except ValueError as exc:
-        if "already exists" not in str(exc):
-            raise
+    except ToolAlreadyRegisteredError:
         logger.debug("agent_resume tool already bound this epoch; registration is a no-op")
 
 

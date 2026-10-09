@@ -7,8 +7,10 @@ the bearer files, sync the skills, ship the runner payload, and build the runner
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
+from tai42_contract.app import tai42_app
 from tai42_contract.sandbox import SandboxSession
 
 from tai42_agents.claude_code.credentials import _CREDS_DIR, _SHORT_EXEC_TIMEOUT, _bearer_file, _BearerMaterial
@@ -64,20 +66,35 @@ def _settings_json(settings: ClaudeCodeSettings) -> dict[str, Any]:
     return doc
 
 
+async def proxy_tool_specs(tool_names: Sequence[str]) -> list[dict[str, Any]]:
+    """The granted tools as ``{name, description, input_schema}``, read off their client-tool handles.
+
+    An unknown name raises (the platform's ``UnknownToolError``).
+    """
+    if not tool_names:
+        return []
+    handles = await tai42_app.tools.get_client_tools(list(tool_names))
+    return [
+        {"name": handle.name, "description": handle.description, "input_schema": handle.input_schema}
+        for handle in handles
+    ]
+
+
 def build_payload(
     *,
     settings: ClaudeCodeSettings,
     ws: str,
     options_snapshot: dict[str, Any],
+    proxy_tools: list[dict[str, Any]],
     static_env_names: list[str],
     model_env_name: str,
     resume_id: str | None,
 ) -> dict[str, Any]:
-    """Build the runner options payload from ``settings`` and the per-turn options snapshot."""
+    """Build the runner options payload from ``settings``, the per-turn options snapshot and the granted tools."""
     return build_options_payload(
         ws=ws,
         system_prompt=options_snapshot["system_message"],
-        tool_names=options_snapshot["tool_names"],
+        proxy_tools=proxy_tools,
         skills=options_snapshot["skills"],
         subagents=options_snapshot["subagents"],
         response_format=options_snapshot["response_format"],

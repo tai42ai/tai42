@@ -1,7 +1,7 @@
-"""The agents declare, at registration, which of their tools can pause (``tai42/pauses``).
+"""Which of the agents' tools can pause (``tai42/pauses``).
 
-The parking kinds' run tools and the park continuations (``agent_resume``, the chained-park delivery) declare it;
-the kinds that never park do not.
+A kind's run tool is declared through its ``parks`` class attribute, never its registration ``meta``; the
+park continuations (``agent_resume``, the chained-park delivery) declare it at registration.
 """
 
 from __future__ import annotations
@@ -22,13 +22,21 @@ from tai42_agents.voting_agent import agent as _voting_agent  # noqa: F401
 from .conftest import APP
 
 
-@pytest.mark.parametrize("name", ["tools_agent", "langchain_deep_agent", "claude_code"])
-def test_a_parking_kind_declares_its_run_tool_can_pause(name: str) -> None:
-    assert APP.agents.meta[name].get(TOOL_META_PAUSES) is True
-
-
-@pytest.mark.parametrize("name", ["refine_agent", "voting_agent", "vqa_agent", "retrieval_tools_agent"])
-def test_a_kind_that_never_parks_declares_nothing(name: str) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tools_agent",
+        "langchain_deep_agent",
+        "claude_code",
+        "refine_agent",
+        "voting_agent",
+        "vqa_agent",
+        "retrieval_tools_agent",
+    ],
+)
+def test_no_agent_registration_declares_the_pause_meta_itself(name: str) -> None:
+    # A kind's run-tool pause declaration comes from its ``parks`` class attribute (the platform
+    # derives the meta from it); a registration naming the meta key itself is refused.
     assert TOOL_META_PAUSES not in APP.agents.meta[name]
 
 

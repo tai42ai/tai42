@@ -1,7 +1,7 @@
-"""The in-process client-tool runnable's error semantics.
+"""The client-tool handle's error semantics.
 
 A tool body's OWN failure while doing its job becomes a typed, model-visible
-``ToolException`` (the same message shape a FastMCP boundary uses), so an agent's
+``ClientToolError`` (the same message shape a FastMCP boundary uses), so an agent's
 tool loop surfaces it instead of aborting. Platform-machinery failures — a vanished
 registration re-resolved on the live-fire path, an identity-gate denial — stay raw
 loud aborts, and cancellation passes through untouched.
@@ -13,9 +13,8 @@ import asyncio
 import logging
 
 import pytest
-from langchain_core.tools import ToolException
 from pydantic import BaseModel
-from tai42_contract.tools import TOOL_META_PAUSES
+from tai42_contract.tools import TOOL_META_PAUSES, ClientTool, ClientToolError
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -34,6 +33,11 @@ class _SurrogateKeyModel(BaseModel):
     data: dict
 
 
+async def _handle(name: str) -> ClientTool:
+    [handle] = await app.tools.get_client_tools([name])
+    return handle
+
+
 @pytest.fixture(autouse=True)
 def _clean_server():
     async def _clear() -> None:
@@ -46,7 +50,7 @@ def _clean_server():
     asyncio.run(_clear())
 
 
-def test_tool_body_exception_becomes_tool_exception(caplog):
+def test_tool_body_exception_becomes_client_tool_error(caplog):
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
 
@@ -55,14 +59,13 @@ def test_tool_body_exception_becomes_tool_exception(caplog):
                 """A tool whose body raises while doing its job."""
                 raise ValueError("kaboom")
 
-            tool_obj = await app.tools.get_tool("boom")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("boom")
 
             with (
                 caplog.at_level(logging.WARNING, logger="tai42_skeleton.tools.binding.client_tools"),
-                pytest.raises(ToolException, match=r"Error calling tool 'boom': kaboom"),
+                pytest.raises(ClientToolError, match=r"Error calling tool 'boom': kaboom"),
             ):
-                await runnable(q="x")
+                await handle.invoke({"q": "x"})
 
             # The server-side trace is not silenced: the binding logs the failure
             # naming the tool and the error.
@@ -72,24 +75,6 @@ def test_tool_body_exception_becomes_tool_exception(caplog):
                 and "kaboom" in r.getMessage()
                 for r in caplog.records
             )
-
-    asyncio.run(run())
-
-
-def test_client_tool_ainvoke_surfaces_tool_exception():
-    # End to end through the exposed StructuredTool: a body failure reaches a caller
-    # (a ToolNode / middleware) as a ToolException, not a raw abort.
-    async def run() -> None:
-        async with app.app_context(Manifest.model_validate({})):
-
-            @app.tools.tool(force=True)
-            async def boom(q: str) -> str:
-                """A tool whose body raises while doing its job."""
-                raise RuntimeError("down")
-
-            [client_tool] = await app.tools.get_client_tools(["boom"])
-            with pytest.raises(ToolException, match=r"Error calling tool 'boom': down"):
-                await client_tool.ainvoke({"q": "x"})
 
     asyncio.run(run())
 
@@ -105,8 +90,7 @@ def test_machinery_failure_on_live_fire_propagates_unchanged(monkeypatch):
                 """A tool that would succeed if it still existed."""
                 return q
 
-            tool_obj = await app.tools.get_tool("gone")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("gone")
 
             # Enter the identity-bound branch, then vanish the registration so the
             # re-resolution fails as machinery before the body is ever reached.
@@ -114,7 +98,7 @@ def test_machinery_failure_on_live_fire_propagates_unchanged(monkeypatch):
             app._tool_binding.remove_tool("gone")
 
             with pytest.raises(UnknownToolError):
-                await runnable(q="x")
+                await handle.invoke({"q": "x"})
 
     asyncio.run(run())
 
@@ -133,8 +117,7 @@ def test_identity_gate_denial_propagates_unchanged(monkeypatch):
                 """A tool the identity gate refuses to dispatch."""
                 return q
 
-            tool_obj = await app.tools.get_tool("guarded")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("guarded")
 
             async def _deny(*args, **kwargs):
                 raise GateDeniedError("not allowed")
@@ -143,7 +126,7 @@ def test_identity_gate_denial_propagates_unchanged(monkeypatch):
             monkeypatch.setattr(app._tool_binding, "_authorize_execution_dispatch", _deny)
 
             with pytest.raises(GateDeniedError):
-                await runnable(q="x")
+                await handle.invoke({"q": "x"})
 
     asyncio.run(run())
 
@@ -159,27 +142,22 @@ def test_cancelled_error_passes_through_untouched():
                 """A tool whose body is cancelled mid-run."""
                 raise asyncio.CancelledError
 
-            tool_obj = await app.tools.get_tool("cancels")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("cancels")
 
             with pytest.raises(asyncio.CancelledError):
-                await runnable(q="x")
+                await handle.invoke({"q": "x"})
 
     asyncio.run(run())
 
 
-def test_suspended_interaction_becomes_the_reserved_park_marker():
-    # An async ask parks the caller and returns a SuspendedInteraction sentinel.
-    # Inside a graph the tool task must COMPLETE (so ask runs exactly once, never
-    # replayed on resume), so the in-process seam converts the sentinel to the reserved
-    # contract marker the in-graph park middleware recognizes — never the raw sentinel.
+def test_a_declared_park_returns_the_suspended_interaction_unadapted():
+    # An async ask parks the caller and returns a SuspendedInteraction sentinel. The handle hands
+    # it back BY TYPE with its owner and both id lists: adopting it is the engine adapter's job.
     from datetime import UTC, datetime
 
     from tai42_contract.interactions import (
-        SUSPENDED_INTERACTION_MARKER_KEY,
         SuspendedInteraction,
         get_resume_continuation_tool,
-        read_suspended_interaction_marker,
         reset_resume_continuation_tool,
         set_resume_continuation_tool,
     )
@@ -192,39 +170,34 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
             @app.tools.tool(force=True, meta={TOOL_META_PAUSES: True})
             async def parks(q: str):
                 """A tool that async-parks and returns the suspension sentinel."""
-                # Faithful to ``ask(mode="async")``: the park names the continuation
-                # bound around this run as its owner, so this run may adopt it.
                 return SuspendedInteraction(
-                    interaction_id="i1", expiry_at=deadline, resume_owner=get_resume_continuation_tool()
+                    interaction_id="i1",
+                    expiry_at=deadline,
+                    resume_owner=get_resume_continuation_tool(),
+                    interaction_ids=["i1", "i2"],
+                    caller_interaction_ids=["i2"],
                 )
 
-            tool_obj = await app.tools.get_tool("parks")
-            runnable = app._tool_binding._client_runnable(tool_obj)
-
+            handle = await _handle("parks")
             token = set_resume_continuation_tool("agent_resume")
             try:
-                result = await runnable(q="x")
+                result = await handle.invoke({"q": "x"})
             finally:
                 reset_resume_continuation_tool(token)
-            assert isinstance(result, dict)
-            assert SUSPENDED_INTERACTION_MARKER_KEY in result
-            marker = read_suspended_interaction_marker(result)
-            assert marker == {
-                "interaction_id": "i1",
-                "expiry_at": deadline.isoformat(),
-                # The owner rides the wire form the claim point reads.
-                "resume_owner": "agent_resume",
-                # The per-ask id lists ride it too, defaulting to the single id / empty caller set.
-                "interaction_ids": ["i1"],
-                "caller_interaction_ids": [],
-            }
+            assert result == SuspendedInteraction(
+                interaction_id="i1",
+                expiry_at=deadline,
+                resume_owner="agent_resume",
+                interaction_ids=["i1", "i2"],
+                caller_interaction_ids=["i2"],
+            )
 
     asyncio.run(run())
 
 
-def test_unencodable_result_becomes_a_model_visible_tool_exception():
-    # A tool whose return holds a lone surrogate is refused as a model-visible ToolException
-    # naming the tool and the JSON path — never a crash when the langchain layer encodes it.
+def test_unencodable_result_becomes_a_model_visible_client_tool_error():
+    # A tool whose return holds a lone surrogate is refused as a model-visible ClientToolError
+    # naming the tool and the JSON path — never a crash when an engine encodes it.
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
 
@@ -233,11 +206,10 @@ def test_unencodable_result_becomes_a_model_visible_tool_exception():
                 """A tool whose dict value holds a lone surrogate."""
                 return {"token": "\ud83d"}
 
-            tool_obj = await app.tools.get_tool("emits")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("emits")
 
-            with pytest.raises(ToolException, match=r"emits.*cannot be JSON-encoded at \$\.token"):
-                await runnable()
+            with pytest.raises(ClientToolError, match=r"emits.*cannot be JSON-encoded at \$\.token"):
+                await handle.invoke({})
 
     asyncio.run(run())
 
@@ -253,18 +225,17 @@ def test_a_pydantic_return_with_a_surrogate_is_refused():
                 """A tool returning a pydantic model whose field holds a lone surrogate."""
                 return _PydanticOut(name="\ud83d")
 
-            tool_obj = await app.tools.get_tool("emits")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("emits")
 
-            with pytest.raises(ToolException, match=r"emits.*cannot be JSON-encoded at \$\.name"):
-                await runnable()
+            with pytest.raises(ClientToolError, match=r"emits.*cannot be JSON-encoded at \$\.name"):
+                await handle.invoke({})
 
     asyncio.run(run())
 
 
-def test_an_unencodable_model_leaf_becomes_a_model_visible_tool_exception():
+def test_an_unencodable_model_leaf_becomes_a_model_visible_client_tool_error():
     # A leaf the encoder cannot render (a model holding a surrogate dict key) is refused as a
-    # model-visible ToolException naming the tool and the FIELD path — the model is not
+    # model-visible ClientToolError naming the tool and the FIELD path — the model is not
     # deep-reduced, and the reduction never crashes raw into the agent loop.
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
@@ -274,11 +245,10 @@ def test_an_unencodable_model_leaf_becomes_a_model_visible_tool_exception():
                 """A tool whose payload field is a model the encoder cannot render."""
                 return {"payload": _SurrogateKeyModel(data={"\ud83d": "v"})}
 
-            tool_obj = await app.tools.get_tool("emits")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("emits")
 
-            with pytest.raises(ToolException, match=r"emits.*cannot be JSON-encoded at \$\.payload"):
-                await runnable()
+            with pytest.raises(ClientToolError, match=r"emits.*cannot be JSON-encoded at \$\.payload"):
+                await handle.invoke({})
 
     asyncio.run(run())
 
@@ -293,10 +263,9 @@ def test_an_encodable_emoji_return_passes_through():
                 """A tool returning a real, encodable emoji."""
                 return {"emoji": "😀"}
 
-            tool_obj = await app.tools.get_tool("emits")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("emits")
 
-            assert await runnable() == {"emoji": "😀"}
+            assert await handle.invoke({}) == {"emoji": "😀"}
 
     asyncio.run(run())
 
@@ -304,7 +273,7 @@ def test_an_encodable_emoji_return_passes_through():
 def test_tool_body_failed_terminal_renders_the_whole_outcome_as_text():
     # A driver's FAILED terminal RAISES ``RunTerminalFailed`` carrying the outcome WHOLE. The
     # in-process agent tool door renders the whole opaque outcome as JSON TEXT on the
-    # ``ToolException`` (reading no key inside it), so the model reads the driver's own graceful
+    # ``ClientToolError`` (reading no key inside it), so the model reads the driver's own graceful
     # surface — the deep nested marker, well past the 200-char record cap, present and untruncated —
     # not the bare contract message the generic arm would collapse it to.
     import json
@@ -330,12 +299,11 @@ def test_tool_body_failed_terminal_renders_the_whole_outcome_as_text():
                 """A driver whose body raises a failed terminal carrying a whole outcome."""
                 raise RunTerminalFailed(outcome)
 
-            tool_obj = await app.tools.get_tool("flow")
-            runnable = app._tool_binding._client_runnable(tool_obj)
+            handle = await _handle("flow")
 
-            with pytest.raises(ToolException) as caught:
-                await runnable()
-            # The ToolException carries the WHOLE outcome as JSON text (via the contract helper).
+            with pytest.raises(ClientToolError) as caught:
+                await handle.invoke({})
+            # The ClientToolError carries the WHOLE outcome as JSON text (via the contract helper).
             assert str(caught.value) == failed_outcome_text(outcome)
             assert json.loads(str(caught.value)) == outcome
             assert "DEEP_MARKER_PAST_200" in str(caught.value)
