@@ -8,13 +8,15 @@ it). Guard policy is injected per test.
 
 from __future__ import annotations
 
+import socket
 from typing import Any
 
+import httpcore
 import httpx
 import pytest
 
 from tai42_kit.net import fetch_url, url_guard
-from tai42_kit.net.fetch_url import _PinningBackend, _unwrap_guard_error
+from tai42_kit.net.fetch_url import _HTTPCORE_TO_HTTPX, PinningTransport, _PinningBackend, unwrap_guard_error
 from tai42_kit.net.url_guard import UrlGuardError, UrlGuardSettings
 
 
@@ -285,7 +287,7 @@ async def test_pinning_backend_delegates_unix_socket_and_sleep() -> None:
     assert calls == {"unix": ("/tmp/sock", 1.5), "sleep": 0.25}
 
 
-def test_unwrap_guard_error_finds_the_rejection_down_either_leg() -> None:
+def test_guard_error_unwrapping_finds_the_rejection_down_either_leg() -> None:
     """The rejection is recovered whether it was chained explicitly or displaced.
 
     An exception that displaces the rejection carries it in ``__context__``; one that
@@ -294,19 +296,97 @@ def test_unwrap_guard_error_finds_the_rejection_down_either_leg() -> None:
     """
     guard_error = UrlGuardError("SSRF guard: blocked.")
 
-    assert _unwrap_guard_error(guard_error) is guard_error
+    assert unwrap_guard_error(guard_error) is guard_error
 
     displaced = RuntimeError("teardown failed")
     displaced.__context__ = guard_error
-    assert _unwrap_guard_error(displaced) is guard_error
+    assert unwrap_guard_error(displaced) is guard_error
 
     chained = RuntimeError("mapped by a transport")
     chained.__cause__ = guard_error
-    assert _unwrap_guard_error(chained) is guard_error
+    assert unwrap_guard_error(chained) is guard_error
 
     unrelated = RuntimeError("nothing to do with the guard")
-    assert _unwrap_guard_error(unrelated) is None
+    assert unwrap_guard_error(unrelated) is None
 
     looped = RuntimeError("loop")
     looped.__context__ = looped
-    assert _unwrap_guard_error(looped) is None
+    assert unwrap_guard_error(looped) is None
+
+
+# -- the pinning transport ------------------------------------------------------
+
+
+def _record_resolver(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Route every guard resolution to loopback, recording the host it was asked for."""
+    hosts: list[str] = []
+
+    async def resolve(host: str) -> str:
+        hosts.append(host)
+        return "127.0.0.1"
+
+    monkeypatch.setattr(url_guard, "resolve_and_validate", resolve)
+    return hosts
+
+
+def _closed_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def test_pinning_transport_resolves_every_connection_through_the_guard(
+    monkeypatch: pytest.MonkeyPatch, local_server: Any
+) -> None:
+    """The ``.invalid`` name resolves nowhere, so only a connection pinned by the guard reaches the server."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    hosts = _record_resolver(monkeypatch)
+    local_server.configure(body=b"pinned body")
+    port = local_server.base_url.rsplit(":", 1)[1]
+    async with httpx.AsyncClient(transport=PinningTransport()) as client:
+        response = await client.get(f"http://pinned.invalid:{port}/x")
+    assert response.content == b"pinned body"
+    assert hosts == ["pinned.invalid"]
+    assert local_server.requests == ["GET"]
+
+
+async def test_pinning_transport_maps_pool_errors_to_httpx_classes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    _record_resolver(monkeypatch)
+    async with httpx.AsyncClient(transport=PinningTransport()) as client:
+        with pytest.raises(httpx.ConnectError) as refused:
+            await client.get(f"http://127.0.0.1:{_closed_loopback_port()}/x")
+        assert isinstance(refused.value.__cause__, httpcore.ConnectError)
+        with pytest.raises(httpx.UnsupportedProtocol):
+            await client.get("file:///etc/hostname")
+
+
+async def test_pinning_transport_surfaces_a_guard_rejection_as_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+    rejection = UrlGuardError("SSRF guard: refused")
+
+    async def refuse(host: str) -> str:
+        raise rejection
+
+    monkeypatch.setattr(url_guard, "resolve_and_validate", refuse)
+    async with httpx.AsyncClient(transport=PinningTransport()) as client:
+        with pytest.raises(UrlGuardError) as raised:
+            await client.get("http://refused.invalid/x")
+    assert raised.value is rejection
+
+
+def test_httpcore_exception_table_covers_every_exported_error() -> None:
+    """Vendor pin: every exception httpcore exports maps to httpx's class of the same name.
+
+    ``ConnectionNotAvailable`` never leaves the pool (the pool catches it and retries), so it is
+    not mapped. An httpcore release exporting a new error class fails here.
+    """
+    exported = {
+        getattr(httpcore, name)
+        for name in httpcore.__all__
+        if isinstance(getattr(httpcore, name), type) and issubclass(getattr(httpcore, name), Exception)
+    }
+    exported.discard(httpcore.ConnectionNotAvailable)
+    assert exported == set(_HTTPCORE_TO_HTTPX)
+    for source, target in _HTTPCORE_TO_HTTPX.items():
+        assert target is getattr(httpx, source.__name__)

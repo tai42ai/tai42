@@ -141,11 +141,13 @@ async def _enter_boot_serving_app(inner_app, app_state: dict) -> None:
     a profile apply must be able to close THIS lifespan from the swap task — which only
     the supervisor's one-task/one-context pattern allows. ``finalize`` records the
     lifespan-bearing FastMCP app as ``mcp_lifespan_app`` so the lifespan is entered even
-    when middleware wraps ``inner_app``. The boot serving app is attached wrapped in this
-    generation's admission counter so a later retire drains its work.
+    when middleware wraps ``inner_app``; that app is also the boot generation's serving
+    surface (every request's scope points at it). The boot serving app is attached wrapped
+    in this generation's admission counter so a later retire drains its work.
     """
     boot_epoch = epoch.current_epoch()
     lifespan_app = getattr(inner_app, "mcp_lifespan_app", inner_app)
+    boot_epoch.record_serving_surface(lifespan_app)
     if getattr(lifespan_app, "lifespan", None) is not None:
         supervisor = SubAppLifespan(lifespan_app)
         await supervisor.start()
@@ -175,8 +177,10 @@ async def _worker_lifespan(
         # resolves to its real value before ``start()`` probes any mount.
         manifest = app.lifecycle.read_boot_manifest()
         async with app.app_context(manifest):
-            inner_app = _build_inner_app(app, transport, stateless_http)
-            await _enter_boot_serving_app(inner_app, app_state)
+            # The boot serving app is handed straight to the dispatch slot: this frame stays
+            # suspended for the whole process, so it keeps no reference to a generation a
+            # reload later retires.
+            await _enter_boot_serving_app(_build_inner_app(app, transport, stateless_http), app_state)
             yield
     except Exception:
         logger.exception("Worker application lifespan failed")

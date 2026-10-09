@@ -22,7 +22,9 @@ from __future__ import annotations
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
@@ -67,3 +69,13 @@ class SubMcpSettings(TaiBaseSettings):
 def sub_mcp_settings() -> SubMcpSettings:
     """The cached :class:`SubMcpSettings` for this process."""
     return SubMcpSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The durable sub-MCP registration Redis, unless the store runs in memory.
+
+    Redis-backed whenever ``SUB_MCP_REDIS_URL`` is set: its rehydrate handler runs on every
+    boot/reload and every registration writes to it.
+    """
+    sub_mcp = sub_mcp_settings()
+    return [] if sub_mcp.in_memory else [ReadinessTarget("sub_mcp", RedisClient, sub_mcp.redis)]

@@ -17,6 +17,8 @@ from importlib.resources.abc import Traversable
 
 from pydantic import Field, model_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
+from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import (
     MigrationEntry,
     assert_chain_applied,
@@ -101,6 +103,17 @@ def states_store_configured() -> bool:
     return component_store_configured(STATES_COMPONENT)
 
 
+def readiness_targets() -> list[ReadinessTarget]:
+    """The state store's own bound database, when it is configured.
+
+    A row of its own whichever database the binding names; when that is the database the
+    other skeleton stores use, ``/ready`` pings the shared pool once.
+    """
+    if not states_store_configured():
+        return []
+    return [ReadinessTarget("states", PostgresClient, component_store_settings(STATES_COMPONENT))]
+
+
 def states_entry() -> MigrationEntry:
     """The state store's chain as a runner entry against the component's bound MIGRATOR identity.
 
@@ -139,6 +152,7 @@ __all__ = [
     "STATES_COMPONENT",
     "StatesSettings",
     "assert_states_schema_applied",
+    "readiness_targets",
     "states_entry",
     "states_migrations_dir",
     "states_settings",

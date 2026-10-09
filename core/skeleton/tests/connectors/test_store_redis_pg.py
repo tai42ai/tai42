@@ -20,6 +20,8 @@ import tai42_skeleton.connectors.store.redis_pg as redis_pg
 from tai42_skeleton.connectors.store.redis_pg import (
     _ALIAS_UNIQUE_CONSTRAINT,
     RedisPgConnectorTokenStore,
+    RestoreRowResult,
+    StoredConnection,
     _expireat_arg,
 )
 
@@ -119,6 +121,20 @@ class FakeCursor:
             if row is not None and filters_expired and _expired(row["exp"]):
                 row = None
             self._result_one = None if row is None else (row["blob"], row["exp"], row["ver"])
+        elif norm.startswith("SELECT connection_id, provider_id, alias, encrypted_blob, session_expires_at"):
+            # The full-row reads: every row (expired included), or one row by id.
+            def full(c):
+                r = self._pg.rows[c]
+                return (uuid.UUID(c), r["provider_id"], r["alias"], r["blob"], r["exp"])
+
+            if "WHERE connection_id = %s" in norm:
+                cid = str(params[0])
+                self._result_one = full(cid) if cid in self._pg.rows else None
+            else:
+                self._result_all = [full(c) for c in sorted(self._pg.rows)]
+        elif norm.startswith("SELECT connection_id FROM connector_connections WHERE connection_id = ANY"):
+            wanted = {str(u) for u in params[0]}
+            self._result_all = [(uuid.UUID(c),) for c in self._pg.rows if c in wanted]
         elif norm.startswith("SELECT connection_id"):
             # list() applies the same session-expiry filter as get().
             self._result_all = [(uuid.UUID(c),) for c in sorted(self._pg.rows) if not _expired(self._pg.rows[c]["exp"])]
@@ -196,6 +212,27 @@ class FakeConn:
 
     def cursor(self):
         return FakeCursor(self._pg)
+
+    def transaction(self):
+        return FakeSavepoint(self._pg)
+
+
+class FakeSavepoint:
+    """A savepoint: on an exception the rows roll back to their state at entry, then it re-raises."""
+
+    def __init__(self, pg: FakePg) -> None:
+        self._pg = pg
+        self._snapshot: dict[str, dict] = {}
+
+    async def __aenter__(self):
+        self._snapshot = {c: dict(r) for c, r in self._pg.rows.items()}
+        return self
+
+    async def __aexit__(self, exc_type, *exc):
+        if exc_type is not None:
+            self._pg.rows.clear()
+            self._pg.rows.update(self._snapshot)
+        return False
 
 
 class FakePg:
@@ -690,3 +727,171 @@ def test_token_store_builds_concrete_store():
     from tai42_skeleton.connectors.store import token_store
 
     assert isinstance(token_store(), RedisPgConnectorTokenStore)
+
+
+# -- full listing, durable re-read, restore -----------------------------------
+
+
+def _stored(
+    cid: str,
+    blob: bytes,
+    exp: datetime | None = None,
+    *,
+    provider_id: str = "acme",
+    alias: str = "work",
+) -> StoredConnection:
+    return StoredConnection(
+        connection_id=cid, provider_id=provider_id, alias=alias, encrypted_blob=blob, session_expires_at=exp
+    )
+
+
+async def test_list_all_including_expired_returns_every_row_sorted(store_fakes):
+    _redis, pg, _ = store_fakes
+    past = datetime(2000, 1, 1, tzinfo=UTC)
+    pg.rows[CID2] = _row(b"live", None, provider_id="acme", alias="b")
+    pg.rows[CID] = _row(b"lapsed", past, provider_id="acme", alias="a")
+    rows = await RedisPgConnectorTokenStore().list_all_including_expired()
+    assert rows == [
+        _stored(CID, b"lapsed", past, alias="a"),
+        _stored(CID2, b"live", None, alias="b"),
+    ]
+
+
+async def test_reread_reads_durably_without_touching_the_cache(store_fakes):
+    """A re-read returns the durable row (expired included) and never reads or writes Redis."""
+    redis, pg, classes = store_fakes
+    past = datetime(2000, 1, 1, tzinfo=UTC)
+    pg.rows[CID] = _row(b"durable", past)
+    redis.store[f"connectors:rec:{CID}"] = {_BLOB_FIELD: b"cached", _VER_FIELD: b"1"}
+    row = await RedisPgConnectorTokenStore().reread(CID)
+    assert row == _stored(CID, b"durable", past)
+    assert classes == [PostgresClient]
+    assert redis.store[f"connectors:rec:{CID}"] == {_BLOB_FIELD: b"cached", _VER_FIELD: b"1"}
+
+
+async def test_reread_missing_row_is_none(store_fakes):
+    assert await RedisPgConnectorTokenStore().reread(CID) is None
+
+
+async def test_restore_creates_updates_and_skips_existing(store_fakes):
+    _redis, pg, _ = store_fakes
+    pg.rows[CID] = _row(b"old", None, ver=3)
+    store = RedisPgConnectorTokenStore()
+    cid3 = "33333333-3333-4333-8333-333333333333"
+
+    skipped = await store.restore([_stored(CID, b"new")], overwrite=False)
+    assert skipped == [RestoreRowResult(connection_id=CID, outcome="skipped_existing")]
+    assert pg.rows[CID]["blob"] == b"old"
+
+    results = await store.restore(
+        [_stored(CID, b"new"), _stored(cid3, b"third", alias="third")],
+        overwrite=True,
+    )
+    assert results == [
+        RestoreRowResult(connection_id=CID, outcome="updated"),
+        RestoreRowResult(connection_id=cid3, outcome="created"),
+    ]
+    assert pg.rows[CID]["blob"] == b"new"
+    assert pg.rows[CID]["ver"] == 4
+    assert pg.rows[cid3]["blob"] == b"third"
+
+
+async def test_restore_reports_alias_in_use_per_row_and_restores_the_rest(store_fakes):
+    _redis, pg, _ = store_fakes
+    pg.rows[CID] = _row(b"holder", None, alias="work")
+    cid3 = "33333333-3333-4333-8333-333333333333"
+    results = await RedisPgConnectorTokenStore().restore(
+        [_stored(CID2, b"clash", alias="work"), _stored(cid3, b"clean", alias="home")],
+        overwrite=False,
+    )
+    assert results == [
+        RestoreRowResult(connection_id=CID2, outcome="alias_in_use"),
+        RestoreRowResult(connection_id=cid3, outcome="created"),
+    ]
+    assert CID2 not in pg.rows
+    assert pg.rows[cid3]["blob"] == b"clean"
+
+
+async def test_restore_keys_rows_on_the_canonical_id(store_fakes):
+    """A non-canonical id (upper case) is stored, reported and cached under its canonical form."""
+    redis, pg, _ = store_fakes
+    pg.rows[CID] = _row(b"old", None, ver=1)
+    results = await RedisPgConnectorTokenStore().restore([_stored(CID.upper(), b"new")], overwrite=False)
+    assert results == [RestoreRowResult(connection_id=CID, outcome="skipped_existing")]
+    results = await RedisPgConnectorTokenStore().restore([_stored(CID.upper(), b"new")], overwrite=True)
+    assert results == [RestoreRowResult(connection_id=CID, outcome="updated")]
+    assert redis.store[f"connectors:rec:{CID}"][_BLOB_FIELD] == b"new"
+
+
+async def test_restore_writes_back_the_cache_at_the_new_version(store_fakes):
+    """A warm entry at the old version is replaced by the restored blob at the restored row's version."""
+    redis, pg, _ = store_fakes
+    pg.rows[CID] = _row(b"old", None, ver=1)
+    redis.store[f"connectors:rec:{CID}"] = {_BLOB_FIELD: b"old", _VER_FIELD: b"1"}
+    await RedisPgConnectorTokenStore().restore([_stored(CID, b"restored")], overwrite=True)
+    assert redis.store[f"connectors:rec:{CID}"] == {_BLOB_FIELD: b"restored", _VER_FIELD: b"2"}
+
+
+async def test_restore_skip_leaves_the_warm_cache_untouched(store_fakes):
+    redis, pg, _ = store_fakes
+    pg.rows[CID] = _row(b"old", None, ver=1)
+    redis.store[f"connectors:rec:{CID}"] = {_BLOB_FIELD: b"old", _VER_FIELD: b"1"}
+    await RedisPgConnectorTokenStore().restore([_stored(CID, b"restored")], overwrite=False)
+    assert redis.store[f"connectors:rec:{CID}"] == {_BLOB_FIELD: b"old", _VER_FIELD: b"1"}
+    assert redis.deleted == []
+
+
+async def test_restore_tombstones_an_expired_row_at_the_new_version(store_fakes):
+    """An expired restored row leaves a version-only tombstone at its new version, never a blob."""
+    redis, pg, _ = store_fakes
+    pg.rows[CID] = _row(b"old", None, ver=1)
+    redis.store[f"connectors:rec:{CID}"] = {_BLOB_FIELD: b"old", _VER_FIELD: b"1"}
+    past = datetime(2000, 1, 1, tzinfo=UTC)
+    await RedisPgConnectorTokenStore().restore([_stored(CID, b"lapsed", past)], overwrite=True)
+    assert redis.store[f"connectors:rec:{CID}"] == {_VER_FIELD: b"2"}
+    assert pg.rows[CID]["blob"] == b"lapsed"
+
+
+async def test_restore_cache_write_back_failure_raises_after_the_commit(monkeypatch):
+    redis = FakeRedis(fail={"eval"})
+    pg = FakePg()
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield redis if client_cls is RedisClient else pg
+
+    monkeypatch.setattr(redis_pg, "client_ctx", fake_client_ctx)
+    with pytest.raises(RuntimeError, match="redis down"):
+        await RedisPgConnectorTokenStore().restore([_stored(CID, b"restored")], overwrite=True)
+    assert pg.rows[CID]["blob"] == b"restored"
+
+
+async def test_restore_expired_row_tombstone_failure_raises(monkeypatch):
+    redis = FakeRedis(fail={"eval"})
+    pg = FakePg()
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield redis if client_cls is RedisClient else pg
+
+    monkeypatch.setattr(redis_pg, "client_ctx", fake_client_ctx)
+    past = datetime(2000, 1, 1, tzinfo=UTC)
+    with pytest.raises(RuntimeError, match="redis down"):
+        await RedisPgConnectorTokenStore().restore([_stored(CID, b"lapsed", past)], overwrite=True)
+
+
+async def test_restore_reraises_a_non_alias_unique_violation(monkeypatch, store_fakes):
+
+    class _PkViolation(UniqueViolation):
+        diag: Any = SimpleNamespace(constraint_name="connector_connections_pkey")
+
+    original = FakeCursor.execute
+
+    async def failing_execute(self, sql, params=()):
+        if sql.lstrip().startswith("INSERT"):
+            raise _PkViolation()
+        return await original(self, sql, params)
+
+    monkeypatch.setattr(FakeCursor, "execute", failing_execute)
+    with pytest.raises(UniqueViolation):
+        await RedisPgConnectorTokenStore().restore([_stored(CID, b"x")], overwrite=True)

@@ -36,7 +36,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources.abc import Traversable
 from itertools import pairwise
-from typing import LiteralString, cast
+from typing import Final, LiteralString, cast
 
 from psycopg import AsyncConnection
 from psycopg.errors import UndefinedTable
@@ -48,10 +48,10 @@ logger = logging.getLogger(__name__)
 
 # One session-scoped advisory lock guards every migration run against a database,
 # so two racing replicas serialise (one waits) rather than both applying. The key
-# is the 8 ASCII bytes "tai_migr" as a bigint; it is deliberately distinct from
-# the marketplace installer's own advisory key so the two never collide when a
-# plugin install runs migrations while holding the marketplace lock.
-_MIGRATION_LOCK_KEY = 0x7461695F6D696772  # "tai_migr"
+# is the 8 ASCII bytes "tai_migr" as a bigint. Session- and transaction-scoped
+# advisory locks share one key space per database, so every other single-bigint
+# advisory key a deployment takes against the same database must differ from it.
+MIGRATION_LOCK_KEY: Final = 0x7461695F6D696772  # "tai_migr"
 
 # The per-database history table. Created idempotently in the apply path ALONE
 # (``apply_migrations``, under the DDL-owning identity and the advisory lock) —
@@ -304,12 +304,12 @@ def _group_by_dsn(entries: Sequence[MigrationEntry]) -> list[list[MigrationEntry
 async def _acquire_lock(conn: AsyncConnection) -> None:
     # Blocking (not ``try``): a second runner waits for the first rather than
     # failing, so a rollout with two replicas resolves to one-applies/one-no-ops.
-    await conn.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_LOCK_KEY,))
+    await conn.execute("SELECT pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
 
 
 async def _release_lock(conn: AsyncConnection) -> None:
     try:
-        await conn.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK_KEY,))
+        await conn.execute("SELECT pg_advisory_unlock(%s)", (MIGRATION_LOCK_KEY,))
     except Exception:
         # The polite release; closing the pinned connection is the real guarantee,
         # so a failure here (e.g. a connection already gone) is logged, not raised

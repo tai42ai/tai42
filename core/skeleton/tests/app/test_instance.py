@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+import pytest
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.app.instance as instance
@@ -242,3 +243,51 @@ async def test_lifespan_enters_and_exits_router_lifespan(monkeypatch):
         assert events == ["router-open"]
 
     assert events == ["router-open", "router-close"]
+
+
+# --- the app's own readiness and drain declarations -------------------------
+
+
+def test_a_rebuilt_singleton_declares_its_readiness_and_drain_again(monkeypatch):
+    # Every build of the singleton declares the platform's readiness contributors and the
+    # tool-runs drain budget on the app it builds, so a reset singleton rebuilds cleanly
+    # and the fresh app carries its own declarations.
+    monkeypatch.setattr(instance, "_app", None)
+    first = instance.build_app()
+    monkeypatch.setattr(instance, "_app", None)
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://conversations")
+    monkeypatch.setenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS", "23")
+    reset_all_settings()
+    try:
+        second = instance.build_app()
+        assert second is not first
+        assert "conversations" in [target.name for target in second.readiness.wired_targets()]
+        assert second.drain_budgets.budget() == 23.0
+    finally:
+        monkeypatch.delenv("CONVERSATIONS_REDIS_URL")
+        monkeypatch.delenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS")
+        reset_all_settings()
+
+
+def test_a_duplicate_declaration_within_one_app_is_refused(monkeypatch):
+    monkeypatch.setattr(instance, "_app", None)
+    app = instance.build_app()
+    with pytest.raises(ValueError, match="'bus'"):
+        app.readiness.register("bus", list)
+    with pytest.raises(ValueError, match="'tool_runs'"):
+        app.drain_budgets.register("tool_runs", lambda: 1.0)
+
+
+def test_a_failed_build_raises_its_own_error_again_on_the_next_build(monkeypatch):
+    # A build that fails leaves no singleton and no half-made declarations behind, so the
+    # next build fails on the same root cause rather than on a leftover registration.
+    monkeypatch.setattr(instance, "_app", None)
+
+    def _failing_install() -> None:
+        raise RuntimeError("the redactor could not be installed")
+
+    monkeypatch.setattr(instance, "install_meta_log_redactor", _failing_install)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="the redactor could not be installed"):
+            instance.build_app()
+    assert instance._app is None

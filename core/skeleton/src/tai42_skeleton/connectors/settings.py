@@ -30,8 +30,14 @@ from datetime import timedelta
 
 from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import component_store_configured, component_store_settings
 from tai42_kit.settings import KeyMaterial, TaiBaseSettings, settings_cache
+
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 _KEK_BYTE_LENGTH = 32
 _STATE_HMAC_MIN_BYTE_LENGTH = 32
@@ -284,3 +290,18 @@ class ConnectorAdapterSettings(TaiBaseSettings):
 def connector_adapter_settings() -> ConnectorAdapterSettings:
     """Return the cached connector adapter settings."""
     return ConnectorAdapterSettings()
+
+
+def readiness_targets() -> list[ReadinessTarget]:
+    """The connector store's database when it is configured, plus its Redis cache when a URL resolves.
+
+    A Postgres-only deployment readies on the database row alone rather than failing on a
+    Redis it never wired.
+    """
+    if not component_store_configured(SKELETON_COMPONENT):
+        return []
+    targets = [ReadinessTarget("connectors", PostgresClient, component_store_settings(SKELETON_COMPONENT))]
+    redis = connector_store_settings().redis
+    if redis.redis_url:
+        targets.append(ReadinessTarget("connectors", RedisClient, redis))
+    return targets

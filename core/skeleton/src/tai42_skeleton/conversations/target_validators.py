@@ -234,7 +234,7 @@ async def target_bind_refusal_lines(create: ConversationRouteCreate, candidate_b
 
     owner = await _resolve_target_owner(create)
     lines = await _platform_target_lines(create, candidate_body, owner)
-    validator = instance.app._target_validator_registry.get(*owner)
+    validator = instance.app.target_validator(*owner)
     if validator is not None:
         lines = [*lines, *await validator(create, candidate_body)]
     return lines

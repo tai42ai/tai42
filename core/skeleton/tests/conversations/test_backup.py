@@ -388,6 +388,9 @@ class _BindCheckApp:
         self.agents = _BindCheckApp._Agents()
         self._target_validator_registry = TargetBindValidatorRegistry()
 
+    def target_validator(self, target_kind, target_name):
+        return self._target_validator_registry.get(target_kind, target_name)
+
 
 async def test_import_rejects_a_row_whose_target_fails_the_bind_check(wired, monkeypatch):
     """A restored row whose target cannot bind — an asking agent bound with no reply/resume path — is a
@@ -437,6 +440,9 @@ class _RelayBindApp:
     def __init__(self) -> None:
         self.agents = _RelayBindApp._Agents()
         self._target_validator_registry = TargetBindValidatorRegistry()
+
+    def target_validator(self, target_kind, target_name):
+        return self._target_validator_registry.get(target_kind, target_name)
 
 
 class _FlipRefusingManager(_DictManager):

@@ -424,10 +424,11 @@ def _collect_manifest_sources() -> dict[str, tuple[PluginSpec, Path | None]]:
     import yaml
 
     from tai42_skeleton.config import ConfigManagerFactory
+    from tai42_skeleton.config.file_manager import FileConfigManager
     from tai42_skeleton.manifest import Manifest
 
     config_manager = ConfigManagerFactory.create()
-    manifest_path = getattr(config_manager, "_manifest_path", None)
+    manifest_path = config_manager.manifest_path if isinstance(config_manager, FileConfigManager) else None
     target = f"the configured manifest at {manifest_path}" if manifest_path else "the configured manifest"
     try:
         document = config_manager.read_manifest()

@@ -11,8 +11,9 @@ size-capped while streaming; turning the guard off opts out of both.
 
 from __future__ import annotations
 
-from contextlib import aclosing
-from typing import Any
+from collections.abc import AsyncIterable, AsyncIterator, Iterator
+from contextlib import aclosing, contextmanager
+from typing import Any, Final, cast
 
 import httpcore
 import httpx
@@ -64,15 +65,110 @@ class _PinningBackend(httpcore.AsyncNetworkBackend):
         await self._wrapped.sleep(seconds)
 
 
-class _PinningTransport(httpx.AsyncHTTPTransport):
-    """An httpx transport whose pool validates and pins every TCP target through :class:`_PinningBackend`."""
+# httpcore's exported errors and httpx's class of the same name, for a transport built over the
+# pool's public constructor. ``ConnectionNotAvailable`` is absent: the pool catches it and
+# retries, so it never reaches the transport.
+_HTTPCORE_TO_HTTPX: Final[dict[type[Exception], type[httpx.TransportError]]] = {
+    httpcore.TimeoutException: httpx.TimeoutException,
+    httpcore.ConnectTimeout: httpx.ConnectTimeout,
+    httpcore.ReadTimeout: httpx.ReadTimeout,
+    httpcore.WriteTimeout: httpx.WriteTimeout,
+    httpcore.PoolTimeout: httpx.PoolTimeout,
+    httpcore.NetworkError: httpx.NetworkError,
+    httpcore.ConnectError: httpx.ConnectError,
+    httpcore.ReadError: httpx.ReadError,
+    httpcore.WriteError: httpx.WriteError,
+    httpcore.ProxyError: httpx.ProxyError,
+    httpcore.UnsupportedProtocol: httpx.UnsupportedProtocol,
+    httpcore.ProtocolError: httpx.ProtocolError,
+    httpcore.LocalProtocolError: httpx.LocalProtocolError,
+    httpcore.RemoteProtocolError: httpx.RemoteProtocolError,
+}
+
+
+@contextmanager
+def _as_httpx_errors() -> Iterator[None]:
+    """Re-raise an httpcore exception as httpx's class of the same name; any other exception passes unchanged."""
+    try:
+        yield
+    except Exception as exc:
+        mapped = next((_HTTPCORE_TO_HTTPX[cls] for cls in type(exc).__mro__ if cls in _HTTPCORE_TO_HTTPX), None)
+        if mapped is None:
+            raise
+        raise mapped(str(exc)) from exc
+
+
+class _PoolResponseStream(httpx.AsyncByteStream):
+    """httpx body stream over the pool's response stream, mapping httpcore errors raised mid-body."""
+
+    def __init__(self, stream: AsyncIterable[bytes]) -> None:
+        self._stream = stream
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        with _as_httpx_errors():
+            async for part in self._stream:
+                yield part
+
+    async def aclose(self) -> None:
+        aclose = getattr(self._stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
+class PinningTransport(httpx.AsyncBaseTransport):
+    """httpx transport over a connection pool whose network backend validates and pins every TCP target.
+
+    Built through the libraries' public constructors: httpx's ``AsyncHTTPTransport`` takes no
+    network backend, while httpcore's pool does. The pool settings, TLS context and backend are
+    what ``httpx.AsyncHTTPTransport()`` builds by default, with :class:`_PinningBackend` wrapping
+    the asyncio backend. Environment proxies stay unused: an ``httpx.AsyncClient`` given a
+    transport reads none.
+    """
 
     def __init__(self) -> None:
-        super().__init__()
-        self._pool._network_backend = _PinningBackend(self._pool._network_backend)
+        """Build the pinned pool with ``httpx.AsyncHTTPTransport``'s default limits and TLS context."""
+        limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            # ``httpcore`` declares a stand-in ``AnyIOBackend`` for installs without anyio; httpx
+            # requires anyio, so the class here is the real asyncio network backend.
+            network_backend=_PinningBackend(cast("httpcore.AsyncNetworkBackend", httpcore.AnyIOBackend())),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Send ``request`` through the pinned pool, mapping httpcore's errors to httpx's."""
+        pool_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        with _as_httpx_errors():
+            response = await self._pool.handle_async_request(pool_request)
+        if not isinstance(response.stream, AsyncIterable):
+            raise TypeError(f"the async connection pool returned a synchronous body stream: {type(response.stream)!r}")
+        return httpx.Response(
+            status_code=response.status,
+            headers=response.headers,
+            stream=_PoolResponseStream(response.stream),
+            extensions=response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        """Close the pool and every connection it holds."""
+        await self._pool.aclose()
 
 
-def _unwrap_guard_error(exc: BaseException) -> UrlGuardError | None:
+def unwrap_guard_error(exc: BaseException) -> UrlGuardError | None:
     """Return the :class:`UrlGuardError` in ``exc``'s cause/context chain, if any.
 
     A guard rejection raised inside the network backend usually surfaces as itself.
@@ -95,7 +191,7 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
     """Fetch the URL's body and return ``(bytes, mime)``.
 
     ``mime`` is the response ``Content-Type`` header (``None`` when absent). When
-    the guard is enabled the request runs over :class:`_PinningTransport`, which
+    the guard is enabled the request runs over :class:`PinningTransport`, which
     validates and pins every connection (initial request and each redirect hop
     that opens a new connection), and the body is size-capped while streaming.
     Raises rather than truncating an over-cap body or reaching a non-public host.
@@ -122,7 +218,7 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
 
     max_redirects = url_guard.url_guard_settings().max_redirects
     try:
-        async with httpx.AsyncClient(transport=_PinningTransport(), follow_redirects=False) as client:
+        async with httpx.AsyncClient(transport=PinningTransport(), follow_redirects=False) as client:
             request = client.build_request("GET", url)
             for _ in range(max_redirects + 1):
                 async with aclosing(await client.send(request, stream=True)) as response:
@@ -142,7 +238,7 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
                 f"SSRF guard: exceeded max_redirects={max_redirects} fetching {url!r}."
             )
     except Exception as exc:
-        guard_error = _unwrap_guard_error(exc)
+        guard_error = unwrap_guard_error(exc)
         if guard_error is not None:
             # Re-raise the guard's own rejection rather than whatever exception is carrying
             # it, so the caller sees the policy that refused the fetch instead of a generic
@@ -151,3 +247,6 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
             # raised on its own.
             raise guard_error from guard_error.__context__
         raise
+
+
+__all__ = ["PinningTransport", "fetch_url", "unwrap_guard_error"]

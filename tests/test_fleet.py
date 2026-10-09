@@ -407,3 +407,26 @@ def test_harness_public_api_present():
         module = importlib.import_module(module_name)
         for name in names:
             assert hasattr(module, name), f"{module_name}.{name} missing from public API"
+
+
+# --------------------------------------------------- 7. coverage floor precision
+
+FLOOR_DIRS = [
+    d
+    for d in MEMBER_DIRS
+    if "fail_under" in _load_toml(d / "pyproject.toml").get("tool", {}).get("coverage", {}).get("report", {})
+]
+
+
+@pytest.mark.parametrize("member_dir", FLOOR_DIRS, ids=[d.relative_to(ROOT).as_posix() for d in FLOOR_DIRS])
+def test_coverage_floor_binds_at_its_declared_value(member_dir: Path):
+    """coverage.py fails a run only when the total ROUNDED to the report
+    ``precision`` is below ``fail_under``; the default precision of 0 lets a
+    95 floor pass a 94.6 total. Every member that declares a floor declares a
+    precision of at least two decimals, so the floor binds at its stated value."""
+    report = _load_toml(member_dir / "pyproject.toml")["tool"]["coverage"]["report"]
+    precision = report.get("precision", 0)
+    assert precision >= 2, (
+        f"{member_dir.relative_to(ROOT)}: [tool.coverage.report] fail_under={report['fail_under']} "
+        f"needs precision >= 2 (found {precision!r}) for the floor to bind"
+    )

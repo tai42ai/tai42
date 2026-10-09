@@ -27,17 +27,13 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from tai42_contract.app import DEFAULT_LOCAL_PORT
 
 from tai42_cli.client import DEFAULT_READ_TIMEOUT_SECONDS, ApiClient
 
 SERVER_URL_ENV = "TAI_SERVER_URL"
 API_KEY_ENV = "TAI_API_KEY"
 TIMEOUT_ENV = "TAI_CLI_TIMEOUT_SECONDS"
-
-# The port the local server binds by default. The server's serve-args settings
-# default imports this so the CLI's default ``--server`` URL and a default
-# ``tai serve`` cannot drift.
-DEFAULT_LOCAL_PORT = 8000
 
 
 def config_path() -> Path:

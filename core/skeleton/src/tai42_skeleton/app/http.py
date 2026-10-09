@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.routing import BaseRoute, Route
 
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
 from tai42_skeleton.app.raw_path_route import RawPathRoute, SpaFallbackRoute
@@ -23,6 +24,17 @@ if TYPE_CHECKING:
 
     from tai42_skeleton.app.route_registry import RouteAction
     from tai42_skeleton.app.server import TaiMCP
+
+
+def _fastmcp_route_table(fast_mcp: object) -> list[BaseRoute] | None:
+    """The live additional-HTTP-route list a FastMCP server serves, or ``None`` for an object keeping none.
+
+    FastMCP affords no public accessor for that list: its ``custom_route`` appends to it and its
+    route reader returns a copy, so the in-place edits this surface owns (raw-path upgrade, SPA
+    fallback, module savepoint and rollback) read it here and only here. An offline stand-in
+    (metadata capture, route discovery) keeps no table and yields ``None``.
+    """
+    return getattr(fast_mcp, "_additional_http_routes", None)
 
 
 def plugin_owner(binding: MountBinding) -> RouteOwner:
@@ -215,7 +227,7 @@ class HttpSurface:
 
         route_registry.mark_raw_path_matched(path_prefix)
         fast_mcp = self._app._fast_mcp
-        routes = getattr(fast_mcp, "_additional_http_routes", None)
+        routes = _fastmcp_route_table(fast_mcp)
         if routes is None:
             if isinstance(fast_mcp, FastMCP):
                 raise RuntimeError(
@@ -224,7 +236,7 @@ class HttpSurface:
                 )
             return
         for index, route in enumerate(routes):
-            if getattr(route, "path", "").startswith(path_prefix) and not isinstance(route, RawPathRoute):
+            if isinstance(route, Route) and route.path.startswith(path_prefix) and not isinstance(route, RawPathRoute):
                 routes[index] = RawPathRoute(
                     route.path,
                     endpoint=route.endpoint,
@@ -252,7 +264,7 @@ class HttpSurface:
         from fastmcp import FastMCP
 
         fast_mcp = self._app._fast_mcp
-        routes = getattr(fast_mcp, "_additional_http_routes", None)
+        routes = _fastmcp_route_table(fast_mcp)
         if routes is None:
             if isinstance(fast_mcp, FastMCP):
                 raise RuntimeError(
@@ -261,7 +273,7 @@ class HttpSurface:
                 )
             return
         for index, route in enumerate(routes):
-            if getattr(route, "path", "") == path and not isinstance(route, SpaFallbackRoute):
+            if isinstance(route, Route) and route.path == path and not isinstance(route, SpaFallbackRoute):
                 routes[index] = SpaFallbackRoute(
                     route.path,
                     endpoint=route.endpoint,
@@ -290,6 +302,13 @@ class HttpSurface:
             )
         return binding.resolved_path("")
 
+    def _served_route_table(self) -> list[BaseRoute]:
+        """The served FastMCP's live route table; a server keeping none is a torn surface and raises."""
+        routes = _fastmcp_route_table(self._app._fast_mcp)
+        if routes is None:
+            raise RuntimeError("the served FastMCP exposes no additional-route table")
+        return routes
+
     def route_table_savepoint(self) -> int:
         """The current length of the FastMCP additional-route table — a plugin-import savepoint.
 
@@ -297,11 +316,11 @@ class HttpSurface:
         only ever APPENDS routes (one per ``custom_route``), so truncating back to this
         length drops exactly the routes that module registered and nothing earlier.
 
-        Reaches the FastMCP-private route list because FastMCP affords no route-removal
-        API; this surface already owns every write into that list, so it owns the
-        savepoint too.
+        Reads the route list through :func:`_fastmcp_route_table` because FastMCP affords no
+        route-removal API; this surface already owns every write into that list, so it owns
+        the savepoint too.
         """
-        return len(self._app._fast_mcp._additional_http_routes)
+        return len(self._served_route_table())
 
     def rollback_module_routes(self, binding: MountBinding, savepoint: int) -> None:
         """Undo every route a failed bound module registered, across all three surfaces.
@@ -315,7 +334,7 @@ class HttpSurface:
         ``_verify_all_registered`` raise — since both leave the rows committed before
         the fault standing. A misused savepoint (outside the current table) raises.
         """
-        routes = self._app._fast_mcp._additional_http_routes
+        routes = self._served_route_table()
         if not 0 <= savepoint <= len(routes):
             raise ValueError(f"route-table savepoint {savepoint} is outside the current table of {len(routes)} routes")
         del routes[savepoint:]

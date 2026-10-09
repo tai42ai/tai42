@@ -30,8 +30,10 @@ build reached by any other route must take that same exclusive side.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
+import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -39,7 +41,9 @@ from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients import advance_client_epoch, current_client_epoch, drain_epoch
 from tai42_kit.settings import reset_all_settings
-from tai42_kit.settings.cache_registry import register_settings_reset, sweep_stale_settings
+from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
+
+from tai42_skeleton.app.retired_generations import arm_retired_generation_certification, detach_retired_generations
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -57,8 +61,9 @@ class Epoch:
     ``number`` is the client epoch the generation was born under
     (``current_client_epoch``), so its retired pools and its stale-settings sweep key
     on it. ``serving_app`` is the ASGI handle the dispatch slot serves for this
-    generation. In-flight requests are counted against the epoch that admitted them,
-    so a retire drains exactly this generation's live work.
+    generation; its serving surface (:meth:`record_serving_surface`) is the object every
+    request it serves points at. In-flight requests are counted against the epoch that
+    admitted them, so a retire drains exactly this generation's live work.
     """
 
     number: int
@@ -71,6 +76,7 @@ class Epoch:
     # streamable-http session-manager task group) open. Retiring the generation
     # ``aclose()``s it, terminating this generation's transports.
     supervisor: SubAppLifespan | None = None
+    _surface: weakref.ref[object] | None = None
     _in_flight: int = 0
     _idle: asyncio.Event = field(default_factory=asyncio.Event)
     _periodic_cancels: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
@@ -99,6 +105,30 @@ class Epoch:
     def in_flight(self) -> int:
         """The count of requests currently admitted on this generation."""
         return self._in_flight
+
+    def record_serving_surface(self, surface: object) -> None:
+        """Record the object every request this generation serves points at (its ``scope["app"]``).
+
+        Held weakly: what a served request leaves behind (a context a runtime timer or task
+        keeps, an open stream) reaches the generation through this object, so once it is
+        collected nothing a request left behind reaches the generation any more.
+        """
+        self._surface = weakref.ref(surface)
+
+    def serving_surface(self) -> object | None:
+        """This generation's recorded serving surface, or ``None`` when none was recorded or it was collected."""
+        return None if self._surface is None else self._surface()
+
+    def drop_serving_surface(self) -> None:
+        """Drop this generation's serving handle, core and lifespan supervisor.
+
+        The retire calls it once the generation is drained and closed, so the epoch object
+        the retire itself keeps no longer reaches the generation's collaborators (and the
+        settings they read) when the retired generation is certified.
+        """
+        self.serving_app = None
+        self.core = None
+        self.supervisor = None
 
     def register_periodic_loop(self, cancel: Callable[[], Awaitable[None]]) -> None:
         """Register a cancel-and-await callback for a periodic loop this generation owns.
@@ -228,8 +258,11 @@ def mark_current_request_drain_exempt() -> None:
     request end. A no-op off a served request or if already exempt. Only a genuinely
     long-lived stream calls this; every real / short request stays counted, so a retire STILL
     drains in-flight work (an MCP tool call, a sync REST tool run) BEFORE the ``aclose``. The
-    exempted stream's own generation is held (uncounted) until the client disconnects — a
-    bounded per-open-connection retention, not a leak of the in-flight counter.
+    exempted stream reads its own configuration through the cached settings accessors at each
+    use, so it keeps no settings object of its own across a reload; the generation serving it
+    (its ASGI stack and that stack's collaborators) stays reachable, uncounted, until the
+    client disconnects, and that generation's certification runs once its serving surface is
+    collected after the disconnect.
     """
     state = _admission.get()
     if state is None or state.drain_exempt:
@@ -257,10 +290,6 @@ _building_epoch: Epoch | None = None
 # that the proposed env removed rather than leaving its stale value in os.environ —
 # mirrors ``_loaded_env_keys`` in the in-place reload path.
 _loaded_env_keys: set[str] = set()
-
-# Set to the retiring epoch number for the span of the retire's settings reset so
-# the registered sweep hook sweeps exactly that generation; ``None`` otherwise.
-_retiring_epoch: int | None = None
 
 # True within the context of an HTTP request (set by ``EpochAdmissionApp``). A
 # door-triggered reload (``write_env`` / ``reload_config`` / ``fleet_reload_config``, incl.
@@ -374,21 +403,7 @@ async def clear_epoch() -> None:
     _current = None
     _serving_slot = None
     _loaded_env_keys = set()
-
-
-@register_settings_reset
-def _sweep_retiring_epoch() -> None:
-    """Settings-reset hook that sweeps the retiring generation for stale-config leaks.
-
-    Runs only when a retire triggers the reset. A no-op for every other reset
-    (the retire flag is unset), so the global reset stays cheap. Never drops
-    anything — a retired-epoch settings instance still reachable is reported
-    loudly by ``sweep_stale_settings``.
-    """
-    retiring = _retiring_epoch
-    if retiring is None:
-        return
-    sweep_stale_settings(retiring)
+    detach_retired_generations()
 
 
 def _apply_env(proposed: Mapping[str, str]) -> None:
@@ -459,19 +474,21 @@ def _drain_budget(deadline: float | None) -> float:
     # absolute time — mirrors the kit's ``drain_epoch(epoch, deadline)`` vocabulary.
     if deadline is not None:
         return deadline
-    from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
+    from tai42_skeleton.app import instance
 
-    return tool_runs_settings().shutdown_drain_seconds
+    return instance.build_app().drain_budgets.budget()
 
 
 async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_driver: bool = False) -> None:
     """Retire the previous generation, bounded by the drain budget.
 
     Cancels the generation's periodic loops first (no timer outlives its epoch),
-    drains its in-flight requests and background supervisors, closes its retired
-    client pools, and sweeps its stale settings (via the registered reset hook). Each
-    step is independent so one failure cannot skip the rest — the fresh epoch already
-    serves new traffic, so a retire fault is loud but never fatal.
+    drains its in-flight requests and background supervisors, resets the settings,
+    closes its retired client pools, and — once its in-flight requests are drained and
+    its lifespan closed — arms its certification: the generation's settings are swept
+    for stale-config leaks once its serving surface is collected. Each step is
+    independent so one failure cannot skip the rest — the fresh epoch already serves new
+    traffic, so a retire fault is loud but never fatal.
 
     ``tolerate_driver`` marks a door-driven reload: it runs the swap synchronously INSIDE
     the request that drove it, and if that request is an MCP tool call it is served by THIS
@@ -482,9 +499,10 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
     serving loop: ``build_and_swap`` returns at once, the driver finishes and flushes its
     response on the still-live session manager, then the task drains the old epoch and
     ``aclose``s it (for every OTHER session, a beat later, off the reload's hot path —
-    so long-lived streamable-http streams no longer gate reload latency either). A bus-driven
-    reload (``tolerate_driver=False``) serves no in-flight request that needs its response
-    delivered, so it drains + closes synchronously.
+    so long-lived streamable-http streams no longer gate reload latency either), and the
+    certification is armed after the drain there too. A bus-driven reload
+    (``tolerate_driver=False``) serves no in-flight request that needs its response
+    delivered, so it drains, closes and arms the certification synchronously.
     """
     budget = _drain_budget(deadline)
     await old._cancel_periodic_loops(budget)
@@ -524,39 +542,41 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
         except Exception:
             logger.exception("epoch %d retire: serving-lifespan close failed", old.number)
 
-    # Sweep the retired generation's stale settings through the registered reset
-    # hook: the flag scopes the sweep to exactly this generation.
-    global _retiring_epoch
-    _retiring_epoch = retired
-    try:
-        reset_all_settings()
-    finally:
-        _retiring_epoch = None
+    # Drop every settings cache and settings-derived singleton the retired generation
+    # left behind.
+    reset_all_settings()
 
     try:
         await drain_epoch(retired, budget)
     except Exception:
         logger.exception("epoch %d retire: client-pool drain failed", retired)
 
-    if tolerate_driver and old.supervisor is not None:
+    if tolerate_driver:
         # Defer the driver-severing drain + session-manager close so the reload returns now
         # and the driving request flushes its response on the still-live session manager.
+        # The task and its done-callback start from an empty context: either would
+        # otherwise copy the driving request's, and with it keep the retired generation
+        # reachable after the retire.
         task = asyncio.create_task(
-            _deferred_drain_and_close(old, budget),
+            _deferred_drain_and_close(old, retired, budget),
             name=f"tai-epoch-{old.number}-deferred-retire",
+            context=contextvars.Context(),
         )
         _deferred_retire_tasks.add(task)
-        task.add_done_callback(_deferred_retire_tasks.discard)
+        task.add_done_callback(_deferred_retire_tasks.discard, context=contextvars.Context())
+    else:
+        arm_retired_generation_certification(old, retired)
 
 
-async def _deferred_drain_and_close(old: Epoch, budget: float) -> None:
+async def _deferred_drain_and_close(old: Epoch, retired: int, budget: float) -> None:
     """Background tail of a door-driven reload's retire.
 
     Waits (bounded by the drain budget) for the old generation's in-flight
     requests — including the driver, whose response then flushes on the
     still-live session manager — to finish, then ``aclose`` its FastMCP lifespan
-    (for every remaining/streaming session). Runs on the serving loop (the
-    supervisor's owner loop), so the lifespan close stays loop-correct.
+    (for every remaining/streaming session) and arms the retired generation's
+    certification. Runs on the serving loop (the supervisor's owner loop), so the
+    lifespan close stays loop-correct.
     """
     try:
         await old._drain_in_flight(budget)
@@ -566,6 +586,24 @@ async def _deferred_drain_and_close(old: Epoch, budget: float) -> None:
                 await old.supervisor.aclose()
             except Exception:
                 logger.exception("epoch %d retire: deferred serving-lifespan close failed", old.number)
+    arm_retired_generation_certification(old, retired)
+
+
+async def _outside_any_request[T](step: Callable[[], Awaitable[T]]) -> T:
+    """Await ``step`` in a task that starts from an empty context.
+
+    A task copies the context it is created in. A door-driven reload runs inside the
+    request that drove it, whose context carries that request (and through its scope the
+    retiring generation's app) and its caller's identity. The new generation's long-lived
+    tasks — its FastMCP lifespan supervisor and its periodic loops — are created in the
+    steps run through here, so they start from no request's context, the same on every
+    door.
+    """
+
+    async def _step() -> T:
+        return await step()
+
+    return await asyncio.create_task(_step(), context=contextvars.Context())
 
 
 def _default_rebuild() -> None:
@@ -601,7 +639,8 @@ async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
     route table — including a reload-added router — is snapshotted anew and actually
     serves. Its FastMCP lifespan (a fresh streamable-http session manager) is entered
     through a dedicated-task supervisor so the swap task can later close it in the same
-    context; the built core is recorded on the epoch (retire drops it), and
+    context; the built core (the retire drops it) and, weakly, the lifespan-bearing app
+    (the serving surface every request's scope points at) are recorded on the epoch, and
     ``_building`` is cleared so post-swap reads resolve through ``current_epoch()``.
     """
     from tai42_skeleton.app import instance
@@ -620,6 +659,7 @@ async def _default_build_serving_app(epoch: Epoch) -> ASGIApp:
         await supervisor.start()
         epoch.core = core
         epoch.supervisor = supervisor
+        epoch.record_serving_surface(lifespan_app)
         return EpochAdmissionApp(inner, epoch)
     finally:
         app._building = None
@@ -660,16 +700,19 @@ async def build_and_swap_epoch(
       clear the accessor cache with ``reset_all_settings`` so the build reads it;
     - build the new serving surface OFF TO THE SIDE — ``rebuild`` re-initialises the
       registries, ``build_serving_app`` produces this generation's fresh dispatch
-      handle — with ZERO mutation of the live epoch;
-    - SUCCESS: advance the client epoch, swap the dispatch slot and the current-epoch
-      pointer together, retire the previous generation (periodic loops cancelled,
-      in-flight work + supervisors drained, retired pools closed, stale settings swept),
+      handle and may record its serving surface on the epoch (when it records none, the
+      handle it returns is the surface) — with ZERO mutation of the live epoch;
+    - SUCCESS: advance the client epoch, stamp the settings the build read with it, swap
+      the dispatch slot and the current-epoch pointer together, retire the previous
+      generation (periodic loops cancelled, in-flight work + supervisors drained, retired
+      pools closed, and its settings swept for stale-config leaks once its serving
+      surface is collected),
       and establish the new generation's loop-affine background loops on THIS serving
       loop (registered with the new epoch). The applied env STAYS live; the caller
       persists it;
-    - FAILURE: the half-built epoch is DISCARDED, ``os.environ`` is restored EXACTLY
-      from the snapshot (restore-on-failure only), the old epoch keeps serving
-      untouched, and the build failure is re-raised loudly.
+    - FAILURE: the half-built epoch is DISCARDED (a lifespan it entered is closed),
+      ``os.environ`` is restored EXACTLY from the snapshot (restore-on-failure only),
+      the old epoch keeps serving untouched, and the build failure is re-raised loudly.
 
     The ``rebuild`` / ``build_serving_app`` / ``establish_background_loops`` seams
     default to the running app; they are injectable so the build/swap/discard contract
@@ -691,12 +734,17 @@ async def build_and_swap_epoch(
     _building_epoch = new_epoch
     try:
         apply_env_and_reset_settings(proposed_env)
+        # Every settings instance read from here on is read under the proposed env for the
+        # generation being built; the mark lets the commit below stamp them with its epoch.
+        settings_mark = settings_birth_mark()
         # Open a staged generation for every per-generation global, so ``start()`` and the
         # epoch handlers populate the generation being built and the live epoch's globals
         # stay untouched until the atomic commit below.
         begin_staging_all()
         rebuild()
-        serving_app = await build_serving_app(new_epoch)
+        serving_app = await _outside_any_request(lambda: build_serving_app(new_epoch))
+        if new_epoch._surface is None:
+            new_epoch.record_serving_surface(serving_app)
     except BaseException:
         # Drop every staged generation and re-derive the process caches from the
         # untouched committed state: the staged registrations are discarded, the env is
@@ -718,12 +766,19 @@ async def build_and_swap_epoch(
             "epoch build failed under the proposed env — discarded; the previous epoch keeps serving",
             exc_info=True,
         )
+        # A lifespan the build entered (the reload cancelled once the build finished, or a
+        # failure after the enter) belongs to the discarded generation and is closed with it.
+        if new_epoch.supervisor is not None:
+            await new_epoch.supervisor.aclose()
         raise
     finally:
         _building_epoch = None
 
     retired = advance_client_epoch()
     new_epoch.number = current_client_epoch()
+    # The build read its settings before its epoch was current; they belong to the new
+    # generation, so the retire's sweep of ``retired`` judges only the previous generation's.
+    restamp_settings_born_after(settings_mark)
     new_epoch.serving_app = serving_app
     # Promote every staged generation to committed in the same no-await stretch as the
     # dispatch-slot swap, so no request ever sees a mix of the old and new generations.
@@ -734,5 +789,5 @@ async def build_and_swap_epoch(
     # background loops and register them with the now-current epoch. Runs AFTER the
     # retire cancelled the previous generation's loops, so there is no cross-generation
     # overlap and no timer outlives its epoch.
-    await establish_background_loops()
+    await _outside_any_request(establish_background_loops)
     return new_epoch

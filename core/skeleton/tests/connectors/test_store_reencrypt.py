@@ -54,13 +54,17 @@ class _FakeCursor:
 
     async def execute(self, sql, params=()):
         norm = " ".join(sql.split())
-        if norm.startswith("SELECT connection_id, encrypted_blob, session_expires_at"):
-            # The sweep's full-table enumeration — EVERY row, expired included.
-            self._all = [(uuid.UUID(cid), r["blob"], r["exp"]) for cid, r in sorted(self._pg.rows.items())]
-        elif norm.startswith("SELECT encrypted_blob, session_expires_at"):
-            # A post-CAS-miss re-read of one row.
-            row = self._pg.rows.get(str(params[0]))
-            self._one = None if row is None else (row["blob"], row["exp"])
+        if norm.startswith("SELECT connection_id, provider_id, alias, encrypted_blob, session_expires_at"):
+            if "WHERE connection_id = %s" in norm:
+                # The store's durable re-read of one row after a CAS miss.
+                cid = str(params[0])
+                row = self._pg.rows.get(cid)
+                self._one = None if row is None else (uuid.UUID(cid), "acme", cid, row["blob"], row["exp"])
+            else:
+                # The store's full listing — EVERY row, expired included.
+                self._all = [
+                    (uuid.UUID(cid), "acme", cid, r["blob"], r["exp"]) for cid, r in sorted(self._pg.rows.items())
+                ]
         elif norm.startswith("UPDATE"):
             # CAS: params = (new_blob, session_expires_at, conn_uuid, expected_blob).
             cid = str(params[2])
@@ -131,9 +135,7 @@ def sweep_fakes(monkeypatch):
         else:
             raise AssertionError(f"unexpected client {client_cls!r}")
 
-    # The sweep enumerates/re-reads through its own module's client_ctx; store.put
-    # (CAS + cache) goes through redis_pg's. Share one pg/redis across both.
-    monkeypatch.setattr(reencrypt, "client_ctx", fake_client_ctx)
+    # The sweep enumerates, re-reads and writes back through the token store.
     monkeypatch.setattr(redis_pg, "client_ctx", fake_client_ctx)
     return pg, redis
 

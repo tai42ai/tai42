@@ -25,7 +25,7 @@ from typing import Any
 _URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]{0,62}://[^\s\"'<>]+")
 
 
-def _redact(text: str) -> str:
+def redact_probe_error(text: str) -> str:
     """Redact URL-embedded credentials in arbitrary text.
 
     For each URL, userinfo and every query-string VALUE become ``<redacted>``;
@@ -91,7 +91,7 @@ def record_failure(title: str, exc: BaseException) -> None:
     The stored message never carries URL-embedded credentials — it is a read-tier surface.
     """
     ts = _now_iso()
-    message = _redact(str(exc))
+    message = redact_probe_error(str(exc))
     with _HEALTH_LOCK:
         entry = _HEALTH.setdefault(title, _McpHealth())
         entry.last_error = {"type": type(exc).__name__, "message": message, "at": ts}

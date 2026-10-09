@@ -8,8 +8,12 @@ single construction point and must not call the facet back (that would loop).
 
 from __future__ import annotations
 
+from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_contract.versioning import VersionedStore
+from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import component_store_configured, component_store_settings
 
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 
@@ -24,4 +28,11 @@ def versioned_store() -> PostgresVersionedStore:
     return PostgresVersionedStore()
 
 
-__all__ = ["PostgresVersionedStore", "VersionedStore", "versioned_store"]
+def readiness_targets() -> list[ReadinessTarget]:
+    """The versioned-document store's database, when it is configured."""
+    if not component_store_configured(SKELETON_COMPONENT):
+        return []
+    return [ReadinessTarget("versioning", PostgresClient, component_store_settings(SKELETON_COMPONENT))]
+
+
+__all__ = ["PostgresVersionedStore", "VersionedStore", "readiness_targets", "versioned_store"]

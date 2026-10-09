@@ -96,7 +96,7 @@ def test_default_dir_is_app(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_MANIFEST_PATH", raising=False)
     mgr = FileConfigManager()
     assert mgr._env_path == os.path.join("/app", ".env")
-    assert mgr._manifest_path == os.path.join("/app", "manifest.yml")
+    assert mgr.manifest_path == os.path.join("/app", "manifest.yml")
     assert mgr._defaults_manifest_path == os.path.join("/app", "templates", "manifest.yml")
 
 
@@ -115,21 +115,21 @@ def test_tai_manifest_path_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     override = str(tmp_path / "custom.yml")
     monkeypatch.setenv("TAI_MANIFEST_PATH", override)
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    assert mgr._manifest_path == override
+    assert mgr.manifest_path == override
 
 
 def test_an_empty_tai_manifest_path_is_absent(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("TAI_MANIFEST_PATH", "")
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    assert mgr._manifest_path == os.path.join(str(tmp_path), "manifest.yml")
+    assert mgr.manifest_path == os.path.join(str(tmp_path), "manifest.yml")
 
 
 def test_tai_manifest_path_is_read_per_call(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
     monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "first.yml"))
-    assert mgr._manifest_path == str(tmp_path / "first.yml")
+    assert mgr.manifest_path == str(tmp_path / "first.yml")
     monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "second.yml"))
-    assert mgr._manifest_path == str(tmp_path / "second.yml")
+    assert mgr.manifest_path == str(tmp_path / "second.yml")
 
 
 # --- env read/write ---------------------------------------------------------

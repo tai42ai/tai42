@@ -17,6 +17,7 @@ so a runner and its boot gate always target the same database.
 """
 
 from tai42_kit.db.migrations import (
+    MIGRATION_LOCK_KEY,
     AppliedMigration,
     ChecksumMismatch,
     ChecksumMismatchError,
@@ -46,6 +47,7 @@ from tai42_kit.db.registry import (
 )
 
 __all__ = [
+    "MIGRATION_LOCK_KEY",
     "AdminIdentityIncompleteError",
     "AppliedMigration",
     "ChecksumMismatch",

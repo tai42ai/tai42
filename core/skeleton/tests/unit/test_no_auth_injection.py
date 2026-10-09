@@ -1,4 +1,4 @@
-"""No-auth token-injection paths in _prepare_request + the resolver wrapper.
+"""No-auth token-injection paths in prepare_managed_request + the resolver wrapper.
 
 OAuth: token injected as http Bearer / stdio _meta. No-auth with client config:
 headers merged (http) or env merged (stdio), NO token, NO _meta. No-auth without
@@ -20,7 +20,7 @@ import tai42_skeleton.app.instance  # noqa: F401
 from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
 from tai42_skeleton.connectors.token_injection import (
     CONNECTOR_META_TOKEN_KEY,
-    _prepare_request,
+    prepare_managed_request,
     resolve_managed_auth_for_config,
 )
 
@@ -46,14 +46,14 @@ def _config(*, transport: str = "http") -> TaiMCPConfig:
 
 def test_prepare_request_none_injects_nothing():
     cfg = _config()
-    out_cfg, meta = _prepare_request(cfg, None, "http")
+    out_cfg, meta = prepare_managed_request(cfg, None, "http")
     assert out_cfg is cfg
     assert meta is None
 
 
 def test_prepare_request_oauth_http_bearer():
     cfg = _config(transport="http")
-    out_cfg, meta = _prepare_request(cfg, ManagedAuth(access_token="tok"), "http")
+    out_cfg, meta = prepare_managed_request(cfg, ManagedAuth(access_token="tok"), "http")
     assert meta is None
     assert out_cfg.config.headers is not None
     assert out_cfg.config.headers["authorization"] == "Bearer tok"
@@ -61,14 +61,14 @@ def test_prepare_request_oauth_http_bearer():
 
 def test_prepare_request_oauth_stdio_meta():
     cfg = _config(transport="stdio")
-    _out_cfg, meta = _prepare_request(cfg, ManagedAuth(access_token="tok"), "stdio")
+    _out_cfg, meta = prepare_managed_request(cfg, ManagedAuth(access_token="tok"), "stdio")
     assert meta == {CONNECTOR_META_TOKEN_KEY: "tok"}
 
 
 def test_prepare_request_no_auth_http_headers():
     cfg = _config(transport="http")
     auth = ManagedAuth(headers={"x-api-key": "k-123"})
-    out_cfg, meta = _prepare_request(cfg, auth, "http")
+    out_cfg, meta = prepare_managed_request(cfg, auth, "http")
     assert meta is None
     assert out_cfg.config.headers is not None
     assert out_cfg.config.headers["x-api-key"] == "k-123"
@@ -79,7 +79,7 @@ def test_prepare_request_no_auth_http_headers():
 def test_prepare_request_no_auth_stdio_env():
     cfg = _config(transport="stdio")
     auth = ManagedAuth(env={"API_KEY": "k-123"})
-    out_cfg, meta = _prepare_request(cfg, auth, "stdio")
+    out_cfg, meta = prepare_managed_request(cfg, auth, "stdio")
     # No _meta token for no-auth stdio.
     assert meta is None
     assert out_cfg.config.env is not None

@@ -23,6 +23,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.store.backup as store_backup
+import tai42_skeleton.connectors.store.redis_pg as redis_pg
 from tai42_skeleton.connectors.oauth import crypto
 from tai42_skeleton.connectors.store.backup import (
     export_connector_categories,
@@ -30,9 +31,11 @@ from tai42_skeleton.connectors.store.backup import (
     import_connector_categories,
     import_connector_connections,
 )
-from tai42_skeleton.connectors.store.redis_pg import _ALIAS_UNIQUE_CONSTRAINT, RedisPgConnectorTokenStore
 
 from .conftest import CID, CID2
+
+# The durable ``UNIQUE (provider_id, alias)`` constraint name from the skeleton schema.
+_ALIAS_UNIQUE_CONSTRAINT = "connector_connections_provider_alias_unique"
 
 # Default creation time stamped on a fake row that was seeded without an explicit
 # one, so the created_at-bearing export SELECTs always have a value to serialize.
@@ -71,6 +74,7 @@ class _FakeCursor:
     def __init__(self, pg: _FakePg) -> None:
         self._pg = pg
         self._result_all: list = []
+        self._result_one: Any = None
 
     async def __aenter__(self):
         return self
@@ -82,6 +86,7 @@ class _FakeCursor:
         norm = " ".join(sql.split())
         self._pg.executed.append(norm)
         self._result_all = []
+        self._result_one = None
         pg = self._pg
         if norm.startswith("SELECT id, display_name, sort_order"):
             self._result_all = [
@@ -103,9 +108,11 @@ class _FakeCursor:
                 (uuid.UUID(k), r["provider_id"], r["alias"], r["blob"], r["exp"])
                 for k, r in sorted(pg.connections.items())
             ]
-        elif norm == "SELECT connection_id FROM connector_connections":
-            self._result_all = [(uuid.UUID(k),) for k in pg.connections]
+        elif norm.startswith("SELECT connection_id FROM connector_connections WHERE connection_id = ANY"):
+            wanted = {str(u) for u in params[0]}
+            self._result_all = [(uuid.UUID(k),) for k in pg.connections if k in wanted]
         elif norm.startswith("INSERT INTO connector_connections"):
+            # The store's upsert: params = (conn_uuid, provider_id, alias, blob, exp), RETURNING cache_version.
             if pg.raise_on_conn_insert is not None:
                 raise pg.raise_on_conn_insert
             conn_uuid, provider_id, alias, blob, exp = params
@@ -113,12 +120,23 @@ class _FakeCursor:
             for other_cid, r in pg.connections.items():
                 if other_cid != cid and r["provider_id"] == provider_id and r["alias"] == alias:
                     raise _AliasUniqueViolation()
-            pg.connections[cid] = {"provider_id": provider_id, "alias": alias, "blob": bytes(blob), "exp": exp}
+            version = pg.connections[cid].get("ver", 1) + 1 if cid in pg.connections else 1
+            pg.connections[cid] = {
+                "provider_id": provider_id,
+                "alias": alias,
+                "blob": bytes(blob),
+                "exp": exp,
+                "ver": version,
+            }
+            self._result_one = (version,)
         else:
             raise AssertionError(f"unhandled SQL in fake: {norm!r}")
 
     async def fetchall(self):
         return self._result_all
+
+    async def fetchone(self):
+        return self._result_one
 
 
 class _FakeConn:
@@ -144,25 +162,33 @@ class _FakeConn:
 
 
 class _FakeRedis:
-    """Minimal stand-in for the pooled Redis client the cache-invalidation path
-    reaches through ``client_ctx(RedisClient, ...)``.
+    """The pooled Redis client the token store's cache write-back reaches.
 
-    ``warm`` models keys currently present in the cache; ``delete`` records every
-    key it was asked to drop (so a test can assert the invalidation happened) and
-    discards it from ``warm``, mirroring redis ``DEL`` returning the drop count."""
+    ``warm`` maps a record key to its cached hash fields; ``eval`` models the store's two
+    version-fenced Lua scripts — the set-if-newer write (installs the blob + version when
+    the key is absent or older) and the tombstone (a version-only marker when the key is
+    absent or not newer)."""
 
     def __init__(self) -> None:
-        self.warm: set[str] = set()
-        self.deleted: list[str] = []
+        self.warm: dict[str, dict[str, bytes]] = {}
+        self.evals: list[str] = []
 
-    async def delete(self, *keys: str) -> int:
-        dropped = 0
-        for key in keys:
-            self.deleted.append(key)
-            if key in self.warm:
-                self.warm.discard(key)
-                dropped += 1
-        return dropped
+    async def eval(self, script, numkeys, *args):
+        if "DEL" in script:
+            key, _ver_field, version, _expireat = args
+            self.evals.append(key)
+            current = self.warm.get(key, {}).get("ver")
+            if current is not None and int(current) > int(version):
+                return 0
+            self.warm[key] = {"ver": str(int(version)).encode()}
+            return 1
+        key, _ver_field, _blob_field, blob, version, _expireat = args
+        self.evals.append(key)
+        current = self.warm.get(key, {}).get("ver")
+        if current is not None and int(current) >= int(version):
+            return 0
+        self.warm[key] = {"blob": bytes(blob), "ver": str(int(version)).encode()}
+        return 1
 
 
 class _FakePg:
@@ -193,6 +219,7 @@ def pg(monkeypatch):
             raise AssertionError(f"unexpected client_cls in fake: {client_cls!r}")
 
     monkeypatch.setattr(store_backup, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(redis_pg, "client_ctx", fake_client_ctx)
     return fake
 
 
@@ -365,45 +392,56 @@ async def test_connections_reimport_under_skip_leaves_existing(pg):
     assert report == BackupSectionReport(created=0, updated=0, skipped=0, details={"skipped_existing": 1})
 
 
-async def test_import_invalidates_warm_cache(pg):
-    """A restore into a running deployment must DROP each restored connection's
-    Redis cache key so the next ``get`` repopulates the restored token from
-    Postgres — ``get`` serves a cached blob on a HIT with no read-side version
-    check, so a warm entry would otherwise keep serving the stale pre-import token."""
+_REC_KEY = f"connectors:rec:{CID}"
+
+
+async def test_import_writes_the_restored_blob_back_at_the_new_version(pg):
+    """A restore into a running deployment moves each restored connection's warm cache entry
+    to the restored ciphertext at the row's new ``cache_version`` — ``get`` serves a cached
+    blob on a HIT with no read-side version check, so a warm entry must not keep the
+    pre-import token."""
     blob = crypto.encrypt(b"fresh-token", connection_id=CID)
-    pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None}
+    pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None, "ver": 1}
     payload = await export_connector_connections()
+    pg.redis.warm[_REC_KEY] = {"blob": b"stale", "ver": b"1"}
 
-    rec_key = RedisPgConnectorTokenStore()._rec_key(CID)
-    pg.redis.warm.add(rec_key)  # the connection is warm in the cache before the restore
-
-    # Overwrite replaces the stored ciphertext, so the stale cache entry must go.
     await import_connector_connections(payload, "overwrite")
 
-    assert rec_key in pg.redis.deleted  # the cache key was dropped
-    assert rec_key not in pg.redis.warm  # so the next get repopulates from Postgres
+    assert pg.connections[CID]["ver"] == 2
+    assert pg.redis.warm[_REC_KEY] == {"blob": blob, "ver": b"2"}
+
+
+async def test_import_tombstones_an_expired_restored_row(pg):
+    """An expired restored row leaves a version-only tombstone at its new version, so no stale
+    blob can be served or re-installed."""
+    past = datetime(2000, 1, 1, tzinfo=UTC)
+    blob = crypto.encrypt(b"lapsed", connection_id=CID)
+    pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": past, "ver": 1}
+    payload = await export_connector_connections()
+    pg.redis.warm[_REC_KEY] = {"blob": b"stale", "ver": b"1"}
+
+    await import_connector_connections(payload, "overwrite")
+
+    assert pg.redis.warm[_REC_KEY] == {"ver": b"2"}
 
 
 async def test_skip_leaves_warm_cache_untouched(pg):
     """Under ``skip`` an existing connection is not re-upserted, so its warm cache
-    entry — serving the connection that is being left in place — is NOT dropped."""
+    entry — serving the connection that is being left in place — is not touched."""
     blob = crypto.encrypt(b"fresh-token", connection_id=CID)
-    pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None}
+    pg.connections[CID] = {"provider_id": "acme", "alias": "work", "blob": blob, "exp": None, "ver": 1}
     payload = await export_connector_connections()
-
-    rec_key = RedisPgConnectorTokenStore()._rec_key(CID)
-    pg.redis.warm.add(rec_key)
+    pg.redis.warm[_REC_KEY] = {"blob": blob, "ver": b"1"}
 
     await import_connector_connections(payload)  # skip is the default
 
-    assert rec_key not in pg.redis.deleted
-    assert rec_key in pg.redis.warm
+    assert pg.redis.evals == []
+    assert pg.redis.warm[_REC_KEY] == {"blob": blob, "ver": b"1"}
 
 
-async def test_import_invalidates_cache_on_canonical_id(pg):
-    """A backup carrying a non-canonical connection_id (uppercase) still drops the
-    CANONICAL cache key get() reads — invalidation keys on str(UUID), not the raw
-    backup string."""
+async def test_import_writes_back_on_the_canonical_id(pg):
+    """A backup carrying a non-canonical connection_id (uppercase) is restored and cached under
+    the CANONICAL key ``get()`` reads."""
     payload = [
         {
             "connection_id": CID.upper(),
@@ -413,12 +451,32 @@ async def test_import_invalidates_cache_on_canonical_id(pg):
             "encrypted_blob_b64": base64.b64encode(b"z").decode("ascii"),
         }
     ]
-    canonical_key = RedisPgConnectorTokenStore()._rec_key(CID)  # CID is already canonical
-    pg.redis.warm.add(canonical_key)
 
     await import_connector_connections(payload)
 
-    assert canonical_key in pg.redis.deleted
+    assert CID in pg.connections
+    assert pg.redis.warm[_REC_KEY] == {"blob": b"z", "ver": b"1"}
+
+
+async def test_import_cache_write_back_failure_raises_after_the_commit(pg, monkeypatch):
+    """A Redis failure during the write-back raises — the durable restore already stands."""
+
+    async def redis_down(*args):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(pg.redis, "eval", redis_down)
+    payload = [
+        {
+            "connection_id": CID,
+            "provider_id": "acme",
+            "alias": "work",
+            "session_expires_at": None,
+            "encrypted_blob_b64": base64.b64encode(b"z").decode("ascii"),
+        }
+    ]
+    with pytest.raises(RuntimeError, match="redis down"):
+        await import_connector_connections(payload)
+    assert pg.connections[CID]["blob"] == b"z"
 
 
 async def test_connections_non_alias_unique_violation_raises(pg):

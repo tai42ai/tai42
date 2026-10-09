@@ -20,7 +20,6 @@ from tai42_skeleton.interactions.caller_ask import is_caller_ask
 from tai42_skeleton.interactions.settings import (
     INTERACTIONS_NOT_CONFIGURED_CODE,
     INTERACTIONS_NOT_CONFIGURED_MESSAGE,
-    InteractionsSettings,
 )
 from tai42_skeleton.interactions.store import (
     ADD_EVENT,
@@ -166,7 +165,7 @@ async def _frame_for_event(
     return None
 
 
-async def _stream_events(request: Request, store: InteractionStore, settings: InteractionsSettings, cursor: str):
+async def _stream_events(request: Request, store: InteractionStore, cursor: str):
     """Resolve the caller's isolation identity once, then run the NEVER-completing live tail.
 
     This is a TAIL-ONLY stream: the pending set is served by the paged
@@ -175,6 +174,8 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
     events-stream tail the route handler captured BEFORE returning the response, so any
     add published after the client has the response headers has an id past it and is
     guaranteed delivered (the generator body runs only once the response iterates).
+    The tail outlives settings reloads, so it keeps no settings object: each read goes
+    through the cached accessor at the point of use.
     """
     _user_id, restricted_id = request_identity()
     restricted = restricted_id is not None
@@ -199,7 +200,7 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
     # stripped on this connection only — the keepalive XREAD blocks legitimately
     # for the keepalive window, which a blanket 5s read timeout would kill; the
     # outer wait_for below bounds a black-holed redis instead.
-    tail_redis = settings.redis.model_copy(update={"socket_timeout": None})
+    tail_redis = _pkg.interactions_settings().redis.model_copy(update={"socket_timeout": None})
     # Keepalive cadence is governed by a monotonic loop-clock DEADLINE, not by
     # whether a given XREAD returned events. Any global-stream event (including one
     # filtered out for a restricted caller) makes XREAD return early; tying the
@@ -214,15 +215,16 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
             if await request.is_disconnected():
                 break
             block_seconds = max(0.0, next_keepalive - _pkg._now())
+            grace_seconds = _pkg.interactions_settings().blocking_grace_seconds
             try:
                 result = await asyncio.wait_for(
                     tail_conn.xread({store.events_key: cursor}, block=max(1, int(block_seconds * 1000))),
-                    timeout=block_seconds + settings.blocking_grace_seconds,
+                    timeout=block_seconds + grace_seconds,
                 )
             except TimeoutError as exc:
                 raise RuntimeError(
                     "interactions SSE tail: redis XREAD did not return within the keepalive "
-                    f"window + {settings.blocking_grace_seconds}s grace — connection presumed stalled"
+                    f"window + {grace_seconds}s grace — connection presumed stalled"
                 ) from exc
             yielded = False
             for _stream, messages in result or ():
@@ -278,8 +280,7 @@ async def stream(request: Request) -> Response:
             {"error": INTERACTIONS_NOT_CONFIGURED_MESSAGE, "code": INTERACTIONS_NOT_CONFIGURED_CODE},
             status_code=501,
         )
-    settings = _pkg.interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(_pkg.interactions_settings().key_prefix)
     # SSE resume: a reconnecting client echoes the last-delivered stream id back as the
     # ``Last-Event-ID`` header (a ``?last_event_id=`` query param is the fallback for
     # transports that cannot set the header). With it the cursor resumes AFTER the gap;
@@ -290,10 +291,10 @@ async def stream(request: Request) -> Response:
     # event published after this read has an id past the cursor. The connection is
     # released here — the never-completing tail below runs on its own dedicated
     # connection and must never pin the shared pool.
-    async with _pkg.client_ctx(RedisClient, settings.redis) as r:
+    async with _pkg.client_ctx(RedisClient, _pkg.interactions_settings().redis) as r:
         cursor = await _resume_cursor(r, store, last_event_id)
     return StreamingResponse(
-        _stream_events(request, store, settings, cursor),
+        _stream_events(request, store, cursor),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )

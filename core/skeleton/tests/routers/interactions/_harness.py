@@ -236,7 +236,7 @@ async def _tail_collect(wired, inject, *, alive: int = 1, identity=None) -> list
     ctx = identity if identity is not None else contextlib.nullcontext()
     cursor = await _events_cursor(wired)
     with ctx:
-        gen = _stream_events(cast(Request, _AliveRequest(alive=alive)), wired.store, wired.settings, cursor)
+        gen = _stream_events(cast(Request, _AliveRequest(alive=alive)), wired.store, cursor)
         return [frame async for frame in gen]
 
 

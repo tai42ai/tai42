@@ -149,7 +149,7 @@ class McpProbeMixin(LifecycleState):
         loop, and the ``reload_mcp`` / ``reload_failed_mcps`` doors), so what a failure
         records is decided in one place. Stores the coarse ``unavailable`` status, a
         credential-free ``category`` (``auth`` / ``unreachable`` / ``error``), the
-        redacted exception ``message`` (``mcp_health._redact`` strips URL-embedded
+        redacted exception ``message`` (``mcp_health.redact_probe_error`` strips URL-embedded
         credentials, the same way the dispatch-health record does) and the
         ``http_status`` the exception carries when it has one. The config itself is
         never stored — ``list_failed_mcps`` is LLM-callable and the config carries
@@ -158,7 +158,7 @@ class McpProbeMixin(LifecycleState):
         """
         http_status = _mcp_http_status(exc)
         category = _mcp_failure_category(exc, http_status)
-        message = mcp_health._redact(str(exc))
+        message = mcp_health.redact_probe_error(str(exc))
         self._failed_mcps[config.title] = {
             "status": "unavailable",
             "category": category,

@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 from starlette.requests import Request
+from tai42_contract.plugins.spec import PluginSpec
 
 import tai42_skeleton.operations.marketplace as mkt_ops
 import tai42_skeleton.routers.marketplace as router
@@ -48,6 +49,8 @@ from tai42_skeleton.marketplace.errors import (
 )
 from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations import NotSupportedError
+
+from ..marketplace._specs import make_spec, tool_item
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +83,26 @@ def _data(resp) -> Any:
     return json.loads(bytes(resp.body))
 
 
+def _mcp_item(name: str) -> dict[str, Any]:
+    return {"kind": "mcp-server", "name": name, "description": f"The {name} server", "mcp": {"command": "run"}}
+
+
+def _descriptor_spec(ref: str, *items: dict[str, Any]) -> dict[str, Any]:
+    """A valid stored descriptor-only spec (no package) for ``ref``, providing ``items`` (default: one mcp-server)."""
+    namespace, name = ref.split("/")
+    document = {
+        "spec_version": 1,
+        "namespace": namespace,
+        "name": name,
+        "version": "1.0.0",
+        "description": "A test plugin",
+        "license": "Apache-2.0",
+        "categories": ["dev"],
+        "provides": list(items) or [_mcp_item(name)],
+    }
+    return PluginSpec.model_validate(document).model_dump(mode="json")
+
+
 def _record(ref: str, version: str = "1.0.0") -> InstallRecord:
     return InstallRecord(
         ref=ref,
@@ -87,7 +110,7 @@ def _record(ref: str, version: str = "1.0.0") -> InstallRecord:
         source="pypi",
         repository_url=None,
         tag=None,
-        spec={},
+        spec=_descriptor_spec(ref),
         installed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
@@ -247,27 +270,62 @@ async def test_installed_happy_computes_update_availability(monkeypatch: pytest.
     # A row whose stored spec names no package cannot be verdicted — surfaced
     # as unknown, never a silent "compatible".
     assert row["compat"]["status"] == "unknown"
+    assert row["delivery"] == "descriptor"
 
 
 async def test_installed_exposes_provided_item_names(monkeypatch: pytest.MonkeyPatch) -> None:
     # Studio joins these names against the manifest's mcp-entry titles; the row
-    # carries {kind, name} from LOCAL spec truth, in spec order. A spec with no
-    # provides yields [].
+    # carries {kind, name} from LOCAL spec truth, in spec order.
     record = InstallRecord(
         ref="tai42/postgres-mcp",
         version="1.0.0",
         source="pypi",
         repository_url=None,
         tag=None,
-        spec={"provides": [{"kind": "mcp-server", "name": "postgres", "mcp": {"command": "run"}}]},
+        spec=_descriptor_spec("tai42/postgres-mcp", _mcp_item("postgres"), _mcp_item("replica")),
         installed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     _use_store(monkeypatch, [record, _record("tai42/toolbox", "1.0.0")])
     _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
     resp = await router.marketplace_installed(_get())
     rows = {r["ref"]: r for r in _data(resp)["data"]["installed"]}
-    assert rows["tai42/postgres-mcp"]["items"] == [{"kind": "mcp-server", "name": "postgres"}]
-    assert rows["tai42/toolbox"]["items"] == []
+    assert rows["tai42/postgres-mcp"]["items"] == [
+        {"kind": "mcp-server", "name": "postgres"},
+        {"kind": "mcp-server", "name": "replica"},
+    ]
+    assert rows["tai42/toolbox"]["items"] == [{"kind": "mcp-server", "name": "toolbox"}]
+
+
+async def test_installed_corrupt_stored_spec_is_500_naming_the_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stored spec that no longer validates is corrupt local state: the listing fails
+    # loudly naming the row, never serving a guessed shape.
+    corrupt = InstallRecord(
+        ref="tai42/toolbox",
+        version="1.0.0",
+        source="pypi",
+        spec={"provides": "not-a-list"},
+        installed_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    _use_store(monkeypatch, [corrupt])
+    _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
+    resp = await router.marketplace_installed(_get())
+    assert resp.status_code == 500
+    assert "tai42/toolbox" in json.dumps(_data(resp))
+
+
+async def test_installed_corrupt_stored_ref_is_500_naming_the_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = InstallRecord(
+        ref="Tai42/Toolbox",
+        version="1.0.0",
+        source="pypi",
+        spec=_descriptor_spec("tai42/toolbox"),
+        installed_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    _use_store(monkeypatch, [record])
+    _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
+    resp = await router.marketplace_installed(_get())
+    assert resp.status_code == 500
+    assert "the stored ref 'Tai42/Toolbox' is corrupt" in json.dumps(_data(resp))
 
 
 async def test_installed_exposes_stored_route_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -279,7 +337,7 @@ async def test_installed_exposes_stored_route_mounts(monkeypatch: pytest.MonkeyP
         source="pypi",
         repository_url=None,
         tag=None,
-        spec={},
+        spec=_descriptor_spec("tai42/gateway"),
         route_mounts={"gateway": "custom/base"},
         installed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
@@ -382,7 +440,7 @@ async def test_installed_serves_per_row_compat_verdict(monkeypatch: pytest.Monke
         ref="tai42/toolbox",
         version="1.0.0",
         source="pypi",
-        spec={"package": "acme-toolbox"},
+        spec=make_spec(package="acme-toolbox", provides=[tool_item()]).model_dump(mode="json"),
         installed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     _use_store(monkeypatch, [record])

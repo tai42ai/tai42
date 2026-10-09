@@ -31,11 +31,7 @@ from tai42_skeleton.interactions.continuation import (
 )
 from tai42_skeleton.interactions.giveup_delivery import deliver_park_giveup
 from tai42_skeleton.interactions.kill import kill_park, redeliver_kill
-from tai42_skeleton.interactions.settings import (
-    InteractionsSettings,
-    interactions_settings,
-    interactions_store_configured,
-)
+from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import (
     CONTINUATION_DROPPED,
     KILL_ACT_ON_PENDING,
@@ -104,16 +100,15 @@ async def reap_expired_parks_once() -> int:
     """
     if not interactions_store_configured():
         return 0
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     fired = 0
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         now = datetime.now(UTC)
         for interaction_id in await store.due_expiries(r, now):
             # Guard each member: one park that deterministically raises must not abort
             # the whole pass every interval and starve the others. Log loudly, continue.
             try:
-                if await _reap_one_expired_park(r, store, settings, interaction_id, now):
+                if await _reap_one_expired_park(r, store, interaction_id, now):
                     fired += 1
             except Exception:
                 logger.error(
@@ -124,9 +119,7 @@ async def reap_expired_parks_once() -> int:
     return fired
 
 
-async def _reap_one_expired_park(
-    r: Redis, store: InteractionStore, settings: InteractionsSettings, interaction_id: str, now: datetime
-) -> bool:
+async def _reap_one_expired_park(r: Redis, store: InteractionStore, interaction_id: str, now: datetime) -> bool:
     """Resolve a single due park by expiry; return True when this call resolved it.
 
     Branches on the park's stored ``on_expiry``: ``"kill"`` (the default) tears the whole chain
@@ -169,7 +162,7 @@ async def _reap_one_expired_park(
     # floors to 1s. The claim also drops the expiry-index member and, ATOMICALLY,
     # enqueues the durable continuation-due record.
     reply_ttl = max(1, int((state.request.timeout_at - now).total_seconds()))
-    due_ttl, due_first_attempt_at_ms = continuation_due_timing(settings)
+    due_ttl, due_first_attempt_at_ms = continuation_due_timing(interactions_settings())
     claimed = await store.record_answer(
         r,
         response,
@@ -203,15 +196,14 @@ async def redeliver_due_continuations_once() -> int:
     """
     if not interactions_store_configured():
         return 0
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     redelivered = 0
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         now = datetime.now(UTC)
-        backoff_base_ms = int(settings.expiry_reaper_interval_seconds * 1000)
+        backoff_base_ms = int(interactions_settings().expiry_reaper_interval_seconds * 1000)
         # Cap the backoff at the record's own TTL — retrying past its lifetime is
         # pointless (the record would have TTL-expired and been reconciled off).
-        backoff_cap_ms = settings.idle_ttl_seconds * 1000
+        backoff_cap_ms = interactions_settings().idle_ttl_seconds * 1000
         for interaction_id in await store.due_continuations(r, now):
             # Guard each member: one poison record must not abort the whole pass and
             # starve the rest. Log loudly, continue.
@@ -288,14 +280,13 @@ async def redeliver_due_kills_once() -> int:
     """
     if not interactions_store_configured():
         return 0
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     redelivered = 0
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         now = datetime.now(UTC)
         now_ms = int(now.timestamp() * 1000)
-        backoff_base_ms = int(settings.expiry_reaper_interval_seconds * 1000)
-        backoff_cap_ms = settings.idle_ttl_seconds * 1000
+        backoff_base_ms = int(interactions_settings().expiry_reaper_interval_seconds * 1000)
+        backoff_cap_ms = interactions_settings().idle_ttl_seconds * 1000
         for interaction_id in await store.due_kills(r, now):
             # Guard each member: one poison kill must not abort the whole pass. Log loudly, continue.
             try:
@@ -383,12 +374,11 @@ async def sweep_untaken_outcomes_once() -> int:
     """
     if not interactions_store_configured():
         return 0
-    settings = interactions_settings()
-    store = InteractionStore(settings.key_prefix)
+    store = InteractionStore(interactions_settings().key_prefix)
     dropped = 0
-    async with client_ctx(RedisClient, settings.redis) as r:
+    async with client_ctx(RedisClient, interactions_settings().redis) as r:
         now = datetime.now(UTC)
-        for completion_id in await store.due_untaken_outcomes(r, now, settings.idle_ttl_seconds):
+        for completion_id in await store.due_untaken_outcomes(r, now, interactions_settings().idle_ttl_seconds):
             # Guard each member: one poison outcome must not abort the whole pass. Log loudly, continue.
             try:
                 outcome = await store.claim_outcome(r, completion_id)

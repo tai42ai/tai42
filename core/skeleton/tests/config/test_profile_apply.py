@@ -111,7 +111,7 @@ def _epoch_state() -> Iterator[None]:
     try:
         yield
     finally:
-        for name in ("_current", "_serving_slot", "_retiring_epoch", "_building_epoch"):
+        for name in ("_current", "_serving_slot", "_building_epoch"):
             setattr(epoch_mod, name, None)
         epoch_mod._loaded_env_keys = loaded_before
 

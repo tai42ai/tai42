@@ -8,12 +8,16 @@ running app.
 
 from __future__ import annotations
 
+import contextvars
 import os
 from collections.abc import Iterator
+from contextvars import ContextVar
 
 import pytest
+from pydantic_settings import BaseSettings
 from tai42_contract.app import tai42_app
 from tai42_kit.clients.base import current_client_epoch
+from tai42_kit.settings import reset_all_settings
 from tai42_kit.settings.cache_registry import (
     _stamp_settings,
     settings_cache,
@@ -21,6 +25,7 @@ from tai42_kit.settings.cache_registry import (
 )
 
 from tai42_skeleton.app import epoch as epoch_mod
+from tai42_skeleton.app import retired_generations as retired_mod
 from tai42_skeleton.app.epoch import (
     Epoch,
     EpochAdmissionApp,
@@ -39,10 +44,12 @@ tai42_app.bind(build_app())
 
 class _Serving:
     """A distinct ASGI-callable stand-in for a built serving app — identity + name
-    let a test assert which generation the dispatch slot points at."""
+    let a test assert which generation the dispatch slot points at. ``core`` is the
+    generation core it serves, as a real serving surface reaches its FastMCP."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, core: object | None = None) -> None:
         self.name = name
+        self.core = core
 
     async def __call__(self, scope, receive, send) -> None:  # pragma: no cover
         raise AssertionError("sentinel serving app is never dispatched in these tests")
@@ -65,15 +72,16 @@ def _reset_epoch_state() -> Iterator[None]:
     These tests drive ``build_and_swap_epoch`` with INJECTED no-op ``rebuild`` seams, so
     a successful build promotes EMPTY generations over the per-generation registries;
     the suite-wide ``_preserve_generation_globals`` fixture restores them after each test."""
-    for name in ("_current", "_serving_slot", "_retiring_epoch"):
+    for name in ("_current", "_serving_slot"):
         setattr(epoch_mod, name, None)
     epoch_mod._loaded_env_keys = set()
     try:
         yield
     finally:
-        for name in ("_current", "_serving_slot", "_retiring_epoch", "_building_epoch"):
+        for name in ("_current", "_serving_slot", "_building_epoch"):
             setattr(epoch_mod, name, None)
         epoch_mod._loaded_env_keys = set()
+        retired_mod.detach_retired_generations()
 
 
 def _install_boot(name: str = "boot-app") -> dict:
@@ -572,10 +580,75 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
     assert app_state["app"].name == "new-app"
 
 
+async def test_a_reload_cancelled_after_the_build_finished_closes_the_new_generations_lifespan() -> None:
+    """The reload is cancelled after the new generation's build finished (its lifespan
+    entered) but before the reload resumed: the discard closes that lifespan, so no started
+    generation is left running behind the still-serving previous one."""
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
+
+    app_state = _install_boot("boot-app")
+    boot_epoch = current_epoch()
+    built = asyncio.Event()
+    lifespan_exited = asyncio.Event()
+
+    class _LifespanApp:
+        @asynccontextmanager
+        async def lifespan(self, _app):
+            try:
+                yield
+            finally:
+                lifespan_exited.set()
+
+    async def _build(epoch: Epoch) -> _Serving:
+        supervisor = SubAppLifespan(_LifespanApp())  # type: ignore[arg-type]
+        await supervisor.start()
+        epoch.supervisor = supervisor
+        # The waiter below wakes before the reload does: the build sets the event and
+        # then finishes, so the reload's wake-up is queued behind the test's.
+        built.set()
+        return _Serving("new-app")
+
+    reload = asyncio.create_task(
+        build_and_swap_epoch({"TAI_EPOCH_CANCELLED": "v"}, rebuild=lambda: None, build_serving_app=_build)
+    )
+    await built.wait()
+    reload.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reload
+
+    assert lifespan_exited.is_set()
+    assert app_state["app"].name == "boot-app"
+    assert current_epoch() is boot_epoch
+    assert "TAI_EPOCH_CANCELLED" not in os.environ
+
+
+async def test_a_build_failing_after_its_lifespan_entered_closes_that_lifespan() -> None:
+    """A build that entered its generation's lifespan and then failed: the discard closes it."""
+    app_state = _install_boot("boot-app")
+    closed: list[str] = []
+
+    class _FakeSupervisor:
+        async def aclose(self) -> None:
+            closed.append("closed")
+
+    async def _build(epoch: Epoch) -> _Serving:
+        epoch.supervisor = _FakeSupervisor()  # type: ignore[assignment]
+        raise RuntimeError("deliberate failure after the lifespan entered")
+
+    with pytest.raises(RuntimeError, match="after the lifespan entered"):
+        await build_and_swap_epoch({"K": "v"}, rebuild=lambda: None, build_serving_app=_build)
+
+    assert closed == ["closed"]
+    assert app_state["app"].name == "boot-app"
+
+
 # -- stale-settings sweep ------------------------------------------------------
 
 
-async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> None:
+async def test_a_clean_build_and_swap_cycle_leaves_no_stale_settings() -> None:
     # The boot app bound at import (under process epoch 0) permanently holds an
     # epoch-0 AccessControlSettings through its AuthAdapter/verifier/backend/policy
     # singletons — legitimate live holders of the boot generation. Advance past epoch
@@ -588,9 +661,8 @@ async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> Non
     advance_client_epoch()
     _install_boot("boot-app")
 
-    # The retire's settings reset sweeps the retired generation through the
-    # registered hook; a clean cycle (no holder pins a retired-epoch settings
-    # instance) reports zero.
+    # The retire resets the settings and then sweeps the retired generation; a clean
+    # cycle (no holder pins a retired-epoch settings instance) reports zero.
     retired_number = current_epoch().number
     await build_and_swap_epoch(
         {"K": "v"},
@@ -600,7 +672,411 @@ async def test_sweep_hook_registered_and_returns_zero_after_clean_cycle() -> Non
     assert sweep_stale_settings(retired_number) == []
 
 
-def test_sweep_hook_flags_a_leaked_retired_settings_instance() -> None:
+def _install_boot_generation(rebuild) -> None:
+    """Install a boot epoch whose core the given ``rebuild`` seam builds, holding no local reference to it."""
+    from tai42_skeleton.app import instance
+
+    rebuild()
+    epoch_mod._current = Epoch(number=current_client_epoch(), core=instance.app._building, serving_app=_Serving("boot"))
+    instance.app._building = None
+
+
+def _serving_core_rebuild() -> None:
+    """The default rebuild's serving-core step plus the identity provider a build instantiates per generation.
+
+    The core carries the access-control adapter chain read under the applied env, and the
+    redis identity provider is built against the same settings the way the build's
+    provider probe does, so both settings families the generation reads are held by it.
+    """
+    from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
+
+    from tai42_skeleton.access_control.settings import access_control_settings
+    from tai42_skeleton.app import instance
+
+    core = instance.app._build_serving_core()
+    core.active_auth_providers["redis"] = RedisApiKeyProvider(access_control_settings())
+    instance.app._building = core
+
+
+async def _record_built_core(epoch: Epoch) -> _Serving:
+    """The default build's bookkeeping: the built core recorded on its epoch, the build slot cleared.
+
+    The returned serving surface reaches the core, as a real one reaches its FastMCP.
+    """
+    from tai42_skeleton.app import instance
+
+    epoch.core = instance.app._building
+    instance.app._building = None
+    return _Serving("new-app", core=epoch.core)
+
+
+_KEPT_GENERATIONS: list[object] = []
+
+
+@pytest.fixture
+def _access_control_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Access control and the redis identity provider on, the app's build slot restored after the test."""
+    from tai42_kit.clients.base import advance_client_epoch
+
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
+    monkeypatch.setenv("TAI_IDENTITY_REDIS_URL", "redis://127.0.0.1:1/0")
+    monkeypatch.setattr(instance.app, "_building", instance.app._building)
+    reset_all_settings()
+    # The app bound at import holds its own scaffold core's settings for the process life;
+    # move past the epoch it was read under so only this test's generations are swept.
+    advance_client_epoch()
+
+
+@pytest.mark.usefixtures("_access_control_on")
+async def test_reloads_with_access_control_on_report_no_stale_settings(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    _install_boot_generation(_serving_core_rebuild)
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+        for _ in range(3):
+            await build_and_swap_epoch(
+                {"ACCESS_CONTROL_ENABLE": "true", "TAI_IDENTITY_REDIS_URL": "redis://127.0.0.1:1/0"},
+                rebuild=_serving_core_rebuild,
+                build_serving_app=_record_built_core,
+                drain_deadline=0.1,
+            )
+    # Each generation's settings carry its own epoch, so the live generation's adapter chain
+    # and identity provider are never reported as holders of the generation it replaced.
+    assert "Stale settings instance" not in caplog.text
+
+
+_ACCESS_CONTROL_ENV = {"ACCESS_CONTROL_ENABLE": "true", "TAI_IDENTITY_REDIS_URL": "redis://127.0.0.1:1/0"}
+
+
+async def _reload_access_control_generation() -> None:
+    await build_and_swap_epoch(
+        _ACCESS_CONTROL_ENV,
+        rebuild=_serving_core_rebuild,
+        build_serving_app=_record_built_core,
+        drain_deadline=0.1,
+    )
+
+
+class _RequestLike:
+    """A served request as the runtime keeps it: its scope points at the generation's serving surface."""
+
+    def __init__(self, app: object) -> None:
+        self.scope = {"app": app}
+
+
+# The request a context snapshot carries, as a web framework's request variable does.
+_held_request: ContextVar[_RequestLike | None] = ContextVar("test_held_request", default=None)
+
+
+def _context_holding_a_request_to(surface: object) -> contextvars.Context:
+    """A context snapshot of a request the given surface served, the hold a runtime timer or task keeps."""
+    context = contextvars.Context()
+    context.run(_held_request.set, _RequestLike(surface))
+    return context
+
+
+def _stale_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "Stale settings instance" in r.getMessage()]
+
+
+def _pending(number: int) -> list[retired_mod.RetiredGeneration]:
+    return [generation for generation in retired_mod.retired_generations() if generation.number == number]
+
+
+@pytest.mark.usefixtures("_access_control_on")
+async def test_a_retired_generation_still_reachable_from_a_request_context_is_not_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import asyncio
+    import gc
+    import logging
+
+    _install_boot_generation(_serving_core_rebuild)
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+        await _reload_access_control_generation()
+        served = current_epoch()
+        retired = served.number
+        held_context = _context_holding_a_request_to(served.serving_app)
+        del served
+        await _reload_access_control_generation()
+        await asyncio.sleep(0)
+        # A request the retired generation served is still kept by the runtime: the
+        # generation is legitimately reachable and nothing is reported yet.
+        assert _stale_lines(caplog) == []
+        assert [generation.surface_alive for generation in _pending(retired)] == [True]
+        del held_context
+        gc.collect()
+        await asyncio.sleep(0)
+    # Once its serving surface is collected the generation is certified, and nothing of it remains.
+    assert _pending(retired) == []
+    assert _stale_lines(caplog) == []
+
+
+_CAPTURED: list[object] = []
+
+
+@pytest.mark.usefixtures("_access_control_on")
+async def test_a_captured_settings_singleton_is_reported_when_its_generation_is_collected(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import asyncio
+    import gc
+    import logging
+
+    _install_boot_generation(_serving_core_rebuild)
+    try:
+        with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+            await _reload_access_control_generation()
+            served = current_epoch()
+            retired = served.number
+            assert served.core is not None
+            _CAPTURED.append(served.core._fast_mcp.auth)  # a module global keeps the generation's adapter
+            held_context = _context_holding_a_request_to(served.serving_app)
+            del served
+            await _reload_access_control_generation()
+            await asyncio.sleep(0)
+            assert _stale_lines(caplog) == []  # judged only once the generation is released
+            del held_context
+            gc.collect()
+            await asyncio.sleep(0)
+        lines = _stale_lines(caplog)
+        assert len(lines) == 1, lines
+        assert f"AccessControlSettings (epoch {retired})" in lines[0]
+        assert "AuthAdapter" in lines[0]
+    finally:
+        _CAPTURED.clear()
+
+
+@pytest.mark.usefixtures("_access_control_on")
+async def test_a_reload_still_reports_a_retired_generation_something_keeps(caplog: pytest.LogCaptureFixture) -> None:
+    import asyncio
+    import gc
+    import logging
+
+    _install_boot_generation(_serving_core_rebuild)
+    try:
+        with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+            await _reload_access_control_generation()
+            _KEPT_GENERATIONS.append(current_epoch().core)  # the whole core outlives its surface
+            await _reload_access_control_generation()
+            gc.collect()
+            await asyncio.sleep(0)
+    finally:
+        _KEPT_GENERATIONS.clear()
+    stale_lines = _stale_lines(caplog)
+    assert any("AccessControlSettings" in line and "AuthAdapter" in line for line in stale_lines), stale_lines
+    assert any("RedisIdentitySettings" in line and "RedisApiKeyProvider" in line for line in stale_lines), stale_lines
+
+
+async def test_a_surface_collected_on_another_thread_is_certified_on_the_serving_loop() -> None:
+    import asyncio
+    import threading
+
+    from tai42_kit.clients.base import advance_client_epoch
+
+    advance_client_epoch()
+    _install_boot("boot-app")
+    held: list[object] = []
+
+    async def _build(_epoch: Epoch) -> _Serving:
+        return _Serving("new-app")
+
+    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1)
+    retired = current_epoch().number
+    held.append(current_epoch().serving_app)
+    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1)
+    assert [generation.surface_alive for generation in _pending(retired)] == [True]
+
+    collector = threading.Thread(target=held.clear)
+    collector.start()
+    collector.join()
+    assert [generation.surface_alive for generation in _pending(retired)] == [False]
+    await asyncio.sleep(0)
+    assert _pending(retired) == []
+
+
+def test_no_certification_is_scheduled_on_a_closed_loop() -> None:
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    loop.close()
+    retired_mod._schedule_certification(loop, 0)  # the process stopped serving: nothing to schedule
+
+
+async def test_clear_epoch_disarms_the_pending_certifications() -> None:
+    from tai42_kit.clients.base import advance_client_epoch
+
+    advance_client_epoch()
+    _install_boot("boot-app")
+    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
+    surface = current_epoch().serving_app
+    retired = current_epoch().number
+    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.1)
+    assert [generation.number for generation in retired_mod.retired_generations()] == [retired]
+
+    await epoch_mod.clear_epoch()
+    assert retired_mod.retired_generations() == ()
+    del surface  # collected after the process left its generations: nothing is scheduled
+
+
+class _RequestScopedSettings(BaseSettings):
+    value: int = 1
+
+
+@settings_cache
+def _request_scoped_settings() -> _RequestScopedSettings:
+    return _RequestScopedSettings()
+
+
+async def _door_reload_with_a_concurrent_request(release_within_budget: bool) -> None:
+    """A door-driven reload while a concurrent request holds a settings instance across an await.
+
+    The driving request and the concurrent one are both admitted on the retiring
+    generation; the concurrent one read its settings before the reload and finishes
+    on the old generation (within the drain budget, or past it).
+    """
+    import asyncio
+
+    from tai42_kit.clients.base import advance_client_epoch
+
+    # The app bound at import holds its own scaffold core's settings for the process life;
+    # move past the epoch it was read under so only this reload's generation is swept.
+    advance_client_epoch()
+    _install_boot("boot-app")
+    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
+    boot = current_epoch()
+    boot.admit()  # the driving request
+    boot.admit()  # the concurrent request
+    answered = asyncio.get_running_loop().create_future()
+
+    async def _concurrent_request() -> None:
+        # The request runs inside the generation's serving surface and reads its settings.
+        scope = {"app": boot.serving_app}
+        settings = _request_scoped_settings()
+        await answered
+        assert settings.value == 1
+        assert scope["app"] is not None
+        boot.release()
+
+    request = asyncio.create_task(_concurrent_request())
+    await asyncio.sleep(0)
+    token = epoch_mod._reload_driven_by_request.set(True)
+    try:
+        await build_and_swap_epoch(
+            {"TAI_EPOCH_DOOR_RELOAD": "v"},
+            rebuild=lambda: None,
+            build_serving_app=_serve("new-app"),
+            drain_deadline=0.5,
+            drain_tolerate_driver=True,
+        )
+    finally:
+        epoch_mod._reload_driven_by_request.reset(token)
+        os.environ.pop("TAI_EPOCH_DOOR_RELOAD", None)
+    boot.release()  # the driver's response is flushed
+    if release_within_budget:
+        answered.set_result(None)
+        await request
+    async with asyncio.timeout(5.0):
+        await asyncio.gather(*epoch_mod._deferred_retire_tasks)
+    if not release_within_budget:
+        answered.set_result(None)
+        await request
+    del request
+    await asyncio.sleep(0)
+
+
+async def test_a_door_driven_reload_sweeps_after_the_in_flight_requests_finish(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+        await _door_reload_with_a_concurrent_request(release_within_budget=True)
+    # The request finished on the old generation inside the drain budget, before the sweep.
+    assert "Stale settings instance" not in caplog.text
+
+
+async def test_a_door_driven_reload_reports_a_request_past_the_drain_budget_and_no_settings_it_releases(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        await _door_reload_with_a_concurrent_request(release_within_budget=False)
+    # The drain reports the request it could not wait for; the request releases its settings
+    # when it ends, so nothing is reported while it runs on the retired generation or once
+    # that generation is certified.
+    assert "request(s) still in flight after the drain budget" in caplog.text
+    assert "Stale settings instance" not in caplog.text
+
+
+_request_context_state: ContextVar[object | None] = ContextVar("test_request_context_state", default=None)
+
+
+async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the_driving_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The driving request's context reaches the retiring generation; nothing the new one keeps copies it."""
+    import asyncio
+    import logging
+
+    from tai42_kit.clients.base import advance_client_epoch
+
+    # The app bound at import holds its own scaffold core's settings for the process life;
+    # move past the epoch it was read under so only this reload's generation is swept.
+    advance_client_epoch()
+    _install_boot("boot-app")
+    boot = current_epoch()
+    boot.admit()  # the driving request
+    generation_tasks: list[asyncio.Task[bool]] = []
+
+    def _spawn_generation_task() -> None:
+        generation_tasks.append(asyncio.get_running_loop().create_task(asyncio.Event().wait()))
+
+    async def _build(_epoch: Epoch) -> _Serving:
+        _spawn_generation_task()  # the generation's lifespan supervisor
+        return _Serving("new-app")
+
+    async def _establish() -> None:
+        _spawn_generation_task()  # a periodic loop of the generation
+
+    async def _driving_request() -> None:
+        # The request carries an object of the retiring generation in its context.
+        _request_context_state.set(_request_scoped_settings())
+        token = epoch_mod._reload_driven_by_request.set(True)
+        try:
+            await build_and_swap_epoch(
+                {"TAI_EPOCH_DOOR_RELOAD": "v"},
+                rebuild=lambda: None,
+                build_serving_app=_build,
+                establish_background_loops=_establish,
+                drain_deadline=1.0,
+                drain_tolerate_driver=True,
+            )
+        finally:
+            epoch_mod._reload_driven_by_request.reset(token)
+            os.environ.pop("TAI_EPOCH_DOOR_RELOAD", None)
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+            driver = asyncio.create_task(_driving_request(), context=contextvars.Context())
+            await driver
+            del driver
+            boot.release()  # the driver's response is flushed and its task is gone
+            async with asyncio.timeout(5.0):
+                await asyncio.gather(*epoch_mod._deferred_retire_tasks)
+        assert len(generation_tasks) == 2
+        assert all(_request_context_state not in task.get_context() for task in generation_tasks)
+        assert "Stale settings instance" not in caplog.text
+    finally:
+        for task in generation_tasks:
+            task.cancel()
+        await asyncio.gather(*generation_tasks, return_exceptions=True)
+
+
+def test_the_sweep_flags_a_leaked_retired_settings_instance() -> None:
     from pydantic_settings import BaseSettings
 
     class _Leaky(BaseSettings):

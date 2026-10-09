@@ -88,7 +88,7 @@ async def test_stream_flushes_connect_comment_before_tail(wired):
         return await real_xread(streams, block=block)
 
     wired.monkeypatch.setattr(wired.fake, "xread", _counting_xread)
-    gen = _stream_events(cast(Request, _AliveRequest(alive=1)), wired.store, wired.settings, cursor)
+    gen = _stream_events(cast(Request, _AliveRequest(alive=1)), wired.store, cursor)
     try:
         first = await gen.__anext__()
     finally:
@@ -152,7 +152,7 @@ async def test_stream_tail_keepalive_then_disconnect(wired):
             return {"type": "http.disconnect"}
 
     cursor = await _events_cursor(wired)
-    frames = await _collect_stream(_stream_events(Request(scope, receive), wired.store, wired.settings, cursor))
+    frames = await _collect_stream(_stream_events(Request(scope, receive), wired.store, cursor))
     # The connect comment flushes first (at connect, before the tail's first XREAD), then
     # the idle window's due keepalive.
     assert frames == [_CONNECT_FRAME, ": keepalive\n\n"]
@@ -193,7 +193,7 @@ async def test_keepalive_is_deadline_driven_not_reset_by_filtered_events(wired):
 
     with _identity(user_id="keyA", owner="alice"):
         # The tail arms the deadline at _now() + 10 == 1010.
-        gen = _stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings, "0-0")
+        gen = _stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, "0-0")
         tail = [frame async for frame in gen]
     # The filtered window emitted nothing and left the deadline at 1010; only window 2's
     # deadline crossing emits a keepalive. A dropped `_now() >= next_keepalive` guard
@@ -236,7 +236,7 @@ async def test_keepalive_deadline_rearmed_by_delivered_frame(wired):
 
     with _identity(user_id="keyA", owner="alice"):
         # The tail arms the deadline at _now() + 10 == 1010.
-        gen = _stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings, "0-0")
+        gen = _stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, "0-0")
         tail = [frame async for frame in gen]
     # Only the entitled add rides the tail (after the leading connect comment); the
     # following idle window stays silent because delivering the add re-armed the deadline

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
-from tai42_kit.settings import reset_all_settings
+import logging
 
+import pytest
+from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
+from tai42_kit.settings import reset_all_settings, sweep_stale_settings
+
+from tai42_skeleton.app.retired_generations import certify_retired_generation
 from tai42_skeleton.conversations import cache as cache_module
 from tai42_skeleton.conversations.ledger import ChannelSendLedger
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
@@ -156,3 +160,25 @@ def test_interactions_store_configured_reads_the_cached_settings(monkeypatch):
     for _ in range(5):
         assert interactions_store_configured() is True
     assert len(builds) == 1
+
+
+@pytest.mark.parametrize("backend_env", ["in_memory_env", "durable_env"])
+def test_a_retired_settings_generation_is_not_held_by_the_manager(request, caplog, backend_env):
+    # A reload retires the manager with its settings; the retire sweep must find no
+    # retired-generation ConversationsSettings still reachable through it.
+    request.getfixturevalue(backend_env)
+    reset_all_settings()
+    manager = cache_module.get_conversations_manager()
+    retired = current_client_epoch()
+    del manager
+    advance_client_epoch()
+
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
+        reset_all_settings()
+        certify_retired_generation(retired)
+
+    held = [h for h in sweep_stale_settings(retired) if h.settings_type.endswith(".ConversationsSettings")]
+    assert held == []
+    assert "ConversationsSettings" not in caplog.text
+    # The next read serves a manager built over the new generation's settings.
+    assert cache_module.get_conversations_manager().settings is conversations_settings()

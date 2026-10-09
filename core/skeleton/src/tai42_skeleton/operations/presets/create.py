@@ -25,6 +25,7 @@ from tai42_kit.db import component_store_configured
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
+from tai42_skeleton.db.lock_keys import PRESET_LOCK_NAMESPACE
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
@@ -62,11 +63,6 @@ _pkg = sys.modules["tai42_skeleton.operations.presets"]
 # transient 503 — the store is absent, not momentarily down.
 _NOT_CONFIGURED_CODE = "versioning-not-configured"
 _NOT_CONFIGURED_NOUN = "versioned-document store"
-
-# The advisory-lock namespace every preset create claims its NAME in ("pset" as ASCII
-# bytes, a positive int32). A namespace of its own keeps these locks from excluding
-# another feature that happens to lock the same name.
-_PRESET_LOCK_NAMESPACE = 0x70736574
 
 
 async def _check_create_name(name: str, mgr: Any) -> None:
@@ -122,7 +118,7 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
     so a nested acquire would wait on a lock its own caller holds.
     """
     # The advisory lock is read through the package object so a monkeypatch bites.
-    async with _pkg.advisory_name_lock(_PRESET_LOCK_NAMESPACE, name):
+    async with _pkg.advisory_name_lock(PRESET_LOCK_NAMESPACE, name):
         # The name's existence is re-read from the STORE here: the pre-checks above read
         # THIS worker's registry, which a sibling process's create never reaches. An
         # existing preset conflicts before the clean-slate cascade below, so a create of

@@ -10,6 +10,8 @@ from tai42_kit.settings.cache_registry import (
     keyed_settings_cache,
     register_settings_reset,
     reset_all_settings,
+    restamp_settings_born_after,
+    settings_birth_mark,
     settings_cache,
     sweep_stale_settings,
 )
@@ -64,6 +66,8 @@ __all__ = [
     "require",
     "require_secret",
     "reset_all_settings",
+    "restamp_settings_born_after",
+    "settings_birth_mark",
     "settings_cache",
     "sweep_stale_settings",
     "unknown_owned_env_keys",

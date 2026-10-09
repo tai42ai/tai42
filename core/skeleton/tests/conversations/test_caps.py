@@ -11,7 +11,7 @@ import pytest
 from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
 from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 
-from tai42_skeleton.app import epoch as epoch_module
+from tai42_skeleton.app.retired_generations import certify_retired_generation
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.caps import AddressAdmission, ThreadBusyError, ThreadQueueOverflowError, TurnCaps
@@ -265,19 +265,17 @@ async def test_a_settings_reload_keeps_a_live_thread_serialized(monkeypatch, fre
     assert inside == ["B"]
 
 
-def test_a_retired_settings_generation_is_not_held_by_the_caps(monkeypatch, fresh_caps_singleton, caplog):
+def test_a_retired_settings_generation_is_not_held_by_the_caps(fresh_caps_singleton, caplog):
     # The caps singleton outlives every reload; it must not keep the retired generation's
     # settings instance alive, or every retire sweep reports a stale-config leak.
-    monkeypatch.setattr(epoch_module, "_retiring_epoch", None)
     reset_all_settings()
     caps = caps_module.get_turn_caps()
     retired = current_client_epoch()
     advance_client_epoch()
 
-    monkeypatch.setattr(epoch_module, "_retiring_epoch", retired)
     with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
         reset_all_settings()
-    monkeypatch.setattr(epoch_module, "_retiring_epoch", None)
+        certify_retired_generation(retired)
 
     held = [h for h in sweep_stale_settings(retired) if h.settings_type.endswith(".ConversationsSettings")]
     assert held == []

@@ -60,7 +60,7 @@ class _ValidationMixin(_ConfigServiceBase):
         # different from the current stored value (rotation-via-editor), never an unchanged
         # carry — the stored env is the real values a read-modify-write round-trip re-sends.
         refuse_key_material(changes, self._read_stored_env())
-        effective = self._effective_env(changes)
+        effective = self.effective_env(changes)
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             preserved = self._read_preserved_manifest()
@@ -88,7 +88,7 @@ class _ValidationMixin(_ConfigServiceBase):
         # Change-aware key-material refusal (see :meth:`_validate_env`): a CHANGE to a KEK /
         # signing key is refused, an unchanged carry is allowed.
         refuse_key_material(changes, self._read_stored_env())
-        effective = self._effective_env(changes)
+        effective = self.effective_env(changes)
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             refuse_unresolved_env(document, effective)

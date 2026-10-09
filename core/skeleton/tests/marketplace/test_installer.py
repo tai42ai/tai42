@@ -269,7 +269,7 @@ class FakeConfigService:
         resolved = parse_config(data=dump_manifest(cast("Any", document))) or {}
         Manifest.model_validate(resolved)
 
-    def _effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+    def effective_env(self, changes: dict[str, str]) -> dict[str, str]:
         # The preview's missing-env computation reads the effective env through this
         # seam (stored env overlaid on the process env). The fake tracks no env store,
         # so the process env plus any ``changes`` stands in.

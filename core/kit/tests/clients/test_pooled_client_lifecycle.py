@@ -7,11 +7,12 @@ module-global, class-keyed pool from leaking state across tests.
 """
 
 import asyncio
+import contextvars
 
 import pytest
 from tai42_contract.errors import ClientDisconnectedError
 
-from tai42_kit.clients import ClientSettings, PooledClient, client_ctx, shutdown_all_clients
+from tai42_kit.clients import ClientSettings, PooledClient, advance_client_epoch, client_ctx, shutdown_all_clients
 
 
 class _Conn:
@@ -69,7 +70,7 @@ def test_default_predicate_is_isinstance_against_set():
 def test_key_is_order_independent_json():
     # The pool key is canonical JSON, so kwarg order does not split the pool.
     base = PooledClient()
-    assert base._key(a=1, b=2) == base._key(b=2, a=1)
+    assert base.pool_key(a=1, b=2) == base.pool_key(b=2, a=1)
 
 
 async def test_disconnection_evicts_closes_and_raises_wrapped():
@@ -336,3 +337,131 @@ async def test_shutdown_all_clients_collects_errors_into_group():
     assert cls.closed == 2
     assert len(ei.value.exceptions) == 2
     assert all(isinstance(e, RuntimeError) for e in ei.value.exceptions)
+
+
+_caller_state: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("test_caller_state", default=None)
+
+
+async def test_a_pooled_client_is_created_outside_the_first_callers_context():
+    # A pooled client is shared by every later caller of its epoch on this loop, so the
+    # tasks its creation starts (a driver pool's workers) carry no first caller's state.
+    spawned: list[asyncio.Task] = []
+
+    class _TaskOwningClient(_make_client_cls()):
+        async def _create(self, **kwargs):
+            spawned.append(asyncio.get_running_loop().create_task(asyncio.Event().wait()))
+            return _Conn(**kwargs)
+
+    async def first_caller():
+        _caller_state.set("request-1")
+        async with _TaskOwningClient().current(url="a"):
+            pass
+
+    try:
+        await asyncio.create_task(first_caller(), context=contextvars.Context())
+        assert len(spawned) == 1
+        assert _caller_state not in spawned[0].get_context()
+    finally:
+        for task in spawned:
+            task.cancel()
+        await asyncio.gather(*spawned, return_exceptions=True)
+        await shutdown_all_clients()
+
+
+async def test_a_first_caller_cancelled_after_creation_finished_leaves_the_client_pooled():
+    # The caller is cancelled after the creation finished but before it resumed: the
+    # created client is still handed over (pooled under the live epoch), never dropped.
+    created_signal = asyncio.Event()
+
+    class _SignallingClient(_make_client_cls()):
+        async def _create(self, **kwargs):
+            conn = await super()._create(**kwargs)
+            created_signal.set()
+            return conn
+
+    async def first_caller():
+        async with _SignallingClient().current(url="a"):
+            pass
+
+    caller = asyncio.create_task(first_caller())
+    # The waiter here wakes before the caller does: the creation sets the event and then
+    # finishes, so the caller's wake-up is queued behind this one.
+    await created_signal.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert _SignallingClient.created == 1
+    assert _SignallingClient.closed == 0
+
+    # The pooled client serves the next caller without a second creation.
+    async with _SignallingClient().current(url="a") as conn:
+        assert conn.closed is False
+    assert _SignallingClient.created == 1
+
+    await shutdown_all_clients()
+    assert _SignallingClient.closed == 1
+
+
+async def test_a_cancelled_first_caller_closes_a_client_created_under_a_retired_epoch():
+    # Cancelled in the same window while the epoch advanced under the creation: the
+    # client cannot be pooled under its retired epoch, so it is closed, never orphaned.
+    created_signal = asyncio.Event()
+    closed_conns: list[_Conn] = []
+
+    class _SignallingClient(_make_client_cls()):
+        async def _create(self, **kwargs):
+            conn = await super()._create(**kwargs)
+            advance_client_epoch()
+            created_signal.set()
+            return conn
+
+        async def _close(self, client):
+            closed_conns.append(client)
+            await super()._close(client)
+
+    async def first_caller():
+        async with _SignallingClient().current(url="a"):
+            pass
+
+    caller = asyncio.create_task(first_caller())
+    await created_signal.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert _SignallingClient.created == 1
+    assert _SignallingClient.closed == 1
+    assert closed_conns[0].closed is True
+    await shutdown_all_clients()
+    assert _SignallingClient.closed == 1
+
+
+async def test_a_first_caller_cancelled_during_creation_cancels_the_creation():
+    # A cancellation while the creation is still running goes into ``_create`` itself
+    # (its own guard tears down what it opened) and the caller re-raises it; nothing is
+    # pooled and nothing is left for a later caller.
+    entered = asyncio.Event()
+    creation_cancelled = asyncio.Event()
+
+    class _BlockingClient(_make_client_cls()):
+        async def _create(self, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                creation_cancelled.set()
+                raise
+            raise AssertionError("unreachable")
+
+    async def first_caller():
+        async with _BlockingClient().current(url="a"):
+            pass
+
+    caller = asyncio.create_task(first_caller())
+    await entered.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert creation_cancelled.is_set()
+    assert _BlockingClient.created == 0
+    await shutdown_all_clients()
+    assert _BlockingClient.closed == 0
