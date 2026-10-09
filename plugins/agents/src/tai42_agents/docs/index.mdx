@@ -164,8 +164,9 @@ its `VotingOutput`; the vqa agent runs one completion with no tools and no threa
 
 Live in-process `tools` are the platform's framework-neutral `ClientTool` handles (from
 `tai42_app.tools.get_client_tools`, or any object with `name`, `description`, `input_schema` and
-an async `invoke`); this plugin adapts each to its LangChain runtime, and every tool name is held
-to the 64-character bound — a longer one is refused, never truncated.
+an async `invoke`); this plugin adapts each to its LangChain runtime, and every tool name the model
+is handed is held to the 64-character bound — a longer one is refused, never truncated. A preset is
+handed under its own name, so a short-named preset over a longer-named base tool binds.
 
 Each agent also reports the memory its run keywords address (`addressed_memory`): the thread and
 checkpoint ids its `langgraph_config` (or per-role configs) and `resume_checkpoint_id` carry, and

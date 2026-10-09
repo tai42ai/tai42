@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
+from fastmcp.tools import Tool
 from langchain_core.tools import ToolException
 from tai42_contract.agent import PresetSpec
 from tai42_contract.interactions import (
@@ -49,7 +50,7 @@ _PROPS = {"example_config": {"type": "object"}, "example_config_kwargs": {"type"
 
 
 class FakeTools:
-    """A stand-in for the app's ``tools`` facet: the two members the adapter reaches."""
+    """A stand-in for the app's ``tools`` facet: the members the adapter reaches."""
 
     def __init__(self, handles: dict[str, FakeClientTool] | None = None) -> None:
         self.handles = handles or {
@@ -63,6 +64,10 @@ class FakeTools:
 
     async def get_client_tools(self, names: list[str] | None = None) -> list[FakeClientTool]:
         return [self.handles[name] for name in (names or list(self.handles))]
+
+    async def get_tool(self, key: str) -> Tool:
+        handle = self.handles[key]
+        return Tool(name=handle.name, description=handle.description, parameters=handle.input_schema)
 
     async def run_tool(self, key: str, arguments: dict[str, Any]) -> Any:
         self.run_tool_calls.append((key, arguments))

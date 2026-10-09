@@ -99,13 +99,12 @@ def to_structured_tool(handle: ClientTool) -> StructuredTool:
     )
 
 
-def _preset_schema(base: ClientTool, preset: PresetSpec) -> dict[str, Any]:
-    """The base tool's argument schema minus the preset's fixed keys.
+def _preset_schema(schema: dict[str, Any], preset: PresetSpec) -> dict[str, Any]:
+    """The base tool's argument ``schema`` minus the preset's fixed keys.
 
     A base ``required`` that is not a list of names is refused: iterating a bare string would
     match no property and silently downgrade a mandatory argument to optional.
     """
-    schema = base.input_schema
     base_required = schema.get("required", [])
     if not isinstance(base_required, (list, tuple)) or not all(isinstance(name, str) for name in base_required):
         raise TypeError(
@@ -123,8 +122,11 @@ async def preset_structured_tool(app_tools: AppTools, preset: PresetSpec) -> Str
     The model sees the base tool's arguments minus the fixed ones, so it cannot override a fixed
     value; the call merges the model's arguments over the fixed kwargs. The base tool's own failure
     is this tool's failure, worded with the preset's name (the name the model called).
+
+    The base tool is read for its argument schema only and is never bound, so the bound tool-name
+    length holds the preset's name, not the base's.
     """
-    [base] = await app_tools.get_client_tools([preset.base_tool])
+    base = await app_tools.get_tool(preset.base_tool)
 
     # The parameter is not named ``runtime``: a graph's tool node injects its own value into a
     # tool function parameter of that name.
@@ -154,7 +156,7 @@ async def preset_structured_tool(app_tools: AppTools, preset: PresetSpec) -> Str
     return StructuredTool(
         name=preset.name,
         description=preset.description,
-        args_schema=_preset_schema(base, preset),
+        args_schema=_preset_schema(base.parameters, preset),
         coroutine=_run,
     )
 

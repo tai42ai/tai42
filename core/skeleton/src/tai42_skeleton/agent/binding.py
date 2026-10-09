@@ -11,7 +11,6 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar, cast
 
-from fastmcp.tools.function_tool import FunctionTool
 from makefun import create_function
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined, core_schema
@@ -32,6 +31,7 @@ from tai42_skeleton.agent.thread_reservation import (
     run_kwargs_from_tool_input,
 )
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
+from tai42_skeleton.tools.binding.secret_tool import _SecretRevealingTool
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -298,7 +298,10 @@ class AgentBinding:
             module_name=module,
             doc=agent.tool_description,
         )
-        run_tool = FunctionTool(
+        # Built as the platform's MCP-facing surface class, as every function tool is, so a
+        # park rides the MCP wire as the reserved park marker and reaches an in-process preset
+        # dispatch as the typed sentinel, whatever the advertised output schema.
+        run_tool = _SecretRevealingTool(
             name=name,
             description=agent.tool_description,
             parameters=tool_input.model_json_schema(),

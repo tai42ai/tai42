@@ -289,7 +289,9 @@ class _BranchBindingMixin(_ToolBindingBase):
             # A prebuilt Tool object is registered DIRECTLY so its typed schema
             # (hidden baked args, remaining real arg types/descriptions) survives
             # unchanged; wrapping it in a function would flatten that to one opaque
-            # blob. Its own name/description/tags ride on the object.
+            # blob. Its own name/description/tags ride on the object. A prebuilt
+            # ``FunctionTool`` is built as the secret-revealing surface subclass by its
+            # constructor; a ``TransformedTool`` delegates to its parent's conversion.
             return add_surface_tool(self._fast_mcp, func)
         if not callable(func):
             raise TypeError(

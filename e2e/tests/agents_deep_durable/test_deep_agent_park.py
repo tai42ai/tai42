@@ -28,7 +28,7 @@ import json
 from collections.abc import Callable
 
 import pytest
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import read_suspended_interaction_marker
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.llmstub import LlmStub
@@ -57,7 +57,8 @@ async def _resume_record(stack: TaiStack, thread_id: str) -> dict | None:
 
 async def _park(stack: TaiStack, thread_id: str, question: str, expiry_seconds: float) -> dict:
     """Drive a ``langchain_deep_agent`` run on replica A that parks on ``e2e_agent_async_ask``,
-    returning ``{receipt}`` on a suspended park or ``{error}`` on a loud refusal."""
+    returning ``{marker}`` (the reserved park marker read off the result's structured content, or
+    ``None`` when the run did not park) or ``{error}`` on a loud refusal."""
     async with stack.mcp(port=stack.port_a) as mcp:
         result = await mcp.call_tool(
             AGENT,
@@ -71,7 +72,7 @@ async def _park(stack: TaiStack, thread_id: str, question: str, expiry_seconds: 
         )
     if result.is_error:
         return {"error": " ".join(getattr(p, "text", "") for p in result.content)}
-    return {"receipt": result.data}
+    return {"marker": read_suspended_interaction_marker(result.structured_content)}
 
 
 @pytest.mark.needs("probe-tools", "setting:tai42_e2e_fixtures.sandbox_provider")
@@ -142,15 +143,12 @@ async def test_park_answer_resumes_across_workers(
     )
 
     parked = await _park(stack, thread_id, question, expiry_seconds=3600)
-    receipt = parked.get("receipt")
-    # A park crossing the agent TOOL-face is now the generic ``SuspendedInteraction`` sentinel
-    # (model-dumped over the wire as ``{"interaction_id": ..., "expiry_at": ...}``, no top-level
-    # ``"status"`` and a single ``interaction_id``, not an ``interaction_ids`` list) — never the
-    # agent's INTERNAL suspended-receipt dict. Validate the wire dict back to that sentinel to
-    # PROVE the run parked: a completed run returns free-form text or an answer dict, neither of
-    # which carries the required ``interaction_id`` and so fails this validation loudly.
-    assert isinstance(receipt, dict), f"the deep agent run did not return a park sentinel: {parked}"
-    interaction_id = SuspendedInteraction.model_validate(receipt).interaction_id
+    # A park crossing the agent run tool over MCP is the platform's reserved park marker in the
+    # result's structured content, the same marker every parking tool and preset emits. A completed
+    # run carries no marker, so this read fails loudly when the run did not park.
+    marker = parked.get("marker")
+    assert marker is not None, f"the deep agent run did not park: {parked}"
+    interaction_id = marker["interaction_id"]
 
     # Answer through replica B's door: fires agent_resume on B — a different worker than the one
     # that parked on A — rebuilding the graph from the shared redis checkpoint.
