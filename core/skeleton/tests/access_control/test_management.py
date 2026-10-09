@@ -137,6 +137,23 @@ async def test_mint_requires_an_existing_enabled_owner_principal(
     assert pg.policy("k") is None
 
 
+async def test_mint_for_a_disabled_owner_admitted_only_when_the_caller_allows_it(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
+) -> None:
+    # The backup restore re-mints an archived key whose owner the archive holds disabled;
+    # the owner stays disabled and the key mints onto it.
+    pg.add_principal("off", disabled=True)
+    raw_key, body, _fingerprint = await management.add_user_api_key(
+        "k", "d", ["*"], owner_user_id="off", owner_may_be_disabled=True
+    )
+    assert raw_key == "sk-k"
+    assert body["policy_data"][OWNER_USER_ID_CLAIM] == "off"
+    assert pg.principal("off")["disabled"] is True
+    # An unknown owner is refused whatever the caller allows.
+    with pytest.raises(ValueError, match="does not exist"):
+        await management.add_user_api_key("k2", "d", ["*"], owner_user_id="ghost", owner_may_be_disabled=True)
+
+
 async def test_mint_rejects_unknown_scope_before_provisioning(
     pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis
 ) -> None:

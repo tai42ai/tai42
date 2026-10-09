@@ -462,6 +462,7 @@ async def add_user_api_key(
     condition: TemplatedText | None = None,
     *,
     owner_user_id: str,
+    owner_may_be_disabled: bool = False,
 ) -> tuple[str, dict[str, Any], str]:
     """Provision a new key for ``user_id`` and return ``(raw_sk_key, committed_body, key_fingerprint)``.
 
@@ -476,7 +477,10 @@ async def add_user_api_key(
     the same ``user_id`` leaves an old binding resolving to nothing.
 
     ``owner_user_id`` is REQUIRED: every api key belongs to a principal. The owner must be
-    an EXISTING, ENABLED principal (a loud ``ValueError`` naming the state otherwise). The
+    an EXISTING, ENABLED principal (a loud ``ValueError`` naming the state otherwise);
+    ``owner_may_be_disabled`` admits a disabled owner, left disabled — the backup restore
+    re-mints an archived key whose owner the archive holds disabled, and every door denies
+    that key while its owner stays disabled (the standing check's owner test). The
     owner claim is DUAL-HOMED at this single mint — written into the committed
     ``policy_data`` under ``OWNER_USER_ID_CLAIM``, the owner every door reads, and persisted
     by the provider on the identity record, whose copy arrives on every request and is
@@ -488,11 +492,11 @@ async def add_user_api_key(
     a key is switched off by revoking it.
 
     ORCHESTRATES the backends in a FAIL-CLOSED order. Raises ``ValueError`` if the
-    user id is already provisioned, if the owner is not an enabled principal, if
-    ``policy_data`` carries the ``disabled`` claim, if the key has neither a scope nor a
-    condition, or if any requested scope does not exist (has no url mapping) — all checked
-    BEFORE any write, so
-    a user error never leaves a half-provisioned key. Then:
+    user id is already provisioned, if the owner is not an enabled principal (unless
+    ``owner_may_be_disabled``), if ``policy_data`` carries the ``disabled`` claim, if the
+    key has neither a scope nor a condition, or if any requested scope does not exist (has
+    no url mapping) — all checked BEFORE any write, so a user error never leaves a
+    half-provisioned key. Then:
 
     1. the provider's ``provision`` writes the identity/key record FIRST — the key
        authenticates but GRANTS NOTHING until the policy below exists;
@@ -509,15 +513,15 @@ async def add_user_api_key(
     provider = _identity_provider()
     store = access_control_store()
 
-    # The owner MUST be an existing, enabled principal — every api key belongs to one.
-    # Checked with no side effect, so an ownerless/disabled/unknown owner raises before
-    # the provider mints anything.
+    # The owner MUST be an existing principal, enabled unless the caller admits a disabled
+    # one — every api key belongs to one. Checked with no side effect, so an
+    # ownerless/disabled/unknown owner raises before the provider mints anything.
     if not owner_user_id:
         raise ValueError("owner_user_id is required: every api key belongs to a principal")
     owner_principal = await store.get_principal(owner_user_id)
     if owner_principal is None:
         raise ValueError(f"owner principal {owner_user_id!r} does not exist; a key must belong to a principal")
-    if owner_principal["disabled"]:
+    if owner_principal["disabled"] and not owner_may_be_disabled:
         raise ValueError(f"owner principal {owner_user_id!r} is disabled; cannot mint a key for it")
 
     # Pre-checks with NO side effect, so a duplicate user or an unknown scope raises
@@ -586,9 +590,12 @@ async def edit_user_payload(
 
     Returns the committed policy body on success, or ``None`` if ``user_id`` is not
     provisioned (a falsy sentinel the route's 404 guard tests). Raises ``ValueError``
-    if any supplied scope does not exist. A principal's own row is written under the
-    last-admin guard: an edit that demotes the last enabled admin principal raises
-    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
+    if any supplied scope does not exist, or if the edit leaves the policy with neither a
+    scope nor a condition (the message names the repair for a key or for a principal). A
+    principal's own row is written under the last-admin guard: an edit that demotes the
+    last enabled admin principal raises
+    :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written, ahead of
+    the empty-policy refusal.
     """
     provider = _identity_provider()
     store = access_control_store()

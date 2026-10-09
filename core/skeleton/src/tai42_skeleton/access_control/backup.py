@@ -66,7 +66,7 @@ async def export_access_control() -> dict[str, Any]:
     }
 
 
-async def _restore_principals(payload: dict[str, Any], report: BackupSectionReport) -> dict[str, bool]:
+async def _restore_principals(payload: dict[str, Any], report: BackupSectionReport) -> None:
     """Restore principals FIRST so the token restore below finds every owner provisioned.
 
     Each principal's own policy row (the fingerprint-less role policy) travels with it. An
@@ -76,14 +76,14 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
     A principal whose policy row already exists in Postgres (but whose principal row does
     not — a Redis-only loss recovered from a surviving Postgres) keeps the live policy: the
     policy rows in Postgres are the source of truth, matching the token restore, so the
-    principal row is created and the exported policy body is not re-written.
-
-    Returns each created principal's archived ``disabled`` flag, which
-    :func:`_apply_archived_disabled` applies once the tokens are restored: a key outlives its
-    owner being disabled, so an archive can hold a disabled owner's key, and a key is minted
-    only for an enabled owner.
+    principal row is created and the exported policy body is not re-written. The archived
+    ``disabled`` flag is then applied with the raw flip (no last-admin count), enabled or
+    disabled: it is the authority, and the flip writes the policy's ``disabled`` projection
+    from it whatever the archived or surviving policy carried. The flag lands with the
+    principal, before the route and token steps, so a later failure never leaves an archived
+    disabled principal enabled; the token restore re-mints its keys onto it while it stays
+    disabled.
     """
-    archived_disabled: dict[str, bool] = {}
     for principal in payload.get("principals") or []:
         user_id = principal.get("user_id")
         if not isinstance(user_id, str) or not user_id:
@@ -102,27 +102,12 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
                 await management.create_principal_policy(
                     user_id, list(policy.get("scopes") or []), policy.get("policy_data"), policy.get("condition")
                 )
+            await management.set_principal_disabled_row(user_id, bool(principal.get("disabled")))
         except (ValueError, KeyError) as exc:
             report.errors.append(f"principal {user_id!r}: {exc}")
             report.skipped += 1
             continue
-        archived_disabled[user_id] = bool(principal.get("disabled"))
         report.created += 1
-    return archived_disabled
-
-
-async def _apply_archived_disabled(archived_disabled: dict[str, bool], report: BackupSectionReport) -> None:
-    """Apply each restored principal's archived ``disabled`` flag with the raw flip (no last-admin count).
-
-    Enabled or disabled, the archived flag is the authority: the flip writes the policy's
-    ``disabled`` projection from it whatever the archived or surviving policy carried. A
-    store failure is a loud per-principal error.
-    """
-    for user_id, disabled in archived_disabled.items():
-        try:
-            await management.set_principal_disabled_row(user_id, disabled)
-        except KeyError as exc:
-            report.errors.append(f"principal {user_id!r}: {exc}")
 
 
 def _canonical_archive_urls(urls: Iterable[str]) -> dict[str, str]:
@@ -163,7 +148,7 @@ async def import_access_control(payload: dict[str, Any], mode: BackupMode) -> Ba
     # Every write below records its change; the policy cache is invalidated once at the end,
     # and still when a write part-way raises.
     async with management.policy_write_batch():
-        archived_disabled = await _restore_principals(payload, report)
+        await _restore_principals(payload, report)
 
         # Replay route -> scope mappings first so the token restore below finds every
         # referenced scope already provisioned. Keyed by the canonical url the table holds:
@@ -195,7 +180,6 @@ async def import_access_control(payload: dict[str, Any], mode: BackupMode) -> Ba
                 report.created += 1
 
         await _restore_tokens(payload, report)
-        await _apply_archived_disabled(archived_disabled, report)
     return report
 
 
@@ -239,6 +223,9 @@ async def _restore_token(token: dict[str, Any], report: BackupSectionReport) -> 
                 token.get("policy_data"),
                 condition,
                 owner_user_id=owner_user_id,
+                # A key outlives its owner being disabled, so an archive can hold a disabled
+                # owner's key: it is re-minted onto the owner as restored, still disabled.
+                owner_may_be_disabled=True,
             )
     except ValueError as exc:
         # Per-token failure (collided id, absent scope, bad condition) surfaced loudly.

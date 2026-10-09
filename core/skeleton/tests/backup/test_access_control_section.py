@@ -193,11 +193,11 @@ async def test_import_restores_principals_before_tokens(pg: FakeAccessControlPg,
 
 
 async def test_import_restores_a_key_owned_by_a_disabled_principal(
-    pg: FakeAccessControlPg, provider: _SpyProvider
+    pg: FakeAccessControlPg, provider: _SpyProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A key keeps living when its owner principal is disabled after the mint, so an archive
-    # can hold a disabled principal with a key it owns. The restore re-mints that key and
-    # leaves the principal disabled, as archived.
+    # can hold a disabled principal with a key it owns. The restore re-mints that key while
+    # the principal stays disabled, as archived: it is never enabled, not even for the mint.
     payload = {
         "principals": [
             {
@@ -212,11 +212,52 @@ async def test_import_restores_a_key_owned_by_a_disabled_principal(
         ],
         "tokens": [_token("k2", owner="owner-2")],
     }
+    owner_disabled_at_mint: list[bool] = []
+    spy_provision = provider.provision
+
+    async def _provision(user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
+        owner_disabled_at_mint.append(pg.principal("owner-2")["disabled"])
+        return await spy_provision(user_id, description, owner_user_id=owner_user_id)
+
+    monkeypatch.setattr(provider, "provision", _provision)
     report = await ac_backup.import_access_control(payload, "skip")
     assert report.errors == []
+    assert owner_disabled_at_mint == [True]
     assert provider.identities["k2"] == "restored"
+    assert provider.provision_owners["k2"] == "owner-2"
     assert any(row["user_id"] == "k2" for row in report.details["new_api_keys"])
     assert pg.principal("owner-2")["disabled"] is True
+    assert pg.policy_body("owner-2")["policy_data"] == {"disabled": True}
+
+
+async def test_an_import_that_raises_at_a_key_mint_leaves_an_archived_disabled_principal_disabled(
+    pg: FakeAccessControlPg, provider: _SpyProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A provider fault at the key mint propagates out of the import; the principal restored
+    # before it keeps the archived disabled state rather than coming back enabled.
+    payload = {
+        "principals": [
+            {
+                "user_id": "owner-2",
+                "kind": "service",
+                "display_name": "Owner Two",
+                "created_by": "owner-1",
+                "disabled": True,
+                "created_at": None,
+                "policy": {"scopes": ["*"], "policy_data": {}, "condition": None},
+            }
+        ],
+        "tokens": [_token("k2", owner="owner-1")],
+    }
+
+    async def _provider_down(user_id: str, description: str, *, owner_user_id: str | None = None) -> str:
+        raise RuntimeError("identity store unavailable")
+
+    monkeypatch.setattr(provider, "provision", _provider_down)
+    with pytest.raises(RuntimeError, match="identity store unavailable"):
+        await ac_backup.import_access_control(payload, "skip")
+    assert pg.principal("owner-2")["disabled"] is True
+    assert pg.policy_body("owner-2")["policy_data"] == {"disabled": True}
 
 
 async def test_import_reports_a_mapping_of_a_route_public_by_its_declaration(
@@ -437,8 +478,8 @@ async def test_restore_store_calls_in_order_with_one_bump_at_the_end(recorder: _
         ("create_principal", "p-new", "service", "p-new", "owner-1"),
         ("get_policy_body", "p-new"),
         ("create_policy", "p-new", ["*"], {}, None),
-        ("add_url_to_scope", "things", "/api/things", None),
         ("set_principal_disabled", "p-new", True),
+        ("add_url_to_scope", "things", "/api/things", None),
         ("bump",),
     ]
 

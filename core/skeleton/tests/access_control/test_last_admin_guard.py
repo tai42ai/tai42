@@ -466,6 +466,49 @@ async def test_modify_scopes_door_maps_the_refusal_to_409(
     assert pg.policy_body("a") == _ADMIN_BODY
 
 
+_EMPTY_PRINCIPAL_POLICY_EDIT = (
+    "the edit leaves the principal's policy with neither a scope nor a condition: a policy with neither "
+    "grants nothing, and every door treats it as no key; disable or delete the principal instead"
+)
+
+
+async def test_edit_api_key_door_emptying_the_last_admin_principal_is_409(
+    pg: FakeAccessControlPg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The last-admin refusal comes before the empty-policy refusal: the user reads why the
+    # admin cannot lose its grant, not a policy-shape error.
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+
+    monkeypatch.setattr(api_keys_ops, "access_control_settings", lambda: AccessControlSettings(enable=True))
+    _admin_caller(monkeypatch)
+    _admin(pg, "a")
+    with pytest.raises(ConflictError, match="last enabled admin"):
+        await api_keys_ops.edit_api_key("a", {"scopes": []})
+    with pytest.raises(ConflictError, match="last enabled admin"):
+        await api_keys_ops.modify_api_key_scopes("a", remove=["*"])
+    assert pg.policy_body("a") == _ADMIN_BODY
+
+
+async def test_edit_api_key_door_emptying_a_principal_is_400_naming_the_principal_repair(
+    pg: FakeAccessControlPg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A principal's own row is not a key: the refusal names the principals door's repair,
+    # never a key revoke (which answers 404 for a principal).
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+
+    monkeypatch.setattr(api_keys_ops, "access_control_settings", lambda: AccessControlSettings(enable=True))
+    _admin_caller(monkeypatch)
+    _admin(pg, "a")
+    _admin(pg, "b")
+    with pytest.raises(BadRequestError) as exc:
+        await api_keys_ops.edit_api_key("a", {"scopes": []})
+    assert exc.value.message == _EMPTY_PRINCIPAL_POLICY_EDIT
+    with pytest.raises(BadRequestError) as exc:
+        await api_keys_ops.modify_api_key_scopes("a", remove=["*"])
+    assert exc.value.message == _EMPTY_PRINCIPAL_POLICY_EDIT
+    assert pg.policy_body("a") == _ADMIN_BODY
+
+
 async def test_rollback_door_maps_the_refusal_to_409(pg: FakeAccessControlPg, monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 

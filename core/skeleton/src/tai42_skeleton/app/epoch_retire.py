@@ -60,7 +60,7 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None, *, tole
     serving loop: ``build_and_swap`` returns at once, the driver finishes and flushes its
     response on the still-live session manager, then the task drains the old epoch and
     ``aclose``s it (for every OTHER session, a beat later, off the reload's hot path —
-    so long-lived streamable-http streams no longer gate reload latency either), and the
+    so long-lived streamable-http streams do not gate reload latency either), and the
     certification is armed after the drain there too. A bus-driven reload
     (``tolerate_driver=False``) serves no in-flight request that needs its response
     delivered, so it drains, closes and arms the certification synchronously.

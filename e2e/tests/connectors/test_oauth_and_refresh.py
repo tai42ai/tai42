@@ -136,6 +136,10 @@ async def test_concurrent_refresh_takes_lock_once(
     )
 
 
+# Two rotations each restart both serve replicas and the backend worker in turn: six
+# restart readiness waits in one test, more than the package's per-test 120 s holds on a
+# loaded host, so the test carries its own bound.
+@pytest.mark.timeout(360)
 @pytest.mark.needs("probe-tools", "process", "files", "setting:CONNECTORS_KEK")
 async def test_kek_rotation_serves_via_ring_and_converges(
     connectors_stack: TaiStack, oauth_idp: OAuthIdp, uniq: Callable[[str], str]
